@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "HandoverSpec",
+  "description": "Contract a lead emits and a coder consumes (workflow mode).",
+  "type": "object",
+  "required": ["task_id", "domain", "goal", "files_in_scope", "constraints", "acceptance_criteria", "validation_commands", "discovery_context", "out_of_scope", "depends_on", "interface_contract"],
+  "additionalProperties": false,
+  "properties": {
+    "task_id": { "type": "string" },
+    "domain": { "type": "string", "enum": ["frontend", "backend", "devops", "qa"] },
+    "goal": { "type": "string" },
+    "files_in_scope": { "type": "array", "items": { "type": "string" } },
+    "constraints": { "type": "array", "items": { "type": "string" } },
+    "acceptance_criteria": { "type": "array", "items": { "type": "string" } },
+    "validation_commands": { "type": "array", "items": { "type": "string" } },
+    "discovery_context": { "type": "string" },
+    "out_of_scope": { "type": "array", "items": { "type": "string" } },
+    "depends_on": { "type": "array", "items": { "type": "string" } },
+    "interface_contract": { "type": "string" }
+  }
+}

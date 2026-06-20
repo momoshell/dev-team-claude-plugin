@@ -226,6 +226,9 @@ while (remaining.length) {
   }))
 
   ready.forEach((task, k) => finished.set(task.id, outcomes[k] || failed(task, null, null, ['task chain died'])))
+  const wPass = ready.filter((t) => finished.get(t.id)?.passed).length
+  const wFail = ready.filter((t) => !finished.get(t.id)?.passed)
+  log(`wave ${waveNo} done: ${wPass}/${ready.length} passed${wFail.length ? ` — needs-work: ${wFail.map((t) => t.id).join(', ')}` : ''}`)
   const ranIds = new Set(ready.map((t) => t.id))
   remaining = remaining.filter((t) => !ranIds.has(t.id))
 }

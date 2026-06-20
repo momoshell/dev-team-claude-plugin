@@ -139,7 +139,8 @@ const gatePrompt = (spec, tier) =>
 
 const buildCheckPrompt = (spec) =>
   `Type-check and build the project, then report. The changed files are: ${JSON.stringify(spec.files_in_scope)}.\n` +
-  `Set pass=true only if BOTH the type-check and the build succeed; summary = one line ("clean", or the key errors).`
+  `First detect what the project actually has (package.json scripts, tsconfig, go.mod, Cargo.toml, etc.) and run only the type-check/build steps that exist.\n` +
+  `pass=true if every step that EXISTS succeeds. A project with NO build step and/or NO type-checker is NOT a failure — set pass=true, summary "no build/type-check step". Only set pass=false for real type/compile/build errors. summary = one line.`
 
 if (!normalized.length) {
   log('No tasks provided in args.tasks — nothing to do.')

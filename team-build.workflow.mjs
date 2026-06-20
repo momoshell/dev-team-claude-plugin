@@ -13,9 +13,13 @@ export const meta = {
 // `id` defaults to `t<index>`. `depends_on` lists the ids of tasks that must PASS the gate
 // before this one runs — the scheduler orders tasks into dependency waves (see below).
 // Unroutable domains (anything not a plan-domain below) are REJECTED, not laundered into a fallback lead.
-const goal = args?.goal ?? 'unspecified goal'
-const projectMemory = args?.projectMemory ?? '(no project memory provided)'
-const rawTasks = Array.isArray(args?.tasks) ? args.tasks : []
+// Some harnesses deliver `args` as a JSON string rather than a parsed object — tolerate both.
+const A = (typeof args === 'string')
+  ? (() => { try { return JSON.parse(args) } catch { return {} } })()
+  : (args || {})
+const goal = A.goal ?? 'unspecified goal'
+const projectMemory = A.projectMemory ?? '(no project memory provided)'
+const rawTasks = Array.isArray(A.tasks) ? A.tasks : []
 
 // Normalize: assign stable ids and a clean depends_on list, preserving input order.
 const normalized = rawTasks.map((t, i) => ({

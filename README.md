@@ -177,9 +177,3 @@ team-build.workflow.mjs  the deterministic workflow
 - **Claude Code** with plugin support.
 - **Node.js** — used by the Workflow tool to run `team-build.workflow.mjs` (workflow mode only).
 - **jq** — only if you opt into the optional `subagentStatusLine` script; not needed by the plugin itself.
-
----
-
-## License
-
-No license specified yet — add one before distributing.

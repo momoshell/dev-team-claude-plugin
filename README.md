@@ -27,7 +27,11 @@ Then enable it (persists in `enabledPlugins`):
 # or, no marketplace needed:  claude --plugin-dir /absolute/path/to/dev-team-plugin
 ```
 
-Once enabled, a `SessionStart` hook loads the orchestration rules each session. No further setup.
+> **Editing the plugin while it's installed?** A directory-marketplace install **copies** the plugin into a version-pinned cache (`~/.claude/plugins/cache/dev-team/dev-team/<version>/`). Editing the source does **not** propagate — `plugin update` no-ops while the version is unchanged. So while iterating, either:
+> - prefer **`claude --plugin-dir /absolute/path/to/dev-team-plugin`** — loads the source live, no cache, no install; or
+> - **bump `version`** in `.claude-plugin/plugin.json`, then `claude plugin marketplace update dev-team && claude plugin update dev-team@dev-team` (restart to apply).
+
+Once enabled, a `SessionStart` hook loads the orchestration rules each session. New components (agents/commands) load on a fresh session or `/reload-plugins` — installing mid-session won't hot-load them. No further setup.
 
 ---
 

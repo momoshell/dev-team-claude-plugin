@@ -76,11 +76,9 @@ const RETURN_SCHEMA = {
     changes: { type: 'array', items: { type: 'string' }, description: "Required when done. Each item: '<path> — <one-line summary>'." },
     validation: { type: 'string', description: 'Required when done. Commands run + pass/fail.' },
   },
-  // Mirror coder-return.schema.json: insufficient must say what's missing; done must report changes + validation.
-  allOf: [
-    { if: { required: ['status'], properties: { status: { const: 'insufficient' } } }, then: { required: ['missing_context'] } },
-    { if: { required: ['status'], properties: { status: { const: 'done' } } }, then: { required: ['changes', 'validation'] } },
-  ],
+  // NOTE: keep this FLAT — the structured-output tool's input_schema rejects conditional
+  // keywords (if/then/allOf/anyOf). The status-conditional requirements (missing_context when
+  // insufficient; changes+validation when done) are enforced via buildPrompt + the code below.
 }
 
 const BUILD_SCHEMA = {
@@ -128,7 +126,8 @@ const planPrompt = (task, extra) =>
   `Produce ONE Handover Spec with every field populated. discovery_context must be complete enough that the coder never explores beyond files_in_scope.`
 
 const buildPrompt = (spec) =>
-  `Execute this Handover Spec exactly. Read only within files_in_scope, implement, run validation_commands, and end with the structured return.\n\n` +
+  `Execute this Handover Spec exactly. Read only within files_in_scope, implement, run validation_commands, and end with the structured return ` +
+  `(when done: include changes + validation; when insufficient: include missing_context).\n\n` +
   JSON.stringify(spec, null, 2)
 
 const gatePrompt = (spec, tier) =>

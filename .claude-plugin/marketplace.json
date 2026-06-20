@@ -1,7 +1,7 @@
 {
   "name": "dev-team",
   "owner": { "name": "Momcilo" },
-  "metadata": { "description": "Local marketplace for the dev-team plugin", "version": "0.1.2" },
+  "metadata": { "description": "Local marketplace for the dev-team plugin", "version": "0.1.3" },
   "plugins": [
     {
       "name": "dev-team",

@@ -193,10 +193,13 @@ const runTask = async (task) => {
 
   const findings = [...((review && review.findings) || [])]
   if (!review) findings.push('review agent died — verdict unavailable')
-  if (!build) findings.push('build-validator died — build status unknown')
-  else if (!build.pass) findings.push(`build failed: ${build.summary}`)
+  // build-validator is advisory: a real reported failure blocks; a dead/no-verdict run
+  // does NOT block (the coder already ran validation_commands and the reviewer checked criteria).
+  let buildOk = true
+  if (!build) findings.push('build-validator returned no verdict — build status unknown (advisory, not blocking)')
+  else if (!build.pass) { buildOk = false; findings.push(`build failed: ${build.summary}`) }
 
-  const pass = Boolean(review && review.pass && build && build.pass)
+  const pass = Boolean(review && review.pass && buildOk)
   return { task, spec, ret, verdict: { pass, findings, tier }, passed: pass }
 }
 

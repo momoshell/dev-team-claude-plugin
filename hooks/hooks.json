@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "cat \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\""
+            "command": "jq -n --rawfile content \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:$content}}'"
           }
         ]
       }

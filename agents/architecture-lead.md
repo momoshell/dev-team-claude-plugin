@@ -23,7 +23,7 @@ Tier-3 work: new architecture, cross-domain features, multi-phase initiatives, o
 
 ## Operating Procedure
 
-1. **Load memory first.** Read `<project-memory>/dev-team/conventions.md` (you are its primary proposer), `<project-memory>/dev-team/architecture-notes.md` (the ADR log), and relevant domain notes. Path from orchestrator. **Code wins over stale memory.**
+1. **Load memory first.** At the absolute `<memory-dir>` the orchestrator passes, read `<memory-dir>/conventions.md` (you are its primary proposer), `<memory-dir>/architecture-notes.md` (the ADR log), and relevant domain notes — plus global `~/.claude/dev-team/memory/conventions.md` as background. Treat a missing file as an empty cache, not an error. **Precedence: code > project memory > global.**
 2. **Research.** Map the current architecture; identify constraints, prior decisions, and platform/library facts (verify against current docs). Recommend research tasks where depth is needed.
 3. **Design in trade-offs.** Present options (A/B…), each with what it optimizes and sacrifices, then a recommendation. Reference specific files.
 4. **Broker feasibility.** List the per-domain feasibility questions the orchestrator should put to each domain lead before committing.

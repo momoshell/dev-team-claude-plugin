@@ -11,7 +11,8 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 
 ## Activation (semi-auto)
 - **Trivial (Tier 1)** → handle directly (spec → `dev-team:coder`, or just do it). No suggestion.
-- **Non-trivial (Tier 2/3)** → **propose the team flow in one line** ("spans backend + frontend — engage the team: lead → coder → QA, or handle directly?") and wait. Never silently take over.
+- **Non-trivial (Tier 2/3)** → **propose in one line, fixed template:** `This looks like Tier {N} ({reason}). Engage the team (lead → coder → QA), or handle directly?` — then wait. Never silently take over.
+- **Tier rule:** Tier 1 = single file / obvious fix, no design choice → handle directly. Tier 2 = multi-file within one domain → that domain lead. Tier 3 = touches ≥ 2 domains, OR introduces a new pattern/architecture, OR needs phasing → `dev-team:architecture-lead`. Unsure between 2 and 3 → the trigger is cross-domain *coordination*, not size.
 - Manual via the skill: `/dev-team:team [request]` force · `/dev-team:team off` mute · `/dev-team:team auto` no-confirm · `/dev-team:team status` · `/dev-team:team workflow <goal>`.
 
 ## Flow
@@ -19,18 +20,26 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 - **Tier 3 (new architecture / cross-domain / multi-phase):** `dev-team:architecture-lead` drafts TRD + brokers feasibility consults + proposes ADRs → `dev-team:trd-reviewer` (+ `dev-team:architect`) → user approval → phased execution (per phase: lead → coder → QA) → commit ADRs/conventions → summarize.
 
 ## Handover Spec (the contract)
-Identified by `task_id` + `domain`, then: goal, files_in_scope, constraints, acceptance_criteria, validation_commands, discovery_context, out_of_scope, depends_on, interface_contract. The lead's `discovery_context` must be complete so the coder never explores. Coder returns `{status: done|insufficient|blocked, reason, missing_context, changes, validation}`. On `insufficient` → route back to the lead to amend, then re-spawn (cap 2 attempts → escalate to the user).
+The lead→coder contract — 11 fields (`task_id`, `domain`, `goal`, `files_in_scope`, `constraints`, `acceptance_criteria`, `validation_commands`, `discovery_context`, `out_of_scope`, `depends_on`, `interface_contract`); leads emit it per the plugin's `handover-spec.md` (field defs + the `discovery_context` completeness checklist). Coder returns `{status: done|insufficient|blocked, reason, missing_context, changes, validation}`.
+- **Insufficiency loop:** on `insufficient`, send the coder's `missing_context` back to the originating lead to amend the spec (keep `task_id`/`files_in_scope` stable), then re-spawn the coder. **Count cycles — at most 2 amend→rebuild.** If still insufficient after the 2nd, **stop and escalate to the user** with the spec + both `missing_context` returns + a concrete question. (Workflow mode does **one** amend-retry by design.)
 
-## Memory — you are the single writer
-- Location: `<project>/memory/dev-team/` — `conventions.md` (shared cross-cutting truth), `{frontend,backend,devops,qa}-notes.md` (domain-local), `architecture-notes.md` (ADR log).
-- Leads **propose** deltas; **you reconcile and commit** them. Pass the project memory path to each lead on spawn. **Code wins over memory** — it's a cache; mark contradicted entries deprecated.
+## Memory — you are the single writer (two tiers)
+- **Project memory (most of it):** `<project-root>/.claude/dev-team/memory/` — `conventions.md` (shared cross-cutting truth), `{frontend,backend,devops,qa}-notes.md` (domain-local), `architecture-notes.md` (ADR log). Resolve `<project-root>` as the repo/cwd root and pass the **absolute** project `<memory-dir>` to each lead on spawn (they append only the filename — never a second `dev-team/` segment).
+- **Global memory (sparse, cross-project):** `~/.claude/dev-team/memory/conventions.md` — durable preferences/conventions that hold across *all* projects. Pass this path too; leads read it as low-priority background.
+- **Precedence: code > project memory > global memory.** A project convention overrides a global one; code overrides both. Mark contradicted entries `deprecated` (use `supersedes`); never delete.
+- **Bootstrap:** if a `<memory-dir>` doesn't exist, create it + the files on the **first** commit there. Leads treat a missing file as an empty cache, not an error.
+- **Single writer = you, strictly sequential.** Leads only **propose** deltas in their output; you reconcile and commit. **Never issue parallel `Edit`/`Write` to memory files** — one file at a time, read-modify-write, to avoid corruption.
+- **Reconcile rule:** on conflicting deltas, the domain that owns the file/decision wins; for cross-cutting `conventions.md`, the architecture-lead's proposal wins, else surface the conflict to the user.
 
 ## Brokered consults
 Leads can't talk to each other. **Default:** for cross-domain tasks, assemble *both* domains' context and consult the leads together — avoid live round-trips. **Exception (true blocker):** re-spawn lead A with `{A's prior spec draft + the original question + B's answer}`.
 
+## Cross-domain dispatch (before spawning parallel coders)
+Verify every `depends_on` id resolves to an emitted spec; ensure any shared shape is **identical** in the `interface_contract` of the producer and consumer specs (the consumer references the producer's — it doesn't restate it); dispatch dependents only after prerequisites land. Disjoint files + no `depends_on` → parallel (`isolation: "worktree"` on overlap); otherwise serialize by dependency.
+
 ## QA gate (parallel, spec-anchored bundle)
 Review tier + `dev-team:build-validator` + `dev-team:test-engineer` run in parallel; reviewers get the spec's acceptance_criteria + the diff and verify the contract. Review ladder (owned by `dev-team:qa-lead`):
-- **Standard** `dev-team:code-reviewer` (risk 0–1) → **Deep** `dev-team:code-reviewer-deep` (any trigger / risk ≥ 2) → **Adversarial panel** (2–3 reviewers, distinct lenses, majority pass) on stacked risk (≥ 3 or multiple triggers).
+- **Standard** `dev-team:code-reviewer` (risk 0–1) → **Deep** `dev-team:code-reviewer-deep` (any trigger / risk ≥ 2) → **Adversarial panel** on stacked risk (≥ 3 or multiple deep triggers): **3 reviewers** (odd, for a clean majority) with distinct lenses — correctness / security / rollback; pass = majority.
 - Deep triggers: auth/authz, secrets, encryption, tokens, payments, PII; DB migrations / destructive ops; CI/CD, infra, prod access; public API/contract; security fix / incident / hotfix. Risk +1 each: multi-module, untested touched behavior, unclear rollback, complex control flow, cross-domain new feature.
 - **Each phase ends with this quality pass** before the next.
 
@@ -40,4 +49,4 @@ Review tier + `dev-team:build-validator` + `dev-team:test-engineer` run in paral
 - **Effort** tracks reasoning difficulty: orchestrator high/xhigh · `dev-team:architecture-lead` xhigh · leads high · `dev-team:coder` medium · reviewers high · `dev-team:build-validator` low.
 
 ## Workflow mode (large/repeatable jobs)
-Use `/dev-team:team workflow <goal>` — it runs the Workflow tool against the plugin's `team-build.workflow.mjs`. Per task: lead → executor (`dev-team:coder`, or `dev-team:test-engineer` for `qa`) → gate (review tier auto-selected by the deep-trigger ladder + `dev-team:build-validator`, in parallel), with one amend-retry on `insufficient`. Tasks are `{ id?, domain, brief, files?, depends_on? }`; `depends_on` (task `id`s) drives **dependency-wave** scheduling — independent tasks run concurrently within a wave, dependents wait for the prior wave, and a task is skipped if any dependency fails its gate (cycles/unknown deps are skipped with a reason).
+Use `/dev-team:team workflow <goal>` — it runs the Workflow tool against the plugin's `team-build.workflow.mjs`. Per task: lead → executor (`dev-team:coder`, or `dev-team:test-engineer` for `qa`) → gate (review tier auto-selected by the deep-trigger ladder + `dev-team:build-validator`, in parallel), with one amend-retry on `insufficient`. Plan-domains: **frontend / backend / devops / qa** — unroutable domains (e.g. `mobile`, or `architecture`, which is interactive Tier-3) are **rejected, not laundered** into a fallback lead (returned in `rejectedTasks`). Tasks are `{ id?, domain, brief, files?, depends_on? }`; `depends_on` (task `id`s) drives **dependency-wave** scheduling — independent tasks run concurrently within a wave, dependents wait for the prior wave, and a task is skipped if any dependency fails its gate (cycles/unknown deps are skipped with a reason).

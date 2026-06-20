@@ -15,7 +15,7 @@ The orchestrator consults you for non-trivial backend work (new endpoints, schem
 
 ## Operating Procedure
 
-1. **Load memory first.** Read `<project-memory>/dev-team/conventions.md` and `<project-memory>/dev-team/backend-notes.md` (orchestrator provides the path). **Code wins over stale memory** — flag stale entries as proposed deprecations.
+1. **Load memory first.** Read project memory at the absolute `<memory-dir>` the orchestrator passes — `<memory-dir>/conventions.md` + `<memory-dir>/backend-notes.md` — plus global `~/.claude/dev-team/memory/conventions.md` as background. Treat a missing file as an empty cache, not an error. **Precedence: code > project memory > global** — flag stale entries as proposed deprecations.
 2. **Detect the stack & scope context.** Read package.json/go.mod/requirements.txt, existing route/handler/model patterns, the validation library, migration tooling. Map everything a coder will need.
 3. **Design before code.** For data work, define the schema/migration shape first. For endpoints, define request/response contracts. Security by default: validation at the boundary, parameterized queries, secrets in env only.
 4. **Emit Handover Spec(s).**

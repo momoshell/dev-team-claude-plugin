@@ -9,21 +9,21 @@ export const meta = {
 }
 
 // args: { goal: string, projectMemory?: string,
-//         tasks: [{ id?: string, domain, brief, files?: string[], depends_on?: string[] }] }
+//         tasks: [{ id?: string, domain: 'frontend'|'backend'|'devops'|'qa', brief, files?: string[], depends_on?: string[] }] }
 // `id` defaults to `t<index>`. `depends_on` lists the ids of tasks that must PASS the gate
 // before this one runs — the scheduler orders tasks into dependency waves (see below).
+// Unroutable domains (anything not a plan-domain below) are REJECTED, not laundered into a fallback lead.
 const goal = args?.goal ?? 'unspecified goal'
 const projectMemory = args?.projectMemory ?? '(no project memory provided)'
 const rawTasks = Array.isArray(args?.tasks) ? args.tasks : []
 
 // Normalize: assign stable ids and a clean depends_on list, preserving input order.
-const tasks = rawTasks.map((t, i) => ({
+const normalized = rawTasks.map((t, i) => ({
   ...t,
   id: t?.id != null ? String(t.id) : `t${i}`,
   depends_on: Array.isArray(t?.depends_on) ? t.depends_on.map(String) : [],
   _index: i,
 }))
-const idSet = new Set(tasks.map((t) => t.id))
 
 const LEAD = {
   frontend: 'dev-team:frontend-lead',
@@ -31,6 +31,16 @@ const LEAD = {
   devops: 'dev-team:devops-lead',
   qa: 'dev-team:qa-lead',
 }
+
+// Route check: reject unroutable domains up front rather than mis-routing them.
+// (architecture is interactive Tier-3, not a coder-executable workflow domain.)
+const tasks = []
+const rejected = []
+for (const t of normalized) {
+  if (LEAD[t.domain]) tasks.push(t)
+  else rejected.push({ id: t.id, domain: t.domain ?? '(none)', reason: `unroutable domain '${t.domain}' — workflow plan-domains are frontend/backend/devops/qa (architecture = interactive Tier-3)` })
+}
+const idSet = new Set(tasks.map((t) => t.id))
 
 const SPEC_SCHEMA = {
   type: 'object',
@@ -59,12 +69,14 @@ const RETURN_SCHEMA = {
     status: { type: 'string', enum: ['done', 'insufficient', 'blocked'] },
     reason: { type: 'string' },
     missing_context: { type: 'string', description: 'Required when status is insufficient: exactly what the coder needs (file, contract, decision).' },
-    changes: { type: 'array', items: { type: 'string' }, description: "Each item formatted '<path> — <one-line summary>'." },
-    validation: { type: 'string' },
+    changes: { type: 'array', items: { type: 'string' }, description: "Required when done. Each item: '<path> — <one-line summary>'." },
+    validation: { type: 'string', description: 'Required when done. Commands run + pass/fail.' },
   },
-  // Mirror coder-return.schema.json: an insufficient return must say what's missing.
-  if: { properties: { status: { const: 'insufficient' } } },
-  then: { required: ['missing_context'] },
+  // Mirror coder-return.schema.json: insufficient must say what's missing; done must report changes + validation.
+  allOf: [
+    { if: { required: ['status'], properties: { status: { const: 'insufficient' } } }, then: { required: ['missing_context'] } },
+    { if: { required: ['status'], properties: { status: { const: 'done' } } }, then: { required: ['changes', 'validation'] } },
+  ],
 }
 
 const BUILD_SCHEMA = {
@@ -87,15 +99,14 @@ const VERDICT_SCHEMA = {
   },
 }
 
-// `architecture` is intentionally NOT a workflow domain — architecture-lead does Tier-3
-// interactive TRD/design work, not coder-executable specs. Unknown domains fall back to backend-lead.
-const leadFor = (domain) => LEAD[domain] || 'dev-team:backend-lead'
+// Unroutable domains are rejected up front (see route split), so every routable task maps to a lead.
+const leadFor = (domain) => LEAD[domain]
 
 // QA tasks are executed by the test-engineer (write/run tests), everything else by the coder.
 const executorFor = (domain) => (domain === 'qa' ? 'dev-team:test-engineer' : 'dev-team:coder')
 
 // Review ladder (mirrors orchestration.md → QA gate). Deep triggers escalate the reviewer.
-const DEEP_TRIGGERS = /\b(authn|authz|auth|authentication|authorization|secrets?|credentials?|encrypt(?:ion|ed|ing|s)?|tokens?|payments?|pii|migrat(?:e|es|ion|ions|ing)|backfills?|destructive|drop\s+table|truncate|ci\/?cd|pipelines?|infra(?:structure)?|terraform|kubernetes|k8s|production|prod\b|deploy(?:s|ed|ing|ment|ments)?|public[\s-]*api|api[\s-]*contract|breaking[\s-]*change|backward[\s-]*compat(?:ible|ibility)?|security|incidents?|hotfix(?:es)?|code-reviewer-deep)\b/i
+const DEEP_TRIGGERS = /\b(authn|authz|auth|authentication|authorization|passwords?|secrets?|credentials?|encrypt(?:ion|ed|ing|s)?|tokens?|payments?|pii|migrat(?:e|es|ion|ions|ing)|backfills?|destructive|drop\s+table|truncate|ci\/?cd|pipelines?|infra(?:structure)?|terraform|kubernetes|k8s|production|prod\b|deploy(?:s|ed|ing|ment|ments)?|public[\s-]*api|api[\s-]*contract|breaking[\s-]*change|backward[\s-]*compat(?:ible|ibility)?|security|incidents?|hotfix(?:es)?|code-reviewer-deep)\b/i
 
 const reviewTierFor = (spec) => {
   if (spec.domain === 'devops') return 'deep' // infra/delivery is inherently high-risk
@@ -127,12 +138,13 @@ const buildCheckPrompt = (spec) =>
   `Type-check and build the project, then report. The changed files are: ${JSON.stringify(spec.files_in_scope)}.\n` +
   `Set pass=true only if BOTH the type-check and the build succeed; summary = one line ("clean", or the key errors).`
 
-if (!tasks.length) {
+if (!normalized.length) {
   log('No tasks provided in args.tasks — nothing to do.')
-  return { goal, total: 0, passed: 0, results: [] }
+  return { goal, total: 0, routable: 0, rejected: 0, passed: 0, results: [], rejectedTasks: [] }
 }
+if (rejected.length) log(`rejected ${rejected.length} unroutable task(s): ${rejected.map((r) => `${r.id}(${r.domain})`).join(', ')}`)
 
-log(`team-build: ${tasks.length} task(s) for goal: ${goal}`)
+log(`team-build: ${tasks.length} routable task(s) for goal: ${goal}`)
 
 // Run ONE task through the full plan → build → gate chain. Returns a uniform
 // { task, spec, ret, verdict, passed } shape (passed mirrors verdict.pass).
@@ -140,7 +152,6 @@ const failed = (task, spec, ret, findings) => ({ task, spec, ret, verdict: { pas
 
 const runTask = async (task) => {
   const id = task.id
-  if (!LEAD[task.domain]) log(`task ${id}: unknown domain '${task.domain}' → falling back to backend-lead`)
 
   // Carry upstream dependencies' contracts into planning so dependent specs stay coherent.
   const deps = task.depends_on.map((d) => finished.get(d)).filter(Boolean)
@@ -221,11 +232,13 @@ while (remaining.length) {
 
 const clean = tasks.map((t) => finished.get(t.id)).filter(Boolean)
 const passed = clean.filter((r) => r.passed)
-log(`team-build done: ${passed.length}/${clean.length} passed the gate (${waveNo} wave(s))`)
+log(`team-build done: ${passed.length}/${clean.length} passed the gate (${waveNo} wave(s))${rejected.length ? `, ${rejected.length} rejected` : ''}`)
 
 return {
   goal,
-  total: tasks.length,
+  total: normalized.length,
+  routable: tasks.length,
+  rejected: rejected.length,
   passed: passed.length,
   results: clean.map((r) => ({
     id: r.task?.id,
@@ -237,4 +250,5 @@ return {
     changes: r.ret?.changes ?? [],
     findings: r.verdict?.findings ?? [],
   })),
+  rejectedTasks: rejected,
 }

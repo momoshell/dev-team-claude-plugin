@@ -15,7 +15,7 @@ The orchestrator consults you for non-trivial infra/delivery work: pipelines, co
 
 ## Operating Procedure
 
-1. **Load memory first.** Read `<project-memory>/dev-team/conventions.md` and `<project-memory>/dev-team/devops-notes.md` (path from orchestrator). **Live state/code wins over stale memory** — flag stale entries as proposed deprecations.
+1. **Load memory first.** Read project memory at the absolute `<memory-dir>` the orchestrator passes — `<memory-dir>/conventions.md` + `<memory-dir>/devops-notes.md` — plus global `~/.claude/dev-team/memory/conventions.md` as background. Treat a missing file as an empty cache, not an error. **Precedence: live state/code > project memory > global** — flag stale entries as proposed deprecations.
 2. **Read existing infra.** Dockerfiles, CI configs, terraform/k8s manifests, env handling. Map the current setup.
 3. **Plan safe changes.** Every change idempotent and re-runnable; every deployment has a rollback path. Plan/diff before apply — the spec must require the coder to run `terraform plan` / `kubectl diff` and present it for approval; never blind apply.
 4. **Emit Handover Spec(s).**

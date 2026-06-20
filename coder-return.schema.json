@@ -9,9 +9,11 @@
     "status": { "type": "string", "enum": ["done", "insufficient", "blocked"] },
     "reason": { "type": "string" },
     "missing_context": { "type": "string", "description": "Required when status is insufficient: exactly what the coder needs (file, contract, decision)." },
-    "changes": { "type": "array", "items": { "type": "string" }, "description": "Each item formatted '<path> — <one-line summary>'." },
-    "validation": { "type": "string", "description": "Commands run + pass/fail." }
+    "changes": { "type": "array", "items": { "type": "string" }, "description": "Required when status is done. Each item: '<path> — <one-line summary>'." },
+    "validation": { "type": "string", "description": "Required when status is done. Commands run + pass/fail." }
   },
-  "if": { "properties": { "status": { "const": "insufficient" } } },
-  "then": { "required": ["missing_context"] }
+  "allOf": [
+    { "if": { "required": ["status"], "properties": { "status": { "const": "insufficient" } } }, "then": { "required": ["missing_context"] } },
+    { "if": { "required": ["status"], "properties": { "status": { "const": "done" } } }, "then": { "required": ["changes", "validation"] } }
+  ]
 }

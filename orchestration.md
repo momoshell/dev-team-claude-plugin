@@ -6,6 +6,7 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 
 ## Roles
 - **Leads** (opus, read-only — plan, don't execute): `dev-team:frontend-lead`, `dev-team:backend-lead`, `dev-team:devops-lead`, `dev-team:qa-lead`, `dev-team:architecture-lead`. They read project memory, scope context, and emit **Handover Specs** + **propose memory deltas**.
+  - **Plan from shared context.** For cross-domain work, plan from the orchestrator's shared discovery digest (see Shared discovery); read only to fill a specific gap — don't re-scan what the digest already covers.
   - **Static discovery only — no Bash.** Leads read *code* (Read/Glob/Grep). **Runtime/dynamic discovery** — running commands, live data, API responses, actual output shapes — is not theirs. When a task hinges on it, scout it first (dispatch `Explore`, which has Bash + read tools, or do a quick scout yourself) and feed the **verified facts** into the spec's `discovery_context`. Never let a lead guess a runtime shape.
 - **Coder** (sonnet, execute-only): `dev-team:coder`. Implements a Handover Spec; reads within scope, never scouts broadly; returns `{status: done|insufficient|blocked, reason, missing_context, changes, validation}`.
 - **QA executors** (bundled): `dev-team:code-reviewer` / `dev-team:code-reviewer-deep`, `dev-team:build-validator`, `dev-team:test-engineer`. **Architecture team** (bundled): `dev-team:architect`, `dev-team:trd-reviewer`, `dev-team:doc-writer`, `Explore` (built-in).
@@ -13,12 +14,15 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 ## Activation (semi-auto)
 - **Trivial (Tier 1)** → handle directly (spec → `dev-team:coder`, or just do it). No suggestion.
 - **Non-trivial (Tier 2/3)** → **propose in one line, fixed template:** `This looks like Tier {N} ({reason}). Engage the team (lead → coder → QA), or handle directly?` — then wait. Never silently take over.
-- **Tier rule:** Tier 1 = single file / obvious fix, no design choice → handle directly. Tier 2 = multi-file within one domain → that domain lead. Tier 3 = touches ≥ 2 domains, OR introduces a new pattern/architecture, OR needs phasing → `dev-team:architecture-lead`. Unsure between 2 and 3 → the trigger is cross-domain *coordination*, not size.
+- **Tier rule:** Tier 1 = single file / obvious fix, no design choice → handle directly. Tier 2 = multi-file within one domain → that domain lead. Tier 3 = touches ≥ 2 domains, OR introduces a new pattern/architecture, OR needs phasing → `dev-team:architecture-lead`. Unsure between 2 and 3 → the trigger is cross-domain *coordination*, not size. **The full team is expensive — bias to direct handling when borderline; reserve leads + coders + gate for work that genuinely clears Tier 2.**
 - Manual via the skill: `/dev-team:team [request]` force · `/dev-team:team off` mute · `/dev-team:team auto` no-confirm · `/dev-team:team status` · `/dev-team:team workflow <goal>`.
 
 ## Flow
 - **Tier 2 (single domain):** domain lead → Handover Spec → `dev-team:coder`(s) (parallel; `isolation: "worktree"` on overlap) → QA gate → commit memory deltas → summarize.
 - **Tier 3 (new architecture / cross-domain / multi-phase):** `dev-team:architecture-lead` drafts TRD + brokers feasibility consults + proposes ADRs → `dev-team:trd-reviewer` (+ `dev-team:architect`) → user approval → phased execution (per phase: lead → coder → QA) → commit ADRs/conventions → summarize.
+
+## Shared discovery (gather once, then leads plan from it)
+For cross-domain / Tier-3 work (≥ 2 leads), gather context **once** and share it — don't let each lead re-scan the same code. Dispatch scout(s) (`Explore` — Bash + read tools) to map the relevant code across **all** involved domains and return a structured **context digest**: key files, patterns/conventions, contracts/shapes, gotchas, and any runtime facts. Hand the *same* digest to every lead; they **plan from it** and Read/Grep only to fill a **specific** gap it doesn't cover — never re-scan broadly. One thorough sweep → nothing missed, *and* N leads don't each pay to re-read the same files. (Single-domain Tier 2: the one lead scopes its own targeted context; no sharing needed.)
 
 ## Progress signalling (so the user can follow along)
 Narrate the spine in one-liners. Before a dispatch: `→ {agent}: {what}` (e.g. `→ backend-lead: planning be-01`); for a parallel batch, announce once: `→ 3 coders: be-02, fe-01, fe-03`. After it returns: `✓ {agent}: {result}` or `✗ {agent}: {blocker}`. End each phase with the gate verdict. Keep it to these lines — the subagent panel + `/agents` (and `/workflows` in workflow mode) carry the live detail; you carry the story.
@@ -34,6 +38,7 @@ The lead→coder contract — 11 fields (`task_id`, `domain`, `goal`, `files_in_
 - **Bootstrap:** if a `<memory-dir>` doesn't exist, create it + the files on the **first** commit there. Leads treat a missing file as an empty cache, not an error.
 - **Single writer = you, strictly sequential.** Leads only **propose** deltas in their output; you reconcile and commit. **Never issue parallel `Edit`/`Write` to memory files** — one file at a time, read-modify-write, to avoid corruption.
 - **Reconcile rule:** on conflicting deltas, the domain that owns the file/decision wins; for cross-cutting `conventions.md`, the architecture-lead's proposal wins, else surface the conflict to the user.
+- **Keep it lean.** Leads read these on every spawn — prune and `deprecate` aggressively so each file stays a tight cache, not an archive. Stale bulk is a recurring per-spawn cost.
 
 ## Brokered consults
 Leads can't talk to each other. **Default:** for cross-domain tasks, assemble *both* domains' context and consult the leads together — avoid live round-trips. **Exception (true blocker):** re-spawn lead A with `{A's prior spec draft + the original question + B's answer}`.

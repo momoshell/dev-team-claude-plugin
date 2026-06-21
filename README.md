@@ -166,13 +166,24 @@ This plugin uses standard Claude Code surfaces — no custom UI:
   marketplace.json       local marketplace manifest
 agents/                  the 13 agent definitions
 commands/team.md         the /dev-team:team command
-hooks/hooks.json         SessionStart → loads orchestration.md
+hooks/hooks.json         SessionStart → injects orchestration.md into context
 orchestration.md         the orchestrator's operating rules (loaded each session)
 handover-spec.md         canonical spec template + conventions
 handover-spec.schema.json
 coder-return.schema.json
 team-build.workflow.mjs  the deterministic workflow
+test/                    regression suite (node --test); CI in .github/workflows
 ```
+
+---
+
+## Tests
+
+```text
+node --test        # or: npm test
+```
+
+Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, the advisory build-validator, a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), and agent-frontmatter validity. Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
 
 ---
 

@@ -1,0 +1,9 @@
+{
+  "name": "dev-team-plugin",
+  "private": true,
+  "type": "module",
+  "description": "Dev-only metadata for the dev-team Claude Code plugin (tests/CI). Not part of the plugin runtime.",
+  "scripts": {
+    "test": "node --test"
+  }
+}

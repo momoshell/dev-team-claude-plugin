@@ -6,6 +6,7 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 
 ## Roles
 - **Leads** (opus, read-only — plan, don't execute): `dev-team:frontend-lead`, `dev-team:backend-lead`, `dev-team:devops-lead`, `dev-team:qa-lead`, `dev-team:architecture-lead`. They read project memory, scope context, and emit **Handover Specs** + **propose memory deltas**.
+  - **Static discovery only — no Bash.** Leads read *code* (Read/Glob/Grep). **Runtime/dynamic discovery** — running commands, live data, API responses, actual output shapes — is not theirs. When a task hinges on it, scout it first (dispatch `Explore`, which has Bash + read tools, or do a quick scout yourself) and feed the **verified facts** into the spec's `discovery_context`. Never let a lead guess a runtime shape.
 - **Coder** (sonnet, execute-only): `dev-team:coder`. Implements a Handover Spec; reads within scope, never scouts broadly; returns `{status: done|insufficient|blocked, reason, missing_context, changes, validation}`.
 - **QA executors** (bundled): `dev-team:code-reviewer` / `dev-team:code-reviewer-deep`, `dev-team:build-validator`, `dev-team:test-engineer`. **Architecture team** (bundled): `dev-team:architect`, `dev-team:trd-reviewer`, `dev-team:doc-writer`, `Explore` (built-in).
 

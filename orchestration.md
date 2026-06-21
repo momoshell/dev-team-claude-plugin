@@ -24,6 +24,8 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 ## Shared discovery (gather once, then leads plan from it)
 For cross-domain / Tier-3 work (≥ 2 leads), gather context **once** and share it — don't let each lead re-scan the same code. Dispatch scout(s) (`Explore` — Bash + read tools) to map the relevant code across **all** involved domains and return a structured **context digest**: key files, patterns/conventions, contracts/shapes, gotchas, and any runtime facts. Hand the *same* digest to every lead; they **plan from it** and Read/Grep only to fill a **specific** gap it doesn't cover — never re-scan broadly. One thorough sweep → nothing missed, *and* N leads don't each pay to re-read the same files. (Single-domain Tier 2: the one lead scopes its own targeted context; no sharing needed.)
 
+**Reuse before re-scan (any tier):** hand the lead any relevant context you already have — from classification, a runtime scout, or earlier turns — so it doesn't re-discover what's known. The dedicated shared sweep above is only worth its overhead at ≥ 2 leads.
+
 ## Progress signalling (so the user can follow along)
 Narrate the spine in one-liners. Before a dispatch: `→ {agent}: {what}` (e.g. `→ backend-lead: planning be-01`); for a parallel batch, announce once: `→ 3 coders: be-02, fe-01, fe-03`. After it returns: `✓ {agent}: {result}` or `✗ {agent}: {blocker}`. End each phase with the gate verdict. Keep it to these lines — the subagent panel + `/agents` (and `/workflows` in workflow mode) carry the live detail; you carry the story.
 

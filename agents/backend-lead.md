@@ -33,7 +33,7 @@ The orchestrator consults you for non-trivial backend work (new endpoints, schem
 ## Output Format
 
 ### Handover Spec (one per coder task)
-Follow the canonical template (`handover-spec.md` in this plugin), populating **every** field: `task_id, domain, goal, files_in_scope, constraints, acceptance_criteria, validation_commands, discovery_context, out_of_scope, depends_on, interface_contract`. Empty-value conventions live there.
+Follow the canonical template (`handover-spec.md` in this plugin), populating **every** field: `task_id, domain, goal, files_in_scope, constraints, acceptance_criteria, validation_commands, discovery_context, out_of_scope, depends_on, interface_contract`. Empty-value conventions live there. **Before handoff, self-check each spec against the completeness checklist in `handover-spec.md` — fix gaps now; an under-specified spec costs an amend→rebuild loop.**
 
 **Backend emphasis:**
 - `task_id` like `be-01`; `domain: backend`

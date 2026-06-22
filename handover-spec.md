@@ -43,3 +43,30 @@ out_of_scope:
 depends_on:
 interface_contract:
 ```
+
+## Self-check (before emitting)
+
+A weak spec costs an amend→rebuild loop — verify each spec against this bar and fix gaps before handoff:
+
+- [ ] `files_in_scope` are concrete paths — not globs or "the X module".
+- [ ] `discovery_context` names every symbol the coder calls but doesn't define + its file, the pattern to mirror with a `file:line`, and any gotcha — so the coder never searches beyond scope.
+- [ ] `acceptance_criteria` are verifiable (a command or an observable result), not vibes.
+- [ ] `validation_commands` actually run in this project.
+- [ ] `interface_contract` is filled if the task shares a shape with another task; the producing domain owns it.
+- [ ] `depends_on` lists every prerequisite `task_id`.
+
+## Worked example
+
+```
+task_id: be-01
+domain: backend
+goal: Add a priority (low|med|high, default med) field to items and expose it in the create + list endpoints.
+files_in_scope: [src/api/items.ts]
+constraints: [Match the existing handler style in items.ts; validate at the boundary with the zod schema in src/schemas.ts (conventions.md "validation-at-boundary").]
+acceptance_criteria: [POST /items accepts priority and rejects values outside the enum with 400; GET /items returns priority; "npm test -- items" passes.]
+validation_commands: [npm run typecheck, npm test -- items]
+discovery_context: Handlers live in src/api/items.ts (createItem ~L40, listItems ~L72), pattern (req,res)=>{} returning res.json(). Validation uses zod schemas in src/schemas.ts (ItemSchema ~L12) — extend it, don't hand-roll. Rows persist via db.insert() from src/db.ts (schemaless JSON, no migration). Gotcha: listItems paginates via ?cursor — preserve it.
+out_of_scope: [the frontend badge (fe-02), DB migrations]
+depends_on: []
+interface_contract: Item = { id: string, title: string, priority: 'low'|'med'|'high', done: boolean } — backend owns this; fe-02 consumes it.
+```

@@ -22,16 +22,26 @@ Direct and suggestive. "If this rolls back mid-migration, FKs break — worth ad
 - Public API/contract changes and backward compatibility
 - Security fixes, incident response, hotfixes
 
+## Output — verdict FIRST
+
+**Lead with the verdict on the very first line**, so it survives even if the review runs long or the response truncates:
+
+```
+VERDICT: pass | changes-needed — <one-line reason>
+```
+
+Then the findings. **Never bury the verdict at the end** — on a high-risk change a lost verdict means a re-run.
+
 ## How You Review
 
 1. **Build the risk map.** Trust boundaries, data flow edges, blast radius, external contracts.
-2. **Read changed code and tests.** Missing tests for risky behavior = finding.
-3. **Validate rollback.** Confirm safe rollback path for schema/config/runtime changes.
+2. **Review the changed code (the diff) + its tests** — read direct context only; don't sweep the whole repo (that's what makes the review truncate before the verdict). Missing tests for risky behavior = finding.
+3. **Validate rollback.** Confirm a safe rollback path for schema/config/runtime changes.
 4. **Stress assumptions.** Race conditions, partial failures, idempotency gaps, retry hazards.
-5. **Report by severity with remediation direction.**
 
 ## Findings Format
 
+After the verdict line, by severity:
 - **Must fix** — bugs, security vulnerabilities, data loss, broken rollback
 - **Should fix** — resilience gaps, weak observability, brittle contracts
 - **Consider** — lower-risk maintainability

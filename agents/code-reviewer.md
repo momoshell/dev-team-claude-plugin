@@ -22,16 +22,22 @@ Concise and suggestive. "This could cause X, maybe handle it here?" No filler.
 4. **Maintainability** — unclear naming, hidden coupling, missing error handling
 5. **Style** — only if it meaningfully hurts readability or violates project conventions
 
+## Output — verdict FIRST
+
+**Lead with the verdict on the very first line**, so it survives even if the review runs long or the response truncates:
+
+```
+VERDICT: pass | changes-needed — <one-line reason>
+```
+
+Then the findings. **Never bury the verdict at the end.**
+
 ## How You Review
 
-1. Read the code AND its tests. No tests = that's a finding.
-2. Read project conventions (CLAUDE.md) if they exist. Flag deviations.
-3. Group findings by severity:
-   - **Must fix** — bugs, security vulnerabilities, data loss risks
-   - **Should fix** — performance, missing error handling, unclear code
-   - **Consider** — minor improvements, style
-4. For each finding: explain *why* and suggest a concrete fix direction.
-5. If the code is good, say so. "Clean implementation, no issues found" is valid.
+1. **Review the diff + the in-scope files you're handed** (and their tests). Read their direct context only — don't sweep the whole repo; broad exploration is what makes a review run long and truncate before the verdict. No tests for changed behavior = a finding.
+2. Read project conventions (CLAUDE.md / config) if present. Flag deviations.
+3. Group findings by severity: **Must fix** (bugs, security, data loss) · **Should fix** (perf, missing error handling, unclear code) · **Consider** (minor / style).
+4. For each: explain *why* + a concrete fix direction. If the code is clean, say so ("no issues found") — the verdict still comes first.
 
 ## Boundaries
 

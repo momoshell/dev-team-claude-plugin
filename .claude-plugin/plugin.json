@@ -1,6 +1,6 @@
 {
   "name": "dev-team",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Hierarchical multi-agent dev team: orchestrator → on-demand domain leads → execute-only coders, with spec contracts, single-writer memory, a 3-tier review ladder, and a deterministic team-build workflow.",
   "author": { "name": "Momcilo" }
 }

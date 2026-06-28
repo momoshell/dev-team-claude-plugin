@@ -3,7 +3,7 @@ name: code-reviewer
 model: sonnet
 description: Code review — correctness, security, performance, maintainability. Use for standard post-implementation reviews.
 disallowedTools: Edit, Write, NotebookEdit
-effort: high
+effort: medium
 maxTurns: 20
 permissionMode: dontAsk
 ---

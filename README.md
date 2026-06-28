@@ -44,6 +44,8 @@ Two ways to run the team:
 | **Conversational** (semi-auto) | Day-to-day work; the orchestrator proposes the team for non-trivial requests | just talk, or `/dev-team:team` |
 | **Workflow** (deterministic) | Large or repeatable batches you want fanned out and gated automatically | `/dev-team:team workflow <goal>` |
 
+**Cost model.** Every subagent is its own context window with its own cost, so spend is driven by *how many* windows a task opens. The team economizes on **count** — Tier-1 runs direct (no window), deterministic validation runs inline, the low-risk QA gate is a single sonnet reviewer, and the standard reviewer runs at medium effort. It deliberately does **not** economize on the windows that prevent expensive failures: planning leads, the architecture lead, deep review, and the adversarial panel stay on opus. Cheap where it's safe, strong where it compounds.
+
 ### Activation tiers (conversational)
 
 - **Tier 1 — trivial** (one file, obvious fix): the orchestrator edits directly and validates inline. No spec, no coder, no gate — no window spent on a one-liner.

@@ -192,3 +192,9 @@ Dependency-free (`node:test`), no live model. Covers the workflow's wave schedul
 - **Claude Code** with plugin support.
 - **Node.js** — used by the Workflow tool to run `team-build.workflow.mjs` (workflow mode only).
 - **jq** — required by the bundled `SessionStart` hook that injects `orchestration.md` into context.
+
+---
+
+## Contributing — invariants
+
+**Keep agent system prompts static (prompt-cache invariant).** Every agent runs in its own context window, so the base prompt + the agent's `.md` is a prefix that prompt-caching reuses across the many spawns — *only while it stays byte-stable*. Never interpolate per-task content (paths, the Handover Spec, the memory dir, a discovery digest, the goal) **into an agent `.md` system prompt**. All variable content goes in the **spawn prompt** (the `agent()`/Task `prompt` = the user turn) — that's how `team-build.workflow.mjs` already does it (`planPrompt`/`buildPrompt`/`gatePrompt`). Baking task content into a system prompt silently busts the cache on *every* spawn, which is the dominant per-window cost. The `${`-free `agents/` tree is checked by reading; keep it that way.

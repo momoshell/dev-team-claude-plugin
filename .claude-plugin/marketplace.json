@@ -1,11 +1,15 @@
 {
   "name": "dev-team",
   "owner": { "name": "Momcilo" },
-  "metadata": { "description": "Local marketplace for the dev-team plugin", "version": "0.1.11" },
+  "metadata": { "description": "Local marketplace for the dev-team plugin", "version": "0.1.12" },
   "plugins": [
     {
       "name": "dev-team",
-      "source": "./",
+      "source": {
+        "source": "url",
+        "url": "https://github.com/momoshell/dev-team-claude-plugin.git",
+        "ref": "main"
+      },
       "description": "Hierarchical multi-agent dev team: orchestrator → on-demand domain leads → execute-only coders, with spec contracts, single-writer memory, a 3-tier review ladder, and a team-build workflow."
     }
   ]

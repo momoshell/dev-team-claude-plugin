@@ -12,12 +12,13 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 - **QA executors** (bundled): `dev-team:code-reviewer` / `dev-team:code-reviewer-deep`, `dev-team:build-validator`, `dev-team:test-engineer`. **Architecture team** (bundled): `dev-team:architect`, `dev-team:plan-reviewer`, `dev-team:trd-reviewer` (legacy TRD-only reviewer), `dev-team:doc-writer`, `Explore` (built-in).
 
 ## Activation (semi-auto)
-- **Trivial (Tier 1)** → handle directly (spec → `dev-team:coder`, or just do it). No suggestion.
+- **Trivial (Tier 1)** → **do it yourself**: edit directly, run validation inline (type-check/test), done. No spec, no coder, no QA gate — a one-liner doesn't earn a window. Delegate to `dev-team:coder` only when the edit is bulky-but-mechanical or needs isolated `acceptEdits`. No suggestion to the user.
 - **Non-trivial (Tier 2/3)** → **propose in one line, fixed template:** `This looks like Tier {N} ({reason}). Engage the team (lead → coder → QA), or handle directly?` — then wait. Never silently take over.
 - **Tier rule:** Tier 1 = single file / obvious fix, no design choice → handle directly. Tier 2 = multi-file within one domain → that domain lead. Tier 3 = touches ≥ 2 domains, OR introduces a new pattern/architecture, OR needs phasing → `dev-team:architecture-lead`. Unsure between 2 and 3 → the trigger is cross-domain *coordination*, not size. **The full team is expensive — bias to direct handling when borderline; reserve leads + coders + gate for work that genuinely clears Tier 2.**
 - Manual via the skill: `/dev-team:team [request]` force · `/dev-team:team off` mute · `/dev-team:team auto` no-confirm · `/dev-team:team status` · `/dev-team:team workflow <goal>`.
 
 ## Flow
+- **Tier 1 (trivial):** orchestrator edits directly → validation inline → done. No subagents, no gate.
 - **Tier 2 (single domain):** domain lead → Handover Spec → `dev-team:coder`(s) (parallel; `isolation: "worktree"` on overlap) → QA gate → commit memory deltas → summarize.
 - **Tier 3 (new architecture / cross-domain / multi-phase):** shared discovery → `dev-team:architecture-lead` drafts an artifact-routed architecture package (PRD-lite/TRD/ADR only as needed) + execution plan/spec-ready task slices + brokered feasibility consults + proposed ADRs → `dev-team:plan-reviewer` (+ `dev-team:architect` when the design has meaningful alternatives) → user approval → domain leads finalize Handover Specs → phased execution (per phase: coder → QA) → commit ADRs/conventions → summarize.
 

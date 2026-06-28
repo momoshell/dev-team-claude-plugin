@@ -46,7 +46,7 @@ Two ways to run the team:
 
 ### Activation tiers (conversational)
 
-- **Tier 1 — trivial** (one file, obvious fix): handled directly. No ceremony.
+- **Tier 1 — trivial** (one file, obvious fix): the orchestrator edits directly and validates inline. No spec, no coder, no gate — no window spent on a one-liner.
 - **Tier 2 — single domain** (multi-file): the orchestrator proposes one line — *"This looks like Tier 2 (…). Engage the team, or handle directly?"* — then runs `lead → coder → QA gate`.
 - **Tier 3 — cross-domain / new architecture / phased**: `architecture-lead` drafts the smallest useful architecture package (PRD-lite/TRD/ADR only as needed) + execution plan → independent plan review → your approval → phased execution.
 

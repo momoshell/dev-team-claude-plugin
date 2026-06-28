@@ -134,6 +134,8 @@ Owned by `qa-lead`, applied at every gate:
 2. **Deep** — `code-reviewer-deep` (any deep trigger, or risk ≥ 2).
 3. **Adversarial panel** — 3 reviewers, distinct lenses (correctness / security / rollback), majority pass — on stacked risk (≥ 3, or multiple deep triggers). Workflow mode applies this panel automatically for stacked risk.
 
+The ladder sets review *depth*; the **bundle size** scales with risk too. Low-risk (0–1) is a single reviewer with validation folded in inline — `test-engineer` joins only when the change adds/alters behavior that isn't already covered (or the spec demands tests). Deep-trigger / stacked risk adds `test-engineer` for negative + security coverage.
+
 **Deep triggers:** auth/authz, secrets, encryption, tokens, passwords, payments, PII; DB migrations / destructive ops; CI/CD, infra, prod; public API/contract changes; security fix / incident / hotfix. Plausible auth bypass, cross-tenant access, privilege escalation, reachable injection/RCE, prod secret exposure, destructive data loss, payment/PII leakage, or unsafe migration rollback blocks shipping.
 
 ---

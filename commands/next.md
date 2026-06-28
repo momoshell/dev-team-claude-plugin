@@ -12,10 +12,10 @@ Take the next task and **plan** it (don't execute yet). `$ARGUMENTS` may name a 
 
 3. **Plan it through the team** (no edits, no coders yet):
    - Classify the tier (orchestration Tier rule).
-   - Run **shared discovery once** across the involved domains (scout / `Explore` → one digest). For Tier 3, have `dev-team:architecture-lead` draft the TRD (→ `dev-team:trd-reviewer`).
+   - Run **shared discovery once** across the involved domains (scout / `Explore` → one digest). For Tier 3, have `dev-team:architecture-lead` draft the artifact-routed architecture package — PRD-lite/TRD/ADR only as needed, plus execution plan (→ `dev-team:plan-reviewer`).
    - Have each relevant lead produce a **Handover Spec** from the shared digest — self-checked against `handover-spec.md`, `interface_contract` filled for shared shapes, `depends_on` set.
    - Use `config.validate` for the specs' `validation_commands` and `config.review_defaults` to set review depth.
 
-4. **Present the plan for approval** — the TRD/specs + the dispatch shape (which coders, parallel vs sequenced) + the gate plan. **Stop here.** On approval, continue to coders → QA gate → commit reconciled memory deltas (or the user runs execution separately). Never auto-execute Tier 3 without approval.
+4. **Present the plan for approval** — the architecture package/specs + the dispatch shape (which coders, parallel vs sequenced) + the gate plan. **Stop here.** On approval, continue to coders → QA gate → commit reconciled memory deltas (or the user runs execution separately). Never auto-execute Tier 3 without approval.
 
 **Task:** $ARGUMENTS

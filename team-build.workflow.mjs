@@ -107,13 +107,34 @@ const leadFor = (domain) => LEAD[domain]
 // QA tasks are executed by the test-engineer (write/run tests), everything else by the coder.
 const executorFor = (domain) => (domain === 'qa' ? 'dev-team:test-engineer' : 'dev-team:coder')
 
-// Review ladder (mirrors orchestration.md → QA gate). Deep triggers escalate the reviewer.
-const DEEP_TRIGGERS = /\b(authn|authz|auth|authentication|authorization|passwords?|secrets?|credentials?|encrypt(?:ion|ed|ing|s)?|tokens?|payments?|pii|migrat(?:e|es|ion|ions|ing)|backfills?|destructive|drop\s+table|truncate|ci\/?cd|pipelines?|infra(?:structure)?|terraform|kubernetes|k8s|production|prod\b|deploy(?:s|ed|ing|ment|ments)?|public[\s-]*api|api[\s-]*contract|breaking[\s-]*change|backward[\s-]*compat(?:ible|ibility)?|security|incidents?|hotfix(?:es)?|code-reviewer-deep)\b/i
+// Review ladder (mirrors orchestration.md → QA gate). Deep triggers escalate;
+// stacked triggers/risk use a 3-reviewer adversarial panel.
+const DEEP_TRIGGER_GROUPS = [
+  ['auth', /\b(authn|authz|auth|authentication|authorization|permissions?|roles?|tenan(?:t|cy)|owner(?:ship)?)\b/i],
+  ['secrets', /\b(passwords?|secrets?|credentials?|encrypt(?:ion|ed|ing|s)?|tokens?|sessions?|cookies?)\b/i],
+  ['sensitive-data', /\b(payments?|pii|personal data|billing|cardholder)\b/i],
+  ['data-change', /\b(migrat(?:e|es|ion|ions|ing)|backfills?|destructive|drop\s+table|truncate)\b/i],
+  ['infra', /\b(ci\/?cd|pipelines?|infra(?:structure)?|terraform|kubernetes|k8s|production|prod\b|deploy(?:s|ed|ing|ment|ments)?)\b/i],
+  ['public-contract', /\b(public[\s-]*api|api[\s-]*contract|breaking[\s-]*change|backward[\s-]*compat(?:ible|ibility)?)\b/i],
+  ['security-fix', /\b(security|incidents?|hotfix(?:es)?|vulnerabilit(?:y|ies)|cve)\b/i],
+]
 
-const reviewTierFor = (spec) => {
-  if (spec.domain === 'devops') return 'deep' // infra/delivery is inherently high-risk
+const RISK_FACTORS = [
+  /\bmulti[-\s]?module\b/i,
+  /\buntested\b/i,
+  /\bunclear rollback\b/i,
+  /\bcomplex control flow\b/i,
+  /\bcross[-\s]?domain\b/i,
+]
+
+const reviewRouteFor = (spec) => {
   const hay = [spec.goal, spec.interface_contract, ...(spec.constraints || []), ...(spec.acceptance_criteria || [])].join('\n')
-  return DEEP_TRIGGERS.test(hay) ? 'deep' : 'standard'
+  const triggers = DEEP_TRIGGER_GROUPS.filter(([, re]) => re.test(hay)).map(([name]) => name)
+  if (spec.domain === 'devops' && !triggers.includes('infra')) triggers.push('infra')
+  const riskScore = RISK_FACTORS.reduce((n, re) => n + (re.test(hay) ? 1 : 0), 0)
+  if (triggers.length >= 2 || riskScore >= 3) return { tier: 'adversarial', triggers, riskScore }
+  if (triggers.length || riskScore >= 2) return { tier: 'deep', triggers, riskScore }
+  return { tier: 'standard', triggers, riskScore }
 }
 const reviewerFor = (tier) => (tier === 'deep' ? 'dev-team:code-reviewer-deep' : 'dev-team:code-reviewer')
 
@@ -185,22 +206,53 @@ const runTask = async (task) => {
   if (!ret) return failed(task, spec, null, ['executor agent died — no result'])
   if (ret.status !== 'done') return failed(task, spec, ret, [`executor returned status=${ret.status}: ${ret.reason}`])
 
-  const tier = reviewTierFor(spec)
-  const [review, build] = await parallel([
-    () => agent(gatePrompt(spec, tier), { agentType: reviewerFor(tier), schema: VERDICT_SCHEMA, label: `gate:${task.domain}-${id}`, phase: 'Gate' }),
-    () => agent(buildCheckPrompt(spec), { agentType: 'dev-team:build-validator', schema: BUILD_SCHEMA, label: `build-check:${task.domain}-${id}`, phase: 'Gate' }),
-  ])
+  const route = reviewRouteFor(spec)
+  const findings = []
+  let reviewPass = false
+  let build
 
-  const findings = [...((review && review.findings) || [])]
-  if (!review) findings.push('review agent died — verdict unavailable')
+  if (route.tier === 'adversarial') {
+    const lenses = [
+      ['correctness', 'correctness and contract stability'],
+      ['security', 'security vulnerabilities, trust boundaries, and source-to-sink exploitability'],
+      ['rollback', 'rollback safety, idempotency, partial failure, and operational blast radius'],
+    ]
+    const outcomes = await parallel([
+      ...lenses.map(([key, lens]) => () => agent(
+        `${gatePrompt(spec, 'deep')}\nAdversarial panel lens: ${lens}. Return pass=false for any must-fix issue in this lens.`,
+        { agentType: 'dev-team:code-reviewer-deep', schema: VERDICT_SCHEMA, label: `gate-${key}:${task.domain}-${id}`, phase: 'Gate' },
+      )),
+      () => agent(buildCheckPrompt(spec), { agentType: 'dev-team:build-validator', schema: BUILD_SCHEMA, label: `build-check:${task.domain}-${id}`, phase: 'Gate' }),
+    ])
+    const reviews = outcomes.slice(0, lenses.length)
+    build = outcomes[lenses.length]
+    const passCount = reviews.filter((r) => r && r.pass).length
+    reviewPass = passCount >= 2
+    reviews.forEach((r, i) => {
+      const lens = lenses[i][0]
+      if (!r) findings.push(`${lens} review died — verdict unavailable`)
+      else findings.push(...((r.findings || []).map((f) => `${lens}: ${f}`)))
+    })
+    if (!reviewPass) findings.push(`adversarial panel failed: ${passCount}/3 reviewers passed`)
+  } else {
+    const [review, buildResult] = await parallel([
+      () => agent(gatePrompt(spec, route.tier), { agentType: reviewerFor(route.tier), schema: VERDICT_SCHEMA, label: `gate:${task.domain}-${id}`, phase: 'Gate' }),
+      () => agent(buildCheckPrompt(spec), { agentType: 'dev-team:build-validator', schema: BUILD_SCHEMA, label: `build-check:${task.domain}-${id}`, phase: 'Gate' }),
+    ])
+    build = buildResult
+    reviewPass = Boolean(review && review.pass)
+    findings.push(...((review && review.findings) || []))
+    if (!review) findings.push('review agent died — verdict unavailable')
+  }
+
   // build-validator is advisory: a real reported failure blocks; a dead/no-verdict run
   // does NOT block (the coder already ran validation_commands and the reviewer checked criteria).
   let buildOk = true
   if (!build) findings.push('build-validator returned no verdict — build status unknown (advisory, not blocking)')
   else if (!build.pass) { buildOk = false; findings.push(`build failed: ${build.summary}`) }
 
-  const pass = Boolean(review && review.pass && buildOk)
-  return { task, spec, ret, verdict: { pass, findings, tier }, passed: pass }
+  const pass = Boolean(reviewPass && buildOk)
+  return { task, spec, ret, verdict: { pass, findings, tier: route.tier }, passed: pass }
 }
 
 // Dependency-wave scheduler: a task is READY once every dependency has finished;

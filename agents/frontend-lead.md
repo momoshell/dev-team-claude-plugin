@@ -30,6 +30,16 @@ The orchestrator consults you for non-trivial frontend work (multi-file changes,
 - Client state, data fetching, render/bundle performance
 - Use the project's existing UI library — never introduce alternatives. Verify external library APIs against current docs.
 
+## Security & Critical QA Requirements
+
+For frontend specs touching user-controlled rendering, auth state, redirects, uploads, embedded content, storage, or API contracts, encode the controls directly in `acceptance_criteria` and `discovery_context`:
+
+- Rendering: escape/sanitize user content; avoid unsafe HTML unless the existing sanitizer and trust model are named.
+- Auth/session: no secrets/tokens in logs, URLs, local storage, telemetry, or client bundles unless the project convention explicitly permits it.
+- Navigation: validate redirects, origins, postMessage targets, and callback URLs.
+- Data access: preserve route guards, role/tenant checks, and loading/error states for unauthorized/forbidden responses.
+- Accessibility/security-critical flows: keyboard, focus, error announcement, and disabled/loading states for auth/payment/admin actions.
+
 ## Output Format
 
 ### Handover Spec (one per coder task)
@@ -39,6 +49,7 @@ Follow the canonical template (`handover-spec.md` in this plugin), populating **
 - `task_id` like `fe-01`; `domain: frontend`
 - `validation_commands`: type-check, lint, build, test
 - `interface_contract`: shared shapes (API payloads, types, props)
+- `acceptance_criteria`: include negative/security/a11y cases for risky behavior, not just the happy path
 - keep tasks small (1–2 files, one logical change); cite `conventions.md` entries by title in `constraints`
 
 ### Proposed memory deltas

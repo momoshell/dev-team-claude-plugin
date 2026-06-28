@@ -37,7 +37,8 @@ export function mockAgent(opts = {}) {
   const { calls = [], specFor, returnFor, gatePass = () => true, buildNull = () => false, buildPass = () => true } = opts
   return async (_prompt, o) => {
     const label = o.label || ''
-    const kind = label.split(':')[0]
+    const rawKind = label.split(':')[0]
+    const kind = rawKind.startsWith('gate-') ? 'gate' : rawKind
     const domain = (label.split(':')[1] || '').split('-')[0] || 'backend'
     calls.push({ kind, domain, agentType: o.agentType, label, phase: o.phase })
     if (kind === 'plan' || kind === 'amend') {

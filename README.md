@@ -48,7 +48,7 @@ Two ways to run the team:
 
 - **Tier 1 — trivial** (one file, obvious fix): handled directly. No ceremony.
 - **Tier 2 — single domain** (multi-file): the orchestrator proposes one line — *"This looks like Tier 2 (…). Engage the team, or handle directly?"* — then runs `lead → coder → QA gate`.
-- **Tier 3 — cross-domain / new architecture / phased**: `architecture-lead` drafts a TRD → independent review → your approval → phased execution.
+- **Tier 3 — cross-domain / new architecture / phased**: `architecture-lead` drafts the smallest useful architecture package (PRD-lite/TRD/ADR only as needed) + execution plan → independent plan review → your approval → phased execution.
 
 It never silently takes over; it proposes and waits.
 
@@ -56,14 +56,14 @@ It never silently takes over; it proposes and waits.
 
 ## The team
 
-13 agents, each scoped to one job:
+14 agents, each scoped to one job:
 
 | Group | Agents | Role |
 |-------|--------|------|
 | **Leads** (plan, read-only) | `architecture-lead`, `backend-lead`, `frontend-lead`, `devops-lead`, `qa-lead` | Read memory, scope context, emit **Handover Specs**, propose memory deltas. Never edit code. |
 | **Executor** | `coder` | Implements one Handover Spec exactly, within scope. Never plans or explores. |
 | **QA gate** | `code-reviewer`, `code-reviewer-deep`, `build-validator`, `test-engineer` | Review (standard/deep), independent type-check + build, test authoring. |
-| **Architecture** | `architect`, `trd-reviewer`, `doc-writer` | Second-opinion design, independent TRD review, ADR/README authoring. |
+| **Architecture** | `architect`, `plan-reviewer`, `trd-reviewer`, `doc-writer` | Second-opinion design, independent plan/TRD review, ADR/README authoring. |
 
 Agents are referenced as `dev-team:<name>` (e.g. `dev-team:backend-lead`).
 
@@ -101,7 +101,7 @@ Agents are referenced as `dev-team:<name>` (e.g. `dev-team:backend-lead`).
 
 - **Plan-domains:** `frontend` · `backend` · `devops` · `qa`. Anything else (e.g. `mobile`, or `architecture` which is interactive Tier-3) is **rejected, not laundered** — returned in `rejectedTasks`.
 - **`depends_on`** (task ids) drives **dependency-wave** scheduling: independent tasks run concurrently within a wave; a dependent waits for its prerequisites and is **skipped if any prerequisite fails its gate**. Cycles and unknown deps are skipped with a reason.
-- **Risk-keyed review:** auth / migration / secrets / infra / public-API / etc. (and the whole `devops` domain) escalate to `code-reviewer-deep`; everything else gets `code-reviewer`.
+- **Risk-keyed review:** auth / migration / secrets / infra / public-API / etc. (and the whole `devops` domain) escalate to `code-reviewer-deep`; stacked risk gets a 3-reviewer adversarial panel; everything else gets `code-reviewer`.
 - **Self-healing:** one amend-retry per task on a coder `insufficient` return (conversational mode allows up to two).
 
 ---
@@ -132,9 +132,9 @@ Owned by `qa-lead`, applied at every gate:
 
 1. **Standard** — `code-reviewer` (risk 0–1).
 2. **Deep** — `code-reviewer-deep` (any deep trigger, or risk ≥ 2).
-3. **Adversarial panel** — 3 reviewers, distinct lenses (correctness / security / rollback), majority pass — on stacked risk (≥ 3, or multiple deep triggers).
+3. **Adversarial panel** — 3 reviewers, distinct lenses (correctness / security / rollback), majority pass — on stacked risk (≥ 3, or multiple deep triggers). Workflow mode applies this panel automatically for stacked risk.
 
-**Deep triggers:** auth/authz, secrets, encryption, tokens, passwords, payments, PII; DB migrations / destructive ops; CI/CD, infra, prod; public API/contract changes; security fix / incident / hotfix.
+**Deep triggers:** auth/authz, secrets, encryption, tokens, passwords, payments, PII; DB migrations / destructive ops; CI/CD, infra, prod; public API/contract changes; security fix / incident / hotfix. Plausible auth bypass, cross-tenant access, privilege escalation, reachable injection/RCE, prod secret exposure, destructive data loss, payment/PII leakage, or unsafe migration rollback blocks shipping.
 
 ---
 
@@ -191,4 +191,4 @@ Dependency-free (`node:test`), no live model. Covers the workflow's wave schedul
 
 - **Claude Code** with plugin support.
 - **Node.js** — used by the Workflow tool to run `team-build.workflow.mjs` (workflow mode only).
-- **jq** — only if you opt into the optional `subagentStatusLine` script; not needed by the plugin itself.
+- **jq** — required by the bundled `SessionStart` hook that injects `orchestration.md` into context.

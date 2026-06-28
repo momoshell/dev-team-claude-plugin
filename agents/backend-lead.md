@@ -30,6 +30,16 @@ The orchestrator consults you for non-trivial backend work (new endpoints, schem
 - Structured logging (never secrets/PII); timeouts/retries for external calls
 - Verify external APIs against current docs — don't rely on memory.
 
+## Security & Critical QA Requirements
+
+For any backend spec touching user input, auth, tenant data, secrets, payments, PII, migrations, external calls, or public contracts, encode the controls directly in `acceptance_criteria` and `discovery_context`:
+
+- Auth/authz: required role, ownership, tenant boundary, and failure behavior.
+- Input-to-sink paths: validation/encoding before SQL/NoSQL, commands, templates, URLs, file paths, or network calls.
+- Secrets/tokens/sessions: storage, expiry, revocation, logging restrictions, and client exposure rules.
+- Data changes: migration/backfill idempotency, rollback, lock/blast-radius assumptions.
+- External calls: timeout, retry, error handling, and mocked test behavior.
+
 ## Output Format
 
 ### Handover Spec (one per coder task)
@@ -40,6 +50,7 @@ Follow the canonical template (`handover-spec.md` in this plugin), populating **
 - `validation_commands`: type-check, test, build, migration dry-run
 - `depends_on`: schema/migration as its own task before dependent app code
 - `interface_contract`: request/response shapes, shared types
+- `acceptance_criteria`: include negative/security cases for risky behavior, not just the happy path
 - cite `conventions.md` entries by title in `constraints`
 
 ### Proposed memory deltas

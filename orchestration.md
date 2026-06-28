@@ -9,7 +9,7 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
   - **Plan from shared context.** For cross-domain work, plan from the orchestrator's shared discovery digest (see Shared discovery); read only to fill a specific gap — don't re-scan what the digest already covers.
   - **Static discovery only — no Bash.** Leads read *code* (Read/Glob/Grep). **Runtime/dynamic discovery** — running commands, live data, API responses, actual output shapes — is not theirs. When a task hinges on it, scout it first (dispatch `Explore`, which has Bash + read tools, or do a quick scout yourself) and feed the **verified facts** into the spec's `discovery_context`. Never let a lead guess a runtime shape.
 - **Coder** (sonnet, execute-only): `dev-team:coder`. Implements a Handover Spec; reads within scope, never scouts broadly; returns `{status: done|insufficient|blocked, reason, missing_context, changes, validation}`.
-- **QA executors** (bundled): `dev-team:code-reviewer` / `dev-team:code-reviewer-deep`, `dev-team:build-validator`, `dev-team:test-engineer`. **Architecture team** (bundled): `dev-team:architect`, `dev-team:trd-reviewer`, `dev-team:doc-writer`, `Explore` (built-in).
+- **QA executors** (bundled): `dev-team:code-reviewer` / `dev-team:code-reviewer-deep`, `dev-team:build-validator`, `dev-team:test-engineer`. **Architecture team** (bundled): `dev-team:architect`, `dev-team:plan-reviewer`, `dev-team:trd-reviewer` (legacy TRD-only reviewer), `dev-team:doc-writer`, `Explore` (built-in).
 
 ## Activation (semi-auto)
 - **Trivial (Tier 1)** → handle directly (spec → `dev-team:coder`, or just do it). No suggestion.
@@ -19,7 +19,16 @@ These rules are active because the `dev-team` plugin is enabled. You are the **o
 
 ## Flow
 - **Tier 2 (single domain):** domain lead → Handover Spec → `dev-team:coder`(s) (parallel; `isolation: "worktree"` on overlap) → QA gate → commit memory deltas → summarize.
-- **Tier 3 (new architecture / cross-domain / multi-phase):** `dev-team:architecture-lead` drafts TRD + brokers feasibility consults + proposes ADRs → `dev-team:trd-reviewer` (+ `dev-team:architect`) → user approval → phased execution (per phase: lead → coder → QA) → commit ADRs/conventions → summarize.
+- **Tier 3 (new architecture / cross-domain / multi-phase):** shared discovery → `dev-team:architecture-lead` drafts an artifact-routed architecture package (PRD-lite/TRD/ADR only as needed) + execution plan/spec-ready task slices + brokered feasibility consults + proposed ADRs → `dev-team:plan-reviewer` (+ `dev-team:architect` when the design has meaningful alternatives) → user approval → domain leads finalize Handover Specs → phased execution (per phase: coder → QA) → commit ADRs/conventions → summarize.
+
+## Tier-3 architecture package
+Architecture work is not "always write a TRD." The architecture lead chooses the smallest useful package:
+- **PRD-lite** when product/user behavior, workflow, actors, or success criteria are ambiguous.
+- **TRD/RFC** when implementation architecture, contracts, migration, sequencing, or trade-offs are the hard part.
+- **ADR** when a durable technical decision should be remembered, superseded, or revisited later.
+- **Execution plan** for every buildable Tier-3 request: phases, domain task slices, dependencies, interface contracts, acceptance criteria, validation strategy, and QA route.
+
+Before asking for user approval, present the architecture package plus the dispatch shape: which Handover Specs will be produced, which coders can run in parallel, which tasks are dependent, and which gate tier applies. Do not move from Tier-3 design into implementation without explicit approval unless the user has enabled `auto` and the request is not high-risk.
 
 ## Shared discovery (gather once, then leads plan from it)
 For cross-domain / Tier-3 work (≥ 2 leads), gather context **once** and share it — don't let each lead re-scan the same code. Dispatch scout(s) (`Explore` — Bash + read tools) to map the relevant code across **all** involved domains and return a structured **context digest**: key files, patterns/conventions, contracts/shapes, gotchas, and any runtime facts. Hand the *same* digest to every lead; they **plan from it** and Read/Grep only to fill a **specific** gap it doesn't cover — never re-scan broadly. One thorough sweep → nothing missed, *and* N leads don't each pay to re-read the same files. (Single-domain Tier 2: the one lead scopes its own targeted context; no sharing needed.)
@@ -52,6 +61,7 @@ Verify every `depends_on` id resolves to an emitted spec; ensure any shared shap
 Review tier + `dev-team:build-validator` + `dev-team:test-engineer` run in parallel; reviewers get the spec's acceptance_criteria + the diff and verify the contract. **Reviewers lead with a one-line verdict (`pass` / `changes-needed`) so it survives a long or truncated review** — if a reviewer returns no verdict, treat it as inconclusive and re-run (scoped to the diff), don't assume pass. Review ladder (owned by `dev-team:qa-lead`):
 - **Standard** `dev-team:code-reviewer` (risk 0–1) → **Deep** `dev-team:code-reviewer-deep` (any trigger / risk ≥ 2) → **Adversarial panel** on stacked risk (≥ 3 or multiple deep triggers): **3 reviewers** (odd, for a clean majority) with distinct lenses — correctness / security / rollback; pass = majority.
 - Deep triggers: auth/authz, secrets, encryption, tokens, payments, PII; DB migrations / destructive ops; CI/CD, infra, prod access; public API/contract; security fix / incident / hotfix. Risk +1 each: multi-module, untested touched behavior, unclear rollback, complex control flow, cross-domain new feature.
+- Critical issue classes always block shipping when plausible: auth bypass, cross-tenant data access, privilege escalation, remote code execution, injection with a reachable source→sink path, prod secret exposure, destructive data loss, unsafe migration rollback, or payment/PII leakage.
 - **Each phase ends with this quality pass** before the next.
 
 ## Scaling & effort

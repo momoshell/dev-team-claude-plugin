@@ -105,6 +105,21 @@ test('deep triggers and the devops domain escalate the review tier', async () =>
   assert.equal(devops.out.results[0].review_tier, 'deep')
 })
 
+test('stacked risk uses an adversarial review panel', async () => {
+  const calls = []
+  const { out } = await run(
+    { goal: 'g', tasks: [{ id: 'be-01', domain: 'backend', brief: 'x' }] },
+    mockAgent({
+      calls,
+      specFor: () => ({ acceptance_criteria: ['authz enforced for every tenant before running the DB migration'] }),
+    }))
+  assert.equal(out.results[0].review_tier, 'adversarial')
+  assert.equal(out.results[0].pass, true)
+  const gates = calls.filter((c) => c.kind === 'gate')
+  assert.equal(gates.length, 3)
+  assert.deepEqual(new Set(gates.map((g) => g.agentType)), new Set(['dev-team:code-reviewer-deep']))
+})
+
 test('build-validator is advisory: a dead run does not block; a reported failure does', async () => {
   const died = await run(
     { goal: 'g', tasks: [{ id: 'be-01', domain: 'backend', brief: 'x' }] },

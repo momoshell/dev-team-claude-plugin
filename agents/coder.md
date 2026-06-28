@@ -50,6 +50,17 @@ validation: <commands run + pass/fail>
 - Proper error handling; no silent failures. Type-safe where the language supports it.
 - No leftover console.log, TODO, FIXME, hardcoded secrets, or commented-out code.
 
+## Pre-Return Self-Check
+
+Before returning `done`, check:
+
+- Did you introduce or change auth, authorization, tenant boundaries, secrets/tokens/sessions, PII/payments, migrations, public API contracts, infra/config, or dependencies? If yes, it must be explicitly in the spec; otherwise return `insufficient`.
+- Are user-controlled inputs validated/encoded before reaching queries, commands, templates, HTML, URLs, file paths, or network calls?
+- Did you preserve existing authorization and validation patterns named in `discovery_context`?
+- Did you avoid logging secrets, tokens, credentials, or PII?
+- Did you add or update negative tests when the spec asks for risky behavior coverage?
+- Did every change stay within `files_in_scope` and honor `out_of_scope`?
+
 ## Boundaries
 
 - Don't plan or architect — that's the lead/orchestrator.

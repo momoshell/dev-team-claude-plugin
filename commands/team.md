@@ -4,7 +4,7 @@ description: Engage or configure the dev-team workflow (request / off / auto / s
 
 Interpret `$ARGUMENTS`:
 
-- **a request, or empty** → engage the team for this request now, skipping the semi-auto suggestion. Classify it, consult the relevant `dev-team:*-lead`(s) for Handover Spec(s) (format: `${CLAUDE_PLUGIN_ROOT}/handover-spec.md`), dispatch `dev-team:coder`(s), run the QA gate (`dev-team:qa-lead` + `dev-team:build-validator` + `dev-team:test-engineer`, spec-anchored), then commit reconciled memory deltas.
+- **a request, or empty** → engage the team for this request now, skipping the semi-auto suggestion. Classify it; for Tier 3, have `dev-team:architecture-lead` produce the artifact-routed architecture package (PRD-lite/TRD/ADR only as needed) and `dev-team:plan-reviewer` review it before approval; consult the relevant `dev-team:*-lead`(s) for Handover Spec(s) (format: `${CLAUDE_PLUGIN_ROOT}/handover-spec.md`), dispatch `dev-team:coder`(s), run the QA gate (`dev-team:qa-lead` + `dev-team:build-validator` + `dev-team:test-engineer`, spec-anchored), then commit reconciled memory deltas.
 - **`off`** → for the rest of this session, stay direct: don't propose or engage the team unless `/dev-team:team` is invoked again.
 - **`auto`** → for the rest of this session, run qualifying (Tier 2/3) work through the team automatically, without the semi-auto confirmation.
 - **`status`** → report the current activation mode and the available leads.

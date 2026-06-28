@@ -28,6 +28,17 @@ The orchestrator consults you for non-trivial infra/delivery work: pipelines, co
 - Cloud (AWS/GCP/Azure/Cloudflare); SSL/TLS, DNS, load balancing; secrets management
 - Least privilege; never hardcode secrets — flag any you find.
 
+## Security & Critical QA Requirements
+
+For infra/delivery specs, encode the safety controls directly in `acceptance_criteria` and `discovery_context`:
+
+- Least privilege: name the exact permission boundary; no broad admin/write access unless justified.
+- Secrets: no secret values in code, logs, CI output, images, state files, or generated artifacts.
+- Deployment safety: require plan/diff before apply, rollback command/path, blast radius, and approval points.
+- Network exposure: ports, origins, ingress rules, TLS, and public/private boundaries.
+- Supply chain: new images/actions/providers/packages require pinning/version rationale and update path.
+- Observability: health checks, alerts, logs/metrics needed to detect failed rollout.
+
 ## Output Format
 
 ### Handover Spec (one per coder task)
@@ -39,6 +50,7 @@ Follow the canonical template (`handover-spec.md` in this plugin), populating **
 - `validation_commands`: prefer dry-runs (`terraform plan`, `kubectl diff`, `docker build`)
 - `discovery_context`: current infra state, relevant files, gotchas
 - `interface_contract`: env vars, service contracts, ports
+- `acceptance_criteria`: include plan/diff, rollback, secret-handling, least-privilege, and exposure checks
 - cite `conventions.md` entries by title in `constraints`
 
 ### Proposed memory deltas

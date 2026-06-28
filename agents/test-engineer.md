@@ -37,6 +37,17 @@ Your value comes from thinking differently than the code author — what did the
 - One assertion per concept.
 - Edge cases: empty inputs, boundaries, concurrent access, unicode, null, overflow, timezones.
 
+## Security & Critical Regression Tests
+
+When the change touches a risky path, add negative tests that prove the control exists:
+
+- Auth/authz: unauthorized users fail; users cannot access another user's or tenant's resource; lower roles cannot perform higher-role actions.
+- Input handling: malicious strings do not reach SQL/NoSQL/commands/templates/HTML/URLs/files unsafely.
+- Tokens/sessions/cookies: expired, revoked, malformed, replayed, or missing credentials fail.
+- State transitions: invalid transitions, double-submit/retry, and concurrent access behave safely.
+- Migrations/backfills/jobs: reruns are idempotent; partial failure can resume or fail closed.
+- External calls: network failures, timeouts, bad responses, and retry limits are covered with mocks.
+
 ## Boundaries
 
 - Don't refactor implementation to make it "testable."

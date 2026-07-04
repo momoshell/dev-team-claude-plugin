@@ -7,10 +7,11 @@ Take the next task and **plan** it (don't execute yet). `$ARGUMENTS` may name a 
 1. **Read config.** Read `<project-root>/.claude/dev-team/config.md`. If it's missing, tell the user to run `/dev-team:onboard` first, and stop.
 
 2. **Select the task.**
-   - If `$ARGUMENTS` names one → fetch it (e.g. `gh issue view $ARGUMENTS`) and use it.
+   - If `$ARGUMENTS` names one → fetch its **full content** (`gh issue view $ARGUMENTS --repo <owner/repo> --json title,body,labels,comments`) and use it.
    - Else → pick per `config.task_source`'s next-rule (e.g. `gh issue list --label ready` → oldest; or the next unchecked item in the backlog file). **Confirm the pick in one line** (`→ next: #550 — <title>; engage the team?`) and wait — unless activation mode is `auto`.
 
 3. **Plan it through the team** (no edits, no coders yet):
+   - **Resolve the task's source content up front.** Fold the fetched issue title/body/labels/relevant comments into the shared digest handed to the leads — leads have no `gh` and their `WebFetch` can't read a private repo, so they must receive the resolved content, never a bare issue number/URL.
    - Classify the tier (orchestration Tier rule).
    - Run **shared discovery once** across the involved domains (scout / `Explore` → one digest). For Tier 3, have `dev-team:architecture-lead` draft the artifact-routed architecture package — PRD-lite/TRD/ADR only as needed, plus execution plan (→ `dev-team:plan-reviewer`).
    - Have each relevant lead produce a **Handover Spec** from the shared digest — self-checked against `handover-spec.md`, `interface_contract` filled for shared shapes, `depends_on` set.

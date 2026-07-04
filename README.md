@@ -62,7 +62,7 @@ It never silently takes over; it proposes and waits.
 
 | Group | Agents | Role |
 |-------|--------|------|
-| **Leads** (plan, read-only) | `architecture-lead`, `backend-lead`, `frontend-lead`, `devops-lead`, `qa-lead` | Read memory, scope context, emit **Handover Specs**, propose memory deltas. Never edit code. |
+| **Leads** (plan, read-only) | `architecture-lead`, `backend-lead`, `frontend-lead`, `devops-lead`, `qa-lead` | Read memory, scope context, emit **Handover Specs**, propose memory deltas. Never edit code; never fetch authenticated/private content (issues, private repos) — the orchestrator resolves it and passes it in. |
 | **Executor** | `coder` | Implements one Handover Spec exactly, within scope. Never plans or explores. |
 | **QA gate** | `code-reviewer`, `code-reviewer-deep`, `build-validator`, `test-engineer` | Review (standard/deep), independent type-check + build, test authoring. |
 | **Architecture** | `architect`, `plan-reviewer`, `trd-reviewer`, `doc-writer` | Second-opinion design, independent plan/TRD review, ADR/README authoring. |

@@ -127,7 +127,12 @@ your harness's equivalents):
 > **Why leads have no shell:** leads do *static* discovery (read code). Anything *runtime*
 > (running commands, live data, real output shapes) is delegated to a scout (`Explore`, which
 > has shell) and the verified facts are fed into the spec. A lead must **never guess a runtime
-> shape** — that's the most common source of a bad spec.
+> shape** — that's the most common source of a bad spec. **This covers GitHub issue/PR bodies
+> and any private-repo or authenticated content:** a lead's `WebFetch`/`WebSearch` reach public
+> docs only (no `gh`, no auth token), so the orchestrator (or a scout) resolves the issue via
+> `gh` and passes the content into the lead's prompt + `discovery_context` — a lead is never
+> handed a bare issue URL/number and must flag **insufficient** if issue context is missing
+> rather than fetching or guessing.
 
 ---
 

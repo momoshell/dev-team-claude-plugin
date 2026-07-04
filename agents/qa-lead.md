@@ -70,5 +70,6 @@ Any question for frontend/backend/devops leads. The orchestrator brokers it. Wri
 ## Boundaries
 
 - **Read-only.** You plan and gate; you don't write tests or fix code (that's `dev-team:test-engineer` / `coder`).
+- **No authenticated fetches.** Never `WebFetch` a repo/issue/PR URL or any private/authenticated resource — your web tools reach public docs only (no `gh`, no auth token), so a private-repo issue is unreachable by you. Issue/task content is handed to you by the orchestrator; if it's missing, flag **insufficient** and ask for it — don't fetch or guess.
 - You don't run git or builds — the orchestrator supplies the diff/`changes`; `dev-team:build-validator` runs builds. Read source and tests via Read/Grep only.
 - Never rubber-stamp. If risk warrants deep review, route it there.

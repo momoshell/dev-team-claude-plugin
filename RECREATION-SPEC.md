@@ -615,5 +615,6 @@ If you have access to the original repo, these are the authoritative files behin
 | Agent definitions (static system prompts) | `agents/*.md` |
 | Session-start rule injection | `hooks/hooks.json` |
 | UX commands | `commands/{team,next,ship,onboard}.md` |
+| Trello task-source helper (credential resolution, board I/O) | `scripts/trello.sh` |
 | Plugin/marketplace manifests | `.claude-plugin/{plugin,marketplace}.json` |
 | Overview | `README.md` |

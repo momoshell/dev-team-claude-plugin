@@ -9,9 +9,10 @@ Take the next task and **plan** it (don't execute yet). `$ARGUMENTS` may name a 
 2. **Select the task.**
    - If `$ARGUMENTS` names one → fetch its **full content** (`gh issue view $ARGUMENTS --repo <owner/repo> --json title,body,labels,comments`) and use it.
    - Else → pick per `config.task_source`'s next-rule (e.g. `gh issue list --label ready` → oldest; or the next unchecked item in the backlog file). **Confirm the pick in one line** (`→ next: #550 — <title>; engage the team?`) and wait — unless activation mode is `auto`.
+   - **Trello source** → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" next-card <ready-list-id>` (top card = highest priority; never raw `curl`/`security` — the script keeps the token out of the transcript). `EMPTY` → report "no cards in *<ready list>*" and stop. Otherwise `trello.sh card <card-id>` for the full content (desc, checklists, comments), and record the pick as a `current_task:` line (card id + name + url) in `config.md` so `/dev-team:ship` can update the board later.
 
 3. **Plan it through the team** (no edits, no coders yet):
-   - **Resolve the task's source content up front.** Fold the fetched issue title/body/labels/relevant comments into the shared digest handed to the leads — leads have no `gh` and their `WebFetch` can't read a private repo, so they must receive the resolved content, never a bare issue number/URL.
+   - **Resolve the task's source content up front.** Fold the fetched issue/card title, body/description, labels, checklists, and relevant comments into the shared digest handed to the leads — leads have no `gh`/`trello.sh` and their `WebFetch` can't read a private repo or board, so they must receive the resolved content, never a bare issue number/card id/URL.
    - Classify the tier (orchestration Tier rule).
    - Run **shared discovery once** across the involved domains (scout / `Explore` → one digest). For Tier 3, have `dev-team:architecture-lead` draft the artifact-routed architecture package — PRD-lite/TRD/ADR only as needed, plus execution plan (→ `dev-team:plan-reviewer`).
    - Have each relevant lead produce a **Handover Spec** from the shared digest — self-checked against `handover-spec.md`, `interface_contract` filled for shared shapes, `depends_on` set.

@@ -17,9 +17,13 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
    - `git push -u origin HEAD`.
    - `gh pr create` — title from `$ARGUMENTS` or derived; body summarizing the change, validation results, reviewer notes / follow-ups; link the task (`Closes #N`) if known.
 
-4. **Commit reconciled memory deltas** the leads/reviewers proposed (you are the sole writer).
+4. **Update the task source** (after the PR exists):
+   - GitHub issues → the `Closes #N` in the PR body already handles it.
+   - Trello (config has a `current_task:` card) → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" comment <card-id> "<PR URL>"` then `trello.sh move <card-id> <done-list-id>`, and clear the `current_task:` line from `config.md`. Non-fatal: if the board update fails, report it and continue — the PR is the source of truth.
 
-5. **Report** the branch, the PR URL, and the gate verdict.
+5. **Commit reconciled memory deltas** the leads/reviewers proposed (you are the sole writer).
+
+6. **Report** the branch, the PR URL, the gate verdict, and any task-source update.
 
 **Confirm before pushing / opening the PR** unless activation mode is `auto`.
 

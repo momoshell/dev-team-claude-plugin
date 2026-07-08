@@ -84,6 +84,28 @@ Agents are referenced as `dev-team:<name>` (e.g. `dev-team:backend-lead`).
 
 ---
 
+## Task sources
+
+`/dev-team:onboard` wires the project to a task source, `/dev-team:next` picks from it, and `/dev-team:ship` closes the loop. Supported: **GitHub issues**, a **GitHub Projects board**, an **in-repo backlog file** (`TASKS.md` / `BACKLOG.md`), or a **Trello board**.
+
+### Trello
+
+Credentials are set up once per machine. Get an API key at <https://trello.com/power-ups/admin> (create a Power-Up), then:
+
+```text
+security add-generic-password -s trello-api -a key -w '<api key>'
+scripts/trello.sh auth-url        # open the printed URL, click Allow, copy the token
+security add-generic-password -s trello-api -a token -w '<token>'
+```
+
+Non-macOS: `TRELLO_KEY` / `TRELLO_TOKEN` env vars, or `KEY=` / `TOKEN=` lines in `~/.config/trello/credentials` (`chmod 600`).
+
+Then run `/dev-team:onboard https://trello.com/b/<shortlink>/<name>` — it validates the credentials, maps the board's lists (ready / doing / done) in a single confirmation, and stores **list IDs, never credential values**, in `.claude/dev-team/config.md`. Day to day, `/dev-team:next` takes the **top card of the ready list** (drag cards to reprioritize) and folds its description, checklists, and comments into the team's shared digest; `/dev-team:ship` comments the PR URL on the card and moves it to the done list.
+
+All board access goes through `scripts/trello.sh`, which resolves credentials internally (env → macOS Keychain → credentials file) so tokens never appear in the session transcript. Onboarding offers to allowlist the script path so daily runs don't hit permission prompts.
+
+---
+
 ## Workflow mode
 
 `/dev-team:team workflow <goal>` runs the bundled `team-build.workflow.mjs` via the Workflow tool. Per task it does **lead → coder (or `test-engineer` for `qa`) → gate**, where the gate runs the right reviewer tier **and** `build-validator` in parallel.
@@ -169,7 +191,8 @@ This plugin uses standard Claude Code surfaces — no custom UI:
   plugin.json            plugin manifest
   marketplace.json       local marketplace manifest
 agents/                  the 13 agent definitions
-commands/team.md         the /dev-team:team command
+commands/                /dev-team:team, :onboard, :next, :ship
+scripts/trello.sh        Trello task-source helper (credential resolution + board I/O)
 hooks/hooks.json         SessionStart → injects orchestration.md into context
 orchestration.md         the orchestrator's operating rules (loaded each session)
 handover-spec.md         canonical spec template + conventions
@@ -187,7 +210,7 @@ test/                    regression suite (node --test); CI in .github/workflows
 node --test        # or: npm test
 ```
 
-Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, the advisory build-validator, a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), and agent-frontmatter validity. Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
+Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, the advisory build-validator, a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, and the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
 
 ---
 
@@ -195,7 +218,7 @@ Dependency-free (`node:test`), no live model. Covers the workflow's wave schedul
 
 - **Claude Code** with plugin support.
 - **Node.js** — used by the Workflow tool to run `team-build.workflow.mjs` (workflow mode only).
-- **jq** — required by the bundled `SessionStart` hook that injects `orchestration.md` into context.
+- **jq** — required by the bundled `SessionStart` hook that injects `orchestration.md` into context, and by `scripts/trello.sh` (Trello task source only).
 
 ---
 

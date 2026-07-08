@@ -20,6 +20,7 @@ usage: trello.sh <command> [args]
   auth-url                    print the one-click token-authorize URL for the stored key
   board <shortlink>           board name + url (shortlink = token after /b/ in the board URL)
   lists <shortlink>           lists on the board, one per line: <id>	<name>
+  cards <shortlink>           all open cards on the board, one per line: <list-name>	<name>
   next-card <list-id>         top card of the list as JSON {id,name,url}, or the word EMPTY
   card <card-id>              full card JSON: name, desc, labels, due, checklists, comments
   move <card-id> <list-id>    move a card to a list
@@ -130,6 +131,17 @@ case "$cmd" in
     resolve_creds
     require_jq
     api GET "/boards/$1/lists?fields=name" | jq -r '.[] | .id + "\t" + .name'
+    ;;
+  cards)
+    [[ $# -eq 1 ]] || { err "usage: trello.sh cards <shortlink>"; exit 2; }
+    resolve_creds
+    require_jq
+    api GET "/boards/$1/cards?fields=name,idList" >"${TMPDIR:-/tmp}/trello-cards.$$"
+    api GET "/boards/$1/lists?fields=name" |
+      jq -r --slurpfile cards "${TMPDIR:-/tmp}/trello-cards.$$" '
+        map({key: .id, value: .name}) | from_entries as $lists
+        | $cards[0][] | ($lists[.idList] // .idList) + "\t" + .name'
+    rm -f "${TMPDIR:-/tmp}/trello-cards.$$"
     ;;
   next-card)
     [[ $# -eq 1 ]] || { err "usage: trello.sh next-card <list-id>"; exit 2; }

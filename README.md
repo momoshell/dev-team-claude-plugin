@@ -193,6 +193,7 @@ This plugin uses standard Claude Code surfaces — no custom UI:
 agents/                  the 13 agent definitions
 commands/                /dev-team:team, :onboard, :next, :ship
 scripts/trello.sh        Trello task-source helper (credential resolution + board I/O)
+scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
 hooks/hooks.json         SessionStart → injects orchestration.md into context
 orchestration.md         the orchestrator's operating rules (loaded each session)
 handover-spec.md         canonical spec template + conventions
@@ -210,7 +211,7 @@ test/                    regression suite (node --test); CI in .github/workflows
 node --test        # or: npm test
 ```
 
-Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, the advisory build-validator, a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, and the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
+Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, the advisory build-validator, a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), and the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
 
 ---
 

@@ -214,6 +214,22 @@ Dependency-free (`node:test`), no live model. Covers the workflow's wave schedul
 
 ---
 
+## Cost model
+
+The team's economics rest on two facts about how context is billed:
+
+1. **Subagent windows are cheap because they die.** Leads, coders, and reviewers each get a fresh context that is discarded on return. Their cost is bounded by the work they do.
+2. **The main window is expensive because it doesn't.** Every turn re-reads the entire transcript, so a session's cost grows with the *square* of its length. Real-world data point: an 11-day, 5,000-turn session spent ~90% of its total cost on the main window re-reading itself — the entire 80-agent team accounted for the remainder.
+
+The rules that follow (enforced by the commands and `orchestration.md`):
+
+- **One task per window.** `/dev-team:next` → work → `/dev-team:ship` → `/clear`. Disk memory + `config.md` + the task source carry everything between windows; the transcript carries nothing worth its re-read cost.
+- **The main model doesn't need to be opus.** The thinking is pinned in the agents' frontmatter (leads/deep review on opus) regardless of the session model — a sonnet main loop routes the same opus brains at a fraction of the token weight.
+- **Engage the team deliberately.** Tier-1 trivia goes direct; batches go through workflow mode (fresh bounded windows per task), not one long conversational session.
+- **Cut window count, not depth** — savings come from fewer/cheaper windows on low-risk work, never from lowering effort/model on architecture, leads, or deep review (see `orchestration.md` § Scaling & effort).
+
+---
+
 ## Requirements
 
 - **Claude Code** with plugin support.

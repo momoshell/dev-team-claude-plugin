@@ -23,7 +23,7 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
 
 5. **Commit reconciled memory deltas** the leads/reviewers proposed (you are the sole writer).
 
-6. **Report** the branch, the PR URL, the gate verdict, and any task-source update.
+6. **Report** the branch, the PR URL, the gate verdict, and any task-source update. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
 
 **Confirm before pushing / opening the PR** unless activation mode is `auto`.
 

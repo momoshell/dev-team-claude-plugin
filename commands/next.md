@@ -5,6 +5,7 @@ description: Pick the next task from the configured source, plan it with the tea
 Take the next task and **plan** it (don't execute yet). `$ARGUMENTS` may name a specific task (e.g. an issue number); if given, use that instead of auto-picking.
 
 1. **Read config.** Read `<project-root>/.claude/dev-team/config.md`. If it's missing, tell the user to run `/dev-team:onboard` first, and stop.
+   - **One task per window:** if this session already shipped (or substantially worked) a previous task, don't stack another onto the same transcript — tell the user to `/clear` and run `/dev-team:next` in the fresh window (config + memory carry everything; the accumulated transcript only adds re-read cost). Proceed anyway if they explicitly insist.
 
 2. **Select the task.**
    - If `$ARGUMENTS` names one → fetch its **full content** (`gh issue view $ARGUMENTS --repo <owner/repo> --json title,body,labels,comments`) and use it.

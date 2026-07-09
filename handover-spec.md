@@ -20,12 +20,14 @@ The contract a **lead emits** and a **coder consumes**. Conversational mode uses
 
 ## Coder return
 
+Matches `coder-return.schema.json`: `status`/`reason` always required; `missing_context` required only when `insufficient`; `changes`/`validation` required only when `done`. `changes` is a **list** — one entry per file — not a single string.
+
 ```
 status: done | insufficient | blocked
 reason: <one line>
-missing_context: <what's needed, or —>
-changes: <each file modified + one line; or —>
-validation: <commands run + pass/fail>
+missing_context: <required when insufficient — the exact gap; omit otherwise>
+changes: <required when done — one entry per file: "<path> — <one-line summary>"; omit otherwise>
+validation: <required when done — commands run + pass/fail; omit otherwise>
 ```
 
 ## Fill-in template

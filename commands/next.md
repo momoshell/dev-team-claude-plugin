@@ -17,8 +17,9 @@ Take the next task and **plan** it (don't execute yet). `$ARGUMENTS` may name a 
    - Classify the tier (orchestration Tier rule).
    - Run **shared discovery once** across the involved domains (scout / `Explore` → one digest). For Tier 3, have `dev-team:architecture-lead` draft the artifact-routed architecture package — PRD-lite/TRD/ADR only as needed, plus execution plan (→ `dev-team:plan-reviewer`).
    - Have each relevant lead produce a **Handover Spec** from the shared digest — self-checked against `handover-spec.md`, `interface_contract` filled for shared shapes, `depends_on` set.
+   - **Lint each spec before presenting it** — `node "${CLAUDE_PLUGIN_ROOT}/scripts/spec-lint.mjs" --root <project-root> <spec.json>` (mechanical checks: paths exist, `file:line` refs resolve, commands are runnable). Exit 1 → bounce to the lead and re-lint before continuing (orchestration.md § Handover Spec).
    - Use `config.validate` for the specs' `validation_commands` and `config.review_defaults` to set review depth.
 
-4. **Present the plan for approval** — the architecture package/specs + the dispatch shape (which coders, parallel vs sequenced) + the gate plan. **Stop here.** On approval, continue to coders → QA gate → commit reconciled memory deltas (or the user runs execution separately). Never auto-execute Tier 3 without approval.
+4. **Present the plan for approval** — the architecture package/specs + the dispatch shape (which coders, parallel vs sequenced) + the gate plan. **Stop here.** On approval, continue to coders → QA gate → commit reconciled memory deltas (or the user runs execution separately). Don't move from Tier-3 design into implementation without explicit approval, unless activation mode is `auto` and the request is not high-risk (orchestration.md § Tier-3 architecture package).
 
 **Task:** $ARGUMENTS

@@ -21,14 +21,13 @@ Your value comes from thinking differently than the code author — what did the
 
 1. Read the implementation first.
 2. Detect the test framework (package.json, pytest.ini, go.mod, etc.).
-3. Propose a test plan:
+3. Include the test plan at the top of your report, then implement it — you run in a single pass with no approval round-trip:
    ```
    ## Test Plan for [module]
    - [pass] [behavior] — success case
    - [fail] [behavior] — failure / edge case
    ```
-4. Implement after approval.
-5. Run tests and report results. Don't auto-fix failures.
+4. Run tests and report results. Don't auto-fix failures.
 
 ## What Makes Good Tests
 

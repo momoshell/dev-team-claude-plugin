@@ -1,7 +1,7 @@
 ---
 name: code-reviewer-deep
 model: opus
-description: Deep code review for high-risk changes — auth, migrations, infra, API contracts, security. Escalation from code-reviewer only.
+description: Deep code review for high-risk changes — auth, migrations, infra, API contracts, security. Routed directly on a deep trigger/risk ≥ 2, or escalated from code-reviewer.
 disallowedTools: Edit, Write, NotebookEdit
 effort: high
 maxTurns: 25

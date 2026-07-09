@@ -19,8 +19,16 @@ const REQUIRED_FIELDS = [
   'task_id', 'domain', 'goal', 'files_in_scope', 'constraints', 'acceptance_criteria',
   'validation_commands', 'discovery_context', 'out_of_scope', 'depends_on', 'interface_contract',
 ]
-// npm test/start work without "run"; everything else needs run <script>.
-const NPM_SHORTHANDS = new Set(['test', 'start', 'stop', 'restart'])
+// npm/pnpm/yarn all support omitting "run" for a script name (npm test,
+// yarn lint, pnpm build); anything NOT a recognized package-manager verb is
+// treated as a script name and checked against package.json.
+const PKG_MGR_VERBS = new Set([
+  'run', 'run-script', 'install', 'i', 'ci', 'add', 'remove', 'rm', 'uninstall',
+  'update', 'up', 'upgrade', 'exec', 'dlx', 'link', 'unlink', 'init', 'create',
+  'publish', 'pack', 'audit', 'outdated', 'prune', 'list', 'ls', 'why', 'config',
+  'cache', 'doctor', 'login', 'logout', 'whoami', 'view', 'info',
+])
+const PACKAGE_MANAGERS = new Set(['npm', 'pnpm', 'yarn'])
 
 const failures = []
 const warnings = []
@@ -54,8 +62,14 @@ function readSpec(input) {
   }
 }
 
+// Lines in the file, ignoring one trailing newline (a file ending "a\nb\n"
+// is 2 lines, not 3) so a citation of the true last line doesn't false-fail
+// and a citation one past it doesn't false-pass.
 function lineCount(path) {
-  return readFileSync(path, 'utf8').split('\n').length
+  const content = readFileSync(path, 'utf8')
+  if (content === '') return 0
+  const body = content.endsWith('\n') ? content.slice(0, -1) : content
+  return body.split('\n').length
 }
 
 function checkFields(spec) {
@@ -85,9 +99,32 @@ function checkFilesInScope(spec, root) {
   }
 }
 
-// Lint path references in discovery_context. `dir/file.ext:123` (with a
-// slash) must resolve and the line must be within the file; slash-less
-// `file.ext:123` only warns (could be a basename or a memory-dir file).
+// A citation's first path segment looking like a domain (contains a dot,
+// e.g. "github.com", "api.example.com") means it's almost certainly a URL
+// fragment, not a repo-relative path — skip rather than false-FAIL on it.
+function looksLikeDomain(path) {
+  return path.split('/')[0].includes('.')
+}
+
+function checkFileLineRef(label, abs, line) {
+  const hasDir = label.includes('/')
+  if (hasDir && !label.startsWith('/') && looksLikeDomain(label)) return
+  if (!existsSync(abs) || !statSync(abs).isFile()) {
+    if (hasDir) fail('discovery_context', `cited ${label}:${line} — file does not exist`)
+    else warn('discovery_context', `cited ${label}:${line} — file not found from project root (basename-only reference?)`)
+    return
+  }
+  const lines = lineCount(abs)
+  if (Number(line) > lines) fail('discovery_context', `cited ${label}:${line} — file has only ${lines} lines`)
+}
+
+// Lint path references in discovery_context.
+//   dir/file.ext:123   relative to --root; must resolve, line must be in range.
+//   /dir/file.ext:123  a leading "/" is project-root-relative (not a URL —
+//                      excluded from matching mid-URL by requiring the "/"
+//                      not be preceded by another "/" or a ":").
+//   file.ext:123       slash-less: only warns (could be a basename/memory-dir ref).
+//   dir/file.ext       (no line number) bare mention — must exist if cited.
 function checkDiscoveryRefs(spec, root) {
   const ctx = String(spec.discovery_context || '')
   if (!ctx || ctx.trim() === 'none') {
@@ -96,27 +133,30 @@ function checkDiscoveryRefs(spec, root) {
     }
     return
   }
-  const refs = ctx.matchAll(/(?<![\w@:/])((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z]{1,8}):(\d+)/g)
-  for (const [, path, line] of refs) {
-    const hasDir = path.includes('/')
-    const abs = resolve(root, path)
-    if (!existsSync(abs) || !statSync(abs).isFile()) {
-      if (hasDir) fail('discovery_context', `cited ${path}:${line} — file does not exist`)
-      else warn('discovery_context', `cited ${path}:${line} — file not found from project root (basename-only reference?)`)
-      continue
-    }
-    const lines = lineCount(abs)
-    if (Number(line) > lines) fail('discovery_context', `cited ${path}:${line} — file has only ${lines} lines`)
+
+  const relRefs = ctx.matchAll(/(?<![\w@:./])((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z]{1,8}):(\d+)/g)
+  for (const [, path, line] of relRefs) {
+    checkFileLineRef(path, resolve(root, path), line)
   }
-  const bare = ctx.matchAll(/(?<![\w@:/.])((?:[\w.-]+\/)+[\w.-]+\.[A-Za-z]{1,8})(?![\w:])/g)
+
+  const absRefs = ctx.matchAll(/(?<![\w@:./])\/((?:[\w.-]+\/)*[\w.-]+\.[A-Za-z]{1,8}):(\d+)/g)
+  for (const [, path, line] of absRefs) {
+    checkFileLineRef('/' + path, resolve(root, path), line)
+  }
+
+  const bare = ctx.matchAll(/(?<![\w@:./])((?:[\w.-]+\/)+[\w.-]+\.[A-Za-z]{1,8})(?![\w:])/g)
   for (const [, path] of bare) {
+    if (looksLikeDomain(path)) continue
     const abs = resolve(root, path)
     if (!existsSync(abs)) fail('discovery_context', `mentions ${path} — file does not exist`)
   }
 }
 
-function onPath(cmd) {
-  if (cmd.includes('/')) return existsSync(cmd)
+function onPath(cmd, root) {
+  if (cmd.includes('/')) {
+    const abs = isAbsolute(cmd) ? cmd : resolve(root, cmd)
+    return existsSync(abs)
+  }
   for (const dir of (process.env.PATH || '').split(delimiter)) {
     if (!dir) continue
     try {
@@ -140,26 +180,22 @@ function packageScripts(root) {
 function checkValidationCommands(spec, root) {
   const scripts = packageScripts(root)
   for (const cmd of spec.validation_commands || []) {
-    const tokens = String(cmd).trim().split(/\s+/).filter((t) => !/^[A-Z_][A-Z0-9_]*=/.test(t))
+    const tokens = String(cmd).trim().split(/\s+/).filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
     if (!tokens.length) {
       fail('validation_commands', `empty command: ${JSON.stringify(cmd)}`)
       continue
     }
     const [bin, sub, scriptName] = tokens
-    if (['npm', 'pnpm'].includes(bin)) {
-      const name = sub === 'run' ? scriptName : NPM_SHORTHANDS.has(sub) ? sub : null
+    if (PACKAGE_MANAGERS.has(bin) && sub) {
+      const name = (sub === 'run' || sub === 'run-script') ? scriptName : (PKG_MGR_VERBS.has(sub) ? null : sub)
       if (name) {
         if (scripts === null) fail('validation_commands', `"${cmd}" — no readable package.json at project root`)
         else if (!(name in scripts)) fail('validation_commands', `"${cmd}" — script "${name}" not in package.json`)
         continue
       }
+      // a recognized package-manager verb (install, exec, ...) — just needs the binary, checked below.
     }
-    if (bin === 'yarn' && sub === 'run' && scriptName) {
-      if (scripts === null) fail('validation_commands', `"${cmd}" — no readable package.json at project root`)
-      else if (!(scriptName in scripts)) fail('validation_commands', `"${cmd}" — script "${scriptName}" not in package.json`)
-      continue
-    }
-    if (!onPath(bin)) fail('validation_commands', `"${cmd}" — "${bin}" not found on PATH`)
+    if (!onPath(bin, root)) fail('validation_commands', `"${cmd}" — "${bin}" not found on PATH`)
   }
 }
 

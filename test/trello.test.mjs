@@ -33,7 +33,7 @@ test('trello.sh parses (bash -n)', () => {
 test('help exits 0 and documents every subcommand', () => {
   const r = run(['help'])
   assert.equal(r.status, 0)
-  for (const cmd of ['check', 'auth-url', 'board', 'lists', 'next-card', 'card', 'move', 'comment']) {
+  for (const cmd of ['check', 'auth-url', 'board', 'lists', 'cards', 'next-card', 'card', 'move', 'comment']) {
     assert.match(r.stdout, new RegExp(`\\b${cmd}\\b`), `usage mentions ${cmd}`)
   }
 })
@@ -73,7 +73,10 @@ test('subcommands with wrong arity fail before any network call', () => {
   // creds are present here, so a passing arity check would try the network —
   // the usage error must fire first (and instantly).
   const env = { ...cleanEnv, TRELLO_KEY: 'k', TRELLO_TOKEN: 't' }
-  for (const args of [['board'], ['lists'], ['cards'], ['next-card'], ['card'], ['move', 'onlyone'], ['comment', 'onlyone']]) {
+  for (const args of [
+    ['board'], ['lists'], ['cards'], ['next-card'], ['card'], ['move', 'onlyone'], ['comment', 'onlyone'],
+    ['check', 'extra'], ['auth-url', 'extra'],
+  ]) {
     const r = run(args, env)
     assert.equal(r.status, 2, `${args.join(' ')} exits 2`)
     assert.match(r.stderr, /usage: trello\.sh/, `${args.join(' ')} prints usage`)

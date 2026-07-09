@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "jq -n --rawfile content \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:$content}}'"
+            "command": "command -v jq >/dev/null 2>&1 || { echo 'dev-team: jq is required for the SessionStart hook (brew install jq / apt install jq) — orchestration.md was not loaded this session.' >&2; exit 0; }; jq -n --rawfile content \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:$content}}'"
           }
         ]
       }

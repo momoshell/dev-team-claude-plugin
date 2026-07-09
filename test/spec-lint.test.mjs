@@ -12,8 +12,10 @@ const SCRIPT = join(ROOT, 'scripts', 'spec-lint.mjs')
 
 const fixture = mkdtempSync(join(tmpdir(), 'spec-lint-'))
 mkdirSync(join(fixture, 'src', 'api'), { recursive: true })
+mkdirSync(join(fixture, 'scripts'), { recursive: true })
 writeFileSync(join(fixture, 'src', 'api', 'items.ts'), 'export {}\n'.repeat(80))
-writeFileSync(join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc' } }))
+writeFileSync(join(fixture, 'scripts', 'run.sh'), '#!/bin/sh\necho hi\n')
+writeFileSync(join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc', lint: 'eslint .' } }))
 process.on('exit', () => rmSync(fixture, { recursive: true, force: true }))
 
 const baseSpec = {
@@ -102,10 +104,42 @@ test('discovery_context citing a line beyond EOF fails', () => {
   assert.match(r.stdout, /file has only/)
 })
 
+test('discovery_context citing the true last line passes (lineCount off-by-one)', () => {
+  const r = lint({ discovery_context: 'See src/api/items.ts:80 for the pattern.' })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('discovery_context citing one line past the true last line fails (lineCount off-by-one)', () => {
+  const r = lint({ discovery_context: 'See src/api/items.ts:81 for the pattern.' })
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /file has only 80 lines/)
+})
+
 test('discovery_context mentioning a nonexistent bare path fails', () => {
   const r = lint({ discovery_context: 'Rows persist via db.insert() from src/gone/db.ts.' })
   assert.equal(r.status, 1)
   assert.match(r.stdout, /file does not exist/)
+})
+
+test('discovery_context mentioning a domain-like bare path is not flagged', () => {
+  const r = lint({ discovery_context: 'Pattern from github.com/foo/bar/utils.ts here.' })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('discovery_context citing a nonexistent absolute path fails', () => {
+  const r = lint({ discovery_context: 'see /src/api/nope.ts:40 for the shape' })
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /file does not exist/)
+})
+
+test('discovery_context citing an existing absolute (root-relative) path passes', () => {
+  const r = lint({ discovery_context: 'see /src/api/items.ts:40 for the shape' })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('discovery_context with a full URL is not misread as a path citation', () => {
+  const r = lint({ discovery_context: 'See https://example.com/docs/api.ts:40 for background.' })
+  assert.equal(r.status, 0, r.stdout)
 })
 
 test('empty discovery_context with non-empty scope warns but passes', () => {
@@ -129,6 +163,49 @@ test('validation command whose binary is not on PATH fails', () => {
 test('env-var prefix is skipped when resolving the binary', () => {
   const r = lint({ validation_commands: ['CI=1 node --version'] })
   assert.equal(r.status, 0, r.stdout)
+})
+
+test('lowercase env-var prefix is also skipped when resolving the binary', () => {
+  const r = lint({ validation_commands: ['npm_config_yes=true node --version'] })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('pnpm without "run" whose script is missing fails', () => {
+  const r = lint({ validation_commands: ['pnpm nonexistent-xyz'] })
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /not in package\.json/)
+})
+
+test('pnpm without "run" whose script exists passes', () => {
+  const r = lint({ validation_commands: ['pnpm lint'] })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('yarn without "run" whose script is missing fails', () => {
+  const r = lint({ validation_commands: ['yarn nonexistent-xyz'] })
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /not in package\.json/)
+})
+
+test('yarn without "run" whose script exists passes', () => {
+  const r = lint({ validation_commands: ['yarn test'] })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('a package-manager verb (install) is not treated as a script name', () => {
+  const r = lint({ validation_commands: ['npm install'] })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('a relative-path command is resolved against --root, not the linter cwd', () => {
+  const r = lint({ validation_commands: ['scripts/run.sh'] })
+  assert.equal(r.status, 0, r.stdout)
+})
+
+test('a nonexistent relative-path command fails', () => {
+  const r = lint({ validation_commands: ['scripts/nope.sh'] })
+  assert.equal(r.status, 1)
+  assert.match(r.stdout, /not found on PATH/)
 })
 
 test('invalid JSON exits 2', () => {

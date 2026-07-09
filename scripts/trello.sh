@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # Trello task-source helper for the dev-team plugin.
 #
-# Credentials are resolved internally (env → macOS Keychain → ~/.config/trello/credentials)
-# and are NEVER printed — only Trello API responses reach stdout, and the auth header is
-# passed to curl on stdin so secrets stay out of the process list. Callers must always go
-# through this script rather than running curl/security directly, so tokens never land in
-# the session transcript.
+# Credentials are resolved internally (env → macOS Keychain → ~/.config/trello/credentials).
+# The TOKEN is never printed on any code path. The auth header is passed to curl on stdin
+# so secrets stay out of the process list. Callers must always go through this script
+# rather than running curl/security directly, so the token never lands in the session
+# transcript. Exception: `auth-url` necessarily embeds the KEY (the semi-public half —
+# useless without the token) in the printed authorize URL; that's inherent to the OAuth
+# handshake, not a leak.
 set -euo pipefail
 
 API="https://api.trello.com/1"
@@ -26,7 +28,7 @@ usage: trello.sh <command> [args]
   move <card-id> <list-id>    move a card to a list
   comment <card-id> <text>    add a comment to a card
 
-credentials (resolved in this order; values are never printed):
+credentials (resolved in this order; the token is never printed, `auth-url` prints the key):
   1. TRELLO_KEY / TRELLO_TOKEN environment variables
   2. macOS Keychain:  security add-generic-password -s trello-api -a key   -w '<key>'
                       security add-generic-password -s trello-api -a token -w '<token>'
@@ -108,6 +110,7 @@ case "$cmd" in
     usage
     ;;
   auth-url)
+    [[ $# -eq 0 ]] || { err "usage: trello.sh auth-url"; exit 2; }
     resolve_key
     if [[ -z "$KEY" ]]; then
       setup_help
@@ -116,6 +119,7 @@ case "$cmd" in
     printf 'https://trello.com/1/authorize?expiration=never&scope=read,write&response_type=token&name=dev-team&key=%s\n' "$KEY"
     ;;
   check)
+    [[ $# -eq 0 ]] || { err "usage: trello.sh check"; exit 2; }
     resolve_creds
     require_jq
     api GET "/members/me?fields=username" | jq -r '"authenticated as " + .username'
@@ -136,12 +140,13 @@ case "$cmd" in
     [[ $# -eq 1 ]] || { err "usage: trello.sh cards <shortlink>"; exit 2; }
     resolve_creds
     require_jq
-    api GET "/boards/$1/cards?fields=name,idList" >"${TMPDIR:-/tmp}/trello-cards.$$"
+    cards_tmp="$(mktemp)"
+    trap 'rm -f "$cards_tmp"' EXIT
+    api GET "/boards/$1/cards?fields=name,idList" >"$cards_tmp"
     api GET "/boards/$1/lists?fields=name" |
-      jq -r --slurpfile cards "${TMPDIR:-/tmp}/trello-cards.$$" '
+      jq -r --slurpfile cards "$cards_tmp" '
         map({key: .id, value: .name}) | from_entries as $lists
         | $cards[0][] | ($lists[.idList] // .idList) + "\t" + .name'
-    rm -f "${TMPDIR:-/tmp}/trello-cards.$$"
     ;;
   next-card)
     [[ $# -eq 1 ]] || { err "usage: trello.sh next-card <list-id>"; exit 2; }

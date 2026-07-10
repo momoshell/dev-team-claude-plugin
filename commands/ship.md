@@ -12,8 +12,9 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
    - On any **must-fix** finding or failing command → **stop and report**. Do not ship.
 
 3. **Branch, commit, PR** (only after green):
-   - **Never commit to the default branch.** If on `main` / `master` / `develop`, create a feature branch first (`git switch -c <type>/<slug>`).
+   - **Never commit to the default branch.** If on `main` / `master` / `develop`, create a feature branch first (`git switch -c <type>/<slug>`) — this carries any uncommitted work onto the new branch untouched, so it's safe even mid-change.
    - Stage + commit with a clear message (what + why).
+   - **Sync with upstream before pushing.** `git fetch origin`, then compare the feature branch's base against `origin/<default-branch>`. If the branch was just cut from a local `main` that was behind origin (or `origin/<default-branch>` has moved since), `git rebase origin/<default-branch>` now — before the first push, while the branch is still just your own local commits — so the PR opens against current upstream instead of a stale base. Resolve any conflicts; if a rebase looks nontrivial, stop and report instead of forcing it. Skip this on an already-existing feature branch that's been pushed before (rebasing published history needs the user's call, not an automatic one).
    - `git push -u origin HEAD`.
    - `gh pr create` — title from `$ARGUMENTS` or derived; body summarizing the change, validation results, reviewer notes / follow-ups; link the task (`Closes #N`) if known.
 

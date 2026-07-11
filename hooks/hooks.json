@@ -8,6 +8,15 @@
             "command": "command -v jq >/dev/null 2>&1 || { echo 'dev-team: jq is required for the SessionStart hook (brew install jq / apt install jq) — orchestration.md was not loaded this session.' >&2; exit 0; }; jq -n --rawfile content \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:$content}}'"
           }
         ]
+      },
+      {
+        "matcher": "clear",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v jq >/dev/null 2>&1 || exit 0; input=$(cat); session_id=$(printf '%s' \"$input\" | jq -r '.session_id // empty'); [ -n \"$session_id\" ] || exit 0; dir=\"$HOME/.claude/dev-team/task-cost\"; mkdir -p \"$dir\"; printf '{\"since\":\"%s\"}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" > \"$dir/$session_id.json\""
+          }
+        ]
       }
     ]
   }

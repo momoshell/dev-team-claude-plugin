@@ -194,7 +194,8 @@ agents/                  the 14 agent definitions
 commands/                /dev-team:team, :onboard, :next, :ship
 scripts/trello.sh        Trello task-source helper (credential resolution + board I/O)
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
-hooks/hooks.json         SessionStart → injects orchestration.md into context
+scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)
+hooks/hooks.json         SessionStart → injects orchestration.md into context; marks /clear boundaries for task-cost.mjs
 orchestration.md         the orchestrator's operating rules (loaded each session)
 handover-spec.md         canonical spec template + conventions
 handover-spec.schema.json
@@ -211,7 +212,7 @@ test/                    regression suite (node --test); CI in .github/workflows
 node --test        # or: npm test
 ```
 
-Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, build-validator (advisory only on a dead/no-verdict run; a reported failure blocks), a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), and the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
+Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, build-validator (advisory only on a dead/no-verdict run; a reported failure blocks), a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), the **task-cost** calculator (since-marker filtering, sidechain exclusion, cache-tier pricing, intro-rate expiry), and the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
 
 ---
 
@@ -228,6 +229,30 @@ The rules that follow (enforced by the commands and `orchestration.md`):
 - **The main model doesn't need to be opus.** The thinking is pinned in the agents' frontmatter (leads/deep review on opus) regardless of the session model — a sonnet main loop routes the same opus brains at a fraction of the token weight.
 - **Engage the team deliberately.** Tier-1 trivia goes direct; batches go through workflow mode (fresh bounded windows per task), not one long conversational session.
 - **Cut window count, not depth** — savings come from fewer/cheaper windows on low-risk work, never from lowering effort/model on architecture, leads, or deep review (see `orchestration.md` § Scaling & effort).
+
+### Per-task cost
+
+Claude Code's own `$` figure (the bottom status bar, and `cost.total_cost_usd` in a statusLine script) is scoped to the whole terminal session — it does **not** reset on `/clear`, only on relaunch. That's correct behavior (it's tracking cumulative spend for the process, not per-task liability), but it means you can't read "cost of this task" off it directly.
+
+This plugin ships the pieces for a **real** per-task readout, computed from actual token usage since your last `/clear` (not since session start):
+
+1. A bundled `SessionStart(matcher: "clear")` hook writes a timestamp marker to `~/.claude/dev-team/task-cost/<session-id>.json` every time you run `/clear` — no setup needed, it's active whenever the plugin is enabled.
+2. `scripts/task-cost.mjs` reads a statusLine JSON payload on stdin, sums the main transcript's token usage since that marker (same scope as the built-in `$` figure — subagent windows aren't included, since they're separately billed and already excluded from the built-in total), prices it against a small hardcoded table, and prints a bare `$X.XX`.
+
+This isn't auto-installed as your statusLine — add it to your own `statusLine` command in `settings.json`. Minimal example:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "jq -r '\"[\\(.model.display_name)] \\(.workspace.current_dir)\"' ; node ~/.claude/plugins/cache/dev-team/dev-team/<version>/scripts/task-cost.mjs"
+  }
+}
+```
+
+If you already have a custom statusLine script, just call `node <plugin-root>/scripts/task-cost.mjs` with the same stdin JSON your script receives and splice the result into your existing line — the script only ever writes a bare `$X.XX` (or nothing, on any error) to stdout, so it's safe to embed.
+
+The pricing table is a maintenance point — see `scripts/task-cost.mjs`'s `PRICING` object when new models ship or an introductory rate expires.
 
 ---
 

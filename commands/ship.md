@@ -11,18 +11,18 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
    - Review the diff at the right tier (standard → deep per the deep-trigger ladder + `config.review_defaults`); add `dev-team:build-validator` / `dev-team:test-engineer` as warranted.
    - On any **must-fix** finding or failing command → **stop and report**. Do not ship.
 
-3. **Branch, commit, PR** (only after green):
+3. **Reconcile memory deltas** the leads/reviewers proposed (you are the sole writer) — write them to the project memory files now, **before** committing. Apply `orchestration.md` § Memory's size triggers as part of this write: `wc -l` each touched live file (archive at ~300 lines) and each touched `*.archive.md` (git-gated trim at ~500 lines). This has to happen before step 4's commit — a memory delta that lands in git only stays permanently un-collectible, since the archive-GC rule requires at least one prior commit to trust a trim as recoverable.
+
+4. **Branch, commit, PR** (only after green):
    - **Never commit to the default branch.** If on `main` / `master` / `develop`, create a feature branch first (`git switch -c <type>/<slug>`) — this carries any uncommitted work onto the new branch untouched, so it's safe even mid-change.
-   - Stage + commit with a clear message (what + why).
+   - Stage + commit the code change with a clear message (what + why). Stage + commit the memory-dir changes from step 3 as their own small commit on the same branch (e.g. `chore: reconcile dev-team memory deltas`) — keep it separate from the code commit so `git log -- <memory-file>` stays a clean per-file history for the archive-GC check.
    - **Sync with upstream before pushing.** `git fetch origin`, then compare the feature branch's base against `origin/<default-branch>`. If the branch was just cut from a local `main` that was behind origin (or `origin/<default-branch>` has moved since), `git rebase origin/<default-branch>` now — before the first push, while the branch is still just your own local commits — so the PR opens against current upstream instead of a stale base. Resolve any conflicts; if a rebase looks nontrivial, stop and report instead of forcing it. Skip this on an already-existing feature branch that's been pushed before (rebasing published history needs the user's call, not an automatic one).
    - `git push -u origin HEAD`.
    - `gh pr create` — title from `$ARGUMENTS` or derived; body summarizing the change, validation results, reviewer notes / follow-ups; link the task (`Closes #N`) if known.
 
-4. **Update the task source** (after the PR exists):
+5. **Update the task source** (after the PR exists):
    - GitHub issues → the `Closes #N` in the PR body already handles it.
    - Trello (config has a `current_task:` card) → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" comment <card-id> "<PR URL>"` then `trello.sh move <card-id> <done-list-id>`, and clear the `current_task:` line from `config.md`. Non-fatal: if the board update fails, report it and continue — the PR is the source of truth.
-
-5. **Commit reconciled memory deltas** the leads/reviewers proposed (you are the sole writer).
 
 6. **Report** the branch, the PR URL, the gate verdict, and any task-source update. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
 

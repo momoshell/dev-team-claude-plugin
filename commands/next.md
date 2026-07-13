@@ -6,6 +6,7 @@ Take the next task and **plan** it (don't execute yet). `$ARGUMENTS` may name a 
 
 1. **Read config.** Read `<project-root>/.claude/dev-team/config.md`. If it's missing, tell the user to run `/dev-team:onboard` first, and stop.
    - **One task per window:** if this session already shipped (or substantially worked) a previous task, don't stack another onto the same transcript — tell the user to `/clear` and run `/dev-team:next` in the fresh window (config + memory carry everything; the accumulated transcript only adds re-read cost). Proceed anyway if they explicitly insist.
+   - **Memory hygiene sweep (every run, not just the domain this task touches).** `orchestration.md`'s archive trigger only fires on a delta write, so a domain nobody's touched in a while never gets checked otherwise. `wc -l` every file in `<project-root>/.claude/dev-team/memory/` now — one cheap local command, not a subagent — and archive any live file over ~300 lines per the same rule (`deprecated` entries → `<file>.archive.md`; git-gated trim on the archive file itself if that crosses ~500). Silent when nothing trips the threshold — don't report a clean sweep, only an action taken.
 
 2. **Select the task.**
    - If `$ARGUMENTS` names one → fetch its **full content** (`gh issue view $ARGUMENTS --repo <owner/repo> --json title,body,labels,comments`) and use it.

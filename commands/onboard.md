@@ -23,6 +23,7 @@ Set up (or refresh) the dev-team for **this project**. This is the foundation th
    - Offer to add an allow rule for the resolved script path (e.g. `Bash(<plugin-root>/scripts/trello.sh:*)`) to the project's `.claude/settings.json` so daily `/dev-team:next` runs don't prompt.
 
 4. **Seed project memory.** Create `<project-root>/.claude/dev-team/memory/` and, if missing, these files with a header + entry-format stub: `conventions.md`, `frontend-notes.md`, `backend-notes.md`, `devops-notes.md`, `qa-notes.md`, `architecture-notes.md`. Seed `conventions.md` from the existing convention docs — **summarize and cite the source file; don't copy wholesale**. (`<project-root>` = repo root; never add a second `dev-team/` segment.)
+   - **On a refresh (files already exist), backfill the size check.** `orchestration.md` § Memory's archive trigger only fires right after a lead-delta write — a file that grew before that rule existed (or hasn't had a delta written to it in a while) never gets checked on its own. `wc -l` every existing live file now; over ~300 lines, archive its `deprecated` entries into `<file>.archive.md` per the same rule. This is the only way to clean up pre-existing bloat — re-running `/dev-team:onboard` in each project is the trigger.
 
 5. **Write `<project-root>/.claude/dev-team/config.md`** — keep it tight; it's read on every run:
    - `task_source:` — type + repo/board + the next-selection rule (Trello: board shortlink, ready/doing/done list IDs + names, creds resolution method).

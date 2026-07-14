@@ -7,7 +7,7 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
 1. **Scope the change.** `git status` + `git diff --stat` (and the diff) to see what changed. If nothing changed, say so and stop. Read `.claude/dev-team/config.md` for `validate` commands and `review_defaults`.
 
 2. **Run the QA gate** (the `dev-team:qa-lead` ladder), spec-anchored if a spec/acceptance exists:
-   - Run `config.validate` (typecheck / test / lint / build) — these must pass.
+   - Run **`config.validate.full`** (the complete suite — full tests + integration/e2e + build) — these must pass. **This is the single place the full slow suite runs** — coders and the mid-execution inline re-verify only ran the scoped `fast` lane, so ship is where the authoritative run happens, exactly once before the PR. (If `config.validate` isn't split into `fast`/`full` — an older config — run all of it; re-run `/dev-team:onboard` to add the split.)
    - Review the diff at the right tier (standard → deep per the deep-trigger ladder + `config.review_defaults`); add `dev-team:build-validator` / `dev-team:test-engineer` as warranted.
    - On any **must-fix** finding or failing command → **stop and report**. Do not ship.
 

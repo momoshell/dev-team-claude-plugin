@@ -11,7 +11,10 @@ Set up (or refresh) the dev-team for **this project**. This is the foundation th
    - Task surfaces — `gh issue list --limit 5` and `gh project list` (skip silently if `gh` is unavailable).
    - Any existing `.claude/dev-team/config.md`.
 
-2. **Determine the validation commands** the project actually uses — typecheck / test / lint / build — from the scripts you found.
+2. **Determine the validation commands** the project actually uses — typecheck / test / lint / build — from the scripts you found. **Split them into a fast lane and a full lane**, because a full test suite that runs for tens of minutes must not run on every coder self-check:
+   - `fast:` — the checks safe to run often during iteration: typecheck, lint, and the *quickest* test command that still gives real signal (a smoke/unit-only/no-DB run — e.g. `make smoke`, `npm test -- --changed`, `pytest -m "not integration"`). If the project truly only has one test command and it's slow, say so — `fast` can omit tests and carry just typecheck+lint.
+   - `full:` — the authoritative suite that must pass before a PR: the complete test run + integration/e2e + build. This runs **once, at `/dev-team:ship`** — never per-coder. Note explicitly which commands here are slow (the ones you're keeping out of the fast lane).
+   Many projects already declare both (a `smoke`/`ci-*-fast` script alongside a full `test`) — map to those rather than inventing commands.
 
 3. **Decide the task source, then CONFIRM with the user before writing.** Choose the most likely of: GitHub issues · GitHub Projects board · a Trello board (URL in `$ARGUMENTS` or existing config) · an in-repo backlog file (`TASKS.md` / `BACKLOG.md` / roadmap) · none. Prefer whatever `gh` / the repo actually shows. State your pick **and the "next" selection rule** (e.g. "label `ready`, else oldest open") in one line, and wait for the user to confirm or correct.
 
@@ -35,7 +38,7 @@ Set up (or refresh) the dev-team for **this project**. This is the foundation th
 
 5. **Write `<project-root>/.claude/dev-team/config.md`** — keep it tight; it's read on every run:
    - `task_source:` — type + repo/board + the next-selection rule (Trello: board shortlink, ready/doing/done list IDs + names, creds resolution method; GitHub Projects board: project number, owner, `ready_status`/`in_progress_status`/`done_status` values, scoped repo(s), `project_node_id`, `status_field_id`, `status_options`) + the confirmed epic/umbrella exclusion pattern.
-   - `validate:` — the typecheck / test / lint / build commands.
+   - `validate:` — the typecheck / test / lint / build commands, **split into `validate.fast` (iteration lane — typecheck+lint+smoke/quick tests, run often) and `validate.full` (the authoritative pre-PR suite — full tests + integration + build, run once at ship)**, per step 2. Mark the slow commands. If a project genuinely has only one lane, set `fast` and `full` to the same value and note it.
    - `review_defaults:` — domains/paths that should default to deep review (e.g. contracts, auth, migrations, infra).
    - `notes:` — project-specific things worth always knowing (monorepo layout, gotchas).
 

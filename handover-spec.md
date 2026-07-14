@@ -12,7 +12,7 @@ The contract a **lead emits** and a **coder consumes**. Conversational mode uses
 - **files_in_scope** — explicit paths the coder may touch
 - **constraints** — conventions/patterns to match (cite `conventions.md` entries)
 - **acceptance_criteria** — how "done" is verified
-- **validation_commands** — exact commands (type-check, lint, test, build)
+- **validation_commands** — exact commands, **scoped to `files_in_scope` — the narrowest run that still covers the change** (e.g. `npm test -- items`, `pytest tests/foo -k thing`), plus typecheck/lint. Draw from `config.validate.fast`, **never the full `config.validate.full` suite** — the coder runs these as a self-check and the orchestrator re-runs them inline per dispatch, so a full slow suite here runs tens of minutes on every coder. The full suite runs once at `/dev-team:ship`, not here.
 - **discovery_context** — what the lead already found, so the coder never re-scouts. **Complete when it names:** every symbol/function the coder will call but not define + the file it lives in; the exact pattern to mirror — **paste the key excerpt (~5–10 lines) inline, plus its `file:line`** (a bare pointer costs the coder a Read and drifts when parallel edits shift lines; pointers alone are fine for everything *other* than the one pattern to mirror); any gotcha that would otherwise need a grep; the relevant existing conventions. If the coder would have to search beyond `files_in_scope` to proceed, it's incomplete.
 - **out_of_scope** — explicit don'ts
 - **depends_on** — prerequisite task_ids (or —)
@@ -55,7 +55,7 @@ A weak spec costs an amend→rebuild loop — verify each spec against this bar 
 - [ ] `acceptance_criteria` are verifiable (a command or an observable result), not vibes.
 - [ ] every `acceptance_criteria` entry is covered by a `validation_commands` entry or an explicitly named reviewer/manual check — a criterion nothing verifies is a vibe with punctuation.
 - [ ] Risky paths name their required negative/security checks: authz/tenant boundaries, input validation/encoding, secret handling, rollback/idempotency, or public contract compatibility as applicable.
-- [ ] `validation_commands` actually run in this project.
+- [ ] `validation_commands` actually run in this project **and are scoped to the change** — a targeted/filtered run from `config.validate.fast`, not the full `config.validate.full` suite (which runs once at ship, not per coder).
 - [ ] `interface_contract` is filled if the task shares a shape with another task; the producing domain owns it.
 - [ ] `depends_on` lists every prerequisite `task_id`.
 

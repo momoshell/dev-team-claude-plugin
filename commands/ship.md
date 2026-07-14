@@ -21,7 +21,12 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
    - `gh pr create` — title from `$ARGUMENTS` or derived; body summarizing the change, validation results, reviewer notes / follow-ups; link the task (`Closes #N`) if known.
 
 5. **Update the task source** (after the PR exists):
-   - GitHub issues → the `Closes #N` in the PR body already handles it.
+   - GitHub issues (no Projects board) → the `Closes #N` in the PR body already handles it.
+   - GitHub Projects board (config has `project_node_id`/`status_field_id`/`status_options` and a `current_task:` line with the item node id from `next.md`) → move it to `done_status`, same call shape as the in-progress move `next.md` made:
+     ```
+     gh project item-edit --id <item-node-id> --project-id <project_node_id> --field-id <status_field_id> --single-select-option-id <status_options.done>
+     ```
+     `Closes #N` still closes the issue itself — this additionally syncs the board's `Status` field, which closing alone doesn't touch. Clear the `current_task:` line from `config.md` after. Non-fatal: if it fails, report it and continue — the PR is the source of truth.
    - Trello (config has a `current_task:` card) → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" comment <card-id> "<PR URL>"` then `trello.sh move <card-id> <done-list-id>`, and clear the `current_task:` line from `config.md`. Non-fatal: if the board update fails, report it and continue — the PR is the source of truth.
 
 6. **Report** the branch, the PR URL, the gate verdict, and any task-source update. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.

@@ -2,7 +2,7 @@
 description: Ship the current work — run the QA gate, then branch, commit, push, and open a PR
 ---
 
-Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue ref. **Refuse to ship if the gate doesn't pass.**
+Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue ref. **Refuse to ship if the gate doesn't pass.** Invoking this command is itself the go-ahead to push and open the PR once the gate is green — don't stop to ask again before step 4; the QA gate (must-fix findings, failing `validate` commands) is the actual checkpoint, not a second confirmation after it's already passed.
 
 1. **Scope the change.** `git status` + `git diff --stat` (and the diff) to see what changed. If nothing changed, say so and stop. Read `.claude/dev-team/config.md` for `validate` commands and `review_defaults`.
 
@@ -30,7 +30,5 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
    - Trello (config has a `current_task:` card) → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" comment <card-id> "<PR URL>"` then `trello.sh move <card-id> <done-list-id>`, and clear the `current_task:` line from `config.md`. Non-fatal: if the board update fails, report it and continue — the PR is the source of truth.
 
 6. **Report** the branch, the PR URL, the gate verdict, and any task-source update. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
-
-**Confirm before pushing / opening the PR** unless activation mode is `auto`.
 
 **Input:** $ARGUMENTS

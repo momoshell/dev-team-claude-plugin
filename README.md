@@ -106,6 +106,8 @@ keybindings:
 
 The repo must have a `repoPaths` mapping in the same config (that's where `{{.RepoPath}}` comes from) and a local checkout — the script errors clearly when either is missing.
 
+You don't have to wire this by hand: when `/dev-team:onboard` detects gh-dash + worktrunk + Ghostty on the machine, it offers to add the keybinding and the `repoPaths` mapping itself. It copies the launcher to `~/.claude/dev-team/bin/` first (the installed plugin's path changes on every version bump, so the keybinding never points into the plugin cache) and re-copies on each onboard refresh so the stable copy tracks plugin updates.
+
 ---
 
 ## Task sources

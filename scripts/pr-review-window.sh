@@ -97,7 +97,10 @@ case $stage in
   open)
     # Don't resolve the path here — stage 1 blocks the gh-dash TUI, so anything slow
     # (the discovery scan, a clone prompt) belongs in the window, not here.
-    exec open -na Ghostty --args --title="pr-review #$pr — $repo" \
+    # --window-save-state=never: without it, macOS state restoration resurrects the
+    # previous launcher instance's window as an extra empty tab next to the -e one.
+    exec open -na Ghostty --args --window-save-state=never \
+      --title="pr-review #$pr — $repo" \
       -e "${BASH_SOURCE[0]}" run "$repo_path" "$repo" "$pr"
     ;;
   run) ;;

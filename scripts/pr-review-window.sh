@@ -23,6 +23,10 @@ repo_path=${2/#\~/$HOME}
 repo=$3
 pr=$4
 
+# gh-dash renders a missing RepoPath as the literal "<no value>" (via {{index . "RepoPath"}}
+# under missingkey=error) — normalize it to empty so the error message stays clean.
+[ "$repo_path" = "<no value>" ] && repo_path=""
+
 case $stage in
   open)
     if [ -z "$repo_path" ] || [ ! -d "$repo_path" ]; then

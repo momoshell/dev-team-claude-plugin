@@ -101,7 +101,7 @@ keybindings:
       name: claude pr-review
       command: >-
         <path-to-plugin>/scripts/pr-review-window.sh
-        open "{{.RepoPath}}" "{{.RepoName}}" {{.PrNumber}}
+        open "{{index . "RepoPath"}}" "{{.RepoName}}" {{.PrNumber}}
 ```
 
 The repo must have a `repoPaths` mapping in the same config (that's where `{{.RepoPath}}` comes from) and a local checkout — the script errors clearly when either is missing.

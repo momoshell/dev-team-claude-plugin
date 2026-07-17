@@ -92,6 +92,20 @@ Agents are referenced as `dev-team:<name>` (e.g. `dev-team:backend-lead`).
 
 Either way, **nothing is posted until you've seen the exact drafted text and said yes** — comments go out under your name. Pass an explicit `review`/`respond` after the PR ref to override the auto-detected mode.
 
+**One-keypress launch from gh-dash** (macOS, [Ghostty](https://ghostty.org) + [worktrunk](https://github.com/max-sixty/worktrunk)): `scripts/pr-review-window.sh` opens the PR in a fresh Ghostty window (its own instance — never a tab in your existing window), checks it out into its own worktree via `wt switch pr:N`, and runs `claude "/dev-team:pr-review <pr-url>"` there. When the session ends or the window closes, the worktree is removed — never with `--force`, so a worktree holding uncommitted changes is kept and reported instead of destroyed (merged branches are cleaned up by worktrunk; unmerged ones stay as local branches). Wire it to a key in `~/.config/gh-dash/config.yml`:
+
+```yaml
+keybindings:
+  prs:
+    - key: V
+      name: claude pr-review
+      command: >-
+        <path-to-plugin>/scripts/pr-review-window.sh
+        open "{{.RepoPath}}" "{{.RepoName}}" {{.PrNumber}}
+```
+
+The repo must have a `repoPaths` mapping in the same config (that's where `{{.RepoPath}}` comes from) and a local checkout — the script errors clearly when either is missing.
+
 ---
 
 ## Task sources
@@ -205,6 +219,7 @@ commands/                /dev-team:team, :onboard, :next, :ship, :pr-review
 scripts/trello.sh        Trello task-source helper (credential resolution + board I/O)
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
 scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)
+scripts/pr-review-window.sh  gh-dash keybinding target: Ghostty window + worktrunk PR worktree + /dev-team:pr-review (see § PR review)
 hooks/hooks.json         SessionStart → injects orchestration.md into context; marks /clear boundaries for task-cost.mjs
 orchestration.md         the orchestrator's operating rules (loaded each session)
 handover-spec.md         canonical spec template + conventions

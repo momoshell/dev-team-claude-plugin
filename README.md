@@ -104,7 +104,7 @@ keybindings:
         open "{{index . "RepoPath"}}" "{{.RepoName}}" {{.PrNumber}}
 ```
 
-The repo must have a `repoPaths` mapping in the same config (that's where `{{.RepoPath}}` comes from) and a local checkout — the script errors clearly when either is missing.
+A `repoPaths` mapping is optional: when gh-dash doesn't resolve `{{index . "RepoPath"}}` (or the path doesn't exist), the launcher **discovers the checkout itself** — cache first (`~/.claude/dev-team/repo-paths.cache`, re-validated against the remote every use), then a scan of the search roots (`~/Development` and `~/Work` by default; override with a space-separated `PR_REVIEW_SEARCH_ROOTS`) matching each repo's `origin` against the PR's `owner/repo`. Nested grouping dirs (e.g. `~/Development/some-org/<repo>`) are found up to 4 levels deep. No checkout anywhere → it offers to clone. `pr-review-window.sh discover <owner/repo>` prints what would be resolved, for debugging.
 
 You don't have to wire this by hand: when `/dev-team:onboard` detects gh-dash + worktrunk + Ghostty on the machine, it offers to add the keybinding and the `repoPaths` mapping itself. It copies the launcher to `~/.claude/dev-team/bin/` first (the installed plugin's path changes on every version bump, so the keybinding never points into the plugin cache) and re-copies on each onboard refresh so the stable copy tracks plugin updates.
 

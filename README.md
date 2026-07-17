@@ -80,7 +80,17 @@ Agents are referenced as `dev-team:<name>` (e.g. `dev-team:backend-lead`).
 /dev-team:team auto             Run qualifying work through the team without asking
 /dev-team:team status           Show activation mode + available leads
 /dev-team:team workflow <goal>  Run the deterministic pipeline (below)
+/dev-team:pr-review <n|url>     Work a PR like a teammate (below)
 ```
+
+### PR review
+
+`/dev-team:pr-review <number|url>` detects whose PR it is and picks the mode:
+
+- **Someone else's PR → review mode.** The diff is risk-classified through the same review ladder the QA gate uses (standard reviewer → deep on triggers → adversarial panel on stacked risk), findings are verified against the head-ref code before anything is drafted, and the result is **one** review — a short summary plus inline comments in a polite, inquisitive register ("What do you think about…", "Is it correct that…"), each with a precise explanation, a concise fix, and a `[blocking]`/`[question]`/`[nit]` tag.
+- **Your own PR → respond mode.** Unresolved review threads are triaged on evidence (valid / invalid / unclear), valid findings are fixed as one commit per logical fix, and the drafted replies cite the fix hashes (`Fixed in abc1234 — …`); pushback on invalid comments comes with `file:line` evidence, politely.
+
+Either way, **nothing is posted until you've seen the exact drafted text and said yes** — comments go out under your name. Pass an explicit `review`/`respond` after the PR ref to override the auto-detected mode.
 
 ---
 
@@ -191,7 +201,7 @@ This plugin uses standard Claude Code surfaces — no custom UI:
   plugin.json            plugin manifest
   marketplace.json       local marketplace manifest
 agents/                  the 14 agent definitions
-commands/                /dev-team:team, :onboard, :next, :ship
+commands/                /dev-team:team, :onboard, :next, :ship, :pr-review
 scripts/trello.sh        Trello task-source helper (credential resolution + board I/O)
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
 scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)

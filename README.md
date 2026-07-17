@@ -97,7 +97,7 @@ Either way, **nothing is posted until you've seen the exact drafted text and sai
 ```yaml
 keybindings:
   prs:
-    - key: D
+    - key: ctrl+r
       name: claude pr-review
       command: >-
         <path-to-plugin>/scripts/pr-review-window.sh

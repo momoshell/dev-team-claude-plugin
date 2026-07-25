@@ -222,8 +222,9 @@ scripts/trello.sh        Trello task-source helper (credential resolution + boar
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
 scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)
 scripts/pr-review-window.sh  gh-dash keybinding target: Ghostty window + worktrunk PR worktree + /dev-team:pr-review (see § PR review)
-hooks/hooks.json         SessionStart → injects orchestration.md into context; marks /clear boundaries for task-cost.mjs
-orchestration.md         the orchestrator's operating rules (loaded each session)
+hooks/hooks.json         SessionStart → injects orchestration.md (+ resolved plugin root) into context; marks /clear boundaries for task-cost.mjs
+orchestration.md         the orchestrator's core operating rules (lean; loaded each session)
+references/              deep protocol, loaded on demand: tier3-planning.md, qa-gate.md, memory.md
 handover-spec.md         canonical spec template + conventions
 handover-spec.schema.json
 coder-return.schema.json
@@ -255,7 +256,7 @@ The rules that follow (enforced by the commands and `orchestration.md`):
 - **One task per window.** `/dev-team:next` → work → `/dev-team:ship` → `/clear`. Disk memory + `config.md` + the task source carry everything between windows; the transcript carries nothing worth its re-read cost.
 - **The main model doesn't need to be opus.** The thinking is pinned in the agents' frontmatter (leads/deep review on opus) regardless of the session model — a sonnet main loop routes the same opus brains at a fraction of the token weight.
 - **Engage the team deliberately.** Tier-1 trivia goes direct; batches go through workflow mode (fresh bounded windows per task), not one long conversational session.
-- **Cut window count, not depth** — savings come from fewer/cheaper windows on low-risk work, never from lowering effort/model on architecture, leads, or deep review (see `orchestration.md` § Scaling & effort).
+- **Cut window count, not depth** — savings come from fewer/cheaper windows on low-risk work, never from lowering effort/model on architecture, leads, or deep review (see `orchestration.md` § Session hygiene & where to spend).
 
 ### Per-task cost
 

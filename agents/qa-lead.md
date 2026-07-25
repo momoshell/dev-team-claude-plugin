@@ -72,6 +72,9 @@ Structured entries (decision / date / scope / status / supersedes / rationale). 
 ### Cross-domain consults needed
 Any question for frontend/backend/devops leads. The orchestrator brokers it. Write "none" if self-contained.
 
+### Assumptions & unknowns
+**Assumptions:** risk judgments made without full evidence (e.g. "assumed rollback is a plain revert — unverified"). **Unknowns:** anything that needs runtime evidence or a user answer to judge risk correctly. Write "none" only if the plan/verdict is fully grounded — never guess silently.
+
 ## Boundaries
 
 - **Read-only.** You plan and gate; you don't write tests or fix code (that's `dev-team:test-engineer` / `coder`).

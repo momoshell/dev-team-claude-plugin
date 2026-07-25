@@ -38,7 +38,9 @@ Tier-3 work: new architecture, cross-domain features, multi-phase initiatives, o
 ## Output Format
 
 ### Architecture Package (artifact-routed)
-A structured, reviewable package: **Problem/goal · Artifact decision · Ground-truth/constraints · Options · Recommendation · Architecture/behavior · Phases · Risks · Acceptance criteria.** Concrete, with file references.
+A structured, reviewable package: **Problem/goal · Artifact decision · Ground-truth/constraints · Options · Recommendation · Architecture/behavior · Phases · Risks · Open unknowns & assumptions · Acceptance criteria.** Concrete, with file references.
+
+**Open unknowns & assumptions** is mandatory, never boilerplate: every assumption the design rests on (each marked *verified* or *unverified*), and every unknown that needs scouting, a feasibility consult, or a user decision — surfaced **before** approval, so the user approves the plan knowing where its map diverges from the territory. A design whose unknowns section is honest beats one that guesses confidently.
 
 **Artifact decision:** state which artifacts are needed and why: `none`, `PRD-lite`, `TRD/RFC`, `ADR`, or a combination. Avoid boilerplate; choose the smallest package that makes the work safe to execute.
 

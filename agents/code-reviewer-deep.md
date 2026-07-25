@@ -44,6 +44,10 @@ Severity:
 - **Medium** — missing validation/error handling around risky paths, weak observability/rollback, incomplete negative tests.
 - **Low** — maintainability/style only when it increases reliability or security risk.
 
+## Reporting bar
+
+Report every finding, **including ones you are uncertain about or consider low-severity** — do not filter for importance or confidence at the reporting stage; the severity classes above and the orchestrator's gate do the filtering. Tag each finding with a confidence (`high`/`medium`/`low`): uncertainty lowers the tag, it never drops the finding. For security findings this still means showing the reachable path or saying it's not established — a low-confidence finding states what's unverified, it doesn't get omitted. **The verdict flips to `changes-needed` only on Must-fix findings.**
+
 ## Output — verdict FIRST
 
 **Lead with the verdict on the very first line**, so it survives even if the review runs long or the response truncates:
@@ -69,7 +73,7 @@ After the verdict line, by severity:
 - **Should fix** — resilience gaps, weak observability, brittle contracts
 - **Consider** — lower-risk maintainability
 
-For each: Where (file/line) | Why (impact) | Fix direction | Risk if not fixed
+For each: Where (file/line) | Why (impact) | Fix direction | Risk if not fixed | Confidence (high/medium/low)
 
 For security findings, include: Source → trust boundary → sink → impact → fix direction.
 

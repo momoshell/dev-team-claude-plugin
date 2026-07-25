@@ -31,3 +31,5 @@ The review *depth* follows the ladder below; the *bundle* (how many windows) sca
 ## Reviewer verdicts
 
 **Reviewers lead with a one-line verdict (`pass` / `changes-needed`) so it survives a long or truncated review** — if a reviewer returns no verdict, treat it as inconclusive and re-run (scoped to the diff), don't assume pass.
+
+**Reviewers report coverage-first — you are the filter.** They surface every finding, including uncertain and low-severity ones, tagged with severity + confidence; only **Must-fix** findings block the gate. Route Should-fix items into the task summary (fix now if cheap, else note them); Consider items are informational — don't spawn extra windows to re-litigate them.

@@ -18,6 +18,7 @@ Architecture work is not "always write a TRD." The architecture lead chooses the
 - **TRD/RFC** when implementation architecture, contracts, migration, sequencing, or trade-offs are the hard part.
 - **ADR** when a durable technical decision should be remembered, superseded, or revisited later.
 - **Execution plan** for every buildable Tier-3 request: phases, domain task slices, dependencies, interface contracts, acceptance criteria, validation strategy, and QA route.
+- **Open unknowns & assumptions** (mandatory in every package): what the design presumes (verified vs unverified) and what still needs scouting, a feasibility consult, or a user decision. Resolve what you can (scout, consult) before approval; present the rest alongside the package so the user approves knowing the gaps.
 
 The package goes to `dev-team:plan-reviewer` (+ `dev-team:architect` when the design has meaningful alternatives) before approval.
 

@@ -58,6 +58,7 @@ A weak spec costs an amend→rebuild loop — verify each spec against this bar 
 - [ ] `validation_commands` actually run in this project **and are scoped to the change** — a targeted/filtered run from `config.validate.fast`, not the full `config.validate.full` suite (which runs once at ship, not per coder).
 - [ ] `interface_contract` is filled if the task shares a shape with another task; the producing domain owns it.
 - [ ] `depends_on` lists every prerequisite `task_id`.
+- [ ] Assumptions the spec rests on are **stated** (in `discovery_context` or `constraints`), not silent — a coder can't flag an assumption it doesn't know was made.
 
 ## Worked example
 

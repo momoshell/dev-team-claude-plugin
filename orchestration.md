@@ -15,7 +15,7 @@ Deep protocol lives in `${CLAUDE_PLUGIN_ROOT}/references/` (the resolved plugin 
 
 - **Leads** (opus, read-only — plan, don't execute): `dev-team:frontend-lead`, `dev-team:backend-lead`, `dev-team:devops-lead`, `dev-team:qa-lead`, `dev-team:architecture-lead`. They read project memory, scope context, and emit **Handover Specs** + propose memory deltas. **Static discovery only — no Bash, no authenticated fetches.** Runtime/dynamic facts (command output, live data, actual API shapes) and private GitHub/Trello content must be scouted by you — dispatch `Explore` (which has Bash) or resolve it yourself (§ External content) — and fed into the spec's `discovery_context` as verified facts. Never let a lead guess a runtime shape or hand it a bare URL/id.
 - **Coder** (sonnet, execute-only): `dev-team:coder`. Implements a Handover Spec; reads within scope, never scouts broadly; returns `{status, reason, missing_context?, changes?, validation?}` per `coder-return.schema.json`.
-- **QA executors** (bundled): `dev-team:code-reviewer` / `dev-team:code-reviewer-deep`, `dev-team:build-validator`, `dev-team:test-engineer`. **Architecture team** (bundled): `dev-team:architect`, `dev-team:plan-reviewer`, `dev-team:trd-reviewer` (legacy TRD-only reviewer), `dev-team:doc-writer`, `Explore` (built-in).
+- **QA executors** (bundled): `dev-team:code-reviewer` (sonnet) / `dev-team:code-reviewer-deep` (opus), `dev-team:build-validator` (haiku), `dev-team:test-engineer` (sonnet). **Architecture team** (bundled): `dev-team:architect` (opus), `dev-team:plan-reviewer` (opus), `dev-team:trd-reviewer` (opus, legacy TRD-only reviewer), `dev-team:doc-writer` (haiku), `Explore` (built-in, session model). These are the pinned models — use them verbatim in the `{agent type} ({model})` description prefix (§ Progress signalling); don't assume an executor runs on the session model.
 
 ## External / authenticated content (the moment a URL/id appears)
 
@@ -41,7 +41,7 @@ Deep protocol lives in `${CLAUDE_PLUGIN_ROOT}/references/` (the resolved plugin 
 
 ## Progress signalling
 
-Narrate the spine in one-liners: `→ {agent}: {what}` before a dispatch (parallel batch, once: `→ 3 coders: be-02, fe-01, fe-03`); `✓ {agent}: {result}` or `✗ {agent}: {blocker}` after; end each phase with the gate verdict. The subagent panel carries the live detail; you carry the story. **Prefix every Agent-tool `description` with `{agent type} ({model})`** — the panel row renders only that string, so make it self-identifying: `Explore (sonnet): Stage 3 build surface`, `architecture-lead (opus): plan Stage 3 execution`. Applies to every dispatch — scouts, leads, coders, QA executors.
+Narrate the spine in one-liners: `→ {agent}: {what}` before a dispatch (parallel batch, once: `→ 3 coders: be-02, fe-01, fe-03`); `✓ {agent}: {result}` or `✗ {agent}: {blocker}` after; end each phase with the gate verdict. The subagent panel carries the live detail; you carry the story. **Prefix every Agent-tool `description` with `{agent type} ({model})`** — the panel row renders only that string, so make it self-identifying: `Explore (sonnet): Stage 3 build surface`, `architecture-lead (opus): plan Stage 3 execution`. The model in the prefix is the agent's **pinned** model from § Roles — not the session model; a `code-reviewer-deep` dispatch is `(opus)` even when you run on sonnet. Applies to every dispatch — scouts, leads, coders, QA executors.
 
 ## Handover Spec (the lead→coder contract)
 

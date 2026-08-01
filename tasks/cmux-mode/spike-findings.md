@@ -437,3 +437,17 @@ Fire a signal (latch), then arm two waiters on the same token:
 ### Slice-1a gate status: **fully cleared**
 
 Every platform gate v2 named for 1a is now discharged with live evidence: S22a/b/c/e/f/g, S24, U2 (the break) + S25c (the fix validated), S25b (await-loop semantics settled favorably). Remaining S25 items (S25a notify-flag/GUI eyeball, S25d profile-closure smoke, S25e `.claude/worktrees` carve-out iff that siting is chosen) gate slice **1c**, not 1a, and S23/S15b gate the Phase-2 GO/NO-GO. S20 remains deferred (coordinated restart).
+
+---
+
+## S20 — restart durability — FIXTURES STAGED, awaiting post-restart check
+
+Cannot be run in-session (the orchestrator lives in a cmux pane; a full quit+relaunch kills it). Fixtures were staged pre-restart on 2026-08-01:
+
+- **Latch token:** `devteam-s20-restart-probe-4063` fired via `cmux wait-for -S` and left un-consumed. Post-restart test: one waiter with a short timeout → instant release = latch persisted; timeout = in-memory latch lost (the expected/designed-for outcome — rank-0 file-watch is the recovery path, so this does not block).
+- **Moved doc-tab panel:** pane `F64A4364-2FB9-4380-9596-A74D1DDF53A2` (ref `pane:31` pre-restart) held two sibling tabs — terminal `surface:60` + markdown `surface:61` for `/tmp/s20-doc.md` (opened via `markdown open` + `move-surface`). Post-restart test: does a `[markdown]` surface titled `s20-doc.md` reappear in `cmux tree`, and does it live-reload.
+- **Check script:** `/tmp/s20-check.sh` — run ONCE after relaunch (the token waiter is consume-once; running it before the restart destroys the test). It prints a PASS/FAIL for the token and dumps the tree for the panel check.
+
+**Runbook (user-executed):** (1) fully quit cmux (Cmd-Q the app — there is no `cmux quit` verb); (2) relaunch cmux and reopen this project; (3) in any cmux terminal run `bash /tmp/s20-check.sh`; (4) paste its output into a fresh Claude session in this repo to record the result here and close S20.
+
+**Result:** _pending post-restart run._

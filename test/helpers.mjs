@@ -7,6 +7,8 @@ import { dirname, join } from 'node:path'
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+export { MODEL_ALIASES } from '../scripts/cmux/contract.mjs'
+
 export function loadWorkflowSource() {
   return readFileSync(join(ROOT, 'team-build.workflow.mjs'), 'utf8')
 }

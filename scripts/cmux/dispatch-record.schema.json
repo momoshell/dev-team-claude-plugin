@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "DispatchRecord",
+  "description": "Written parent-side at ~/.dev-team/state/<task-slug>/dispatch/<stem>.json. Schema evolution: every file carries schema_version, starting at 1. A reader that encounters a schema_version higher than the one it knows REFUSES the document — it never best-efforts; the validator reports this as a distinctly named schema_version_too_new violation. Adding a value to an enum bumps schema_version if and only if some consumer branches on that enum with a documented default or else path. No bump: tools, profile.allow grants, permission_mode, isolation, agent, return.kind. Bump: outcome, level, escalate_to, postcondition. When in doubt, bump. This record is written parent-side and is not reachable by a worker's tool calls; a Bash subprocess can nonetheless read parent-side state (G13). The completion nonce (ADR-003 Am. 1) MUST NOT appear in this record in any field, including free-text fields; it is delivered via ~/.dev-team/state/<task-slug>/<dispatch_id>.nonce, mode 0600, read-and-unlinked by the adapter before claude exists. The nonce PATH is likewise prohibited from this record, and the completion-nonce prefix is the frozen constant devteam-done- so writer and argv builder can both assert by substring scan over the serialized bytes. Lifecycle: three states, two permitted transitions — create (T0, before pane creation) then bind (T1, after cmux new-pane returns ids: surface and bound_at set) then terminate (T2: outcome and ended_at set). Each transition is written atomically (tmp file plus rename) and is MONOTONE: null becomes set, never set becomes null and never set becomes a different value. Every other field is byte-identical across all three states, and dispatch_id is never reused. profile.allow's grammar is agent-specific and discriminated by `agent`. Four parent-side sidecar file formats, keyed by dispatch_id under ~/.dev-team/state/<task-slug>/: <dispatch_id>.exit is the child's decimal exit code; <dispatch_id>.gate is the Stop gate's decimal block counter; <dispatch_id>.nonce is mode 0600, read-and-unlinked; <dispatch_id>.signal-log is one attested JSON line per observed signal write. All four are writable by a worker's Bash subprocess (same uid); each one's blast radius is bounded because completion is re-derived from the ladder on every wake. returns/<stem>.md is written by the PARENT after validation, for doc-tab display, and is covered by no grant — the human's viewport is a file no worker can write. Residual: sibling workers can read each other's returns/ and signals/ content under --add-dir; no token or credential lives in those files.",
+  "type": "object",
+  "required": ["schema_version", "dispatch_id", "slice_id", "attempt", "task_id", "task_slug", "repo_slug", "role", "agent", "model", "effort", "tools", "disallowed_tools", "flags", "profile", "role_prompt_path", "role_prompt_sha256", "return", "task_dir", "spec_path", "return_path", "signals_path", "primary_checkout", "isolation", "worktree", "cwd", "env", "attn_parent", "attn_upstream", "kickoff", "gate", "timeout_s", "max_turns", "surface", "created_at", "bound_at", "ended_at", "outcome"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "dispatch_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "slice_id": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,15}){0,3}$" },
+    "attempt": { "type": "integer", "minimum": 1, "maximum": 99 },
+    "task_id": { "type": "string", "pattern": "\\S" },
+    "task_slug": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+    "repo_slug": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+    "role": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+    "agent": { "type": "string", "enum": ["claude"], "description": "Discriminates profile.allow's grammar." },
+    "model": { "type": "string", "pattern": "\\S" },
+    "effort": { "type": ["string", "null"], "enum": ["low", "medium", "high", "xhigh", null] },
+    "tools": { "type": "array", "items": { "type": "string", "enum": ["Read", "Edit", "Write", "Glob", "Grep", "Bash"] }, "uniqueItems": true },
+    "disallowed_tools": { "type": "array", "items": { "type": "string", "enum": ["mcp__*", "Task", "Agent"] }, "uniqueItems": true },
+    "flags": {
+      "type": "object",
+      "required": ["strict_mcp_config", "disable_slash_commands"],
+      "additionalProperties": false,
+      "properties": {
+        "strict_mcp_config": { "type": "boolean", "const": true },
+        "disable_slash_commands": { "type": "boolean", "const": true }
+      }
+    },
+    "profile": {
+      "description": "The COMPOSED profile. `allow`'s grammar is AGENT-SPECIFIC and discriminated by the top-level `agent` field, while `grants` carries the agent-neutral intent it expanded from. `allow` MUST contain both of these literals byte-identically, in every composed profile including judgment and validator: Bash(cmux notify *) and Bash(cmux wait-for -S *).",
+      "type": "object",
+      "required": ["name", "permission_mode", "grants", "allow", "postcondition", "postcondition_ignore"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$" },
+        "permission_mode": { "type": "string", "enum": ["dontAsk"] },
+        "grants": { "type": "array", "items": { "type": "string", "enum": ["returns_write", "signals_append", "worktree_write", "validation_commands"] }, "uniqueItems": true, "minItems": 2, "description": "The agent-neutral tokens this expanded from." },
+        "allow": { "type": "array", "items": { "type": "string", "pattern": "^(Edit|Read)\\(//[^)]+\\)$|^Bash\\([^)]+\\)$" }, "uniqueItems": true, "minItems": 4 },
+        "postcondition": { "type": "string", "enum": ["clean", "changes_expected"] },
+        "postcondition_ignore": { "type": "array", "items": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$" } }
+      }
+    },
+    "role_prompt_path": { "type": "string", "pattern": "^/[^/].*$", "description": "Inside the per-task plugin snapshot." },
+    "role_prompt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "return": {
+      "description": "RESOLVED return spec.",
+      "type": "object",
+      "required": ["kind", "schema_path", "required_sections", "verdict_block"],
+      "additionalProperties": false,
+      "properties": {
+        "kind": { "type": "string", "enum": ["json", "markdown"] },
+        "schema_path": { "type": ["string", "null"], "pattern": "^/[^/].*$", "description": "Inside the per-task snapshot; null when kind is markdown." },
+        "required_sections": { "type": "array", "items": { "type": "string", "pattern": "\\S" }, "description": "May be []." },
+        "verdict_block": { "type": "boolean" }
+      }
+    },
+    "task_dir": { "type": "string", "pattern": "^/[^/].*$", "description": "<root>/tasks/<repo_slug>/<task_slug>" },
+    "spec_path": { "type": "string", "pattern": "^/[^/].*$", "description": "<task_dir>/spec/<slice_id>.json (no attempt — the spec is per slice)" },
+    "return_path": { "type": "string", "pattern": "^/[^/].*$", "description": "<task_dir>/returns/<stem>.json where stem = <slice_id>.<attempt>" },
+    "signals_path": { "type": "string", "pattern": "^/[^/].*$", "description": "<task_dir>/signals/<stem>.jsonl" },
+    "primary_checkout": { "type": "string", "pattern": "^(?!.*(^|/)\\.(claude|git|vscode|idea|husky|devcontainer)(/|$))/[^/].*$" },
+    "isolation": { "type": "string", "enum": ["worktree", "primary"] },
+    "worktree": {
+      "description": "Worktree path is <task_artifacts_root>/worktrees/<repo-slug>/<task-slug>/<slice_id>, keyed to slice_id (never task_id), reused across attempts of the same slice, and rooted outside every checkout. Null if and only if isolation is \"primary\".",
+      "type": ["object", "null"],
+      "required": ["path", "branch", "created_by_dispatcher", "source_slice_id"],
+      "additionalProperties": false,
+      "properties": {
+        "path": { "type": "string", "pattern": "^(?!.*(^|/)\\.(claude|git|vscode|idea|husky|devcontainer)(/|$))/[^/].*$", "description": "Must not equal primary_checkout (relation not schema-expressible; asserted by the 1b builder test)." },
+        "branch": { "type": "string", "pattern": "^dt/[a-z0-9-]+/[a-z0-9-]+$", "description": "dt/<task-slug>/<slice_id>" },
+        "created_by_dispatcher": { "type": "boolean" },
+        "source_slice_id": { "type": ["string", "null"], "pattern": "^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,15}){0,3}$", "description": "Null if and only if created_by_dispatcher is true; names the slice whose worktree this dispatch inspects." }
+      }
+    },
+    "cwd": { "type": "string", "pattern": "^/[^/].*$" },
+    "env": {
+      "description": "Closed, exactly eight keys, ALL required, all values strings. Each key is justified by exactly one worker-side hook consumer; DEVTEAM_STATE_DIR is deliberately omitted (least privilege — hand each hook its one file, never the state root, which would disclose the nonce path and every sibling's sentinels); adding a ninth key is a deliberate schema_version event.",
+      "type": "object",
+      "required": ["DEVTEAM_WORKER", "DEVTEAM_ROLE", "DEVTEAM_TASK_ID", "DEVTEAM_DISPATCH_ID", "DEVTEAM_TASK_DIR", "DEVTEAM_DISPATCH_RECORD", "DEVTEAM_SIGNAL_LOG", "DEVTEAM_GATE_COUNTER"],
+      "additionalProperties": false,
+      "properties": {
+        "DEVTEAM_WORKER": { "type": "string", "const": "1", "description": "Consumer: SessionStart neutralization guard." },
+        "DEVTEAM_ROLE": { "type": "string", "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$", "description": "Attestation / telemetry." },
+        "DEVTEAM_TASK_ID": { "type": "string", "pattern": "\\S", "description": "Attestation / telemetry." },
+        "DEVTEAM_DISPATCH_ID": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", "description": "Attestation identity." },
+        "DEVTEAM_TASK_DIR": { "type": "string", "pattern": "^/[^/].*$", "description": "PostToolUse path matcher." },
+        "DEVTEAM_DISPATCH_RECORD": { "type": "string", "pattern": "^/[^/].*$", "description": "Stop gate reads gate.max_blocks." },
+        "DEVTEAM_SIGNAL_LOG": { "type": "string", "pattern": "^/[^/].*$", "description": "PostToolUse append target." },
+        "DEVTEAM_GATE_COUNTER": { "type": "string", "pattern": "^/[^/].*$", "description": "Stop gate block counter." }
+      }
+    },
+    "attn_parent": { "type": "string", "pattern": "^devteam-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-attn$" },
+    "attn_upstream": { "type": "string", "pattern": "^devteam-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-attn$", "description": "Equals attn_parent for an orchestrator-initiated dispatch." },
+    "kickoff": { "description": "Single line handed to the worker at pane start. Must carry dispatch_id, task_dir, spec_path, return_path, signals_path, attn_parent and attn_upstream as expanded absolute literals — the record is parent-side, so the kickoff is the worker's only reliable channel for its own dispatch identity and paths. Must never contain the completion-nonce prefix devteam-done-.", "type": "string", "pattern": "^[^\\n\\r]{1,4000}$" },
+    "gate": {
+      "type": "object",
+      "required": ["max_blocks"],
+      "additionalProperties": false,
+      "properties": {
+        "max_blocks": { "type": "integer", "minimum": 0, "maximum": 10 }
+      }
+    },
+    "timeout_s": { "type": "integer", "minimum": 60, "maximum": 86400 },
+    "max_turns": { "type": ["integer", "null"], "minimum": 1 },
+    "surface": {
+      "description": "Null in state create, set at bind. The UUID pattern makes a positional reference such as surface:9 structurally unrepresentable.",
+      "type": ["object", "null"],
+      "required": ["workspace_id", "pane_id", "surface_id"],
+      "additionalProperties": false,
+      "properties": {
+        "workspace_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "pane_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "surface_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" }
+      }
+    },
+    "created_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$" },
+    "bound_at": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$" },
+    "ended_at": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$" },
+    "outcome": { "type": ["string", "null"], "enum": ["ok", "exit_nonzero", "no_return", "invalid_return", "refused_postcondition", "timeout", "aborted", null] }
+  }
+}

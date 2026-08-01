@@ -1,0 +1,145 @@
+{
+  "schema_version": 1,
+  "tools": ["Read", "Edit", "Write", "Glob", "Grep", "Bash"],
+  "defaults": {
+    "agent": "claude",
+    "timeout_s": 1800,
+    "icon": "robot",
+    "max_gate_blocks": 2,
+    "max_turns": null
+  },
+  "profiles": {
+    "executor": {
+      "description": "Writes code in its own worktree and runs the spec's validation commands. Cannot run state-changing commands outside those; the built-in read-only set executes in every mode regardless of rules.",
+      "permission_mode": "dontAsk",
+      "allow": ["returns_write", "signals_append", "worktree_write", "validation_commands"],
+      "postcondition": "changes_expected"
+    },
+    "validator": {
+      "description": "Runs the repo's declared validate lane against a worktree it cannot edit. Cannot run state-changing commands outside that lane; the built-in read-only set executes in every mode regardless of rules.",
+      "permission_mode": "dontAsk",
+      "allow": ["returns_write", "signals_append", "validation_commands"],
+      "postcondition": "clean"
+    },
+    "judgment": {
+      "description": "Reads, reasons and returns. Cannot run state-changing commands; the built-in read-only set (git log, git diff, grep, cat) executes in every mode regardless of rules.",
+      "permission_mode": "dontAsk",
+      "allow": ["returns_write", "signals_append"],
+      "postcondition": "clean"
+    }
+  },
+  "roles": {
+    "coder": {
+      "profile": "executor",
+      "isolation": "worktree",
+      "model": "sonnet",
+      "effort": "medium",
+      "pane": true,
+      "doc_tab": false,
+      "timeout_s": 1800,
+      "return": { "kind": "json", "schema": "coder-return.schema.json" }
+    },
+    "test-engineer": {
+      "profile": "executor",
+      "isolation": "worktree",
+      "model": "sonnet",
+      "pane": false,
+      "doc_tab": false,
+      "return": { "kind": "json", "schema": "coder-return.schema.json" }
+    },
+    "doc-writer": {
+      "profile": "executor",
+      "isolation": "worktree",
+      "model": "haiku",
+      "effort": "low",
+      "pane": false,
+      "doc_tab": false,
+      "return": { "kind": "json", "schema": "coder-return.schema.json" }
+    },
+    "build-validator": {
+      "profile": "validator",
+      "isolation": "worktree",
+      "model": "haiku",
+      "effort": "low",
+      "pane": false,
+      "doc_tab": false,
+      "return": { "kind": "markdown", "required_sections": ["Verdict"], "verdict_block": true }
+    },
+    "code-reviewer": {
+      "profile": "judgment",
+      "isolation": "worktree",
+      "model": "sonnet",
+      "pane": false,
+      "doc_tab": true,
+      "return": { "kind": "markdown", "required_sections": ["Verdict", "Must-fix", "Notes"], "verdict_block": true }
+    },
+    "code-reviewer-deep": {
+      "profile": "judgment",
+      "isolation": "worktree",
+      "model": "opus",
+      "effort": "high",
+      "pane": false,
+      "doc_tab": true,
+      "return": { "kind": "markdown", "required_sections": ["Verdict", "Must-fix", "Notes"], "verdict_block": true }
+    },
+    "plan-reviewer": {
+      "profile": "judgment",
+      "isolation": "primary",
+      "model": "opus",
+      "effort": "high",
+      "pane": false,
+      "doc_tab": true,
+      "return": { "kind": "markdown", "required_sections": ["Verdict"] }
+    },
+    "architecture-lead": {
+      "profile": "judgment",
+      "isolation": "primary",
+      "model": "opus",
+      "effort": "xhigh",
+      "pane": false,
+      "doc_tab": true,
+      "timeout_s": 3600,
+      "return": { "kind": "markdown", "required_sections": ["Proposed memory deltas", "Assumptions & unknowns"] }
+    },
+    "backend-lead": {
+      "profile": "judgment",
+      "isolation": "primary",
+      "model": "opus",
+      "effort": "high",
+      "pane": false,
+      "doc_tab": true,
+      "timeout_s": 2400,
+      "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
+    },
+    "frontend-lead": {
+      "profile": "judgment",
+      "isolation": "primary",
+      "model": "opus",
+      "effort": "high",
+      "pane": false,
+      "doc_tab": true,
+      "timeout_s": 2400,
+      "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
+    },
+    "devops-lead": {
+      "profile": "judgment",
+      "isolation": "primary",
+      "model": "opus",
+      "effort": "high",
+      "pane": false,
+      "doc_tab": true,
+      "timeout_s": 2400,
+      "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
+    },
+    "qa-lead": {
+      "profile": "judgment",
+      "isolation": "primary",
+      "model": "opus",
+      "effort": "high",
+      "pane": false,
+      "doc_tab": true,
+      "timeout_s": 2400,
+      "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
+    }
+  }
+}

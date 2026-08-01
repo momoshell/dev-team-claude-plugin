@@ -2,9 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
-import { ROOT, listAgents, loadWorkflowSource } from './helpers.mjs'
-
-const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable']
+import { ROOT, listAgents, loadWorkflowSource, MODEL_ALIASES } from './helpers.mjs'
 
 function frontmatter(md) {
   const m = md.match(/^---\n([\s\S]*?)\n---/)

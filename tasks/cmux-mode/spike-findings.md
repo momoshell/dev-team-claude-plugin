@@ -412,3 +412,28 @@ One dispatch-shaped launch combining everything: `--model haiku --effort low --p
 Probed the exact ADR-006 task-dir location with the exact rule form that passed S22a minutes earlier: `--permission-mode dontAsk --allowedTools "Edit(//Users/x/Development/dev-team-claude-plugin/.claude/dev-team/tasks/probe-test/returns/**)"` → Write to that very path **DENIED** (transcript-visible error block, file never created). Same rule shape, same session-type, only difference: the path sits under `.claude/`.
 
 **Conclusion: the protected-path denial (G9) covers `.claude/**` and `permissions.allow` does not override it — so ADR-006's `.claude/dev-team/tasks/<task-slug>/` location cannot receive worker return/signal writes at all.** The task-artifacts dir must move outside any protected directory name (e.g. a gitignored repo-root sibling like `.dev-team-tasks/`, or an external location — naming is an architecture-lead/plan-review decision). Note the boundary is asymmetric: the *orchestrator's* own session writes to `.claude/dev-team/` fine (memory/config — this whole session proves it, orchestrator runs in `auto`/interactive modes where the protection prompts rather than hard-denies, and direct tool writes by the assistant are the user's own session); the hard denial bites **worker panes in `dontAsk`**, which is exactly where the return files live. Probe dir removed after the test.
+
+---
+
+## Third addendum — S25b + S25c (the two spikes that gated slice 1a's first commit under v2). Both PASS.
+
+### S25b — `wait-for` latch consumption semantics (G19 / U10) — FREE, no API spend
+
+Fire a signal (latch), then arm two waiters on the same token:
+- Waiter #1 → returned in **0.017s** (latch present).
+- Waiter #2 (same token) → **timed out at 4.02s, exit 1** — the latch was **consumed** by waiter #1.
+- Re-confirmed deterministically on a second token; and a **double-signal does not stack** (fire twice → one waiter consumes, second times out — binary set/unset latch, consistent with S5's "double signal is a no-op").
+
+**Finding: `wait-for` tokens are consume-once, not persistent latches.** This is the **favorable** branch for the v2 §7.3 await loop: because each signal is consumed by exactly one waiter, the parent can simply **re-arm phase 1 (`wait-for ATTN_PARENT`) after every wake** and each attention signal produces a fresh live nudge — no token-burning spin, no need for the pessimistic two-phase design. **The two-phase loop collapses to a single repeating phase-1.** (Signals that arrive while no waiter is armed still latch once and are drained from the `signals/` file on the next wake; multiple signals before a wake coalesce to one wake + a full file drain, which the design already does.) Build note for #3 (backend-lead): the adapter's EXIT trap fires `ATTN_PARENT` too, so completion and attention share the token — the parent must, on every wake, re-derive completion from the ladder first (already the ADR-003 invariant) before treating a wake as "just attention."
+
+### S25c — task-dir relocation probe at the real `~/.dev-team` path (confirms ADR-006 Amendment 1) — 1 launch
+
+`--permission-mode dontAsk --tools "Read,Edit,Write" --allowedTools "Edit(//Users/x/.dev-team/tasks/probe/returns/**)" --add-dir /Users/x/.dev-team/tasks/probe`, worker instructed to write inside then outside. Transcript (session `1c8f5c49`):
+- Write `.../probe/returns/out.txt` → **succeeded** (`is_error` absent; file on disk = `INSIDE-OK`).
+- Write `.../probe/outside.txt` → **denied** (`is_error=True`, dontAsk message; file never created).
+
+**Finding: the chosen relocation target works exactly as S22a did for a non-`.claude` path — the `.dev-team` dot-name is NOT on any protected list, and the exact-match `Edit(//abs/**)` grant scopes correctly there.** ADR-006 Amendment 1's `~/.dev-team/tasks/<repo-slug>/<task-slug>/` location is validated end-to-end for `dontAsk` worker writes. Probe dir removed after the test.
+
+### Slice-1a gate status: **fully cleared**
+
+Every platform gate v2 named for 1a is now discharged with live evidence: S22a/b/c/e/f/g, S24, U2 (the break) + S25c (the fix validated), S25b (await-loop semantics settled favorably). Remaining S25 items (S25a notify-flag/GUI eyeball, S25d profile-closure smoke, S25e `.claude/worktrees` carve-out iff that siting is chosen) gate slice **1c**, not 1a, and S23/S15b gate the Phase-2 GO/NO-GO. S20 remains deferred (coordinated restart).

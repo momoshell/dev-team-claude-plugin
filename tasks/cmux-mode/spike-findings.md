@@ -311,3 +311,46 @@ Same tiny fixed spec ("How many lines are in package.json? Reply with just the n
 6. **This spike session itself — ratified.** Session ran with you present; 20/21 items answered; S20 explicitly deferred with your sign-off.
 
 **Net effect on "no finding contradicts a locked decision":** the five S-item escalations above are still gaps/refinements, not reversals. Decision 3, however, **is** a genuine amendment to ADR-005/D9 — record this distinctly when it reaches architecture-lead, since it changes an *accepted* ADR, not just an unverified assumption.
+
+---
+
+## Post-exit-gate addendum (same day, after architecture-lead review) — live S22-preview tests + corrections to earlier findings
+
+The architecture-lead's amendment package (`architecture-amendment-package.md`) challenged several of this file's findings on documented-platform-contract grounds and proposed spike items S22a–g. The user then directed a specific mechanism for decision 3 — *"don't go for deny wildcards with cmux; just be precise what is allowed and what is not, one by one"* — and the orchestrator ran the decisive tests live. Results, with the evidence method upgraded from screen-reads to **the pane session's own transcript** (`~/.claude/projects/<project>/<session>.jsonl`, tool_use/tool_result pairs):
+
+### Critical method correction first
+
+**The TUI's collapsed "Ran N shell commands" line counts *denied attempts* as "ran."** Both live tests below initially looked like "everything executed" on-screen; the transcripts showed the opposite. **Every permission conclusion in this file that rested on screen-reads (parts of S9/S10) was unreliable for exactly this reason.** Transcript evidence is now the standard; screen-reads are diagnostics only (extends the S7 caveat).
+
+### Test A — precise allow, no deny rules (`--permission-mode dontAsk --tools "Read,Bash" --allowedTools "Bash(cmux notify *)"`)
+
+Transcript (session `92949d0e`):
+- `cmux notify --title spike-allow-test` → **`OK`, executed** — corroborated at the socket layer by a `notification.requested` event (payload shape `method/params/result`) at the exact timestamp.
+- `cmux ping` → **denied** ("denied because Claude Code is running in don't ask mode").
+- `cmux close-surface --surface surface:999` → **denied** (same).
+
+### Test B — scoped denies, no allows (`--disallowedTools "Bash(cmux ping*)" "Bash(cmux close-surface*)"`)
+
+Transcript (session `c210c0bb`):
+- `cmux ping` → **denied by the scoped deny rule specifically** ("Permission to use Bash with command cmux ping has been denied" — rule-attributed message, distinct from the mode message).
+- `cmux notify` (no allow rule in this run) → **denied by dontAsk** (mode message).
+
+### What this establishes (on claude 2.1.220, live, transcript-verified)
+
+1. **In `dontAsk`, omission IS denial for cmux commands** — they are not in the built-in read-only set, so anything not matching an allow rule is denied. (Corrects this file's S10 conclusion: the `echo` that ran in the original S10 test ran because `echo` is in the built-in read-only set — the architecture-lead's G5 explanation, now confirmed — not because allowlists fail to close.)
+2. **A precise, argument-scoped allow rule (`Bash(cmux notify *)`) is honored** — the single verb runs, everything else stays denied.
+3. **Scoped deny rules (`Bash(cmux ping*)`) enforce correctly** — pre-answering S22c's core question.
+4. **Therefore the user's directed mechanism for decision 3 is empirically viable exactly as stated:** no `Bash(cmux *)` deny wildcard at all; enumerate precise allows one-by-one (`Bash(cmux notify *)`, `Bash(cmux wait-for -S *)`); every other cmux verb — including verbs future cmux versions add — is denied by default. Fail-closed by omission, so the architecture-lead's fail-open objection (§7.2 of the package) does not apply: that objection assumed a deny list had to exist for containment; it doesn't. The deny-beats-allow conflict never arises because no cmux deny rule is needed. Pattern fragility (G8) only cuts in the safe direction under allow-only rules: a weirdly-quoted legitimate call gets denied (fail-closed), and `sh -c 'cmux …'` evasions match no allow rule → denied.
+5. **Residual scope of the package's §7.3 hook-relay:** still relevant for judgment roles if they carry no Bash at all, and the `signals/` file remains the durable record per the user's standing rule ("workers and leads shouldn't skip on those files"). Whether judgment roles get Bash-with-two-allows or the hook-relay is a plan-review question, not a blocker.
+
+### S22g resolved — the file flags exist
+
+`claude --append-system-prompt-file /nonexistent -p "x"` → `Error: Append system prompt file not found: /nonexistent` (flag parsed, file read attempted, no API call); an actually-unknown flag errors as `unknown option`. **`--append-system-prompt-file` and `--system-prompt-file` both exist on 2.1.220 — they are merely absent from the main `--help` listing** (they appear only inside `--bare`'s help text). **Corrects this file's S8 finding** (U1 resolved in the docs' favor); §5.3's composed argv can use the file variant directly, keeping ADR-009's byte-stability trivially.
+
+### S22 scoreboard after this addendum
+
+- S22c (scoped deny enforcement) — **answered, yes** (Test B).
+- S22d's underlying question (is a deny-wildcard + allow carve-out needed?) — **mooted**: no deny wildcard in the design anymore.
+- New equivalent evidence: allow-only omission-denial — **answered, yes** (Test A).
+- S22g — **answered, flags exist**.
+- Still open, still gating 1a: **S22a** (Edit path-scoped grant with corrected `Edit(//abs/**)` syntax), **S22b** (Write-rule startup warning), **S22e** (plugin-dir PreToolUse/PostToolUse delivery — keystone for ADR-010, and now also for whether the hook-relay is even needed given Test A), **S22f** (full argv smoke), **S24** (cross-workspace wait-for).

@@ -354,3 +354,55 @@ Transcript (session `c210c0bb`):
 - New equivalent evidence: allow-only omission-denial — **answered, yes** (Test A).
 - S22g — **answered, flags exist**.
 - Still open, still gating 1a: **S22a** (Edit path-scoped grant with corrected `Edit(//abs/**)` syntax), **S22b** (Write-rule startup warning), **S22e** (plugin-dir PreToolUse/PostToolUse delivery — keystone for ADR-010, and now also for whether the hook-relay is even needed given Test A), **S22f** (full argv smoke), **S24** (cross-workspace wait-for).
+
+---
+
+## Second addendum — remaining S22/S24 tests, all run live (same day). Every 1a gate discharged.
+
+All results transcript-verified (pane session `.jsonl`, `is_error` field) and/or file-evidence-verified; screen-reads used only for turn-completion detection.
+
+### S24 — cross-workspace `wait-for` — **PASS, both directions**
+
+- Waiter armed in workspace A (orchestrator's shell), signal fired from a terminal inside a freshly created workspace B (`workspace:3`): waiter **released** immediately.
+- Latch order: signal fired from workspace B *first*, waiter armed in A ~2s later: returned in **0.02s** (not the 10s timeout). **Token namespace confirmed global across workspaces** — S5's inference upgraded to direct evidence. A11 verified. Zero API spend.
+
+### S22a — Edit path-scoped grant, corrected syntax — **PASS, both directions**
+
+- `--permission-mode dontAsk --tools "Read,Edit,Write,Glob,Grep" --allowedTools "Edit(//Users/x/spike-s22a/returns/**)" --add-dir /Users/x/spike-s22a` (deliberately avoiding `/tmp`, a symlink to `/private/tmp`, so path canonicalization couldn't confound the match).
+- Transcript (session `fb2b07e9`): `Write .../returns/out.txt` → **succeeded** (file contained `INSIDE-OK`); `Write .../outside.txt` → **denied** (dontAsk message; file never created).
+- **Confirms on-machine: the `Edit(//abs/**)` rule form scopes correctly, and an `Edit` rule covers the `Write` tool.** The architecture-lead's false-negative diagnosis of the original S9 is now proven, not just argued: ADR-005's scoped-grant mechanism works as accepted. A9 verified (no third cause).
+
+### S22b — `Write()` rule startup warning — **PASS, detectable with remediation text**
+
+- `--allowedTools "Write(//…/returns/**)"` in a `--print` run emitted on stderr: *"Permission allow rule (--allowed-tools): Write(…) is not matched by file permission checks — only Edit(path) rules are. Use Edit(…) instead (Edit rules cover all file-editing tools)."*
+- The argv builder can fail fast by grepping stderr for `is not matched by file permission checks`. G1 confirmed on this build.
+
+### S22e — plugin-dir `PreToolUse`/`PostToolUse` (ADR-010 keystone) — **PASS, all three arms**
+
+Minimal plugin (`.claude-plugin/plugin.json` + `hooks/hooks.json`, jq-based, static) loaded via `--plugin-dir`, under `dontAsk`:
+1. **Hook-allow works:** `touch <path>/allow-marker-file` — a non-read-only command matching **no** allow rule (would be denied by dontAsk) — **executed** because the PreToolUse hook returned `permissionDecision:"allow"`. File exists on disk.
+2. **Hook-deny works and overrides the built-in read-only auto-allow:** `echo forbidden-marker-test` — `echo` is in the always-runs read-only set — was **blocked**, tool_result `is_error=True` with the hook's own reason string ("blocked by s22e test hook").
+3. **PostToolUse fires from a plugin-dir plugin:** matcher `Write|Edit` logged `POSTTOOLUSE-FIRED tool=Write path=…` for each Write, with tool name and file path available to the hook.
+- A10 verified. **Proposed ADR-010 (hook-layer containment) and the §7.3 hook-relay mechanism are both platform-viable.**
+
+### S22f — full composed-argv v3 smoke — **PASS end-to-end**
+
+One dispatch-shaped launch combining everything: `--model haiku --effort low --permission-mode dontAsk --append-system-prompt-file <role file> --tools … --allowedTools "Edit(//<target>/**)" "Bash(cmux notify *)" "Bash(cmux wait-for -S *)" --disallowedTools "mcp__*" "Task" --strict-mcp-config --disable-slash-commands --plugin-dir <test plugin> --add-dir <target> -- "<kickoff>"`, with the orchestrator's waiter armed **before** kickoff (arm-before-kickoff order):
+- Return file written under the Edit rule (`RETURN-OK`) → PostToolUse observed the write.
+- `cmux notify --title s22f-smoke` → **OK** (precise allow honored).
+- `cmux wait-for -S s22f-smoke-token` → **OK, and released the orchestrator's pre-armed waiter** — the worker→parent signal path works end-to-end through a real dispatched session.
+- `cmux ping` → **denied** (omission).
+- `--append-system-prompt-file` accepted and consumed the role file (S22g's finding exercised in anger). `UserPromptSubmit` fired; turn completed to `DONE`.
+
+### Gate scoreboard after this addendum
+
+| Gate | Status |
+|---|---|
+| S22a / S22b / S22c / S22e / S22f / S22g | **all discharged, PASS** |
+| S22d | mooted (no deny wildcard in the design) |
+| S24 | **discharged, PASS (global namespace)** |
+| **Slice 1a (contracts freeze)** | **UNBLOCKED** — every named gate passed |
+| S23 (isolation/cost arms) | open — gates Phase-2 GO/NO-GO only, not 1a |
+| S20 (restart durability) | open — deferred, needs coordinated cmux relaunch; not a 1a gate |
+| U2 (task-dir location vs protected paths) | open — needs the epic's #3/#6 text confirmed before 1a freezes (one lookup, no test) |
+| U7 (§7.3 deviation ratification) | **resolved by the user's directive + Tests A/B:** primary mechanism = precise enumerated allows (`Bash(cmux notify *)`, `Bash(cmux wait-for -S *)`), no deny wildcard; hook-relay (§7.3) validated as viable (S22e) and remains the option for Bash-less judgment roles — final split is a plan-review call |

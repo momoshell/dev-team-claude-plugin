@@ -1,4 +1,4 @@
-# Architecture Package v2 (final) — cmux execution mode: spike reconciliation, ADR-003/005/006/009 amendments, ADR-010
+# Architecture Package v2 (final) — cmux execution mode: spike reconciliation, ADR-003/005/006/009 amendments, ADR-012
 
 **Author:** architecture-lead · **Date:** 2026-08-01 · **Supersedes:** v1 (`/Users/x/Development/dev-team-claude-plugin/tasks/cmux-mode/architecture-amendment-package.md`) in full
 **Applies to:** epic #15 design record (TRD v2) · issues #1 (spike), #3 (dispatcher), #4 (profiles/argv), #5 (worker neutralization), #6 (task artifacts)
@@ -25,7 +25,7 @@ This document stands alone. Where it disagrees with v1, v2 wins; v1 should be tr
 | **SF11** | A12 not fully verified; `notify *` wildcards its flag surface | **Adopted.** A12 downgraded to "executes + emits socket event, GUI visibility unconfirmed"; S25a = free GUI eyeball + `cmux notify --help` flag enumeration, with a tightening rule if any flag has side effects. | §11, §14 |
 | **SF12** | A14 got worse; attention channel is prompt-dependent | **Adopted.** A14 re-stated: **the attention channel is best-effort and unreliable by construction; the `signals/` file record and the completion ladder carry every guarantee.** Written into the ADR-003 amendment, not just the assumption table. | §8, §10.1, §14 |
 | **SF13** | Sequenced-token machinery unworkable; adopt fixed token | **Adopted.** Sequenced tokens dropped. Fixed per-dispatch attention tokens, delivered as **literals in the kickoff** (not env — the `-S "$VAR"` match form is untested, G8; noted as the reason for the choice). Two-phase parent await makes the design correct under either latch semantics. | §7.2, §7.3 |
-| **SF14** | ADR-010 re-scope | **Adopted verbatim.** ADR-010 re-titled *"CLI permission rules are the primary enforcement layer; hooks enforce the invariants rules cannot express."* No PreToolUse hook on file tools in the default profile → the per-call latency risk disappears. | §9.1, §10.5 |
+| **SF14** | ADR-012 re-scope | **Adopted verbatim.** ADR-012 re-titled *"CLI permission rules are the primary enforcement layer; hooks enforce the invariants rules cannot express."* No PreToolUse hook on file tools in the default profile → the per-call latency risk disappears. | §9.1, §10.5 |
 | **SF15** | Judgment roles get Bash + the two cmux allows | **Adopted, no blocker found.** `--tools` is now **identical across all roles**; profiles differ only in `--allowedTools`. Hook-relay emitter retired (kept as a documented contingency only). | §5, §8 |
 | **SF16** | worker→orchestrator direct was silently narrowed | **Resolved — direct path designed, not narrowed.** The orchestrator's currently-armed attention token propagates down the dispatch chain and rides each worker's kickoff alongside the immediate dispatcher's. Worker→orchestrator is a first-class path. | §7.2, §7.3 |
 | **SF17** | Unowned items (U8, U5, U3, `mcp__*`, `--disable-slash-commands`, plugin-root staleness) | **All owned.** U8 given a mechanical predicate + 1a owner; U5 orchestrator pre-post check; U3 + `mcp__*` + slash-commands folded into one **profile-closure smoke test** (S25d, slice 1c); plugin-root staleness resolved by **snapshotting the worker plugin per task into parent-side state**. | §7.5, §10.6, §11, §12 |
@@ -46,7 +46,7 @@ The Phase-0 spike (issue #1) returned five escalations against accepted TRD v2 t
 | Artifact | Needed? | Why |
 |---|---|---|
 | **ADR amendments** (ADR-003, ADR-005, **ADR-006**, ADR-009) | Yes | Four accepted ADRs change in substance. ADR-006's task-dir location is a hard break (MF1), not a refinement. |
-| **New ADR-010** (enforcement layering) | Yes | "Which layer enforces what" is now a durable decision with a *different* answer than v1 proposed (SF14) — it must be recorded so the next editor doesn't re-add per-call hooks. |
+| **New ADR-012** (enforcement layering) | Yes | "Which layer enforces what" is now a durable decision with a *different* answer than v1 proposed (SF14) — it must be recorded so the next editor doesn't re-add per-call hooks. |
 | **TRD §5.3 patch** (composed argv v4) | Yes | The accepted block cannot execute; v1's replacement had a shell-composition bug. |
 | **TRD §5.x addition** (token & identity model) | Yes | New normative content with no home in the accepted TRD: completion nonce, attention tokens, parent await loop. |
 | **Verification set S25** | Yes, but **not gating 1a** | Five cheap checks, three of them free; two run before 1a's first commit, three inside 1c. |
@@ -67,7 +67,7 @@ Verification status is now first-class: **L** = live-verified on this machine (`
 | G4 | A bare tool-name deny removes the tool from context; a scoped deny leaves the tool and blocks matching calls. | **L** (S10 follow-up, Test B) | `--disallowedTools` semantics |
 | G5 | `dontAsk` runs: calls matching `permissions.allow`, the **built-in read-only Bash set**, and PreToolUse-hook-approved calls. Set is documented as `ls cat echo pwd head tail grep find wc which diff stat du cd` + read-only `git`. | **L for `echo`** (S22e arm 2 had to hook-override it); **D** for the rest | reviewer capability surface → **S25d** |
 | G6 | `--allowedTools` is an allow-*rule* list, not a capability list; `--tools` closes the tool set. | **L** (Test A: `--tools "Read,Bash"` + one allow ⇒ everything else denied) | §5 |
-| G7 | PreToolUse exit-2 / `permissionDecision:"deny"` blocks before rules and overrides the read-only auto-allow; `"allow"` permits a call no rule matches. | **L** (S22e arms 1–2) | ADR-010 |
+| G7 | PreToolUse exit-2 / `permissionDecision:"deny"` blocks before rules and overrides the read-only auto-allow; `"allow"` permits a call no rule matches. | **L** (S22e arms 1–2) | ADR-012 |
 | G8 | Bash argument-pattern rules are documented-fragile (spacing, variables, wrappers, `sh -c`, `eval`). Under an **allow-only** regime this cuts fail-*closed*. | **D** for the enumeration; **L** for the direction (Test A) | signal allows; token literal form |
 | G9 | Protected paths are denied in `dontAsk` and `permissions.allow` does not override. `.claude/**` included (documented carve-out: `.claude/worktrees`). | **L** (U2 probe: exact-match `Edit(//…/.claude/dev-team/tasks/probe-test/returns/**)` ⇒ **denied**) | **MF1 / ADR-006** |
 | G10 | `AskUserQuestion` is denied in `dontAsk` even if allowed. | **D** | justifies an out-of-band attention channel |
@@ -77,7 +77,7 @@ Verification status is now first-class: **L** = live-verified on this machine (`
 | G14 | `--append-system-prompt-file` and `--system-prompt-file` **exist** on 2.1.220; they are simply absent from the main `--help` listing. | **L** (S22g; exercised in anger by S22f) | §5, ADR-009 |
 | G15 | In `dontAsk`, **omission is denial** for anything outside the read-only set. A precise argument-scoped allow (`Bash(cmux notify *)`) is honored while sibling verbs stay denied. | **L** (Tests A/B, S22f) | the whole containment model |
 | G16 | `wait-for` tokens are a **global namespace across workspaces**, in both orders (signal-then-arm latches). | **L** (S24, both directions) | every liveness signal |
-| G17 | A plugin loaded via `--plugin-dir` fires `SessionStart`/`UserPromptSubmit`/`Stop` **and** `PreToolUse`/`PostToolUse` in a dispatched pane. | **L** (S11, S22e) | ADR-009, ADR-010 |
+| G17 | A plugin loaded via `--plugin-dir` fires `SessionStart`/`UserPromptSubmit`/`Stop` **and** `PreToolUse`/`PostToolUse` in a dispatched pane. | **L** (S11, S22e) | ADR-009, ADR-012 |
 | G18 | The TUI's collapsed "Ran N shell commands" line counts **denied** attempts as ran. Permission verdicts must come from the session transcript (`~/.claude/projects/<slug>/<session>.jsonl`, `is_error`). | **L** (method correction) | every acceptance test |
 | G19 | Whether a latched `wait-for` token is **consumed** by the first waiter (tmux semantics) or persists permanently is **not established**. S5 fired twice and armed once — ambiguous. | **Unknown** | await loop → **S25b** |
 
@@ -344,7 +344,7 @@ v1 §7.2 is **deleted**: its premise 1 (a deny wildcard must exist, so a carve-o
 
 ## 9. Deliverable 5 — enforcement layering and the return post-condition
 
-### 9.1 ADR-010, re-scoped — **SF14**
+### 9.1 ADR-012, re-scoped — **SF14**
 
 **Title: "CLI permission rules are the primary enforcement layer; hooks enforce the invariants rules cannot express."**
 
@@ -363,7 +363,7 @@ v1 proposed the inverse ("hooks are the guarantee, rules are defense-in-depth").
 
 v1 had two defects: it fired false positives (task artifacts inside the checkout are legitimate writes) and then hard-reset a worktree on them; and it applied only to judgment roles, i.e. exactly the roles without the vector that motivates it.
 
-**Vector, correctly named (MF8).** Under the old broad-Bash model the escape was `node -e`. Under allow-only, `node -e` is denied by omission. The live vector is `Bash(npm run typecheck *)` / `Bash(npm test *)`: these execute **repo-controlled scripts** that can write anywhere the uid can reach. That is an *executor* capability. ADR-010's hook layer does not see it (hooks see tool calls, not what npm spawns). The post-condition is the only control.
+**Vector, correctly named (MF8).** Under the old broad-Bash model the escape was `node -e`. Under allow-only, `node -e` is denied by omission. The live vector is `Bash(npm run typecheck *)` / `Bash(npm test *)`: these execute **repo-controlled scripts** that can write anywhere the uid can reach. That is an *executor* capability. ADR-012's hook layer does not see it (hooks see tool calls, not what npm spawns). The post-condition is the only control.
 
 **Decision — applies to ALL roles, every dispatch, unconditionally:**
 
@@ -390,7 +390,7 @@ v1 had two defects: it fired false positives (task artifacts inside the checkout
 - **The attention channel is additionally best-effort and not guaranteed to arrive** (SF12). A dispatch whose worker never signals must reach the same outcome, later.
 - **The completion token is an unguessable per-dispatch nonce** delivered to the adapter out of band (§7.1) and never exposed to the worker. Rank-2's sentinel file moves to parent-side state so it cannot be forged by a tool call.
 - **Rank-2 (EXIT trap) is permanent, not provisional** — no per-surface process-exit event exists in cmux 0.64.20's catalogue (S2). Remove any "may be retired by future cmux events" hedge.
-- **Rank-3's rationale is cross-referenced** with ADR-010: "hooks run outside the tool-permission system" now justifies the Stop gate *and* the signal attestation. A future editor weakening one must see the other.
+- **Rank-3's rationale is cross-referenced** with ADR-012: "hooks run outside the tool-permission system" now justifies the Stop gate *and* the signal attestation. A future editor weakening one must see the other.
 - **Rank-0 chunk sizing:** S17 raises the Bash ceiling to 600 s (120 s default). 90 s stands as conservative-safe; widening is tuning.
 - **New: the two-phase await loop** (§7.3) is normative for #3, with its behaviour under both branches of G19 documented.
 
@@ -420,7 +420,9 @@ v1 had two defects: it fired false positives (task artifacts inside the checkout
 - **The worker plugin's `hooks/hooks.json` must be static** — no per-dispatch path interpolation, including in `if:` filters. The PostToolUse hook reads `$DEVTEAM_TASK_DIR` from env and does its own path check.
 - `--plugin-dir` delivery is fully confirmed, including `PreToolUse`/`PostToolUse` (S11 + S22e). The plugin path is a **per-task snapshot** (§7.5), not a version-pinned cache path.
 
-### 10.5 ADR-010 (new) — enforcement layering
+### 10.5 ADR-012 (new) — enforcement layering
+
+> **Numbering note (U5 resolved by the orchestrator, 2026-08-01):** epic #15's design record already carries ADR-010 (machine-readable verdicts, D17) and ADR-011 (shared noise-glob, D16). This enforcement-layering ADR — proposed as "ADR-010" in v2's first draft — is therefore assigned **ADR-012**, the next free number. All references to it in this document read ADR-012.
 
 Title, layer table, and the explicit exclusion of per-file-call PreToolUse hooks: §9.1. Status: **proposed, unblocked** (S22e discharged the keystone), but with a *different decision* than v1 proposed — the review's SF14 framing is adopted intact.
 
@@ -450,7 +452,7 @@ OS-level sandboxing (`sandbox.filesystem`) is the only mechanism that closes G13
 | **S22b** — `Write(...)` rule warning | **PASS.** Detectable stderr string with remediation text; drives the builder's fail-fast. |
 | **S22c** — scoped deny enforcement | **PASS** (Test B). Now moot for the design — no cmux deny exists. |
 | **S22d** — deny + carve-out | **Mooted.** No deny wildcard in the design. |
-| **S22e** — plugin-dir `PreToolUse`/`PostToolUse` | **PASS, all three arms** (hook-allow, hook-deny overriding the read-only auto-allow, PostToolUse firing). ADR-010's keystone. |
+| **S22e** — plugin-dir `PreToolUse`/`PostToolUse` | **PASS, all three arms** (hook-allow, hook-deny overriding the read-only auto-allow, PostToolUse firing). ADR-012's keystone. |
 | **S22f** — full composed-argv smoke | **PASS end-to-end.** Return written under the Edit rule, both cmux allows honored, `cmux ping` denied, waiter released, `--append-system-prompt-file` consumed. |
 | **S22g** — system-prompt file flags | **PASS.** Both flags exist; U1 resolved. |
 | **S24** — cross-workspace `wait-for` | **PASS both orders.** Global token namespace. A11 verified. |
@@ -553,7 +555,7 @@ OS-level sandboxing (`sandbox.filesystem`) is the only mechanism that closes G13
 
 **For this package (before it is treated as ratified):**
 1. Every normative claim in §3 carries a status of **L** (live evidence, with the item that produced it) or **D** (doc-derived), and no recommendation rests on a **D** fact without either a named owner slice or an explicitly stated residual.
-2. U5 (ADR-010 numbering) is checked against epic #15's design record before posting; renumber on commit if taken.
+2. U5 (ADR numbering) — **resolved:** epic #15 already uses ADR-010 (verdicts) and ADR-011 (noise-glob); the enforcement-layering ADR is assigned **ADR-012** (§10.5 note).
 
 **For slice 1a (contracts) — testable at freeze:**
 3. **Builder tests, one per hard rule 1–9.** In particular: (rule 2) the builder returns a **string array** and a test asserts that a role body containing spaces, `*`, `$(`, and newlines produces exactly the expected element count with byte-identical content; (rule 6) a test asserts no composed profile contains any `Bash(cmux` deny and contains exactly the two allows; (rule 9) a test asserts the nonce appears in neither the argv array nor the child env map.
@@ -601,7 +603,7 @@ Reconciled against what is already recorded — nothing below re-proposes an exi
 - **NEW — ADR-006 Amendment 1 (proposed): task artifacts relocate out of `.claude/` to `~/.dev-team/tasks/<repo-slug>/<task-slug>/`**, with parent-side-only state at `~/.dev-team/state/<task-slug>/` (nonce files, EXIT sentinels, hook attestation, per-task worker-plugin snapshot) which is never `--add-dir`'d. Configurable as `task_artifacts_root`. Supersedes ADR-006's `.claude/dev-team/tasks/<task-slug>/`. *Why:* `.claude/**` hard-denies `dontAsk` worker writes even with an exact-match allow rule (live-verified) — the accepted location would have broken the return-file contract on every dispatch; siting outside every checkout additionally removes the entire false-positive class from the `git status` post-condition. Status: proposed.
 - **NEW — ADR-003 Amendment 1 (proposed): the completion token is an unguessable per-dispatch nonce, and completion is re-derived from the ladder on every wake regardless of which token released it.** The nonce reaches the adapter via a mode-0600 file outside the task dir that the adapter reads and unlinks before spawning `claude`; it never enters the worker's env, argv, kickoff, role body, or task dir. Rank-2's EXIT sentinel moves to parent-side state. The attention channel is orthogonal to the ladder, is never completion evidence, **and is best-effort by construction** — the `signals/` file record and the ladder carry every guarantee. Rank-2 is permanent (no process-exit event exists in cmux 0.64.20). Status: proposed.
 - **NEW — ADR-005 Amendment 1 (proposed, extends the recorded 2026-08-01 D9 entry; does not supersede it): `--tools` is identical across all worker roles (`Read,Edit,Write,Glob,Grep,Bash`); profiles differ only in `--allowedTools`.** Judgment roles keep Bash and gain the built-in read-only set (`git log`, `git diff`, `grep`) plus the two cmux allows — which retires the hook-relay as a signal emitter and leaves exactly one emitter (the worker) for every role. The `git status --porcelain` post-condition is unconditional and applies to **all** roles (the live escape vector is `Bash(npm test *)` spawning repo-controlled scripts, an executor capability), with the reset scoped strictly to the worker's own worktree and a documented residual for writes outside the repo. Status: proposed.
-- **NEW — ADR-010 (proposed, unblocked): "CLI permission rules are the primary enforcement layer; hooks enforce the invariants rules cannot express."** Rules own tool-set closure, path scoping, cmux verb containment and MCP/skill/subagent closure (all live-verified). Hooks own the bounded Stop gate, signal attestation, and startup fail-fast — **no PreToolUse hook on file tools in the default worker profile**, so there is no per-call latency cost. Neither layer closes G13's subprocess gap; the post-condition covers it inside the repo and OS sandboxing is deferred. *Note:* this **replaces** the v1 package's proposed ADR-010 framing ("hooks are the guarantee, CLI flags are defense-in-depth"), which was never committed — S22a and Tests A/B showed the CLI layer closes, weakening the necessity half of that argument while S22e strengthened its feasibility half. Status: proposed.
+- **NEW — ADR-012 (proposed, unblocked): "CLI permission rules are the primary enforcement layer; hooks enforce the invariants rules cannot express."** Rules own tool-set closure, path scoping, cmux verb containment and MCP/skill/subagent closure (all live-verified). Hooks own the bounded Stop gate, signal attestation, and startup fail-fast — **no PreToolUse hook on file tools in the default worker profile**, so there is no per-call latency cost. Neither layer closes G13's subprocess gap; the post-condition covers it inside the repo and OS sandboxing is deferred. *Note:* this **replaces** the v1 package's proposed ADR-012 framing ("hooks are the guarantee, CLI flags are defense-in-depth"), which was never committed — S22a and Tests A/B showed the CLI layer closes, weakening the necessity half of that argument while S22e strengthened its feasibility half. Status: proposed.
 - **NEW — ADR-009 Amendment 1 (proposed): byte-stability applies to prompt bytes.** `--append-system-prompt-file` exists on 2.1.220 (S22g), so role bodies are static files passed by path — no interpolation. All per-dispatch variance rides env + the kickoff, and **attention tokens ride the kickoff as literals** (env delivery would require the untested `Bash(cmux wait-for -S "$VAR")` match form). The worker plugin's `hooks/hooks.json` stays static (env-driven path checks, no interpolated `if:` filters), and `--plugin-dir` points at a **per-task snapshot** rather than the version-pinned marketplace cache path. A `permissions`-only `--settings` file would not violate this ADR (recorded so the ban isn't over-applied), but is not needed. Status: proposed.
 - **NEW — 2026-08-01** — Recommendation reversed vs. spike S16: role bodies use **`--append-system-prompt-file`**, not `--system-prompt` (replace). *Why:* S16's comparison is confounded (both arms ran under the `orchestration.md` injection), and a full replace discards Claude Code's built-in tool-use scaffolding for no isolation benefit — the bleed-through is hook-injected `additionalContext`, which survives a replace. Re-test after isolation lands (S23). Status: proposed.
 

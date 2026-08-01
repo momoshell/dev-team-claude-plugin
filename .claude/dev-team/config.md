@@ -46,7 +46,7 @@ Deep review by default for:
 
 ## current_task
 
-`#1 (item: PVTI_lAHOBZYqs84BfEhfzg05G90)` — Phase 0 spike session, moved to `In progress` 2026-08-01.
+_(none — #1 Phase-0 spike completed & closed 2026-08-01; board item → Done. Next task selected via `/dev-team:next`.)_
 
 ## notes
 

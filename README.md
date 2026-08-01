@@ -222,6 +222,12 @@ scripts/trello.sh        Trello task-source helper (credential resolution + boar
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
 scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)
 scripts/pr-review-window.sh  gh-dash keybinding target: Ghostty window + worktrunk PR worktree + /dev-team:pr-review (see § PR review)
+scripts/cmux/roster.schema.json          roster contract (schema)
+scripts/cmux/roster.default.json         shipped zero-config roster: 3 profiles + 12 roles
+scripts/cmux/dispatch-record.schema.json dispatcher/adapter/hook dispatch record (schema)
+scripts/cmux/signal-record.schema.json   worker-to-parent signal line (schema)
+scripts/cmux/return-envelope.schema.json worker-to-parent return wrapper (schema)
+scripts/cmux/contract.mjs                hand-rolled budget validator + frozen cmux constants
 hooks/hooks.json         SessionStart → injects orchestration.md (+ resolved plugin root) into context; marks /clear boundaries for task-cost.mjs
 orchestration.md         the orchestrator's core operating rules (lean; loaded each session)
 references/              deep protocol, loaded on demand: tier3-planning.md, qa-gate.md, memory.md
@@ -240,7 +246,7 @@ test/                    regression suite (node --test); CI in .github/workflows
 node --test        # or: npm test
 ```
 
-Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, build-validator (advisory only on a dead/no-verdict run; a reported failure blocks), a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), the **task-cost** calculator (since-marker filtering, sidechain exclusion, cache-tier pricing, intro-rate expiry), and the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
+Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, build-validator (advisory only on a dead/no-verdict run; a reported failure blocks), a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), the **task-cost** calculator (since-marker filtering, sidechain exclusion, cache-tier pricing, intro-rate expiry), the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage), and the **cmux contract freeze** (a keyword-budget walk over `scripts/cmux/*.schema.json`, default-roster validity and the role/agent partition, and the hand-rolled `validate()`/`shouldArchive()`/`slugify()` units). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
 
 ---
 

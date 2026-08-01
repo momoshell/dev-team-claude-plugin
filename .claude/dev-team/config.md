@@ -47,7 +47,7 @@ Deep review by default for:
 
 ## current_task
 
-current_task: #2 (item: PVTI_lAHOBZYqs84BfEhfzg05G-I) — "1a: contracts — roster + dispatch-record schemas (freeze first)" — selected 2026-08-01 via `/dev-team:next`, user-directed pick.
+_(none — #2 slice-1a contracts shipped 2026-08-01 as PR #16; board item → Done. Next task selected via `/dev-team:next`.)_
 
 ## notes
 

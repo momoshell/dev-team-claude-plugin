@@ -450,4 +450,13 @@ Cannot be run in-session (the orchestrator lives in a cmux pane; a full quit+rel
 
 **Runbook (user-executed):** (1) fully quit cmux (Cmd-Q the app — there is no `cmux quit` verb); (2) relaunch cmux and reopen this project; (3) in any cmux terminal run `bash /tmp/s20-check.sh`; (4) paste its output into a fresh Claude session in this repo to record the result here and close S20.
 
-**Result:** _pending post-restart run._
+**Result (2026-08-01, post-restart):**
+
+- **Part 1 — wait-for latch durability: SURVIVED a real restart (surprising).** The events log carries three distinct `boot_id`s across the window — `7052C03A` (15:57, fixtures staged) → `F25EE904` (16:33) → `6AEA9FB1` (16:38, current) — and `boot_id` changes on a real cmux restart, so at least one genuine app restart occurred. Yet the pre-restart token `devteam-s20-restart-probe-4063` released a waiter in **0.03 s** afterward. **cmux persists `wait-for` tokens to a durable store, not just in-memory** — the opposite of the expected tmux-style behavior.
+- **Part 2 — moved doc-tab panel: DID NOT survive.** `pane:31` and its `[markdown] s20-doc.md` sibling tab are absent from the post-restart tree; cmux "never offered to resume" (user-reported). The orchestrator's **own** agent-session pane *did* restore (same `CMUX_PANEL_ID` `5859A559…`, this claude session resumed — tty flipped `ttys011`→`ttys010`), so **provider/agent panes are restored by session-restore but a moved auxiliary markdown panel is not.**
+
+**Design implications:**
+1. Part 1 relaxes no guarantee — ADR-003's rank-0 file-watch + ladder re-derivation stays primary; the durable latch is a bonus, not a dependency. But it **reinforces must-fix 4 / the completion-nonce design**: a durable token store means a stale latched token from a *prior* dispatch can survive a restart and fire a spurious wake, so (a) completion tokens must be per-dispatch unguessable nonces and (b) the parent must re-derive completion from the ladder on every wake regardless of which token released it — both already decided. S20 turns them from prudent into load-bearing.
+2. Part 2 confirms **recovery must be file-based, not GUI-session-restore-based** for anything the dispatcher mounts (doc tabs, moved panels). Matches ADR-004's accepted fallback ("the doc tab is re-opened by the dispatcher on resume from files") and S21's "native resume forgone; recovery is file-based by design." Not a blocker.
+
+**S20: DISCHARGED. All 21 spike items now answered.** No finding contradicts a locked design decision; Part 1 strengthens two already-made decisions rather than reversing any.

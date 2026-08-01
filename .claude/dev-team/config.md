@@ -33,7 +33,7 @@ fast: node --test
 full: node --test
 ```
 
-Single lane — the entire suite (87 tests across `test/*.mjs`) runs in **under 1 second** (`node --test`, verified). No typecheck or lint tooling exists in this repo (no `tsconfig.json`, no eslint config) — it's plain JS/Markdown. `full` and `fast` are identical; there is no slow suite to keep out of the fast lane.
+Single lane — the entire suite (~180 tests across `test/*.mjs` as of v0.1.44; grows with the cmux contract work) runs in **under 1 second** (`node --test`, verified). No typecheck or lint tooling exists in this repo (no `tsconfig.json`, no eslint config) — it's plain JS/Markdown. `full` and `fast` are identical; there is no slow suite to keep out of the fast lane.
 
 ## review_defaults
 
@@ -42,11 +42,12 @@ Deep review by default for:
 - `orchestration.md`, `references/*.md` — the core behavior rules injected into every session via the `SessionStart` hook.
 - `hooks/hooks.json` — session-start injection wiring.
 - `scripts/trello.sh` — handles credentials (must never leak them to stdout/stderr/transcript).
+- `scripts/cmux/*.schema.json`, `scripts/cmux/roster.default.json`, `scripts/cmux/contract.mjs` — the cmux execution-mode contract freeze (slice 1a); same blast-radius class as the root schemas, plus it encodes a permission/security boundary.
 - `scripts/pr-review-window.sh` — spawns windows/processes and does worktree teardown.
 
 ## current_task
 
-_(none — #1 Phase-0 spike completed & closed 2026-08-01; board item → Done. Next task selected via `/dev-team:next`.)_
+current_task: #2 (item: PVTI_lAHOBZYqs84BfEhfzg05G-I) — "1a: contracts — roster + dispatch-record schemas (freeze first)" — selected 2026-08-01 via `/dev-team:next`, user-directed pick.
 
 ## notes
 

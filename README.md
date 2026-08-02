@@ -228,6 +228,11 @@ scripts/cmux/dispatch-record.schema.json dispatcher/adapter/hook dispatch record
 scripts/cmux/signal-record.schema.json   worker-to-parent signal line (schema)
 scripts/cmux/return-envelope.schema.json worker-to-parent return wrapper (schema)
 scripts/cmux/contract.mjs                hand-rolled budget validator + frozen cmux constants
+scripts/cmux/resolve.mjs                 path/roster resolution: task+state layout, worktree derivation, role resolution, permission-rule composition
+scripts/cmux/record.mjs                  dispatch-record lifecycle (create/bind/terminate), worker-plugin snapshot, claude argv builder
+scripts/cmux/cmuxctl.mjs                 the single boundary to the cmux CLI: invocation, id normalization, preflight gate, pane/tab control
+scripts/cmux/ladder.mjs                  evidence layer: return validation, freshness, completion/outcome classification, recovery reconcile
+scripts/cmux/dispatch.mjs                the cmux dispatcher CLI: preflight/workspace/dispatch/await/close/status/teardown (execution_mode: cmux only)
 hooks/hooks.json         SessionStart → injects orchestration.md (+ resolved plugin root) into context; marks /clear boundaries for task-cost.mjs
 orchestration.md         the orchestrator's core operating rules (lean; loaded each session)
 references/              deep protocol, loaded on demand: tier3-planning.md, qa-gate.md, memory.md
@@ -240,13 +245,21 @@ test/                    regression suite (node --test); CI in .github/workflows
 
 ---
 
+## Execution mode (`execution_mode`, experimental)
+
+`.claude/dev-team/config.md` may set an `execution_mode` key: `subagent` (default, when the key is absent) or `cmux`. `subagent` is today's Task-tool substrate — every command and hook in this repo runs on it, unconditionally. `cmux` opts a repo into the cmux dispatcher (`scripts/cmux/dispatch.mjs`): worker turns run in real cmux panes instead of subagent windows. `dispatch.mjs` refuses every mutating verb (`workspace`, `dispatch`, `await`, `close`, `teardown`) with a clear message unless `execution_mode: cmux` is set; `preflight` and `status` are read-only and run regardless. A `config.md` with more than one `execution_mode:` line (for example, one inside a fenced code example) is refused as ambiguous rather than silently matching the first one it finds. No file in this repo sets `execution_mode: cmux` — the orchestrator-side dispatch-entry branch that would actually invoke `dispatch.mjs` from a live session is a separate, later change.
+
+**Trust decision:** a checked-out repo's `.claude/dev-team/roster.json` and `.claude/dev-team/config.md` are read as part of building dispatch context — including `execution_mode` itself, the project-level roster layer, and (via the roster) the exact role/profile keys that get joined into snapshot filesystem paths. Reading them is trusting the checkout the same way running its build or test suite already is; this is not a new trust boundary opened by cmux mode, but it is worth naming so nobody mistakes a hostile checkout's config for a neutral input.
+
+---
+
 ## Tests
 
 ```text
 node --test        # or: npm test
 ```
 
-Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, build-validator (advisory only on a dead/no-verdict run; a reported failure blocks), a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), the **task-cost** calculator (since-marker filtering, sidechain exclusion, cache-tier pricing, intro-rate expiry), the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage), and the **cmux contract freeze** (a keyword-budget walk over `scripts/cmux/*.schema.json`, default-roster validity and the role/agent partition, and the hand-rolled `validate()`/`shouldArchive()`/`slugify()` units). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
+Dependency-free (`node:test`), no live model. Covers the workflow's wave scheduling, dependency/cycle handling, domain rejection, qa→test-engineer routing, `args`-as-string tolerance, review-tier escalation, build-validator (advisory only on a dead/no-verdict run; a reported failure blocks), a **schema lint** (no conditional JSON-Schema keywords in tool-facing schemas), agent-frontmatter validity, the **spec lint** (path/glob/file:line/command checks against a fixture project), the **task-cost** calculator (since-marker filtering, sidechain exclusion, cache-tier pricing, intro-rate expiry), the Trello helper's offline behavior (credential-miss paths, arity checks, no token leakage), the **cmux contract freeze** (a keyword-budget walk over `scripts/cmux/*.schema.json`, default-roster validity and the role/agent partition, and the hand-rolled `validate()`/`shouldArchive()`/`slugify()` units), the cmux resolve/record/cmuxctl/ladder units (path derivation, the dispatch-record lifecycle, the fake-cmux-backed cmuxctl boundary, and the return-evidence/outcome ladder), and the **cmux dispatcher** (`dispatch.mjs`: preflight hard-stops, id normalization on the write path, attempt derivation and worktree reuse, dependency prep, the poll-first single-writer `await` loop, close/teardown ordering, and the `execution_mode` gate — all against a fake cmux binary and real temporary git repos, never a live cmux or network call). Runs on every push via GitHub Actions. `test/` and `package.json` are dev-only — not part of the plugin runtime.
 
 ---
 

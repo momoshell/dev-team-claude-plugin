@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-current_task: #3 (item: PVTI_lAHOBZYqs84BfEhfzg05G-s) — 1b: dispatcher. **Executed & gate-passed 2026-08-02** on branch `feat/cmux-1b-dispatcher` (5 modules + 5 test files, suite 559/559, adversarial panel: all Must-fix verified fixed, M4 probe-confirmed closed). Memory reconciled. **Awaiting `/dev-team:ship`** (version already bumped to 0.1.45 in-tree; PR body must call out the RECOVERY_ROWS widening to #7; PRE-1C-VERIFY already posted to #4).
+_(none — #3 slice-1b dispatcher shipped 2026-08-02 as PR #17; board item → Done. Next task selected via `/dev-team:next`.)_
 
 ## notes
 

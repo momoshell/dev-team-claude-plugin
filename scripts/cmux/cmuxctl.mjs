@@ -24,7 +24,7 @@ export const CMUX_BIN = process.env.CMUX_BIN || 'cmux'
 export const VERBS = Object.freeze([
   'ping', 'identify', 'capabilities', 'tree', 'new-window', 'new-workspace', 'new-pane',
   'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab',
-  'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config',
+  'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config', 'wait-for',
 ])
 
 // Live `capabilities --json` (cmux 0.64.20) returns 255 RPC-style DOTTED
@@ -175,6 +175,30 @@ export function cmux(verb, args = [], opts = {}) {
     ? { code: match[1].trim(), message: match[2].trim() }
     : { code: 'unknown', message: stderr.trim() || `exit ${result.status}` }
   return { ok: false, code: result.status, stdout, json: null, error }
+}
+
+/**
+ * signalToken(token) -> boolean
+ * be-1c-04's adapter-side exit handler fires this, best-effort, after claude
+ * has already exited (the token then appears in the `cmux wait-for -S
+ * <token>` child process's own argv, visible to `ps` for the residual
+ * one-wasted-loop window ADR-003 Am.1 bounds — never before that point).
+ * `wait-for` carries no VERB_METHODS entry (no confidently-known RPC method
+ * name) and must never be preflight-gated on one; it is still a VERBS
+ * member so runVerb's allowlist accepts it. Never throws and never logs
+ * `token` — a failed signal degrades to the orchestrator's own poll cadence,
+ * never a crash.
+ */
+export function signalToken(token) {
+  if (typeof token !== 'string' || token === '') {
+    return false
+  }
+  try {
+    const res = cmux('wait-for', ['-S', token], { timeoutMs: 5000 })
+    return res.ok
+  } catch {
+    return false
+  }
 }
 
 function checkVersion() {

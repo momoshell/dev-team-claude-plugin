@@ -502,7 +502,7 @@ const ATTN = `devteam-${DISPATCH_ID}-attn`
 
 function buildDispatchRecord(overrides = {}) {
   return {
-    schema_version: 1,
+    schema_version: 2,
     dispatch_id: DISPATCH_ID,
     slice_id: 'be-1a',
     attempt: 1,
@@ -570,8 +570,8 @@ test('Rider D: the top-level description now says state/<repo-slug>/<task-slug>/
   assert.equal(/state\/<task-slug>\//.test(description), false)
 })
 
-test('Rider D: schema_version stays 1', () => {
-  assert.equal(dispatchRecordSchema.properties.schema_version.const, 1)
+test('MF1: schema_version bumped to 2 for the blocked outcome enum addition', () => {
+  assert.equal(dispatchRecordSchema.properties.schema_version.const, 2)
 })
 
 test('Rider D: validate() still accepts the create lifecycle fixture', async () => {

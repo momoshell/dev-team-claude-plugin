@@ -33,7 +33,7 @@ const SHA256 = '0123456789abcdef'.repeat(4)
 
 function buildTerminateRecord() {
   return {
-    schema_version: 1,
+    schema_version: 2,
     dispatch_id: DISPATCH_ID,
     slice_id: 'be-1a',
     attempt: 1,
@@ -288,16 +288,16 @@ test('negative: a malformed attn_parent', () => {
 })
 
 const SCHEMA_VERSION_CASES = [
-  ['roster.schema.json', () => rosterSchema, () => structuredClone(roster)],
-  ['dispatch-record.schema.json', () => dispatchRecordSchema, () => buildTerminateRecord()],
-  ['signal-record.schema.json', () => signalSchema, () => ({ ...buildSignal(), schema_version: 1 })],
-  ['return-envelope.schema.json', () => envelopeSchema, () => buildEnvelopeJson()],
+  ['roster.schema.json', () => rosterSchema, () => structuredClone(roster), 2],
+  ['dispatch-record.schema.json', () => dispatchRecordSchema, () => buildTerminateRecord(), 3],
+  ['signal-record.schema.json', () => signalSchema, () => ({ ...buildSignal(), schema_version: 1 }), 2],
+  ['return-envelope.schema.json', () => envelopeSchema, () => buildEnvelopeJson(), 2],
 ]
 
-for (const [name, getSchema, getInstance] of SCHEMA_VERSION_CASES) {
-  test(`negative: schema_version 2 on ${name} yields exactly one schema_version_too_new violation`, () => {
+for (const [name, getSchema, getInstance, tooNewVersion] of SCHEMA_VERSION_CASES) {
+  test(`negative: schema_version ${tooNewVersion} on ${name} yields exactly one schema_version_too_new violation`, () => {
     const instance = getInstance()
-    instance.schema_version = 2
+    instance.schema_version = tooNewVersion
     const violations = validate(getSchema(), instance)
     assert.equal(violations.length, 1)
     assert.equal(violations[0].path, '$.schema_version')
@@ -564,12 +564,13 @@ test('dispatch-record.schema.json kickoff node description names all seven kicko
 // Export-surface meta-test
 // ---------------------------------------------------------------------------
 
-test('contract.mjs exports exactly the 3 functions + 15 constants of the frozen surface', () => {
+test('contract.mjs exports exactly the 3 functions + 16 constants of the frozen surface', () => {
   const expected = new Set([
     'validate', 'shouldArchive', 'slugify',
     'BUDGET', 'TOOLS', 'DISALLOWED_TOOLS', 'CMUX_ALLOWS', 'GRANT_TOKENS', 'OUTCOMES',
     'NONCE_PREFIX', 'PROTECTED_PATH_COMPONENTS', 'SIGNAL_LIMITS', 'SECTION_HEADING_RE',
     'MODEL_ALIASES', 'SUBAGENT_ONLY', 'PANE_ROLES', 'SLICE_ID_RE', 'CMD_RE',
+    'WORKER_BLOCKED_STATUSES',
   ])
   assert.deepEqual(new Set(Object.keys(contract)), expected)
   assert.equal('resolveRole' in contract, false)

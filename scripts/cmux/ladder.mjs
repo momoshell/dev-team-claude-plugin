@@ -401,7 +401,13 @@ export function classify({ record, fsState, tree, now, quietState, topIdle, quie
   }
 
   if (completed) {
-    return { state: 'completed', reason: 'fresh_valid_return', warnings }
+    // bodyStatus(validation.envelope) -> MF1: thread the worker's own
+    // self-reported status onto the completed classification (WORKER_BLOCKED_STATUSES,
+    // defined in contract.mjs, is the OUTCOME_MAPPING row's discriminator — never
+    // the .exit sentinel, per U-4). markdown bodies are strings, not objects -> null.
+    const body = validation.envelope && validation.envelope.body
+    const bodyStatus = body && typeof body === 'object' && typeof body.status === 'string' ? body.status : null
+    return { state: 'completed', reason: 'fresh_valid_return', warnings, bodyStatus }
   }
 
   const createdMs = Date.parse(record.created_at)

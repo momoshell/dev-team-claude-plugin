@@ -82,7 +82,7 @@ function buildRecord(overrides = {}) {
   mkdirSync(join(dir, 'returns'), { recursive: true })
   mkdirSync(join(dir, 'signals'), { recursive: true })
   return {
-    schema_version: 1,
+    schema_version: 2,
     dispatch_id: DISPATCH_ID,
     slice_id: 'be-1b',
     attempt: 1,
@@ -775,6 +775,53 @@ test('L-26 per-call form: classify with hostile exitSentinel/gateCounter/signalL
   const hostileTree = { windows: [{ workspaces: [{ id: 'evil', panes: [{ id: 'evil', surfaces: [{ id: 'evil' }] }] }] }] }
   const hostileResult = classify({ record, fsState: hostileFsState, tree: hostileTree, now, quietState: null, topIdle: null })
   assert.equal(hostileResult.state, 'completed')
+})
+
+// ---------------------------------------------------------------------------
+// GROUP 5b — MF1: classify threads the envelope body's self-reported status
+// onto the completed classification as bodyStatus, so dispatch.mjs's
+// OUTCOME_MAPPING can key on it instead of the .exit sentinel (U-4).
+// ---------------------------------------------------------------------------
+
+test('MF1 (positive, FIRST): a completed "done" return carries bodyStatus "done"', () => {
+  const record = buildRecord()
+  const result = classifyFreshCase(record)
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyStatus, 'done')
+})
+
+test('MF1: a completed markdown reviewer return carries bodyStatus null (the body is a string, not an object)', () => {
+  const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Findings'], verdict_block: false } })
+  const result = classifyFreshCase(record, { role: 'code-reviewer', body: '# Findings\nAll good.' })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyStatus, null)
+})
+
+test('MF1: a completed "blocked" body carries bodyStatus "blocked"', () => {
+  const record = buildRecord()
+  const result = classifyFreshCase(record, { body: { status: 'blocked', reason: 'gate exhausted' } })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyStatus, 'blocked')
+})
+
+test('MF1: a completed "insufficient" body carries bodyStatus "insufficient"', () => {
+  const record = buildRecord()
+  const result = classifyFreshCase(record, { body: { status: 'insufficient', reason: 'missing contract', missing_context: 'x' } })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyStatus, 'insufficient')
+})
+
+// U-4 REGRESSION GUARD: a hostile-but-plausible non-zero .exit sentinel
+// alongside a fresh, valid "done" return must NEVER move classify's verdict
+// or its bodyStatus — only add a warning. A "fix" that reorders exit_nonzero
+// ahead of completed, or keys off the sentinel instead of the body, breaks
+// this test.
+test('U-4 REGRESSION GUARD: .exit "2" + fresh valid "done" return -> still completed, bodyStatus "done", warning only', () => {
+  const record = buildRecord()
+  const result = classifyWith(record, { returnKind: 'fresh-valid', exit: '2' })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyStatus, 'done')
+  assert.ok(result.warnings.some((w) => w.includes('exit_nonzero:2') && w.includes('despite a valid return')))
 })
 
 // ---------------------------------------------------------------------------

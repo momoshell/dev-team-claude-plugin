@@ -6,7 +6,7 @@
   "required": ["schema_version", "dispatch_id", "slice_id", "attempt", "task_id", "task_slug", "repo_slug", "role", "agent", "model", "effort", "tools", "disallowed_tools", "flags", "profile", "role_prompt_path", "role_prompt_sha256", "return", "task_dir", "spec_path", "return_path", "signals_path", "primary_checkout", "isolation", "worktree", "cwd", "env", "attn_parent", "attn_upstream", "kickoff", "gate", "timeout_s", "max_turns", "surface", "created_at", "bound_at", "ended_at", "outcome"],
   "additionalProperties": false,
   "properties": {
-    "schema_version": { "type": "integer", "const": 1 },
+    "schema_version": { "type": "integer", "const": 2 },
     "dispatch_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
     "slice_id": { "type": "string", "pattern": "^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,15}){0,3}$" },
     "attempt": { "type": "integer", "minimum": 1, "maximum": 99 },
@@ -42,7 +42,7 @@
         "postcondition_ignore": { "type": "array", "items": { "type": "string", "pattern": "^(?!/)(?!.*(^|/)\\.\\.(/|$)).+$" } }
       }
     },
-    "role_prompt_path": { "type": "string", "pattern": "^/[^/].*$", "description": "Inside the per-task plugin snapshot." },
+    "role_prompt_path": { "type": "string", "pattern": "^/[^/].*$", "description": "Inside the per-dispatch plugin snapshot." },
     "role_prompt_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
     "return": {
       "description": "RESOLVED return spec.",
@@ -51,7 +51,7 @@
       "additionalProperties": false,
       "properties": {
         "kind": { "type": "string", "enum": ["json", "markdown"] },
-        "schema_path": { "type": ["string", "null"], "pattern": "^/[^/].*$", "description": "Inside the per-task snapshot; null when kind is markdown." },
+        "schema_path": { "type": ["string", "null"], "pattern": "^/[^/].*$", "description": "The PLUGIN-ROOT source schema (D-1), never a path under the per-dispatch snapshot; null when kind is markdown." },
         "required_sections": { "type": "array", "items": { "type": "string", "pattern": "\\S" }, "description": "May be []." },
         "verdict_block": { "type": "boolean" }
       }
@@ -76,7 +76,7 @@
     },
     "cwd": { "type": "string", "pattern": "^/[^/].*$" },
     "env": {
-      "description": "Closed, exactly eight keys, ALL required, all values strings. Each key is justified by exactly one worker-side hook consumer; DEVTEAM_STATE_DIR is deliberately omitted (least privilege — hand each hook its one file, never the state root, which would disclose the nonce path and every sibling's sentinels); adding a ninth key is a deliberate schema_version event.",
+      "description": "Closed, exactly eight keys, ALL required, all values strings. Each key is justified by exactly one worker-side hook consumer; DEVTEAM_STATE_DIR is deliberately omitted, but not for location secrecy — DEVTEAM_GATE_COUNTER already discloses that same directory, so a worker's Bash subprocess can already list it (G13). The omission's actual value is least privilege over WHICH files each hook is handed (its one file, never the state root as a whole); nonce confidentiality is lifetime-bounded (read-and-unlinked before the worker's own process exists, Rider E), never location-bounded. Adding a ninth key is a deliberate schema_version event.",
       "type": "object",
       "required": ["DEVTEAM_WORKER", "DEVTEAM_ROLE", "DEVTEAM_TASK_ID", "DEVTEAM_DISPATCH_ID", "DEVTEAM_TASK_DIR", "DEVTEAM_DISPATCH_RECORD", "DEVTEAM_SIGNAL_LOG", "DEVTEAM_GATE_COUNTER"],
       "additionalProperties": false,
@@ -118,6 +118,6 @@
     "created_at": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$" },
     "bound_at": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$" },
     "ended_at": { "type": ["string", "null"], "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{3})?Z$" },
-    "outcome": { "type": ["string", "null"], "enum": ["ok", "exit_nonzero", "no_return", "invalid_return", "refused_postcondition", "timeout", "aborted", null] }
+    "outcome": { "type": ["string", "null"], "enum": ["ok", "exit_nonzero", "no_return", "invalid_return", "refused_postcondition", "timeout", "aborted", "blocked", null] }
   }
 }

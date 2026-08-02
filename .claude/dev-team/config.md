@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-_(none — #3 slice-1b dispatcher shipped 2026-08-02 as PR #17; board item → Done. Next task selected via `/dev-team:next`.)_
+_(none — #4 slice-1c shipped 2026-08-02 as PR #20; board item → Done. Next task selected via `/dev-team:next` — epic #15's next ready sub-issue is #5 (1d wiring & docs).)_
 
 ## notes
 

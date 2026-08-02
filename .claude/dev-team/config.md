@@ -43,11 +43,12 @@ Deep review by default for:
 - `hooks/hooks.json` — session-start injection wiring.
 - `scripts/trello.sh` — handles credentials (must never leak them to stdout/stderr/transcript).
 - `scripts/cmux/*.schema.json`, `scripts/cmux/roster.default.json`, `scripts/cmux/contract.mjs` — the cmux execution-mode contract freeze (slice 1a); same blast-radius class as the root schemas, plus it encodes a permission/security boundary.
+- `scripts/cmux/*.mjs` (`resolve.mjs`, `record.mjs`, `cmuxctl.mjs`, `ladder.mjs`, `dispatch.mjs`) — the 1b dispatcher runtime; every one encodes a permission, path, or completion-evidence boundary (adversarial 3-reviewer panel was required at 1b, not just deep review).
 - `scripts/pr-review-window.sh` — spawns windows/processes and does worktree teardown.
 
 ## current_task
 
-_(none — #2 slice-1a contracts shipped 2026-08-01 as PR #16; board item → Done. Next task selected via `/dev-team:next`.)_
+current_task: #3 (item: PVTI_lAHOBZYqs84BfEhfzg05G-s) — 1b: dispatcher. **Executed & gate-passed 2026-08-02** on branch `feat/cmux-1b-dispatcher` (5 modules + 5 test files, suite 559/559, adversarial panel: all Must-fix verified fixed, M4 probe-confirmed closed). Memory reconciled. **Awaiting `/dev-team:ship`** (version already bumped to 0.1.45 in-tree; PR body must call out the RECOVERY_ROWS widening to #7; PRE-1C-VERIFY already posted to #4).
 
 ## notes
 

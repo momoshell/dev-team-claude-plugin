@@ -32,6 +32,7 @@ import { randomBytes } from 'node:crypto'
 
 import {
   resolveRoots, taskPaths, stemOf, specPathFor, renderPathFor, sidecarPaths, deriveWorktree, loadRoster,
+  snapshotDirFor,
 } from './resolve.mjs'
 import {
   snapshotWorkerPlugin, newDispatchId, isoMs, nextAttempt,
@@ -44,7 +45,7 @@ import {
   closeSurface, closeWorkspace, mountDocTab, readEvents, tree,
 } from './cmuxctl.mjs'
 import { collectFsState, classify, reconcile, evaluatePostcondition } from './ladder.mjs'
-import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES } from './contract.mjs'
+import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_PLUGIN_ROOT = resolvePath(HERE, '..', '..')
@@ -75,7 +76,18 @@ export function readExecutionMode(configText) {
 // OUTCOME MAPPING — single documented table, evaluated in order.
 // ---------------------------------------------------------------------------
 
+// OUTCOME_WORKER_BLOCKED(body status) -> the dedicated terminal outcome (added
+// to OUTCOMES + the schema by fix-1c-00) for a worker-side refusal/exhaustion
+// (MF1); keyed strictly on the envelope body status, never the .exit sentinel (U-4).
+export const OUTCOME_WORKER_BLOCKED = 'blocked'
+
 export const OUTCOME_MAPPING = [
+  // RESIDUAL (pre-reviewer-panes, issue #6): bodyStatus is null for a markdown
+  // (reviewer/validator) return, so a blocked markdown body falls through to
+  // completed->ok here. Harmless while PANE_ROLES is coder-only (json bodies):
+  // reviewers carry their own non-pass verdict inside the return. Revisit when
+  // reviewer roles become pane-dispatched.
+  { row: 'worker_blocked', outcome: OUTCOME_WORKER_BLOCKED, when: (c) => c.state === 'completed' && WORKER_BLOCKED_STATUSES.includes(c.bodyStatus) },
   { row: 'completed', outcome: 'ok', when: (c) => c.state === 'completed' },
   { row: 'exit_nonzero', outcome: 'exit_nonzero', when: (c, fsState) => fsState && fsState.exitSentinel != null && fsState.exitSentinel !== '0' },
   { row: 'timeout', outcome: 'timeout', when: (c) => c.state === 'timeout' },
@@ -577,6 +589,33 @@ function runDependencyPrep(worktreePath, prepCommands) {
 }
 
 // ---------------------------------------------------------------------------
+// Adapter launch line — what actually gets typed into the pane. This is the
+// launch contract be-1c-04's adapter-claude.mjs documents: `<execPath>
+// <pluginRoot>/scripts/cmux/adapter-claude.mjs run <recordPath>`. Composed
+// here (not inline at the sendLine call site) so it is independently
+// unit-testable and so a hostile component is refused with a NAMED cause —
+// sendLine's own assertSafeLine (cmuxctl.mjs) would otherwise catch the same
+// hazard only as an opaque "interpolated path failed the charset check"
+// symptom. process.execPath (never the bare string 'node') is the dispatcher
+// process's own node — the pane's shell PATH is not ours to assume.
+// ---------------------------------------------------------------------------
+
+const ADAPTER_LAUNCH_CHARSET_RE = /^[A-Za-z0-9._/-]+$/
+
+export function adapterLaunchLine({ execPath, pluginRoot, recordPath }) {
+  for (const [name, value] of [['execPath', execPath], ['pluginRoot', pluginRoot], ['recordPath', recordPath]]) {
+    if (typeof value !== 'string' || !ADAPTER_LAUNCH_CHARSET_RE.test(value)) {
+      throw new Error(`adapterLaunchLine: refused — ${name} contains a character outside ^[A-Za-z0-9._/-]+$: ${JSON.stringify(value)}`)
+    }
+    if (!value.startsWith('/')) {
+      throw new Error(`adapterLaunchLine: refused — ${name} must be an absolute path (leading '/'): ${JSON.stringify(value)}`)
+    }
+  }
+  const adapterPath = join(pluginRoot, 'scripts', 'cmux', 'adapter-claude.mjs')
+  return `${execPath} ${adapterPath} run ${recordPath}`
+}
+
+// ---------------------------------------------------------------------------
 // dispatch — the 11-step sequence (see acceptance criteria).
 // ---------------------------------------------------------------------------
 
@@ -647,7 +686,7 @@ export function dispatchCmd(args, ctx) {
 
   const roles = roster.roles
   const profiles = roster.profiles
-  const snapshot = snapshotWorkerPlugin({ pluginRoot, snapshotDir: paths.snapshotDir, roles, profiles })
+  const snapshot = snapshotWorkerPlugin({ pluginRoot, snapshotDir: snapshotDirFor(paths, dispatchId), roles, profiles })
 
   const recordCtx = {
     roots, paths, roster, resolved, pluginRoot,
@@ -765,20 +804,25 @@ export function dispatchCmd(args, ctx) {
   // returned, never placed in argv/env/kickoff/task dir.
   writeCompletionNonce(sidecars.nonce)
 
-  // (9) sendLine the kickoff (send THEN send-key enter — cmuxctl owns this).
-  // trust M3 residual (i): a sendLine refusal (its own charset gate) must
-  // not leave the nonce on disk against an unterminated record — the record
-  // is already bound at this point, so no allowUnbound is needed. The
-  // cleanup itself is wrapped separately: every field the kickoff embeds
-  // (task_dir/spec_path/return_path/signals_path via frozen path charsets,
-  // attn_parent/attn_upstream via the frozen devteam-<uuid>-attn pattern) is
-  // independently charset-constrained upstream, so this throw path has no
-  // known reachable trigger through the public CLI today — it exists for
-  // defense-in-depth against a future kickoff-composition change, and must
-  // not itself crash uninformatively if a secondary failure (e.g. the
-  // record having become otherwise unreadable) hits terminateRecord.
+  // (9) sendLine the adapter launch line (send THEN send-key enter — cmuxctl
+  // owns this) — this is what actually starts an agent in the pane;
+  // record.kickoff itself is unchanged and reaches the model via
+  // adapter-claude.mjs's buildArgv-derived `--` positional, not the pane
+  // shell. trust M3 residual (i): a sendLine refusal (its own charset gate,
+  // or adapterLaunchLine's own refusal above it) must not leave the nonce on
+  // disk against an unterminated record — the record is already bound at
+  // this point, so no allowUnbound is needed. The cleanup itself is wrapped
+  // separately: every field the kickoff embeds (task_dir/spec_path/
+  // return_path/signals_path via frozen path charsets, attn_parent/
+  // attn_upstream via the frozen devteam-<uuid>-attn pattern) is
+  // independently charset-constrained upstream, and pluginRoot/recordPath are
+  // both resolvePath-derived, so this throw path has no known reachable
+  // trigger through the public CLI today — it exists for defense-in-depth
+  // against a future kickoff/launch-composition change, and must not itself
+  // crash uninformatively if a secondary failure (e.g. the record having
+  // become otherwise unreadable) hits terminateRecord.
   try {
-    sendLine(surfaceId, record.kickoff)
+    sendLine(surfaceId, adapterLaunchLine({ execPath: process.execPath, pluginRoot, recordPath }))
   } catch (err) {
     unlinkIfExists(sidecars.nonce)
     try {

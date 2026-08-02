@@ -18,7 +18,13 @@ export const CMUX_ALLOWS = ['Bash(cmux notify *)', 'Bash(cmux wait-for -S *)']
 export const GRANT_TOKENS = ['returns_write', 'signals_append', 'worktree_write', 'validation_commands']
 
 // null is NOT a member; it is the not-yet-terminated state, handled separately.
-export const OUTCOMES = ['ok', 'exit_nonzero', 'no_return', 'invalid_return', 'refused_postcondition', 'timeout', 'aborted']
+export const OUTCOMES = ['ok', 'exit_nonzero', 'no_return', 'invalid_return', 'refused_postcondition', 'timeout', 'aborted', 'blocked']
+
+// MF1: a coder-return body whose self-reported status is one of these is a
+// worker-side refusal/exhaustion, not a completed success — ladder.mjs
+// (classify) and dispatch.mjs (OUTCOME_MAPPING) both key on this list; also
+// consumed by fix-1c-04 and fix-1c-06.
+export const WORKER_BLOCKED_STATUSES = ['blocked', 'insufficient']
 
 export const NONCE_PREFIX = 'devteam-done-'
 

@@ -1,14 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, unlinkSync } from 'node:fs'
+import { join, dirname, resolve as resolvePath } from 'node:path'
+import { pathToFileURL } from 'node:url'
 import { tmpdir } from 'node:os'
 import { ROOT } from './helpers.mjs'
 import { validate, NONCE_PREFIX, OUTCOMES, CMUX_ALLOWS } from '../scripts/cmux/contract.mjs'
-import { resolveRoots, taskPaths, resolveRole } from '../scripts/cmux/resolve.mjs'
+import { resolveRoots, taskPaths, resolveRole, snapshotDirFor } from '../scripts/cmux/resolve.mjs'
+import { validateReturn } from '../scripts/cmux/ladder.mjs'
 import {
   newDispatchId, attnTokenFor, isoMs,
-  snapshotWorkerPlugin, composeRolePrompt, PROFILE_ADDENDA,
+  snapshotWorkerPlugin, composeRolePrompt, PROFILE_ADDENDA, WORKER_PLUGIN_MANIFEST,
   buildRecord, buildArgv,
   writeRecord, bindRecord, terminateRecord, readRecord, listRecords, nextAttempt,
   initGateCounter, assertNoNonce, StaleReturnError, RecordInvalidError, RecordLockError, withRecordLock,
@@ -33,8 +35,9 @@ function makeCtxAndPaths({ root, taskId = 'be-1a task', taskSlug = 'sample-task'
   mkdirSync(primaryCheckout, { recursive: true })
   const roots = resolveRoots({ taskArtifactsRoot: join(root, 'dev-team') })
   const paths = taskPaths({ roots, repoSlug, taskSlug })
-  const snapshot = snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir: paths.snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
   const dispatchId = newDispatchId()
+  const snapshotDir = snapshotDirFor(paths, dispatchId)
+  const snapshot = snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
   const ctx = {
     roots,
     paths,
@@ -563,13 +566,36 @@ test('snapshotWorkerPlugin: idempotent — running twice yields byte-identical f
 })
 
 test('composeRolePrompt: strips YAML frontmatter from the agent body', () => {
-  const text = composeRolePrompt(ROOT, 'coder', 'executor')
+  const text = composeRolePrompt(ROOT, 'coder', 'executor', rosterDefault.roles.coder.return)
   assert.equal(text.startsWith('---'), false)
   assert.ok(text.includes('You are a code implementation agent'))
 })
 
 test('negative: composeRolePrompt throws for an unknown profile name', () => {
-  assert.throws(() => composeRolePrompt(ROOT, 'coder', 'bogus-profile'))
+  assert.throws(() => composeRolePrompt(ROOT, 'coder', 'bogus-profile', rosterDefault.roles.coder.return))
+})
+
+test('negative: composeRolePrompt throws for an unknown return kind', () => {
+  assert.throws(() => composeRolePrompt(ROOT, 'coder', 'executor', { kind: 'bogus-kind' }))
+})
+
+test('composeRolePrompt: appends the JSON return-contract addendum for a json-kind role', () => {
+  const text = composeRolePrompt(ROOT, 'coder', 'executor', rosterDefault.roles.coder.return)
+  assert.ok(text.includes('Return contract (JSON)'))
+  assert.ok(text.includes('exactly these keys'))
+})
+
+test('composeRolePrompt: appends the markdown return-contract addendum plus the required_sections/verdict-block line for a markdown-kind role', () => {
+  const text = composeRolePrompt(ROOT, 'code-reviewer', 'judgment', rosterDefault.roles['code-reviewer'].return)
+  assert.ok(text.includes('Return contract (Markdown)'))
+  assert.ok(text.includes('Required sections for this role: Verdict, Must-fix, Notes.'))
+  assert.ok(text.includes('fenced json block matching {verdict, findings}'))
+})
+
+test('composeRolePrompt: a markdown role without verdict_block gets no verdict-block sentence', () => {
+  const text = composeRolePrompt(ROOT, 'plan-reviewer', 'judgment', rosterDefault.roles['plan-reviewer'].return)
+  assert.ok(text.includes('Required sections for this role: Verdict.'))
+  assert.equal(text.includes('fenced json block matching'), false)
 })
 
 // ---------------------------------------------------------------------------
@@ -651,7 +677,9 @@ test('buildArgv: omits --effort when record.effort is null', () => {
 // return schema, nothing else.
 test('trust M2: snapshot inventory over the full roster is closed & enumerable — exactly the enumerated files, zero extras', () => {
   const root = makeTmpDir('cmux-record-')
-  const snapshotDir = join(root, 'worker-plugin')
+  const roots = resolveRoots({ taskArtifactsRoot: join(root, 'dev-team') })
+  const paths = taskPaths({ roots, repoSlug: 'sample-repo', taskSlug: 'sample-task' })
+  const snapshotDir = snapshotDirFor(paths, newDispatchId())
   snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
 
   function deepList(dir, prefix = '') {
@@ -676,9 +704,244 @@ test('trust M2: snapshot inventory over the full roster is closed & enumerable �
   const expected = [
     ...Object.keys(rosterDefault.roles).map((role) => `roles/${role}.txt`),
     ...distinctSchemas,
+    ...Object.keys(WORKER_PLUGIN_MANIFEST),
   ].sort()
 
   assert.deepEqual(deepList(snapshotDir), expected)
+})
+
+// ---------------------------------------------------------------------------
+// Import-closure — every copied .mjs must resolve its static imports and
+// module-load-time reads INSIDE the snapshot, or the worker-side hook chain
+// (return-lint.mjs -> ladder.mjs -> resolve.mjs / contract.mjs, plus the
+// three module-load-time schema reads) breaks on import. The required set is
+// DERIVED FROM A SOURCE-TEXT SCAN of the copied bytes, never re-typed from
+// WORKER_PLUGIN_MANIFEST — a re-typed list is circular and would have missed
+// exactly the dispatch-record.schema.json gap this manifest entry closes
+// (backend-notes.md 2026-08-01: source-text regex, never import).
+// ---------------------------------------------------------------------------
+
+// scanRequiredRefs(destRel, text) -> Set<snapshot-relative dest> of every
+// static `import ... from './x'` specifier and every module-load-time
+// join(MODULE_DIR, 'y') read found in `text`, resolved relative to destRel's
+// own directory (every .mjs in the manifest lives in hooks/, so this is
+// always another hooks/* destination).
+function scanRequiredRefs(destRel, text) {
+  const refs = new Set()
+  const dir = dirname(destRel)
+  const importRe = /import\s+[^'"]*from\s+'\.\/([^']+)'/g
+  let m
+  while ((m = importRe.exec(text))) {
+    refs.add(join(dir, m[1]))
+  }
+  const joinRe = /join\(MODULE_DIR,\s*'([^']+)'\)/g
+  while ((m = joinRe.exec(text))) {
+    refs.add(join(dir, m[1]))
+  }
+  return refs
+}
+
+// CLOSURE-TEST ANTI-VACUITY (placed first, ahead of the positive): proves the
+// closure check actually bites — deleting the manifest's newest entry from a
+// built snapshot makes (i) the scan-derived requirement report it missing
+// and (ii) import()ing the copied return-lint.mjs from that scratch snapshot
+// reject.
+test('closure-test anti-vacuity: deleting hooks/dispatch-record.schema.json from a built snapshot makes the closure check report it missing and makes import() of the copied return-lint.mjs reject', async () => {
+  const root = makeTmpDir('cmux-record-')
+  const snapshotDir = join(root, 'worker-plugin')
+  snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+
+  const returnLintText = readFileSync(join(snapshotDir, 'hooks/return-lint.mjs'), 'utf8')
+  const required = scanRequiredRefs('hooks/return-lint.mjs', returnLintText)
+  assert.ok(required.has('hooks/dispatch-record.schema.json'), 'expected the scan to require hooks/dispatch-record.schema.json')
+
+  unlinkSync(join(snapshotDir, 'hooks/dispatch-record.schema.json'))
+
+  // (i) the closure check reports the destination as missing.
+  const stillMissing = [...required].filter((ref) => !existsSync(join(snapshotDir, ref)))
+  assert.deepEqual(stillMissing, ['hooks/dispatch-record.schema.json'])
+
+  // (ii) import() of the copied return-lint.mjs rejects.
+  await assert.rejects(() => import(pathToFileURL(join(snapshotDir, 'hooks/return-lint.mjs')).href))
+})
+
+test('import-closure: every copied .mjs\'s scan-derived static imports and module-load-time reads resolve to another manifest destination present in the same snapshot', () => {
+  const root = makeTmpDir('cmux-record-')
+  const snapshotDir = join(root, 'worker-plugin')
+  snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+
+  const destinations = new Set(Object.keys(WORKER_PLUGIN_MANIFEST))
+  let scannedAny = false
+  let totalRequired = 0
+
+  for (const destRel of destinations) {
+    if (!destRel.endsWith('.mjs')) continue
+    scannedAny = true
+    const text = readFileSync(join(snapshotDir, destRel), 'utf8')
+    const required = scanRequiredRefs(destRel, text)
+    totalRequired += required.size
+    for (const ref of required) {
+      assert.ok(destinations.has(ref), `${destRel} requires ${ref} at import/module-load time but it is not a manifest destination`)
+      assert.ok(existsSync(join(snapshotDir, ref)), `${destRel} requires ${ref} but it is missing from the snapshot`)
+    }
+  }
+  assert.ok(scannedAny, 'expected at least one copied .mjs to be scanned')
+  // At least one required ref must have been found across the whole closure
+  // (return-lint.mjs -> ladder.mjs/contract.mjs + dispatch-record.schema.json,
+  // ladder.mjs -> contract.mjs/resolve.mjs + two schema reads) — otherwise
+  // the scan itself would be vacuous.
+  assert.ok(totalRequired > 0, 'expected the source-text scan to find at least one required reference across the copied .mjs files')
+})
+
+// SMOKE (module surface only — no argv[1] assumptions; the ESM loader
+// realpaths import.meta.url, so comparing it against process.argv[1] is
+// unreliable under a symlinked TMPDIR such as macOS's, which is exactly why
+// 02a switched the gate to import() + main() rather than a direct-invocation
+// check).
+test('SMOKE: import()ing the snapshot copy of hooks/return-lint.mjs resolves, and its exported writeBlockedReturn produces bytes that pass ladder.validateReturn', async () => {
+  const root = makeTmpDir('cmux-record-')
+  const snapshotDir = join(root, 'worker-plugin')
+  snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+
+  const mod = await import(pathToFileURL(join(snapshotDir, 'hooks/return-lint.mjs')).href)
+  assert.equal(typeof mod.writeBlockedReturn, 'function')
+
+  const returnPath = join(root, 'returns', 'be-1a.1.json')
+  const record = {
+    dispatch_id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    slice_id: 'be-1a',
+    attempt: 1,
+    role: 'build-validator',
+    return: { kind: 'markdown', required_sections: ['Verdict'], verdict_block: true },
+    task_dir: root,
+    return_path: returnPath,
+  }
+
+  const writtenPath = mod.writeBlockedReturn(record, 'smoke test')
+  assert.equal(writtenPath, returnPath)
+  const text = readFileSync(returnPath, 'utf8')
+  const result = validateReturn(record, text)
+  assert.deepEqual(result.violations, [])
+  assert.ok(result.ok)
+})
+
+// D-1 GUARD: hooks/dispatch-record.schema.json is copied for worker-side
+// self-containment only — it is referenced by NO record field.
+// record.return.schema_path still names the plugin-root source, and no
+// path-valued record field other than role_prompt_path itself (which is,
+// by definition, the snapshot artifact --plugin-dir points at) resolves
+// inside dirname(dirname(role_prompt_path)).
+test('D-1 guard: no record field other than role_prompt_path resolves inside the snapshot tree; return.schema_path still names the plugin-root source', () => {
+  const rec = buildValidRecord()
+  const workerTree = resolvePath(dirname(dirname(rec.role_prompt_path)))
+  assert.equal(rec.return.schema_path, join(ROOT, 'coder-return.schema.json'))
+
+  const otherPathFields = [
+    rec.task_dir, rec.spec_path, rec.return_path, rec.signals_path,
+    rec.primary_checkout, rec.cwd, rec.worktree.path, rec.return.schema_path,
+  ]
+  for (const p of otherPathFields) {
+    const resolved = resolvePath(p)
+    assert.notEqual(resolved, workerTree, `path field resolves to the snapshot tree itself: ${p}`)
+    assert.equal(resolved.startsWith(`${workerTree}/`), false, `path field resolves inside the snapshot tree: ${p}`)
+  }
+})
+
+// BYTE-STABILITY (extends the roles.coder-only check above): two snapshots
+// into two DIFFERENT directories, built from two ctx objects differing only
+// in dispatch_id/paths/now, produce byte-identical roles/<role>.txt and
+// identical sha256 for every role and every WORKER_PLUGIN_MANIFEST file.
+test('byte-stability: two snapshots in two different directories from ctx objects differing only in dispatch_id/paths/now are byte-identical for every role and every manifest file', () => {
+  const { paths: pathsA } = makeCtxAndPaths({ root: makeTmpDir('cmux-record-'), now: 1754136000123 })
+  const { paths: pathsB } = makeCtxAndPaths({ root: makeTmpDir('cmux-record-'), now: 1754999999999 })
+  const snapA = snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir: pathsA.snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+  const snapB = snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir: pathsB.snapshotDir, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+
+  for (const role of Object.keys(rosterDefault.roles)) {
+    const textA = readFileSync(snapA.roles[role].path, 'utf8')
+    const textB = readFileSync(snapB.roles[role].path, 'utf8')
+    assert.equal(textA, textB, `role prompt differs for role ${role}`)
+    assert.equal(snapA.roles[role].sha256, snapB.roles[role].sha256, `sha256 differs for role ${role}`)
+  }
+  for (const destRel of Object.keys(WORKER_PLUGIN_MANIFEST)) {
+    const bytesA = readFileSync(snapA.plugin[destRel].path)
+    const bytesB = readFileSync(snapB.plugin[destRel].path)
+    assert.ok(bytesA.equals(bytesB), `bytes differ for manifest file ${destRel}`)
+    assert.equal(snapA.plugin[destRel].sha256, snapB.plugin[destRel].sha256, `sha256 differs for manifest file ${destRel}`)
+  }
+})
+
+// R1 (contract #9): a long-lived executor worker's snapshot must never share
+// a directory with a concurrent reviewer dispatch's snapshot. This is the
+// explicit, named byte-stability test across two per-dispatch dirs differing
+// ONLY in dispatch_id (same task, same paths, same roster) — the prior
+// byte-stability test above varies paths/now too; this one isolates
+// dispatch_id as the sole variable and additionally checks the root schema
+// copies written INTO each per-dispatch dir (closes consider-item C3).
+test('byte-stability across dispatches: two per-dispatch snapshot dirs differing ONLY in dispatch_id are byte-identical for every role, every manifest file, and every schema copy', () => {
+  const root = makeTmpDir('cmux-record-')
+  const roots = resolveRoots({ taskArtifactsRoot: join(root, 'dev-team') })
+  const paths = taskPaths({ roots, repoSlug: 'sample-repo', taskSlug: 'sample-task' })
+  const dirA = snapshotDirFor(paths, newDispatchId())
+  const dirB = snapshotDirFor(paths, newDispatchId())
+  assert.notEqual(dirA, dirB)
+
+  const snapA = snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir: dirA, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+  const snapB = snapshotWorkerPlugin({ pluginRoot: ROOT, snapshotDir: dirB, roles: rosterDefault.roles, profiles: rosterDefault.profiles })
+
+  for (const role of Object.keys(rosterDefault.roles)) {
+    const textA = readFileSync(snapA.roles[role].path, 'utf8')
+    const textB = readFileSync(snapB.roles[role].path, 'utf8')
+    assert.equal(textA, textB, `role prompt differs for role ${role}`)
+    assert.equal(snapA.roles[role].sha256, snapB.roles[role].sha256, `sha256 differs for role ${role}`)
+    assert.notEqual(snapA.roles[role].path, snapB.roles[role].path)
+  }
+  for (const destRel of Object.keys(WORKER_PLUGIN_MANIFEST)) {
+    const bytesA = readFileSync(snapA.plugin[destRel].path)
+    const bytesB = readFileSync(snapB.plugin[destRel].path)
+    assert.ok(bytesA.equals(bytesB), `bytes differ for manifest file ${destRel}`)
+    assert.equal(snapA.plugin[destRel].sha256, snapB.plugin[destRel].sha256, `sha256 differs for manifest file ${destRel}`)
+  }
+  for (const filename of Object.keys(snapA.schemas)) {
+    // schemas[filename] is the PLUGIN-ROOT source path (D-1) — identical
+    // across dispatches by construction — the snapshot COPY written into
+    // each per-dispatch dir must also be byte-identical.
+    const copyA = readFileSync(join(dirA, filename))
+    const copyB = readFileSync(join(dirB, filename))
+    assert.ok(copyA.equals(copyB), `root schema copy differs for ${filename}`)
+  }
+})
+
+// Snapshot files must never carry a dispatch_id, an absolute state path, or a
+// timestamp — every snapshot file is a pure function of on-disk plugin
+// source, never of a particular dispatch.
+test('snapshot files carry no dispatch_id, no absolute state path, and no timestamp (regex sweep over every written file)', () => {
+  const root = makeTmpDir('cmux-record-')
+  const { ctx, paths } = makeCtxAndPaths({ root })
+  const snapshotDir = paths.snapshotDir
+
+  const dispatchIdRe = new RegExp(escapeRegExp(ctx.dispatchId))
+  const uuidRe = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i
+  const isoRe = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z/
+  const absPathRe = new RegExp(escapeRegExp(paths.taskDir))
+
+  function walk(dir) {
+    const out = []
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const full = join(dir, entry.name)
+      if (entry.isDirectory()) out.push(...walk(full))
+      else out.push(full)
+    }
+    return out
+  }
+
+  for (const file of walk(snapshotDir)) {
+    const text = readFileSync(file, 'utf8')
+    assert.equal(dispatchIdRe.test(text), false, `${file} contains the dispatch_id`)
+    assert.equal(uuidRe.test(text), false, `${file} contains a uuid-shaped literal`)
+    assert.equal(isoRe.test(text), false, `${file} contains an ISO timestamp`)
+    assert.equal(absPathRe.test(text), false, `${file} contains an absolute state path`)
+  }
 })
 
 // trust M4: readRecord validates against dispatch-record.schema.json and

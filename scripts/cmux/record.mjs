@@ -1,6 +1,6 @@
 // Dispatch-record builder: the artifact every worker's permissions, prompt
 // and identity derive from. Owns the three-state atomic lifecycle (create ->
-// bind -> terminate), the per-task worker-plugin snapshot, the claude argv
+// bind -> terminate), the per-dispatch worker-plugin snapshot, the claude argv
 // builder, and three structural invariants the evidence layer (be-1b-D)
 // depends on and cannot establish for itself: (slice_id, attempt) uniqueness
 // per dispatch, exclusive create over an unoccupied return_path, and
@@ -221,18 +221,47 @@ function stripFrontmatter(src) {
   return m ? src.slice(m[0].length) : src
 }
 
-// composeRolePrompt(pluginRoot, role, profileName) -> string. The role body
-// (agents/<role>.md, frontmatter stripped) plus the static profile addendum.
-// Pure function of its inputs, so byte-stability across dispatches (A10) and
-// idempotent re-snapshotting both fall out for free.
-export function composeRolePrompt(pluginRoot, role, profileName) {
+// returnContractAddendum(pluginRoot, returnSpec) -> string. Static,
+// record-independent addendum sourced from be-1c-01's
+// scripts/cmux/prompts/return-contract.{json,markdown}.md, selected by
+// returnSpec.kind. For markdown roles, one static line enumerating the
+// role's required_sections (and, when verdict_block is true, the
+// verdict-block requirement) is appended — this is ROSTER data (fixed per
+// role, not per-dispatch), so it stays a pure function of pluginRoot/role
+// and preserves byte-stability (A10).
+function returnContractAddendum(pluginRoot, returnSpec) {
+  const filename = returnSpec.kind === 'json'
+    ? join('scripts', 'cmux', 'prompts', 'return-contract.json.md')
+    : join('scripts', 'cmux', 'prompts', 'return-contract.markdown.md')
+  const text = readFileSync(join(pluginRoot, filename), 'utf8').trimEnd()
+  if (returnSpec.kind !== 'markdown') {
+    return text
+  }
+  const sections = (returnSpec.required_sections || []).join(', ')
+  const verdictNote = returnSpec.verdict_block
+    ? ' A Verdict section must carry exactly one fenced json block matching {verdict, findings}.'
+    : ''
+  return `${text}\n\nRequired sections for this role: ${sections}.${verdictNote}`
+}
+
+// composeRolePrompt(pluginRoot, role, profileName, returnSpec) -> string. The
+// role body (agents/<role>.md, frontmatter stripped), the static profile
+// addendum, and the return-contract addendum matching returnSpec.kind
+// (`{ kind, required_sections?, verdict_block? }`, i.e. roleDef.return from
+// the roster). Pure function of its inputs, so byte-stability across
+// dispatches (A10) and idempotent re-snapshotting both fall out for free.
+export function composeRolePrompt(pluginRoot, role, profileName, returnSpec) {
   const addendum = PROFILE_ADDENDA[profileName]
   if (!addendum) {
     throw new Error(`composeRolePrompt: unknown profile: ${JSON.stringify(profileName)}`)
   }
+  if (!returnSpec || (returnSpec.kind !== 'json' && returnSpec.kind !== 'markdown')) {
+    throw new Error(`composeRolePrompt: unknown return kind: ${JSON.stringify(returnSpec && returnSpec.kind)}`)
+  }
   const src = readFileSync(join(pluginRoot, 'agents', `${role}.md`), 'utf8')
   const body = stripFrontmatter(src).trimEnd()
-  return `${body}\n\n${addendum}`
+  const returnAddendum = returnContractAddendum(pluginRoot, returnSpec)
+  return `${body}\n\n${addendum}\n${returnAddendum}\n`
 }
 
 // ---------------------------------------------------------------------------
@@ -263,21 +292,50 @@ export function composeRolePrompt(pluginRoot, role, profileName) {
 // future classify() re-reads.
 // ---------------------------------------------------------------------------
 
+// WORKER_PLUGIN_MANIFEST: snapshot-relative destination -> plugin-root-
+// relative source. The closed, exhaustive allow-list of every hooks/ and
+// .claude-plugin/ file the per-dispatch --plugin-dir snapshot ships (conventions.md
+// "prefer a whitelist to a blacklist" — a positive allow-list, never a glob,
+// the same discipline test/schema.test.mjs's hardcoded list follows). The
+// eleventh entry, hooks/dispatch-record.schema.json (added 2026-08-02 on an
+// empirically verified gap): return-lint.mjs line 27 reads
+// join(MODULE_DIR, 'dispatch-record.schema.json') at module-evaluation time
+// to validate the record before trusting any field, so without this entry
+// the copied import closure is ENOENT on import.
+export const WORKER_PLUGIN_MANIFEST = Object.freeze({
+  '.claude-plugin/plugin.json': 'scripts/cmux/worker-plugin/.claude-plugin/plugin.json',
+  'hooks/hooks.json': 'scripts/cmux/worker-plugin/hooks/hooks.json',
+  'hooks/return-gate.sh': 'scripts/cmux/return-gate.sh',
+  'hooks/gate-mode.sh': 'scripts/cmux/gate-mode.sh',
+  'hooks/return-lint.mjs': 'scripts/cmux/return-lint.mjs',
+  'hooks/ladder.mjs': 'scripts/cmux/ladder.mjs',
+  'hooks/resolve.mjs': 'scripts/cmux/resolve.mjs',
+  'hooks/contract.mjs': 'scripts/cmux/contract.mjs',
+  'hooks/return-envelope.schema.json': 'scripts/cmux/return-envelope.schema.json',
+  'hooks/signal-record.schema.json': 'scripts/cmux/signal-record.schema.json',
+  'hooks/dispatch-record.schema.json': 'scripts/cmux/dispatch-record.schema.json',
+})
+
 // snapshotWorkerPlugin({ pluginRoot, snapshotDir, roles, profiles }) ->
-// { roles: { <role>: { path, sha256 } }, schemas: { <filename>: path } }
+// { roles: { <role>: { path, sha256 } }, schemas: { <filename>: path },
+//   plugin: { <destRel>: { path, sha256 } } }
 // `roles` is a roster-shaped map (role -> { profile, return, ... }); `profiles`
 // is a roster-shaped map (profile name -> profile def), used only to assert
-// every referenced profile actually exists. Idempotent: composeRolePrompt is
-// a pure function of on-disk source, so re-running yields byte-identical
-// files and identical sha256. --plugin-dir points at this snapshot
-// (ADR-009 Am.1), never the version-pinned marketplace cache; this module
-// writes only roles/ and the return schemas here — hooks/ and the
-// .claude-plugin/ manifest belong to 1c. D-1: `schemas[filename]` is the
+// every referenced profile actually exists. Idempotent: composeRolePrompt and
+// the WORKER_PLUGIN_MANIFEST copy loop are both pure functions of on-disk
+// source, so re-running yields byte-identical files and identical sha256.
+// --plugin-dir points at this snapshot (ADR-009 Am.1), never the
+// version-pinned marketplace cache. D-1: `schemas[filename]` is the
 // PLUGIN-ROOT source path (not the snapshot copy) — the copy is still
 // written into the snapshot for 1c's self-containment, but nothing on the
 // record ever points a completion decision back at worker-writable bytes.
 export function snapshotWorkerPlugin({ pluginRoot, snapshotDir, roles, profiles }) {
-  const result = { roles: {}, schemas: {} }
+  const result = { roles: {}, schemas: {}, plugin: {} }
+
+  // Roles first, deliberately: trust M5-B relies on every role/profile being
+  // validated (and every path containment-checked) before ANY filesystem
+  // effect — including the manifest copy — so a hostile role key still
+  // throws before touching disk anywhere in this snapshot.
   for (const [role, roleDef] of Object.entries(roles)) {
     const profileName = roleDef.profile
     if (!profiles[profileName]) {
@@ -291,7 +349,7 @@ export function snapshotWorkerPlugin({ pluginRoot, snapshotDir, roles, profiles 
     assertWithinDir(agentsDir, agentSrcPath, `agents source path for role ${JSON.stringify(role)}`)
     assertWithinDir(rolesDir, promptPath, `role prompt path for role ${JSON.stringify(role)}`)
 
-    const promptText = composeRolePrompt(pluginRoot, role, profileName)
+    const promptText = composeRolePrompt(pluginRoot, role, profileName, roleDef.return)
     writeAtomicBytes(promptPath, promptText)
     result.roles[role] = { path: promptPath, sha256: createHash('sha256').update(promptText).digest('hex') }
 
@@ -308,6 +366,17 @@ export function snapshotWorkerPlugin({ pluginRoot, snapshotDir, roles, profiles 
       }
     }
   }
+
+  for (const [destRel, srcRel] of Object.entries(WORKER_PLUGIN_MANIFEST)) {
+    const srcPath = join(pluginRoot, srcRel)
+    const destPath = join(snapshotDir, destRel)
+    assertWithinDir(pluginRoot, srcPath, `plugin manifest source path for ${JSON.stringify(destRel)}`)
+    assertWithinDir(snapshotDir, destPath, `plugin manifest dest path for ${JSON.stringify(destRel)}`)
+    const bytes = readFileSync(srcPath)
+    writeAtomicBytes(destPath, bytes)
+    result.plugin[destRel] = { path: destPath, sha256: createHash('sha256').update(bytes).digest('hex') }
+  }
+
   return result
 }
 
@@ -468,7 +537,7 @@ export function buildRecord(ctx, { role, sliceId, attempt, spec }) {
     : (resolved.max_turns !== undefined ? resolved.max_turns : roster.defaults.max_turns)
 
   const record = {
-    schema_version: 1,
+    schema_version: 2,
     dispatch_id: dispatchId,
     slice_id: sliceId,
     attempt,
@@ -566,7 +635,7 @@ export function buildArgv(record) {
   if (record.flags.disable_slash_commands) {
     argv.push('--disable-slash-commands')
   }
-  // --plugin-dir points at the per-task snapshot, derived from
+  // --plugin-dir points at the per-dispatch snapshot, derived from
   // role_prompt_path (<snapshotDir>/roles/<role>.txt), never the
   // version-pinned marketplace cache (ADR-009 Am.1).
   argv.push('--plugin-dir', dirname(dirname(record.role_prompt_path)))

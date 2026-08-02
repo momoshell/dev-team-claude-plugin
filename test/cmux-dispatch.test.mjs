@@ -14,7 +14,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, readdirSync, symlinkSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, readdirSync, symlinkSync, cpSync,
 } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -31,7 +31,7 @@ process.env.CMUX_BIN = FIXTURE
 const {
   readExecutionMode, OUTCOME_MAPPING, mapOutcome, applyPostconditionOverride,
   parseArgs, buildContext, ensureWorktree, isDispatcherWorktree, removeWorktreeIfCleanAndMerged,
-  writeCompletionNonce,
+  writeCompletionNonce, adapterLaunchLine,
   preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd,
   UsageError, OperationalError, main,
 } = await import(DISPATCH_PATH)
@@ -40,7 +40,7 @@ const { PREFLIGHT_MESSAGES, formatPreflightMessage, closeSurface } = await impor
 const {
   readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
 } = await import(join(ROOT, 'scripts', 'cmux', 'record.mjs'))
-const { specPathFor } = await import(join(ROOT, 'scripts', 'cmux', 'resolve.mjs'))
+const { specPathFor, sidecarPaths } = await import(join(ROOT, 'scripts', 'cmux', 'resolve.mjs'))
 
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
@@ -229,6 +229,45 @@ test('OUTCOME_MAPPING: timeout and no_return rows', () => {
   assert.equal(mapOutcome({ state: 'running', warnings: [] }, { exitSentinel: null, returnPathKind: 'absent' }), 'no_return')
 })
 
+// ---------------------------------------------------------------------------
+// MF1 — the worker_blocked row (dispatch.mjs:78) sits ahead of the completed
+// row and keys strictly on classification.bodyStatus, never fsState.exitSentinel.
+// Positives asserted first.
+// ---------------------------------------------------------------------------
+
+test('MF1 (positive, FIRST): a completed classification with bodyStatus "done" maps to ok', () => {
+  const classification = { state: 'completed', warnings: [], bodyStatus: 'done' }
+  const fsState = { exitSentinel: null, returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'ok')
+})
+
+test('MF1 (positive): a completed classification with bodyStatus null (markdown reviewer return) maps to ok', () => {
+  const classification = { state: 'completed', warnings: [], bodyStatus: null }
+  const fsState = { exitSentinel: null, returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'ok')
+})
+
+test('MF1: a completed classification with bodyStatus "blocked" maps to the dedicated blocked outcome', () => {
+  const classification = { state: 'completed', warnings: [], bodyStatus: 'blocked' }
+  const fsState = { exitSentinel: '2', returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'blocked')
+})
+
+test('MF1: a completed classification with bodyStatus "insufficient" also maps to the dedicated blocked outcome', () => {
+  const classification = { state: 'completed', warnings: [], bodyStatus: 'insufficient' }
+  const fsState = { exitSentinel: '0', returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'blocked')
+})
+
+// U-4 REGRESSION GUARD: the worker_blocked row must never fire off the .exit
+// sentinel alone — a "done" body alongside a hostile non-zero .exit sentinel
+// still maps to ok (warning only, carried in classify()'s own output).
+test('U-4 REGRESSION GUARD: bodyStatus "done" + .exit "2" still maps to outcome ok', () => {
+  const classification = { state: 'completed', warnings: ['exit_nonzero:2 despite a valid return'], bodyStatus: 'done' }
+  const fsState = { exitSentinel: '2', returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'ok')
+})
+
 test('applyPostconditionOverride: a violated clean postcondition overrides ok with refused_postcondition, never demotes a non-ok outcome', () => {
   assert.equal(applyPostconditionOverride('ok', { ok: false, offending: ['M file'] }), 'refused_postcondition')
   assert.equal(applyPostconditionOverride('ok', { ok: true, offending: [] }), 'ok')
@@ -280,6 +319,172 @@ test('SHELL SAFETY paired positive: the identical flow with a clean root reaches
   dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
   const log = readLog(env.logPath)
   assert.ok(log.find((e) => e.argv[0] === 'send'))
+})
+
+// ---------------------------------------------------------------------------
+// ADAPTER LAUNCH LINE (be-1c-05) — dispatchCmd sends the composed adapter
+// launch line instead of record.kickoff prose; record.kickoff itself is
+// unchanged and reaches the model via adapter-claude.mjs's buildArgv `--`
+// positional, not the pane shell.
+// ---------------------------------------------------------------------------
+
+test('adapterLaunchLine composes "<execPath> <pluginRoot>/scripts/cmux/adapter-claude.mjs run <recordPath>"', () => {
+  const line = adapterLaunchLine({ execPath: '/usr/bin/node', pluginRoot: '/plugin', recordPath: '/state/be-1a.1.json' })
+  assert.equal(line, '/usr/bin/node /plugin/scripts/cmux/adapter-claude.mjs run /state/be-1a.1.json')
+})
+
+test('adapterLaunchLine throws a named-cause error when any component contains a character outside the SAFE_PATH_RE charset, a space in particular', () => {
+  assert.throws(
+    () => adapterLaunchLine({ execPath: '/usr/bin/no de', pluginRoot: '/plugin', recordPath: '/state/x.json' }),
+    /execPath/,
+  )
+  assert.throws(
+    () => adapterLaunchLine({ execPath: '/usr/bin/node', pluginRoot: '/plu gin', recordPath: '/state/x.json' }),
+    /pluginRoot/,
+  )
+  assert.throws(
+    () => adapterLaunchLine({ execPath: '/usr/bin/node', pluginRoot: '/plugin', recordPath: '/sta te/x.json' }),
+    /recordPath/,
+  )
+})
+
+test('adapterLaunchLine throws a named-cause error when any component is a relative path (leading-\'/\' charset hardening)', () => {
+  assert.throws(
+    () => adapterLaunchLine({ execPath: 'usr/bin/node', pluginRoot: '/plugin', recordPath: '/state/x.json' }),
+    /execPath.*absolute/,
+  )
+  assert.throws(
+    () => adapterLaunchLine({ execPath: '/usr/bin/node', pluginRoot: 'plugin', recordPath: '/state/x.json' }),
+    /pluginRoot.*absolute/,
+  )
+  assert.throws(
+    () => adapterLaunchLine({ execPath: '/usr/bin/node', pluginRoot: '/plugin', recordPath: 'state/x.json' }),
+    /recordPath.*absolute/,
+  )
+})
+
+test('adapter launch PAIRED POSITIVE: a successful dispatch sends the composed launch line verbatim, exactly one send + one send-key enter, and the nonce is still present at that moment (consumed by the adapter, not by dispatch)', () => {
+  const { dir, env, ctx } = setUpWorkspace('adapter-launch-positive')
+  const specPath = makeSpecFile(ctx)
+  const res = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  assert.equal(res.code, 0)
+
+  const recordPath = join(ctx.paths.dispatchDir, 'be-1a.1.json')
+  const record = readRecord(recordPath)
+  const expectedLine = adapterLaunchLine({ execPath: process.execPath, pluginRoot: ctx.pluginRoot, recordPath })
+
+  const log = readLog(env.logPath)
+  const sendEntries = log.filter((e) => e.argv[0] === 'send')
+  const sendKeyEntries = log.filter((e) => e.argv[0] === 'send-key')
+  assert.equal(sendEntries.length, 1, `expected exactly one send, got ${JSON.stringify(sendEntries)}`)
+  assert.equal(sendKeyEntries.length, 1, `expected exactly one send-key, got ${JSON.stringify(sendKeyEntries)}`)
+  assert.equal(sendKeyEntries[0].argv[2], 'enter')
+  assert.equal(sendEntries[0].argv[2], expectedLine)
+
+  // record.kickoff is unchanged (still the model's prompt, delivered via
+  // buildArgv's positional) and is NOT what was typed into the pane.
+  assert.equal(typeof record.kickoff, 'string')
+  assert.notEqual(sendEntries[0].argv[2], record.kickoff)
+
+  const sidecars = sidecarPaths(ctx.paths, res.json.dispatch_id)
+  assert.ok(existsSync(sidecars.nonce), 'the nonce must still be on disk right after a successful dispatch')
+})
+
+test('adapter launch NEGATIVE: an execPath containing a space is refused as an OperationalError, terminates the record aborted, and unlinks the nonce (never a crash)', () => {
+  const { env, ctx } = setUpWorkspace('adapter-launch-bad-execpath')
+  const specPath = makeSpecFile(ctx)
+  const savedExecPath = process.execPath
+  process.execPath = '/usr/bin/no de'
+  try {
+    assert.throws(
+      () => dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx),
+      (err) => err instanceof OperationalError && /sendLine failed after bind/.test(err.message),
+    )
+  } finally {
+    process.execPath = savedExecPath
+  }
+
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  assert.equal(record.outcome, 'aborted')
+  const sidecars = sidecarPaths(ctx.paths, record.dispatch_id)
+  assert.equal(existsSync(sidecars.nonce), false, 'the nonce must be unlinked on the sendLine-refusal abort path')
+
+  const log = readLog(env.logPath)
+  assert.equal(log.filter((e) => e.argv[0] === 'send').length, 0)
+})
+
+test('adapter launch NEGATIVE: a pluginRoot containing a space is refused as an OperationalError, terminates the record aborted, and unlinks the nonce (never a crash)', () => {
+  const spaceRootParent = mkdtempSync(join(tmpdir(), 'cmux-adapter-space-'))
+  const spacePluginRoot = join(spaceRootParent, 'plugin root')
+  // A realistic pluginRoot fixture: a full copy of the plugin tree (agents,
+  // schemas, scripts/cmux) under a path containing a space, minus .git and
+  // this repo's own test/ dir (neither is read by preflight/snapshot).
+  cpSync(ROOT, spacePluginRoot, {
+    recursive: true,
+    filter: (src) => !/\/\.git(\/|$)/.test(src) && !/\/test(\/|$)/.test(src),
+  })
+
+  const env = freshCmuxEnv('adapter-launch-bad-pluginroot')
+  const checkout = makeGitCheckout(env.dir)
+  const ctx = buildContext({
+    task: 'sample-task', checkout, repo: 'sample-repo', root: join(env.dir, 'dev-team'), 'plugin-root': spacePluginRoot,
+  })
+  const preflightRes = preflightCmd({}, ctx)
+  assert.equal(preflightRes.code, 0, `preflight failed: ${JSON.stringify(preflightRes.json)}`)
+  workspaceCmd({}, ctx)
+  const specPath = makeSpecFile(ctx)
+
+  assert.throws(
+    () => dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx),
+    (err) => err instanceof OperationalError && /sendLine failed after bind/.test(err.message),
+  )
+
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  assert.equal(record.outcome, 'aborted')
+  const sidecars = sidecarPaths(ctx.paths, record.dispatch_id)
+  assert.equal(existsSync(sidecars.nonce), false, 'the nonce must be unlinked on the sendLine-refusal abort path')
+
+  const log = readLog(env.logPath)
+  assert.equal(log.filter((e) => e.argv[0] === 'send').length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// SNAPSHOT DIR WIRING (R1) — dispatchCmd snapshots into the PER-DISPATCH
+// directory (snapshotDirFor(paths, dispatchId)), never the shared
+// paths.snapshotDir parent, so two concurrent dispatches never share a
+// worker-plugin snapshot (contract #9).
+// ---------------------------------------------------------------------------
+
+test('dispatchCmd snapshots into snapshotDirFor(paths, dispatchId): role_prompt_path lives under <stateDir>/worker-plugin/<dispatch_id>/roles/', () => {
+  const { ctx } = setUpWorkspace('snapshot-dir-wiring')
+  const specPath = makeSpecFile(ctx)
+  const res = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  const expectedPrefix = join(ctx.paths.snapshotDir, res.json.dispatch_id, 'roles')
+  assert.ok(
+    record.role_prompt_path.startsWith(`${expectedPrefix}/`),
+    `expected role_prompt_path under ${expectedPrefix}/, got ${record.role_prompt_path}`,
+  )
+})
+
+test('dispatchCmd: two dispatches in the same task write two distinct per-dispatch snapshot dirs (no collision)', () => {
+  const { ctx } = setUpWorkspace('snapshot-dir-no-collision')
+  const specA = makeSpecFile(ctx, 'be-1a')
+  const specB = makeSpecFile(ctx, 'be-1b')
+
+  const resA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
+  const resB = dispatchCmd({ slice: 'be-1b', role: 'coder', spec: specB }, ctx)
+  assert.notEqual(resA.json.dispatch_id, resB.json.dispatch_id)
+
+  const recordA = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  const recordB = readRecord(join(ctx.paths.dispatchDir, 'be-1b.1.json'))
+
+  const dirA = join(ctx.paths.snapshotDir, resA.json.dispatch_id)
+  const dirB = join(ctx.paths.snapshotDir, resB.json.dispatch_id)
+  assert.notEqual(dirA, dirB)
+  assert.ok(recordA.role_prompt_path.startsWith(`${dirA}/`))
+  assert.ok(recordB.role_prompt_path.startsWith(`${dirB}/`))
 })
 
 // ---------------------------------------------------------------------------
@@ -830,6 +1035,71 @@ test('close: a violated clean postcondition overrides ok with refused_postcondit
   const res = closeCmd({ dispatch: record.dispatch_id }, ctx)
   assert.equal(res.json.outcome, 'refused_postcondition')
   assert.ok(res.json.postcondition.offending.length > 0)
+})
+
+// ---------------------------------------------------------------------------
+// MF1 END-TO-END — a real record (built via record.buildRecord, through
+// dispatchCmd) plus a real blocked-status envelope written to return_path on
+// disk, closed through the full closeCmd path. Positives asserted first.
+// ---------------------------------------------------------------------------
+
+test('MF1 (positive, FIRST): a real "done" return closes with outcome ok', () => {
+  const { ctx } = setUpWorkspace('mf1-done')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+
+  const res = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(res.json.outcome, 'ok')
+})
+
+test('MF1 (positive): a real markdown reviewer return (bodyStatus null) closes with outcome ok', () => {
+  const { ctx } = setUpWorkspace('mf1-markdown')
+  const record = buildAndBindRecord(ctx, { role: 'code-reviewer', sliceId: 'be-1b' })
+  writeValidReturn(record)
+
+  const res = closeCmd({ dispatch: record.dispatch_id }, ctx)
+  assert.equal(res.json.outcome, 'ok')
+})
+
+test('MF1 vector (a) adapter-refusal: a blocked body + .exit "2" closes with outcome blocked, not ok', () => {
+  const { ctx } = setUpWorkspace('mf1-adapter-refusal')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record, { status: 'blocked', reason: 'PRE-1C-VERIFY refused the dispatch' })
+  writeFileSync(join(ctx.paths.stateDir, `${dispatchRes.json.dispatch_id}.exit`), '2')
+
+  const res = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(res.json.outcome, 'blocked')
+})
+
+test('MF1 vector (b) CLI-missing: a blocked body + .exit "3" closes with outcome blocked, not ok', () => {
+  const { ctx } = setUpWorkspace('mf1-cli-missing')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record, { status: 'blocked', reason: 'agent CLI not found on PATH' })
+  writeFileSync(join(ctx.paths.stateDir, `${dispatchRes.json.dispatch_id}.exit`), '3')
+
+  const res = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(res.json.outcome, 'blocked')
+})
+
+// This vector is the one only the body-status fix catches: .exit "0" is the
+// completed-looking sentinel exit_nonzero would never flag, so a fix keyed on
+// the sentinel (violating U-4) would still launder this one as ok.
+test('MF1 vector (c) gate-exhaustion: a blocked body + .exit "0" closes with outcome blocked — the sentinel alone would say ok', () => {
+  const { ctx } = setUpWorkspace('mf1-gate-exhaustion')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record, { status: 'blocked', reason: 'gate exhausted: max_blocks reached' })
+  writeFileSync(join(ctx.paths.stateDir, `${dispatchRes.json.dispatch_id}.exit`), '0')
+
+  const res = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(res.json.outcome, 'blocked')
 })
 
 // ---------------------------------------------------------------------------

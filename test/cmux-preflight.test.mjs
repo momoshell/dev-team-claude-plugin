@@ -200,8 +200,10 @@ test('preflight succeeds end-to-end and caches to <taskArtifactsRoot>/preflight.
   assert.equal(result.team_window_id, null)
   assert.ok(result.checked_at)
   // events/config/set-status have no confidently-known RPC method name —
-  // unverifiable-by-capabilities, never gated (qa-lead addendum).
-  assert.deepEqual(result.unverifiable_verbs, ['config', 'events', 'set-status'])
+  // unverifiable-by-capabilities, never gated (qa-lead addendum). wait-for
+  // joined VERBS at 1c with deliberately no VERB_METHODS entry (never
+  // preflight-gated), so it lands in the same unverifiable set.
+  assert.deepEqual(result.unverifiable_verbs, ['config', 'events', 'set-status', 'wait-for'])
 
   const artifactsRoot = join(dir, 'artifacts')
   const cachedRaw = readFileSync(join(artifactsRoot, 'preflight.json'), 'utf8')

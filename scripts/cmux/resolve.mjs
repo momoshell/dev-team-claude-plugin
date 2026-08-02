@@ -111,6 +111,23 @@ export function taskPaths({ roots, repoSlug, taskSlug }) {
   }
 }
 
+// snapshotDirFor(paths, dispatchId) -> the per-dispatch worker-plugin
+// snapshot directory, <stateDir>/worker-plugin/<dispatch_id>. paths.snapshotDir
+// (<stateDir>/worker-plugin) stays the PARENT — a long-lived executor
+// worker's snapshot must never share a directory (and therefore never share
+// hooks/*.sh) with a concurrent reviewer dispatch's snapshot (contract #9 /
+// R1), so every dispatch gets its own subdirectory under the same parent.
+// It stays UNDER stateDir, so teardown's wholesale stateDir archive/delete
+// still sweeps it with no teardown change. dispatchId is validated the same
+// way record.mjs's assertLowerHexId validates every id it accepts (non-empty,
+// no uppercase) before being joined into the path.
+export function snapshotDirFor(paths, dispatchId) {
+  if (typeof dispatchId !== 'string' || dispatchId === '' || /[A-Z]/.test(dispatchId)) {
+    throw new Error(`snapshotDirFor: dispatch_id must be a lowercase id, got: ${JSON.stringify(dispatchId)}`)
+  }
+  return assertSafePath(join(paths.snapshotDir, dispatchId))
+}
+
 // stemOf(sliceId, attempt) -> `${sliceId}.${attempt}` (spec/ is stem-free).
 export function stemOf(sliceId, attempt) {
   assertSliceId(sliceId)

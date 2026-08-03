@@ -227,6 +227,32 @@ test('negative: a fenced fake Verdict heading inside an example never satisfies 
   assert.ok(found.includes(VERDICT_SECTION_MISSING))
 })
 
+// be-06-01 S2: extractSection's match predicate is now the SAME as S1's
+// checkSections predicate (level >= 2, case-folded prefix). A divergence
+// between the heading the lint REQUIRES and the heading the verdict block is
+// looked up IN is exactly the accept-a-fake hole recorded at
+// .claude/dev-team/memory/backend-notes.md:16.
+test('positive: `### Verdict (gate)` satisfies the Verdict section lookup (level >= 2, prefix match)', () => {
+  const record = buildTestRecord('build-validator')
+  const body = `### Verdict (gate)\n\n\`\`\`json\n${JSON.stringify({ verdict: 'pass', findings: [] })}\n\`\`\`\n`
+  writeReturnFile(record, envelopeText(record, body))
+  assert.deepEqual(lintReturn(record), [])
+})
+
+test('negative: `# Verdict` (level 1) does NOT satisfy the Verdict section lookup', () => {
+  const record = buildTestRecord('build-validator')
+  const body = `# Verdict\n\n\`\`\`json\n${JSON.stringify({ verdict: 'pass', findings: [] })}\n\`\`\`\n`
+  writeReturnFile(record, envelopeText(record, body))
+  assert.ok(keywords(lintReturn(record)).includes(VERDICT_SECTION_MISSING))
+})
+
+test('positive: the Verdict section still ends at the next real heading of ANY level (including level 1)', () => {
+  const record = buildTestRecord('build-validator')
+  const body = `## Verdict\n\n\`\`\`json\n${JSON.stringify({ verdict: 'pass', findings: [] })}\n\`\`\`\n\n# Unrelated trailer\n\nnot part of the verdict section\n`
+  writeReturnFile(record, envelopeText(record, body))
+  assert.deepEqual(lintReturn(record), [])
+})
+
 test('negative: zero fenced json blocks in the Verdict section is verdict_block_missing', () => {
   const record = buildTestRecord('build-validator')
   writeReturnFile(record, envelopeText(record, '## Verdict\n\nNo fenced block here.\n'))

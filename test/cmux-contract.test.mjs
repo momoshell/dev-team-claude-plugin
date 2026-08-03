@@ -8,6 +8,7 @@ import {
   validate, shouldArchive, slugify,
   OUTCOMES, NONCE_PREFIX, PROTECTED_PATH_COMPONENTS, SIGNAL_LIMITS, CMD_RE, CMUX_ALLOWS,
   TOOLS, DISALLOWED_TOOLS, GRANT_TOKENS, SECTION_HEADING_RE, SLICE_ID_RE,
+  PANE_ROLES, SUBAGENT_ONLY,
 } from '../scripts/cmux/contract.mjs'
 
 const rosterSchema = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/roster.schema.json'), 'utf8'))
@@ -468,6 +469,12 @@ test('DISALLOWED_TOOLS deep-equals dispatch-record.schema.json properties.disall
 
 test('GRANT_TOKENS deep-equals dispatch-record.schema.json properties.profile.properties.grants.items.enum', () => {
   assert.deepEqual(dispatchRecordSchema.properties.profile.properties.grants.items.enum, GRANT_TOKENS)
+})
+
+test('PANE_ROLES deep-equals the seven-role be-06-01 literal, and PANE_ROLES ∩ SUBAGENT_ONLY is empty', () => {
+  assert.deepEqual(PANE_ROLES, ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead'])
+  const intersection = PANE_ROLES.filter((r) => SUBAGENT_ONLY.includes(r))
+  assert.deepEqual(intersection, [])
 })
 
 test('[...OUTCOMES, null] deep-equals dispatch-record.schema.json properties.outcome.enum', () => {

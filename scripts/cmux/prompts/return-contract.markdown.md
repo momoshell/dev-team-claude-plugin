@@ -15,9 +15,12 @@ timestamp with millisecond precision.
 `body` is itself a Markdown STRING (not a nested JSON object) — the envelope
 is JSON, its `body` field is prose. The required section headings for your
 role are named in your first message; each one must appear in `body` as its
-own Markdown heading (`##` or similar), spelled exactly as given, outside of
+own Markdown heading of level 2 or deeper (`##`, `###`, and so on — a
+top-level `#` heading never matches), matched case-insensitively by prefix
+(so a heading may carry trailing words after the required name), outside of
 any fenced code example. A heading that only appears inside a fenced example
-does not count.
+does not count. For example, a required section named `Handover Spec` is
+satisfied by a heading such as `### Handover Spec (one per coder task)`.
 
 If your role requires a Verdict section, that section must contain exactly
 one fenced code block tagged as json, and nothing else fenced inside it. The

@@ -94,13 +94,27 @@ export function stripFences(body) {
 }
 
 // checkSections(body, requiredSections) -> string[] of missing section names.
-// Uses SECTION_HEADING_RE from contract.mjs via [...stripFences(body).matchAll(RE)],
-// capture group 1 trimmed. (Discharges A10 "markdown required_sections check
-// using SECTION_HEADING_RE".)
+// Uses SECTION_HEADING_RE from contract.mjs via [...stripFences(body).matchAll(RE)].
+// (Discharges A10 "markdown required_sections check using SECTION_HEADING_RE".)
+//
+// be-06-01 S1: level->=2 + case-folded PREFIX matching, entirely consumer-side
+// (SECTION_HEADING_RE itself is untouched — see PINNED DECISION U-5 above).
+// The level is derived from m[0] (the full matched heading line under /gm),
+// never from group 1. A required entry that is empty/whitespace after trim
+// is reported MISSING, never vacuously satisfied — a roster typo must not
+// silently disable the check.
 export function checkSections(body, requiredSections) {
   const stripped = stripFences(body)
-  const headings = new Set([...stripped.matchAll(SECTION_HEADING_RE)].map((m) => m[1].trim()))
-  return requiredSections.filter((name) => !headings.has(name))
+  const headings = [...stripped.matchAll(SECTION_HEADING_RE)].map((m) => ({
+    text: m[1].trim(),
+    level: m[0].match(/^#+/)[0].length,
+  }))
+  return (requiredSections || []).filter((name) => {
+    const req = name.trim()
+    if (req === '') return true
+    const needle = req.toLowerCase()
+    return !headings.some((h) => h.level >= 2 && h.text.toLowerCase().startsWith(needle))
+  })
 }
 
 // ---------------------------------------------------------------------------

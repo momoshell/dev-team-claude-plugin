@@ -87,26 +87,26 @@
       "isolation": "primary",
       "model": "opus",
       "effort": "high",
-      "pane": false,
+      "pane": true,
       "doc_tab": true,
-      "return": { "kind": "markdown", "required_sections": ["Verdict"] }
+      "return": { "kind": "markdown", "required_sections": ["Must Fix", "Should Fix"] }
     },
     "architecture-lead": {
       "profile": "judgment",
       "isolation": "primary",
       "model": "opus",
       "effort": "xhigh",
-      "pane": false,
+      "pane": true,
       "doc_tab": true,
       "timeout_s": 3600,
-      "return": { "kind": "markdown", "required_sections": ["Proposed memory deltas", "Assumptions & unknowns"] }
+      "return": { "kind": "markdown", "required_sections": ["Architecture Package", "Recommended team dispatch", "Proposed memory deltas"] }
     },
     "backend-lead": {
       "profile": "judgment",
       "isolation": "primary",
       "model": "opus",
       "effort": "high",
-      "pane": false,
+      "pane": true,
       "doc_tab": true,
       "timeout_s": 2400,
       "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
@@ -116,7 +116,7 @@
       "isolation": "primary",
       "model": "opus",
       "effort": "high",
-      "pane": false,
+      "pane": true,
       "doc_tab": true,
       "timeout_s": 2400,
       "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
@@ -126,7 +126,7 @@
       "isolation": "primary",
       "model": "opus",
       "effort": "high",
-      "pane": false,
+      "pane": true,
       "doc_tab": true,
       "timeout_s": 2400,
       "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
@@ -136,10 +136,10 @@
       "isolation": "primary",
       "model": "opus",
       "effort": "high",
-      "pane": false,
+      "pane": true,
       "doc_tab": true,
       "timeout_s": 2400,
-      "return": { "kind": "markdown", "required_sections": ["Handover Spec", "Proposed memory deltas", "Assumptions & unknowns"] }
+      "return": { "kind": "markdown", "required_sections": ["QA Plan", "Proposed memory deltas", "Assumptions & unknowns"] }
     }
   }
 }

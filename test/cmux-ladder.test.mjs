@@ -42,6 +42,7 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
   validateReturn, checkIdentity, checkSections, stripFences,
@@ -136,7 +137,7 @@ test('validateReturn: a valid json envelope returns zero violations and ok true'
 
 test('validateReturn: a valid markdown envelope with a satisfied required section returns zero violations', () => {
   const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Findings'], verdict_block: false } })
-  const envelope = buildEnvelope({ role: 'code-reviewer', body: '# Findings\nAll good.' })
+  const envelope = buildEnvelope({ role: 'code-reviewer', body: '## Findings\nAll good.' })
   const result = validateReturn(record, JSON.stringify(envelope))
   assert.equal(result.ok, true)
   assert.deepEqual(result.violations, [])
@@ -792,7 +793,7 @@ test('MF1 (positive, FIRST): a completed "done" return carries bodyStatus "done"
 
 test('MF1: a completed markdown reviewer return carries bodyStatus null (the body is a string, not an object)', () => {
   const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Findings'], verdict_block: false } })
-  const result = classifyFreshCase(record, { role: 'code-reviewer', body: '# Findings\nAll good.' })
+  const result = classifyFreshCase(record, { role: 'code-reviewer', body: '## Findings\nAll good.' })
   assert.equal(result.state, 'completed')
   assert.equal(result.bodyStatus, null)
 })
@@ -962,7 +963,9 @@ test('L-31: surface identity is the (workspace_id, pane_id, surface_id) TRIPLE �
 // checkSections / stripFences — isolated review.
 // ---------------------------------------------------------------------------
 
-test('checkSections: heading levels 1-6 all count; a section name in prose (not a heading) does NOT count; trailing whitespace tolerated', () => {
+// be-06-01 S1: level->=2 + case-folded prefix matching, entirely
+// consumer-side (SECTION_HEADING_RE itself is untouched).
+test('checkSections: heading levels 2-6 count; level 1 does NOT; a section name in prose (not a heading) does NOT count; trailing whitespace tolerated', () => {
   const body = [
     '# One',
     '## Two',
@@ -972,8 +975,108 @@ test('checkSections: heading levels 1-6 all count; a section name in prose (not 
     '###### Six',
     'Prose mentioning Seven but not as a heading.',
   ].join('\n')
-  assert.deepEqual(checkSections(body, ['One', 'Two', 'Three', 'Four', 'Five', 'Six']), [])
+  assert.deepEqual(checkSections(body, ['One']), ['One']) // level 1 never matches
+  assert.deepEqual(checkSections(body, ['Two', 'Three', 'Four', 'Five', 'Six']), [])
   assert.deepEqual(checkSections(body, ['Seven']), ['Seven'])
+})
+
+test('checkSections: `### Handover Spec (one per coder task)` satisfies required section `Handover Spec` (prefix match)', () => {
+  const body = '### Handover Spec (one per coder task)\ncontent'
+  assert.deepEqual(checkSections(body, ['Handover Spec']), [])
+})
+
+test('checkSections: `## HANDOVER SPEC` satisfies `Handover Spec` (case-folded)', () => {
+  const body = '## HANDOVER SPEC\ncontent'
+  assert.deepEqual(checkSections(body, ['Handover Spec']), [])
+})
+
+test('checkSections: `# Handover Spec` (level 1) does NOT satisfy `Handover Spec`', () => {
+  const body = '# Handover Spec\ncontent'
+  assert.deepEqual(checkSections(body, ['Handover Spec']), ['Handover Spec'])
+})
+
+test('checkSections: a `## Handover Spec` heading inside a fenced block does NOT count (existing fence-stripping behavior preserved)', () => {
+  const body = '```\n## Handover Spec\n```\ncontent'
+  assert.deepEqual(checkSections(body, ['Handover Spec']), ['Handover Spec'])
+})
+
+test('checkSections: an empty or whitespace-only required entry is reported missing, never vacuously satisfied', () => {
+  const body = '## Handover Spec\ncontent'
+  assert.deepEqual(checkSections(body, ['']), [''])
+  assert.deepEqual(checkSections(body, ['   ']), ['   '])
+})
+
+// ANCHORED-PREFIX NEGATIVE (qa-lead gate audit, load-bearing): the rule is
+// startsWith, not includes/contains. A heading whose text merely CONTAINS the
+// required string mid-word/mid-phrase (rather than beginning with it) must
+// NOT satisfy the requirement — an includes()-based implementation would
+// pass every other case in this file (all the positives here happen to also
+// be prefixes) and only this negative catches that degenerate.
+test('checkSections: `### Draft Handover Spec` does NOT satisfy required section `Handover Spec` (startsWith, not includes/contains)', () => {
+  const body = '### Draft Handover Spec\ncontent'
+  assert.deepEqual(checkSections(body, ['Handover Spec']), ['Handover Spec'])
+})
+
+// LOCALE-INDEPENDENCE (qa-lead gate audit): the interface_contract pins
+// "plain .toLowerCase() (no locale)". String.prototype.toLowerCase() and
+// .toLocaleLowerCase() (no explicit locale arg) are byte-identical in this
+// process's default (non-Turkish) locale — so a mutation from toLowerCase()
+// to toLocaleLowerCase() is INVISIBLE to any in-process assertion here. The
+// only way to make that mutation observable is to force the Turkish locale
+// (LC_ALL=tr_TR.UTF-8) in a subprocess: under that locale, 'İ' (LATIN
+// CAPITAL LETTER I WITH DOT ABOVE) case-folds to plain 'i' via
+// toLocaleLowerCase, but toLowerCase() ALWAYS folds it to 'i' + a combining
+// dot-above (U+0307), regardless of locale. A heading '## İSTANBUL' must
+// therefore NEVER satisfy required section 'istanbul' — under the pinned
+// plain .toLowerCase() rule this holds in EVERY locale; a toLocaleLowerCase
+// mutation would flip it to satisfied specifically under a Turkish locale.
+test('checkSections: locale-independence — `## İSTANBUL` never satisfies `istanbul`, even under a forced Turkish locale (catches a toLowerCase -> toLocaleLowerCase mutation)', () => {
+  const script = `
+    import assert from 'node:assert/strict'
+    import { checkSections } from ${JSON.stringify(join(ROOT, 'scripts/cmux/ladder.mjs'))}
+    const body = '## İSTANBUL\\ncontent'
+    const missing = checkSections(body, ['istanbul'])
+    assert.deepEqual(missing, ['istanbul'])
+    console.log('LOCALE_OK')
+  `
+  const res = spawnSync(process.execPath, ['--input-type=module', '--eval', script], {
+    encoding: 'utf8',
+    env: { ...process.env, LANG: 'tr_TR.UTF-8', LC_ALL: 'tr_TR.UTF-8' },
+  })
+  assert.equal(res.status, 0, `subprocess failed: ${res.stderr}`)
+  assert.match(res.stdout, /LOCALE_OK/)
+})
+
+// PROPOSED-MEMORY-DELTAS heading-vs-prose (qa-lead gate audit): the roster
+// requires this exact section for every lead role. A heading whose body is
+// literally the word "none" must satisfy it (per V2:333's "may say
+// 'none'"); a bare PROSE line with no heading marker at all must not — the
+// rule matches markdown HEADINGS, never a colon-delimited prose sentence
+// that merely happens to start with the same words.
+test('checkSections: `### Proposed memory deltas` heading with body "none" satisfies the section', () => {
+  const body = '### Proposed memory deltas\nnone\n'
+  assert.deepEqual(checkSections(body, ['Proposed memory deltas']), [])
+})
+
+test('checkSections: a bare prose line `Proposed memory deltas: none` (no heading marker) does NOT satisfy the section', () => {
+  const body = 'Proposed memory deltas: none\n'
+  assert.deepEqual(checkSections(body, ['Proposed memory deltas']), ['Proposed memory deltas'])
+})
+
+test('checkSections: a `~~~` fenced fake Proposed memory deltas heading does NOT count (tilde-fence variant of the fence-stripping rule)', () => {
+  const body = '~~~\n### Proposed memory deltas\nnone\n~~~\ncontent'
+  assert.deepEqual(checkSections(body, ['Proposed memory deltas']), ['Proposed memory deltas'])
+})
+
+test('checkSections: an unclosed fence swallows a real heading to EOF, so the required section is reported missing', () => {
+  const body = '# Title\n\n```\nunclosed fence content\n### Handover Spec\nmore content'
+  assert.deepEqual(checkSections(body, ['Handover Spec']), ['Handover Spec'])
+})
+
+test('checkSections: requiredSections defaults to empty via `|| []` guard', () => {
+  const body = '## Handover Spec\ncontent'
+  assert.deepEqual(checkSections(body, null), [])
+  assert.deepEqual(checkSections(body, undefined), [])
 })
 
 test('stripFences: an unclosed fence strips to EOF', () => {
@@ -1006,6 +1109,41 @@ test('renderReturn: throws for kind json (runs only for markdown)', () => {
   const record = buildRecord() // default kind json
   const envelope = buildEnvelope()
   assert.throws(() => renderReturn(record, envelope))
+})
+
+// WRITE DISCIPLINE (source-level, qa-lead gate audit + acceptance criteria):
+// renderReturn is the one function in the repo that writes the doc-tab
+// RENDER path — a delete-then-recreate there bricks the mounted cmux panel
+// permanently (design R16 / V2:558). This extracts renderReturn's own
+// function body by brace-counting (not a substring match, so it can't be
+// fooled by a comment) and asserts it contains no unlinkSync/rmSync call at
+// all — the ONLY legitimate write shape for this function is tmp+rename
+// (writeFileSync(tmp) then renameSync(tmp, path)), which the function body
+// must also still contain. Kills the mutation "replace tmp+rename with
+// rm-then-write on the render path".
+function extractFunctionBody(source, startRe) {
+  const m = startRe.exec(source)
+  assert.ok(m, `could not locate function matching ${startRe} in source`)
+  const braceStart = source.indexOf('{', m.index)
+  assert.ok(braceStart !== -1, 'no opening brace found for matched function')
+  let depth = 0
+  for (let i = braceStart; i < source.length; i += 1) {
+    if (source[i] === '{') depth += 1
+    else if (source[i] === '}') {
+      depth -= 1
+      if (depth === 0) return source.slice(braceStart, i + 1)
+    }
+  }
+  throw new Error('unbalanced braces while extracting function body')
+}
+
+test('WRITE DISCIPLINE: renderReturn\'s function body contains no unlinkSync/rmSync call and still uses the tmp+rename shape', () => {
+  const source = readFileSync(join(ROOT, 'scripts/cmux/ladder.mjs'), 'utf8')
+  const body = extractFunctionBody(source, /export function renderReturn\(/)
+  assert.equal(/\bunlinkSync\s*\(/.test(body), false, 'renderReturn must never unlink the render path — tmp+rename only')
+  assert.equal(/\brmSync\s*\(/.test(body), false, 'renderReturn must never rm the render path — tmp+rename only')
+  assert.match(body, /writeFileSync\(/)
+  assert.match(body, /renameSync\(/)
 })
 
 // ---------------------------------------------------------------------------

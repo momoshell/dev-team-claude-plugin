@@ -4,7 +4,7 @@ Self-contained: with only `orchestration.md` plus this file, an orchestrator can
 
 ## 1. Operating protocol
 
-**Every role the roster marks `pane: true` is dispatched through `dispatch.mjs`, never the Agent tool.** Today that's `coder`; write dispatches generically so the rule doesn't go stale when reviewer roles gain panes. Common options on every verb: `--checkout <primary-checkout-dir> --repo <repo-slug> --root <task-artifacts-root> --config <path-to-json>` (`--plugin-root <dir>` is also accepted). Verbatim invocation for a `dispatch`:
+**Every role the roster marks `pane: true` is dispatched through `dispatch.mjs`, never the Agent tool.** That's `coder`, `plan-reviewer`, `architecture-lead`, `backend-lead`, `frontend-lead`, `devops-lead`, and `qa-lead` as of this slice; write dispatches generically so the rule doesn't go stale when the remaining reviewer roles gain panes. Common options on every verb: `--checkout <primary-checkout-dir> --repo <repo-slug> --root <task-artifacts-root> --config <path-to-json>` (`--plugin-root <dir>` is also accepted). Verbatim invocation for a `dispatch`:
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/scripts/cmux/dispatch.mjs" dispatch --task <slug> --slice <slice_id> --role <role> --spec <path> [--attempt N] [--settle-ms N]
@@ -36,7 +36,13 @@ Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = 
 
 **Teardown order at ship** mirrors `teardownCmd`: `tree --json --all` to enumerate → `close-surface` each surface in the workspace → `close-workspace` (skipped, logged as a no-op, when the cached preflight says it's unavailable) → `tree --json --all` again to verify → task dir and state dir archived or deleted. Dispatcher-created worktrees are removed only when clean **and** merged; leftovers are kept and reported in `leftover_worktrees`. Never `--force`.
 
-**Write discipline:** any file backing a live panel is written tmp+rename or in-place — never rm-then-recreate. Deleting it outside cmux's ~500ms watcher retry bricks the panel.
+**Write discipline:** any file backing a live panel is written tmp+rename or in-place — never rm-then-recreate. Deleting it can outrun cmux's own file watcher and brick the panel (the retry window is design prose, never a spike-measured number — do not quote one).
+
+**Doc-tab mount is a three-rung fallback chain, in order — each rung is attempted only if the previous one failed:** (1) `markdown open <path> --surface <terminal>`, moving into the target pane with `--focus false` if it lands elsewhere, then `reorder-surface --before <terminal>`; (2) `new-surface --type browser --url file://<path> --pane <pane> --focus false`, same move/reorder shape; (3) `markdown open <path>` with no `--surface`, left in its own pane. Failure of all three degrades to a logged no-op — a doc-tab failure never fails a dispatch, a resolution, or a close. On return, the rendered doc tab is re-presented as the pane's first tab (`reorder-surface --before` alone, when a doc tab is already mounted; a fresh mount via the chain above, otherwise) — no focus verb is ever issued at any rung.
+
+**Phase pill:** `node dispatch.mjs phase --set <planning|building|gate>` sets the frozen `devteam-phase` status key for the task's bound workspace. `workspace` fires `planning` and a successful `dispatch` fires `building`, both automatically; `gate` is never fired from code — the orchestrator invokes `phase --set gate` itself at the review gate.
+
+**Doc-tab render files follow the same never-rm write discipline named above:** the parent-render pass (on a validated return) overwrites the placeholder file in place, tmp+rename, exactly like every other panel-backing write — it is never unlinked first.
 
 **Shared context is written once:** the Tier-3 discovery digest goes to the task dir's `context.md` a single time and is referenced by absolute path in every kickoff — never pasted into N prompts.
 
@@ -67,14 +73,15 @@ These are what `dispatch.mjs` invokes on your behalf. The orchestrator hand-type
 | `send-key <surface> enter` | the submit; always paired after `send` |
 | `rename-tab <surface> <title>` | sets the `{agent type} ({model})` tab title |
 | `markdown open <path> --surface <surface>` | mounts a doc panel; no `--json`, returns no id |
-| `move-surface <surface> --pane <pane>` | doc-tab placement |
+| `move-surface <surface> --pane <pane> --focus false` | doc-tab placement; never focuses |
+| `new-surface --type browser\|terminal\|agent-session --url <u> [--pane <id>\|--workspace <id>] --focus false` | mints a surface directly (no `--json`, returns no id — same tree-diff recovery); NOT capabilities-gated (no confidently-known RPC method name, so it is never preflight-gated on one) |
 | `reorder-surface <surface> --before <surface>` | doc-tab ordering |
 | `close-surface <id>` | closes one surface |
 | `close-workspace <id>` | closes the workspace; may no-op while a live agent occupies a pane — NOT `workspace close` |
 | `top --format tsv` | per-surface CPU; triage step 1 |
 | `events [--after <seq> --limit <n> --no-ack --no-heartbeat]` | latency optimization only; ids are boot-scoped, a persisted cursor does not survive a cmux restart |
 | `wait-for -S <token>` | consume-once latch, durable across restart |
-| `set-status <key> <value> [--icon --color --priority]` | status pill |
+| `set-status <key> <value> [--icon --color --priority] [--workspace <id>]` | status pill; the frozen `devteam-phase` key takes exactly one of `planning`, `building`, `gate` — always passed with an explicit `--workspace <id>`, never the caller's own workspace by default |
 | `config doctor` | environment doctor |
 | `read-screen --surface <uuid> --lines 40` | orchestrator-manual triage only; diagnostics, never a result channel — exact flags are hedged above, not frozen |
 | `docs <topic>` | canonical docs URLs for the installed version |

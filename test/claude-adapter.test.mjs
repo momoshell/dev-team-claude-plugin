@@ -18,9 +18,9 @@ import { tmpdir } from 'node:os'
 import { ROOT } from './helpers.mjs'
 import { resolveRoots, taskPaths, resolveRole } from '../scripts/cmux/resolve.mjs'
 import {
-  newDispatchId, buildRecord, snapshotWorkerPlugin, WORKER_PLUGIN_MANIFEST,
+  newDispatchId, buildRecord, snapshotWorkerPlugin, WORKER_PLUGIN_MANIFEST, buildArgv,
 } from '../scripts/cmux/record.mjs'
-import { NONCE_PREFIX } from '../scripts/cmux/contract.mjs'
+import { NONCE_PREFIX, PANE_ROLES } from '../scripts/cmux/contract.mjs'
 
 const rosterDefault = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/roster.default.json'), 'utf8'))
 const ADAPTER_PATH = join(ROOT, 'scripts/cmux/adapter-claude.mjs')
@@ -241,6 +241,102 @@ test('run: happy path — one fake-claude invocation, fresh valid return, exit 0
   assert.ok(log.length > 0)
   assert.equal(log.includes(NONCE_PREFIX), false)
   assert.equal(result.stderr.includes(NONCE_PREFIX), false)
+})
+
+// ---------------------------------------------------------------------------
+// be-06-01 S10 — B-1 argv invariants for EVERY newly pane-enabled role.
+// Driven off the imported PANE_ROLES constant (not a hand-written list) so
+// #8's flip (code-reviewer / code-reviewer-deep) inherits these assertions
+// automatically. buildArgv is pure (record.mjs) — no subprocess spawn
+// needed, this asserts against the composed argv directly.
+// ---------------------------------------------------------------------------
+
+// argvSegmentAfter(argv, flag) -> the argv elements between `flag` and the
+// next '--'-prefixed flag (or end of argv) — e.g. every rule that follows
+// --disallowedTools / --allowedTools.
+function argvSegmentAfter(argv, flag) {
+  const idx = argv.indexOf(flag)
+  if (idx === -1) return []
+  const seg = []
+  for (let i = idx + 1; i < argv.length && !argv[i].startsWith('--'); i += 1) {
+    seg.push(argv[i])
+  }
+  return seg
+}
+
+// frontmatterDisallowedTools(role) -> string[] — the comma-split
+// `disallowedTools:` frontmatter line for agents/<role>.md, or [] when the
+// role declares none (true for every PANE_ROLES member in this slice; #8's
+// flip adds three roles that DO declare one, which is exactly what this
+// generic, PANE_ROLES-driven loop is for). Scoped to the frontmatter block
+// (between the leading `---` fences) only — a `disallowedTools:`-looking
+// line anywhere in the prose body must never be mistaken for the real one.
+function frontmatterDisallowedTools(role) {
+  const text = readFileSync(join(ROOT, 'agents', `${role}.md`), 'utf8')
+  const fenceMatch = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?/)
+  const frontmatter = fenceMatch ? fenceMatch[1] : ''
+  const m = frontmatter.match(/^disallowedTools:\s*(.+)$/m)
+  if (!m) return []
+  return m[1].split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+// qa should-fix: frontmatterDisallowedTools is vacuous over PANE_ROLES today
+// (no member declares disallowedTools) — a positive control against
+// code-reviewer (out of PANE_ROLES in this slice, flips in #8) proves the
+// helper actually reads the real frontmatter value rather than always
+// returning [].
+test('frontmatterDisallowedTools positive control: code-reviewer.md declares disallowedTools: Edit, Write, NotebookEdit', () => {
+  assert.deepEqual(frontmatterDisallowedTools('code-reviewer'), ['Edit', 'Write', 'NotebookEdit'])
+})
+
+test('B-1 argv invariants: every PANE_ROLES role composes an argv with no bare Edit/Write/NotebookEdit deny token, --tools exactly the roster tools array, no frontmatter disallowedTools leak, scoped grants exactly right, and a bare -- before the prompt', () => {
+  for (const role of PANE_ROLES) {
+    const { record } = buildTestRecord(role)
+    const argv = buildArgv(record)
+
+    // no bare Edit/Write/NotebookEdit token in --disallowedTools.
+    const disallowedSeg = argvSegmentAfter(argv, '--disallowedTools')
+    for (const bare of ['Edit', 'Write', 'NotebookEdit']) {
+      assert.equal(disallowedSeg.includes(bare), false, `role ${role}: --disallowedTools carries a bare ${bare} deny token`)
+    }
+
+    // --tools equals the roster's single top-level tools array exactly.
+    const toolsIdx = argv.indexOf('--tools')
+    assert.ok(toolsIdx !== -1, `role ${role}: missing --tools`)
+    assert.equal(argv[toolsIdx + 1], rosterDefault.tools.join(','), `role ${role}: --tools does not match roster.default.json's top-level tools array`)
+
+    // no string from the role's frontmatter disallowedTools reaches argv at all.
+    for (const token of frontmatterDisallowedTools(role)) {
+      assert.equal(argv.includes(token), false, `role ${role}: frontmatter disallowedTools token ${JSON.stringify(token)} leaked into argv`)
+    }
+
+    // scoped grants: asserted against the COMPOSED ARGV's --allowedTools
+    // segment, not record.profile.allow directly — argv is what actually
+    // reaches claude, and a divergence between the two would otherwise go
+    // undetected. For every isolation:'primary' role, exactly the two
+    // exact-path Edit rules expandGrants emits for the judgment profile
+    // appear there, with NO worktree or repo-wide Edit rule.
+    const allowedSeg = argvSegmentAfter(argv, '--allowedTools')
+    if (record.isolation === 'primary') {
+      const editRules = allowedSeg.filter((r) => r.startsWith('Edit('))
+      assert.equal(editRules.length, 2, `role ${role}: --allowedTools must carry exactly two Edit grants for isolation 'primary', got ${JSON.stringify(editRules)}`)
+      assert.ok(editRules.every((r) => /\/returns\/.*\.json\)$/.test(r) || /\/signals\/.*\.jsonl\)$/.test(r)), `role ${role}: expected only exact-path returns/signals Edit rules in --allowedTools, got ${JSON.stringify(editRules)}`)
+      assert.equal(editRules.some((r) => r.includes('/**)')), false, `role ${role}: a worktree/repo-wide Edit rule (**) must never appear in --allowedTools for isolation 'primary'`)
+    }
+    // Whole-argv sweep: no `Edit(` rule ever appears OUTSIDE the
+    // --allowedTools segment (e.g. leaked into --tools, --disallowedTools,
+    // or the kickoff positional).
+    const allowedSegSet = new Set(allowedSeg)
+    for (let i = 0; i < argv.length; i += 1) {
+      if (/^Edit\(/.test(argv[i]) && !allowedSegSet.has(argv[i])) {
+        assert.fail(`role ${role}: an Edit( rule (${argv[i]}) appears outside the --allowedTools segment`)
+      }
+    }
+
+    // a bare -- immediately precedes the prompt positional.
+    assert.equal(argv[argv.length - 2], '--', `role ${role}: expected a bare -- immediately before the prompt positional`)
+    assert.equal(argv[argv.length - 1], record.kickoff, `role ${role}: expected the prompt positional to be record.kickoff`)
+  }
 })
 
 // ---------------------------------------------------------------------------

@@ -350,16 +350,79 @@ switch (verb) {
     const renderPath = argv[2]
     const fromSurface = argAfter('--surface')
     const state = loadState()
-    const found = findSurfaceEntry(state, fromSurface)
-    if (!found) fail('not_found', 'Surface not found')
-    const newSurf = nextId(state)
-    found.pane.surface_ids.push(newSurf)
-    found.pane.surfaces.push({ id: newSurf, pane_id: found.pane.id, type: 'markdown', tty: null, title: renderPath })
-    saveState(state)
+    if (fromSurface) {
+      const found = findSurfaceEntry(state, fromSurface)
+      if (!found) fail('not_found', 'Surface not found')
+      const newSurf = nextId(state)
+      found.pane.surface_ids.push(newSurf)
+      found.pane.surfaces.push({ id: newSurf, pane_id: found.pane.id, type: 'markdown', tty: null, title: renderPath })
+      // qa should-fix test hook: a PRE-SEEDED state flag (never a new env
+      // switch — this is exactly the "pre-seed FAKE_CMUX_STATE" escape
+      // hatch), simulating a second, concurrent surface creation racing
+      // this one so a consumer's before/after tree diff finds TWO new
+      // surfaces instead of one (recoverNewId's own "expected exactly 1 new
+      // surface, found 2" ambiguity path — otherwise unreachable from a
+      // single synchronous fake invocation).
+      if (state._simulateConcurrentCreate) {
+        const raceSurf = nextId(state)
+        found.pane.surface_ids.push(raceSurf)
+        found.pane.surfaces.push({ id: raceSurf, pane_id: found.pane.id, type: 'markdown', tty: null, title: `${renderPath}.race` })
+      }
+      saveState(state)
+    } else {
+      // be-06-01 S7(b): `markdown open` WITHOUT --surface matches live cmux
+      // (tasks/cmux-mode/spike-findings.md:228) — it creates its own new
+      // pane + markdown surface rather than failing not_found. This is what
+      // mountDocTab's rung 3 depends on.
+      const win = state.windows[0]
+      const ws = win.workspaces[0]
+      const paneId = nextId(state)
+      const surfId = nextId(state)
+      ws.panes.push({
+        id: paneId,
+        workspace_id: ws.id,
+        surface_ids: [surfId],
+        selected_surface_id: surfId,
+        surfaces: [{ id: surfId, pane_id: paneId, type: 'markdown', tty: null, title: renderPath }],
+      })
+      saveState(state)
+    }
     // Live `markdown open` prints NOTHING — cmuxctl.mjs recovers the new
     // surface's id via tree-diff (recoverNewId), never from stdout. A fake
     // that printed the id would pass every test while breaking on the
     // first live run (qa-lead vacuity S2).
+    succeed('')
+    break
+  }
+
+  case 'new-surface': {
+    // be-06-01 S7(a): a `new-surface` case mutating topology, env-switch-free.
+    // With --pane, append a browser-type surface to that pane; without
+    // --pane (i.e. with --workspace), create a new pane holding it. Prints
+    // nothing — id recovery is tree-diff, exactly as `markdown open` above.
+    const type = argAfter('--type') || 'browser'
+    const targetPaneId = argAfter('--pane')
+    const state = loadState()
+    const newSurf = nextId(state)
+    if (targetPaneId) {
+      const targetPane = findPane(state, targetPaneId)
+      if (!targetPane) fail('not_found', 'Target pane not found')
+      targetPane.surfaces.push({ id: newSurf, pane_id: targetPane.id, type, tty: null, title: argAfter('--url') || '' })
+      targetPane.surface_ids.push(newSurf)
+    } else {
+      const wsId = argAfter('--workspace')
+      const entry = findWorkspaceEntry(state, wsId)
+      if (!entry) fail('not_found', 'Workspace not found')
+      const paneId = nextId(state)
+      entry.workspace.panes.push({
+        id: paneId,
+        workspace_id: entry.workspace.id,
+        surface_ids: [newSurf],
+        selected_surface_id: newSurf,
+        surfaces: [{ id: newSurf, pane_id: paneId, type, tty: null, title: argAfter('--url') || '' }],
+      })
+    }
+    saveState(state)
     succeed('')
     break
   }
@@ -383,6 +446,31 @@ switch (verb) {
   }
 
   case 'reorder-surface': {
+    // qa should-fix test hook: a PRE-SEEDED state flag (never a new env
+    // switch), simulating rung 2's live-unverified file:// BROWSER surface
+    // silently relocating away from the target pane between reorder-surface
+    // reporting success and mountDocTab's own post-mount verification
+    // re-read — otherwise unreachable from this deterministic fixture,
+    // where reorder-surface itself is normally a no-op. Gated on the moved
+    // surface's own type === 'browser' so this can only ever affect rung 2's
+    // surface — a rung 1 (markdown) reorder-surface call must never be
+    // relocated by this hook, or a future test could accidentally observe
+    // rung 1 "succeeding" with a silently-relocated surface.
+    const stateForVerificationFailCheck = loadState()
+    if (stateForVerificationFailCheck._simulateBrowserSurfaceRelocateOnReorder) {
+      const surfaceId = argv[1]
+      const found = findSurfaceEntry(stateForVerificationFailCheck, surfaceId)
+      if (found && found.surface.type === 'browser') {
+        found.pane.surfaces.splice(found.idx, 1)
+        found.pane.surface_ids = found.pane.surface_ids.filter((s) => s.toLowerCase() !== surfaceId.toLowerCase())
+        const decoyPaneId = nextId(stateForVerificationFailCheck)
+        const win = stateForVerificationFailCheck.windows[0]
+        const ws = win.workspaces[0]
+        found.surface.pane_id = decoyPaneId
+        ws.panes.push({ id: decoyPaneId, workspace_id: ws.id, surface_ids: [surfaceId], selected_surface_id: surfaceId, surfaces: [found.surface] })
+        saveState(stateForVerificationFailCheck)
+      }
+    }
     // Ordering itself is not asserted by any consumer of this fixture; the
     // invocation still needs to succeed and be logged.
     succeed('')

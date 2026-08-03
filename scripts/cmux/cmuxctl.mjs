@@ -13,6 +13,7 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { delimiter, dirname, isAbsolute, join, relative, resolve as resolvePath } from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 // The binary is ALWAYS this constant — never a literal 'cmux' elsewhere in
 // this module or in any test. Tests set CMUX_BIN to the fixture so no test
@@ -25,6 +26,7 @@ export const VERBS = Object.freeze([
   'ping', 'identify', 'capabilities', 'tree', 'new-window', 'new-workspace', 'new-pane',
   'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab',
   'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config', 'wait-for',
+  'new-surface',
 ])
 
 // Live `capabilities --json` (cmux 0.64.20) returns 255 RPC-style DOTTED
@@ -657,7 +659,37 @@ export function setStatus(key, value, opts = {}) {
   if (opts.icon) args.push('--icon', opts.icon)
   if (opts.color) args.push('--color', opts.color)
   if (opts.priority) args.push('--priority', opts.priority)
-  cmux('set-status', args)
+  if (opts.workspaceId) args.push('--workspace', opts.workspaceId)
+  const res = cmux('set-status', args)
+  if (!res.ok) {
+    // A wedged status pill was previously invisible (the result was
+    // discarded outright) — log one loud line naming the key/value so a
+    // stuck phase pill (or any other status) surfaces somewhere.
+    // eslint-disable-next-line no-console
+    console.error(`setStatus: set-status ${key} ${value} failed: ${res.error?.message}`)
+  }
+}
+
+// be-06-01 S9 — the workspace phase pill.
+export const PHASES = Object.freeze(['planning', 'building', 'gate'])
+
+/**
+ * setPhase(phase, { workspaceId }) -> void
+ * `set-status` targets $CMUX_WORKSPACE_ID by default (live-verified via
+ * `cmux set-status --help`), but this always passes --workspace explicitly
+ * — the dispatcher has the persisted workspace uuid in workspace.json and
+ * must never rely on the env default. Refuses (throws) BEFORE any spawn for
+ * an out-of-enum phase or a missing workspaceId. The key literal
+ * 'devteam-phase' is frozen.
+ */
+export function setPhase(phase, { workspaceId } = {}) {
+  if (!PHASES.includes(phase)) {
+    throw new Error(`setPhase: phase must be one of ${PHASES.join('|')}, got ${JSON.stringify(phase)}`)
+  }
+  if (typeof workspaceId !== 'string' || workspaceId === '') {
+    throw new Error('setPhase: workspaceId is required')
+  }
+  setStatus('devteam-phase', phase, { workspaceId })
 }
 
 export function closeSurface(id) {
@@ -671,9 +703,147 @@ export function closeWorkspace(id) {
 }
 
 /**
+ * findDocTabSurface(t, { paneId, terminalSurfaceId }) -> { id: string|null, ambiguous: boolean }
+ * Candidates are the given pane's surfaces other than terminalSurfaceId; if
+ * any candidate carries type === 'markdown', the candidate set narrows to
+ * those. `id` is set iff exactly one candidate remains. `ambiguous` is true
+ * iff MORE THAN ONE candidate remains after narrowing (never true when
+ * `id` is set, never true when zero candidates remain — "no doc tab" and
+ * "can't tell which" are DISTINCT outcomes; treating both as "not mounted"
+ * is exactly the fail-open hole that let an ambiguous pane accumulate
+ * panels forever). NEVER throws.
+ */
+export function findDocTabSurface(t, { paneId, terminalSurfaceId } = {}) {
+  try {
+    const pane = locate(t, paneId)?.pane
+    if (!pane) return { id: null, ambiguous: false }
+    let candidates = (pane.surfaces || []).filter((s) => s.id !== terminalSurfaceId)
+    if (candidates.length === 0) return { id: null, ambiguous: false }
+    const markdownCandidates = candidates.filter((s) => s.type === 'markdown')
+    if (markdownCandidates.length > 0) candidates = markdownCandidates
+    if (candidates.length === 1) return { id: candidates[0].id, ambiguous: false }
+    return { id: null, ambiguous: true }
+  } catch {
+    return { id: null, ambiguous: false }
+  }
+}
+
+/**
+ * reorderDocTabFirst({ paneId, terminalSurfaceId }) -> boolean
+ * Fetches a FRESH tree, resolves the doc tab via findDocTabSurface, and on a
+ * hit issues `reorder-surface <docId> --before <terminalSurfaceId>` and
+ * nothing else. An AMBIGUOUS pane (>=2 markdown candidates) is refused
+ * loudly — there is no way to know which surface to reorder, so this never
+ * guesses. NEVER throws, NEVER focuses.
+ */
+export function reorderDocTabFirst({ paneId, terminalSurfaceId } = {}) {
+  try {
+    const t = tree({ all: true })
+    const found = findDocTabSurface(t, { paneId, terminalSurfaceId })
+    if (found.ambiguous) {
+      // eslint-disable-next-line no-console
+      console.error(`reorderDocTabFirst: pane ${paneId} has more than one doc-tab candidate — ambiguous, refusing to guess`)
+      return false
+    }
+    if (!found.id) return false
+    const res = cmux('reorder-surface', [found.id, '--before', terminalSurfaceId])
+    if (!res.ok) {
+      // eslint-disable-next-line no-console
+      console.error(`reorderDocTabFirst: reorder-surface failed: ${res.error?.message}`)
+      return false
+    }
+    return true
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`reorderDocTabFirst: unexpected failure: ${err.message}`)
+    return false
+  }
+}
+
+// RungAbortError — an id-recovery ambiguity (concurrent creation: "expected
+// exactly 1 new surface") is NOT a rung capability failure; it is thrown to
+// ABORT THE WHOLE CHAIN rather than advance to the next rung, since
+// advancing would create yet another surface on top of an already-ambiguous
+// set, amplifying orphan creation under wave dispatch. mountDocTab's own
+// try/catch turns this into a single null return — it never re-throws past
+// this module's public surface (NEVER throws stays true for every export).
+class RungAbortError extends Error {}
+
+// abandonOrphan(surfaceId, paneId, rungLabel, reason) — a surface was
+// created by a rung but could not be placed (move-surface or reorder-surface
+// failed, or rung 2's post-mount placement verification failed). Best-effort
+// closeSurface in a try/catch (never throws either way — closeSurface's own
+// never-throw behavior is untouched), then ONE loud line naming the
+// orphaned id, the rung, the reason, and the pane it was in. The line says
+// "close attempted", never "closed" — closeSurface itself no-ops silently
+// when the target is already gone (requireTargetPresent), so this function
+// cannot truthfully claim the surface WAS closed, only that closing it was
+// attempted.
+function abandonOrphan(surfaceId, paneId, rungLabel, reason) {
+  try {
+    closeSurface(surfaceId)
+  } catch {
+    // best-effort only — never throw out of orphan handling
+  }
+  // eslint-disable-next-line no-console
+  console.error(`mountDocTab: ${rungLabel} created ${surfaceId} but could not place it (${reason}) — close attempted, pane ${paneId}`)
+}
+
+// attemptOpenRung: shared shape for rungs 1 and 2 of mountDocTab — run the
+// creation call, tree-diff to recover the new surface id, move it into
+// paneId if it landed elsewhere (--focus false, never focusing), then
+// reorder it ahead of terminalSurfaceId. Returns surfaceId on full success,
+// null on an ORDINARY rung failure (the caller falls through to the next
+// rung, after this function has already abandoned any surface it created).
+// Throws RungAbortError on an id-recovery ambiguity — see that class's own
+// comment for why that case must not simply return null.
+function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel }) {
+  const openRes = openFn()
+  if (!openRes.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`mountDocTab: ${rungLabel} failed: ${openRes.error?.message}`)
+    return null
+  }
+  const after = tree({ all: true })
+  let surfaceId
+  try {
+    surfaceId = recoverNewId(before, after, 'surface')
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`mountDocTab: ${rungLabel} id-recovery ambiguity — ABORTING the whole fallback chain (not advancing to the next rung): ${err.message}`)
+    throw new RungAbortError(err.message)
+  }
+  const loc = locate(after, surfaceId)
+  const landedPaneId = loc?.pane?.id ?? null
+  if (landedPaneId !== paneId) {
+    const moveRes = cmux('move-surface', [surfaceId, '--pane', paneId, '--focus', 'false'])
+    if (!moveRes.ok) {
+      abandonOrphan(surfaceId, landedPaneId ?? paneId, rungLabel, `move-surface failed: ${moveRes.error?.message}`)
+      return null
+    }
+  }
+  const reorderRes = cmux('reorder-surface', [surfaceId, '--before', terminalSurfaceId])
+  if (!reorderRes.ok) {
+    abandonOrphan(surfaceId, paneId, rungLabel, `reorder-surface failed: ${reorderRes.error?.message}`)
+    return null
+  }
+  return surfaceId
+}
+
+/**
  * mountDocTab({ renderPath, paneId, terminalSurfaceId }) -> surfaceId | null
- * NEVER throws, NEVER focuses. On any failure returns null and logs one
- * loud line — a doc-tab failure must not fail a dispatch.
+ * NEVER throws, NEVER focuses. Three-rung fallback chain, each rung
+ * attempted only if the previous failed:
+ *   r1 `markdown open <renderPath> --surface <terminalSurfaceId>`
+ *   r2 `new-surface --type browser --url <pathToFileURL(renderPath).href> --pane <paneId> --focus false`,
+ *      then a post-mount tree re-read verifies the surface actually landed
+ *      in <paneId> before trusting success (file:// acceptance is
+ *      live-unverified) — a verification failure falls through to rung 3.
+ *   r3 `markdown open <renderPath>` (no --surface, left in its own pane)
+ * An id-recovery ambiguity inside ANY rung (RungAbortError) aborts the
+ * whole chain immediately rather than advancing — see that class's comment.
+ * Failure of all three returns null and logs one loud line — a doc-tab
+ * failure must not fail a dispatch.
  */
 export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
   try {
@@ -683,29 +853,68 @@ export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
       console.error(`mountDocTab: terminal surface ${terminalSurfaceId} is gone from the fresh tree — no-op`)
       return null
     }
-    const openRes = cmux('markdown', ['open', renderPath, '--surface', terminalSurfaceId])
+
+    let rung1
+    try {
+      rung1 = attemptOpenRung(
+        before,
+        () => cmux('markdown', ['open', renderPath, '--surface', terminalSurfaceId]),
+        { paneId, terminalSurfaceId, rungLabel: 'rung 1 (markdown open --surface)' },
+      )
+    } catch (err) {
+      if (err instanceof RungAbortError) return null
+      throw err
+    }
+    if (rung1) return rung1
+
+    // Rung 2 (browser file://) is the one live-unverified rung — logged
+    // loudly on every use so a live acceptance run surfaces it regardless
+    // of eventual success.
+    // eslint-disable-next-line no-console
+    console.error('mountDocTab: attempting rung 2 (new-surface browser file://) — file:// acceptance is live-unverified')
+    const beforeR2 = tree({ all: true })
+    const fileUrl = pathToFileURL(renderPath).href
+    let rung2
+    try {
+      rung2 = attemptOpenRung(
+        beforeR2,
+        () => cmux('new-surface', ['--type', 'browser', '--url', fileUrl, '--pane', paneId, '--focus', 'false']),
+        { paneId, terminalSurfaceId, rungLabel: 'rung 2 (new-surface browser)' },
+      )
+    } catch (err) {
+      if (err instanceof RungAbortError) return null
+      throw err
+    }
+    if (rung2) {
+      // Post-mount placement verification (fix for rung 2's live-unverified
+      // file:// acceptance): re-read the tree and require the surface to
+      // actually be present in the target pane before trusting success. A
+      // verification failure is an ORDINARY rung failure (falls through to
+      // rung 3), not an abort — only an id-recovery ambiguity aborts.
+      const verifyTree = tree({ all: true })
+      const stillPresent = (locate(verifyTree, paneId)?.pane?.surfaces || []).some((s) => s.id === rung2)
+      if (stillPresent) return rung2
+      abandonOrphan(rung2, paneId, 'rung 2 (new-surface browser)', 'post-mount placement verification failed')
+    }
+
+    const beforeR3 = tree({ all: true })
+    const openRes = cmux('markdown', ['open', renderPath])
     if (!openRes.ok) {
       // eslint-disable-next-line no-console
-      console.error(`mountDocTab: markdown open failed: ${openRes.error?.message}`)
+      console.error(`mountDocTab: rung 3 (markdown open, no --surface) failed — all three rungs exhausted: ${openRes.error?.message}`)
       return null
     }
-    const after = tree({ all: true })
-    const surfaceId = recoverNewId(before, after, 'surface')
-    const loc = locate(after, surfaceId)
-    if (loc?.pane?.id !== paneId) {
-      const moveRes = cmux('move-surface', [surfaceId, '--pane', paneId])
-      if (!moveRes.ok) {
-        // eslint-disable-next-line no-console
-        console.error(`mountDocTab: move-surface failed: ${moveRes.error?.message}`)
-        return null
-      }
-    }
-    const reorderRes = cmux('reorder-surface', [surfaceId, '--before', terminalSurfaceId])
-    if (!reorderRes.ok) {
+    let surfaceId
+    try {
+      const afterR3 = tree({ all: true })
+      surfaceId = recoverNewId(beforeR3, afterR3, 'surface')
+    } catch (err) {
       // eslint-disable-next-line no-console
-      console.error(`mountDocTab: reorder-surface failed: ${reorderRes.error?.message}`)
+      console.error(`mountDocTab: rung 3 (markdown open, no --surface) succeeded but id recovery failed: ${err.message}`)
       return null
     }
+    // eslint-disable-next-line no-console
+    console.error('mountDocTab: rung 3 (markdown open, no --surface) succeeded — doc tab left in its own pane, not moved or reordered')
     return surfaceId
   } catch (err) {
     // eslint-disable-next-line no-console

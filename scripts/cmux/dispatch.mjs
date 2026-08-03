@@ -42,9 +42,12 @@ import {
 import {
   PreflightError, isValidPreflightCache,
   preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab,
-  closeSurface, closeWorkspace, mountDocTab, readEvents, tree,
+  closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
+  PHASES, setPhase, readEvents, tree,
 } from './cmuxctl.mjs'
-import { collectFsState, classify, reconcile, evaluatePostcondition } from './ladder.mjs'
+import {
+  collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn,
+} from './ladder.mjs'
 import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -481,7 +484,7 @@ export function writeCompletionNonce(noncePath) {
 // (or '' if absent) — readExecutionMode owns the parse.
 // ---------------------------------------------------------------------------
 
-const MUTATING_VERBS = new Set(['workspace', 'dispatch', 'await', 'close', 'teardown'])
+const MUTATING_VERBS = new Set(['workspace', 'dispatch', 'await', 'close', 'teardown', 'phase'])
 
 function assertExecutionModeCmux(verb, configText) {
   if (!MUTATING_VERBS.has(verb)) return
@@ -575,6 +578,18 @@ export function workspaceCmd(args, ctx) {
     window_id: windowId, workspace_id: workspaceId,
     initial_pane_id: initialPaneId, initial_surface_id: initialSurfaceId,
   })
+
+  // S9 phase pill: entering `workspace` is the 'planning' phase.
+  // setPhase('planning', { workspaceId }) is provably non-throwing here
+  // ('planning' is always valid and workspaceId is always freshly minted
+  // above) — wrapped anyway (qa should-fix) so a future change to setPhase
+  // itself can never turn a successful `workspace` into a reported failure;
+  // any throw is swallowed and logged loudly instead.
+  try {
+    setPhase('planning', { workspaceId })
+  } catch (err) {
+    log(`workspace: setPhase('planning') failed — phase pill not updated: ${err.message}`)
+  }
 
   return { code: 0, json: { window_id: windowId, workspace_id: workspaceId, initial_surface_id: initialSurfaceId } }
 }
@@ -853,6 +868,16 @@ export function dispatchCmd(args, ctx) {
     mountDocTab({ renderPath: renderPathFor(record), paneId, terminalSurfaceId: surfaceId })
   }
 
+  // S9 phase pill: a successful dispatch is the 'building' phase. This
+  // runs AFTER sendLine/bindRecord — a worker is already live at this
+  // point, so an unguarded throw here (however unlikely today) must never
+  // report a failed dispatch for a live worker. Swallowed and logged loudly.
+  try {
+    setPhase('building', { workspaceId: workspaceState.workspace_id })
+  } catch (err) {
+    log(`dispatch: setPhase('building') failed — phase pill not updated: ${err.message}`)
+  }
+
   // (11) print result and exit — non-blocking, never waits for the worker.
   return {
     code: 0,
@@ -992,7 +1017,7 @@ export function awaitCmd(args, ctx, deps = {}) {
         const fsState = collectFsState({ record, paths: { exitPath: sidecars.exit, gatePath: sidecars.gate } })
         const classification = classify({ record, fsState, tree: null, now: now(), quietState: null, topIdle: null })
         if (classification.state !== 'running' && classification.state !== 'attention') {
-          resolvedNow.push({ id, classification, fsState })
+          resolvedNow.push({ id, record, classification, fsState })
         }
       }
 
@@ -1022,6 +1047,14 @@ export function awaitCmd(args, ctx, deps = {}) {
       if (resolvedNow.length > 0) {
         for (const r of resolvedNow) remaining.delete(r.id)
         writeTextAtomic(paths.cursorPath, String(cursor))
+        // S8: render + present the doc tab for every dispatch that just
+        // resolved 'completed', immediately before this return. Never a
+        // resolution failure — presentReturn itself never throws.
+        for (const r of resolvedNow) {
+          if (r.classification.state === 'completed') {
+            presentReturn(r.record, roleDefForRecovery(ctx, r.record.role))
+          }
+        }
         // NOTE (S4, resolution durability — intentionally deferred): await
         // reports a resolution but does not itself call terminateRecord —
         // `close` (or #7's own protocol) is the one that writes the
@@ -1075,6 +1108,24 @@ function gitPorcelain(worktreePath) {
   }
 }
 
+// paneExistsInTree(liveTree, paneId) -> boolean. Mirrors cmuxctl.mjs's own
+// locate() shape (tree === { windows: [{ workspaces: [{ panes: [{ id,
+// surfaces }] }] }] }) without importing that module-private helper — used
+// by statusCmd's re-mount guard to skip a record whose bound pane is
+// already gone from the ALREADY-fetched liveTree (fix for the qa should-fix
+// on the re-mount loop walking terminal/pane-gone records every poll).
+function paneExistsInTree(liveTree, paneId) {
+  if (!liveTree) return false
+  for (const w of liveTree.windows || []) {
+    for (const ws of w.workspaces || []) {
+      for (const p of ws.panes || []) {
+        if (p.id === paneId) return true
+      }
+    }
+  }
+  return false
+}
+
 // lifecycle S12: role info (doc_tab, etc.) is read from roster.snapshot.json
 // in PREFERENCE to the live, mutable roster — the snapshot is written once,
 // at first dispatch, so an edit to the live roster after that point (or a
@@ -1088,6 +1139,57 @@ function roleDefForRecovery(ctx, role) {
   }
   log(`roster.snapshot.json is missing, unreadable, or lacks role ${JSON.stringify(role)} — falling back to the live roster (may have drifted since dispatch)`)
   return (ctx.roster.roles || {})[role] || {}
+}
+
+// ---------------------------------------------------------------------------
+// presentReturn — S8: render the validated markdown return into the doc tab
+// and make that tab the pane's first tab on return. Module-local, never
+// exported to workers. NEVER throws, NEVER focuses; a failure logs one line
+// and is NOT a resolution failure — it must never fail a dispatch, a
+// resolution, or a close. Does NOT call terminateRecord (who-terminates
+// after await resolves stays #7's call, dispatch.mjs:1025-1032).
+// ---------------------------------------------------------------------------
+function presentReturn(record, roleDef) {
+  try {
+    if (!record.surface) return { rendered: false, presented: false }
+    if (!roleDef || !roleDef.doc_tab) return { rendered: false, presented: false }
+
+    // Re-read record.return_path (never trust an already-classified
+    // envelope from an earlier tick) and re-validate read-only.
+    const returnText = readTextOrNull(record.return_path)
+    const validation = validateReturn(record, returnText)
+    if (!validation.ok || record.return.kind !== 'markdown') {
+      return { rendered: false, presented: false }
+    }
+
+    // renderReturn's first call site anywhere (ladder.mjs:434) — only on a
+    // fresh, envelope-valid, kind:'markdown' return.
+    renderReturn(record, validation.envelope)
+
+    const paneId = record.surface.pane_id
+    const terminalSurfaceId = record.surface.surface_id
+    const liveTreeSnapshot = tree({ all: true })
+    const found = findDocTabSurface(liveTreeSnapshot, { paneId, terminalSurfaceId })
+    // Fail CLOSED on ambiguity: an ambiguous pane (>=2 markdown candidates)
+    // must never be treated as "not mounted" — that read is exactly what let
+    // an ambiguous pane accumulate panels forever. Skip the mount (the
+    // divergent direction) and log loudly instead of guessing which surface
+    // to reorder.
+    let presented
+    if (found.ambiguous) {
+      log(`presentReturn: dispatch ${record.dispatch_id} pane ${paneId} has an ambiguous doc-tab candidate set — skipping mount/reorder`)
+      presented = false
+    } else if (found.id) {
+      presented = reorderDocTabFirst({ paneId, terminalSurfaceId })
+    } else {
+      presented = mountDocTab({ renderPath: renderPathFor(record), paneId, terminalSurfaceId }) != null
+    }
+
+    return { rendered: true, presented }
+  } catch (err) {
+    log(`presentReturn: unexpected failure for dispatch ${record.dispatch_id}: ${err.message} — a doc-tab failure is never a resolution failure`)
+    return { rendered: false, presented: false }
+  }
 }
 
 export function closeCmd(args, ctx) {
@@ -1148,10 +1250,10 @@ export function closeCmd(args, ctx) {
     if (roleDef.doc_tab) {
       // doc-tab roles keep the terminal surface; re-ordering the doc tab
       // first is a within-pane selection (never focus-pane / window focus).
-      // Unreachable under the Phase-1 PANE_ROLES gate (no role currently
-      // ships pane:true and doc_tab:true together) — wired for forward
-      // compatibility, intentionally a no-op here until #7 exposes a
-      // reorder-surface primitive on cmuxctl.mjs for a bare doc-tab id.
+      // S8: render + present the return one more time on close (idempotent
+      // — a no-op if presentReturn already ran from awaitCmd) so the doc
+      // tab is current even if `close` is invoked without a prior `await`.
+      presentReturn(record, roleDef)
       log(`close: dispatch ${record.dispatch_id} is a doc-tab role — terminal surface kept`)
     } else {
       closeSurface(record.surface.surface_id)
@@ -1218,8 +1320,36 @@ export function statusCmd(args, ctx) {
   for (const record of records) {
     const roleDef = roleDefForRecovery(ctx, record.role)
     if (!roleDef.doc_tab || !record.surface) continue
-    if (liveTree) {
-      mountDocTab({ renderPath: renderPathFor(record), paneId: record.surface.pane_id, terminalSurfaceId: record.surface.surface_id })
+    if (!liveTree) continue
+    const paneId = record.surface.pane_id
+    const terminalSurfaceId = record.surface.surface_id
+    // Gate on pane liveness ALONE, never on record.outcome. closeCmd
+    // deliberately KEEPS a doc-tab role's terminal surface and pane (never
+    // closeSurface for those), so a record that already closed 'ok' can
+    // still have a perfectly live pane whose doc tab needs recovering after
+    // a cmux restart (S20) — "the architecture-package viewer stays open
+    // for the whole task" is a design invariant, not just a while-running
+    // one. The bound pane itself must still be present in the
+    // ALREADY-fetched liveTree — a pane gone from the tree (not just its
+    // doc-tab surface) is nothing this loop can safely re-mount into, and
+    // is exactly the noise case (a torn-down/aborted record) this check
+    // suppresses instead.
+    if (!paneExistsInTree(liveTree, paneId)) continue
+    // S8 double-mount guard: findDocTabSurface against the ALREADY-fetched
+    // liveTree (never a fresh re-fetch here) — a doc tab already present
+    // skips mountDocTab outright. Without this, every `status` call would
+    // mount another panel for every pane+doc_tab role (S4 made six such
+    // roles; before that this loop was a structural no-op). An AMBIGUOUS
+    // pane (>=2 markdown candidates) is fail-CLOSED: skip the mount and log
+    // loudly rather than guess or pile on a third panel — mounting is the
+    // divergent direction, skipping self-corrects.
+    const found = findDocTabSurface(liveTree, { paneId, terminalSurfaceId })
+    if (found.ambiguous) {
+      log(`status: dispatch ${record.dispatch_id} pane ${paneId} has an ambiguous doc-tab candidate set — skipping re-mount`)
+      continue
+    }
+    if (!found.id) {
+      mountDocTab({ renderPath: renderPathFor(record), paneId, terminalSurfaceId })
     }
   }
 
@@ -1319,6 +1449,28 @@ function archiveOrDelete(dir, archiveBaseDir, archive) {
 }
 
 // ---------------------------------------------------------------------------
+// phase — S9. `phase --set <planning|building|gate>`. 'gate' is never fired
+// from code (only OUTCOME_MAPPING/workspaceCmd/dispatchCmd fire 'planning'/
+// 'building') — the orchestrator invokes `phase --set gate` directly.
+// ---------------------------------------------------------------------------
+
+export function phaseCmd(args, ctx) {
+  const { paths } = ctx
+  if (!args.set) {
+    throw new UsageError('phase requires --set <planning|building|gate>')
+  }
+  if (!PHASES.includes(args.set)) {
+    throw new UsageError(`phase: --set must be one of ${PHASES.join('|')}, got ${JSON.stringify(args.set)}`)
+  }
+  const workspaceState = readJsonOrWarn(join(paths.stateDir, 'workspace.json'), 'workspace.json')
+  if (!workspaceState) {
+    throw new OperationalError('refused: no workspace bound for this task — run `workspace` first')
+  }
+  setPhase(args.set, { workspaceId: workspaceState.workspace_id })
+  return { code: 0, json: { phase: args.set } }
+}
+
+// ---------------------------------------------------------------------------
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
@@ -1330,6 +1482,7 @@ const COMMANDS = {
   close: closeCmd,
   status: statusCmd,
   teardown: teardownCmd,
+  phase: phaseCmd,
 }
 
 function printResult(result) {

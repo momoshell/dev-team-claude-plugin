@@ -32,11 +32,13 @@ const {
   readExecutionMode, EXECUTION_MODES, OUTCOME_MAPPING, mapOutcome, applyPostconditionOverride,
   parseArgs, buildContext, ensureWorktree, isDispatcherWorktree, removeWorktreeIfCleanAndMerged,
   writeCompletionNonce, adapterLaunchLine,
-  preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd,
+  preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd, phaseCmd,
   UsageError, OperationalError, main,
 } = await import(DISPATCH_PATH)
 
-const { PREFLIGHT_MESSAGES, formatPreflightMessage, closeSurface } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
+const {
+  PREFLIGHT_MESSAGES, formatPreflightMessage, closeSurface, tree, findDocTabSurface, createPane, mountDocTab,
+} = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
 const {
   readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
 } = await import(join(ROOT, 'scripts', 'cmux', 'record.mjs'))
@@ -64,6 +66,21 @@ function freshCmuxEnv(prefix) {
 function readLog(logPath) {
   if (!existsSync(logPath)) return []
   return readFileSync(logPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+}
+
+// captureStderr(fn) -> the joined string of everything fn writes to
+// process.stderr while it runs (dispatch.mjs's own log() writes there) —
+// still forwards to the real stderr so failures remain visible.
+function captureStderr(fn) {
+  const original = process.stderr.write.bind(process.stderr)
+  const chunks = []
+  process.stderr.write = (chunk, ...rest) => { chunks.push(String(chunk)); return original(chunk, ...rest) }
+  try {
+    fn()
+  } finally {
+    process.stderr.write = original
+  }
+  return chunks.join('')
 }
 
 // A real git repo (git init + one commit) — worktree tests build against a
@@ -121,7 +138,7 @@ process.env.PATH = `${FAKE_BIN_DIR}${delimiter}${process.env.PATH}`
 function writeValidReturn(record, bodyOverrides = {}) {
   const isMarkdown = record.return.kind === 'markdown'
   const body = isMarkdown
-    ? (record.return.required_sections || []).map((s) => `# ${s}\nok\n`).join('\n')
+    ? (record.return.required_sections || []).map((s) => `## ${s}\nok\n`).join('\n')
     : { status: 'done', reason: 'ok', changes: ['f.mjs — impl'], validation: 'node --test', ...bodyOverrides }
   const envelope = {
     schema_version: 1,
@@ -1041,6 +1058,30 @@ function buildAndBindRecord(ctx, { role, sliceId }) {
   })
 }
 
+// Same shape as buildAndBindRecord, but binds against a GENUINE pane+surface
+// (minted via createPane against the real workspace) rather than
+// buildAndBindRecord's fixed synthetic ids — presentReturn/mountDocTab need
+// an actual topology node to mount into, which the synthetic ids (never
+// created in the fake's tree) cannot provide.
+function buildAndBindRecordWithRealPane(ctx, { role, sliceId, workspaceId }) {
+  const dispatchId = newDispatchId()
+  const worktree = ensureWorktree({
+    roots: ctx.roots, repoSlug: ctx.repoSlug, taskSlug: ctx.taskSlug, sliceId,
+    primaryCheckout: ctx.primaryCheckout, dispatchId, worktreesIndexPath: ctx.paths.worktreesIndexPath,
+  })
+  const snapshot = snapshotWorkerPlugin({ pluginRoot: ctx.pluginRoot, snapshotDir: ctx.paths.snapshotDir, roles: ctx.roster.roles, profiles: ctx.roster.profiles })
+  const record = buildRecord({
+    roots: ctx.roots, paths: ctx.paths, roster: ctx.roster, resolved: ctx.roster.roles[role], pluginRoot: ctx.pluginRoot,
+    taskId: ctx.taskSlug, taskSlug: ctx.taskSlug, repoSlug: ctx.repoSlug, primaryCheckout: ctx.primaryCheckout, snapshot,
+    config: { createdByDispatcher: worktree ? worktree.created_by_dispatcher : undefined, sourceSliceId: worktree ? worktree.source_slice_id : undefined },
+    now: Date.now() - 50, dispatchId, attnUpstream: null,
+  }, { role, sliceId, attempt: 1, spec: { validation_commands: ['node --test'] } })
+  const recordPath = join(ctx.paths.dispatchDir, `${sliceId}.1.json`)
+  writeRecord(record, recordPath)
+  const { paneId, surfaceId } = createPane({ workspaceId })
+  return bindRecord(recordPath, { workspace_id: workspaceId, pane_id: paneId, surface_id: surfaceId })
+}
+
 test('close: a violated clean postcondition overrides ok with refused_postcondition and is escalated loudly', () => {
   const { ctx } = setUpWorkspace('close-postcondition')
   const record = buildAndBindRecord(ctx, { role: 'code-reviewer', sliceId: 'be-1b' })
@@ -1115,6 +1156,362 @@ test('MF1 vector (c) gate-exhaustion: a blocked body + .exit "0" closes with out
 
   const res = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
   assert.equal(res.json.outcome, 'blocked')
+})
+
+// ---------------------------------------------------------------------------
+// be-06-01 S8 — presentReturn: render + present the doc tab on return.
+// ---------------------------------------------------------------------------
+
+// qa should-fix: awaitCmd's own presentReturn call site (dispatch.mjs, just
+// before the resolved-now return) was completely untested — every prior
+// doc-tab test drove presentReturn through closeCmd only. This record is
+// bound to a GENUINE pane (buildAndBindRecordWithRealPane), bypassing
+// dispatchCmd's own placeholder-mount step entirely, so the FIRST mount
+// happens inside awaitCmd's presentReturn call — exactly the untested path.
+test('IDEMPOTENCY: awaitCmd THEN closeCmd on a resolved judgment-role dispatch produce exactly one markdown-open, zero new-surface, exactly two reorder-surface --before <terminal>, and byte-identical render-path content (equal to the envelope body) after each step', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('idempotency-await-close')
+  const record = buildAndBindRecordWithRealPane(ctx, { role: 'backend-lead', sliceId: 'be-2z', workspaceId: workspaceRes.json.workspace_id })
+  writeValidReturn(record)
+
+  const expectedBody = record.return.required_sections.map((s) => `## ${s}\nok\n`).join('\n')
+  const renderPath = join(ctx.paths.taskDir, 'returns', 'be-2z.1.md')
+
+  const awaitRes = awaitCmd({ all: [record.dispatch_id] }, ctx)
+  assert.equal(awaitRes.code, 0)
+  assert.equal(awaitRes.json.resolved[0].state, 'completed')
+  const renderedAfterAwait = readFileSync(renderPath, 'utf8')
+  assert.equal(renderedAfterAwait, expectedBody)
+
+  const closeRes = closeCmd({ dispatch: record.dispatch_id }, ctx)
+  assert.equal(closeRes.json.outcome, 'ok')
+  const renderedAfterClose = readFileSync(renderPath, 'utf8')
+  assert.equal(renderedAfterClose, expectedBody)
+  assert.equal(renderedAfterClose, renderedAfterAwait)
+
+  const log = readLog(env.logPath)
+  const markdownOpens = log.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open')
+  assert.equal(markdownOpens.length, 1, 'expected exactly one markdown-open TOTAL — awaitCmd\'s presentReturn call performs the only mount; closeCmd\'s presentReturn finds the doc tab already present and only reorders')
+  assert.equal(log.filter((e) => e.argv[0] === 'new-surface').length, 0)
+  const reorders = log.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[2] === '--before' && e.argv[3] === record.surface.surface_id)
+  assert.equal(reorders.length, 2, 'expected exactly two reorder-surface --before <terminal>: one from the awaitCmd mount, one from closeCmd\'s presentReturn')
+})
+
+test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -> reorder-surface --before <terminal>; move-surface is skipped since the new surface already lands in the target pane), the render path content equals the envelope body once resolved, and close emits a further reorder-surface --before <terminal> with no close-surface for that surface', () => {
+  const { env, ctx } = setUpWorkspace('doctab-return')
+  const specPath = makeSpecFile(ctx, 'be-2a')
+  const dispatchRes = dispatchCmd({ slice: 'be-2a', role: 'backend-lead', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2a.1.json'))
+
+  // (1) dispatch-time placeholder mount: markdown open -> reorder-surface
+  // --before <terminal>, in that order. move-surface is NOT invoked here:
+  // `markdown open --surface <terminalSurfaceId>` creates the new surface in
+  // the SAME pane as the terminal surface (which IS paneId, since
+  // createPane minted both together) — mountDocTab's rungs only move when
+  // the new surface actually lands in a DIFFERENT pane (interface_contract
+  // item 5: "if pane differs move-surface").
+  const logAfterDispatch = readLog(env.logPath)
+  const markdownIdx = logAfterDispatch.findIndex((e) => e.argv[0] === 'markdown')
+  const reorderIdx = logAfterDispatch.findIndex((e) => e.argv[0] === 'reorder-surface')
+  assert.ok(markdownIdx !== -1 && reorderIdx !== -1, 'expected markdown/reorder-surface in the dispatch-time log')
+  assert.ok(markdownIdx < reorderIdx, 'expected markdown open -> reorder-surface, in order')
+  assert.equal(logAfterDispatch.some((e) => e.argv[0] === 'move-surface'), false)
+  assert.equal(logAfterDispatch[reorderIdx].argv[2], '--before')
+  assert.equal(logAfterDispatch[reorderIdx].argv[3], dispatchRes.json.surface_id)
+
+  // (2) resolve with a valid markdown return, then close — presentReturn
+  // renders the envelope body into the render path (placeholder replaced)
+  // and re-presents (a doc tab is already mounted, so just reorder-surface
+  // again, never another markdown open/move-surface/new-surface).
+  writeValidReturn(record)
+  const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(closeRes.json.outcome, 'ok')
+
+  const renderPath = join(ctx.paths.taskDir, 'returns', 'be-2a.1.md')
+  const rendered = readFileSync(renderPath, 'utf8')
+  const expectedBody = record.return.required_sections.map((s) => `## ${s}\nok\n`).join('\n')
+  assert.equal(rendered, expectedBody)
+
+  const logAfterClose = readLog(env.logPath)
+  const closeSurfaceEntries = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id)
+  assert.equal(closeSurfaceEntries.length, 0, 'a doc-tab role terminal surface must never be closed')
+  const reorderEntriesAfterClose = logAfterClose.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[2] === '--before' && e.argv[3] === dispatchRes.json.surface_id)
+  assert.ok(reorderEntriesAfterClose.length > reorderIdxCountBeforeClose(logAfterDispatch, dispatchRes.json.surface_id), 'expected a further reorder-surface --before <terminal> from close')
+})
+
+function reorderIdxCountBeforeClose(logAfterDispatch, terminalSurfaceId) {
+  return logAfterDispatch.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[2] === '--before' && e.argv[3] === terminalSurfaceId).length
+}
+
+test('S6/S7 FORCED FAILURE: FAKE_CMUX_FAIL=markdown falls through rung 1 to rung 2 (new-surface browser), dispatch/await/close still succeed', () => {
+  const { env, ctx } = setUpWorkspace('doctab-fail-rung1')
+  const specPath = makeSpecFile(ctx, 'be-2b')
+  process.env.FAKE_CMUX_FAIL = 'markdown'
+  const dispatchRes = dispatchCmd({ slice: 'be-2b', role: 'backend-lead', spec: specPath }, ctx)
+  assert.equal(dispatchRes.code, 0, 'a doc-tab mount failure must never fail dispatch')
+
+  const log = readLog(env.logPath)
+  const newSurfaceEntry = log.find((e) => e.argv[0] === 'new-surface')
+  assert.ok(newSurfaceEntry, 'expected rung 2 (new-surface browser) to fire when rung 1 fails')
+  assert.equal(newSurfaceEntry.argv[1], '--type')
+  assert.equal(newSurfaceEntry.argv[2], 'browser')
+  assert.equal(newSurfaceEntry.argv[5], '--pane')
+  assert.equal(newSurfaceEntry.argv[6], dispatchRes.json.pane_id)
+  assert.deepEqual(newSurfaceEntry.argv.slice(-2), ['--focus', 'false'])
+
+  delete process.env.FAKE_CMUX_FAIL
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2b.1.json'))
+  writeValidReturn(record)
+  const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(closeRes.json.outcome, 'ok', 'a doc-tab failure must never fail resolution/close either')
+})
+
+test('S6/S7 FORCED FAILURE: FAKE_CMUX_FAIL=reorder-surface falls through rungs 1 and 2 to rung 3 (markdown open, no --surface), dispatch still succeeds', () => {
+  const { env, ctx } = setUpWorkspace('doctab-fail-rung12')
+  const specPath = makeSpecFile(ctx, 'be-2c')
+  process.env.FAKE_CMUX_FAIL = 'reorder-surface'
+  const dispatchRes = dispatchCmd({ slice: 'be-2c', role: 'backend-lead', spec: specPath }, ctx)
+  assert.equal(dispatchRes.code, 0, 'a doc-tab mount failure must never fail dispatch')
+
+  const log = readLog(env.logPath)
+  const markdownEntries = log.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open')
+  // rung 1 (markdown open --surface ...) and rung 3 (markdown open, no --surface) both fire.
+  assert.ok(markdownEntries.length >= 2, 'expected both rung 1 and rung 3 markdown-open invocations')
+  const rung3 = markdownEntries.find((e) => !e.argv.includes('--surface'))
+  assert.ok(rung3, 'expected rung 3 (markdown open, no --surface) to fire')
+  const newSurfaceEntries = log.filter((e) => e.argv[0] === 'new-surface')
+  assert.equal(newSurfaceEntries.length, 1, 'rung 2 (new-surface) is attempted once before falling through to rung 3')
+
+  delete process.env.FAKE_CMUX_FAIL
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2c.1.json'))
+  writeValidReturn(record)
+  const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(closeRes.json.outcome, 'ok', 'a doc-tab failure must never fail resolution/close either')
+})
+
+test('NO DOUBLE MOUNT: two consecutive statusCmd runs against the same live tree produce exactly one markdown-open invocation for a doc-tab record whose panel is already present', () => {
+  const { env, ctx } = setUpWorkspace('no-double-mount')
+  const specPath = makeSpecFile(ctx, 'be-2d')
+  dispatchCmd({ slice: 'be-2d', role: 'backend-lead', spec: specPath }, ctx)
+
+  const logAfterDispatch = readLog(env.logPath)
+  const mountedMarkdownCount = logAfterDispatch.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  assert.equal(mountedMarkdownCount, 1, 'expected exactly one markdown-open from the dispatch-time placeholder mount')
+
+  statusCmd({}, ctx)
+  statusCmd({}, ctx)
+  const logAfterStatus = readLog(env.logPath)
+  const totalMarkdownOpens = logAfterStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  assert.equal(totalMarkdownOpens, 1, 'two consecutive statusCmd runs must produce exactly one markdown-open TOTAL when the panel is already present')
+})
+
+test('NO DOUBLE MOUNT: statusCmd re-mounts exactly once when the doc-tab panel is absent from the tree', () => {
+  const { env, ctx } = setUpWorkspace('remount-once')
+  const specPath = makeSpecFile(ctx, 'be-2e')
+  const dispatchRes = dispatchCmd({ slice: 'be-2e', role: 'backend-lead', spec: specPath }, ctx)
+
+  // Simulate the doc-tab panel going missing (S20: a moved markdown panel
+  // does not survive a cmux restart) by closing the mounted doc-tab surface
+  // directly out from under the record — the terminal surface stays.
+  const stateBefore = readLog(env.logPath)
+  const markdownOpenCount = stateBefore.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  assert.equal(markdownOpenCount, 1)
+  const t = tree({ all: true })
+  const docTab = findDocTabSurface(t, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
+  assert.ok(docTab.id, 'expected a mounted doc tab after dispatch')
+  closeSurface(docTab.id)
+
+  statusCmd({}, ctx)
+  const logAfterFirstStatus = readLog(env.logPath)
+  assert.equal(logAfterFirstStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, 2, 'expected exactly one re-mount when the panel was absent')
+
+  statusCmd({}, ctx)
+  const logAfterSecondStatus = readLog(env.logPath)
+  assert.equal(logAfterSecondStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, 2, 'a second statusCmd run must not re-mount again once the panel is present')
+})
+
+// qa micro-pass item 1: the re-mount loop's noise-suppression check gates on
+// pane liveness ALONE, never on record.outcome — a record whose bound PANE
+// (not merely its doc-tab surface) is genuinely gone from the live tree is
+// exactly the noise case this suppresses; a torn-down/aborted record has no
+// pane left to safely re-mount into.
+test('NOISE SUPPRESSION: a record whose bound PANE is genuinely absent from the live tree is skipped — no re-mount attempt', () => {
+  const { env, ctx } = setUpWorkspace('pane-genuinely-gone')
+  const specPath = makeSpecFile(ctx, 'be-2i')
+  const dispatchRes = dispatchCmd({ slice: 'be-2i', role: 'backend-lead', spec: specPath }, ctx)
+
+  const baselineMarkdownOpens = readLog(env.logPath).filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  assert.equal(baselineMarkdownOpens, 1)
+
+  // Remove the WHOLE pane (not just its doc-tab surface) from the persisted
+  // topology — pre-seeding FAKE_CMUX_STATE directly, never a new env switch
+  // — simulating a torn-down/aborted pane.
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  for (const w of state.windows) {
+    for (const ws of w.workspaces) {
+      ws.panes = ws.panes.filter((p) => p.id.toLowerCase() !== dispatchRes.json.pane_id.toLowerCase())
+    }
+  }
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  statusCmd({}, ctx)
+  const logAfterStatus = readLog(env.logPath)
+  assert.equal(logAfterStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens, 'a record whose bound pane is gone from the tree must never trigger a re-mount attempt')
+})
+
+// qa micro-pass item 1 (the substantive restore): closeCmd deliberately
+// KEEPS a doc-tab role's terminal surface and pane, so a record that has
+// already closed with a terminal outcome ('ok' here) can still have a
+// perfectly live pane whose doc tab needs recovering after a cmux restart
+// (S20) — "the architecture-package viewer stays open for the whole task"
+// is a design invariant, not just a while-running one. This must re-mount
+// exactly once, the same as a still-running record would.
+test('POST-CLOSE DOC-TAB RECOVERY: a terminal-outcome (closed ok) record whose pane IS live and whose doc tab is missing gets exactly one re-mount', () => {
+  const { env, ctx } = setUpWorkspace('post-close-recovery')
+  const specPath = makeSpecFile(ctx, 'be-2j')
+  const dispatchRes = dispatchCmd({ slice: 'be-2j', role: 'backend-lead', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2j.1.json'))
+  writeValidReturn(record)
+
+  const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  assert.equal(closeRes.json.outcome, 'ok')
+
+  // Simulate the doc tab itself going missing (S20) while the pane —
+  // deliberately kept by closeCmd for a doc-tab role — stays alive.
+  const t = tree({ all: true })
+  const docTab = findDocTabSurface(t, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
+  assert.ok(docTab.id, 'expected a mounted doc tab after close')
+  closeSurface(docTab.id)
+
+  const baselineMarkdownOpens = readLog(env.logPath).filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+
+  statusCmd({}, ctx)
+  const logAfterFirstStatus = readLog(env.logPath)
+  assert.equal(logAfterFirstStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens + 1, 'a closed-ok record with a live pane and a missing doc tab must still be re-mounted exactly once')
+
+  statusCmd({}, ctx)
+  const logAfterSecondStatus = readLog(env.logPath)
+  assert.equal(logAfterSecondStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens + 1, 'a second statusCmd run must not re-mount again once the panel is present')
+})
+
+// qa should-fix (a): an AMBIGUOUS pane (>=2 markdown candidates) must be
+// fail-CLOSED — both statusCmd's re-mount guard and presentReturn's
+// mount-vs-reorder decision must SKIP mounting (never guess, never pile on
+// a third panel) and log loudly. Ambiguity is constructed by invoking the
+// exported mountDocTab function itself a second time against the same
+// pane/terminal (not a topology hand-edit, not a new env switch) — this
+// legitimately creates a second markdown surface in the pane.
+test('AMBIGUOUS PANE (fix 1): statusCmd and presentReturn both skip the mount and log loudly, producing NO additional markdown-open', () => {
+  const { env, ctx } = setUpWorkspace('ambiguous-pane')
+  const specPath = makeSpecFile(ctx, 'be-2h')
+  const dispatchRes = dispatchCmd({ slice: 'be-2h', role: 'backend-lead', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2h.1.json'))
+
+  // Manufacture the ambiguity: a second, independent doc-tab mount into the
+  // SAME pane, alongside the one dispatchCmd already created.
+  const secondSurfaceId = mountDocTab({ renderPath: '/tmp/second-doc.md', paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
+  assert.match(secondSurfaceId, /^[0-9a-f-]+$/)
+
+  const t = tree({ all: true })
+  const found = findDocTabSurface(t, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
+  assert.deepEqual(found, { id: null, ambiguous: true }, 'expected the pane to now be ambiguous (two markdown candidates)')
+
+  const baselineMarkdownOpens = readLog(env.logPath).filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  assert.equal(baselineMarkdownOpens, 2, 'one from dispatch, one from the manufactured second mount above')
+
+  // statusCmd's re-mount guard must skip (log loudly, no further mount).
+  const capturedStatus = captureStderr(() => statusCmd({}, ctx))
+  assert.equal(readLog(env.logPath).filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens, 'statusCmd must never mount into an ambiguous pane')
+  assert.match(capturedStatus, /ambiguous/i)
+
+  // presentReturn (via closeCmd) must also skip mounting/reordering on
+  // ambiguity — a doc-tab failure/skip is never a resolution failure.
+  writeValidReturn(record)
+  let closeRes
+  const capturedClose = captureStderr(() => { closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx) })
+  assert.equal(closeRes.json.outcome, 'ok', 'an ambiguous doc tab must never fail the close/resolution')
+  assert.equal(readLog(env.logPath).filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens, 'presentReturn must never mount into an ambiguous pane either')
+  assert.match(capturedClose, /ambiguous/i)
+})
+
+// ---------------------------------------------------------------------------
+// FOCUS BAN — log-level: a full dispatch->await->close of a judgment role
+// invokes none of focus-pane/focus-panel/select-workspace.
+// ---------------------------------------------------------------------------
+
+test('FOCUS BAN (log-level): a full dispatch->close of a doc-tab judgment role invokes no focus-pane/focus-panel/select-workspace', () => {
+  const { env, ctx } = setUpWorkspace('focus-ban-log')
+  const specPath = makeSpecFile(ctx, 'be-2f')
+  const dispatchRes = dispatchCmd({ slice: 'be-2f', role: 'backend-lead', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2f.1.json'))
+  writeValidReturn(record)
+  closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+
+  const log = readLog(env.logPath)
+  const forbidden = new Set(['focus-pane', 'focus-panel', 'select-workspace'])
+  assert.equal(log.some((e) => forbidden.has(e.argv[0])), false)
+})
+
+// MUTATION-KILLER (qa-lead gate audit): presentReturn's own header comment
+// promises "NEVER throws". mountDocTab/reorderDocTabFirst/findDocTabSurface
+// each already swallow their own internal cmux-call failures, so most
+// forced-failure fixtures never actually exercise presentReturn's OWN outer
+// try/catch. This does: readTextOrNull rethrows any non-ENOENT error, and a
+// DIRECTORY sitting at record.return_path (instead of a file) produces
+// exactly that — EISDIR, not ENOENT. If presentReturn's try/catch were
+// removed, this would propagate out of closeCmd uncaught instead of
+// degrading quietly.
+test('presentReturn: an unreadable return_path (EISDIR, not ENOENT) never crashes close — proves the outer never-throw guard actually does something', () => {
+  const { ctx } = setUpWorkspace('presentreturn-eisdir')
+  const specPath = makeSpecFile(ctx, 'be-2z')
+  const dispatchRes = dispatchCmd({ slice: 'be-2z', role: 'backend-lead', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2z.1.json'))
+  mkdirSync(record.return_path, { recursive: true })
+  let closeRes
+  assert.doesNotThrow(() => {
+    closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  })
+  assert.equal(closeRes.json.outcome === 'ok', false, 'a directory at return_path is not a valid completed return')
+})
+
+// ---------------------------------------------------------------------------
+// be-06-01 S9 — the workspace phase pill.
+// ---------------------------------------------------------------------------
+
+test('phase pill: workspaceCmd emits exactly one set-status devteam-phase planning', () => {
+  const { env, workspaceRes } = setUpWorkspace('phase-planning')
+  const log = readLog(env.logPath)
+  const phaseCalls = log.filter((e) => e.argv[0] === 'set-status' && e.argv[1] === 'devteam-phase')
+  assert.equal(phaseCalls.length, 1)
+  assert.deepEqual(phaseCalls[0].argv, ['set-status', 'devteam-phase', 'planning', '--workspace', workspaceRes.json.workspace_id])
+})
+
+test('phase pill: a successful dispatchCmd emits exactly one set-status devteam-phase building', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('phase-building')
+  const specPath = makeSpecFile(ctx)
+  dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const log = readLog(env.logPath)
+  const buildingCalls = log.filter((e) => e.argv[0] === 'set-status' && e.argv[1] === 'devteam-phase' && e.argv[2] === 'building')
+  assert.equal(buildingCalls.length, 1)
+  assert.deepEqual(buildingCalls[0].argv, ['set-status', 'devteam-phase', 'building', '--workspace', workspaceRes.json.workspace_id])
+})
+
+test('phase pill: `phase --set gate` emits exactly one set-status devteam-phase gate', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('phase-gate')
+  const res = phaseCmd({ set: 'gate' }, ctx)
+  assert.equal(res.code, 0)
+  assert.equal(res.json.phase, 'gate')
+  const log = readLog(env.logPath)
+  const gateCalls = log.filter((e) => e.argv[0] === 'set-status' && e.argv[1] === 'devteam-phase' && e.argv[2] === 'gate')
+  assert.equal(gateCalls.length, 1)
+  assert.deepEqual(gateCalls[0].argv, ['set-status', 'devteam-phase', 'gate', '--workspace', workspaceRes.json.workspace_id])
+})
+
+test('phase pill: `phase --set bogus` exits 2 (UsageError) with zero cmux invocations', () => {
+  const { env, ctx } = setUpWorkspace('phase-bogus')
+  const beforeCount = readLog(env.logPath).length
+  assert.throws(() => phaseCmd({ set: 'bogus' }, ctx), UsageError)
+  const afterCount = readLog(env.logPath).length
+  assert.equal(afterCount, beforeCount, 'an out-of-enum phase must issue zero cmux invocations')
 })
 
 // ---------------------------------------------------------------------------
@@ -1304,6 +1701,28 @@ test('execution mode: `dispatch` proceeds once execution_mode: cmux is set', () 
 
   const log = readLog(env.logPath)
   assert.ok(log.find((e) => e.argv[0] === 'new-pane'))
+})
+
+// qa should-fix: nothing previously pinned that `phase` — the S9 mutating
+// verb added alongside workspace/dispatch/await/close/teardown — actually
+// refuses under the execution-mode gate. `--set gate` is a validly-enumerated
+// value throughout (the gate must refuse BEFORE phaseCmd's own workspace.json
+// read, not because of an unrelated usage error).
+test('execution mode: `phase` (a mutating verb) refuses when execution_mode is not cmux, and proceeds once execution_mode: cmux is set', () => {
+  const env = freshCmuxEnv('exec-mode-phase')
+  const checkout = makeGitCheckout(env.dir)
+  const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+  // No config.md at all (defaults agent-tool) — refuses with zero cmux invocations.
+  assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 1)
+  assert.deepEqual(readLog(env.logPath), [])
+
+  writeConfigMd(checkout, 'execution_mode: cmux\n')
+  assert.equal(silentMain(['preflight', ...commonArgs]), 0)
+  assert.equal(silentMain(['workspace', ...commonArgs]), 0)
+  assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 0)
+  const log = readLog(env.logPath)
+  assert.ok(log.some((e) => e.argv[0] === 'set-status' && e.argv[1] === 'devteam-phase' && e.argv[2] === 'gate'))
 })
 
 // ---------------------------------------------------------------------------

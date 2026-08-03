@@ -119,13 +119,16 @@ function writeAtomicBytes(path, data) {
 const HEADING_LINE_RE = /^#{1,6}[ \t]+(.+?)[ \t]*$/
 const FENCE_OPEN_RE = /^\s*(`{3,}|~{3,})/
 
-// realHeadings(body) -> [{ name, start, end }] byte offsets into the
+// realHeadings(body) -> [{ name, level, start, end }] byte offsets into the
 // ORIGINAL (unstripped) body, for headings that are NOT inside a fenced code
 // block. Mirrors ladder.stripFences's own fence-tracking loop exactly (same
 // fenceChar semantics: an unclosed fence swallows the rest of the document)
 // but records offsets into the source instead of discarding fenced lines —
 // this module still needs the RAW fenced bytes inside the real Verdict
-// section, which stripFences would otherwise remove.
+// section, which stripFences would otherwise remove. `level` is carried so
+// callers can apply the SAME level->=2 + case-folded-prefix predicate S1
+// uses in ladder.checkSections (be-06-01 S2) — SECTION BOUNDARIES still stay
+// "the next real heading of ANY level" regardless of level.
 function realHeadings(body) {
   const headings = []
   let offset = 0
@@ -141,7 +144,8 @@ function realHeadings(body) {
     } else {
       const headingMatch = line.match(HEADING_LINE_RE)
       if (headingMatch) {
-        headings.push({ name: headingMatch[1].trim(), start: offset, end: offset + line.length })
+        const level = line.match(/^#+/)[0].length
+        headings.push({ name: headingMatch[1].trim(), level, start: offset, end: offset + line.length })
       }
     }
     offset += line.length + 1
@@ -149,14 +153,19 @@ function realHeadings(body) {
   return headings
 }
 
-// extractSection(body, name) -> raw substring between the real `name`
-// heading and the next real heading (any level) or end-of-document, WITH
-// fences intact — null when no real heading named `name` exists. A `##
-// Verdict` heading that only appears inside a fenced example is never a
-// real heading (realHeadings excludes it), so it can never satisfy this.
+// extractSection(body, name) -> raw substring between the real heading that
+// matches `name` (level->=2, case-folded prefix — the SAME predicate as
+// ladder.checkSections, be-06-01 S2: a divergence between the heading the
+// lint REQUIRES and the heading the verdict block is looked up IN is exactly
+// the accept-a-fake hole recorded at .claude/dev-team/memory/backend-notes.md:16)
+// and the next real heading of ANY level, or end-of-document, WITH fences
+// intact — null when no matching real heading exists. A `## Verdict` heading
+// that only appears inside a fenced example is never a real heading
+// (realHeadings excludes it), so it can never satisfy this.
 function extractSection(body, name) {
   const headings = realHeadings(body)
-  const idx = headings.findIndex((h) => h.name === name)
+  const needle = name.trim().toLowerCase()
+  const idx = headings.findIndex((h) => h.level >= 2 && h.name.toLowerCase().startsWith(needle))
   if (idx === -1) return null
   const start = Math.min(headings[idx].end + 1, body.length)
   const end = idx + 1 < headings.length ? headings[idx + 1].start : body.length

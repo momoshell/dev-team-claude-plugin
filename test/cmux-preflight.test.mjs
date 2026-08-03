@@ -6,7 +6,7 @@
 // a dynamic import() inside top-level await instead.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -22,12 +22,14 @@ const {
   CMUX_BIN, VERBS, VERB_METHODS, PREFLIGHT_MESSAGES, formatPreflightMessage, PreflightError,
   cmux, normalizeId, normalizeIds, tree, findSurface, findWorkspace, recoverNewId,
   preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab,
-  setStatus, closeSurface, closeWorkspace, mountDocTab, topTsv, readEvents,
+  setStatus, closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
+  PHASES, setPhase, topTsv, readEvents,
 } = await import(CMUXCTL_PATH)
 
 // Fixed orchestrator ids baked into the fixture's fresh topology (lowercase
 // forms — the mixed-case source lives in test/fixtures/fake-cmux.mjs).
 const ORCH_WINDOW = 'f1a063e8-ec2c-40d7-932c-f3610adfe581'
+const ORCH_WORKSPACE = 'a2a063e8-ec2c-40d7-932c-f3610adfe582'
 const ORCH_PANE = 'b3a063e8-ec2c-40d7-932c-f3610adfe583'
 const ORCH_SURFACE = 'c4a063e8-ec2c-40d7-932c-f3610adfe584'
 
@@ -97,6 +99,30 @@ test('every cmux(...) call site in this module uses a verb from VERBS', () => {
   const src = readFileSync(CMUXCTL_PATH, 'utf8')
   const used = new Set([...src.matchAll(/\bcmux\('([a-z-]+)'/g)].map((m) => m[1]))
   for (const verb of used) assert.ok(VERBS.includes(verb), `${verb} is invoked but not in VERBS`)
+})
+
+// FOCUS BAN (be-06-01, acceptance criteria) — source-level guard: no
+// scripts/cmux/*.mjs file may invoke focus-pane, focus-panel or
+// select-workspace as a verb/argv literal. `--focus false` is the opposite
+// of focusing and is exempt because it never matches these literals. The
+// guard matches only a QUOTED occurrence (the shape every real verb/argv
+// literal takes in this codebase, e.g. `'focus-pane'`) so a prose comment
+// merely discussing the ban (e.g. dispatch.mjs's "never focus-pane / window
+// focus") is not itself a false positive.
+test('FOCUS BAN: no scripts/cmux/*.mjs file invokes focus-pane, focus-panel or select-workspace as a quoted literal', () => {
+  const scriptsDir = join(HERE, '..', 'scripts', 'cmux')
+  const scriptFiles = readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs')).map((f) => join(scriptsDir, f))
+  const forbidden = ['focus-pane', 'focus-panel', 'select-workspace']
+  for (const path of scriptFiles) {
+    const src = readFileSync(path, 'utf8')
+    for (const token of forbidden) {
+      // Backtick included alongside '/" — a template-literal verb argument
+      // (e.g. `` `focus-pane` ``) must not slip past a quote class that only
+      // covered single/double quotes.
+      const quotedRe = new RegExp(`['"\`]${token}['"\`]`)
+      assert.equal(quotedRe.test(src), false, `${path} invokes forbidden focus verb ${token} as a quoted literal`)
+    }
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -202,8 +228,12 @@ test('preflight succeeds end-to-end and caches to <taskArtifactsRoot>/preflight.
   // events/config/set-status have no confidently-known RPC method name —
   // unverifiable-by-capabilities, never gated (qa-lead addendum). wait-for
   // joined VERBS at 1c with deliberately no VERB_METHODS entry (never
-  // preflight-gated), so it lands in the same unverifiable set.
-  assert.deepEqual(result.unverifiable_verbs, ['config', 'events', 'set-status', 'wait-for'])
+  // preflight-gated), so it lands in the same unverifiable set. new-surface
+  // joins at be-06-01 S6: the live capabilities capture is 255 dotted RPC
+  // names and inventing one hard-stops every real run — it too gets no
+  // VERB_METHODS entry (list order is whatever UNVERIFIABLE_VERBS's own
+  // derivation — VERBS.filter(...).sort() — actually produces).
+  assert.deepEqual(result.unverifiable_verbs, ['config', 'events', 'new-surface', 'set-status', 'wait-for'])
 
   const artifactsRoot = join(dir, 'artifacts')
   const cachedRaw = readFileSync(join(artifactsRoot, 'preflight.json'), 'utf8')
@@ -628,6 +658,35 @@ test('sendLine no-ops loudly when the target surface is gone from a fresh tree',
 })
 
 // ---------------------------------------------------------------------------
+// setPhase — the workspace phase pill (be-06-01 S9).
+// ---------------------------------------------------------------------------
+
+test('PHASES is frozen and exactly [planning, building, gate]', () => {
+  assert.ok(Object.isFrozen(PHASES))
+  assert.deepEqual(PHASES, ['planning', 'building', 'gate'])
+})
+
+test('setPhase issues `set-status devteam-phase <phase> --workspace <workspaceId>`, explicit target every time', () => {
+  const { logPath } = freshEnv('set-phase-ok')
+  setPhase('planning', { workspaceId: ORCH_WINDOW })
+  const invocations = readLog(logPath)
+  const call = invocations.find((e) => e.argv[0] === 'set-status')
+  assert.deepEqual(call.argv, ['set-status', 'devteam-phase', 'planning', '--workspace', ORCH_WINDOW])
+})
+
+test('setPhase throws before any spawn for an out-of-enum phase', () => {
+  const { logPath } = freshEnv('set-phase-bad-enum')
+  assert.throws(() => setPhase('bogus', { workspaceId: ORCH_WINDOW }))
+  assert.equal(existsSync(logPath), false)
+})
+
+test('setPhase throws before any spawn when workspaceId is missing', () => {
+  const { logPath } = freshEnv('set-phase-no-workspace')
+  assert.throws(() => setPhase('gate', {}))
+  assert.equal(existsSync(logPath), false)
+})
+
+// ---------------------------------------------------------------------------
 // mountDocTab — never throws, never focuses.
 // ---------------------------------------------------------------------------
 
@@ -644,9 +703,51 @@ test('mountDocTab mounts a doc tab, recovers its id via diff (never from stdout 
   assert.deepEqual(reorderCall.argv, ['reorder-surface', surfaceId, '--before', ORCH_SURFACE])
 })
 
-test('mountDocTab returns null and never throws when markdown open fails', () => {
-  freshEnv('mount-doc-tab-fail')
+// qa should-fix: the move-surface branch (the one place --focus false
+// actually lives) was unreachable in every prior test — `markdown open
+// --surface <terminal>` always lands the new surface in the SAME pane as
+// the terminal surface. Force a FOREIGN target pane (a genuine second pane,
+// created via createPane — never a topology hand-edit) so the new surface
+// lands in ORCH_PANE while the requested target is elsewhere, and
+// move-surface must fire.
+test('mountDocTab: the created surface landing in a FOREIGN pane triggers move-surface <id> --pane <pane> --focus false, then reorder-surface', () => {
+  const { logPath } = freshEnv('mount-doc-tab-foreign-pane')
+  const { paneId: foreignPaneId } = createPane({ workspaceId: ORCH_WORKSPACE })
+  const surfaceId = mountDocTab({ renderPath: '/tmp/foreign.md', paneId: foreignPaneId, terminalSurfaceId: ORCH_SURFACE })
+  assert.match(surfaceId, /^[0-9a-f-]+$/)
+  const invocations = readLog(logPath)
+  const moveCall = invocations.find((e) => e.argv[0] === 'move-surface')
+  assert.ok(moveCall, 'expected move-surface — the new surface landed in ORCH_PANE, not the requested foreign pane')
+  assert.deepEqual(moveCall.argv, ['move-surface', surfaceId, '--pane', foreignPaneId, '--focus', 'false'])
+  const reorderCall = invocations.find((e) => e.argv[0] === 'reorder-surface')
+  assert.deepEqual(reorderCall.argv, ['reorder-surface', surfaceId, '--before', ORCH_SURFACE])
+  // move-surface strictly precedes reorder-surface.
+  assert.ok(invocations.indexOf(moveCall) < invocations.indexOf(reorderCall))
+})
+
+// be-06-01 S6/S7: mountDocTab is now a three-rung fallback chain. Rung 1
+// (markdown open --surface) failing falls through to rung 2 (new-surface
+// browser) rather than returning null outright — the forced-failure
+// exercise of the FULL chain (all three rungs) lives in
+// test/cmux-dispatch.test.mjs per the acceptance criteria.
+test('mountDocTab falls through to rung 2 (new-surface) when rung 1 (markdown open) fails, and never throws', () => {
+  const { logPath } = freshEnv('mount-doc-tab-fail')
   process.env.FAKE_CMUX_FAIL = 'markdown'
+  let surfaceId
+  assert.doesNotThrow(() => {
+    surfaceId = mountDocTab({ renderPath: '/tmp/x.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  })
+  assert.match(surfaceId, /^[0-9a-f-]+$/)
+  const invocations = readLog(logPath)
+  const newSurfaceCall = invocations.find((e) => e.argv[0] === 'new-surface')
+  assert.ok(newSurfaceCall, 'new-surface must be invoked as rung 2')
+  assert.deepEqual(newSurfaceCall.argv, ['new-surface', '--type', 'browser', '--url', 'file:///tmp/x.md', '--pane', ORCH_PANE, '--focus', 'false'])
+  assert.equal(invocations.some((e) => e.argv[0] === 'focus-pane'), false)
+})
+
+test('mountDocTab returns null and never throws when all three rungs fail', () => {
+  freshEnv('mount-doc-tab-all-fail')
+  process.env.FAKE_CMUX_FAIL = 'markdown,new-surface'
   assert.doesNotThrow(() => {
     const result = mountDocTab({ renderPath: '/tmp/x.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
     assert.equal(result, null)
@@ -657,6 +758,207 @@ test('mountDocTab returns null loudly when the terminal surface is already gone,
   freshEnv('mount-doc-tab-gone')
   const result = mountDocTab({ renderPath: '/tmp/x.md', paneId: 'irrelevant', terminalSurfaceId: 'ffffffff-ffff-ffff-ffff-ffffffffffff' })
   assert.equal(result, null)
+})
+
+// MUTATION-KILLER (qa-lead gate audit): mountDocTab's own header comment
+// promises "NEVER throws". tree() itself THROWS when `cmux tree` fails
+// (cmuxctl.mjs:221 — "tree: cmux tree failed: ..."), and mountDocTab's very
+// first line is `const before = tree({ all: true })` — a total cmux/tree
+// outage (not merely "the terminal surface is gone from a successful
+// tree", which every other never-throw fixture here exercises) is the one
+// failure mode none of those fixtures reach. Without mountDocTab's OWN
+// outer try/catch, this propagates straight out of a dispatch.
+test('mountDocTab never throws even when the underlying `tree` call itself fails (total cmux outage, not just a missing surface)', () => {
+  freshEnv('mount-doc-tab-tree-fails')
+  process.env.FAKE_CMUX_FAIL = 'tree'
+  let result
+  assert.doesNotThrow(() => {
+    result = mountDocTab({ renderPath: '/tmp/x.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  })
+  assert.equal(result, null)
+})
+
+// qa should-fix (b): a post-creation placement failure (move-surface or
+// reorder-surface) must never abandon the surface it created silently —
+// closeSurface is attempted best-effort and the rung still falls through to
+// the next one. FAKE_CMUX_FAIL=reorder-surface makes rung 1 and rung 2 BOTH
+// create a surface and then fail to place it; rung 3 (which never calls
+// reorder-surface) still succeeds.
+test('mountDocTab: FAKE_CMUX_FAIL=reorder-surface — rung 1 and rung 2 orphans are each closed (best-effort) before falling through, and rung 3 still succeeds', () => {
+  const { logPath } = freshEnv('mount-doc-tab-orphan-close')
+  process.env.FAKE_CMUX_FAIL = 'reorder-surface'
+  const surfaceId = mountDocTab({ renderPath: '/tmp/orphan.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  assert.match(surfaceId, /^[0-9a-f-]+$/)
+
+  const invocations = readLog(logPath)
+  const closeSurfaceCalls = invocations.filter((e) => e.argv[0] === 'close-surface')
+  assert.equal(closeSurfaceCalls.length, 2, `expected exactly two close-surface calls (rung 1's orphan + rung 2's orphan), got ${JSON.stringify(closeSurfaceCalls)}`)
+  // The final, successfully-returned rung-3 surface must never itself be closed.
+  assert.equal(closeSurfaceCalls.some((c) => c.argv[1] === surfaceId), false)
+})
+
+// qa should-fix (c): an id-recovery ambiguity (concurrent creation racing a
+// rung's own tree-diff) must ABORT the whole chain — exactly one creation
+// attempt, never advancing to rung 2/3. Constructed via a PRE-SEEDED
+// FAKE_CMUX_STATE flag (never a new env switch) that makes the fixture's own
+// `markdown open --surface` handler create a SECOND, "racing" surface
+// alongside the real one — see fake-cmux.mjs's `_simulateConcurrentCreate`.
+test('mountDocTab: a recoverNewId ambiguity (concurrent creation) ABORTS the whole chain — exactly one creation attempt, no fallthrough to rung 2/3', () => {
+  const { logPath, statePath } = freshEnv('mount-doc-tab-concurrent-abort')
+  writeFileSync(statePath, JSON.stringify({
+    _seq: 4,
+    _simulateConcurrentCreate: true,
+    windows: [{
+      id: ORCH_WINDOW,
+      title: 'orchestrator',
+      workspaces: [{
+        id: ORCH_WORKSPACE,
+        window_id: ORCH_WINDOW,
+        title: 'main',
+        panes: [{
+          id: ORCH_PANE,
+          workspace_id: ORCH_WORKSPACE,
+          surface_ids: [ORCH_SURFACE],
+          selected_surface_id: ORCH_SURFACE,
+          surfaces: [{ id: ORCH_SURFACE, pane_id: ORCH_PANE, type: 'agent-session', tty: '/dev/ttys001', title: 'orchestrator' }],
+        }],
+      }],
+    }],
+  }))
+
+  const result = mountDocTab({ renderPath: '/tmp/concurrent.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  assert.equal(result, null, 'a recoverNewId ambiguity must abort to null, never a fallback surface id')
+
+  const invocations = readLog(logPath)
+  const markdownOpens = invocations.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open')
+  assert.equal(markdownOpens.length, 1, 'expected exactly ONE creation attempt — the abort must not advance to rung 2/3')
+  assert.equal(invocations.some((e) => e.argv[0] === 'new-surface'), false, 'rung 2 must never fire after an id-recovery abort')
+})
+
+// qa should-fix (d): rung 2's post-mount placement verification failing must
+// be an ORDINARY rung failure (falls through to rung 3, with orphan
+// handling per fix 2), never an abort — only an id-recovery ambiguity
+// aborts. Rung 1 is forced to fail via FAKE_CMUX_FAIL='markdown' (which
+// blanket-fails every `markdown` verb invocation, rung 1 AND rung 3 alike —
+// that is deliberate here: it lets this test observe rung 3 being REACHED
+// (the fallthrough itself) without needing rung 3 to also succeed, which is
+// already covered by the "all three rungs fail" test). Rung 2's own
+// reorder-surface is made to silently relocate the surface away from the
+// target pane via the PRE-SEEDED `_simulateBrowserSurfaceRelocateOnReorder`
+// state flag (never a new env switch, and gated on type === 'browser' so it
+// can only ever affect rung 2's own surface) — mountDocTab's own post-mount
+// re-read then finds it absent from the target pane and must fall through,
+// not abort.
+test('mountDocTab: rung 2 post-mount placement-verification failure is an ORDINARY rung failure (falls through, orphan closed) — not an abort', () => {
+  const { logPath, statePath } = freshEnv('mount-doc-tab-rung2-placement-fail')
+  const { paneId: foreignPaneId } = createPane({ workspaceId: ORCH_WORKSPACE })
+  const seeded = JSON.parse(readFileSync(statePath, 'utf8'))
+  seeded._simulateBrowserSurfaceRelocateOnReorder = true
+  writeFileSync(statePath, JSON.stringify(seeded))
+  process.env.FAKE_CMUX_FAIL = 'markdown'
+
+  const result = mountDocTab({ renderPath: '/tmp/placement.md', paneId: foreignPaneId, terminalSurfaceId: ORCH_SURFACE })
+  // rung 3 also fails here (FAKE_CMUX_FAIL='markdown' blanket-fails it too)
+  // — the point of this test is that the chain ADVANCES to rung 3 rather
+  // than aborting, not that rung 3 itself succeeds.
+  assert.equal(result, null)
+
+  const invocations = readLog(logPath)
+  const newSurfaceCall = invocations.find((e) => e.argv[0] === 'new-surface')
+  assert.ok(newSurfaceCall, 'rung 2 must have been attempted')
+  const closeSurfaceCalls = invocations.filter((e) => e.argv[0] === 'close-surface')
+  assert.ok(closeSurfaceCalls.length >= 1, 'expected at least one close-surface call for rung 2\'s verification-failed (orphaned) surface — fix 2')
+  const markdownOpens = invocations.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open')
+  assert.ok(markdownOpens.some((e) => !e.argv.includes('--surface')), 'expected the chain to ADVANCE to rung 3 (markdown open, no --surface) rather than abort after rung 2\'s verification failure')
+})
+
+// ---------------------------------------------------------------------------
+// findDocTabSurface / reorderDocTabFirst — isolated unit coverage.
+// ---------------------------------------------------------------------------
+
+test('findDocTabSurface: returns the sole non-terminal surface in the pane, not ambiguous', () => {
+  freshEnv('find-doc-tab-solo')
+  const surfaceId = mountDocTab({ renderPath: '/tmp/x.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  assert.match(surfaceId, /^[0-9a-f-]+$/)
+  const t = tree({ all: true })
+  assert.deepEqual(findDocTabSurface(t, { paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE }), { id: surfaceId, ambiguous: false })
+})
+
+test('findDocTabSurface: restricts to markdown-typed candidates when more than one non-terminal surface exists', () => {
+  // A synthetic tree, not a live fixture round-trip: two non-terminal
+  // surfaces share the pane (a stray 'terminal'-typed one plus the real
+  // 'markdown' doc tab) — the lookup must narrow to the markdown-typed
+  // candidate rather than reporting ambiguity.
+  const t = {
+    windows: [{
+      workspaces: [{
+        panes: [{
+          id: ORCH_PANE,
+          surfaces: [
+            { id: ORCH_SURFACE, type: 'agent-session' },
+            { id: 'stray-terminal-surface', type: 'terminal' },
+            { id: 'the-doc-tab-surface', type: 'markdown' },
+          ],
+        }],
+      }],
+    }],
+  }
+  assert.deepEqual(findDocTabSurface(t, { paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE }), { id: 'the-doc-tab-surface', ambiguous: false })
+})
+
+test('findDocTabSurface: ambiguous:true (id:null) when more than one candidate remains and none is markdown-typed — a DISTINCT outcome from "no doc tab"', () => {
+  const t = {
+    windows: [{
+      workspaces: [{
+        panes: [{
+          id: ORCH_PANE,
+          surfaces: [
+            { id: ORCH_SURFACE, type: 'agent-session' },
+            { id: 'a', type: 'terminal' },
+            { id: 'b', type: 'terminal' },
+          ],
+        }],
+      }],
+    }],
+  }
+  assert.deepEqual(findDocTabSurface(t, { paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE }), { id: null, ambiguous: true })
+})
+
+test('findDocTabSurface: ambiguous:true (>=2 markdown candidates) is fail-CLOSED, distinct from "no doc tab"', () => {
+  const t = {
+    windows: [{
+      workspaces: [{
+        panes: [{
+          id: ORCH_PANE,
+          surfaces: [
+            { id: ORCH_SURFACE, type: 'agent-session' },
+            { id: 'md-a', type: 'markdown' },
+            { id: 'md-b', type: 'markdown' },
+          ],
+        }],
+      }],
+    }],
+  }
+  assert.deepEqual(findDocTabSurface(t, { paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE }), { id: null, ambiguous: true })
+})
+
+test('findDocTabSurface: never throws for an unknown pane id, and reports id:null, ambiguous:false ("no doc tab", not "ambiguous")', () => {
+  freshEnv('find-doc-tab-unknown-pane')
+  const t = tree({ all: true })
+  assert.deepEqual(findDocTabSurface(t, { paneId: 'nope', terminalSurfaceId: ORCH_SURFACE }), { id: null, ambiguous: false })
+})
+
+test('reorderDocTabFirst: issues reorder-surface --before and never focuses; returns false when no doc tab is present', () => {
+  const { logPath } = freshEnv('reorder-doc-tab-first')
+  assert.equal(reorderDocTabFirst({ paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE }), false)
+
+  const surfaceId = mountDocTab({ renderPath: '/tmp/x.md', paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  const ok = reorderDocTabFirst({ paneId: ORCH_PANE, terminalSurfaceId: ORCH_SURFACE })
+  assert.equal(ok, true)
+  const invocations = readLog(logPath)
+  const reorderCalls = invocations.filter((e) => e.argv[0] === 'reorder-surface')
+  assert.ok(reorderCalls.some((c) => c.argv[1] === surfaceId && c.argv[2] === '--before' && c.argv[3] === ORCH_SURFACE))
+  assert.equal(invocations.some((e) => e.argv[0] === 'focus-pane'), false)
 })
 
 // ---------------------------------------------------------------------------

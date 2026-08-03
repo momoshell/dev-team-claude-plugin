@@ -594,7 +594,7 @@ test('composeRolePrompt: appends the markdown return-contract addendum plus the 
 
 test('composeRolePrompt: a markdown role without verdict_block gets no verdict-block sentence', () => {
   const text = composeRolePrompt(ROOT, 'plan-reviewer', 'judgment', rosterDefault.roles['plan-reviewer'].return)
-  assert.ok(text.includes('Required sections for this role: Verdict.'))
+  assert.ok(text.includes('Required sections for this role: Must Fix, Should Fix.'))
   assert.equal(text.includes('fenced json block matching'), false)
 })
 

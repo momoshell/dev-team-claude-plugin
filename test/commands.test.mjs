@@ -16,3 +16,15 @@ for (const f of cmds) {
     assert.match(m[1], /description:\s*\S/, 'has a non-empty description')
   })
 }
+
+test('command team.md: documents the mode verb', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  assert.match(md, /mode cmux\|agent-tool/)
+})
+
+test('command team.md: frontmatter description lists mode', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  const m = md.match(/^---\n([\s\S]*?)\n---/)
+  assert.ok(m, 'has a frontmatter block')
+  assert.match(m[1], /description:.*\bmode\b/)
+})

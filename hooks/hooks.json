@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "command -v jq >/dev/null 2>&1 || { echo 'dev-team: jq is required for the SessionStart hook (brew install jq / apt install jq) — orchestration.md was not loaded this session.' >&2; exit 0; }; jq -n --arg root \"${CLAUDE_PLUGIN_ROOT}\" --rawfile content \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"Plugin root (resolved ${CLAUDE_PLUGIN_ROOT}): \" + $root + \"\\n\\n\" + $content)}}'"
+            "command": "if [ -n \"${DEVTEAM_WORKER:-}\" ]; then printf '%s\\n' '{\"systemMessage\":\"dev-team orchestration suppressed: DEVTEAM_WORKER=1\"}'; exit 0; fi; command -v jq >/dev/null 2>&1 || { echo 'dev-team: jq is required for the SessionStart hook (brew install jq / apt install jq) — orchestration.md was not loaded this session.' >&2; exit 0; }; jq -n --arg root \"${CLAUDE_PLUGIN_ROOT}\" --rawfile content \"${CLAUDE_PLUGIN_ROOT}/orchestration.md\" '{hookSpecificOutput:{hookEventName:\"SessionStart\",additionalContext:(\"Plugin root (resolved ${CLAUDE_PLUGIN_ROOT}): \" + $root + \"\\n\\n\" + $content)}}'"
           }
         ]
       },

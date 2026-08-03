@@ -56,6 +56,18 @@ export const DEFAULT_PLUGIN_ROOT = resolvePath(HERE, '..', '..')
 
 const EXECUTION_MODE_LINE_RE = /^execution_mode:\s*(.*)$/gm
 
+// canonical accepted values (whitelist, not a blacklist) — widening this
+// requires a deliberate edit to the EXECUTION_MODES drift-guard test too.
+export const EXECUTION_MODES = Object.freeze(['agent-tool', 'cmux'])
+// legacy spellings normalized on read; 'subagent' predates the agent-tool
+// rename (issue #5) but must keep working.
+export const EXECUTION_MODE_ALIASES = Object.freeze({ subagent: 'agent-tool' })
+export const DEFAULT_EXECUTION_MODE = 'agent-tool'
+
+// note for assertExecutionModeCmux (below): because 'subagent' normalizes to
+// 'agent-tool' here, a config saying `execution_mode: subagent` now produces
+// a gate refusal naming "agent-tool" — intended, since the mode IS
+// agent-tool and subagent is only a spelling of it.
 // trust C2: a config.md with MORE THAN ONE `execution_mode:` line (a fenced
 // example quoting the key is the obvious case) is ambiguous — refusing
 // beats silently matching whichever line the regex found first.
@@ -64,10 +76,13 @@ export function readExecutionMode(configText) {
   if (matches.length > 1) {
     throw new Error(`readExecutionMode: config text contains ${matches.length} 'execution_mode:' lines — ambiguous (a fenced example?), refusing`)
   }
-  if (matches.length === 0) return 'subagent'
-  const value = matches[0][1].trim()
-  if (value !== 'subagent' && value !== 'cmux') {
-    throw new Error(`readExecutionMode: unknown execution_mode value: ${JSON.stringify(value)}`)
+  if (matches.length === 0) return DEFAULT_EXECUTION_MODE
+  const raw = matches[0][1].trim()
+  const value = EXECUTION_MODE_ALIASES[raw] ?? raw
+  if (!EXECUTION_MODES.includes(value)) {
+    // quote the RAW configured spelling, not the normalized one, so the
+    // operator sees what their file actually says.
+    throw new Error(`readExecutionMode: unknown execution_mode value: ${JSON.stringify(raw)}`)
   }
   return value
 }

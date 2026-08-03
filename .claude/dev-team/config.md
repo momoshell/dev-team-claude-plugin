@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-_(none — #4 slice-1c shipped 2026-08-02 as PR #20; board item → Done. Next task selected via `/dev-team:next` — epic #15's next ready sub-issue is #5 (1d wiring & docs).)_
+current_task: #5 (item: PVTI_lAHOBZYqs84BfEhfzg05G_o) — 1d: wiring & docs. Executed 2026-08-03: 5 specs (be-1d-01…05) + gate-driven amendment (A9 inertness guard narrowed in test/cmux-contract.test.mjs). QA gate PASSED (718/718, deep review pass, 10/10 mutations killed, all Should-fix applied); memory deltas committed to memory files. Board item at In progress. **Ready for `/dev-team:ship`** (branch, commit `feat: cmux 1d — …; bump 0.1.47`, PR closes #5).
 
 ## notes
 

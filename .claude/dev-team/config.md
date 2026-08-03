@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-current_task: #6 (item: PVTI_lAHOBZYqs84BfEhfzg05HLw) — Phase 2: judgment roles in panes — markdown returns, doc tabs, scoped writes (approved 2026-08-03; coder dispatched on branch feat/cmux-2-judgment-panes; board → In progress; spec: scratchpad/be-06-01.spec.json)
+_(none — #6 Phase 2 shipped 2026-08-03 as PR #22; board item → Done. Pre-merge on PR #22: live-GUI acceptance L1–L4 (protocol in the PR body; L3/L4 non-deferrable). Post-merge, separate session: S23 context-trimming → S15b cost measurement → user GO/NO-GO. Epic #15 next sub-issues: #7 ‖ #8 ‖ #9 — promote to Ready, then `/dev-team:next` in a fresh window. #8 planner: read the PR #22 "Forward signals" section first.)_
 
 ## notes
 

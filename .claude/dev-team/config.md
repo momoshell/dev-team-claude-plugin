@@ -33,7 +33,7 @@ fast: node --test
 full: node --test
 ```
 
-Single lane — the entire suite (~180 tests across `test/*.mjs` as of v0.1.44; grows with the cmux contract work) runs in **under 1 second** (`node --test`, verified). No typecheck or lint tooling exists in this repo (no `tsconfig.json`, no eslint config) — it's plain JS/Markdown. `full` and `fast` are identical; there is no slow suite to keep out of the fast lane.
+Single command, two usage modes — the full suite (~771 tests as of v0.1.48) runs in **~60 seconds** (`node --test`; the cmux dispatch/preflight tests spawn real fake-cmux process topologies, so the pre-cmux "<1s" figure is obsolete). The `fast` lane in practice is per-file filtering: `node --test test/<relevant files>` scoped to the spec's `files_in_scope` (seconds); reserve the bare `node --test` for ship. No typecheck or lint tooling exists in this repo (no `tsconfig.json`, no eslint config) — it's plain JS/Markdown.
 
 ## review_defaults
 
@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-_(none — #5 slice-1d shipped 2026-08-03 as PR #21; board item → Done. Epic #15's next sub-issues: #6 (Phase 2 judgment roles) onward — promote to Ready on the board, then `/dev-team:next` in a fresh window.)_
+current_task: #6 (item: PVTI_lAHOBZYqs84BfEhfzg05HLw) — Phase 2: judgment roles in panes — markdown returns, doc tabs, scoped writes (approved 2026-08-03; coder dispatched on branch feat/cmux-2-judgment-panes; board → In progress; spec: scratchpad/be-06-01.spec.json)
 
 ## notes
 

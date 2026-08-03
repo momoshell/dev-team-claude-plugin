@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-current_task: #5 (item: PVTI_lAHOBZYqs84BfEhfzg05G_o) — 1d: wiring & docs. Executed 2026-08-03: 5 specs (be-1d-01…05) + gate-driven amendment (A9 inertness guard narrowed in test/cmux-contract.test.mjs). QA gate PASSED (718/718, deep review pass, 10/10 mutations killed, all Should-fix applied); memory deltas committed to memory files. Board item at In progress. **Ready for `/dev-team:ship`** (branch, commit `feat: cmux 1d — …; bump 0.1.47`, PR closes #5).
+_(none — #5 slice-1d shipped 2026-08-03 as PR #21; board item → Done. Epic #15's next sub-issues: #6 (Phase 2 judgment roles) onward — promote to Ready on the board, then `/dev-team:next` in a fresh window.)_
 
 ## notes
 

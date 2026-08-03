@@ -29,7 +29,7 @@ const DISPATCH_PATH = join(ROOT, 'scripts', 'cmux', 'dispatch.mjs')
 process.env.CMUX_BIN = FIXTURE
 
 const {
-  readExecutionMode, OUTCOME_MAPPING, mapOutcome, applyPostconditionOverride,
+  readExecutionMode, EXECUTION_MODES, OUTCOME_MAPPING, mapOutcome, applyPostconditionOverride,
   parseArgs, buildContext, ensureWorktree, isDispatcherWorktree, removeWorktreeIfCleanAndMerged,
   writeCompletionNonce, adapterLaunchLine,
   preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd,
@@ -200,15 +200,30 @@ test('E-P1 sequence: the full dispatch also produces rename-tab and send/send-ke
 // readExecutionMode / OUTCOME_MAPPING / mapOutcome / applyPostconditionOverride
 // ---------------------------------------------------------------------------
 
-test('readExecutionMode defaults to subagent when absent', () => {
-  assert.equal(readExecutionMode(''), 'subagent')
-  assert.equal(readExecutionMode('# some config\nother: stuff\n'), 'subagent')
+test('readExecutionMode defaults to agent-tool when absent', () => {
+  assert.equal(readExecutionMode(''), 'agent-tool')
+  assert.equal(readExecutionMode('# some config\nother: stuff\n'), 'agent-tool')
 })
 
-test('readExecutionMode reads subagent/cmux and throws on any other value', () => {
-  assert.equal(readExecutionMode('execution_mode: subagent\n'), 'subagent')
+test('readExecutionMode reads agent-tool/cmux, normalizes the subagent alias, and throws on any other value', () => {
+  assert.equal(readExecutionMode('execution_mode: agent-tool\n'), 'agent-tool')
   assert.equal(readExecutionMode('execution_mode: cmux\n'), 'cmux')
-  assert.throws(() => readExecutionMode('execution_mode: agent-tool\n'), /unknown execution_mode/)
+  assert.equal(readExecutionMode('execution_mode: subagent\n'), 'agent-tool')
+  assert.throws(() => readExecutionMode('execution_mode: sub-agent\n'), /unknown execution_mode/)
+  assert.throws(() => readExecutionMode('execution_mode: workflow\n'), /unknown execution_mode/)
+  assert.throws(() => readExecutionMode('execution_mode: Cmux\n'), /unknown execution_mode/)
+  assert.throws(() => readExecutionMode('execution_mode:\n'), /unknown execution_mode/)
+})
+
+test('readExecutionMode throw message quotes the raw configured spelling, not the normalized alias', () => {
+  assert.throws(
+    () => readExecutionMode('execution_mode: sub-agent\n'),
+    (err) => err.message.includes(JSON.stringify('sub-agent')),
+  )
+})
+
+test('EXECUTION_MODES drift guard: widening the accepted set requires a deliberate test edit', () => {
+  assert.deepEqual(EXECUTION_MODES, ['agent-tool', 'cmux'])
 })
 
 test('OUTCOME_MAPPING row exit-0-plus-invalid-return never yields ok (qa L-22)', () => {
@@ -1245,7 +1260,7 @@ function writeConfigMd(checkout, text) {
   writeFileSync(configPath, text)
 }
 
-test('execution mode: `dispatch` (a mutating verb) refuses when execution_mode is absent (defaults subagent) or explicitly subagent', () => {
+test('execution mode: `dispatch` (a mutating verb) refuses when execution_mode is absent (defaults agent-tool), explicitly subagent, or explicitly agent-tool', () => {
   const env = freshCmuxEnv('exec-mode-refuse')
   const checkout = makeGitCheckout(env.dir)
   const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
@@ -1259,6 +1274,9 @@ test('execution mode: `dispatch` (a mutating verb) refuses when execution_mode i
   writeConfigMd(checkout, 'execution_mode: subagent\n')
   assert.equal(silentMain(['dispatch', ...commonArgs, '--slice', 'be-1a', '--role', 'coder', '--spec', makeSpecFile(ctx)]), 1)
 
+  writeConfigMd(checkout, 'execution_mode: agent-tool\n')
+  assert.equal(silentMain(['dispatch', ...commonArgs, '--slice', 'be-1a', '--role', 'coder', '--spec', makeSpecFile(ctx)]), 1)
+
   const log = readLog(env.logPath)
   assert.equal(log.filter((e) => e.argv[0] === 'new-pane').length, 0)
 })
@@ -1267,7 +1285,7 @@ test('execution mode: preflight and status are NOT gated by execution_mode', () 
   const env = freshCmuxEnv('exec-mode-readonly')
   const checkout = makeGitCheckout(env.dir)
   const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
-  // No config.md at all — execution_mode defaults to subagent — yet preflight
+  // No config.md at all — execution_mode defaults to agent-tool — yet preflight
   // and status must still run (they are read-only / non-mutating).
   assert.equal(silentMain(['preflight', ...commonArgs]), 0)
   assert.equal(silentMain(['status', ...commonArgs]), 0)

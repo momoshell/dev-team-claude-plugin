@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 import * as contract from '../scripts/cmux/contract.mjs'
@@ -578,20 +578,44 @@ test('contract.mjs exports exactly the 3 functions + 16 constants of the frozen 
 })
 
 // ---------------------------------------------------------------------------
-// A9 — inertness: slice 1a ships inert everywhere except README.md, which
-// deliberately documents the new files.
+// Substrate-agnostic surfaces. Was A9 ("slice-1a ships inert everywhere except
+// README.md") — superseded by slice 1d, which wired cmux mode into
+// orchestration.md and commands/team.md on purpose. Those two are exempt here
+// and carry their own POSITIVE assertions instead: test/orchestration.test.mjs
+// pins all four orchestration.md deltas + the exactly-one-cmux-reference
+// invariant, test/commands.test.mjs pins team.md's `mode cmux|agent-tool` verb.
+// What survives is the part of A9 that still means something after 1d:
+//   - team-build.workflow.mjs never learns about cmux — workflow mode stays on
+//     the Workflow tool's agent() primitive (1d carve-out).
+//   - hooks/hooks.json never learns about cmux — the worker guard keys on a
+//     neutral env var (DEVTEAM_WORKER), never on cmux/roster knowledge.
+//   - every command other than team.md stays substrate-agnostic. A NEW command
+//     is substrate-agnostic by default: it must be added to GUARDED_COMMANDS
+//     deliberately, which is what the closed-manifest assertion below forces.
 // ---------------------------------------------------------------------------
 
-test('cmux/roster stay inert in slice-1a-owned surfaces', () => {
+const CMUX_WIRED_SURFACES = new Set(['orchestration.md', join('commands', 'team.md')])
+const GUARDED_COMMANDS = ['next.md', 'onboard.md', 'pr-review.md', 'ship.md']
+
+test('cmux/roster stay absent from the substrate-agnostic surfaces', () => {
+  // The exemptions must still exist under those exact names — a rename must
+  // fail here, never silently widen the exemption.
+  for (const rel of CMUX_WIRED_SURFACES) {
+    assert.ok(existsSync(join(ROOT, rel)), `exempt surface is missing: ${rel}`)
+  }
+
+  const guardedCommands = readdirSync(join(ROOT, 'commands'))
+    .filter((f) => f.endsWith('.md') && !CMUX_WIRED_SURFACES.has(join('commands', f)))
+    .sort()
+  // Completeness against a closed manifest, not a rejection-only walk: an
+  // empty or mis-globbed list would satisfy every assertion below.
+  assert.deepEqual(guardedCommands, GUARDED_COMMANDS)
+
   const files = [
-    join(ROOT, 'orchestration.md'),
     join(ROOT, 'team-build.workflow.mjs'),
     join(ROOT, 'hooks', 'hooks.json'),
+    ...guardedCommands.map((f) => join(ROOT, 'commands', f)),
   ]
-  const commandsDir = join(ROOT, 'commands')
-  for (const f of readdirSync(commandsDir)) {
-    if (f.endsWith('.md')) files.push(join(commandsDir, f))
-  }
   for (const f of files) {
     const src = readFileSync(f, 'utf8')
     assert.equal(/cmux/i.test(src), false, `${f} contains "cmux"`)

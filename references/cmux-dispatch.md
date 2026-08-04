@@ -22,6 +22,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/cmux/dispatch.mjs" await --task <slug> --all
 
 Re-invoke `await` while it reports `{status:'still-running', remaining:[...]}` (exit 0), until every dispatch resolves. Resolved dispatches return `{resolved:[{dispatch_id,state,warnings}], remaining:[...]}`. `--max-block-s` is clamped to a 5s floor — `--max-block-s 0` cannot make it a non-blocking poll.
 
+**Recommended: `--max-block-s 570`, with an explicit `timeout: 600000` on the Bash tool call wrapping this join.** 570 leaves a 30s margin under the internal clamp ceiling of 600s — at 600 flat, a `dispatch.mjs` process that takes even slightly longer to return than 600.000s collides with the harness's own hard 600,000ms Bash-tool kill timer, which kills the call outright instead of letting `dispatch.mjs` return its clean `still-running` JSON. Never rely on the harness's 120,000ms default timeout for this join. Trade-off: raising the cap from the 120s default to 570s also raises the await-lock stale threshold (2× the cap) from 240s to ~1140s (19 min) — a dead await holder wedges subsequent joins that much longer; the poll-turn savings on every task outweigh this on the rare dead-holder case.
+
 **Outcomes are per-dispatch attributable, from exactly four sources: a fresh schema-valid return, an EXIT sentinel, a quiet timer, or a wall-clock timeout.** cmux `events` only ever trigger a rescan — they never decide an outcome themselves.
 
 Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = success, 1 = operational failure, 2 = usage error or lock contention (`{error:'lock_held', holder}`).

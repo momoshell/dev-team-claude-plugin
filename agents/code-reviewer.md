@@ -40,6 +40,24 @@ VERDICT: pass | changes-needed — <one-line reason>
 
 Then the findings. **Never bury the verdict at the end.**
 
+## Verdict
+
+Exactly one fenced `json` block, machine-readable, matching:
+
+```json
+{"verdict": "pass", "findings": []}
+```
+
+`verdict` is one of `pass` / `changes-needed` / `inconclusive` (matches the `VERDICT:` line above). `findings` is an array of `{"severity": "critical|warning|suggestion", "file": "<path>", "line": <int|null>, "summary": "<string>"}` — one entry per finding, `severity` mapped from the Must-fix/Should-fix/Consider grouping (`critical` for Must-fix, `warning` for Should-fix, `suggestion` for Consider). `inconclusive` only when the review itself could not be completed (e.g. the diff was inaccessible) — never for "no issues found", which is `pass`.
+
+## Must-fix
+
+Bugs, security issues, or anything that flips the verdict to `changes-needed`. For each: where (file/line), why it matters, a concrete fix direction, and a confidence tag. Write `none` if there are no Must-fix findings.
+
+## Notes
+
+Should-fix and Consider findings, plus anything the next reviewer should know. Write `none` if there is nothing to note.
+
 ## How You Review
 
 1. **Review the diff + the in-scope files you're handed** (and their tests). Read their direct context only — don't sweep the whole repo; broad exploration is what makes a review run long and truncate before the verdict. No tests for changed behavior = a finding.

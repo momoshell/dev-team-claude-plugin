@@ -475,8 +475,8 @@ test('BLOCKED_MARKDOWN_PREFIX is the exact literal writeBlockedReturn composes o
   assert.equal(BLOCKED_MARKDOWN_PREFIX, 'status: blocked - ')
 })
 
-test('PANE_ROLES deep-equals the seven-role be-06-01 literal, and PANE_ROLES ∩ SUBAGENT_ONLY is empty', () => {
-  assert.deepEqual(PANE_ROLES, ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead'])
+test('PANE_ROLES deep-equals the ten-role be-08-01 literal, and PANE_ROLES ∩ SUBAGENT_ONLY is empty', () => {
+  assert.deepEqual(PANE_ROLES, ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead', 'build-validator', 'code-reviewer', 'code-reviewer-deep'])
   const intersection = PANE_ROLES.filter((r) => SUBAGENT_ONLY.includes(r))
   assert.deepEqual(intersection, [])
 })

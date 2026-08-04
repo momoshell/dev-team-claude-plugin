@@ -63,9 +63,20 @@ test('the set of roles with pane true equals PANE_ROLES exactly', () => {
 //       specification, not by call. If S1's predicate ever changes, this
 //       regex must be changed to match by hand — that hand-edit is the
 //       review checkpoint.
-// No role is exempted: all six pane+markdown roles must pass this guard as
+// No role is exempted: all nine pane+markdown roles must pass this guard as
 // written; if one does not, the roster value is wrong, not the guard.
-test('every pane+markdown role\'s required_sections is authored in its agents/<role>.md (independent oracle)', () => {
+//
+// EXACTLY ONE, not at-least-one: extractSection (return-lint.mjs) is
+// FIRST-MATCH-WINS on heading order, so a role authoring a SECOND heading
+// that also prefix-matches the same required_sections entry (a shadowing
+// heading placed before the real one) would make the lint read the wrong
+// section — 0 matches means the role doesn't author the section; 2+ means a
+// shadowing heading upstream of the real one.
+function matchingHeadings(authored, needle) {
+  return authored.filter((h) => h.toLowerCase().startsWith(needle))
+}
+
+test('every pane+markdown role\'s required_sections is authored EXACTLY ONCE in its agents/<role>.md (independent oracle)', () => {
   const HEADING_RE = /^#{2,6}[ \t]+(.+?)[ \t]*$/gm
   for (const [name, role] of Object.entries(roster.roles)) {
     if (role.pane !== true || role.return.kind !== 'markdown') continue
@@ -73,10 +84,21 @@ test('every pane+markdown role\'s required_sections is authored in its agents/<r
     const authored = [...body.matchAll(HEADING_RE)].map((m) => m[1].trim())
     for (const req of role.return.required_sections) {
       const needle = req.trim().toLowerCase()
-      const satisfied = authored.some((h) => h.toLowerCase().startsWith(needle))
-      assert.ok(satisfied, `role ${name} required_sections entry ${JSON.stringify(req)} is not authored as a heading in agents/${name}.md`)
+      const matches = matchingHeadings(authored, needle)
+      assert.equal(
+        matches.length, 1,
+        `role ${name} required_sections entry ${JSON.stringify(req)} matched ${matches.length} headings in agents/${name}.md (0 = role doesn't author the section; 2+ = shadowing heading — extractSection is first-match-wins)`,
+      )
     }
   }
+})
+
+// Non-vacuity control: proves the EXACTLY-ONE guard above can actually
+// detect a shadowing heading, against a synthetic heading list independent
+// of any real agent file.
+test('non-vacuity control: the EXACTLY-ONE matching predicate detects a synthetic shadowing heading', () => {
+  const matches = matchingHeadings(['Verdict summary', 'Verdict'], 'verdict')
+  assert.equal(matches.length, 2)
 })
 
 test('no profile description matches /cannot run commands/i', () => {

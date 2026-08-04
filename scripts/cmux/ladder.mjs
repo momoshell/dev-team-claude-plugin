@@ -10,7 +10,7 @@
 import { readFileSync, writeFileSync, renameSync, lstatSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, basename, resolve as resolvePath } from 'node:path'
-import { validate, SIGNAL_LIMITS, SECTION_HEADING_RE } from './contract.mjs'
+import { validate, SIGNAL_LIMITS, SECTION_HEADING_RE, BLOCKED_MARKDOWN_PREFIX } from './contract.mjs'
 import { renderPathFor } from './resolve.mjs'
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url))
@@ -421,7 +421,13 @@ export function classify({ record, fsState, tree, now, quietState, topIdle, quie
     // the .exit sentinel, per U-4). markdown bodies are strings, not objects -> null.
     const body = validation.envelope && validation.envelope.body
     const bodyStatus = body && typeof body === 'object' && typeof body.status === 'string' ? body.status : null
-    return { state: 'completed', reason: 'fresh_valid_return', warnings, bodyStatus }
+    // bodyBlockedMarkdown -> the gate/adapter-composed blocked-markdown
+    // counterpart to bodyStatus: a markdown body is a string, so it never
+    // carries a `status` field and bodyStatus is always null for it. This
+    // flag is how a gate-killed markdown dispatch (writeBlockedReturn's
+    // output) is distinguished from a genuine completed markdown return.
+    const bodyBlockedMarkdown = typeof body === 'string' && body.startsWith(BLOCKED_MARKDOWN_PREFIX)
+    return { state: 'completed', reason: 'fresh_valid_return', warnings, bodyStatus, bodyBlockedMarkdown }
   }
 
   const createdMs = Date.parse(record.created_at)

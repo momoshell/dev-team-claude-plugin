@@ -20,7 +20,7 @@
 import { readFileSync, writeFileSync, renameSync, mkdirSync, realpathSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join, resolve as resolvePath } from 'node:path'
-import { validate } from './contract.mjs'
+import { validate, BLOCKED_MARKDOWN_PREFIX } from './contract.mjs'
 import { validateReturn, collectFsState, isFresh } from './ladder.mjs'
 
 const MODULE_DIR = dirname(fileURLToPath(import.meta.url))
@@ -331,7 +331,7 @@ export function sanitizeReasonForMarkdown(reason) {
 }
 
 function buildBlockedMarkdownBody(record, reason) {
-  const lines = [`status: blocked - ${sanitizeReasonForMarkdown(reason)}`, '']
+  const lines = [`${BLOCKED_MARKDOWN_PREFIX}${sanitizeReasonForMarkdown(reason)}`, '']
   const requiredSections = record.return.required_sections || []
   let sawVerdict = false
 
@@ -387,6 +387,13 @@ function destinationHoldsFreshNonBlockedReturn(record) {
   const validation = validateReturn(record, fsState.returnText)
   if (!validation.ok) return false
 
+  // Deliberately asymmetric with ladder.mjs's classify(): classify() reads a
+  // BLOCKED_MARKDOWN_PREFIX-prefixed markdown body as blocked (dispatch.mjs's
+  // OUTCOME_MAPPING worker_blocked_markdown row), but this function must NOT
+  // key on that prefix — doing so would let a blocked-prefixed body already
+  // on disk return false here and get overwritten, destroying either a prior
+  // blocked envelope from this same dispatch or a worker's own self-authored
+  // blocked markdown return and its real verdict json.
   const { body } = validation.envelope
   const bodyStatus = body && typeof body === 'object' ? body.status : null
   return !WORKER_BLOCKED_STATUSES.includes(bodyStatus)

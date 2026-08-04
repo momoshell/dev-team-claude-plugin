@@ -100,12 +100,15 @@ export function readExecutionMode(configText) {
 export const OUTCOME_WORKER_BLOCKED = 'blocked'
 
 export const OUTCOME_MAPPING = [
-  // RESIDUAL (pre-reviewer-panes, issue #6): bodyStatus is null for a markdown
-  // (reviewer/validator) return, so a blocked markdown body falls through to
-  // completed->ok here. Harmless while PANE_ROLES is coder-only (json bodies):
-  // reviewers carry their own non-pass verdict inside the return. Revisit when
-  // reviewer roles become pane-dispatched.
+  // bodyStatus is null for every markdown (reviewer/validator) body — a
+  // string has no `status` field — so a gate/adapter-composed blocked
+  // markdown envelope (writeBlockedReturn's output) is invisible to the
+  // worker_blocked row above and must be caught here instead, keyed on
+  // ladder.classify()'s bodyBlockedMarkdown flag (never fsState.exitSentinel,
+  // per U-4). === true, not truthiness: fail closed if the field is ever
+  // absent from an older/partial classification.
   { row: 'worker_blocked', outcome: OUTCOME_WORKER_BLOCKED, when: (c) => c.state === 'completed' && WORKER_BLOCKED_STATUSES.includes(c.bodyStatus) },
+  { row: 'worker_blocked_markdown', outcome: OUTCOME_WORKER_BLOCKED, when: (c) => c.state === 'completed' && c.bodyBlockedMarkdown === true },
   { row: 'completed', outcome: 'ok', when: (c) => c.state === 'completed' },
   { row: 'exit_nonzero', outcome: 'exit_nonzero', when: (c, fsState) => fsState && fsState.exitSentinel != null && fsState.exitSentinel !== '0' },
   { row: 'timeout', outcome: 'timeout', when: (c) => c.state === 'timeout' },

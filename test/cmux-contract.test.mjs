@@ -8,7 +8,7 @@ import {
   validate, shouldArchive, slugify,
   OUTCOMES, NONCE_PREFIX, PROTECTED_PATH_COMPONENTS, SIGNAL_LIMITS, CMD_RE, CMUX_ALLOWS,
   TOOLS, DISALLOWED_TOOLS, GRANT_TOKENS, SECTION_HEADING_RE, SLICE_ID_RE,
-  PANE_ROLES, SUBAGENT_ONLY,
+  PANE_ROLES, SUBAGENT_ONLY, BLOCKED_MARKDOWN_PREFIX,
 } from '../scripts/cmux/contract.mjs'
 
 const rosterSchema = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/roster.schema.json'), 'utf8'))
@@ -471,6 +471,10 @@ test('GRANT_TOKENS deep-equals dispatch-record.schema.json properties.profile.pr
   assert.deepEqual(dispatchRecordSchema.properties.profile.properties.grants.items.enum, GRANT_TOKENS)
 })
 
+test('BLOCKED_MARKDOWN_PREFIX is the exact literal writeBlockedReturn composes onto', () => {
+  assert.equal(BLOCKED_MARKDOWN_PREFIX, 'status: blocked - ')
+})
+
 test('PANE_ROLES deep-equals the seven-role be-06-01 literal, and PANE_ROLES ∩ SUBAGENT_ONLY is empty', () => {
   assert.deepEqual(PANE_ROLES, ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead'])
   const intersection = PANE_ROLES.filter((r) => SUBAGENT_ONLY.includes(r))
@@ -571,13 +575,13 @@ test('dispatch-record.schema.json kickoff node description names all seven kicko
 // Export-surface meta-test
 // ---------------------------------------------------------------------------
 
-test('contract.mjs exports exactly the 3 functions + 16 constants of the frozen surface', () => {
+test('contract.mjs exports exactly the 3 functions + 17 constants of the frozen surface', () => {
   const expected = new Set([
     'validate', 'shouldArchive', 'slugify',
     'BUDGET', 'TOOLS', 'DISALLOWED_TOOLS', 'CMUX_ALLOWS', 'GRANT_TOKENS', 'OUTCOMES',
     'NONCE_PREFIX', 'PROTECTED_PATH_COMPONENTS', 'SIGNAL_LIMITS', 'SECTION_HEADING_RE',
     'MODEL_ALIASES', 'SUBAGENT_ONLY', 'PANE_ROLES', 'SLICE_ID_RE', 'CMD_RE',
-    'WORKER_BLOCKED_STATUSES',
+    'WORKER_BLOCKED_STATUSES', 'BLOCKED_MARKDOWN_PREFIX',
   ])
   assert.deepEqual(new Set(Object.keys(contract)), expected)
   assert.equal('resolveRole' in contract, false)

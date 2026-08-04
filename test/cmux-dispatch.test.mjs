@@ -43,6 +43,7 @@ const {
   readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
 } = await import(join(ROOT, 'scripts', 'cmux', 'record.mjs'))
 const { specPathFor, sidecarPaths } = await import(join(ROOT, 'scripts', 'cmux', 'resolve.mjs'))
+const { writeBlockedReturn } = await import(join(ROOT, 'scripts', 'cmux', 'return-lint.mjs'))
 
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
@@ -289,6 +290,21 @@ test('MF1: a completed classification with bodyStatus "insufficient" also maps t
   const classification = { state: 'completed', warnings: [], bodyStatus: 'insufficient' }
   const fsState = { exitSentinel: '0', returnPathKind: 'file' }
   assert.equal(mapOutcome(classification, fsState), 'blocked')
+})
+
+// worker_blocked_markdown row — bodyStatus stays null (a markdown body has
+// no `status` field), so a gate-composed blocked markdown envelope is only
+// caught via bodyBlockedMarkdown.
+test('worker_blocked_markdown: a completed classification with bodyBlockedMarkdown true maps to the dedicated blocked outcome', () => {
+  const classification = { state: 'completed', warnings: [], bodyStatus: null, bodyBlockedMarkdown: true }
+  const fsState = { exitSentinel: null, returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'blocked')
+})
+
+test('worker_blocked_markdown: a completed classification with bodyBlockedMarkdown false still maps to ok', () => {
+  const classification = { state: 'completed', warnings: [], bodyStatus: null, bodyBlockedMarkdown: false }
+  const fsState = { exitSentinel: null, returnPathKind: 'file' }
+  assert.equal(mapOutcome(classification, fsState), 'ok')
 })
 
 // U-4 REGRESSION GUARD: the worker_blocked row must never fire off the .exit
@@ -761,6 +777,28 @@ test('U-1: a stale return file at the derived stem refuses via StaleReturnError,
   assert.equal(newEntries.filter((e) => ['new-pane', 'send', 'send-key', 'rename-tab'].includes(e.argv[0])).length, 0)
 })
 
+test('ADR-017: dispatchCmd refuses a non-null max_turns BEFORE any worktree/branch/snapshot-dir side effect', () => {
+  const { env, ctx } = setUpWorkspace('max-turns-hoist', { configOverrides: { maxTurns: 5 } })
+  const specPath = makeSpecFile(ctx)
+  const logBefore = readLog(env.logPath)
+
+  assert.throws(
+    () => dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx),
+    /max_turns.*ADR-017/s,
+  )
+
+  // No worktree, no worktrees.json entry, no per-dispatch snapshot dir — the
+  // refusal fires before ensureWorktree/snapshotWorkerPlugin ever run.
+  assert.equal(existsSync(ctx.paths.worktreesIndexPath), false)
+  assert.equal(existsSync(ctx.paths.snapshotDir), false)
+
+  // Same hoist discipline as the workspace-liveness check above: only the
+  // one `tree` call the liveness check itself makes, never a dispatching verb.
+  const newEntries = readLog(env.logPath).slice(logBefore.length)
+  assert.ok(newEntries.every((e) => e.argv[0] === 'tree'), `expected only tree calls after the refusal, got: ${JSON.stringify(newEntries)}`)
+  assert.equal(newEntries.filter((e) => ['new-pane', 'send', 'send-key', 'rename-tab'].includes(e.argv[0])).length, 0)
+})
+
 // ---------------------------------------------------------------------------
 // WORKTREES — real git repos (git init + a commit) under os.tmpdir().
 // ---------------------------------------------------------------------------
@@ -1157,6 +1195,36 @@ test('MF1 vector (c) gate-exhaustion: a blocked body + .exit "0" closes with out
   const res = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
   assert.equal(res.json.outcome, 'blocked')
 })
+
+// worker_blocked_markdown END-TO-END — a real gate/adapter-composed blocked
+// markdown envelope, written via the real writeBlockedReturn (never a
+// hand-written fixture string), closes with outcome 'blocked' and exit code
+// 1. Before the fix this was recorded 'ok'/0 (bodyStatus is always null for
+// a markdown body, so the worker_blocked row never fired).
+test('worker_blocked_markdown: a real gate-composed blocked markdown return closes with outcome blocked and exit code 1', () => {
+  const { ctx } = setUpWorkspace('worker-blocked-markdown')
+  const record = buildAndBindRecord(ctx, { role: 'code-reviewer', sliceId: 'be-1b' })
+  writeBlockedReturn(record, 'gate exhausted: max_blocks reached')
+
+  const res = closeCmd({ dispatch: record.dispatch_id }, ctx)
+  assert.equal(res.json.outcome, 'blocked')
+  assert.equal(res.code, 1)
+})
+
+// worker_blocked_markdown REGRESSION — all six already-pane-enabled markdown
+// roles (issue #6): a blocked envelope built via the real writeBlockedReturn
+// output classifies as outcome 'blocked', never a hand-written fixture
+// string standing in for it.
+for (const role of ['plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead']) {
+  test(`worker_blocked_markdown regression (${role}): a real gate-composed blocked markdown return closes with outcome blocked`, () => {
+    const { ctx } = setUpWorkspace(`worker-blocked-markdown-${role}`)
+    const record = buildAndBindRecord(ctx, { role, sliceId: 'be-1b' })
+    writeBlockedReturn(record, 'gate exhausted: max_blocks reached')
+
+    const res = closeCmd({ dispatch: record.dispatch_id }, ctx)
+    assert.equal(res.json.outcome, 'blocked')
+  })
+}
 
 // ---------------------------------------------------------------------------
 // be-06-01 S8 — presentReturn: render + present the doc tab on return.

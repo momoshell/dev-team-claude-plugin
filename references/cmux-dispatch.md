@@ -54,7 +54,7 @@ Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = 
 
 **Carve-outs:** `Explore` scouts stay on the Agent tool always. Workflow mode (`team-build.workflow.mjs`) stays on the Workflow tool's `agent()` primitive — neither goes through `dispatch.mjs`.
 
-**Fidelity notes:** pane workers inherit `CLAUDE.md`, project skills, and MCP servers (Agent-tool subagents do not). `maxTurns` is unenforceable on a pane interactively — there is no hard turn cap until the Phase-3 gate counter lands.
+**Fidelity notes:** pane workers inherit `CLAUDE.md`, project skills, and MCP servers (Agent-tool subagents do not). The runaway/hang bound is `timeout_s` (parent-side, measured from `record.created_at`); `max_turns` remains schema-present but is refused — not silently accepted — if ever set non-null, by design (see ADR-017 in architecture-notes.md).
 
 **Ambiguity trap:** `.claude/dev-team/config.md` must contain exactly one `execution_mode:` line. A second one — a fenced example quoting the key is the classic case — makes the config ambiguous, and every mutating dispatch verb then refuses. Never add a second `execution_mode:` line anywhere in that file, fenced or not.
 

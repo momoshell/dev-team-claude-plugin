@@ -812,6 +812,52 @@ test('MF1: a completed "insufficient" body carries bodyStatus "insufficient"', (
   assert.equal(result.bodyStatus, 'insufficient')
 })
 
+// ---------------------------------------------------------------------------
+// bodyBlockedMarkdown — the gate/adapter-composed blocked-markdown
+// counterpart to bodyStatus (a markdown body is a string; bodyStatus is
+// always null for it). Positives asserted first.
+// ---------------------------------------------------------------------------
+
+test('bodyBlockedMarkdown (positive, FIRST): a completed markdown body starting with BLOCKED_MARKDOWN_PREFIX carries bodyBlockedMarkdown true', () => {
+  const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Verdict'], verdict_block: false } })
+  const result = classifyFreshCase(record, { role: 'code-reviewer', body: 'status: blocked - gate exhausted\n\n## Verdict\n' })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyBlockedMarkdown, true)
+  assert.equal(result.bodyStatus, null)
+})
+
+test('bodyBlockedMarkdown: a normal completed markdown return not starting with the prefix carries bodyBlockedMarkdown false', () => {
+  const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Findings'], verdict_block: false } })
+  const result = classifyFreshCase(record, { role: 'code-reviewer', body: '## Findings\nAll good.' })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyBlockedMarkdown, false)
+})
+
+test('bodyBlockedMarkdown: a markdown body merely CONTAINING the phrase later (not at byte 0) carries bodyBlockedMarkdown false', () => {
+  const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Findings'], verdict_block: false } })
+  const result = classifyFreshCase(record, { role: 'code-reviewer', body: '## Findings\nSee note: status: blocked - not actually, this is prose.' })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyBlockedMarkdown, false)
+})
+
+test('bodyBlockedMarkdown: every json return carries bodyBlockedMarkdown false', () => {
+  const record = buildRecord()
+  const result = classifyFreshCase(record)
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyBlockedMarkdown, false)
+})
+
+// Anti-laundering: a genuine reviewer's legitimate "inconclusive" verdict
+// (a completed markdown return NOT starting with the prefix) must never be
+// misread as gate-killed.
+test('bodyBlockedMarkdown anti-laundering: a completed markdown return NOT starting with the prefix but carrying verdict inconclusive carries bodyBlockedMarkdown false', () => {
+  const record = buildRecord({ role: 'code-reviewer', return: { kind: 'markdown', schema_path: null, required_sections: ['Verdict'], verdict_block: true } })
+  const body = '## Verdict\n\n```json\n{"verdict": "inconclusive", "findings": []}\n```\n'
+  const result = classifyFreshCase(record, { role: 'code-reviewer', body })
+  assert.equal(result.state, 'completed')
+  assert.equal(result.bodyBlockedMarkdown, false)
+})
+
 // U-4 REGRESSION GUARD: a hostile-but-plausible non-zero .exit sentinel
 // alongside a fresh, valid "done" return must NEVER move classify's verdict
 // or its bodyStatus — only add a warning. A "fix" that reorders exit_nonzero

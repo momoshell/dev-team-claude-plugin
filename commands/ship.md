@@ -29,6 +29,17 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
      `Closes #N` still closes the issue itself — this additionally syncs the board's `Status` field, which closing alone doesn't touch. Clear the `current_task:` line from `config.md` after. Non-fatal: if it fails, report it and continue — the PR is the source of truth.
    - Trello (config has a `current_task:` card) → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" comment <card-id> "<PR URL>"` then `trello.sh move <card-id> <done-list-id>`, and clear the `current_task:` line from `config.md`. Non-fatal: if the board update fails, report it and continue — the PR is the source of truth.
 
-6. **Report** the branch, the PR URL, the gate verdict, and any task-source update. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
+6. **Tear down the cmux session** (only when `execution_mode: cmux` is set in `.claude/dev-team/config.md`; **skip this step entirely** when `execution_mode` is `agent-tool` or absent). Runs after step 4's PR and step 3's memory commit, so the durable record is already in git before anything is deleted, and after step 5 so the board is already synced:
+   - **Refusal clause:** if the `--task <slug>` used for this task's workspace/dispatch calls earlier in this run isn't known, **never guess a slug** — skip teardown and report that it was skipped.
+   - Otherwise invoke the existing teardown verb:
+     ```
+     node "${CLAUDE_PLUGIN_ROOT}/scripts/cmux/dispatch.mjs" teardown --task <task-slug> [--keep-artifacts]
+     ```
+     Pass `--keep-artifacts` iff config has `keep_task_artifacts: true`. For the full teardown order (surface/workspace close sequence, verification pass), see `references/cmux-dispatch.md` — don't restate the cmux verbs here.
+   - **Archival:** regardless of `keep_task_artifacts`, a task with any non-zero/non-ok dispatch is always archived (never deleted) — its logs are the trail worth keeping. Archived tasks land at `<task-artifacts-root>/tasks/.archive/<task-slug>-<date>/` (default root `~/.dev-team`; never `.claude/...`).
+   - **Worktrees:** removed only when clean **and** merged — never `--force`. Leftovers are kept and reported as `leftover_worktrees`.
+   - Non-fatal: a teardown failure never un-ships the PR — report it and continue.
+
+7. **Report** the branch, the PR URL, the gate verdict, any task-source update, and (if teardown ran) its outcome including any `leftover_worktrees`. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
 
 **Input:** $ARGUMENTS

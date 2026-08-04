@@ -48,13 +48,15 @@ Deep review by default for:
 
 ## current_task
 
+_(none — #7 shipped 2026-08-04 as PR #31 (board item moved to Done); `/clear` and run `/dev-team:next` to pick up the next task.)_
+
 _(New epic #23 "deterministic backbone" filed 2026-08-04 — separate initiative from epic #15, composes with it (no ADR-007 deviation, no team-build.workflow.mjs edits). Fully planned: design record (v1 → plan-review → architect-consult → v2 → plan-review → v2.1 governing) posted as 8 comments on #23, matching #15's own convention; parked at `tasks/deterministic-backbone/*.md`. Pre-build consulted (2 scouts + backend/qa/devops leads) — findings folded directly into issue bodies for #24/#28, comments on #26/#28/#29. Two real defects caught and fixed pre-build: A0's `--max-block-s` recommendation corrected 600→570 (zero margin against the harness's exact 600,000ms Bash-tool ceiling); B1's baseline design corrected from sha-only to a content-hash fingerprint dict (sha-only couldn't detect a reverted or newly-untracked file — the exact case ADR-016 exists to catch).
 
 **A0 (#24) shipped** 2026-08-04 — `references/cmux-dispatch.md` now recommends `--max-block-s 570` + explicit `timeout: 600000`, with the stale-threshold trade-off stated; pinned-substring + source-extracted tests added in `test/cmux-dispatch-doc.test.mjs`; `node --test` green (775/775); version bumped to 0.1.49. Direct Tier-1 edit, no lead/coder/QA-gate per orchestration.md.
 
 Firm build queue, all sized/reviewed, dependencies stated in each issue: ~~**A0** (#24, doc-only, Tier-1-sized)~~ done → **A1** (#26) → **A2** (#27) ‖ **A3** (#25, needs #7) → **B1** (#28, adversarial panel — command-execution + security-control surface) → **Gate M1** (#29, blocking measurement, no PR — decides whether Phase B is ever filed). Phase B is deliberately NOT filed; contingent on M1's residual-headroom threshold (≥6 decision-class calls/task). Epic #15's #9 was re-scoped by superseding comment (its spec-lint deliverable, one `warn()`, moved into #26).
 
-Start a fresh window with `/dev-team:next` to pick up A1 (#26) next. Epic #15's own sub-issues #7 ‖ #8 ‖ #9 remain independently ready to promote whenever picked up; A3 (#25) and B1 (#28) depend on #9/#7 respectively.)_
+Start a fresh window with `/dev-team:next` to pick up A1 (#26) next. Epic #15's **#7 shipped 2026-08-04 as PR #31** (doc-wiring: ship.md teardown, onboard.md cmux prerequisite, team.md roster verb — deep review pass, 786/786 suite green); its sibling sub-issues #8 ‖ #9 remain independently ready to promote whenever picked up. **A3 (#25) — its `#7` dependency is now satisfied** (PR #31 merges via `Closes #7`); B1 (#28) still depends on #9.)_
 
 ## notes
 

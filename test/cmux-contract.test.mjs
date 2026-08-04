@@ -587,22 +587,33 @@ test('contract.mjs exports exactly the 3 functions + 16 constants of the frozen 
 // ---------------------------------------------------------------------------
 // Substrate-agnostic surfaces. Was A9 ("slice-1a ships inert everywhere except
 // README.md") — superseded by slice 1d, which wired cmux mode into
-// orchestration.md and commands/team.md on purpose. Those two are exempt here
-// and carry their own POSITIVE assertions instead: test/orchestration.test.mjs
-// pins all four orchestration.md deltas + the exactly-one-cmux-reference
-// invariant, test/commands.test.mjs pins team.md's `mode cmux|agent-tool` verb.
-// What survives is the part of A9 that still means something after 1d:
+// orchestration.md and commands/team.md on purpose, and narrowed again by
+// issue #7, which wired commands/ship.md (teardown) and commands/onboard.md
+// (cmux prerequisite check + roster seeding) on purpose. Those four are
+// exempt here and carry their own POSITIVE assertions instead:
+// test/orchestration.test.mjs pins all four orchestration.md deltas + the
+// exactly-one-cmux-reference invariant, test/commands.test.mjs pins team.md's
+// `mode cmux|agent-tool` and `roster <role>=<agent>:<model>` verbs plus
+// ship.md's teardown step and onboard.md's cmux check / config keys / roster
+// seeding.
+// What survives is the part of A9 that still means something after #7:
 //   - team-build.workflow.mjs never learns about cmux — workflow mode stays on
 //     the Workflow tool's agent() primitive (1d carve-out).
 //   - hooks/hooks.json never learns about cmux — the worker guard keys on a
 //     neutral env var (DEVTEAM_WORKER), never on cmux/roster knowledge.
-//   - every command other than team.md stays substrate-agnostic. A NEW command
-//     is substrate-agnostic by default: it must be added to GUARDED_COMMANDS
-//     deliberately, which is what the closed-manifest assertion below forces.
+//   - every command other than team.md/ship.md/onboard.md stays
+//     substrate-agnostic. A NEW command is substrate-agnostic by default: it
+//     must be added to GUARDED_COMMANDS deliberately, which is what the
+//     closed-manifest assertion below forces.
 // ---------------------------------------------------------------------------
 
-const CMUX_WIRED_SURFACES = new Set(['orchestration.md', join('commands', 'team.md')])
-const GUARDED_COMMANDS = ['next.md', 'onboard.md', 'pr-review.md', 'ship.md']
+const CMUX_WIRED_SURFACES = new Set([
+  'orchestration.md',
+  join('commands', 'team.md'),
+  join('commands', 'ship.md'),
+  join('commands', 'onboard.md'),
+])
+const GUARDED_COMMANDS = ['next.md', 'pr-review.md']
 
 test('cmux/roster stay absent from the substrate-agnostic surfaces', () => {
   // The exemptions must still exist under those exact names — a rename must

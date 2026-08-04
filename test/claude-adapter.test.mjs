@@ -266,9 +266,9 @@ function argvSegmentAfter(argv, flag) {
 
 // frontmatterDisallowedTools(role) -> string[] — the comma-split
 // `disallowedTools:` frontmatter line for agents/<role>.md, or [] when the
-// role declares none. build-validator / code-reviewer / code-reviewer-deep
-// (be-08-01) DO declare one, which is exactly what this generic,
-// PANE_ROLES-driven loop is for. Scoped to the frontmatter block
+// role declares none (true for every PANE_ROLES member in this slice; #8's
+// flip adds three roles that DO declare one, which is exactly what this
+// generic, PANE_ROLES-driven loop is for). Scoped to the frontmatter block
 // (between the leading `---` fences) only — a `disallowedTools:`-looking
 // line anywhere in the prose body must never be mistaken for the real one.
 function frontmatterDisallowedTools(role) {
@@ -280,10 +280,11 @@ function frontmatterDisallowedTools(role) {
   return m[1].split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-// qa should-fix: frontmatterDisallowedTools would be vacuous over PANE_ROLES
-// if no member declared disallowedTools — a positive control against
-// code-reviewer (a PANE_ROLES member as of be-08-01) proves the helper
-// actually reads the real frontmatter value rather than always returning [].
+// qa should-fix: frontmatterDisallowedTools is vacuous over PANE_ROLES today
+// (no member declares disallowedTools) — a positive control against
+// code-reviewer (out of PANE_ROLES in this slice, flips in #8) proves the
+// helper actually reads the real frontmatter value rather than always
+// returning [].
 test('frontmatterDisallowedTools positive control: code-reviewer.md declares disallowedTools: Edit, Write, NotebookEdit', () => {
   assert.deepEqual(frontmatterDisallowedTools('code-reviewer'), ['Edit', 'Write', 'NotebookEdit'])
 })

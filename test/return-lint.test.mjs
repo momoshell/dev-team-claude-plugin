@@ -332,53 +332,6 @@ test('writeBlockedReturn: markdown role with multiple required_sections covers e
 })
 
 // ---------------------------------------------------------------------------
-// be-08-01 D17: each of the three newly pane-enabled agent files' authored
-// ## Verdict section carries exactly one fenced json block that itself
-// validates against return-lint.mjs's VERDICT_SCHEMA — extracted from the
-// agent file's own source text (never re-typed) and run through lintReturn's
-// real pipeline via a full, otherwise-valid envelope for that role.
-// ---------------------------------------------------------------------------
-
-function extractVerdictExampleJson(role) {
-  const text = readFileSync(join(ROOT, 'agents', `${role}.md`), 'utf8')
-  const lines = text.split(/\r?\n/)
-  const startIdx = lines.findIndex((l) => l.trim() === '## Verdict')
-  assert.ok(startIdx !== -1, `agents/${role}.md has no ## Verdict section`)
-  let endIdx = lines.length
-  for (let i = startIdx + 1; i < lines.length; i += 1) {
-    if (/^#{2,6}[ \t]+/.test(lines[i])) { endIdx = i; break }
-  }
-  const sectionText = lines.slice(startIdx + 1, endIdx).join('\n')
-  const fenceMatches = [...sectionText.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)]
-  assert.equal(fenceMatches.length, 1, `agents/${role}.md's Verdict section must carry exactly one fenced json block, found ${fenceMatches.length}`)
-  return fenceMatches[0][1]
-}
-
-for (const role of ['build-validator', 'code-reviewer', 'code-reviewer-deep']) {
-  test(`D17: agents/${role}.md's ## Verdict example block validates against VERDICT_SCHEMA`, () => {
-    const exampleJson = extractVerdictExampleJson(role)
-    assert.doesNotThrow(() => JSON.parse(exampleJson), `agents/${role}.md's Verdict example is not valid JSON`)
-
-    const record = buildTestRecord(role)
-    const requiredSections = record.return.required_sections || []
-    const lines = []
-    for (const name of requiredSections) {
-      lines.push(`## ${name}`, '')
-      if (name === 'Verdict') {
-        lines.push('```json', exampleJson, '```', '')
-      } else {
-        lines.push('ok', '')
-      }
-    }
-    writeReturnFile(record, envelopeText(record, lines.join('\n')))
-    const found = keywords(lintReturn(record))
-    for (const verdictKeyword of [VERDICT_SECTION_MISSING, VERDICT_BLOCK_MISSING, VERDICT_BLOCK_MULTIPLE, VERDICT_BLOCK_UNPARSEABLE, VERDICT_BLOCK_INVALID]) {
-      assert.equal(found.includes(verdictKeyword), false, `agents/${role}.md's Verdict example produced ${verdictKeyword}`)
-    }
-  })
-}
-
-// ---------------------------------------------------------------------------
 // destinationHoldsFreshNonBlockedReturn asymmetry (NOT re-keyed on
 // BLOCKED_MARKDOWN_PREFIX, deliberately, unlike ladder.mjs's classify()):
 // writeBlockedReturn must never clobber an existing fresh markdown return

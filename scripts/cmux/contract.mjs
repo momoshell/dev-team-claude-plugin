@@ -49,7 +49,7 @@ export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable']
 
 export const SUBAGENT_ONLY = ['architect', 'trd-reviewer']
 
-export const PANE_ROLES = ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead', 'build-validator', 'code-reviewer', 'code-reviewer-deep']
+export const PANE_ROLES = ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead']
 
 export const SLICE_ID_RE = /^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,15}){0,3}$/
 

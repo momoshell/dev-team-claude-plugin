@@ -61,7 +61,7 @@
       "isolation": "worktree",
       "model": "haiku",
       "effort": "low",
-      "pane": true,
+      "pane": false,
       "doc_tab": false,
       "return": { "kind": "markdown", "required_sections": ["Verdict"], "verdict_block": true }
     },
@@ -69,7 +69,7 @@
       "profile": "judgment",
       "isolation": "worktree",
       "model": "sonnet",
-      "pane": true,
+      "pane": false,
       "doc_tab": true,
       "return": { "kind": "markdown", "required_sections": ["Verdict", "Must-fix", "Notes"], "verdict_block": true }
     },
@@ -78,7 +78,7 @@
       "isolation": "worktree",
       "model": "opus",
       "effort": "high",
-      "pane": true,
+      "pane": false,
       "doc_tab": true,
       "return": { "kind": "markdown", "required_sections": ["Verdict", "Must-fix", "Notes"], "verdict_block": true }
     },

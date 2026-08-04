@@ -635,7 +635,7 @@ test('PROFILE_ADDENDA: all three variants carry the ReturnEnvelope key list, the
 })
 
 // ---------------------------------------------------------------------------
-// buildArgv / buildRecord — max_turns is inert by loud refusal (ADR-014):
+// buildArgv / buildRecord — max_turns is inert by loud refusal (ADR-017):
 // gate-side turn-budget enforcement is not built, so buildRecord throws if
 // max_turns ever resolves non-null from any of its three sources, and
 // buildArgv has no emission path left for it at all.
@@ -655,18 +655,18 @@ test('buildArgv: never emits --max-turns, even for a hand-built record with max_
   assert.equal(argv2.includes('--max-turns'), false)
 })
 
-test('buildRecord: throws naming max_turns and ADR-014 when config.maxTurns is non-null', () => {
+test('buildRecord: throws naming max_turns and ADR-017 when config.maxTurns is non-null', () => {
   const root = makeTmpDir('cmux-record-')
   const { ctx } = makeCtxAndPaths({ root })
   assert.throws(
     () => buildRecord({ ...ctx, config: { maxTurns: 5 } }, {
       role: 'coder', sliceId: 'be-1a', attempt: 1, spec: { validation_commands: [] },
     }),
-    /max_turns.*ADR-014/s
+    /max_turns.*ADR-017/s
   )
 })
 
-test('buildRecord: throws naming max_turns and ADR-014 when the role override sets max_turns', () => {
+test('buildRecord: throws naming max_turns and ADR-017 when the role override sets max_turns', () => {
   const root = makeTmpDir('cmux-record-')
   const { ctx } = makeCtxAndPaths({ root })
   const resolved = resolveRole('coder', { plugin: { ...rosterDefault.roles.coder, max_turns: 7 } })
@@ -674,11 +674,11 @@ test('buildRecord: throws naming max_turns and ADR-014 when the role override se
     () => buildRecord({ ...ctx, resolved }, {
       role: 'coder', sliceId: 'be-1a', attempt: 1, spec: { validation_commands: [] },
     }),
-    /max_turns.*ADR-014/s
+    /max_turns.*ADR-017/s
   )
 })
 
-test('buildRecord: throws naming max_turns and ADR-014 when roster.defaults.max_turns is non-null', () => {
+test('buildRecord: throws naming max_turns and ADR-017 when roster.defaults.max_turns is non-null', () => {
   const root = makeTmpDir('cmux-record-')
   const { ctx } = makeCtxAndPaths({ root })
   const roster = { ...rosterDefault, defaults: { ...rosterDefault.defaults, max_turns: 3 } }
@@ -686,7 +686,7 @@ test('buildRecord: throws naming max_turns and ADR-014 when roster.defaults.max_
     () => buildRecord({ ...ctx, roster }, {
       role: 'coder', sliceId: 'be-1a', attempt: 1, spec: { validation_commands: [] },
     }),
-    /max_turns.*ADR-014/s
+    /max_turns.*ADR-017/s
   )
 })
 

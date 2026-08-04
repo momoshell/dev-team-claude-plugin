@@ -448,6 +448,28 @@ function assertStructuralPathInvariants(record) {
   }
 }
 
+// resolveMaxTurnsOrThrow({ config, resolved, defaults }) -> null (or throws).
+// Single source of truth for the three-source max_turns resolution
+// (config override -> role override -> roster default) shared by
+// dispatchCmd (hoisted before any worktree/snapshot side effect) and
+// buildRecord (a correctness backstop for callers that construct a record
+// directly, e.g. tests). max_turns stays schema-present as integer|null but
+// is inert by refusal — see ADR-017 in architecture-notes.md.
+export function resolveMaxTurnsOrThrow({ config = {}, resolved, defaults }) {
+  const maxTurns = config.maxTurns !== undefined
+    ? config.maxTurns
+    : (resolved.max_turns !== undefined ? resolved.max_turns : defaults.max_turns)
+  if (maxTurns !== null) {
+    throw new Error(
+      'max_turns is set to ' + maxTurns + ' but gate-side turn-budget enforcement ' +
+      'is not implemented (see ADR-017 in architecture-notes.md) — the CLI turn ' +
+      'cap flag emission was removed as unreachable/unenforceable; use timeout_s ' +
+      'to bound a runaway worker instead'
+    )
+  }
+  return maxTurns
+}
+
 // buildRecord(ctx, { role, sliceId, attempt, spec }) -> record (create state:
 // surface/bound_at/ended_at/outcome all null). ctx = { roots, paths, roster,
 // resolved, pluginRoot, taskId, taskSlug, repoSlug, primaryCheckout,
@@ -532,17 +554,7 @@ export function buildRecord(ctx, { role, sliceId, attempt, spec }) {
 
   const maxGateBlocks = config.maxGateBlocks ?? roster.defaults.max_gate_blocks
   const timeoutS = config.timeoutS ?? resolved.timeout_s ?? roster.defaults.timeout_s
-  const maxTurns = config.maxTurns !== undefined
-    ? config.maxTurns
-    : (resolved.max_turns !== undefined ? resolved.max_turns : roster.defaults.max_turns)
-  if (maxTurns !== null) {
-    throw new Error(
-      'max_turns is set to ' + maxTurns + ' but gate-side turn-budget enforcement ' +
-      'is not implemented (see ADR-014 in architecture-notes.md) — the CLI turn ' +
-      'cap flag emission was removed as unreachable/unenforceable; use timeout_s ' +
-      'to bound a runaway worker instead'
-    )
-  }
+  const maxTurns = resolveMaxTurnsOrThrow({ config, resolved, defaults: roster.defaults })
 
   const record = {
     schema_version: 2,

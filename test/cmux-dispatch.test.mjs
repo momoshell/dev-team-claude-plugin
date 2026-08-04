@@ -777,6 +777,28 @@ test('U-1: a stale return file at the derived stem refuses via StaleReturnError,
   assert.equal(newEntries.filter((e) => ['new-pane', 'send', 'send-key', 'rename-tab'].includes(e.argv[0])).length, 0)
 })
 
+test('ADR-017: dispatchCmd refuses a non-null max_turns BEFORE any worktree/branch/snapshot-dir side effect', () => {
+  const { env, ctx } = setUpWorkspace('max-turns-hoist', { configOverrides: { maxTurns: 5 } })
+  const specPath = makeSpecFile(ctx)
+  const logBefore = readLog(env.logPath)
+
+  assert.throws(
+    () => dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx),
+    /max_turns.*ADR-017/s,
+  )
+
+  // No worktree, no worktrees.json entry, no per-dispatch snapshot dir — the
+  // refusal fires before ensureWorktree/snapshotWorkerPlugin ever run.
+  assert.equal(existsSync(ctx.paths.worktreesIndexPath), false)
+  assert.equal(existsSync(ctx.paths.snapshotDir), false)
+
+  // Same hoist discipline as the workspace-liveness check above: only the
+  // one `tree` call the liveness check itself makes, never a dispatching verb.
+  const newEntries = readLog(env.logPath).slice(logBefore.length)
+  assert.ok(newEntries.every((e) => e.argv[0] === 'tree'), `expected only tree calls after the refusal, got: ${JSON.stringify(newEntries)}`)
+  assert.equal(newEntries.filter((e) => ['new-pane', 'send', 'send-key', 'rename-tab'].includes(e.argv[0])).length, 0)
+})
+
 // ---------------------------------------------------------------------------
 // WORKTREES — real git repos (git init + a commit) under os.tmpdir().
 // ---------------------------------------------------------------------------

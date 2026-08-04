@@ -37,7 +37,7 @@ import {
 import {
   snapshotWorkerPlugin, newDispatchId, isoMs, nextAttempt,
   buildRecord, writeRecord, bindRecord, terminateRecord, withRecordLock,
-  listRecords, StaleReturnError,
+  listRecords, StaleReturnError, resolveMaxTurnsOrThrow,
 } from './record.mjs'
 import {
   PreflightError, isValidPreflightCache,
@@ -703,6 +703,13 @@ export function dispatchCmd(args, ctx) {
   if (!liveWorkspace) {
     throw new OperationalError('refused: stale workspace — re-run workspace')
   }
+
+  // lifecycle: the max_turns refusal is hoisted ABOVE any worktree/snapshot
+  // write, mirroring the workspace-liveness hoist above — before
+  // ensureWorktree, before snapshotWorkerPlugin, before a worktree/branch/
+  // worktrees.json entry/snapshot dir ever exists on disk for this dispatch
+  // to strand as leaked state. See ADR-017 in architecture-notes.md.
+  resolveMaxTurnsOrThrow({ config, resolved, defaults: roster.defaults })
 
   // (2) derive the attempt.
   const attempt = args.attempt ? Number(args.attempt) : nextAttempt(paths.dispatchDir, sliceId)

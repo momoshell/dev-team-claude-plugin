@@ -635,20 +635,64 @@ test('PROFILE_ADDENDA: all three variants carry the ReturnEnvelope key list, the
 })
 
 // ---------------------------------------------------------------------------
-// buildArgv — --max-turns and --effort emission rules
+// buildArgv / buildRecord — max_turns is inert by loud refusal (ADR-014):
+// gate-side turn-budget enforcement is not built, so buildRecord throws if
+// max_turns ever resolves non-null from any of its three sources, and
+// buildArgv has no emission path left for it at all.
 // ---------------------------------------------------------------------------
 
-test('buildArgv: emits --max-turns only when max_turns is non-null (Phase 1 never emits it)', () => {
+test('buildArgv: never emits --max-turns, even for a hand-built record with max_turns: 20', () => {
   const rec = buildValidRecord()
   assert.equal(rec.max_turns, null)
   const argv = buildArgv(rec)
   assert.equal(argv.includes('--max-turns'), false)
 
+  // Hand-built record bypasses buildRecord's guard entirely, to prove
+  // buildArgv itself has no emission path left (not just that buildRecord
+  // blocks non-null values upstream).
   const withMaxTurns = { ...rec, max_turns: 20 }
   const argv2 = buildArgv(withMaxTurns)
-  const idx = argv2.indexOf('--max-turns')
-  assert.notEqual(idx, -1)
-  assert.equal(argv2[idx + 1], '20')
+  assert.equal(argv2.includes('--max-turns'), false)
+})
+
+test('buildRecord: throws naming max_turns and ADR-014 when config.maxTurns is non-null', () => {
+  const root = makeTmpDir('cmux-record-')
+  const { ctx } = makeCtxAndPaths({ root })
+  assert.throws(
+    () => buildRecord({ ...ctx, config: { maxTurns: 5 } }, {
+      role: 'coder', sliceId: 'be-1a', attempt: 1, spec: { validation_commands: [] },
+    }),
+    /max_turns.*ADR-014/s
+  )
+})
+
+test('buildRecord: throws naming max_turns and ADR-014 when the role override sets max_turns', () => {
+  const root = makeTmpDir('cmux-record-')
+  const { ctx } = makeCtxAndPaths({ root })
+  const resolved = resolveRole('coder', { plugin: { ...rosterDefault.roles.coder, max_turns: 7 } })
+  assert.throws(
+    () => buildRecord({ ...ctx, resolved }, {
+      role: 'coder', sliceId: 'be-1a', attempt: 1, spec: { validation_commands: [] },
+    }),
+    /max_turns.*ADR-014/s
+  )
+})
+
+test('buildRecord: throws naming max_turns and ADR-014 when roster.defaults.max_turns is non-null', () => {
+  const root = makeTmpDir('cmux-record-')
+  const { ctx } = makeCtxAndPaths({ root })
+  const roster = { ...rosterDefault, defaults: { ...rosterDefault.defaults, max_turns: 3 } }
+  assert.throws(
+    () => buildRecord({ ...ctx, roster }, {
+      role: 'coder', sliceId: 'be-1a', attempt: 1, spec: { validation_commands: [] },
+    }),
+    /max_turns.*ADR-014/s
+  )
+})
+
+test('buildRecord: does not throw and record.max_turns is null when no source sets a value', () => {
+  const rec = buildValidRecord()
+  assert.equal(rec.max_turns, null)
 })
 
 test('buildArgv: never emits an --allowedTools entry not present in record.profile.allow', () => {

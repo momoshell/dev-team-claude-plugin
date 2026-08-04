@@ -535,6 +535,14 @@ export function buildRecord(ctx, { role, sliceId, attempt, spec }) {
   const maxTurns = config.maxTurns !== undefined
     ? config.maxTurns
     : (resolved.max_turns !== undefined ? resolved.max_turns : roster.defaults.max_turns)
+  if (maxTurns !== null) {
+    throw new Error(
+      'max_turns is set to ' + maxTurns + ' but gate-side turn-budget enforcement ' +
+      'is not implemented (see ADR-014 in architecture-notes.md) — the CLI turn ' +
+      'cap flag emission was removed as unreachable/unenforceable; use timeout_s ' +
+      'to bound a runaway worker instead'
+    )
+  }
 
   const record = {
     schema_version: 2,
@@ -640,9 +648,6 @@ export function buildArgv(record) {
   // version-pinned marketplace cache (ADR-009 Am.1).
   argv.push('--plugin-dir', dirname(dirname(record.role_prompt_path)))
   argv.push('--add-dir', ...ADD_DIRS(record))
-  if (record.max_turns !== null) {
-    argv.push('--max-turns', String(record.max_turns))
-  }
   // Hard rule 1: a bare -- immediately before the prompt positional. Its
   // absence fails SILENTLY (SessionStart fires, UserPromptSubmit never
   // does, indefinite idle — conventions.md).

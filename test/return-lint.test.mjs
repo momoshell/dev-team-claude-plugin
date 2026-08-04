@@ -534,6 +534,27 @@ test('negative: two untagged fenced blocks (none json-tagged) still falls back t
 })
 
 // ---------------------------------------------------------------------------
+// verdictBlockViolations gating: a role without verdict_block is untouched.
+// ---------------------------------------------------------------------------
+
+test('positive: a role without verdict_block is untouched by verdictBlockViolations (no Verdict section at all)', () => {
+  const record = buildTestRecord('plan-reviewer')
+  assert.equal(record.return.verdict_block, false)
+  const body = '## Must Fix\n\nnone\n\n## Should Fix\n\nnone\n'
+  writeReturnFile(record, envelopeText(record, body))
+  assert.deepEqual(lintReturn(record), [])
+})
+
+test('positive: flipping verdict_block false suppresses verdict_block_missing for the same body', () => {
+  const record = buildTestRecord('build-validator')
+  const body = '## Verdict\n\nprose only, no fenced block\n'
+  writeReturnFile(record, envelopeText(record, body))
+  assert.ok(keywords(lintReturn(record)).includes(VERDICT_BLOCK_MISSING))
+  record.return.verdict_block = false
+  assert.deepEqual(lintReturn(record), [])
+})
+
+// ---------------------------------------------------------------------------
 // SF7: writeBlockedReturn never clobbers a fresh, valid, non-blocked return
 // already sitting at return_path.
 // ---------------------------------------------------------------------------

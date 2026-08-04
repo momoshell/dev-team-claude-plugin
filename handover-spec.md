@@ -52,6 +52,7 @@ A weak spec costs an amend→rebuild loop — verify each spec against this bar 
 
 - [ ] `files_in_scope` are concrete paths — not globs or "the X module".
 - [ ] `discovery_context` names every symbol the coder calls but doesn't define + its file, the pattern to mirror as an inline excerpt + `file:line`, and any gotcha — so the coder never searches beyond scope.
+- [ ] Generated/vendored content (lockfiles, dist/**, vendored trees) stays out of discovery_context, and a noise path appears in files_in_scope only when changing it is the point — naming one there switches off the gate's noise filtering for it (references/qa-gate.md).
 - [ ] `acceptance_criteria` are verifiable (a command or an observable result), not vibes.
 - [ ] every `acceptance_criteria` entry is covered by a `validation_commands` entry or an explicitly named reviewer/manual check — a criterion nothing verifies is a vibe with punctuation.
 - [ ] Risky paths name their required negative/security checks: authz/tenant boundaries, input validation/encoding, secret handling, rollback/idempotency, or public contract compatibility as applicable.

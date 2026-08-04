@@ -48,7 +48,7 @@ Deep review by default for:
 
 ## current_task
 
-_(none — #8 shipped 2026-08-04 as PR #32 (board item moved to Done); `/clear` and run `/dev-team:next` to pick up the next task.)_
+_(none — #9 shipped 2026-08-05 as PR #33 (board item moved to Done); `/clear` and run `/dev-team:next` to pick up the next task.)_
 
 **#8 summary (reduced scope):** (A) outcome-classifier fix — a gate-composed blocked markdown return was silently recorded `outcome: 'ok'` since #6 for all 6 already-pane-dispatched markdown roles; fixed via `BLOCKED_MARKDOWN_PREFIX` keying, never the verdict enum. (C) `max_turns` gate enforcement descoped to a loud refusal — investigation found the worker plugin's two hooks (`Stop`/`UserPromptSubmit`) have no point where `{"continue":false}` can interrupt a running loop; `--max-turns` CLI emission deleted (was already unreachable), `dispatchCmd`/`buildRecord` now throw before any side effect if `max_turns` ever resolves non-null. Recorded as **ADR-017** (not 014/015/016 — all three already claimed by the separate deterministic-backbone epic, #23). (D) `references/qa-gate.md` rewritten: gate branches on the parsed `{verdict,findings}` enum, never prose. Full 3-reviewer adversarial panel run once, revised after a bounce, re-reviewed clean (`code-reviewer-deep`, pass). 811/811 suite green, version 0.1.55, branch `feat/cmux-3b-gate-hardening`, PR #32. Planning specs archived at `.claude/dev-team/tasks/issue-8/*.spec.json`.
 

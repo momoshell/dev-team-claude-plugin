@@ -65,7 +65,7 @@
               "kind": { "type": "string", "enum": ["json", "markdown"] },
               "schema": { "type": "string", "pattern": "^[a-z0-9.-]+\\.schema\\.json$", "description": "Plugin-root-relative filename. Required when kind is json." },
               "required_sections": { "type": "array", "items": { "type": "string", "pattern": "\\S" }, "description": "Used when kind is markdown." },
-              "verdict_block": { "type": "boolean", "description": "Reserved; prose default false." }
+              "verdict_block": { "type": "boolean", "description": "When true, the role's Verdict section must carry exactly one fenced json block matching {verdict, findings}, enforced by return-lint.mjs (not by this schema); prose default false." }
             }
           }
         }

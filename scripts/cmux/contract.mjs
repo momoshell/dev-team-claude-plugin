@@ -26,6 +26,14 @@ export const OUTCOMES = ['ok', 'exit_nonzero', 'no_return', 'invalid_return', 'r
 // consumed by fix-1c-04 and fix-1c-06.
 export const WORKER_BLOCKED_STATUSES = ['blocked', 'insufficient']
 
+// The one shared literal between the composer (return-lint.mjs's
+// buildBlockedMarkdownBody) and the recognizer (ladder.mjs's classify):
+// the exact first line a gate/adapter-composed blocked markdown envelope
+// begins with. Deliberately NOT the verdict enum — a genuine reviewer may
+// legitimately return verdict "inconclusive"; keying on the enum would
+// misread a real review as gate-killed.
+export const BLOCKED_MARKDOWN_PREFIX = 'status: blocked - '
+
 export const NONCE_PREFIX = 'devteam-done-'
 
 export const PROTECTED_PATH_COMPONENTS = ['.claude', '.git', '.vscode', '.idea', '.husky', '.devcontainer']
@@ -41,7 +49,7 @@ export const MODEL_ALIASES = ['opus', 'sonnet', 'haiku', 'fable']
 
 export const SUBAGENT_ONLY = ['architect', 'trd-reviewer']
 
-export const PANE_ROLES = ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead']
+export const PANE_ROLES = ['coder', 'plan-reviewer', 'architecture-lead', 'backend-lead', 'frontend-lead', 'devops-lead', 'qa-lead', 'build-validator', 'code-reviewer', 'code-reviewer-deep']
 
 export const SLICE_ID_RE = /^[a-z][a-z0-9]{0,15}(-[a-z0-9]{1,15}){0,3}$/
 

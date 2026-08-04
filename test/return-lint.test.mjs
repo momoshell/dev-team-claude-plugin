@@ -21,6 +21,7 @@ import {
   USAGE_MESSAGE, RECORD_UNREADABLE_MESSAGE, RECORD_INVALID_MESSAGE,
   RETURN_PATH_ESCAPES_TASK_DIR_MESSAGE,
 } from '../scripts/cmux/return-lint.mjs'
+import { BLOCKED_MARKDOWN_PREFIX } from '../scripts/cmux/contract.mjs'
 
 const rosterDefault = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/roster.default.json'), 'utf8'))
 const FIXED_CREATED_AT = '2026-08-01T00:00:00.000Z'
@@ -331,6 +332,89 @@ test('writeBlockedReturn: markdown role with multiple required_sections covers e
 })
 
 // ---------------------------------------------------------------------------
+// be-08-01 D17: each of the three newly pane-enabled agent files' authored
+// ## Verdict section carries exactly one fenced json block that itself
+// validates against return-lint.mjs's VERDICT_SCHEMA — extracted from the
+// agent file's own source text (never re-typed) and run through lintReturn's
+// real pipeline via a full, otherwise-valid envelope for that role.
+// ---------------------------------------------------------------------------
+
+function extractVerdictExampleJson(role) {
+  const text = readFileSync(join(ROOT, 'agents', `${role}.md`), 'utf8')
+  const lines = text.split(/\r?\n/)
+  const startIdx = lines.findIndex((l) => l.trim() === '## Verdict')
+  assert.ok(startIdx !== -1, `agents/${role}.md has no ## Verdict section`)
+  let endIdx = lines.length
+  for (let i = startIdx + 1; i < lines.length; i += 1) {
+    if (/^#{2,6}[ \t]+/.test(lines[i])) { endIdx = i; break }
+  }
+  const sectionText = lines.slice(startIdx + 1, endIdx).join('\n')
+  const fenceMatches = [...sectionText.matchAll(/```json\r?\n([\s\S]*?)\r?\n```/g)]
+  assert.equal(fenceMatches.length, 1, `agents/${role}.md's Verdict section must carry exactly one fenced json block, found ${fenceMatches.length}`)
+  return fenceMatches[0][1]
+}
+
+for (const role of ['build-validator', 'code-reviewer', 'code-reviewer-deep']) {
+  test(`D17: agents/${role}.md's ## Verdict example block validates against VERDICT_SCHEMA`, () => {
+    const exampleJson = extractVerdictExampleJson(role)
+    assert.doesNotThrow(() => JSON.parse(exampleJson), `agents/${role}.md's Verdict example is not valid JSON`)
+
+    const record = buildTestRecord(role)
+    const requiredSections = record.return.required_sections || []
+    const lines = []
+    for (const name of requiredSections) {
+      lines.push(`## ${name}`, '')
+      if (name === 'Verdict') {
+        lines.push('```json', exampleJson, '```', '')
+      } else {
+        lines.push('ok', '')
+      }
+    }
+    writeReturnFile(record, envelopeText(record, lines.join('\n')))
+    const found = keywords(lintReturn(record))
+    for (const verdictKeyword of [VERDICT_SECTION_MISSING, VERDICT_BLOCK_MISSING, VERDICT_BLOCK_MULTIPLE, VERDICT_BLOCK_UNPARSEABLE, VERDICT_BLOCK_INVALID]) {
+      assert.equal(found.includes(verdictKeyword), false, `agents/${role}.md's Verdict example produced ${verdictKeyword}`)
+    }
+  })
+}
+
+// ---------------------------------------------------------------------------
+// destinationHoldsFreshNonBlockedReturn asymmetry (NOT re-keyed on
+// BLOCKED_MARKDOWN_PREFIX, deliberately, unlike ladder.mjs's classify()):
+// writeBlockedReturn must never clobber an existing fresh markdown return
+// already sitting at return_path, whether or not that return happens to be
+// blocked-prefixed itself. See the comment at return-lint.mjs's
+// destinationHoldsFreshNonBlockedReturn pointing at OUTCOME_MAPPING's
+// worker_blocked_markdown row for the classifier's opposite treatment.
+// ---------------------------------------------------------------------------
+
+test('destinationHoldsFreshNonBlockedReturn asymmetry: writeBlockedReturn leaves an existing fresh non-blocked markdown return byte-identical', () => {
+  const record = buildTestRecord('build-validator')
+  const existingBody = '## Verdict\n\n```json\n{"verdict": "pass", "findings": []}\n```\n'
+  writeReturnFile(record, envelopeText(record, existingBody))
+  const before = readFileSync(record.return_path, 'utf8')
+
+  const path = writeBlockedReturn(record, 'a racing/orphaned gate write')
+  const after = readFileSync(record.return_path, 'utf8')
+
+  assert.equal(path, record.return_path)
+  assert.equal(after, before, 'writeBlockedReturn must not overwrite an existing fresh legitimate markdown return')
+})
+
+test('destinationHoldsFreshNonBlockedReturn asymmetry: writeBlockedReturn leaves an existing fresh BLOCKED-prefixed markdown return byte-identical too', () => {
+  const record = buildTestRecord('build-validator')
+  const existingBody = `${BLOCKED_MARKDOWN_PREFIX}an earlier blocked envelope\n\n## Verdict\n\n\`\`\`json\n{"verdict": "inconclusive", "findings": []}\n\`\`\`\n`
+  writeReturnFile(record, envelopeText(record, existingBody))
+  const before = readFileSync(record.return_path, 'utf8')
+
+  const path = writeBlockedReturn(record, 'a second, later gate write for the same dispatch')
+  const after = readFileSync(record.return_path, 'utf8')
+
+  assert.equal(path, record.return_path)
+  assert.equal(after, before, 'writeBlockedReturn must not overwrite a prior blocked envelope from the same dispatch either')
+})
+
+// ---------------------------------------------------------------------------
 // WORKER_BLOCKED_STATUSES drift guard (fix-1c-04 constraint: re-declared
 // locally rather than imported from fix-1c-01's contract.mjs export, since
 // fix-1c-01 lands in a parallel fix-round slice — this guards the local
@@ -344,6 +428,23 @@ test('WORKER_BLOCKED_STATUSES drift guard: contract.mjs still declares the ident
     contractSource,
     /export const WORKER_BLOCKED_STATUSES = \['blocked', 'insufficient'\]/,
     'return-lint.mjs re-declares WORKER_BLOCKED_STATUSES locally; update its local copy if contract.mjs\'s literal changed',
+  )
+})
+
+// BLOCKED_MARKDOWN_PREFIX drift guard: return-lint.mjs imports the constant
+// (never re-declares the literal) — this pins contract.mjs still declaring
+// it, mirroring the WORKER_BLOCKED_STATUSES drift guard above.
+test('BLOCKED_MARKDOWN_PREFIX drift guard: contract.mjs still declares the identical literal', () => {
+  const contractSource = readFileSync(join(ROOT, 'scripts/cmux/contract.mjs'), 'utf8')
+  assert.match(
+    contractSource,
+    /export const BLOCKED_MARKDOWN_PREFIX = 'status: blocked - '/,
+    'return-lint.mjs imports BLOCKED_MARKDOWN_PREFIX from contract.mjs; update this guard if contract.mjs\'s literal changed',
+  )
+  const returnLintSource = readFileSync(join(ROOT, 'scripts/cmux/return-lint.mjs'), 'utf8')
+  assert.ok(
+    !/['"]status: blocked - ['"]/.test(returnLintSource),
+    'return-lint.mjs must import BLOCKED_MARKDOWN_PREFIX, never re-declare its literal',
   )
 })
 

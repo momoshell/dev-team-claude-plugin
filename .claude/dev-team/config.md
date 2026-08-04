@@ -48,6 +48,8 @@ Deep review by default for:
 
 ## current_task
 
+current_task: #7 (item: PVTI_lAHOBZYqs84BfEhfzg05HMY) — "3a: commands — ship teardown, onboard prerequisite check, team roster verb" (epic #15, sub-issue). Picked 2026-08-04 over sibling ready sub-issues #8/#9 (parallel, disjoint files, not yet picked) and over the deterministic-backbone queue's stated-next A1 #26 (still `Backlog`, not `Ready`, on project 3).
+
 _(New epic #23 "deterministic backbone" filed 2026-08-04 — separate initiative from epic #15, composes with it (no ADR-007 deviation, no team-build.workflow.mjs edits). Fully planned: design record (v1 → plan-review → architect-consult → v2 → plan-review → v2.1 governing) posted as 8 comments on #23, matching #15's own convention; parked at `tasks/deterministic-backbone/*.md`. Pre-build consulted (2 scouts + backend/qa/devops leads) — findings folded directly into issue bodies for #24/#28, comments on #26/#28/#29. Two real defects caught and fixed pre-build: A0's `--max-block-s` recommendation corrected 600→570 (zero margin against the harness's exact 600,000ms Bash-tool ceiling); B1's baseline design corrected from sha-only to a content-hash fingerprint dict (sha-only couldn't detect a reverted or newly-untracked file — the exact case ADR-016 exists to catch).
 
 **A0 (#24) shipped** 2026-08-04 — `references/cmux-dispatch.md` now recommends `--max-block-s 570` + explicit `timeout: 600000`, with the stale-threshold trade-off stated; pinned-substring + source-extracted tests added in `test/cmux-dispatch-doc.test.mjs`; `node --test` green (775/775); version bumped to 0.1.49. Direct Tier-1 edit, no lead/coder/QA-gate per orchestration.md.

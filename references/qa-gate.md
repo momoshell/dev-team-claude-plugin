@@ -22,6 +22,40 @@ The review *depth* follows the ladder below; the *bundle* (how many windows) sca
 
 **Model scales with risk:** standard `dev-team:code-reviewer` on **sonnet**, `dev-team:code-reviewer-deep` + the adversarial panel on **opus**, `dev-team:build-validator` on **haiku**. Reserve opus reviewer windows for genuine risk — the standard sonnet reviewer covers risk 0–1.
 
+## Noise filtering — what the reviewer bundle and cmux diff leave out
+
+**Filters apply to what an agent reads, never to what a check verifies.** Exactly two read points drop generated and vendored content so a reviewer spends its window on the change instead of the machine's exhaust: the diff you hand the reviewer bundle, and the cmux diff patch view below. The gate report is not a third filtered view — it only repeats the one-line excluded-paths header from whichever of those two it draws from; it doesn't filter anything itself.
+
+**One shared definition, no script.** The shipped defaults are data: ${CLAUDE_PLUGIN_ROOT}/scripts/noise-globs.json, shaped {"globs": [...]} — lockfiles, vendored trees, minified/generated assets, build output. A project extends them (never replaces them) with noise_globs: in .claude/dev-team/config.md; empty or absent means the shipped defaults alone. No script parses that key — you read it and append it, the same way you read the rest of config.md.
+
+**Compose them as git pathspec exclusions, piped through `xargs -0 -r` — never a bare `$EXCLUDES`.** An unquoted `$EXCLUDES` silently no-ops under zsh (this environment's shell: unquoted parameters don't word-split, so git receives one multi-line non-matching pathspec and applies zero exclusions — no error) and silently drops every glob containing `*` under `bash -O nullglob`. That is exactly the "never hide the omission" failure this section exists to prevent, except worse: the header would still claim exclusions happened. The `tr '\n' '\0' | xargs -0 -r` form below has no arrays and no process substitution, so it runs identically in bash, zsh and POSIX `sh` — don't reach for an array form instead (it would need an explicit `bash -c` wrapper and prose stating the snippet assumes bash). The `-r` matters: without it, GNU `xargs` (Linux) still runs `git diff` once on a completely empty glob stream — e.g. an unreadable `noise-globs.json` — producing a fully unfiltered diff while the header still claims exclusions happened; `-r` skips the command entirely on empty input instead, and is accepted by both GNU and BSD/macOS `xargs`. Run this from the repo root — pathspecs match relative to the current working directory, not the repo root, and the data file carries no `:(top)` magic to compensate.
+
+Reviewer-bundle diff (state the range explicitly — the same revision the scope-compliance check above already diffs against — so staged/committed work in an isolated coder worktree is included too, not just the unstaged tree):
+
+```
+jq -r '.globs[] | ":!" + .' "$CLAUDE_PLUGIN_ROOT/scripts/noise-globs.json" | tr '\n' '\0' |
+  xargs -0 -r git diff --name-only <pre-dispatch-sha-or-ref> -- .
+```
+
+Pathspecs go after the `.`; append each `config.md` `noise_globs:` entry the same way (see below) so it flows through the same pipeline, not a separately-quoted tail.
+
+No jq on the box? Same tail, same mechanic — only the glob-producing command changes:
+
+```
+node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).globs.map(g=>":!"+g).join("\n")' "$CLAUDE_PLUGIN_ROOT/scripts/noise-globs.json" | tr '\n' '\0' |
+  xargs -0 -r git diff --name-only <pre-dispatch-sha-or-ref> -- .
+```
+
+— this plugin ships zero dependencies and jq is not in the always-available read-only command set. (These are git pathspecs: `*` crosses `/`, so `*.min.*` catches nested files, while `node_modules/**` catches only a root-level `node_modules` — and a bare literal like `package-lock.json` is the same: root-level only, never a nested one. A monorepo adds its own patterns via `noise_globs:` for the nested cases the shipped ten can't reach.)
+
+**A project's own `noise_globs:` entries join the same newline-separated list before it's piped through `tr` — filtered, not quoted.** `.claude/dev-team/config.md` is a tracked file that travels with a cloned repo, so treat its `noise_globs:` list as untrusted input, not pre-vetted config: before adding an entry to the list, drop (don't add) any entry that doesn't match the allow-list `[A-Za-z0-9._/*-]+` in full — a glob is built only from filename/path characters, a wildcard and a dash, so anything outside that set (spaces, quotes, `$`, backticks, `;`, `|`) is rejected outright rather than escaped.
+
+**Suppression overrides everything.** A noise path the spec names in files_in_scope was intentional: before you run the command, drop from the exclusion list every glob that matches it — in every view, bundle and cmux diff alike (the gate report only repeats the header, above — it never filters on its own). A dependency-bump task's only meaningful diff IS the lockfile. Dropping a glob can un-filter more than the named path (naming a build-output file matching both a directory glob and an extension glob drops both); showing extra noise is the safe direction, hiding a named file is not.
+
+**Never hide the omission.** Every filtered view opens with one line naming the excluded paths and their count, e.g. `excluded 2 noise path(s): package-lock.json, some-generated-file`, and the gate report repeats that line. The failure mode here is silent: a reviewer that passes a diff it never saw. That header is the only thing that makes the omission auditable.
+
+**The scope-compliance check above stays unfiltered.** It exists to catch edits nobody asked for, so noise paths there are labelled, never dropped. A scope check that hides files is a scope check that lies.
+
 ## Review ladder (owned by `dev-team:qa-lead`)
 
 - **Standard** `dev-team:code-reviewer` (risk 0–1) → **Deep** `dev-team:code-reviewer-deep` (any trigger / risk ≥ 2) → **Adversarial panel** on stacked risk (≥ 3 or multiple deep triggers): **3 reviewers** (odd, for a clean majority) with distinct lenses — correctness / security / rollback; pass = majority.
@@ -44,4 +78,4 @@ Reviewers report coverage-first — you are the filter. They surface every findi
 
 ## The human patch view (cmux diff)
 
-When you want eyes on the actual patch at the gate, open it: cmux diff [<patch-file>|-] [--source unstaged|staged|branch|last-turn] [--workspace <id>] [--surface <id>]. It is orchestrator-invoked from the interactive session — a human-facing surface, not a worker capability — so it needs no CMUX_ALLOWS entry (that constant stays the frozen two-element allow list in scripts/cmux/contract.mjs; widening it is a permission change, not a convenience). It is a viewer, not a verdict: it never substitutes for a reviewer's parsed block.
+When you want eyes on the actual patch at the gate, open it: cmux diff [<patch-file>|-] [--source unstaged|staged|branch|last-turn] [--workspace <id>] [--surface <id>]. It is orchestrator-invoked from the interactive session — a human-facing surface, not a worker capability — so it needs no CMUX_ALLOWS entry (that constant stays the frozen two-element allow list in scripts/cmux/contract.mjs; widening it is a permission change, not a convenience). It is a viewer, not a verdict: it never substitutes for a reviewer's parsed block. Apply the noise exclusions above when you open it — same shared list, same suppression rule, same one-line excluded-paths header.

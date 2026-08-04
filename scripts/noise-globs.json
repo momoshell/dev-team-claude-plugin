@@ -1,0 +1,14 @@
+{
+  "globs": [
+    "package-lock.json",
+    "*.lock",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "vendor/**",
+    "node_modules/**",
+    "*.min.*",
+    "*.generated.*",
+    "dist/**",
+    "build/**"
+  ]
+}

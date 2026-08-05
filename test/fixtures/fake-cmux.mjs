@@ -316,8 +316,18 @@ switch (verb) {
     const windowId = argAfter('--window')
     const name = argAfter('--name')
     const cwd = argAfter('--cwd')
+    const hasGroup = argv.includes('--group')
     const win = findWindow(state, windowId)
     if (!win) fail('not_found', 'Window not found')
+
+    // be-11-02 qa should-fix hook: PRE-SEEDED state flags (never a new env
+    // switch), simulating a `--group` rejection so ensureWorkspace's
+    // degradation path is reachable from this deterministic fixture.
+    // `_simulateGroupCreateFails` fails BEFORE creating anything.
+    if (hasGroup && state._simulateGroupCreateFails) {
+      fail('forced_failure', 'simulated --group rejection (no workspace created)')
+    }
+
     const wsId = nextId(state)
     const paneId = nextId(state)
     const surfId = nextId(state)
@@ -336,6 +346,16 @@ switch (verb) {
         },
       ],
     })
+
+    // `_simulateGroupCreateFailsAfterCreating` fails AFTER the workspace
+    // object already exists — the "the --group attempt had in fact created
+    // the workspace" case ensureWorkspace must adopt rather than
+    // blind-retry.
+    if (hasGroup && state._simulateGroupCreateFailsAfterCreating) {
+      saveState(state)
+      fail('forced_failure', 'simulated --group rejection (workspace was created anyway)')
+    }
+
     saveState(state)
     succeed(wsId)
     break
@@ -554,6 +574,11 @@ switch (verb) {
   }
 
   case 'clear-progress': {
+    succeed('')
+    break
+  }
+
+  case 'set-progress': {
     succeed('')
     break
   }

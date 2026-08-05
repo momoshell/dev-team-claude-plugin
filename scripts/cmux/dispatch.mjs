@@ -44,6 +44,7 @@ import {
   preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab,
   closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
   PHASES, setPhase, readEvents, tree,
+  TIERS, setWorkspaceColor, setProgress, clearProgress,
 } from './cmuxctl.mjs'
 import {
   collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn,
@@ -554,7 +555,22 @@ function loadPreflightOrRefuse(paths) {
 // ---------------------------------------------------------------------------
 
 export function workspaceCmd(args, ctx) {
-  const { paths, primaryCheckout, taskSlug } = ctx
+  const { paths, primaryCheckout, taskSlug, repoSlug } = ctx
+
+  // be-11-02: --tier is validated against the imported TIERS enum BEFORE
+  // loadPreflightOrRefuse (i.e. before any possibility of a cmux call), so
+  // an out-of-enum tier issues zero cmux invocations. No default tier is
+  // ever guessed — omitting --tier leaves `tier` null and fires zero
+  // workspace-action calls below.
+  let tier = null
+  if (args.tier !== undefined) {
+    const parsed = Number(args.tier)
+    if (!TIERS.includes(parsed)) {
+      throw new UsageError(`workspace: --tier must be one of ${TIERS.join('|')}, got ${JSON.stringify(args.tier)}`)
+    }
+    tier = parsed
+  }
+
   const { cached, cachePath } = loadPreflightOrRefuse(paths)
 
   const windowId = ensureTeamWindow(cached)
@@ -562,7 +578,9 @@ export function workspaceCmd(args, ctx) {
     writeJsonAtomic(cachePath, { ...cached, team_window_id: windowId })
   }
 
-  const { workspaceId, initialSurfaceId } = ensureWorkspace({ windowId, taskSlug, cwd: primaryCheckout })
+  const { workspaceId, initialSurfaceId } = ensureWorkspace({
+    windowId, taskSlug, cwd: primaryCheckout, group: slugify(repoSlug),
+  })
 
   const before = tree({ all: true })
   const win = (before.windows || []).find((w) => w.id === windowId)
@@ -576,11 +594,31 @@ export function workspaceCmd(args, ctx) {
   // disk would otherwise still hold it forever) — write-once made a cmux
   // restart a permanent wedge (every subsequent `dispatch` reads the stale
   // dead id and throws createPane's "workspace is gone" error).
+  //
+  // be-11-02: workspace.json is rewritten WHOLESALE, so any field not
+  // explicitly carried forward here is silently destroyed on a later
+  // `workspace` run. `carried` is the single, obvious merge point for every
+  // such field — `tier` here, and a later spec's `env_file` block is meant
+  // to be a one-line addition to this same object, not a rewrite.
   const workspaceStatePath = join(paths.stateDir, 'workspace.json')
+  const priorState = readJsonOrWarn(workspaceStatePath, 'workspace.json')
+  const resolvedTier = tier !== null ? tier : (priorState?.tier ?? null)
+  const carried = { tier: resolvedTier }
   writeJsonAtomic(workspaceStatePath, {
+    ...carried,
     window_id: windowId, workspace_id: workspaceId,
     initial_pane_id: initialPaneId, initial_surface_id: initialSurfaceId,
   })
+
+  // be-11-02: the tier colour, when --tier is supplied. Cosmetics never
+  // fail a verb — same swallow-and-log shape as setPhase('planning') below.
+  if (tier !== null) {
+    try {
+      setWorkspaceColor(tier, { workspaceId })
+    } catch (err) {
+      log(`workspace: setWorkspaceColor(${tier}) failed — workspace color not updated: ${err.message}`)
+    }
+  }
 
   // S9 phase pill: entering `workspace` is the 'planning' phase.
   // setPhase('planning', { workspaceId }) is provably non-throwing here
@@ -594,7 +632,10 @@ export function workspaceCmd(args, ctx) {
     log(`workspace: setPhase('planning') failed — phase pill not updated: ${err.message}`)
   }
 
-  return { code: 0, json: { window_id: windowId, workspace_id: workspaceId, initial_surface_id: initialSurfaceId } }
+  return {
+    code: 0,
+    json: { window_id: windowId, workspace_id: workspaceId, initial_surface_id: initialSurfaceId, tier: resolvedTier },
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1004,6 +1045,23 @@ export function awaitCmd(args, ctx, deps = {}) {
     return { code: 2, json: { error: 'lock_held', holder: acquireResult.holder } }
   }
 
+  // be-11-02: workspace-scoped progress. `await` is the only place that
+  // knows numerator (resolved) and denominator (total ids) — read the
+  // workspace id once, the same way phaseCmd does, and skip progress
+  // entirely (logged, not thrown) if it is absent. `label` is composed only
+  // from these two counts (control-plane-safe: never a return body, never
+  // screen text).
+  const workspaceStateForProgress = readJsonOrWarn(join(paths.stateDir, 'workspace.json'), 'workspace.json')
+  function reportProgress(resolvedCount, totalCount) {
+    if (!workspaceStateForProgress) return
+    try {
+      const fraction = Math.min(Math.max(resolvedCount / totalCount, 0), 1)
+      setProgress(fraction, { workspaceId: workspaceStateForProgress.workspace_id, label: `${resolvedCount}/${totalCount}` })
+    } catch (err) {
+      log(`await: setProgress failed — progress pill not updated: ${err.message}`)
+    }
+  }
+
   try {
     let cursor = Number(readTextOrNull(paths.cursorPath)) || 0
     let eventsDisabled = false
@@ -1073,6 +1131,7 @@ export function awaitCmd(args, ctx, deps = {}) {
         // terminates on await's behalf (and whether that is even safe
         // without racing a concurrent close) is #7's protocol call, not a
         // change this file makes unilaterally.
+        reportProgress(ids.length - remaining.size, ids.length)
         return {
           code: 0,
           json: {
@@ -1085,6 +1144,7 @@ export function awaitCmd(args, ctx, deps = {}) {
       const elapsedMs = now() - startMs
       if (elapsedMs >= capS * 1000) {
         writeTextAtomic(paths.cursorPath, String(cursor))
+        reportProgress(ids.length - remaining.size, ids.length)
         return { code: 0, json: { status: 'still-running', remaining: [...remaining] } }
       }
 
@@ -1477,6 +1537,16 @@ export function phaseCmd(args, ctx) {
     throw new OperationalError('refused: no workspace bound for this task — run `workspace` first')
   }
   setPhase(args.set, { workspaceId: workspaceState.workspace_id })
+  // be-11-02: 'gate' is the review gate — clear any stale progress pill.
+  // Cosmetics never fail a verb: swallow-and-log, same shape as
+  // workspaceCmd's setWorkspaceColor/setPhase wrapping.
+  if (args.set === 'gate') {
+    try {
+      clearProgress({ workspaceId: workspaceState.workspace_id })
+    } catch (err) {
+      log(`phase: clearProgress failed — progress pill not cleared: ${err.message}`)
+    }
+  }
   return { code: 0, json: { phase: args.set } }
 }
 

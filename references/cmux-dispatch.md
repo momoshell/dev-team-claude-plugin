@@ -32,7 +32,7 @@ Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = 
 
 **Triage ladder, in order, on timeout or when a pane needs attention:**
 
-1. `top --format tsv` — per-surface CPU; burning = thinking, idle = stalled (also the pending-permission-prompt signature).
+1. `top --format tsv` — a HEADERLESS hierarchical rollup (total/window/workspace/tag/pane/surface), not a flat per-surface list; `id`/`parent_id` are positional refs (`top` has no `--id-format` flag — never UUIDs, never joined to a dispatch record, never an input to classification). Orchestrator-manual triage only: burning = thinking, idle = stalled (also the pending-permission-prompt signature).
 2. `read-screen` — diagnostics only, orchestrator-manual, never a result channel. Exact flags are hedged, not frozen here — see the §2 footer.
 3. Act: extend the wait, or send a one-line `send` nudge, or at the ladder's last rung `close-surface <id>` followed by re-dispatch under a **new** dispatch id, reusing the existing worktree since it holds the prior attempt's work. **A hand-typed nudge is unvalidated:** the allowlist charset check applies only to sends the dispatcher composes internally, not to a manual `cmux send`. The orchestrator must author the nudge itself — one short plain-ASCII line, no shell metacharacters, no CR — and must **never** copy it from `read-screen` output: pane output is task-controlled text, and a CR typed into a live shell is Enter.
 
@@ -42,7 +42,9 @@ Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = 
 
 **Doc-tab mount is a three-rung fallback chain, in order — each rung is attempted only if the previous one failed:** (1) `markdown open <path> --surface <terminal>`, moving into the target pane with `--focus false` if it lands elsewhere, then `reorder-surface --before <terminal>`; (2) `new-surface --type browser --url file://<path> --pane <pane> --focus false`, same move/reorder shape; (3) `markdown open <path>` with no `--surface`, left in its own pane. Failure of all three degrades to a logged no-op — a doc-tab failure never fails a dispatch, a resolution, or a close. On return, the rendered doc tab is re-presented as the pane's first tab (`reorder-surface --before` alone, when a doc tab is already mounted; a fresh mount via the chain above, otherwise) — no focus verb is ever issued at any rung.
 
-**Phase pill:** `node dispatch.mjs phase --set <planning|building|gate>` sets the frozen `devteam-phase` status key for the task's bound workspace. `workspace` fires `planning` and a successful `dispatch` fires `building`, both automatically; `gate` is never fired from code — the orchestrator invokes `phase --set gate` itself at the review gate.
+**Phase pill:** `node dispatch.mjs phase --set <planning|building|gate>` sets the frozen `devteam-phase` status key for the task's bound workspace. `workspace` fires `planning` and a successful `dispatch` fires `building`, both automatically; `gate` is never fired from code — the orchestrator invokes `phase --set gate` itself at the review gate. `phase --set gate` also clears the workspace-scoped progress pill (`clear-progress`); `phase --set building`/`--set planning` never touch it. `workspace --tier 1|2|3` sets the workspace's tab colour (Teal/Blue/Purple) via `workspace-action --action set-color`; omitting `--tier` fires zero colour calls — no default tier is ever guessed — and the previously recorded tier (if any) is carried forward verbatim into the rewritten `workspace.json`. `await` reports workspace-scoped progress (`set-progress <resolved/total>`) on every resolved or cap-reached return, when a workspace is bound (skipped, logged, otherwise — never on the `lock_held` return).
+
+> **User attention fires at exactly four moments, hand-typed, and nowhere else.** `cmux notify --title "dev-team: <moment>" --body "<one line>"` immediately followed by `cmux trigger-flash` — both default to your own workspace/surface, which is correct here: your pane is where the user must look. The four moments are (1) **tier confirmation**, (2) **plan approval**, (3) **insufficiency escalation**, (4) **gate verdict**. No orchestrator-authored alert fires anywhere else: dispatch, resolution, doc-tab mount, teardown, and `await`'s stall-attention outcome are all silent on your side. (A worker's own kickoff-embedded `cmux notify --title <attn_parent> -- done` at task completion is a separate, already-existing, machine-addressed signal — record.mjs's worker→orchestrator attention channel, not one of these four user-facing moments.) `dispatch.mjs` never calls `notify` or `trigger-flash` — an attention outcome comes back to you, and you escalate to the user only if you need a decision, which is moment (3). Desktop alerts are cmux's own behaviour: it raises one only when the user is looking elsewhere. Do not build focus detection. **`cmux jump-to-unread` is the user's hop-to-it key** — it takes no target flags and is never invoked by code; mention it when you alert. During triage, **`cmux list-notifications`** is the sanctioned way to read notification bodies (event payloads redact them by design) — diagnostics only, exactly like `read-screen`: never completion evidence, never an outcome input.
 
 **Doc-tab render files follow the same never-rm write discipline named above:** the parent-render pass (on a validated return) overwrites the placeholder file in place, tmp+rename, exactly like every other panel-backing write — it is never unlinked first.
 
@@ -60,7 +62,7 @@ Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = 
 
 ## 2. Verb reference (distilled)
 
-These are what `dispatch.mjs` invokes on your behalf. The orchestrator hand-types only `top`, `read-screen`, `tree`, and, at the ladder's last rung, `close-surface` — everything else, including the whole teardown sequence, goes through `dispatch.mjs` (a hand-run teardown skips record archival, the clean-and-merged worktree reconciliation, and `leftover_worktrees` reporting).
+These are what `dispatch.mjs` invokes on your behalf. The orchestrator hand-types only `top`, `read-screen`, `tree`, `notify`, `trigger-flash`, `list-notifications`, and, at the ladder's last rung, `close-surface` — everything else, including the whole teardown sequence, goes through `dispatch.mjs` (a hand-run teardown skips record archival, the clean-and-merged worktree reconciliation, and `leftover_worktrees` reporting). `notify`/`trigger-flash`/`list-notifications` are hand-typed for a structural reason, not a style choice: the tier-confirmation moment fires before any task workspace exists, and every mutating `dispatch.mjs` verb requires one already bound — a verb cannot serve it, so `dispatch.mjs` never calls any of the three.
 
 | Verb | Notes |
 |---|---|
@@ -80,12 +82,20 @@ These are what `dispatch.mjs` invokes on your behalf. The orchestrator hand-type
 | `reorder-surface <surface> --before <surface>` | doc-tab ordering |
 | `close-surface <id>` | closes one surface |
 | `close-workspace <id>` | closes the workspace; may no-op while a live agent occupies a pane — NOT `workspace close` |
-| `top --format tsv` | per-surface CPU; triage step 1 |
+| `top --format tsv` | headerless hierarchical rollup (total/window/workspace/tag/pane/surface); `id`/`parent_id` are positional refs, no `--id-format` flag; orchestrator-manual triage step 1 only — never joined to a dispatch record, never a classification input |
 | `events [--after <seq> --limit <n> --no-ack --no-heartbeat]` | latency optimization only; ids are boot-scoped, a persisted cursor does not survive a cmux restart |
 | `wait-for -S <token>` | consume-once latch, durable across restart |
 | `set-status <key> <value> [--icon --color --priority] [--workspace <id>]` | status pill; the frozen `devteam-phase` key takes exactly one of `planning`, `building`, `gate` — always passed with an explicit `--workspace <id>`, never the caller's own workspace by default |
+| `workspace-action --action set-color --color <name> --workspace <id>` | tab colour; `workspace --tier 1\|2\|3` sets Teal/Blue/Purple, always with an explicit `--workspace <id>` |
+| `set-progress <0.0-1.0> [--label <text>] --workspace <id>` | workspace-scoped progress pill; `await` sets it on every return as `resolved/total` |
+| `clear-progress --workspace <id>` | clears the progress pill; fired only by `phase --set gate` |
+| `log <message> [--workspace <id>] [--surface <id>]` | available but unused by `dispatch.mjs` — no wrapper ships; exact flags are hedged, not frozen |
 | `config doctor` | environment doctor |
 | `read-screen --surface <uuid> --lines 40` | orchestrator-manual triage only; diagnostics, never a result channel — exact flags are hedged above, not frozen |
+| `notify --title <text> [--subtitle] [--body] [--workspace] [--surface] [--window]` | hand-typed only, at the four attention moments (§1); defaults to your own workspace/surface; never invoked by `dispatch.mjs` |
+| `trigger-flash [--workspace] [--surface\|--panel] [--window]` | hand-typed only, immediately after `notify`; never invoked by `dispatch.mjs` |
+| `jump-to-unread [--json] [--id-format]` | the user's hop-to-it key; no target flags; never invoked by `dispatch.mjs` |
+| `list-notifications` | hand-typed diagnostics-only read of notification bodies (event payloads redact them by design); never invoked by `dispatch.mjs` |
 | `docs <topic>` | canonical docs URLs for the installed version |
 
 **`--id-format uuids` emits UPPERCASE UUIDs.** The dispatcher normalizes to lowercase at ingestion, and cmux resolves targets case-insensitively — records are lowercase, either case is valid input.

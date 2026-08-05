@@ -26,7 +26,7 @@ export const VERBS = Object.freeze([
   'ping', 'identify', 'capabilities', 'tree', 'new-window', 'new-workspace', 'new-pane',
   'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab',
   'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config', 'wait-for',
-  'new-surface', 'read-screen', 'clear-progress', 'workspace-action',
+  'new-surface', 'read-screen', 'clear-progress', 'workspace-action', 'set-progress',
 ])
 
 // Live `capabilities --json` (cmux 0.64.20) returns 255 RPC-style DOTTED
@@ -55,12 +55,12 @@ export const VERB_METHODS = Object.freeze({
   'reorder-surface': 'surface.reorder',
   markdown: 'markdown.open',
   'rename-tab': 'tab.action',
-  // read-screen/clear-progress/workspace-action are cosmetic/diagnostic
-  // verbs (screen reads, progress pill clears, tab color) deliberately left
-  // OUT of this map: guessing a dotted method for them (e.g. read-screen ->
-  // surface.read_text) hard-stops every real run if the guess is wrong,
-  // while every test still passes against the fixture. They land in
-  // UNVERIFIABLE_VERBS instead and are never capability-gated.
+  // read-screen/clear-progress/workspace-action/set-progress are cosmetic/
+  // diagnostic verbs (screen reads, progress pill clears/sets, tab color)
+  // deliberately left OUT of this map: guessing a dotted method for them
+  // (e.g. read-screen -> surface.read_text) hard-stops every real run if the
+  // guess is wrong, while every test still passes against the fixture. They
+  // land in UNVERIFIABLE_VERBS instead and are never capability-gated.
 })
 
 // The five remediation messages, BYTE-FOR-BYTE, single definition site.
@@ -553,28 +553,76 @@ export function ensureTeamWindow(preflightJson) {
   return newWindowId
 }
 
+// findWorkspaceByTitle(t, windowId, taskSlug) -> workspace|undefined
+// Single definition site for the "does a workspace with this title already
+// exist in this window" scan — used by BOTH ensureWorkspace's fast path and
+// its --group-failure retry path (see ensureWorkspace's own comment for why
+// the retry must re-scan rather than blind-retry).
+function findWorkspaceByTitle(t, windowId, taskSlug) {
+  const win = (t.windows || []).find((w) => w.id === windowId)
+  return win?.workspaces?.find((ws) => ws.title === taskSlug)
+}
+
 /**
  * ensureWorkspace({ windowId, taskSlug, cwd, group }) -> { workspaceId, initialSurfaceId }
  * `cmux workspace create` does not exist; new-workspace is the real verb.
  * Reuses an existing workspace of the same name in the team window so no
  * duplicate is created across repeated dispatches.
+ *
+ * --group degradation (be-11-02): a `--group <slug>` new-workspace call can
+ * fail for reasons unrelated to the workspace object itself (e.g. the group
+ * itself is rejected after the workspace was already created) — a naive
+ * blind retry in that case would create a SECOND workspace and turn
+ * recoverNewId's own "expected exactly 1 new workspace" ambiguity into a
+ * hard chain abort. On a --group failure this re-snapshots the tree FRESH
+ * (never diffs against the stale pre-attempt `before`) and re-scans by
+ * title FIRST — adopting the workspace if the failed attempt actually
+ * created it, and only retrying `new-workspace` WITHOUT --group if it did
+ * not. A failure with no `group` argument at all still throws as before —
+ * no retry, no re-scan.
  */
 export function ensureWorkspace({ windowId, taskSlug, cwd, group } = {}) {
   const before = tree({ all: true })
-  const win = (before.windows || []).find((w) => w.id === windowId)
-  const existing = win?.workspaces?.find((ws) => ws.title === taskSlug)
+  const existing = findWorkspaceByTitle(before, windowId, taskSlug)
   if (existing) {
     const initialSurfaceId = existing.panes?.[0]?.surfaces?.[0]?.id ?? null
     return { workspaceId: existing.id, initialSurfaceId }
   }
 
-  const args = ['--window', windowId, '--name', taskSlug, '--cwd', cwd]
-  if (group) args.push('--group', group)
+  const baseArgs = ['--window', windowId, '--name', taskSlug, '--cwd', cwd]
+  const args = group ? [...baseArgs, '--group', group] : baseArgs
   const res = cmux('new-workspace', args)
-  if (!res.ok) throw new Error(`ensureWorkspace: new-workspace failed: ${res.error?.message}`)
-  const after = tree({ all: true })
-  const workspaceId = recoverNewId(before, after, 'workspace')
-  const initialSurfaceId = recoverNewId(before, after, 'surface')
+  if (res.ok) {
+    const after = tree({ all: true })
+    const workspaceId = recoverNewId(before, after, 'workspace')
+    const initialSurfaceId = recoverNewId(before, after, 'surface')
+    return { workspaceId, initialSurfaceId }
+  }
+
+  if (!group) {
+    throw new Error(`ensureWorkspace: new-workspace failed: ${res.error?.message}`)
+  }
+
+  // eslint-disable-next-line no-console
+  console.error(`ensureWorkspace: new-workspace --group ${group} failed (${res.error?.message}) — re-checking a fresh tree for whether it created the workspace anyway before retrying anything`)
+  const freshAfterFailure = tree({ all: true })
+  const adopted = findWorkspaceByTitle(freshAfterFailure, windowId, taskSlug)
+  if (adopted) {
+    // eslint-disable-next-line no-console
+    console.error(`ensureWorkspace: the --group attempt had in fact created the workspace — adopting it (workspace ${adopted.id}), un-grouped retry skipped`)
+    const initialSurfaceId = adopted.panes?.[0]?.surfaces?.[0]?.id ?? null
+    return { workspaceId: adopted.id, initialSurfaceId }
+  }
+
+  // eslint-disable-next-line no-console
+  console.error(`ensureWorkspace: --group ${group} was not applied and no workspace was created — degrading: retrying new-workspace without --group`)
+  const retryRes = cmux('new-workspace', baseArgs)
+  if (!retryRes.ok) {
+    throw new Error(`ensureWorkspace: new-workspace failed even without --group: ${retryRes.error?.message}`)
+  }
+  const afterRetry = tree({ all: true })
+  const workspaceId = recoverNewId(freshAfterFailure, afterRetry, 'workspace')
+  const initialSurfaceId = recoverNewId(freshAfterFailure, afterRetry, 'surface')
   return { workspaceId, initialSurfaceId }
 }
 
@@ -744,6 +792,33 @@ export function setWorkspaceColor(tier, { workspaceId } = {}) {
   if (!res.ok) {
     // eslint-disable-next-line no-console
     console.error(`setWorkspaceColor: workspace-action set-color tier ${tier} --workspace ${workspaceId} failed: ${res.error?.message}`)
+  }
+}
+
+/**
+ * setProgress(fraction, { workspaceId, label }) -> void
+ * Same throw-before-spawn / degrade-loudly split as clearProgress and
+ * setWorkspaceColor: refuses (throws) BEFORE any spawn for a fraction
+ * outside [0, 1] or a missing workspaceId; a failed `set-progress` call logs
+ * one loud line and never throws. `label`, when given, is passed through
+ * verbatim as `--label` — callers own keeping it composed only from
+ * enum/charset-constrained values, never worker-authored text. Always
+ * passes --workspace explicitly (never the $CMUX_WORKSPACE_ID default).
+ */
+export function setProgress(fraction, { workspaceId, label } = {}) {
+  if (typeof fraction !== 'number' || !Number.isFinite(fraction) || fraction < 0 || fraction > 1) {
+    throw new Error(`setProgress: fraction must be a finite number in [0, 1], got ${JSON.stringify(fraction)}`)
+  }
+  if (typeof workspaceId !== 'string' || workspaceId === '') {
+    throw new Error('setProgress: workspaceId is required')
+  }
+  const args = [String(fraction)]
+  if (label) args.push('--label', label)
+  args.push('--workspace', workspaceId)
+  const res = cmux('set-progress', args)
+  if (!res.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`setProgress: set-progress ${fraction} --workspace ${workspaceId} failed: ${res.error?.message}`)
   }
 }
 

@@ -249,10 +249,11 @@ test('preflight succeeds end-to-end and caches to <taskArtifactsRoot>/preflight.
   // be-11-01 adds read-screen/clear-progress/workspace-action to VERBS with
   // deliberately no VERB_METHODS entry (cosmetic/diagnostic verbs — see the
   // comment at VERB_METHODS's definition site), so they join this same
-  // unverifiable set.
+  // unverifiable set. be-11-02 adds set-progress alongside them for the same
+  // reason.
   assert.deepEqual(
     result.unverifiable_verbs,
-    ['clear-progress', 'config', 'events', 'new-surface', 'read-screen', 'set-status', 'wait-for', 'workspace-action'],
+    ['clear-progress', 'config', 'events', 'new-surface', 'read-screen', 'set-progress', 'set-status', 'wait-for', 'workspace-action'],
   )
 
   const artifactsRoot = join(dir, 'artifacts')

@@ -19,7 +19,11 @@
 //                              NOT CLI verb names; see LIVE_METHODS below).
 //   FAKE_CMUX_NO_CALLER        '1' -> identify returns caller: null.
 //   FAKE_CMUX_EVENTS           path to a file whose lines are echoed by `events`.
-//   FAKE_CMUX_TOP              path to a file whose contents are echoed by `top`.
+//   FAKE_CMUX_TOP              path to a file whose contents are echoed by `top`
+//                              (default: a verbatim live 7-column headerless
+//                              capture — see LIVE_TOP_TSV below).
+//   FAKE_CMUX_SCREEN           path to a file whose contents are echoed by
+//                              `read-screen` (default: a small canned frame).
 //   FAKE_CMUX_EXIT_CODE        overrides the exit code used on a forced failure.
 import { appendFileSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
 
@@ -248,6 +252,17 @@ const LIVE_METHODS = Object.freeze([
   'workspace.remote.status', 'workspace.remote.terminal_session_end', 'workspace.rename',
   'workspace.reorder', 'workspace.reorder_many', 'workspace.select', 'workspace.set_auto_title',
 ])
+
+// The FROZEN live `cmux top --format tsv` output (cmux 0.64.22, captured
+// 2026-08-05) — headerless, 7 positional tab-separated columns: cpu_pct,
+// mem_bytes, proc_count, kind, id, parent_id, title_or_status. A real
+// row's `id`/`parent_id` are positional refs (surface:1, pane:1), never
+// UUIDs — `top` has no --id-format flag. This is a verbatim capture, not an
+// invention (per conventions.md's fake-binary-fixture rule).
+const LIVE_TOP_TSV =
+  '0.0\t0\t0\ttotal\ttotal\t\t\n'
+  + '0.1\t245760000\t2\twindow\twindow:1\t\torchestrator\n'
+  + '18.2\t517574328\t8\tsurface\tsurface:1\tpane:1\t<spinner> Claude Code\n'
 
 switch (verb) {
   case '--version': {
@@ -526,8 +541,25 @@ switch (verb) {
 
   case 'top': {
     const topPath = process.env.FAKE_CMUX_TOP
-    const stdout = topPath && existsSync(topPath) ? readFileSync(topPath, 'utf8') : 'surface_id\ttitle\tcpu\n'
+    const stdout = topPath && existsSync(topPath) ? readFileSync(topPath, 'utf8') : LIVE_TOP_TSV
     succeed(stdout)
+    break
+  }
+
+  case 'read-screen': {
+    const screenPath = process.env.FAKE_CMUX_SCREEN
+    const stdout = screenPath && existsSync(screenPath) ? readFileSync(screenPath, 'utf8') : '$ cmux fake screen frame\n'
+    succeed(stdout)
+    break
+  }
+
+  case 'clear-progress': {
+    succeed('')
+    break
+  }
+
+  case 'workspace-action': {
+    succeed('')
     break
   }
 

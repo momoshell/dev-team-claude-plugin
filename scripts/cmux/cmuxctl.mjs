@@ -26,7 +26,7 @@ export const VERBS = Object.freeze([
   'ping', 'identify', 'capabilities', 'tree', 'new-window', 'new-workspace', 'new-pane',
   'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab',
   'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config', 'wait-for',
-  'new-surface',
+  'new-surface', 'read-screen', 'clear-progress', 'workspace-action',
 ])
 
 // Live `capabilities --json` (cmux 0.64.20) returns 255 RPC-style DOTTED
@@ -55,6 +55,12 @@ export const VERB_METHODS = Object.freeze({
   'reorder-surface': 'surface.reorder',
   markdown: 'markdown.open',
   'rename-tab': 'tab.action',
+  // read-screen/clear-progress/workspace-action are cosmetic/diagnostic
+  // verbs (screen reads, progress pill clears, tab color) deliberately left
+  // OUT of this map: guessing a dotted method for them (e.g. read-screen ->
+  // surface.read_text) hard-stops every real run if the guess is wrong,
+  // while every test still passes against the fixture. They land in
+  // UNVERIFIABLE_VERBS instead and are never capability-gated.
 })
 
 // The five remediation messages, BYTE-FOR-BYTE, single definition site.
@@ -692,6 +698,86 @@ export function setPhase(phase, { workspaceId } = {}) {
   setStatus('devteam-phase', phase, { workspaceId })
 }
 
+// be-11-01 — the workspace-color tier signal and the progress-pill clear.
+export const TIERS = Object.freeze([1, 2, 3])
+// Named colors live-verified via `cmux workspace-action --help`. Red,
+// Crimson and Amber are deliberately reserved for a future failure-state
+// color and must never be assigned to a tier.
+export const TIER_COLORS = Object.freeze({ 1: 'Teal', 2: 'Blue', 3: 'Purple' })
+
+/**
+ * clearProgress({ workspaceId }) -> void
+ * Mirrors setPhase's throw-before-spawn half and setStatus's degrade-loudly
+ * half: refuses (throws) BEFORE any spawn when workspaceId is missing, and
+ * NEVER throws on the underlying `clear-progress` call failing — a failure
+ * logs one loud line instead. Always passes --workspace explicitly (never
+ * the $CMUX_WORKSPACE_ID default) — dispatch.mjs runs in the orchestrator's
+ * own pane, and a defaulted call would decorate the orchestrator's
+ * workspace instead of the task's.
+ */
+export function clearProgress({ workspaceId } = {}) {
+  if (typeof workspaceId !== 'string' || workspaceId === '') {
+    throw new Error('clearProgress: workspaceId is required')
+  }
+  const res = cmux('clear-progress', ['--workspace', workspaceId])
+  if (!res.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`clearProgress: clear-progress --workspace ${workspaceId} failed: ${res.error?.message}`)
+  }
+}
+
+/**
+ * setWorkspaceColor(tier, { workspaceId }) -> void
+ * Same throw-before-spawn / degrade-loudly split as clearProgress. Refuses
+ * before any spawn for a tier outside TIERS or a missing workspaceId; a
+ * failed `workspace-action` call logs one loud line and never throws.
+ * Always passes --workspace explicitly.
+ */
+export function setWorkspaceColor(tier, { workspaceId } = {}) {
+  if (!TIERS.includes(tier)) {
+    throw new Error(`setWorkspaceColor: tier must be one of ${TIERS.join('|')}, got ${JSON.stringify(tier)}`)
+  }
+  if (typeof workspaceId !== 'string' || workspaceId === '') {
+    throw new Error('setWorkspaceColor: workspaceId is required')
+  }
+  const res = cmux('workspace-action', ['--action', 'set-color', '--color', TIER_COLORS[tier], '--workspace', workspaceId])
+  if (!res.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`setWorkspaceColor: workspace-action set-color tier ${tier} --workspace ${workspaceId} failed: ${res.error?.message}`)
+  }
+}
+
+/**
+ * readScreen(surfaceId, { lines = 40 }) -> string | null
+ * NEVER throws. Re-resolves the surface via requireTargetPresent first and
+ * no-ops loudly (returns null) when it is gone from a fresh tree, mirroring
+ * sendLine/renameTab. A failed `read-screen` call also degrades to null
+ * with one loud line rather than throwing. requireTargetPresent's own
+ * `tree()` call can itself throw (a failed `cmux tree` invocation) — this is
+ * rung 2 of the triage ladder, invoked precisely when the substrate is
+ * suspected wedged, i.e. exactly the state most likely to make `tree` fail
+ * — so that call is wrapped too, degrading to null with one loud line
+ * rather than letting the throw escape.
+ */
+export function readScreen(surfaceId, { lines = 40 } = {}) {
+  let present
+  try {
+    present = requireTargetPresent('surface', surfaceId, 'readScreen')
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`readScreen: requireTargetPresent failed (substrate likely wedged): ${err.message}`)
+    return null
+  }
+  if (!present) return null
+  const res = cmux('read-screen', ['--surface', surfaceId, '--lines', String(lines)])
+  if (!res.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`readScreen: read-screen --surface ${surfaceId} failed: ${res.error?.message}`)
+    return null
+  }
+  return res.stdout
+}
+
 export function closeSurface(id) {
   if (!requireTargetPresent('surface', id, 'closeSurface')) return
   cmux('close-surface', [id])
@@ -927,23 +1013,63 @@ export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
 // Degraded-capability readers.
 // ---------------------------------------------------------------------------
 
-export function topTsv() {
-  const res = cmux('top', ['--format', 'tsv'])
+/**
+ * topTsv({ timeoutMs = 2000 }) -> Array<{cpu_pct, mem_bytes, proc_count,
+ * kind, id, parent_id, title_or_status}> | null
+ * Diagnostics only — never an input to any classification. Live `cmux top
+ * --format tsv` (cmux 0.64.22, live-verified 2026-08-05) is HEADERLESS: 7
+ * positional tab-separated columns, no header row to consume. `kind` is a
+ * hierarchical rollup (total, window, workspace, tag, pane, surface), not a
+ * flat surface list. `top` has NO --id-format flag — every id/parent_id is
+ * a positional ref (e.g. surface:1), never a UUID, which is why
+ * normalizeIds is deliberately NOT applied here and why this output must
+ * never be joined to a UUID-keyed record. After be-11-03 this function has
+ * no automated caller; it exists for the orchestrator's manual triage
+ * rung 1.
+ */
+export function topTsv({ timeoutMs = 2000 } = {}) {
+  const res = cmux('top', ['--format', 'tsv'], { timeoutMs })
   if (!res.ok) return null
   const lines = res.stdout.split('\n').filter((l) => l.length > 0)
-  if (lines.length === 0) return []
-  const headers = lines[0].split('\t')
-  const rows = lines.slice(1).map((line) => {
-    const cells = line.split('\t')
-    const row = {}
-    headers.forEach((h, i) => {
-      row[h] = cells[i]
-    })
-    return row
+  return lines.map((line) => {
+    const [cpu_pct, mem_bytes, proc_count, kind, id, parent_id, title_or_status] = line.split('\t')
+    return { cpu_pct, mem_bytes, proc_count, kind, id, parent_id, title_or_status }
   })
-  // Ingestion happens here too — normalizeIds is applied in this module and
-  // nowhere else, and topTsv is a parse path `cmux()` doesn't cover itself.
-  return normalizeIds(rows)
+}
+
+// Live-verified cmux 0.64.22, captured 2026-08-05 via a real Claude Code
+// turn ending inside a cmux pane and reading the resulting line from
+// `cmux events --after <seq> --limit N --no-ack --no-heartbeat`. This is
+// the turn-end event — NOT `notification.requested`, which the TRD and
+// ADR-003 baseline assumed and which is actually a narrower event reserved
+// for explicit `cmux notify` calls. See docs/trd-cmux-execution-mode.md's
+// '## Superseded since ratification' table and architecture-notes.md's
+// ADR-003 Amended-by pointer for the errata this corrects.
+export const TURN_END_EVENT_NAME = 'agent.hook.Stop'
+
+/**
+ * parseTurnEndEvent(rawEvent) -> { surfaceId, occurredAt, seq } | null
+ * Arms ONLY on rawEvent.name === TURN_END_EVENT_NAME — filtering on any
+ * wider "event carrying a surface_id" shape would silently accept unrelated
+ * events. Reads event.surface_id ?? event.payload?.surface_id (both are
+ * populated live, but only the top-level key is guaranteed) and
+ * event.occurred_at, nothing wider. Returns null — never a defaulted value
+ * — when surfaceId or occurredAt is missing or unparseable. readEvents()
+ * already runs every parsed line through normalizeIds, so ids arriving via
+ * that path are already lowercased — but this function runs surfaceId
+ * through normalizeId() itself regardless of caller, so its output is
+ * idempotently lowercase even when fed a raw, un-normalized event directly
+ * (be-11-03
+ * joins this against lowercase-persisted dispatch record UUIDs; an
+ * uppercase mismatch there would silently break attribution).
+ */
+export function parseTurnEndEvent(rawEvent) {
+  if (!rawEvent || rawEvent.name !== TURN_END_EVENT_NAME) return null
+  const surfaceId = rawEvent.surface_id ?? rawEvent.payload?.surface_id
+  const occurredAt = rawEvent.occurred_at
+  if (typeof surfaceId !== 'string' || surfaceId === '') return null
+  if (typeof occurredAt !== 'string' || occurredAt === '' || Number.isNaN(Date.parse(occurredAt))) return null
+  return { surfaceId: normalizeId(surfaceId), occurredAt, seq: rawEvent.seq }
 }
 
 /**

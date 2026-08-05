@@ -1,0 +1,9 @@
+## ADR-005 addendum — trust-boundary clarification (user-raised, 2026-08-01; fold into #10's architecture-notes commit)
+
+**`cmuxOnly` is containment, not immunity.** The socket admits any descendant of the cmux app — which includes every subprocess a worker pane spawns. Third-party code executed by allowed commands (e.g. package scripts under `npm test`) is therefore *inside* the socket trust boundary, and the worker-level `Bash(cmux *)` deny does not mediate it (permission rules govern the agent's tool calls, not grandchild processes).
+
+What the default mode does buy: the boundary shrinks from *the entire user account* (`allowAll`) to *what is deliberately run inside cmux*. The residual inside-risk is the marginal capability the socket adds on top of ordinary arbitrary-code-as-your-user (which any local build already grants): cross-pane typing, screen reading, and driving logged-in browser surfaces **within cmux**.
+
+**Operational rule (goes into ADR-005 and `references/cmux-dispatch.md`'s fidelity notes):** do not keep high-privilege interactive sessions — SSH to production, sudo'd shells, authenticated admin browser surfaces — in the same cmux instance where worker panes execute untrusted build code. Task workspaces are ephemeral by design; privileged long-lived panes belong outside cmux (plain Ghostty) or at minimum outside any cmux instance running dev-team workers.
+
+The existing layers (allowlist profiles under dontAsk, workers denied cmux at the tool layer, ephemeral task workspaces, no bypass modes ever) are unchanged — they defend against agent misbehavior, the common case. The subprocess vector is the supply-chain case; its mitigation is boundary management, stated above.

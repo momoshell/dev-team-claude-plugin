@@ -8,7 +8,8 @@
 >
 > Read it in two passes. **Pass 1 (Parts 1–3)** gives you the mental model and the exact
 > capabilities your harness must expose. **Pass 2 (Parts 4–13)** is the detailed spec of
-> each mechanism. Part 14 is a build checklist.
+> each mechanism. Part 14 is a build checklist. Part 15 (optional) describes a visible-pane
+> execution substrate that trades implementation cost for human observability.
 
 ---
 
@@ -524,6 +525,189 @@ Don't toggle mid-session — switching effort invalidates the prompt cache.
    macros or NL triggers (P12).
 10. **Verify the invariants** (Part 13) hold — especially static prompts and tool-enforced
     read-only roles.
+11. **(Optional) Implement visible-pane execution** (Part 15) — if your harness supports
+    multiplexed terminals and a scripting API. This swaps the substrate from hidden subagents to
+    visible panes, trading complexity for observability and interjection ability; the orchestrator
+    brain stays identical.
+
+---
+
+## Part 15 — Execution substrate: Agent-tool vs. pane adapters (optional layer)
+
+**Preamble.** A faithful recreation of dev-team needs none of what follows. The orchestrator,
+roles, specs, QA gate, and memory protocol are all substrate-agnostic. **This part describes an
+optional execution layer** that *swaps* the substrate — replacing hidden sub-agent dispatch with
+visible multiplexed panes — without changing the brain. It trades implementation cost and
+integration surface area for human observability: users can watch a role work, read its screen,
+and interject; operations staff can triage a stalled task by reading a log instead of guessing at
+token spend.
+
+**Required harness capability:** a multiplexer with a scriptable control API (verbs to create
+panes, send input, read output, signal completion) and a shared filesystem both the orchestrator
+and worker sides can mount (so specs and returns are ordinary files, not serialized into tool
+calls). The reference implementation is `cmux`, a Claude Code terminal multiplexer; the design is
+harness-agnostic.
+
+**Invariant link:** this layer assumes **Invariant 1** (static system prompts, never
+interpolated) holds even more tightly — pane-worker system prompts must be byte-stable across
+dispatches to allow prompt-cache reuse at scale. Every per-dispatch variable goes through
+environment variables and the kickoff message, never the prompt file.
+
+### Roster: per-role dispatch flags
+
+Each role in the dev-team roster is equipped with **two new configuration levers: an agent alias
+(e.g. `claude`, `codex`, `anthropic-pi`) and a `pane` flag** (true/false per role, per phase).
+The roster is a single config file committed to the repo, resolved once at session start, and
+overrides the static pins from each agent's frontmatter.
+
+**Structure (schema omitted, present alongside Part 5's Handover Spec schema):**
+
+```
+{ "version": 2,
+  "execution_mode": "cmux | agent-tool",  ← the substrate lever
+  "defaults": { "agent": "claude", "timeout_s": 1800, "icon": "robot" },
+  "profiles": {                            ← per-role permission profiles
+    "planner":   { "permission_mode": "dontAsk", "tools": [...], "allow": [...], "deny": [...] },
+    "executor":  { "permission_mode": "dontAsk", "tools": [...], "allow": [...], "deny": [...] },
+    "reviewer":  { "permission_mode": "dontAsk", "tools": [...], "allow": [...], "deny": [...] }
+  },
+  "roles": {                               ← per-role overrides
+    "coder":         { "pane": true,  "model": "sonnet", "effort": "medium", "profile": "executor" },
+    "backend-lead":  { "pane": false, "model": "opus", "effort": "high", "profile": "planner" },
+    "code-reviewer": { "pane": false, "model": "sonnet", "profile": "reviewer" }
+  } }
+```
+
+**Resolution precedence** (same as Part 8's memory hierarchy): agent frontmatter → plugin
+default → global → project → session. The `pane` flag is the substrate lever; individual phases
+decide which roles run as panes (Phase 1 ships coder only).
+
+**Profiles** — an allowlist-shaped security model (Part 2 P3 / Part 13 Invariant 3 enforced
+mechanically):
+
+- `permission_mode: "dontAsk"` — never prompt; deny unknown tools up-front.
+- `tools` — universe restriction (e.g. deny Bash if this role only reads).
+- `allow` and `deny` — scoped rules (e.g. `Edit(//<task-dir>/returns/**)`). Deny beats allow.
+- A read-only role gets exactly one write grant: `Edit(//<task-dir>/returns/**)` — to produce
+  its return file. This grant is specific to the pane layer and has no counterpart in the Agent
+  tool; the orchestrator enforces it via a static prompt addendum (never interpolated) appended
+  at dispatch.
+
+### Adapter contract: capabilities and run
+
+An **adapter** is an executable (a shell script, a plugin, or any language) that bridges the
+orchestrator to an agent CLI. Dev-team's design is adapter-agnostic; adding a new agent means
+one new adapter script and one roster line.
+
+**Two verbs:**
+
+1. `<adapter> capabilities` — stdout: a JSON descriptor of the adapter's slots (model selection?
+   effort tiers? permission profiles? system-prompt injection?). Used at preflight to refuse
+   dispatch of a role whose configuration needs a slot the adapter doesn't declare.
+
+2. `<adapter> run <record.json>` — executes inside the multiplexer pane and runs the agent to
+   completion. Input is a single disk file (the dispatch record, see below); the adapter reads
+   it, composes the agent's CLI invocation from its fields, and hands control to the agent. It
+   never returns until the agent exits.
+
+**Return contract** — the non-negotiable output guarantees:
+
+- **A return file at the path named in the record** — fresh (modified-time > dispatch creation),
+  valid per the schema declared in the record (JSON-schema for coders, heading-lint for judgment
+  roles). The return file is simultaneously the data payload (what the orchestrator parses),
+  the doc tab (the user's view into progress and approval surface), and a durability checkpoint
+  (if the pane crashes, the orchestrator sees what was completed).
+
+- **Exactly one completion signal per dispatch** — typically a file-watch sentinel + optional
+  socket token (rank 0 + rank 2 of the completion ladder, below). The signal is unconditional:
+  emitted on success, on failure, on timeout, on crash. Its only job is to wake the orchestrator's
+  `await` loop; the truth of completion comes from the return file.
+
+- **Adapter exit code:** zero on success or graceful shutdown; non-zero on failure. The adapter
+  writes a blocked return (name same as above, content `{status: "blocked", reason: "…"}`) before
+  exiting non-zero, so the orchestrator always has a return to read.
+
+### File data plane; socket control plane only
+
+**The single largest design constraint (inherited from the multiplexer's architecture):**
+
+- **Files are the data plane.** Specs arrive as file paths on the launch line. Returns are
+  written as files on disk. Validation uses file-stat (freshness, schema). All durable state — the
+  dispatch record, the return, logs — live as ordinary files in a shared filesystem namespace.
+
+- **The socket is control/signaling only.** Send a one-line text command (e.g. the kickoff
+  invocation). Receive notifications redacted to metadata (workspace id, surface id, no body).
+  Block on a doorbell (wait-for-token). Read the screen (diagnostics only, never parsed as a
+  contract). Close a pane. The socket cannot carry payloads, structured replies, or multi-line
+  exchanges — by design.
+
+**Why this split matters (Part 13 Invariant 1 applied to streams):** with the socket as control
+only, the system prompt stays byte-stable across dispatches. Per-dispatch variables (paths,
+specs, goals) reach the session via environment variables and the kickoff message, never the
+system prompt. This buys prompt-cache reuse and deterministic behavior. Screen-scraping is
+structurally impossible — there is no "read the output and guess whether it worked" path.
+
+### Completion ladder: four ranks
+
+A pane-based system needs a robust completion signal because the orchestrator cannot see inside
+the agent's reasoning. The reference implementation uses a **four-rank ladder**, ordered by
+latency and reliability, so the orchestrator can always make forward progress:
+
+| Rank | Mechanism | Depends on | Signal job |
+|------|-----------|-----------|----------|
+| **0** | **Filesystem stat + return-lint every 3–5 s, inside the join loop** | Only the filesystem | Wake immediately when a fresh valid return appears. Always works; no platform dependencies. |
+| **1** | **Multiplexer event stream** (e.g. `notification.requested` per turn end, workspace-scoped ⇒ re-scan all returns) | Multiplexer events + agent-native notifications | Push-based wake, near-instant for any pane's turn end; adapter-agnostic. |
+| **2** | **Adapter `trap … EXIT` → write exit sentinel file + optional socket token** | Filesystem + optional socket | Liveness backstop for crash/kill. Sentinel always writes; socket is best-effort. |
+| **3** | **Multiplexer hook (e.g. `Stop`-hook gate)** with return-lint + block | Multiplexer hook delivery to the pane session | Contract enforcement only: the agent cannot end its turn without a valid return. Bounded at 2 blocks; if exhausted, the hook writes the blocked return itself and exits. Never the signal of record. |
+
+**Why a ladder, not one mechanism:** rank 0 (pure filesystem) ensures the orchestrator never
+hangs, independent of multiplexer health. Rank 1 (events) gives near-instant throughput under
+load. Rank 2 (EXIT trap) ensures a crashed agent still signals. Rank 3 (hook gate) shifts
+enforcement from prompt ("you must write a valid return") to mechanism (the system won't let you
+stop without one). **The orchestrator waits on any signal but treats the return file as the truth
+— re-validating it independently before proceeding.**
+
+### Workspace-per-task lifecycle
+
+A task's visible panes live in a multiplexer workspace (a bounded group of terminals and tabs)
+for the duration of the engagement. The lifecycle is:
+
+1. **Preflight** (once per session, cached): verify the multiplexer is running, the orchestrator
+   is inside it (security gate; Part 2 P11), the required control verbs exist, and every adapter
+   CLI is on the PATH. Failure ⇒ hard stop with remediation (never silent fallback).
+
+2. **Workspace ensure** (first Tier-2/3 engagement): create the workspace with metadata (task
+   slug, tier, phase). Tier-1 direct edits stay in the orchestrator's pane; no workspace.
+
+3. **Dispatch** (per role, non-blocking):
+   - Resolve the roster; compose the dispatch record (absolute paths, dispatch id, UUIDs).
+   - Write a placeholder return (lint-invalid by construction) so the doc tab never shows "file
+     unavailable."
+   - Create a pane in the workspace; send the one-line kickoff (`exec <adapter> run <record.json>`).
+   - If the role has `doc_tab: true`, open the return file as a markdown tab beside the pane.
+   - Return control to the orchestrator immediately; the pane runs independently.
+
+4. **Await** (join, non-blocking, re-invoked as needed):
+   - Poll the filesystem (rank 0) and listen for events (rank 1), checking for fresh valid
+     returns every 3–5 seconds, up to a budget per poll cycle.
+   - On first valid return: parse it, hand it to the orchestrator's business logic (insufficient
+     → amend; done → QA gate). Close the pane (or focus the doc tab if approval is pending).
+   - On timeout or stall: triage (CPU usage? screen content? permission prompt?) and offer to
+     extend, nudge, re-dispatch, or escalate to the user.
+
+5. **Close** (on valid return): focus the doc tab if present (approval surface); keep the
+   terminal pane open for log access (it costs nothing when idle). Executor panes without a doc
+   tab are closed.
+
+6. **Teardown** (at ship, after memory distillation): close all workspace panes, close the
+   workspace, delete the task directory (unless `keep_task_artifacts: true`, in which case
+   archive). Worktrees created for isolated execution are removed only if clean and merged
+   (never force-deleted; failed work is preserved for debugging).
+
+**Isolation** (Part 2 P11): overlapping coders are spawned with isolated worktrees (one per
+task, branch `dt/<task-id>`, recorded as durable artifacts). The dispatch record carries absolute
+paths; no path resolution happens inside the pane (locality is lost on re-dispatch). Every re-dispatch
+re-resolves paths from the plugin's running root, so stale references cannot accumulate.
 
 ---
 

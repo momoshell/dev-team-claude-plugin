@@ -59,9 +59,11 @@ function findOutOfBudgetKeys(node, path, hits) {
   }
 }
 
-const CMUX_SCHEMAS = ['scripts/cmux/roster.schema.json', 'scripts/cmux/dispatch-record.schema.json', 'scripts/cmux/signal-record.schema.json', 'scripts/cmux/return-envelope.schema.json']
+// Not cmux-only: the root handover-spec.schema.json is budget-policed here
+// too, since be-a1-01 gave it real (not presence-only) schema validation.
+const BUDGETED_SCHEMAS = ['scripts/cmux/roster.schema.json', 'scripts/cmux/dispatch-record.schema.json', 'scripts/cmux/signal-record.schema.json', 'scripts/cmux/return-envelope.schema.json', 'handover-spec.schema.json']
 
-for (const f of CMUX_SCHEMAS) {
+for (const f of BUDGETED_SCHEMAS) {
   test(`${f}: keyword budget — every schema-node key is in BUDGET`, () => {
     const schema = JSON.parse(readFileSync(join(ROOT, f), 'utf8'))
     const hits = []

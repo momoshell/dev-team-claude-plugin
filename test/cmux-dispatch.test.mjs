@@ -38,12 +38,14 @@ const {
 
 const {
   PREFLIGHT_MESSAGES, formatPreflightMessage, closeSurface, tree, findDocTabSurface, createPane, mountDocTab,
+  ensureWorkspace, TIERS, TIER_COLORS,
 } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
 const {
   readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
 } = await import(join(ROOT, 'scripts', 'cmux', 'record.mjs'))
 const { specPathFor, sidecarPaths } = await import(join(ROOT, 'scripts', 'cmux', 'resolve.mjs'))
 const { writeBlockedReturn } = await import(join(ROOT, 'scripts', 'cmux', 'return-lint.mjs'))
+const { slugify } = await import(join(ROOT, 'scripts', 'cmux', 'contract.mjs'))
 
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
@@ -997,7 +999,11 @@ test('INVOCATION BOUND: a chunked-join across repeated cap-reached calls invokes
 
   const totalInvocations = readLog(env.logPath).length
   const elapsedS = capS * chunks
-  const bound = dispatchInvocationsSoFar + Math.ceil(elapsedS / capS) + 2
+  // be-11-02: each awaitCmd() invocation now also fires exactly one
+  // set-progress call on its return path (workspace.json exists here, from
+  // setUpWorkspace) — one extra cmux call per `chunks` invocation, on top
+  // of the pre-existing bound.
+  const bound = dispatchInvocationsSoFar + Math.ceil(elapsedS / capS) + 2 + chunks
   assert.ok(totalInvocations <= bound, `expected <= ${bound} invocations, got ${totalInvocations}`)
 })
 
@@ -2652,3 +2658,415 @@ test('lifecycle S14 paired positive: a well-formed preflight.json cache is honor
 // trigger today, matching the doc-tab-close branch's same "wired for
 // defense-in-depth, currently unreachable" shape noted elsewhere in this
 // file.
+
+// ---------------------------------------------------------------------------
+// be-11-02 — workspace --tier (color pill), ensureWorkspace --group wiring
+// + degradation, await progress, and phase --set gate's clear-progress.
+// ---------------------------------------------------------------------------
+
+test('workspace --tier 1|2|3 emits exactly one workspace-action set-color per tier, mapped Teal/Blue/Purple', () => {
+  for (const tier of TIERS) {
+    const env = freshCmuxEnv(`tier-${tier}`)
+    const ctx = buildTestCtx(env.dir, { task: `tier-task-${tier}` })
+    preflightCmd({}, ctx)
+    const res = workspaceCmd({ tier: String(tier) }, ctx)
+    assert.equal(res.code, 0)
+    const log = readLog(env.logPath)
+    const colorCalls = log.filter((e) => e.argv[0] === 'workspace-action' && e.argv[1] === '--action' && e.argv[2] === 'set-color')
+    assert.equal(colorCalls.length, 1, `expected exactly one workspace-action set-color for tier ${tier}`)
+    assert.deepEqual(colorCalls[0].argv, ['workspace-action', '--action', 'set-color', '--color', TIER_COLORS[tier], '--workspace', res.json.workspace_id])
+  }
+})
+
+test('workspace with NO --tier emits ZERO workspace-action invocations (no default tier is ever guessed)', () => {
+  const { env } = setUpWorkspace('tier-none')
+  const log = readLog(env.logPath)
+  assert.equal(log.filter((e) => e.argv[0] === 'workspace-action').length, 0)
+})
+
+test('workspace --tier 4 and --tier abc exit as a UsageError with ZERO cmux invocations, validated before any cmux call', () => {
+  const env = freshCmuxEnv('tier-bad')
+  const ctx = buildTestCtx(env.dir, { task: 'tier-bad-task' })
+  for (const bad of ['4', 'abc']) {
+    const before = readLog(env.logPath).length
+    assert.throws(() => workspaceCmd({ tier: bad }, ctx), UsageError)
+    const after = readLog(env.logPath).length
+    assert.equal(after, before, `--tier ${bad} must issue zero cmux invocations`)
+  }
+})
+
+test('workspace.json gains a tier field on --tier, and a LATER --tier-less invocation carries the prior tier forward verbatim, still emitting zero workspace-action calls', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('tier-carry', undefined)
+  const workspaceStatePath = join(ctx.paths.stateDir, 'workspace.json')
+  const initial = JSON.parse(readFileSync(workspaceStatePath, 'utf8'))
+  assert.equal(initial.tier, null, 'no --tier on the very first workspace run leaves tier null')
+
+  const tieredRes = workspaceCmd({ tier: '2' }, ctx)
+  assert.equal(tieredRes.json.tier, 2)
+  const afterTier = JSON.parse(readFileSync(workspaceStatePath, 'utf8'))
+  assert.equal(afterTier.tier, 2)
+
+  const logBefore = readLog(env.logPath).length
+  const laterRes = workspaceCmd({}, ctx)
+  assert.equal(laterRes.json.tier, 2, 'the previously recorded tier is carried forward verbatim')
+  const afterLater = JSON.parse(readFileSync(workspaceStatePath, 'utf8'))
+  assert.equal(afterLater.tier, 2, 'workspace.json is rewritten wholesale — tier must be explicitly carried, not silently destroyed')
+
+  const logAfter = readLog(env.logPath).slice(logBefore)
+  assert.equal(logAfter.filter((e) => e.argv[0] === 'workspace-action').length, 0, 'omitting --tier must never re-fire workspace-action')
+})
+
+test('a forced failure of workspace-action never changes the exit code of `workspace` — cosmetics degrade loudly, never fail the verb', () => {
+  const env = freshCmuxEnv('tier-forced-fail')
+  const ctx = buildTestCtx(env.dir, { task: 'tier-forced-fail-task' })
+  preflightCmd({}, ctx)
+  process.env.FAKE_CMUX_FAIL = 'workspace-action'
+  let res
+  const stderr = captureStderr(() => { res = workspaceCmd({ tier: '1' }, ctx) })
+  delete process.env.FAKE_CMUX_FAIL
+  assert.equal(res.code, 0)
+  assert.match(stderr, /setWorkspaceColor/)
+})
+
+// ---------------------------------------------------------------------------
+// ensureWorkspace --group wiring + degradation.
+// ---------------------------------------------------------------------------
+
+test('ensureWorkspace passes --group <slugify(repoSlug)> on the create path (first-time workspace creation)', () => {
+  const env = freshCmuxEnv('group-wiring')
+  const ctx = buildTestCtx(env.dir, { task: 'group-wiring-task', repo: 'Sample Repo' })
+  preflightCmd({}, ctx)
+  const res = workspaceCmd({}, ctx)
+  const log = readLog(env.logPath)
+  const newWorkspaceEntry = log.find((e) => e.argv[0] === 'new-workspace')
+  assert.ok(newWorkspaceEntry, 'expected a new-workspace invocation')
+  const groupIdx = newWorkspaceEntry.argv.indexOf('--group')
+  assert.notEqual(groupIdx, -1, 'expected --group present in the new-workspace argv')
+  assert.equal(newWorkspaceEntry.argv[groupIdx + 1], slugify(ctx.repoSlug))
+  assert.equal(res.code, 0)
+})
+
+test('ensureWorkspace --group NEGATIVE (created anyway): adopts the workspace the failed --group attempt actually created, exactly one new-workspace attempt total (no retry), exactly one workspace of that title, code 0, and the loud adoption line', () => {
+  const { dir, env, ctx } = setUpWorkspace('group-fail-created')
+  const ctx2 = buildContext({
+    task: 'second-task-created', checkout: ctx.primaryCheckout, repo: ctx.repoSlug, root: join(dir, 'dev-team'), 'plugin-root': ROOT,
+  })
+  preflightCmd({}, ctx2)
+
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateGroupCreateFailsAfterCreating = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const logBefore = readLog(env.logPath).length
+  let res
+  const stderr = captureStderr(() => { res = workspaceCmd({}, ctx2) })
+  assert.equal(res.code, 0, 'the --group degradation must never fail the workspace verb')
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const newWorkspaceAttempts = log.filter((e) => e.argv[0] === 'new-workspace')
+  assert.equal(newWorkspaceAttempts.length, 1, `expected exactly one new-workspace attempt (the failed --group call, adopted — no retry), got ${newWorkspaceAttempts.length}`)
+  assert.match(stderr, /the --group attempt had in fact created the workspace — adopting it/)
+
+  const liveTree = tree({ all: true })
+  const win = liveTree.windows.find((w) => w.id === res.json.window_id)
+  const matches = win.workspaces.filter((w) => w.title === ctx2.taskSlug)
+  assert.equal(matches.length, 1, 'exactly one workspace of that title must exist — never two')
+  assert.equal(matches[0].id, res.json.workspace_id)
+})
+
+test('ensureWorkspace --group NEGATIVE (nothing created): one retry without --group succeeds, the workspace ends up un-grouped, and a loud degradation line is logged', () => {
+  const { dir, env, ctx } = setUpWorkspace('group-fail-nothing')
+  const ctx2 = buildContext({
+    task: 'second-task-nothing', checkout: ctx.primaryCheckout, repo: ctx.repoSlug, root: join(dir, 'dev-team'), 'plugin-root': ROOT,
+  })
+  preflightCmd({}, ctx2)
+
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateGroupCreateFails = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const logBefore = readLog(env.logPath).length
+  let res
+  const stderr = captureStderr(() => { res = workspaceCmd({}, ctx2) })
+  assert.equal(res.code, 0)
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const newWorkspaceAttempts = log.filter((e) => e.argv[0] === 'new-workspace')
+  assert.equal(newWorkspaceAttempts.length, 2, 'expected exactly one --group attempt and exactly one un-grouped retry')
+  assert.ok(newWorkspaceAttempts[0].argv.includes('--group'))
+  assert.ok(!newWorkspaceAttempts[1].argv.includes('--group'), 'the successful retry must be un-grouped')
+  assert.match(stderr, /degrading: retrying new-workspace without --group/)
+
+  const liveTree = tree({ all: true })
+  const win = liveTree.windows.find((w) => w.id === res.json.window_id)
+  const matches = win.workspaces.filter((w) => w.title === ctx2.taskSlug)
+  assert.equal(matches.length, 1)
+})
+
+test('ensureWorkspace: with no group argument at all, a failing new-workspace still throws as before (no retry, no re-scan)', () => {
+  const { env, ctx } = setUpWorkspace('group-none-fails')
+  const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  process.env.FAKE_CMUX_FAIL = 'new-workspace'
+  const logBefore = readLog(env.logPath).length
+  assert.throws(
+    () => ensureWorkspace({ windowId: workspaceState.window_id, taskSlug: 'a-brand-new-ungrouped-task', cwd: ctx.primaryCheckout }),
+    /ensureWorkspace: new-workspace failed/,
+  )
+  delete process.env.FAKE_CMUX_FAIL
+  const log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'new-workspace').length, 1, 'no retry when group was never supplied')
+})
+
+// ---------------------------------------------------------------------------
+// await progress — set-progress on every return path, cleared at the gate.
+// ---------------------------------------------------------------------------
+
+test('await reports progress on the RESOLVED return path: exactly one set-progress call, fraction 1/1', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('progress-resolved')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+
+  const logBefore = readLog(env.logPath).length
+  const res = awaitCmd({ all: [dispatchRes.json.dispatch_id] }, ctx, { sleep: NO_SLEEP })
+  assert.equal(res.json.resolved.length, 1)
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const progressCalls = log.filter((e) => e.argv[0] === 'set-progress')
+  assert.equal(progressCalls.length, 1, 'expected exactly one set-progress call on the resolved return path')
+  assert.equal(progressCalls[0].argv[1], '1')
+  const wsIdx = progressCalls[0].argv.indexOf('--workspace')
+  assert.equal(progressCalls[0].argv[wsIdx + 1], workspaceRes.json.workspace_id)
+})
+
+test('await reports progress on the CAP-REACHED (still-running) return path: exactly one set-progress call, fraction 0/1', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('progress-cap')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+
+  const logBefore = readLog(env.logPath).length
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchRes.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  assert.equal(res.json.status, 'still-running')
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const progressCalls = log.filter((e) => e.argv[0] === 'set-progress')
+  assert.equal(progressCalls.length, 1, 'expected exactly one set-progress call on the cap-reached return path')
+  assert.equal(progressCalls[0].argv[1], '0')
+  const wsIdx = progressCalls[0].argv.indexOf('--workspace')
+  assert.equal(progressCalls[0].argv[wsIdx + 1], workspaceRes.json.workspace_id)
+})
+
+test('a forced failure of set-progress never changes the exit code of `await` — cosmetics degrade loudly, never fail the verb', () => {
+  const { env, ctx } = setUpWorkspace('progress-forced-fail')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+
+  process.env.FAKE_CMUX_FAIL = 'set-progress'
+  let res
+  const stderr = captureStderr(() => { res = awaitCmd({ all: [dispatchRes.json.dispatch_id] }, ctx, { sleep: NO_SLEEP }) })
+  delete process.env.FAKE_CMUX_FAIL
+  assert.equal(res.code, 0)
+  assert.equal(res.json.resolved.length, 1)
+  assert.match(stderr, /setProgress/)
+})
+
+test('phase --set gate emits exactly one clear-progress --workspace <id>; --set building and --set planning emit ZERO clear-progress', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('gate-clears-progress')
+
+  let logBefore = readLog(env.logPath).length
+  phaseCmd({ set: 'building' }, ctx)
+  let log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'clear-progress').length, 0)
+
+  logBefore = readLog(env.logPath).length
+  phaseCmd({ set: 'planning' }, ctx)
+  log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'clear-progress').length, 0)
+
+  logBefore = readLog(env.logPath).length
+  const res = phaseCmd({ set: 'gate' }, ctx)
+  assert.equal(res.code, 0)
+  log = readLog(env.logPath).slice(logBefore)
+  const clearCalls = log.filter((e) => e.argv[0] === 'clear-progress')
+  assert.equal(clearCalls.length, 1)
+  assert.deepEqual(clearCalls[0].argv, ['clear-progress', '--workspace', workspaceRes.json.workspace_id])
+})
+
+test('a forced failure of clear-progress never changes the exit code of `phase --set gate` — cosmetics degrade loudly, never fail the verb', () => {
+  const { env, ctx } = setUpWorkspace('gate-forced-fail')
+  process.env.FAKE_CMUX_FAIL = 'clear-progress'
+  let res
+  const stderr = captureStderr(() => { res = phaseCmd({ set: 'gate' }, ctx) })
+  delete process.env.FAKE_CMUX_FAIL
+  assert.equal(res.code, 0)
+  assert.match(stderr, /clearProgress/)
+})
+
+// ---------------------------------------------------------------------------
+// ADVERSARIAL GAP-FILL (be-11-02 negative-path audit).
+// ---------------------------------------------------------------------------
+
+test('phase --set gate with NO workspace.json at all refuses "no workspace bound" (never a crash, never a clear-progress call) — mirrors dispatchCmd\'s M2-E hoist for phaseCmd', () => {
+  const env = freshCmuxEnv('gate-no-workspace')
+  const ctx = buildTestCtx(env.dir)
+  const preflightRes = preflightCmd({}, ctx)
+  assert.equal(preflightRes.code, 0)
+  // Deliberately skip `workspace` — no workspace.json exists.
+  assert.throws(
+    () => phaseCmd({ set: 'gate' }, ctx),
+    (err) => err instanceof OperationalError && /no workspace bound/.test(err.message),
+  )
+  const log = readLog(env.logPath)
+  assert.equal(log.filter((e) => e.argv[0] === 'clear-progress').length, 0)
+  assert.equal(log.filter((e) => e.argv[0] === 'set-status').length, 0)
+})
+
+test('phase --set gate with a malformed workspace.json is treated as absent (refuses "no workspace bound", never a JSON.parse throw, never a clear-progress call)', () => {
+  const { env, ctx } = setUpWorkspace('gate-malformed-workspace')
+  writeFileSync(join(ctx.paths.stateDir, 'workspace.json'), '{ not json')
+  const logBefore = readLog(env.logPath).length
+  assert.throws(
+    () => phaseCmd({ set: 'gate' }, ctx),
+    (err) => err instanceof OperationalError && /no workspace bound/.test(err.message),
+  )
+  const log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'clear-progress').length, 0)
+})
+
+// ensureWorkspace --group: the ungrouped retry ALSO fails. This must be
+// distinguishable from both (a) the "no group argument at all" immediate
+// throw and (b) a generic "new-workspace failed" message — an operator
+// reading only the thrown message must be able to tell the retry itself
+// (not just the original --group attempt) was the one that failed.
+test('ensureWorkspace --group NEGATIVE (retry also fails): throws a message naming the retry failure explicitly ("even without --group"), with exactly one grouped attempt AND one ungrouped retry logged', () => {
+  const { dir, env, ctx } = setUpWorkspace('group-fail-retry-fails')
+  const ctx2 = buildContext({
+    task: 'third-task-retry-fails', checkout: ctx.primaryCheckout, repo: ctx.repoSlug, root: join(dir, 'dev-team'), 'plugin-root': ROOT,
+  })
+  preflightCmd({}, ctx2)
+
+  // FAKE_CMUX_FAIL matches on verb name alone (argv[0]), so this fails
+  // EVERY new-workspace call — both the initial --group attempt and the
+  // un-grouped retry ensureWorkspace falls back to.
+  process.env.FAKE_CMUX_FAIL = 'new-workspace'
+  const logBefore = readLog(env.logPath).length
+  try {
+    assert.throws(
+      () => workspaceCmd({}, ctx2),
+      (err) => /new-workspace failed even without --group/.test(err.message),
+    )
+  } finally {
+    delete process.env.FAKE_CMUX_FAIL
+  }
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const newWorkspaceAttempts = log.filter((e) => e.argv[0] === 'new-workspace')
+  assert.equal(newWorkspaceAttempts.length, 2, 'expected exactly one --group attempt and exactly one ungrouped retry, both failing')
+  assert.ok(newWorkspaceAttempts[0].argv.includes('--group'), 'first attempt must still carry --group')
+  assert.ok(!newWorkspaceAttempts[1].argv.includes('--group'), 'the retry must be un-grouped even though it also fails')
+
+  // No workspace of that title exists anywhere — both attempts genuinely
+  // failed, nothing was silently adopted.
+  const liveTree = tree({ all: true })
+  const allWorkspaces = (liveTree.windows || []).flatMap((w) => w.workspaces || [])
+  const matches = allWorkspaces.filter((w) => w.title === ctx2.taskSlug)
+  assert.equal(matches.length, 0, 'a fully-failed --group create must never leave a phantom workspace behind')
+})
+
+test('ensureWorkspace --group NEGATIVE (retry also fails) vs. no-group-at-all: the two thrown messages are textually distinguishable', () => {
+  const { env, ctx } = setUpWorkspace('group-vs-no-group-message')
+  const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  process.env.FAKE_CMUX_FAIL = 'new-workspace'
+  let noGroupMessage
+  let withGroupRetryFailsMessage
+  try {
+    try {
+      ensureWorkspace({ windowId: workspaceState.window_id, taskSlug: 'no-group-message-task', cwd: ctx.primaryCheckout })
+    } catch (err) {
+      noGroupMessage = err.message
+    }
+    try {
+      ensureWorkspace({ windowId: workspaceState.window_id, taskSlug: 'with-group-message-task', cwd: ctx.primaryCheckout, group: 'g' })
+    } catch (err) {
+      withGroupRetryFailsMessage = err.message
+    }
+  } finally {
+    delete process.env.FAKE_CMUX_FAIL
+  }
+  assert.ok(noGroupMessage, 'expected the no-group call to throw')
+  assert.ok(withGroupRetryFailsMessage, 'expected the with-group call (both attempts failing) to throw')
+  assert.notEqual(noGroupMessage, withGroupRetryFailsMessage, 'the two failure messages must not be identical — an operator must be able to tell which flag caused it')
+  assert.doesNotMatch(noGroupMessage, /even without --group/)
+  assert.match(withGroupRetryFailsMessage, /even without --group/)
+})
+
+// A corrupted tree with two workspaces sharing the same title must never
+// crash the fast "does one already exist" path — findWorkspaceByTitle's
+// .find() deterministically picks the first match rather than throwing on
+// ambiguity (unlike findDocTabSurface, which fails closed on ambiguity by
+// design — the two helpers have deliberately different contracts).
+test('ensureWorkspace fast path: two workspaces sharing the same title in a corrupted tree resolves to the FIRST match deterministically, never throws', () => {
+  const { env, ctx } = setUpWorkspace('dup-title-fast-path')
+  const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+
+  // Seed a second workspace with the exact same title directly into the
+  // fake's persisted topology, simulating a corrupted/hand-edited tree.
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  const win = state.windows.find((w) => w.id.toLowerCase() === workspaceState.window_id.toLowerCase())
+  const existingWs = win.workspaces.find((w) => w.id.toLowerCase() === workspaceState.workspace_id.toLowerCase())
+  const dupWsId = 'dddddddd-dddd-dddd-dddd-dddddddddddd'
+  const dupPaneId = 'eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee'
+  const dupSurfId = 'ffffffff-ffff-ffff-ffff-ffffffffffff'
+  win.workspaces.push({
+    id: dupWsId,
+    window_id: win.id,
+    title: existingWs.title,
+    panes: [{
+      id: dupPaneId, workspace_id: dupWsId, surface_ids: [dupSurfId], selected_surface_id: dupSurfId,
+      surfaces: [{ id: dupSurfId, pane_id: dupPaneId, type: 'terminal', tty: null, title: 'terminal' }],
+    }],
+  })
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const logBefore = readLog(env.logPath).length
+  const result = ensureWorkspace({ windowId: workspaceState.window_id, taskSlug: existingWs.title, cwd: ctx.primaryCheckout })
+  assert.equal(result.workspaceId, existingWs.id.toLowerCase(), 'must deterministically resolve to the FIRST workspace of that title')
+  const log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'new-workspace').length, 0, 'an existing (even ambiguous) title match must never trigger a create')
+})
+
+// Tier validation: Number() coercion edge cases beyond the existing '4'/'abc'
+// pair. '0' must reject (0 is not in TIERS). Numeric-looking-but-not-integer
+// strings that Number() happens to coerce EXACTLY onto a valid tier (e.g.
+// '1.0', '+1', ' 2') are accepted today — this is documented as the current,
+// intentional-by-omission behavior (Number() coercion, not a stricter
+// integer-string parse), not asserted as a bug to fix here.
+test('workspace --tier: "0", "", "-1", "NaN", "Infinity", "3.5" all reject as UsageError, validated before any cmux call', () => {
+  const env = freshCmuxEnv('tier-more-bad')
+  const ctx = buildTestCtx(env.dir, { task: 'tier-more-bad-task' })
+  for (const bad of ['0', '', '-1', 'NaN', 'Infinity', '3.5']) {
+    const before = readLog(env.logPath).length
+    assert.throws(() => workspaceCmd({ tier: bad }, ctx), UsageError, `--tier ${JSON.stringify(bad)} must be rejected`)
+    const after = readLog(env.logPath).length
+    assert.equal(after, before, `--tier ${JSON.stringify(bad)} must issue zero cmux invocations`)
+  }
+})
+
+test('workspace --tier: Number()-coercible-to-a-valid-tier strings ("1.0", "+1", " 2") are ACCEPTED as that tier — documents current coercion behavior', () => {
+  const env = freshCmuxEnv('tier-coercion-accepted')
+  const ctx = buildTestCtx(env.dir, { task: 'tier-coercion-accepted-task' })
+  preflightCmd({}, ctx)
+  const res1 = workspaceCmd({ tier: '1.0' }, ctx)
+  assert.equal(res1.json.tier, 1)
+  const env2 = freshCmuxEnv('tier-coercion-accepted-2')
+  const ctx2 = buildTestCtx(env2.dir, { task: 'tier-coercion-accepted-task-2' })
+  preflightCmd({}, ctx2)
+  const res2 = workspaceCmd({ tier: ' 2' }, ctx2)
+  assert.equal(res2.json.tier, 2)
+})

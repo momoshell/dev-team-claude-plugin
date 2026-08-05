@@ -24,6 +24,7 @@ const {
   preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab,
   setStatus, closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
   PHASES, setPhase, topTsv, readEvents,
+  TURN_END_EVENT_NAME, parseTurnEndEvent, TIERS, TIER_COLORS, clearProgress, setWorkspaceColor, readScreen,
 } = await import(CMUXCTL_PATH)
 
 // Fixed orchestrator ids baked into the fixture's fresh topology (lowercase
@@ -208,6 +209,18 @@ test('VERB_METHODS maps every gated verb to a dotted RPC method name, never a CL
   }
 })
 
+test('be-11-01: VERBS gains read-screen/clear-progress/workspace-action; VERB_METHODS gains NO new entry', () => {
+  assert.ok(['read-screen', 'clear-progress', 'workspace-action'].every((v) => VERBS.includes(v)))
+  assert.deepEqual(
+    Object.keys(VERB_METHODS).sort(),
+    [
+      'capabilities', 'close-surface', 'close-workspace', 'identify', 'markdown', 'move-surface',
+      'new-pane', 'new-window', 'new-workspace', 'ping', 'rename-tab', 'reorder-surface',
+      'send', 'send-key', 'top', 'tree',
+    ].sort(),
+  )
+})
+
 // ---------------------------------------------------------------------------
 // Preflight — order, caching, and the five remediation messages.
 // ---------------------------------------------------------------------------
@@ -233,7 +246,15 @@ test('preflight succeeds end-to-end and caches to <taskArtifactsRoot>/preflight.
   // names and inventing one hard-stops every real run — it too gets no
   // VERB_METHODS entry (list order is whatever UNVERIFIABLE_VERBS's own
   // derivation — VERBS.filter(...).sort() — actually produces).
-  assert.deepEqual(result.unverifiable_verbs, ['config', 'events', 'new-surface', 'set-status', 'wait-for'])
+  // be-11-01 adds read-screen/clear-progress/workspace-action to VERBS with
+  // deliberately no VERB_METHODS entry (cosmetic/diagnostic verbs — see the
+  // comment at VERB_METHODS's definition site), so they join this same
+  // unverifiable set. be-11-02 adds set-progress alongside them for the same
+  // reason.
+  assert.deepEqual(
+    result.unverifiable_verbs,
+    ['clear-progress', 'config', 'events', 'new-surface', 'read-screen', 'set-progress', 'set-status', 'wait-for', 'workspace-action'],
+  )
 
   const artifactsRoot = join(dir, 'artifacts')
   const cachedRaw = readFileSync(join(artifactsRoot, 'preflight.json'), 'utf8')
@@ -687,6 +708,119 @@ test('setPhase throws before any spawn when workspaceId is missing', () => {
 })
 
 // ---------------------------------------------------------------------------
+// clearProgress / setWorkspaceColor — be-11-01. Mirror setPhase's
+// throw-before-spawn half and setStatus's degrade-loudly half.
+// ---------------------------------------------------------------------------
+
+test('clearProgress throws before any spawn when workspaceId is missing/empty', () => {
+  const { logPath } = freshEnv('clear-progress-no-workspace')
+  assert.throws(() => clearProgress({}))
+  assert.throws(() => clearProgress({ workspaceId: '' }))
+  assert.equal(existsSync(logPath), false)
+})
+
+test('clearProgress invokes exactly `clear-progress --workspace <id>`', () => {
+  const { logPath } = freshEnv('clear-progress-ok')
+  clearProgress({ workspaceId: ORCH_WINDOW })
+  const call = readLog(logPath).find((e) => e.argv[0] === 'clear-progress')
+  assert.deepEqual(call.argv, ['clear-progress', '--workspace', ORCH_WINDOW])
+})
+
+test('clearProgress never throws on a forced cmux failure — logs one loud line instead', () => {
+  const { logPath } = freshEnv('clear-progress-fail')
+  process.env.FAKE_CMUX_FAIL = 'clear-progress'
+  assert.doesNotThrow(() => clearProgress({ workspaceId: ORCH_WINDOW }))
+  const call = readLog(logPath).find((e) => e.argv[0] === 'clear-progress')
+  assert.ok(call)
+})
+
+test('TIERS is frozen [1,2,3] and TIER_COLORS maps 1/2/3 to Teal/Blue/Purple', () => {
+  assert.ok(Object.isFrozen(TIERS))
+  assert.deepEqual(TIERS, [1, 2, 3])
+  assert.ok(Object.isFrozen(TIER_COLORS))
+  assert.deepEqual(TIER_COLORS, { 1: 'Teal', 2: 'Blue', 3: 'Purple' })
+})
+
+test('setWorkspaceColor throws before any spawn for an out-of-TIERS tier or a missing workspaceId', () => {
+  const { logPath } = freshEnv('set-color-bad')
+  assert.throws(() => setWorkspaceColor(4, { workspaceId: ORCH_WINDOW }))
+  assert.throws(() => setWorkspaceColor(1, {}))
+  assert.equal(existsSync(logPath), false)
+})
+
+test('setWorkspaceColor invokes exactly `workspace-action --action set-color --color <TIER_COLORS[tier]> --workspace <id>`', () => {
+  const { logPath } = freshEnv('set-color-ok')
+  setWorkspaceColor(2, { workspaceId: ORCH_WINDOW })
+  const call = readLog(logPath).find((e) => e.argv[0] === 'workspace-action')
+  assert.deepEqual(call.argv, ['workspace-action', '--action', 'set-color', '--color', 'Blue', '--workspace', ORCH_WINDOW])
+})
+
+test('setWorkspaceColor never throws on a forced cmux failure — logs one loud line instead', () => {
+  const { logPath } = freshEnv('set-color-fail')
+  process.env.FAKE_CMUX_FAIL = 'workspace-action'
+  assert.doesNotThrow(() => setWorkspaceColor(3, { workspaceId: ORCH_WINDOW }))
+  const call = readLog(logPath).find((e) => e.argv[0] === 'workspace-action')
+  assert.ok(call)
+})
+
+test('clearProgress/setWorkspaceColor throw for a non-string workspaceId (number or object) — the typeof guard catches these, not just == null', () => {
+  assert.throws(() => clearProgress({ workspaceId: 42 }))
+  assert.throws(() => clearProgress({ workspaceId: { id: ORCH_WINDOW } }))
+  assert.throws(() => setWorkspaceColor(1, { workspaceId: 42 }))
+  assert.throws(() => setWorkspaceColor(1, { workspaceId: { id: ORCH_WINDOW } }))
+})
+
+test('GAP: a whitespace-only workspaceId ("   ") is NOT caught by the `typeof !== \'string\' || === \'\'` precondition — it spawns the call unchanged', () => {
+  // Documents an actual precondition gap rather than papering over it: the
+  // guard is `typeof workspaceId !== 'string' || workspaceId === ''`, which
+  // rejects '' but not whitespace-only strings. This test pins today's
+  // real (arguably wrong) behavior so a future tightening of the guard is a
+  // deliberate, visible test change rather than a silent regression either
+  // way.
+  const { logPath } = freshEnv('clear-progress-whitespace-workspace')
+  assert.doesNotThrow(() => clearProgress({ workspaceId: '   ' }))
+  const call = readLog(logPath).find((e) => e.argv[0] === 'clear-progress')
+  assert.deepEqual(call.argv, ['clear-progress', '--workspace', '   '])
+})
+
+test('setWorkspaceColor never coerces tier — a string "1", a fractional 1.5, and out-of-range -1/0 are all rejected', () => {
+  assert.throws(() => setWorkspaceColor('1', { workspaceId: ORCH_WINDOW })) // string, not number — TIERS.includes uses ===
+  assert.throws(() => setWorkspaceColor(1.5, { workspaceId: ORCH_WINDOW }))
+  assert.throws(() => setWorkspaceColor(-1, { workspaceId: ORCH_WINDOW }))
+  assert.throws(() => setWorkspaceColor(0, { workspaceId: ORCH_WINDOW }))
+})
+
+// ---------------------------------------------------------------------------
+// readScreen — be-11-01. Callable through the frozen VERBS allowlist,
+// re-resolves the surface first, never throws.
+// ---------------------------------------------------------------------------
+
+test('readScreen is callable through the frozen VERBS allowlist and returns the fake read-screen output', () => {
+  freshEnv('read-screen-ok')
+  const out = readScreen(ORCH_SURFACE, { lines: 20 })
+  assert.equal(typeof out, 'string')
+  assert.ok(out.length > 0)
+})
+
+test('readScreen no-ops loudly (returns null, never throws) when the surface is gone from a fresh tree', () => {
+  freshEnv('read-screen-gone')
+  assert.equal(readScreen('00000000-0000-0000-0000-000000000000', {}), null)
+})
+
+test('readScreen never throws when the underlying `tree` call itself fails (substrate wedged — rung 2 of the triage ladder is invoked precisely in this state) — degrades to null', () => {
+  freshEnv('read-screen-tree-fails')
+  process.env.FAKE_CMUX_FAIL = 'tree' // requireTargetPresent's tree() call throws on this
+  assert.doesNotThrow(() => readScreen(ORCH_SURFACE, {}))
+  assert.equal(readScreen(ORCH_SURFACE, {}), null)
+})
+
+test('readScreen never throws on a forced cmux failure — returns null instead', () => {
+  freshEnv('read-screen-fail')
+  process.env.FAKE_CMUX_FAIL = 'read-screen'
+  assert.equal(readScreen(ORCH_SURFACE, {}), null)
+})
+
+// ---------------------------------------------------------------------------
 // mountDocTab — never throws, never focuses.
 // ---------------------------------------------------------------------------
 
@@ -965,18 +1099,90 @@ test('reorderDocTabFirst: issues reorder-surface --before and never focuses; ret
 // Degraded-capability readers.
 // ---------------------------------------------------------------------------
 
-test('topTsv parses TSV rows, normalizes ids at ingestion (mixed-case fixture), and returns null when top is unavailable', () => {
+test('topTsv parses the real HEADERLESS 7-column `top --format tsv` shape positionally — the first line is DATA, never consumed as a header', () => {
   const { dir } = freshEnv('top-tsv')
   const topFile = join(dir, 'top.tsv')
-  // Mixed-case on purpose — live `top` emits uppercase; a lowercase-only
-  // fixture would hide topTsv failing to normalize (qa-lead vacuity C3).
-  writeFileSync(topFile, 'surface_id\ttitle\nCcCcCcCc-0000-0000-0000-000000000000\thello\n')
+  // `top` emits no header row at all; a header-consuming parser fed this
+  // 3-row fixture (first row a `total` rollup, not a header) would drop it
+  // and return only 2 rows.
+  writeFileSync(
+    topFile,
+    '0.0\t0\t0\ttotal\ttotal\t\t\n'
+    + '0.1\t245760000\t2\twindow\twindow:1\t\torchestrator\n'
+    + '18.2\t517574328\t8\tsurface\tsurface:1\tpane:1\t<spinner> Claude Code\n',
+  )
   process.env.FAKE_CMUX_TOP = topFile
   const rows = topTsv()
-  assert.deepEqual(rows, [{ surface_id: 'cccccccc-0000-0000-0000-000000000000', title: 'hello' }])
+  assert.equal(rows.length, 3)
+  assert.deepEqual(rows[0], { cpu_pct: '0.0', mem_bytes: '0', proc_count: '0', kind: 'total', id: 'total', parent_id: '', title_or_status: '' })
+  // `top` has no --id-format flag — ids are positional refs (surface:1),
+  // never UUIDs, so there is nothing to normalize: normalizeIds is NOT
+  // applied here. surface:1 comes back unchanged, not lowercased-through-a-
+  // normalizer (it already is lowercase, but a normalizer would also have
+  // been a no-op-shaped hole for a mixed-case positional ref).
+  assert.deepEqual(rows[2], { cpu_pct: '18.2', mem_bytes: '517574328', proc_count: '8', kind: 'surface', id: 'surface:1', parent_id: 'pane:1', title_or_status: '<spinner> Claude Code' })
 
   process.env.FAKE_CMUX_FAIL = 'top'
   assert.equal(topTsv(), null)
+})
+
+test('topTsv threads its timeout into cmux(top, ..., {timeoutMs}), defaulting to 2000ms', () => {
+  // spawnSync's timeout is not observable through the fixture log (it is a
+  // child_process option, not an argv entry) — assert the default value
+  // itself, since that is the only thing this fixture can prove.
+  assert.equal(topTsv.length, 0) // ({ timeoutMs = 2000 } = {}) — no required arg
+  const src = readFileSync(CMUXCTL_PATH, 'utf8')
+  assert.match(src, /timeoutMs\s*=\s*2000/)
+})
+
+test('topTsv on a truncated row (fewer than 7 tab-separated fields) leaves the missing trailing fields undefined rather than shifting columns', () => {
+  const { dir } = freshEnv('top-tsv-truncated')
+  const topFile = join(dir, 'top.tsv')
+  // Real cmux truncation would drop trailing columns, not leading ones —
+  // a parser that silently reindexed would misassign kind/id and could
+  // make a `total` rollup row look like a `surface` row.
+  writeFileSync(topFile, '1.0\t100\t2\n')
+  process.env.FAKE_CMUX_TOP = topFile
+  const rows = topTsv()
+  assert.deepEqual(rows, [{ cpu_pct: '1.0', mem_bytes: '100', proc_count: '2', kind: undefined, id: undefined, parent_id: undefined, title_or_status: undefined }])
+})
+
+test('topTsv on a row with MORE than 7 tab-separated fields keeps the first 7 positionally and drops the rest — never shifts or throws', () => {
+  const { dir } = freshEnv('top-tsv-extra-fields')
+  const topFile = join(dir, 'top.tsv')
+  writeFileSync(topFile, '1.0\t100\t2\tsurface\tsurface:1\tpane:1\ttitle\tEXTRA1\tEXTRA2\n')
+  process.env.FAKE_CMUX_TOP = topFile
+  const rows = topTsv()
+  assert.deepEqual(rows, [{ cpu_pct: '1.0', mem_bytes: '100', proc_count: '2', kind: 'surface', id: 'surface:1', parent_id: 'pane:1', title_or_status: 'title' }])
+})
+
+test('topTsv on completely empty stdout, a single blank line, and multiple trailing blank lines all return [] / skip the blanks — never a [""]-shaped row', () => {
+  const { dir } = freshEnv('top-tsv-blank')
+  const emptyFile = join(dir, 'empty.tsv')
+  writeFileSync(emptyFile, '')
+  process.env.FAKE_CMUX_TOP = emptyFile
+  assert.deepEqual(topTsv(), [])
+
+  const singleBlankFile = join(dir, 'single-blank.tsv')
+  writeFileSync(singleBlankFile, '\n')
+  process.env.FAKE_CMUX_TOP = singleBlankFile
+  assert.deepEqual(topTsv(), [])
+
+  const trailingBlanksFile = join(dir, 'trailing-blanks.tsv')
+  writeFileSync(trailingBlanksFile, '0.1\t245760000\t2\twindow\twindow:1\t\torchestrator\n\n\n')
+  process.env.FAKE_CMUX_TOP = trailingBlanksFile
+  const rows = topTsv()
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].kind, 'window')
+})
+
+test('topTsv passes non-numeric cpu_pct/mem_bytes/proc_count through unchanged as raw strings — it never coerces or NaNs them', () => {
+  const { dir } = freshEnv('top-tsv-non-numeric')
+  const topFile = join(dir, 'top.tsv')
+  writeFileSync(topFile, 'N/A\tnot-a-number\t\tsurface\tsurface:9\tpane:9\tweird row\n')
+  process.env.FAKE_CMUX_TOP = topFile
+  const rows = topTsv()
+  assert.deepEqual(rows, [{ cpu_pct: 'N/A', mem_bytes: 'not-a-number', proc_count: '', kind: 'surface', id: 'surface:9', parent_id: 'pane:9', title_or_status: 'weird row' }])
 })
 
 test('checkVersion (via preflight) treats a non-zero --version exit as absent, not present', () => {
@@ -1012,6 +1218,105 @@ test('readEvents returns { unavailable: true } when the verb fails, sends --afte
   // Live-verified working combination: --after --limit --no-ack --no-heartbeat.
   const eventsCall = readLog(logPath).filter((e) => e.argv[0] === 'events').at(-1)
   assert.deepEqual(eventsCall.argv, ['events', '--after', '0', '--limit', '3', '--no-ack', '--no-heartbeat'])
+})
+
+// ---------------------------------------------------------------------------
+// TURN_END_EVENT_NAME / parseTurnEndEvent — be-11-01. The turn-end event is
+// `agent.hook.Stop`, NOT `notification.requested` (the TRD/ADR-003's stale
+// assumption — see the Superseded-since-ratification errata).
+// ---------------------------------------------------------------------------
+
+test('TURN_END_EVENT_NAME is the frozen string agent.hook.Stop', () => {
+  assert.equal(TURN_END_EVENT_NAME, 'agent.hook.Stop')
+})
+
+test('POSITIVE mutation-proof: parseTurnEndEvent arms on the live-captured agent.hook.Stop fixture, keyed to TURN_END_EVENT_NAME (not to any event name literal), and lowercases surfaceId even fed the raw mixed-case fixture directly', () => {
+  const raw = readFileSync(join(HERE, 'fixtures', 'live-agent-hook-stop.jsonl'), 'utf8').trim()
+  const rawEvent = JSON.parse(raw)
+  assert.equal(rawEvent.name, TURN_END_EVENT_NAME) // fixture-keyed: arms because the value matches, not because the name literal matches
+  assert.equal(rawEvent.surface_id, '5859A559-6B87-4206-A2E2-DCBC1E7B8753') // fixture is genuinely mixed-case, uncoerced
+  const parsed = parseTurnEndEvent(rawEvent)
+  // parseTurnEndEvent normalizes surfaceId itself (via normalizeId), so its
+  // output is idempotently lowercase regardless of caller — this is fed
+  // the raw fixture directly (bypassing readEvents' own normalizeIds pass)
+  // and must still come back lowercase.
+  assert.deepEqual(parsed, {
+    surfaceId: '5859a559-6b87-4206-a2e2-dcbc1e7b8753',
+    occurredAt: '2026-08-05T09:19:12.190Z',
+    seq: 18338,
+  })
+})
+
+test('normalization boundary: the committed agent.hook.Stop fixture run through the REAL readEvents path (normalizeIds) still comes back lowercase from parseTurnEndEvent', () => {
+  const { dir } = freshEnv('turn-end-via-read-events')
+  const eventsFile = join(dir, 'agent-hook-stop.jsonl')
+  writeFileSync(eventsFile, readFileSync(join(HERE, 'fixtures', 'live-agent-hook-stop.jsonl'), 'utf8'))
+  process.env.FAKE_CMUX_EVENTS = eventsFile
+  const { events } = readEvents({ afterSeq: 0, limit: 10 })
+  assert.equal(events.length, 1)
+  // readEvents' own normalizeIds pass has already lowercased the top-level
+  // surface_id by the time it reaches parseTurnEndEvent.
+  assert.equal(events[0].surface_id, '5859a559-6b87-4206-a2e2-dcbc1e7b8753')
+  const parsed = parseTurnEndEvent(events[0])
+  assert.deepEqual(parsed, {
+    surfaceId: '5859a559-6b87-4206-a2e2-dcbc1e7b8753',
+    occurredAt: '2026-08-05T09:19:12.190Z',
+    seq: 18338,
+  })
+})
+
+test('NEGATIVE: a fixture containing only notification.requested lines produces zero parseTurnEndEvent arms', () => {
+  const { dir } = freshEnv('turn-end-negative')
+  const notifyOnly = join(dir, 'notify-only.jsonl')
+  writeFileSync(
+    notifyOnly,
+    `${JSON.stringify({ name: 'notification.requested', seq: 1, occurred_at: '2026-08-05T00:00:00.000Z', surface_id: '11111111-0000-0000-0000-000000000000' })}\n`,
+  )
+  process.env.FAKE_CMUX_EVENTS = notifyOnly
+  const { events } = readEvents({ afterSeq: 0, limit: 10 })
+  assert.equal(events.length, 1)
+  const armed = events.map(parseTurnEndEvent).filter((e) => e !== null)
+  assert.deepEqual(armed, [])
+})
+
+test('parseTurnEndEvent returns null (never a defaulted value) when surface_id or occurred_at is missing/unparseable', () => {
+  assert.equal(parseTurnEndEvent(null), null)
+  assert.equal(parseTurnEndEvent({ name: TURN_END_EVENT_NAME }), null) // no surface_id anywhere
+  assert.equal(parseTurnEndEvent({ name: TURN_END_EVENT_NAME, surface_id: 'abc' }), null) // no occurred_at
+  assert.equal(parseTurnEndEvent({ name: TURN_END_EVENT_NAME, surface_id: 'abc', occurred_at: 'not-a-date' }), null) // unparseable
+  // falls back to payload.surface_id only when the top-level key is absent
+  const viaPayload = parseTurnEndEvent({ name: TURN_END_EVENT_NAME, occurred_at: '2026-08-05T00:00:00.000Z', payload: { surface_id: 'xyz' } })
+  assert.deepEqual(viaPayload, { surfaceId: 'xyz', occurredAt: '2026-08-05T00:00:00.000Z', seq: undefined })
+})
+
+test('parseTurnEndEvent returns null when payload is explicitly null (not just absent) and no top-level surface_id exists — optional chaining must not throw', () => {
+  assert.doesNotThrow(() => parseTurnEndEvent({ name: TURN_END_EVENT_NAME, occurred_at: '2026-08-05T00:00:00.000Z', payload: null }))
+  assert.equal(parseTurnEndEvent({ name: TURN_END_EVENT_NAME, occurred_at: '2026-08-05T00:00:00.000Z', payload: null }), null)
+})
+
+test('parseTurnEndEvent returns null when occurred_at is a non-string (a number, or null) even though a naive Date.parse would coerce a number', () => {
+  // Date.parse(1234567890000) would actually succeed if occurred_at were
+  // passed through un-type-checked — the typeof guard must reject it
+  // before Date.parse ever runs, not rely on Date.parse to reject it.
+  assert.equal(parseTurnEndEvent({ name: TURN_END_EVENT_NAME, surface_id: 'abc', occurred_at: 1770000000000 }), null)
+  assert.equal(parseTurnEndEvent({ name: TURN_END_EVENT_NAME, surface_id: 'abc', occurred_at: null }), null)
+})
+
+test('parseTurnEndEvent passes seq through unvalidated — a negative or extremely large seq is neither rejected nor clamped', () => {
+  const base = { name: TURN_END_EVENT_NAME, surface_id: 'abc', occurred_at: '2026-08-05T00:00:00.000Z' }
+  assert.equal(parseTurnEndEvent({ ...base, seq: -5 }).seq, -5)
+  assert.equal(parseTurnEndEvent({ ...base, seq: Number.MAX_SAFE_INTEGER }).seq, Number.MAX_SAFE_INTEGER)
+})
+
+test('mutation check: changing TURN_END_EVENT_NAME breaks the positive fixture-arming test (documented, not re-executed here)', () => {
+  // This test documents the required manual mutation-proof: editing
+  // TURN_END_EVENT_NAME's value in cmuxctl.mjs to 'notification.requested'
+  // and re-running this file must fail the POSITIVE test above, because
+  // that test's assertion is fixture-keyed (rawEvent.name === TURN_END_EVENT_NAME)
+  // rather than name-keyed to a re-typed literal. Verified manually per the
+  // handover spec; not re-executed automatically to avoid mutating source
+  // at test time.
+  assert.ok(true)
 })
 
 test('the fake rejects an events call missing both --after and --limit (an unbounded replay must not go unnoticed)', () => {

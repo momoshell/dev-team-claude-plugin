@@ -567,10 +567,14 @@ function findWorkspaceByTitle(t, windowId, taskSlug) {
 }
 
 /**
- * ensureWorkspace({ windowId, taskSlug, cwd, group }) -> { workspaceId, initialSurfaceId }
+ * ensureWorkspace({ windowId, taskSlug, cwd, group, envFile }) ->
+ * { workspaceId, initialSurfaceId, created }
  * `cmux workspace create` does not exist; new-workspace is the real verb.
  * Reuses an existing workspace of the same name in the team window so no
- * duplicate is created across repeated dispatches.
+ * duplicate is created across repeated dispatches. `created` (be-11-05)
+ * lets the caller distinguish a fresh stamp from a carry-forward — it is
+ * true on every path that actually invokes `new-workspace`, false on the
+ * fast reuse path.
  *
  * --group degradation (be-11-02): a `--group <slug>` new-workspace call can
  * fail for reasons unrelated to the workspace object itself (e.g. the group
@@ -583,23 +587,32 @@ function findWorkspaceByTitle(t, windowId, taskSlug) {
  * created it, and only retrying `new-workspace` WITHOUT --group if it did
  * not. A failure with no `group` argument at all still throws as before —
  * no retry, no re-scan.
+ *
+ * envFile (be-11-05, ADR-018): an absolute path or null/undefined. Passed
+ * through VERBATIM as a single `--env-file <path>` argument — NEVER
+ * re-composed KEY=VALUE pairs (conventions.md 2026-08-01: argv is ps-visible
+ * on the local machine). Supplied ONLY on the new-workspace call(s) that
+ * create the task workspace (including the un-grouped retry, which is still
+ * a create) — the fast reuse path never touches it, matching the "supplied
+ * only at creation" contract.
  */
-export function ensureWorkspace({ windowId, taskSlug, cwd, group } = {}) {
+export function ensureWorkspace({ windowId, taskSlug, cwd, group, envFile } = {}) {
   const before = tree({ all: true })
   const existing = findWorkspaceByTitle(before, windowId, taskSlug)
   if (existing) {
     const initialSurfaceId = existing.panes?.[0]?.surfaces?.[0]?.id ?? null
-    return { workspaceId: existing.id, initialSurfaceId }
+    return { workspaceId: existing.id, initialSurfaceId, created: false }
   }
 
   const baseArgs = ['--window', windowId, '--name', taskSlug, '--cwd', cwd]
-  const args = group ? [...baseArgs, '--group', group] : baseArgs
+  const withEnvFile = envFile ? [...baseArgs, '--env-file', envFile] : baseArgs
+  const args = group ? [...withEnvFile, '--group', group] : withEnvFile
   const res = cmux('new-workspace', args)
   if (res.ok) {
     const after = tree({ all: true })
     const workspaceId = recoverNewId(before, after, 'workspace')
     const initialSurfaceId = recoverNewId(before, after, 'surface')
-    return { workspaceId, initialSurfaceId }
+    return { workspaceId, initialSurfaceId, created: true }
   }
 
   if (!group) {
@@ -614,19 +627,19 @@ export function ensureWorkspace({ windowId, taskSlug, cwd, group } = {}) {
     // eslint-disable-next-line no-console
     console.error(`ensureWorkspace: the --group attempt had in fact created the workspace — adopting it (workspace ${adopted.id}), un-grouped retry skipped`)
     const initialSurfaceId = adopted.panes?.[0]?.surfaces?.[0]?.id ?? null
-    return { workspaceId: adopted.id, initialSurfaceId }
+    return { workspaceId: adopted.id, initialSurfaceId, created: true }
   }
 
   // eslint-disable-next-line no-console
   console.error(`ensureWorkspace: --group ${group} was not applied and no workspace was created — degrading: retrying new-workspace without --group`)
-  const retryRes = cmux('new-workspace', baseArgs)
+  const retryRes = cmux('new-workspace', withEnvFile)
   if (!retryRes.ok) {
     throw new Error(`ensureWorkspace: new-workspace failed even without --group: ${retryRes.error?.message}`)
   }
   const afterRetry = tree({ all: true })
   const workspaceId = recoverNewId(freshAfterFailure, afterRetry, 'workspace')
   const initialSurfaceId = recoverNewId(freshAfterFailure, afterRetry, 'surface')
-  return { workspaceId, initialSurfaceId }
+  return { workspaceId, initialSurfaceId, created: true }
 }
 
 export function createPane({ workspaceId } = {}) {

@@ -242,7 +242,7 @@ function classifyFreshCase(record, envelopeOverrides = {}) {
   writeReturn(record, envelope)
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  return classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  return classify({ record, fsState, tree: null, now })
 }
 
 test('L-1 (positive, FIRST): fresh valid envelope with a matching four-tuple -> completed', () => {
@@ -281,7 +281,7 @@ test('L-6: schema_version 2 -> not completed with the schema_version_too_new vio
   writeReturn(record, envelope)
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.notEqual(result.state, 'completed')
   const validation = validateReturn(record, fsState.returnText)
   assert.equal(validation.violations[0].path, '$.schema_version')
@@ -327,8 +327,8 @@ test('L-8: cross-record smear yields exactly { D1: completed, D2: running }', ()
   const now = Date.parse(d1.created_at) + 10000
   const fs1 = collectFsState({ record: d1, paths: {} })
   const fs2 = collectFsState({ record: d2, paths: {} })
-  const r1 = classify({ record: d1, fsState: fs1, tree: null, now, quietState: null, topIdle: null })
-  const r2 = classify({ record: d2, fsState: fs2, tree: null, now, quietState: null, topIdle: null })
+  const r1 = classify({ record: d1, fsState: fs1, tree: null, now })
+  const r2 = classify({ record: d2, fsState: fs2, tree: null, now })
 
   assert.equal(r1.state, 'completed')
   assert.equal(r2.state, 'running')
@@ -344,7 +344,7 @@ test('L-9: mtime exactly === created_at -> NOT completed (fail-closed, strict >)
   writeReturn(record, buildEnvelope(), { mtimeOffsetMs: 0 })
   const fsState = collectFsState({ record, paths: {} })
   assert.equal(isFresh(record, fsState.returnStat), false)
-  const result = classify({ record, fsState, tree: null, now: Date.parse(record.created_at) + 10000, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now: Date.parse(record.created_at) + 10000 })
   assert.notEqual(result.state, 'completed')
 })
 
@@ -353,7 +353,7 @@ test('L-10: mtime one millisecond before created_at -> not completed', () => {
   writeReturn(record, buildEnvelope(), { mtimeOffsetMs: -1 })
   const fsState = collectFsState({ record, paths: {} })
   assert.equal(isFresh(record, fsState.returnStat), false)
-  const result = classify({ record, fsState, tree: null, now: Date.parse(record.created_at) + 10000, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now: Date.parse(record.created_at) + 10000 })
   assert.notEqual(result.state, 'completed')
 })
 
@@ -361,8 +361,8 @@ test('L-11: now < created_at (clock stepped back) with no return file -> no thro
   const record = buildRecord()
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) - 60000
-  assert.doesNotThrow(() => classify({ record, fsState, tree: null, now, quietState: null, topIdle: null }))
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  assert.doesNotThrow(() => classify({ record, fsState, tree: null, now }))
+  const result = classify({ record, fsState, tree: null, now })
   assert.notEqual(result.state, 'completed')
   assert.notEqual(result.state, 'timeout')
 })
@@ -417,8 +417,8 @@ test('L-13: attempt 1 valid+stale return with no attempt-2 file while attempt 2 
   assert.equal(fs2.returnPathKind, 'absent', 'attempt 2 return_path must not exist yet')
 
   const now = Date.parse(attempt1.created_at) + 10000
-  const r1 = classify({ record: attempt1, fsState: fs1, tree: null, now, quietState: null, topIdle: null })
-  const r2 = classify({ record: attempt2, fsState: fs2, tree: null, now, quietState: null, topIdle: null })
+  const r1 = classify({ record: attempt1, fsState: fs1, tree: null, now })
+  const r2 = classify({ record: attempt2, fsState: fs2, tree: null, now })
 
   // attempt1's own evidence is stale relative to ITS created_at offset by
   // -60s in this fixture, but the load-bearing assertion is structural: the
@@ -442,7 +442,7 @@ test('L-14 (defence-in-depth, operator --attempt path): a valid fresh envelope c
   assert.equal(validation.violations[0].keyword, 'dispatch_id_mismatch')
 
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.notEqual(result.state, 'completed')
 })
 
@@ -519,7 +519,7 @@ test('L-20: hostile inputs never throw and never complete, each REASON asserted 
     const now = Date.parse(record.created_at) + 10000
     let result
     assert.doesNotThrow(() => {
-      result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+      result = classify({ record, fsState, tree: null, now })
     }, `classify must not throw for "${c.name}"`)
     assert.notEqual(result.state, 'completed', `"${c.name}" must not classify as completed`)
     assert.equal(result.reason, c.expectedReason, `"${c.name}" must carry the exact named reason`)
@@ -620,7 +620,7 @@ test('L-20 symlink case decided structurally: collectFsState uses lstatSync, not
   assert.equal(fsState.returnText, null)
 
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.equal(result.state, 'running')
 
   // A second layer: even if collectFsState HAD followed the symlink and read
@@ -661,7 +661,7 @@ function classifyWith(record, { returnKind = 'fresh-valid', exit, gate, signals 
   }
   const fsState = collectFsState({ record, paths })
   const now = Date.parse(record.created_at) + 10000
-  return classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  return classify({ record, fsState, tree: null, now })
 }
 
 test('L-21: .exit "0" + fresh valid return -> completed', () => {
@@ -709,6 +709,161 @@ test('L-25: no return file, signals containing a NONCE_PREFIX line and an "outco
   const result = classifyWith(record, { returnKind: 'absent', signals })
   assert.notEqual(result.state, 'completed')
   assert.ok(['attention', 'running'].includes(result.state))
+})
+
+// ---------------------------------------------------------------------------
+// be-11-03 — stall triage PREDICATE, ORDER, and VACUITY tests. attention is
+// STATELESS: turnEndAt != null AND now - Date.parse(turnEndAt) > quietS *
+// 1000, no latch. classify()'s pinned evaluation order (attention evaluates
+// LAST, after crashed) and its completion predicate are untouched.
+// ---------------------------------------------------------------------------
+
+test('PREDICATE: turnEndAt null never arms attention regardless of elapsed time', () => {
+  const record = buildRecord()
+  const fsState = collectFsState({ record, paths: {} })
+  const now = Date.parse(record.created_at) + 1000
+  const result = classify({ record, fsState, tree: null, now, turnEndAt: null, quietS: 45 })
+  assert.notEqual(result.state, 'attention')
+})
+
+test('PREDICATE: at exactly quietS elapsed since turnEndAt, state is still "running" (strict >, not >=)', () => {
+  const record = buildRecord()
+  const fsState = collectFsState({ record, paths: {} })
+  const turnEndAt = record.created_at
+  const now = Date.parse(turnEndAt) + 45 * 1000
+  const result = classify({ record, fsState, tree: null, now, turnEndAt, quietS: 45 })
+  assert.equal(result.state, 'running')
+})
+
+test('PREDICATE: one millisecond past quietS elapsed since turnEndAt arms "attention" with reason quiet_after_turn_end', () => {
+  const record = buildRecord()
+  const fsState = collectFsState({ record, paths: {} })
+  const turnEndAt = record.created_at
+  const now = Date.parse(turnEndAt) + 45 * 1000 + 1
+  const result = classify({ record, fsState, tree: null, now, turnEndAt, quietS: 45 })
+  assert.equal(result.state, 'attention')
+  assert.equal(result.reason, 'quiet_after_turn_end')
+})
+
+test('PREDICATE (no latch): a later turnEndAt observation un-arms attention on the very next call, with no reset logic anywhere', () => {
+  const record = buildRecord()
+  const fsState = collectFsState({ record, paths: {} })
+  const staleQuietStart = record.created_at
+  const now = Date.parse(staleQuietStart) + 100 * 1000
+  const armed = classify({ record, fsState, tree: null, now, turnEndAt: staleQuietStart, quietS: 45 })
+  assert.equal(armed.state, 'attention')
+
+  // A fresh Stop event for the SAME dispatch advances turnEndAt to `now` —
+  // no latch, no persisted "was in attention" flag anywhere in classify().
+  const freshTurnEndAt = new Date(now).toISOString()
+  const disarmed = classify({ record, fsState, tree: null, now, turnEndAt: freshTurnEndAt, quietS: 45 })
+  assert.equal(disarmed.state, 'running')
+})
+
+test('ORDER PRESERVED: a fresh valid return AND an armed, long-expired turnEndAt classifies "completed", never "attention"', () => {
+  const record = buildRecord()
+  const envelope = buildEnvelope()
+  writeReturn(record, envelope)
+  const fsState = collectFsState({ record, paths: {} })
+  const now = Date.parse(record.created_at) + 10000
+  const longExpiredTurnEndAt = new Date(now - 999 * 1000).toISOString()
+  const result = classify({ record, fsState, tree: null, now, turnEndAt: longExpiredTurnEndAt, quietS: 45 })
+  assert.equal(result.state, 'completed')
+})
+
+test('ORDER PRESERVED: a timed-out dispatch with an armed turnEndAt classifies "timeout", never "attention" (attention evaluates AFTER timeout)', () => {
+  const record = buildRecord({ timeout_s: 10 })
+  const fsState = collectFsState({ record, paths: {} })
+  const now = Date.parse(record.created_at) + 20000 // past timeout_s
+  const armedTurnEndAt = new Date(now - 999 * 1000).toISOString()
+  const result = classify({ record, fsState, tree: null, now, turnEndAt: armedTurnEndAt, quietS: 45 })
+  assert.equal(result.state, 'timeout')
+})
+
+// INTERFACE-LEVEL proof only (qa gate: the ORIGINAL version of this test
+// called classify() twice with byte-identical arguments and asserted the
+// two results were deepEqual — trivially true regardless of whether triage
+// data could ever influence classification, since neither call was ever
+// given the frame/signature data through any channel that reaches
+// classify(). It also ran with turnEndAt absent, so attention could never
+// fire either way, making assert.notEqual(state, 'attention') vacuous too.
+// FIXED: this test now only proves classify()'s PARAMETER SURFACE has no
+// slot triage output could occupy (structural, by inspection of the
+// signature below); the MANDATORY, non-vacuous end-to-end proof — running
+// the full await() pipeline twice, once with a screen frame matching every
+// known signature and once with a blank one, asserting attention/
+// resolved/remaining are identical — lives in test/cmux-dispatch.test.mjs
+// as 'VACUITY GUARD (mandatory, end-to-end)'.
+test('VACUITY GUARD (interface-level): classify()\'s parameter surface has no slot for triage/screen data, and a synthetic frame tripping every known signature is confirmed non-trivial', async () => {
+  const { SIGNATURES, detectSignatures } = await import('../scripts/cmux/triage.mjs')
+  const allMatchingFrame = `do you want to proceed?\ndo you trust the files in this folder?\n   >   \n`
+  const sig = detectSignatures(allMatchingFrame)
+  assert.deepEqual(sig.matched.sort(), SIGNATURES.map((s) => s.id).sort(), 'expected the synthetic frame to actually trip every signature (proof the frame fixture itself is not vacuous)')
+
+  // classify()'s ENTIRE parameter surface, read directly off its own
+  // signature — a screen frame, a detected-signature list, or anything
+  // triage.mjs produces has no named slot here to occupy.
+  const classifyParams = classify.toString().match(/classify\(\{\s*([^}]*)\}\)/)[1]
+  for (const forbidden of ['frame', 'screen', 'signature', 'matched', 'triage']) {
+    assert.doesNotMatch(classifyParams.toLowerCase(), new RegExp(forbidden), `classify()'s parameter surface must not name anything triage-shaped: found a match for "${forbidden}"`)
+  }
+})
+
+test('be-11-03: ladder.mjs does not import triage.mjs (structural separation, not a comment)', () => {
+  const source = readFileSync(join(ROOT, 'scripts/cmux/ladder.mjs'), 'utf8')
+  assert.doesNotMatch(source, /triage\.mjs/)
+})
+
+// ---------------------------------------------------------------------------
+// detectSignatures — hostile/edge-case frame inputs. NEVER throws; every
+// input reduces to the closed {lines, last_line_sha256, matched[]} shape.
+// ---------------------------------------------------------------------------
+
+test('detectSignatures: empty string frame reduces to lines:0, an empty-string sha256, and matched:[]', async () => {
+  const { detectSignatures } = await import('../scripts/cmux/triage.mjs')
+  const { createHash } = await import('node:crypto')
+  const result = detectSignatures('')
+  assert.equal(result.lines, 0)
+  assert.equal(result.last_line_sha256, createHash('sha256').update('', 'utf8').digest('hex'))
+  assert.deepEqual(result.matched, [])
+})
+
+test('detectSignatures: a whitespace-only frame is a real single line, not treated as empty', async () => {
+  const { detectSignatures } = await import('../scripts/cmux/triage.mjs')
+  const result = detectSignatures('   \t  ')
+  assert.equal(result.lines, 1)
+  assert.deepEqual(result.matched, [])
+})
+
+test('detectSignatures: an extremely long frame (well beyond any --lines bound) never throws and still reduces correctly', async () => {
+  const { detectSignatures } = await import('../scripts/cmux/triage.mjs')
+  const hugeFrame = `${'x'.repeat(500_000)}\n`.repeat(50) // ~25MB, far past any --lines 40 bound upstream
+  let result
+  assert.doesNotThrow(() => { result = detectSignatures(hugeFrame) })
+  assert.equal(result.lines, 51) // 50 content lines + the trailing empty split segment
+  assert.equal(typeof result.last_line_sha256, 'string')
+  assert.equal(result.last_line_sha256.length, 64)
+})
+
+test('detectSignatures: non-string input (null/undefined/number) reduces to the empty-frame result rather than throwing', async () => {
+  const { detectSignatures } = await import('../scripts/cmux/triage.mjs')
+  for (const hostile of [null, undefined, 12345, {}, []]) {
+    let result
+    assert.doesNotThrow(() => { result = detectSignatures(hostile) }, `must not throw for ${JSON.stringify(hostile)}`)
+    assert.equal(result.lines, 0)
+    assert.deepEqual(result.matched, [])
+  }
+})
+
+test('detectSignatures: an unpaired UTF-16 surrogate (as could result from a truncated multi-byte terminal escape sequence) never throws sha256 hashing', async () => {
+  const { detectSignatures } = await import('../scripts/cmux/triage.mjs')
+  const lonelyHighSurrogate = '\uD83D' // half of an emoji surrogate pair, deliberately unpaired
+  const frame = `some prompt text\n${lonelyHighSurrogate}`
+  let result
+  assert.doesNotThrow(() => { result = detectSignatures(frame) })
+  assert.equal(result.lines, 2)
+  assert.equal(typeof result.last_line_sha256, 'string')
+  assert.equal(result.last_line_sha256.length, 64)
 })
 
 // L-26 — THE INVARIANT, table-driven. The cross-product of return evidence
@@ -764,7 +919,7 @@ test('L-26 per-call form: classify with hostile exitSentinel/gateCounter/signalL
   const legitFsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
 
-  const legitResult = classify({ record, fsState: legitFsState, tree: null, now, quietState: null, topIdle: null })
+  const legitResult = classify({ record, fsState: legitFsState, tree: null, now })
   assert.equal(legitResult.state, 'completed')
 
   const hostileFsState = {
@@ -774,7 +929,7 @@ test('L-26 per-call form: classify with hostile exitSentinel/gateCounter/signalL
     signalLines: ['not json at all', '{"malicious":"payload"}'],
   }
   const hostileTree = { windows: [{ workspaces: [{ id: 'evil', panes: [{ id: 'evil', surfaces: [{ id: 'evil' }] }] }] }] }
-  const hostileResult = classify({ record, fsState: hostileFsState, tree: hostileTree, now, quietState: null, topIdle: null })
+  const hostileResult = classify({ record, fsState: hostileFsState, tree: hostileTree, now })
   assert.equal(hostileResult.state, 'completed')
 })
 
@@ -880,7 +1035,7 @@ test('L-27: a terminal no_return record stays terminal even after a fresh valid 
   writeReturn(record, buildEnvelope()) // appears AFTER termination
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   // classify's first branch is "record.outcome !== null -> terminal" — this
   // is a consequence of the monotone lifecycle (dispatch-record.schema.json:
   // null becomes set, never set becomes null and never set becomes a
@@ -897,7 +1052,7 @@ test('L-28: a terminal ok record stays completed/ok even after its return file i
   writeFileSync(record.return_path, '', 'utf8') // truncated after termination
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   // A terminal record is NEVER re-derived from current evidence.
   assert.equal(result.state, 'terminal')
   assert.equal(result.reason, 'terminal:ok')
@@ -918,7 +1073,7 @@ test('trust M4 (a): a forged well-formed outcome:"ok" record with NO return file
   const record = buildRecord({ outcome: 'ok' }) // forged: no return file was ever written
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.equal(result.state, 'terminal') // never re-opened
   assert.equal(result.reason, 'terminal:ok')
   assert.ok(result.warnings.includes('terminal_outcome_uncorroborated'))
@@ -933,7 +1088,7 @@ test('trust M4 (b) — paired positive: a legitimately-terminated ok record WITH
   writeReturn(record, buildEnvelope())
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.equal(result.state, 'terminal')
   assert.equal(result.reason, 'terminal:ok')
   assert.equal(result.warnings.includes('terminal_outcome_uncorroborated'), false)
@@ -943,7 +1098,7 @@ test('trust M4 (c): a terminal outcome:"timeout" record never attempts corrobora
   const record = buildRecord({ outcome: 'timeout' }) // also no return file
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.equal(result.state, 'terminal')
   assert.equal(result.reason, 'terminal:timeout')
   assert.deepEqual(result.warnings, []) // every non-'ok' outcome is self-inflicted failure, never corroborated
@@ -976,7 +1131,7 @@ test('L-30 end-to-end: real-file -> collectFsState -> classify for one fresh and
   const freshMtime = new Date(Date.parse(freshRecord.created_at) + 5000)
   utimesSync(freshRecord.return_path, freshMtime, freshMtime)
   const freshFsState = collectFsState({ record: freshRecord, paths: {} })
-  const freshResult = classify({ record: freshRecord, fsState: freshFsState, tree: null, now: Date.parse(freshRecord.created_at) + 10000, quietState: null, topIdle: null })
+  const freshResult = classify({ record: freshRecord, fsState: freshFsState, tree: null, now: Date.parse(freshRecord.created_at) + 10000 })
   assert.equal(freshResult.state, 'completed')
 
   const staleRecord = buildRecord()
@@ -984,7 +1139,7 @@ test('L-30 end-to-end: real-file -> collectFsState -> classify for one fresh and
   const staleMtime = new Date(Date.parse(staleRecord.created_at) - 5000)
   utimesSync(staleRecord.return_path, staleMtime, staleMtime)
   const staleFsState = collectFsState({ record: staleRecord, paths: {} })
-  const staleResult = classify({ record: staleRecord, fsState: staleFsState, tree: null, now: Date.parse(staleRecord.created_at) + 10000, quietState: null, topIdle: null })
+  const staleResult = classify({ record: staleRecord, fsState: staleFsState, tree: null, now: Date.parse(staleRecord.created_at) + 10000 })
   assert.notEqual(staleResult.state, 'completed')
 })
 
@@ -993,7 +1148,7 @@ test('L-31: surface identity is the (workspace_id, pane_id, surface_id) TRIPLE �
   // no return file -> not completed regardless of pane presence
   const fsState = collectFsState({ record, paths: {} })
   const now = Date.parse(record.created_at) + 10000
-  const result = classify({ record, fsState, tree: null, now, quietState: null, topIdle: null })
+  const result = classify({ record, fsState, tree: null, now })
   assert.notEqual(result.state, 'completed')
 
   // A tree containing a pane whose pane_id matches but whose workspace_id
@@ -1342,7 +1497,7 @@ test('row 1: fresh return + surface gone = completed', () => {
   const now = Date.parse(record.created_at) + 10000
   const rows = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree: buildTree([]), now })
   assert.equal(rows[0].row, 'completed_surface_gone')
-  assert.equal(rows[0].state, classify({ record, fsState, tree: buildTree([]), now, quietState: null, topIdle: null }).state)
+  assert.equal(rows[0].state, classify({ record, fsState, tree: buildTree([]), now }).state)
 })
 
 test('row 2: fresh return + surface alive = completed, close/focus, do not re-arm', () => {
@@ -1364,6 +1519,51 @@ test('row 3: surface alive + no return = running, re-arm', () => {
   const rows = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree, now })
   assert.equal(rows[0].row, 'running_surface_alive')
   assert.deepEqual(rows[0].actions, ['re_arm'])
+})
+
+test('be-11-03: reconcile threads an optional turnEndAt map (dispatch_id-keyed) into classify(), producing state "attention" for an armed dispatch; the map defaults to {} for every existing caller (attention never arms unless supplied)', () => {
+  const record = buildRecord({ surface: { workspace_id: WORKSPACE_ID, pane_id: PANE_ID, surface_id: SURFACE_ID } })
+  const fsState = collectFsState({ record, paths: {} })
+  const now = Date.parse(record.created_at) + 100000
+  const tree = buildTree([{ workspace_id: WORKSPACE_ID, pane_id: PANE_ID, surface_id: SURFACE_ID }])
+
+  const withoutTurnEndAt = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree, now })
+  assert.equal(withoutTurnEndAt[0].state, 'running')
+
+  const armedTurnEndAt = { [record.dispatch_id]: new Date(now - 999 * 1000).toISOString() }
+  const withTurnEndAt = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree, now, turnEndAt: armedTurnEndAt })
+  assert.equal(withTurnEndAt[0].state, 'attention')
+})
+
+// be-11-03: reconcile has TWO internal classify() call sites — the
+// tree===null (socket_unreachable) branch and the main tree-present branch —
+// each with its OWN `turnEndAt[record.dispatch_id] ?? null` expression. A
+// future edit to just one of the two sites (e.g. threading a differently-keyed
+// map, or forgetting the `?? null` fallback) would silently desync the state
+// a caller sees depending on whether cmux is reachable at that exact moment.
+// This asserts BOTH sites independently derive the identical 'attention'
+// state from the identical turnEndAt map for the identical record — proving
+// neither call site lags behind the other.
+test('be-11-03: reconcile threads turnEndAt identically through BOTH internal classify() call sites (tree===null vs tree-present)', () => {
+  const record = buildRecord({ surface: { workspace_id: WORKSPACE_ID, pane_id: PANE_ID, surface_id: SURFACE_ID } })
+  const fsState = collectFsState({ record, paths: {} })
+  const now = Date.parse(record.created_at) + 100000
+  const armedTurnEndAt = { [record.dispatch_id]: new Date(now - 999 * 1000).toISOString() }
+
+  const tree = buildTree([{ workspace_id: WORKSPACE_ID, pane_id: PANE_ID, surface_id: SURFACE_ID }])
+  const withTreeRows = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree, now, turnEndAt: armedTurnEndAt })
+  const withoutTreeRows = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree: null, now, turnEndAt: armedTurnEndAt })
+
+  assert.equal(withTreeRows[0].state, 'attention', 'tree-present call site must arm attention')
+  assert.equal(withoutTreeRows[0].state, 'attention', 'tree===null call site must ALSO arm attention from the same turnEndAt map')
+  assert.equal(withoutTreeRows[0].row, 'socket_unreachable')
+
+  // And the disarmed case: a fresh turnEndAt un-arms identically on both sites.
+  const freshTurnEndAt = { [record.dispatch_id]: new Date(now).toISOString() }
+  const withTreeDisarmed = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree, now, turnEndAt: freshTurnEndAt })
+  const withoutTreeDisarmed = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree: null, now, turnEndAt: freshTurnEndAt })
+  assert.equal(withTreeDisarmed[0].state, 'running')
+  assert.equal(withoutTreeDisarmed[0].state, 'running')
 })
 
 test('row 4: surface gone + exit sentinel = crashed, offer re-dispatch, dirty-worktree warning', () => {
@@ -1442,7 +1642,7 @@ test('row 9: orchestrator /clear\'ed = state rebuilt from disk alone, no in-memo
   const now = Date.parse(reloadedRecord.created_at) + 10000
   const tree = buildTree([{ workspace_id: WORKSPACE_ID, pane_id: PANE_ID, surface_id: SURFACE_ID }])
   const rows = reconcile({ records: [reloadedRecord], fsState: { [reloadedRecord.dispatch_id]: fsState }, tree, now })
-  const directResult = classify({ record: reloadedRecord, fsState, tree, now, quietState: null, topIdle: null })
+  const directResult = classify({ record: reloadedRecord, fsState, tree, now })
   assert.equal(rows[0].state, directResult.state)
   assert.equal(rows[0].row, 'completed_surface_alive')
 })
@@ -1507,7 +1707,7 @@ test('lifecycle S13 fix: a timed-out dispatch with a live surface reconciles to 
   const now = Date.parse(record.created_at) + 120000 // 120s > 60s timeout_s
   const tree = buildTree([{ workspace_id: WORKSPACE_ID, pane_id: PANE_ID, surface_id: SURFACE_ID }])
 
-  const directResult = classify({ record, fsState, tree, now, quietState: null, topIdle: null })
+  const directResult = classify({ record, fsState, tree, now })
   assert.equal(directResult.state, 'timeout')
 
   const rows = reconcile({ records: [record], fsState: { [record.dispatch_id]: fsState }, tree, now })

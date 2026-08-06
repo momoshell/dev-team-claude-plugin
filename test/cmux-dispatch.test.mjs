@@ -61,6 +61,7 @@ function freshCmuxEnv(prefix) {
   delete process.env.FAKE_CMUX_MISSING_METHODS
   delete process.env.FAKE_CMUX_NO_CALLER
   delete process.env.FAKE_CMUX_EVENTS
+  delete process.env.FAKE_CMUX_EVENTS_HANG
   delete process.env.FAKE_CMUX_TOP
   delete process.env.FAKE_CMUX_EXIT_CODE
   return { dir, logPath, statePath }
@@ -1007,6 +1008,559 @@ test('INVOCATION BOUND: a chunked-join across repeated cap-reached calls invokes
   assert.ok(totalInvocations <= bound, `expected <= ${bound} invocations, got ${totalInvocations}`)
 })
 
+// ---------------------------------------------------------------------------
+// be-11-03 — automated stall triage. Stateless, no persisted sidecar, no CPU
+// polling: turnEndAt is re-derived fresh on every await()/status() call from
+// a single bounded events read, attributed to a dispatch by an EXACT
+// surface_id match against agent.hook.Stop events.
+// ---------------------------------------------------------------------------
+
+function writeTurnEndEvent(eventsPath, { surfaceId, occurredAt, seq = 1, name = 'agent.hook.Stop' }) {
+  writeFileSync(eventsPath, `${JSON.stringify({ seq, name, surface_id: surfaceId, occurred_at: occurredAt })}\n`)
+}
+
+// QA fix (#3, all four reviewers): the ORIGINAL INVOCATION BOUND test above
+// never arms attention, so it is structurally blind to readScreen()'s own
+// cost (TWO cmux calls per fire: requireTargetPresent's own tree() call,
+// plus the read-screen call itself — read-screen fires once per await()
+// INVOCATION in which the dispatch transitions into attention, since
+// previousAttentionIds resets at the top of every awaitCmd() call and a
+// stale-enough turnEndAt re-triggers a "transition" on each fresh call's
+// own first tick). This companion test arms attention for the WHOLE
+// chunked join and documents the AMENDED, honest bound: the original bound
+// PLUS 2 cmux calls per chunk (one tree() + one read-screen, once per
+// invocation) — never silently exceeded with a green suite again.
+test('INVOCATION BOUND UNDER ATTENTION (amended, #3): a chunked join where the dispatch stays in attention for every chunk costs the original bound PLUS exactly 2 calls (tree + read-screen) per chunk', () => {
+  const { dir, env, ctx } = setUpWorkspace('await-bound-attention')
+  const specPath = makeSpecFile(ctx, 'be-1a')
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchInvocationsSoFar = readLog(env.logPath).length
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchRes.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  const capS = 1
+  let now = Date.now()
+  const chunks = 3
+  for (let i = 0; i < chunks; i += 1) {
+    const res = awaitCmd({ all: [dispatchRes.json.dispatch_id], 'max-block-s': String(capS) }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+    })
+    assert.equal(res.json.attention.length, 1, `expected the dispatch to be in attention on chunk ${i}`)
+  }
+  delete process.env.FAKE_CMUX_EVENTS
+
+  const totalInvocations = readLog(env.logPath).length
+  const elapsedS = capS * chunks
+  const baselineBound = dispatchInvocationsSoFar + Math.ceil(elapsedS / capS) + 2 + chunks
+  const READ_SCREEN_CALLS_PER_ATTENTION_TRANSITION = 2 // tree() + read-screen
+  const amendedBound = baselineBound + READ_SCREEN_CALLS_PER_ATTENTION_TRANSITION * chunks
+  assert.ok(totalInvocations <= amendedBound, `expected <= ${amendedBound} invocations (baseline ${baselineBound} + ${READ_SCREEN_CALLS_PER_ATTENTION_TRANSITION} per chunk for read-screen), got ${totalInvocations}`)
+
+  const readScreenCalls = readLog(env.logPath).filter((e) => e.argv[0] === 'read-screen')
+  assert.equal(readScreenCalls.length, chunks, 'expected exactly one read-screen fire per await() invocation while the dispatch stays in attention')
+})
+
+test('ATTRIBUTION: an agent.hook.Stop event carrying A\'s surface_id arms A\'s turnEndAt (attention), leaving concurrent non-terminal B unarmed', () => {
+  const { dir, ctx } = setUpWorkspace('attribution')
+  const specA = makeSpecFile(ctx, 'be-3a')
+  const specB = makeSpecFile(ctx, 'be-3b')
+  const dispatchA = dispatchCmd({ slice: 'be-3a', role: 'coder', spec: specA }, ctx)
+  const dispatchB = dispatchCmd({ slice: 'be-3b', role: 'coder', spec: specB }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString() // well past the 45s default quietS
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id, dispatchB.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.deepEqual(res.json.attention.map((a) => a.dispatch_id), [dispatchA.json.dispatch_id], 'expected ONLY A to be armed')
+  assert.equal(res.json.attention[0].reason, 'quiet_after_turn_end')
+  assert.equal(res.json.attention[0].since, staleOccurredAt)
+  assert.deepEqual([...res.json.remaining].sort(), [dispatchA.json.dispatch_id, dispatchB.json.dispatch_id].sort(), 'an attention dispatch stays in remaining and is never removed from the join')
+})
+
+test('an agent.hook.Stop event carrying a surface_id no record holds (e.g. the orchestrator\'s own pane) arms nothing', () => {
+  const { dir, ctx, preflightRes } = setUpWorkspace('unattributed-surface')
+  const specA = makeSpecFile(ctx, 'be-3c')
+  const dispatchA = dispatchCmd({ slice: 'be-3c', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  // The orchestrator's own surface_id (from preflight's own identify call) —
+  // not bound to any dispatch record.
+  writeTurnEndEvent(eventsPath, { surfaceId: preflightRes.json.orchestrator.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.deepEqual(res.json.attention, [])
+})
+
+test('OUT-OF-ORDER EVENTS: multiple Stop events for the same surface_id, written to the events buffer NOT in chronological order, still fold to the true max(occurred_at) — not "last line wins" or "first line wins"', () => {
+  const { dir, ctx } = setUpWorkspace('out-of-order-events')
+  const specA = makeSpecFile(ctx, 'be-3m')
+  const dispatchA = dispatchCmd({ slice: 'be-3m', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const nowMs = Date.now()
+  // Three events for A's surface, deliberately out of chronological order in
+  // the file: middle timestamp first, then the OLDEST, then the TRUE MAX
+  // last-but-one, then an even older one last — the true max sits in the
+  // MIDDLE of the file, so neither "first wins" nor "last wins" would
+  // accidentally produce the right answer.
+  const trueMaxOccurredAt = new Date(nowMs - 50_000).toISOString() // most recent -> least stale
+  const middleOccurredAt = new Date(nowMs - 80_000).toISOString()
+  const oldestOccurredAt = new Date(nowMs - 200_000).toISOString()
+  const lines = [
+    { seq: 1, name: 'agent.hook.Stop', surface_id: dispatchA.json.surface_id, occurred_at: middleOccurredAt },
+    { seq: 2, name: 'agent.hook.Stop', surface_id: dispatchA.json.surface_id, occurred_at: oldestOccurredAt },
+    { seq: 3, name: 'agent.hook.Stop', surface_id: dispatchA.json.surface_id, occurred_at: trueMaxOccurredAt },
+    { seq: 4, name: 'agent.hook.Stop', surface_id: dispatchA.json.surface_id, occurred_at: middleOccurredAt },
+  ]
+  writeFileSync(eventsPath, lines.map((l) => JSON.stringify(l)).join('\n'))
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.equal(res.json.attention.length, 1)
+  assert.equal(res.json.attention[0].since, trueMaxOccurredAt, 'turnEndAt must be the true chronological max(occurred_at), independent of file order')
+})
+
+test('ZERO EVENTS: a brand-new dispatch with an events buffer that reads back as literally empty never arms attention, and turnEndAt is never misread as some other sentinel', () => {
+  const { dir, ctx } = setUpWorkspace('zero-events')
+  const specA = makeSpecFile(ctx, 'be-3n')
+  const dispatchA = dispatchCmd({ slice: 'be-3n', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  writeFileSync(eventsPath, '') // literally zero events, not merely absent
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.deepEqual(res.json.attention, [], 'zero events read must never arm attention for a dispatch that has never had a Stop event')
+})
+
+test('THREE-WAY COLLISION: three non-terminal records constructed to share ONE surface_id arm NONE of them and log exactly one surface_id_collision line (dedup generalizes past pairs)', () => {
+  const { dir, ctx } = setUpWorkspace('surface-collision-triple')
+  const specA = makeSpecFile(ctx, 'be-3p')
+  const dispatchA = dispatchCmd({ slice: 'be-3p', role: 'coder', spec: specA }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-3p.1.json'))
+
+  function handConstructSharingSurface(sliceId) {
+    const specPath = makeSpecFile(ctx, sliceId)
+    const dispatchId = newDispatchId()
+    const worktree = ensureWorktree({
+      roots: ctx.roots, repoSlug: ctx.repoSlug, taskSlug: ctx.taskSlug, sliceId,
+      primaryCheckout: ctx.primaryCheckout, dispatchId, worktreesIndexPath: ctx.paths.worktreesIndexPath,
+    })
+    const snapshot = snapshotWorkerPlugin({ pluginRoot: ctx.pluginRoot, snapshotDir: ctx.paths.snapshotDir, roles: ctx.roster.roles, profiles: ctx.roster.profiles })
+    const newRecord = buildRecord({
+      roots: ctx.roots, paths: ctx.paths, roster: ctx.roster, resolved: ctx.roster.roles.coder, pluginRoot: ctx.pluginRoot,
+      taskId: ctx.taskSlug, taskSlug: ctx.taskSlug, repoSlug: ctx.repoSlug, primaryCheckout: ctx.primaryCheckout, snapshot,
+      config: { createdByDispatcher: worktree ? worktree.created_by_dispatcher : undefined, sourceSliceId: worktree ? worktree.source_slice_id : undefined },
+      now: Date.now(), dispatchId, attnUpstream: null,
+    }, { role: 'coder', sliceId, attempt: 1, spec: JSON.parse(readFileSync(specPath, 'utf8')) })
+    const recordPath = join(ctx.paths.dispatchDir, `${sliceId}.1.json`)
+    writeRecord(newRecord, recordPath)
+    bindRecord(recordPath, { workspace_id: record.surface.workspace_id, pane_id: record.surface.pane_id, surface_id: record.surface.surface_id })
+    return dispatchId
+  }
+  const dispatchIdB = handConstructSharingSurface('be-3q')
+  const dispatchIdC = handConstructSharingSurface('be-3r')
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: record.surface.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  let res
+  const stderr = captureStderr(() => {
+    res = awaitCmd({ all: [dispatchA.json.dispatch_id, dispatchIdB, dispatchIdC], 'max-block-s': '1' }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+    })
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.deepEqual(res.json.attention, [], 'none of the three colliding dispatches should arm')
+  const collisionLines = stderr.split('\n').filter((l) => l.includes('surface_id_collision'))
+  assert.equal(collisionLines.length, 1, 'expected exactly one surface_id_collision log line even with three colliding records')
+})
+
+test('COLLISION: two non-terminal records constructed to share a surface_id arm NEITHER and log exactly one surface_id_collision line', () => {
+  const { dir, ctx } = setUpWorkspace('surface-collision')
+  const specA = makeSpecFile(ctx, 'be-3d')
+  const dispatchA = dispatchCmd({ slice: 'be-3d', role: 'coder', spec: specA }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-3d.1.json'))
+
+  // Hand-construct a SECOND non-terminal record sharing A's surface_id — the
+  // collision is engineered directly (never a live cmux race), matching
+  // findDocTabSurface's own ambiguity-testing style elsewhere in this file.
+  const specB = makeSpecFile(ctx, 'be-3e')
+  const dispatchIdB = newDispatchId()
+  const worktreeB = ensureWorktree({
+    roots: ctx.roots, repoSlug: ctx.repoSlug, taskSlug: ctx.taskSlug, sliceId: 'be-3e',
+    primaryCheckout: ctx.primaryCheckout, dispatchId: dispatchIdB, worktreesIndexPath: ctx.paths.worktreesIndexPath,
+  })
+  const snapshotB = snapshotWorkerPlugin({ pluginRoot: ctx.pluginRoot, snapshotDir: ctx.paths.snapshotDir, roles: ctx.roster.roles, profiles: ctx.roster.profiles })
+  const recordB = buildRecord({
+    roots: ctx.roots, paths: ctx.paths, roster: ctx.roster, resolved: ctx.roster.roles.coder, pluginRoot: ctx.pluginRoot,
+    taskId: ctx.taskSlug, taskSlug: ctx.taskSlug, repoSlug: ctx.repoSlug, primaryCheckout: ctx.primaryCheckout, snapshot: snapshotB,
+    config: { createdByDispatcher: worktreeB ? worktreeB.created_by_dispatcher : undefined, sourceSliceId: worktreeB ? worktreeB.source_slice_id : undefined },
+    now: Date.now(), dispatchId: dispatchIdB, attnUpstream: null,
+  }, { role: 'coder', sliceId: 'be-3e', attempt: 1, spec: JSON.parse(readFileSync(specB, 'utf8')) })
+  const recordPathB = join(ctx.paths.dispatchDir, 'be-3e.1.json')
+  writeRecord(recordB, recordPathB)
+  bindRecord(recordPathB, { workspace_id: record.surface.workspace_id, pane_id: record.surface.pane_id, surface_id: record.surface.surface_id })
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: record.surface.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  let res
+  const stderr = captureStderr(() => {
+    res = awaitCmd({ all: [dispatchA.json.dispatch_id, dispatchIdB], 'max-block-s': '1' }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+    })
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.deepEqual(res.json.attention, [], 'neither colliding dispatch should arm')
+  const collisionLines = stderr.split('\n').filter((l) => l.includes('surface_id_collision'))
+  assert.equal(collisionLines.length, 1, 'expected exactly one surface_id_collision log line')
+})
+
+test('NAME FILTER: an events buffer containing only notification.requested lines (which also carry ids) arms nothing', () => {
+  const { dir, ctx } = setUpWorkspace('name-filter')
+  const specA = makeSpecFile(ctx, 'be-3f')
+  const dispatchA = dispatchCmd({ slice: 'be-3f', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt, name: 'notification.requested' })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.deepEqual(res.json.attention, [], 'a non-Stop event carrying an id must never arm attention — the client-side name filter runs regardless of --name')
+})
+
+test('SURFACING (resolved path): an armed-but-not-yet-quiet-enough dispatch that later resolves "completed" carries an empty attention array, never appears in attention, and is present in resolved/absent from remaining', () => {
+  const { dir, ctx } = setUpWorkspace('surfacing-resolved')
+  const specA = makeSpecFile(ctx, 'be-3g')
+  const dispatchA = dispatchCmd({ slice: 'be-3g', role: 'coder', spec: specA }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-3g.1.json'))
+  writeValidReturn(record)
+
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id] }, ctx, { sleep: NO_SLEEP })
+  assert.equal(res.json.resolved.length, 1)
+  assert.equal(res.json.resolved[0].dispatch_id, dispatchA.json.dispatch_id)
+  assert.deepEqual(res.json.remaining, [])
+  assert.deepEqual(res.json.attention, [])
+})
+
+test('DEGRADATION: when the events call fails, attention is disabled for that call with one loud line, a --name-filtered failure is retried ONCE without --name, and every other classification is unaffected', () => {
+  const { dir, ctx } = setUpWorkspace('events-degradation')
+  const specA = makeSpecFile(ctx, 'be-3h')
+  const dispatchA = dispatchCmd({ slice: 'be-3h', role: 'coder', spec: specA }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-3h.1.json'))
+  writeValidReturn(record)
+
+  process.env.FAKE_CMUX_FAIL = 'events'
+  let stderr
+  let res
+  stderr = captureStderr(() => {
+    res = awaitCmd({ all: [dispatchA.json.dispatch_id] }, ctx, { sleep: NO_SLEEP })
+  })
+  delete process.env.FAKE_CMUX_FAIL
+
+  // Every OTHER classification is unaffected — the dispatch still resolves
+  // completed even though events (and therefore attention) is unavailable.
+  assert.equal(res.json.resolved.length, 1)
+  assert.equal(res.json.resolved[0].state, 'completed')
+  assert.match(stderr, /events channel .* unavailable/)
+
+  const env = process.env.FAKE_CMUX_LOG
+  const log = readLog(env)
+  const eventsCalls = log.filter((e) => e.argv[0] === 'events')
+  // Retried ONCE without --name: two total attempts, the first carrying
+  // --name, the second not.
+  assert.equal(eventsCalls.length, 2, 'expected exactly two events attempts: one with --name, one retry without')
+  assert.ok(eventsCalls[0].argv.includes('--name'))
+  assert.equal(eventsCalls[1].argv.includes('--name'), false)
+})
+
+test('`status` reports the same attention information from its own independent filtered events read', () => {
+  const { dir, ctx } = setUpWorkspace('status-attention')
+  const specA = makeSpecFile(ctx, 'be-3i')
+  const dispatchA = dispatchCmd({ slice: 'be-3i', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  const res = statusCmd({}, ctx)
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.deepEqual(res.json.attention.map((a) => a.dispatch_id), [dispatchA.json.dispatch_id])
+  assert.equal(res.json.attention[0].reason, 'quiet_after_turn_end')
+})
+
+test('READ-SCREEN TRANSITION: fires exactly once across two consecutive internal ticks where the same dispatch stays in attention (once per raise, not once per tick)', () => {
+  const { dir, ctx } = setUpWorkspace('read-screen-transition')
+  const specA = makeSpecFile(ctx, 'be-3j')
+  const dispatchA = dispatchCmd({ slice: 'be-3j', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  // max-block-s '2' with a 400ms tick forces several internal ticks before
+  // the cap returns — the dispatch is in attention from the very first tick
+  // (turnEndAt is already 100s stale) and stays there for every subsequent
+  // tick of THIS SAME await() invocation.
+  let now = Date.now()
+  const res = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '2' }, ctx, {
+    now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.equal(res.json.status, 'still-running')
+  assert.equal(res.json.attention.length, 1)
+
+  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen')
+  assert.equal(readScreenCalls.length, 1, 'expected exactly one read-screen invocation across every internal tick of this single await() call')
+})
+
+// be-11-03: turnEndAt (and therefore previousAttentionIds) is derived FRESH
+// inside every awaitCmd() invocation — there is no cross-invocation state
+// (the module comment above readTurnEndEvents is explicit about this: "once
+// per raise" is scoped to a single await() call). This test locks in that
+// documented scoping across 3 SEPARATE awaitCmd() calls (not internal ticks
+// of one call): a dispatch that stays armed in attention the whole time gets
+// a read-screen invocation on EVERY one of the three calls, not just the
+// first — proving the "once per transition" guarantee is per-invocation, not
+// per-dispatch-lifetime, and is not accidentally suppressed or amplified
+// across repeated orchestrator polling.
+test('READ-SCREEN ACROSS REPEATED INVOCATIONS: a dispatch that stays in attention across 3 separate awaitCmd() calls gets exactly one read-screen call PER invocation (per-call scoping, not a lifetime latch)', () => {
+  const { dir, ctx } = setUpWorkspace('read-screen-repeated-invocations')
+  const specA = makeSpecFile(ctx, 'be-3s')
+  const dispatchA = dispatchCmd({ slice: 'be-3s', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString() // already well past quietS on invocation 1
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  const readScreenCountsPerCall = []
+  for (let i = 0; i < 3; i += 1) {
+    const before = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen').length
+    let now = Date.now()
+    const res = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+    })
+    assert.equal(res.json.status, 'still-running', `invocation ${i} must still be running (never resolving, never un-arming)`)
+    assert.equal(res.json.attention.length, 1, `invocation ${i} must still report the dispatch as in attention`)
+    const after = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen').length
+    readScreenCountsPerCall.push(after - before)
+  }
+  delete process.env.FAKE_CMUX_EVENTS
+
+  assert.deepEqual(readScreenCountsPerCall, [1, 1, 1], 'expected exactly one read-screen call on EACH of the three separate awaitCmd() invocations — the transition-fire scoping is per-call, per the module\'s own documented design, not a cross-invocation latch')
+})
+
+test('RAW FRAME NEVER REACHES JSON OR DISK: the produced await JSON payload and status.json never contain frame text; only the closed-enum {lines, last_line_sha256, matched[]} shape (drawn from triage.mjs\'s SIGNATURES enum) is ever surfaced, and only via a log line', async () => {
+  const { dir, ctx } = setUpWorkspace('raw-frame-never-json')
+  const specA = makeSpecFile(ctx, 'be-3k')
+  const dispatchA = dispatchCmd({ slice: 'be-3k', role: 'coder', spec: specA }, ctx)
+
+  const screenPath = join(dir, 'screen.txt')
+  const distinctiveFrameText = 'DISTINCTIVE_SCREEN_MARKER_zzq9'
+  writeFileSync(screenPath, `${distinctiveFrameText}\n`)
+  process.env.FAKE_CMUX_SCREEN = screenPath
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  let now = Date.now()
+  let stderr
+  const res = { current: null }
+  stderr = captureStderr(() => {
+    res.current = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 400,
+    })
+  })
+  delete process.env.FAKE_CMUX_EVENTS
+  delete process.env.FAKE_CMUX_SCREEN
+
+  const jsonText = JSON.stringify(res.current.json)
+  assert.doesNotMatch(jsonText, new RegExp(distinctiveFrameText), 'the raw frame must never reach the JSON payload')
+
+  // The real read-screen call happened (proving the assertion above is not
+  // vacuous) and the reduced tuple reached a log line, never the frame text.
+  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen')
+  assert.equal(readScreenCalls.length, 1)
+  assert.match(stderr, /screen signature scan/)
+  assert.doesNotMatch(stderr, new RegExp(distinctiveFrameText), 'the raw frame must never reach a log line either')
+
+  const statusJsonPath = ctx.paths.statusPath
+  if (existsSync(statusJsonPath)) {
+    assert.doesNotMatch(readFileSync(statusJsonPath, 'utf8'), new RegExp(distinctiveFrameText))
+  }
+})
+
+test('VACUITY GUARD (mandatory, end-to-end): running the full await() pipeline with a screen frame matching every known signature vs. a blank frame produces IDENTICAL status/attention/remaining — proves the diagnostic plane can never become a decision input', async () => {
+  // qa gate fix: the ORIGINAL version of this test lived in
+  // cmux-ladder.test.mjs and called classify() twice with byte-identical
+  // arguments — trivially true regardless of whether triage data could
+  // ever influence classification, since neither call was ever given the
+  // frame/signature data through any channel reaching classify(). THIS is
+  // the real, non-vacuous proof: the SAME dispatch, across two SEPARATE
+  // real awaitCmd() invocations (armed turnEndAt both times, so attention
+  // genuinely COULD differ), with the screen frame swapped between an
+  // all-signatures-matching frame and a blank one in between.
+  const { dir, ctx } = setUpWorkspace('vacuity-guard-e2e')
+  const specA = makeSpecFile(ctx, 'be-3m')
+  const dispatchA = dispatchCmd({ slice: 'be-3m', role: 'coder', spec: specA }, ctx)
+
+  const eventsPath = join(dir, 'events.jsonl')
+  const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
+  writeTurnEndEvent(eventsPath, { surfaceId: dispatchA.json.surface_id, occurredAt: staleOccurredAt })
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+
+  const allMatchScreenPath = join(dir, 'screen-all-match.txt')
+  writeFileSync(allMatchScreenPath, 'do you want to proceed?\ndo you trust the files in this folder?\n   >   \n')
+  const blankScreenPath = join(dir, 'screen-blank.txt')
+  writeFileSync(blankScreenPath, 'nothing interesting on this frame at all\n')
+
+  process.env.FAKE_CMUX_SCREEN = allMatchScreenPath
+  let nowAll = Date.now()
+  const resAllMatch = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => nowAll, sleep: (ms) => { nowAll += ms }, tickMs: 400,
+  })
+
+  process.env.FAKE_CMUX_SCREEN = blankScreenPath
+  let nowBlank = Date.now()
+  const resBlank = awaitCmd({ all: [dispatchA.json.dispatch_id], 'max-block-s': '1' }, ctx, {
+    now: () => nowBlank, sleep: (ms) => { nowBlank += ms }, tickMs: 400,
+  })
+
+  delete process.env.FAKE_CMUX_EVENTS
+  delete process.env.FAKE_CMUX_SCREEN
+
+  // Prove this isn't vacuous: read-screen genuinely fired both times (the
+  // diagnostic plane DID see two different frames) and the two frames
+  // really do differ in what they'd match.
+  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen')
+  assert.equal(readScreenCalls.length, 2, 'expected read-screen to fire once per await() invocation (fresh transition each call)')
+
+  // The actual proof: status/attention/remaining are byte-identical
+  // regardless of which frame was on screen.
+  assert.equal(resAllMatch.json.status, 'still-running')
+  assert.equal(resBlank.json.status, 'still-running')
+  assert.deepEqual(resAllMatch.json.remaining, resBlank.json.remaining)
+  assert.deepEqual(resAllMatch.json.attention, resBlank.json.attention)
+})
+
+test('DELETION PROOF: no trace of the superseded CPU-polling design remains anywhere in scripts/ or test/', () => {
+  // The forbidden terms are assembled at runtime (never a literal grep
+  // pattern string embedded in this file) so this very assertion's own
+  // source text can never self-match; THIS_FILE is excluded from the scan
+  // for the same reason.
+  const forbidden = ['top' + 'Idle', 'quiet' + 'State', 'TOP_IDLE_CPU' + '_MAX', 'isSurface' + 'Idle', 'attention' + '.json'].join('\\|')
+  const grepRes = spawnSync('grep', ['-rn', '--exclude', 'cmux-dispatch.test.mjs', forbidden, join(ROOT, 'scripts'), join(ROOT, 'test')], { encoding: 'utf8' })
+  // grep exits 1 when there are no matches — that IS the pass condition.
+  assert.equal(grepRes.status, 1, `expected zero matches; grep exited ${grepRes.status} with stdout:\n${grepRes.stdout}`)
+  assert.equal(grepRes.stdout.trim(), '')
+})
+
+test('QA fix #1 (live-verified): readEvents() treats a timeout-triggered kill as a normal partial read, never "unavailable", recovering every complete line the child wrote before the kill — models cmux\'s REAL "under-satisfied --limit blocks streaming live events" behavior', async () => {
+  // This exercises the REAL node:child_process spawnSync timeout-kill path
+  // against test/fixtures/fake-cmux.mjs's FAKE_CMUX_EVENTS_HANG hook (no
+  // mocking of spawnSync itself) — the fixture prints whatever
+  // FAKE_CMUX_EVENTS holds (modeling "already-retained partial backlog")
+  // and then hangs indefinitely, exactly like a real cmux daemon blocking
+  // to satisfy an under-retained --limit/--name count. Only the caller's
+  // own spawnSync timeout can ever terminate it.
+  const { readEvents } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
+  const { dir } = setUpWorkspace('readevents-partial-capture')
+
+  const eventsPath = join(dir, 'partial-backlog.jsonl')
+  const partialEvents = [
+    { seq: 1, name: 'agent.hook.Stop', surface_id: '11111111-1111-1111-1111-111111111111', occurred_at: '2026-08-05T00:00:00.000Z' },
+    { seq: 2, name: 'agent.hook.Stop', surface_id: '22222222-2222-2222-2222-222222222222', occurred_at: '2026-08-05T00:00:01.000Z' },
+    { seq: 3, name: 'agent.hook.Stop', surface_id: '33333333-3333-3333-3333-333333333333', occurred_at: '2026-08-05T00:00:02.000Z' },
+  ]
+  writeFileSync(eventsPath, partialEvents.map((e) => JSON.stringify(e)).join('\n') + '\n')
+  process.env.FAKE_CMUX_EVENTS = eventsPath
+  process.env.FAKE_CMUX_EVENTS_HANG = '1'
+
+  const startMs = Date.now()
+  // A --limit far exceeding what's retained (per the modeled scenario) —
+  // the fixture hangs after printing the retained partial backlog, so this
+  // NEVER exits on its own; only timeoutMs bounds it.
+  const result = readEvents({ limit: 5000, timeoutMs: 1000 })
+  const elapsedMs = Date.now() - startMs
+
+  delete process.env.FAKE_CMUX_EVENTS
+  delete process.env.FAKE_CMUX_EVENTS_HANG
+
+  assert.equal(result.unavailable, undefined, 'a timeout-triggered kill with real partial data must NEVER be reported as unavailable')
+  assert.equal(result.events.length, 3, 'expected all three complete lines written before the kill to be recovered')
+  assert.deepEqual(result.events.map((e) => e.seq), [1, 2, 3])
+  assert.ok(elapsedMs >= 900 && elapsedMs < 5000, `expected the read to be bounded by timeoutMs (~1000ms), took ${elapsedMs}ms`)
+})
+
+test('QA fix #1 companion: a timeout-triggered kill with ZERO output (a genuinely idle window) is an empty-but-available read, never "unavailable"', async () => {
+  const { readEvents } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
+  const { dir } = setUpWorkspace('readevents-empty-timeout')
+
+  // No FAKE_CMUX_EVENTS set — the fixture prints nothing before hanging.
+  process.env.FAKE_CMUX_EVENTS_HANG = '1'
+  const result = readEvents({ limit: 5000, timeoutMs: 500 })
+  delete process.env.FAKE_CMUX_EVENTS_HANG
+
+  assert.equal(result.unavailable, undefined)
+  assert.deepEqual(result.events, [])
+})
+
 test('L-29 NO DOUBLE TERMINAL TRANSITION: a fresh valid return staged alongside an .exit file resolves once via await, and a second terminateRecord attempt throws without changing the record mtime', () => {
   const { dir, ctx } = setUpWorkspace('await-l29')
   const specPath = makeSpecFile(ctx)
@@ -1270,7 +1824,7 @@ test('IDEMPOTENCY: awaitCmd THEN closeCmd on a resolved judgment-role dispatch p
   assert.equal(reorders.length, 2, 'expected exactly two reorder-surface --before <terminal>: one from the awaitCmd mount, one from closeCmd\'s presentReturn')
 })
 
-test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -> reorder-surface --before <terminal>; move-surface is skipped since the new surface already lands in the target pane), the render path content equals the envelope body once resolved, and close emits a further reorder-surface --before <terminal> with no close-surface for that surface', () => {
+test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -> reorder-surface --before <terminal>; move-surface is skipped since the new surface already lands in the target pane), the render path content equals the envelope body once resolved, and close COLLAPSES to the doc tab (be-11-03)', () => {
   const { env, ctx } = setUpWorkspace('doctab-return')
   const specPath = makeSpecFile(ctx, 'be-2a')
   const dispatchRes = dispatchCmd({ slice: 'be-2a', role: 'backend-lead', spec: specPath }, ctx)
@@ -1292,10 +1846,17 @@ test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -
   assert.equal(logAfterDispatch[reorderIdx].argv[2], '--before')
   assert.equal(logAfterDispatch[reorderIdx].argv[3], dispatchRes.json.surface_id)
 
+  const tBeforeClose = tree({ all: true })
+  const docTabBeforeClose = findDocTabSurface(tBeforeClose, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
+  assert.ok(docTabBeforeClose.id, 'expected a positively-verified sibling doc-tab surface before close')
+
   // (2) resolve with a valid markdown return, then close — presentReturn
   // renders the envelope body into the render path (placeholder replaced)
-  // and re-presents (a doc tab is already mounted, so just reorder-surface
-  // again, never another markdown open/move-surface/new-surface).
+  // and re-presents. be-11-03 COLLAPSE-ON-CLOSE: a sibling doc-tab surface
+  // is positively verified from a FRESH tree after presentReturn, so close
+  // now collapses the pane to its doc tab — exactly ONE close-surface for
+  // the TERMINAL surface id, ZERO for the doc-tab surface id, and the pane
+  // itself stays present (with its doc tab) afterward.
   writeValidReturn(record)
   const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
   assert.equal(closeRes.json.outcome, 'ok')
@@ -1306,15 +1867,41 @@ test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -
   assert.equal(rendered, expectedBody)
 
   const logAfterClose = readLog(env.logPath)
-  const closeSurfaceEntries = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id)
-  assert.equal(closeSurfaceEntries.length, 0, 'a doc-tab role terminal surface must never be closed')
-  const reorderEntriesAfterClose = logAfterClose.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[2] === '--before' && e.argv[3] === dispatchRes.json.surface_id)
-  assert.ok(reorderEntriesAfterClose.length > reorderIdxCountBeforeClose(logAfterDispatch, dispatchRes.json.surface_id), 'expected a further reorder-surface --before <terminal> from close')
+  const closeSurfaceEntriesForTerminal = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id)
+  assert.equal(closeSurfaceEntriesForTerminal.length, 1, 'expected exactly ONE close-surface for the terminal surface id (collapse-on-close)')
+  const closeSurfaceEntriesForDocTab = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === docTabBeforeClose.id)
+  assert.equal(closeSurfaceEntriesForDocTab.length, 0, 'expected ZERO close-surface for the doc-tab surface id')
+
+  const tAfterClose = tree({ all: true })
+  const paneAfterClose = tAfterClose.windows.flatMap((w) => w.workspaces).flatMap((ws) => ws.panes).find((p) => p.id.toLowerCase() === dispatchRes.json.pane_id.toLowerCase())
+  assert.ok(paneAfterClose, 'expected the pane to still be present in the fake\'s tree after collapse')
+  assert.ok(paneAfterClose.surfaces.some((s) => s.id.toLowerCase() === docTabBeforeClose.id.toLowerCase()), 'expected the doc-tab surface to still be present in the pane after collapse')
 })
 
-function reorderIdxCountBeforeClose(logAfterDispatch, terminalSurfaceId) {
-  return logAfterDispatch.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[2] === '--before' && e.argv[3] === terminalSurfaceId).length
-}
+test('COLLAPSE-ON-CLOSE (mount chain failed): with FAKE_CMUX_FAIL blocking every doc-tab mount rung, no sibling doc-tab ever exists, so close emits ZERO close-surface calls and keeps the terminal surface', () => {
+  const { env, ctx } = setUpWorkspace('doctab-mount-chain-failed')
+  const specPath = makeSpecFile(ctx, 'be-2k')
+  // 'markdown' blocks BOTH rung 1 (markdown open --surface) and rung 3
+  // (markdown open, no --surface); 'new-surface' blocks rung 2 — every rung
+  // of mountDocTab is unreachable for the whole test, at dispatch AND close.
+  process.env.FAKE_CMUX_FAIL = 'markdown,new-surface'
+  const dispatchRes = dispatchCmd({ slice: 'be-2k', role: 'backend-lead', spec: specPath }, ctx)
+  assert.equal(dispatchRes.code, 0, 'a doc-tab mount failure must never fail dispatch')
+
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-2k.1.json'))
+  writeValidReturn(record)
+
+  const capturedClose = captureStderr(() => {
+    const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+    assert.equal(closeRes.json.outcome, 'ok', 'a doc-tab mount-chain failure must never fail close/resolution')
+  })
+  delete process.env.FAKE_CMUX_FAIL
+
+  const logAfterClose = readLog(env.logPath)
+  const closeSurfaceEntries = logAfterClose.filter((e) => e.argv[0] === 'close-surface')
+  assert.equal(closeSurfaceEntries.length, 0, 'expected ZERO close-surface calls when the mount chain failed entirely')
+  assert.match(capturedClose, new RegExp(dispatchRes.json.surface_id), 'expected the loud kept-terminal-surface line to name the kept surface id')
+})
 
 test('S6/S7 FORCED FAILURE: FAKE_CMUX_FAIL=markdown falls through rung 1 to rung 2 (new-surface browser), dispatch/await/close still succeed', () => {
   const { env, ctx } = setUpWorkspace('doctab-fail-rung1')
@@ -1432,15 +2019,18 @@ test('NOISE SUPPRESSION: a record whose bound PANE is genuinely absent from the 
   assert.equal(logAfterStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens, 'a record whose bound pane is gone from the tree must never trigger a re-mount attempt')
 })
 
-// qa micro-pass item 1 (the substantive restore): closeCmd deliberately
-// KEEPS a doc-tab role's terminal surface and pane, so a record that has
-// already closed with a terminal outcome ('ok' here) can still have a
-// perfectly live pane whose doc tab needs recovering after a cmux restart
-// (S20) — "the architecture-package viewer stays open for the whole task"
-// is a design invariant, not just a while-running one. This must re-mount
-// exactly once, the same as a still-running record would.
-test('POST-CLOSE DOC-TAB RECOVERY: a terminal-outcome (closed ok) record whose pane IS live and whose doc tab is missing gets exactly one re-mount', () => {
-  const { env, ctx } = setUpWorkspace('post-close-recovery')
+// be-11-03 STALE TERMINAL SURFACE (supersedes the pre-collapse-on-close
+// "POST-CLOSE DOC-TAB RECOVERY" invariant): once a doc-tab dispatch has
+// COLLAPSED (its terminal surface positively verified and closed against a
+// sibling doc tab — see the S8 test above), the terminal surface id is
+// PERMANENTLY dead — mounting always anchors on the terminal surface, so a
+// doc tab can never be re-mounted for that dispatch again (ACCEPTED COST,
+// see closeCmd's own comment). The `.collapsed` sidecar gates statusCmd's
+// re-mount loop and closeCmd's own repeat-close branch so neither one
+// attempts a re-mount/reorder against the dead terminal id, and neither one
+// logs a spurious error for it.
+test('STALE TERMINAL SURFACE: after collapse-on-close, a repeat close and two statusCmd runs emit no reorder/mount attempt against the dead terminal surface and no spurious error lines', () => {
+  const { env, ctx } = setUpWorkspace('stale-terminal-surface')
   const specPath = makeSpecFile(ctx, 'be-2j')
   const dispatchRes = dispatchCmd({ slice: 'be-2j', role: 'backend-lead', spec: specPath }, ctx)
   const record = readRecord(join(ctx.paths.dispatchDir, 'be-2j.1.json'))
@@ -1449,22 +2039,33 @@ test('POST-CLOSE DOC-TAB RECOVERY: a terminal-outcome (closed ok) record whose p
   const closeRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
   assert.equal(closeRes.json.outcome, 'ok')
 
-  // Simulate the doc tab itself going missing (S20) while the pane —
-  // deliberately kept by closeCmd for a doc-tab role — stays alive.
-  const t = tree({ all: true })
-  const docTab = findDocTabSurface(t, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
-  assert.ok(docTab.id, 'expected a mounted doc tab after close')
-  closeSurface(docTab.id)
+  const collapsedSidecarPath = sidecarPaths(ctx.paths, dispatchRes.json.dispatch_id).collapsed
+  assert.ok(existsSync(collapsedSidecarPath), 'expected the .collapsed sidecar to be written on a successful collapse')
 
-  const baselineMarkdownOpens = readLog(env.logPath).filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  const logAfterClose = readLog(env.logPath)
+  const closeSurfaceEntries = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id)
+  assert.equal(closeSurfaceEntries.length, 1, 'expected exactly one close-surface for the terminal surface, from the collapse itself')
+  const markdownOpensAfterClose = logAfterClose.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
+  const reordersAfterClose = logAfterClose.filter((e) => e.argv[0] === 'reorder-surface').length
 
+  // A repeat close must no-op the doc-tab branch entirely — no further
+  // presentReturn/findDocTabSurface/reorder/mount against the dead terminal.
+  const capturedRepeatClose = captureStderr(() => {
+    const repeatCloseRes = closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+    assert.equal(repeatCloseRes.json.outcome, 'ok')
+  })
+  assert.match(capturedRepeatClose, /already collapsed/)
+  const logAfterRepeatClose = readLog(env.logPath)
+  assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id).length, 1, 'a repeat close must not attempt to close the already-dead terminal surface again')
+  assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, markdownOpensAfterClose, 'a repeat close must attempt no further mount against the dead terminal surface')
+  assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'reorder-surface').length, reordersAfterClose, 'a repeat close must attempt no further reorder against the dead terminal surface')
+
+  // Two consecutive statusCmd runs must also skip the re-mount loop for this
+  // (now permanently collapsed) record entirely.
   statusCmd({}, ctx)
-  const logAfterFirstStatus = readLog(env.logPath)
-  assert.equal(logAfterFirstStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens + 1, 'a closed-ok record with a live pane and a missing doc tab must still be re-mounted exactly once')
-
   statusCmd({}, ctx)
-  const logAfterSecondStatus = readLog(env.logPath)
-  assert.equal(logAfterSecondStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, baselineMarkdownOpens + 1, 'a second statusCmd run must not re-mount again once the panel is present')
+  const logAfterStatus = readLog(env.logPath)
+  assert.equal(logAfterStatus.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, markdownOpensAfterClose, 'statusCmd must never attempt a re-mount for a collapsed dispatch')
 })
 
 // qa should-fix (a): an AMBIGUOUS pane (>=2 markdown candidates) must be

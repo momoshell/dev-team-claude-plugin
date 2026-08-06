@@ -351,12 +351,23 @@ function buildIncompleteReason(fresh, validation) {
   return 'no_valid_return'
 }
 
-function isAttention({ now, quietState, topIdle, quietS }) {
-  if (!quietState || quietState.turnEndAt == null) return false
-  if (topIdle === null || topIdle === undefined) return false
-  if (quietState.latched) return true
-  const elapsed = now - Date.parse(quietState.turnEndAt)
-  return elapsed > quietS * 1000 && topIdle === true
+// isAttention — STATELESS, no latch: AT THIS FUNCTION'S OWN LEVEL, a later
+// turnEndAt un-arms attention on the very next call, with no reset logic
+// anywhere. QA fix (#13, correctness-lens W-1): that "very next call" claim
+// describes classify()'s own parameter contract, not production timing —
+// dispatch.mjs's awaitCmd derives turnEndAt ONCE per await() INVOCATION
+// (on the first tick) and reuses that same snapshot across every internal
+// tick of that call, so a worker that resumes mid-invocation stays flagged
+// in `attention` (with a stale `since`) until the NEXT awaitCmd/statusCmd
+// invocation, not near-instantly — staleness is bounded by that next
+// invocation's own cap, same wall-clock-bounded-staleness posture as
+// everything else in this design (advisory only; ADR-017's timeout_s stays
+// the only runaway bound). At exactly quietS elapsed this is still NOT
+// attention (strict >).
+function isAttention({ now, turnEndAt, quietS }) {
+  if (turnEndAt == null) return false
+  const elapsed = now - Date.parse(turnEndAt)
+  return elapsed > quietS * 1000
 }
 
 // ---------------------------------------------------------------------------
@@ -385,16 +396,21 @@ function isAttention({ now, quietState, topIdle, quietS }) {
 //   (3) crashed <=> exit sentinel present AND not completed (the caller's
 //       await loop supplies the "after one rescan" cadence; this module is
 //       stateless per call).
-//   (4) attention <=> a turn-end observation plus a quiet timer, latched
-//       once per attempt, DISABLED ENTIRELY when top or events are
-//       unavailable.
+//   (4) attention <=> turnEndAt != null AND now - Date.parse(turnEndAt) >
+//       quietS * 1000. Stateless — no latch, no CPU/top input anywhere.
+//       turnEndAt is attributed to THIS dispatch by an exact surface_id
+//       match against agent.hook.Stop events (dispatch.mjs's job, not
+//       this module's) and is null whenever that events read is
+//       unavailable, which disables attention entirely for that call —
+//       a doorbell that names the sleeper still only triggers a rescan
+//       and an advisory flag here, never a completion decision.
 //   (5) otherwise running.
 //
 // PINNED DECISION U-4: the .exit sentinel and .gate counter are
 // worker-writable (G13) and NEVER decide completion in either direction —
 // they may only add warnings.
 // ---------------------------------------------------------------------------
-export function classify({ record, fsState, tree, now, quietState, topIdle, quietS = 45 }) {
+export function classify({ record, fsState, tree, now, turnEndAt = null, quietS = 45 }) {
   const warnings = []
 
   if (record.outcome !== null && record.outcome !== undefined) {
@@ -439,7 +455,7 @@ export function classify({ record, fsState, tree, now, quietState, topIdle, quie
     return { state: 'crashed', reason: buildIncompleteReason(fresh, validation), warnings }
   }
 
-  if (isAttention({ now, quietState, topIdle, quietS })) {
+  if (isAttention({ now, turnEndAt, quietS })) {
     return { state: 'attention', reason: 'quiet_after_turn_end', warnings }
   }
 
@@ -505,18 +521,21 @@ function paneAlive(tree, surface) {
   return false
 }
 
-// reconcile({ records, fsState, tree, now }) -> the nine-row recovery
-// matrix. `fsState` is an object keyed by dispatch_id (each value produced
-// by collectFsState). Every row's state is read from classify() on the same
-// inputs rather than duplicating the completion predicate.
+// reconcile({ records, fsState, tree, now, turnEndAt = {} }) -> the nine-row
+// recovery matrix. `fsState` is an object keyed by dispatch_id (each value
+// produced by collectFsState). Every row's state is read from classify() on
+// the same inputs rather than duplicating the completion predicate.
+// `turnEndAt` is an optional dispatch_id-keyed map (be-11-03) threading the
+// attention derivation into classify() — every existing caller that omits
+// it gets the empty-map default, i.e. attention never arms, unchanged.
 //
 // out of scope: this function REPORTS; the CLI decides whether to
 // re-dispatch. No cmux/git/process invocation happens here — tree and
 // porcelain-derived flags (fsState[id].worktreeDirty) are parameters.
-export function reconcile({ records, fsState, tree, now }) {
+export function reconcile({ records, fsState, tree, now, turnEndAt = {} }) {
   if (tree === null) {
     return records.map((record) => {
-      const result = classify({ record, fsState: fsState[record.dispatch_id], tree: null, now, quietState: null, topIdle: null })
+      const result = classify({ record, fsState: fsState[record.dispatch_id], tree: null, now, turnEndAt: turnEndAt[record.dispatch_id] ?? null })
       return {
         dispatch_id: record.dispatch_id,
         slice_id: record.slice_id,
@@ -531,7 +550,7 @@ export function reconcile({ records, fsState, tree, now }) {
 
   return records.map((record) => {
     const state = fsState[record.dispatch_id]
-    const result = classify({ record, fsState: state, tree, now, quietState: null, topIdle: null })
+    const result = classify({ record, fsState: state, tree, now, turnEndAt: turnEndAt[record.dispatch_id] ?? null })
     const surfaceAlive = record.surface ? paneAlive(tree, record.surface) : false
     const worktreeDirty = Boolean(state?.worktreeDirty)
     const gateAtMax = record.gate && state?.gateCounter != null && Number(state.gateCounter) >= record.gate.max_blocks

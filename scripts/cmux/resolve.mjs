@@ -162,8 +162,12 @@ export function renderPathFor(record) {
   return join(record.task_dir, 'returns', `${stem}.md`)
 }
 
-// sidecarPaths(paths, dispatchId) -> the four flat, dispatch_id-keyed
-// sidecar files living directly under STATE_DIR.
+// sidecarPaths(paths, dispatchId) -> the five flat, dispatch_id-keyed
+// sidecar files living directly under STATE_DIR. `collapsed` (be-11-03) is
+// written immediately after a successful collapse-on-close terminal-surface
+// close and gates the stale-terminal-surface skip in both closeCmd's repeat
+// runs and statusCmd's re-mount loop. Teardown's existing wholesale stateDir
+// sweep collects it for free — no new cleanup path needed.
 export function sidecarPaths(paths, dispatchId) {
   if (typeof dispatchId !== 'string' || dispatchId === '') {
     throw new Error('sidecarPaths: dispatchId must be a non-empty string')
@@ -174,6 +178,7 @@ export function sidecarPaths(paths, dispatchId) {
     gate: `${base}.gate`,
     nonce: `${base}.nonce`,
     signalLog: `${base}.signal-log`,
+    collapsed: `${base}.collapsed`,
   }
 }
 

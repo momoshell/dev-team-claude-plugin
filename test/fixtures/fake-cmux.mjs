@@ -597,6 +597,25 @@ switch (verb) {
     }
     const eventsPath = process.env.FAKE_CMUX_EVENTS
     const stdout = eventsPath && existsSync(eventsPath) ? readFileSync(eventsPath, 'utf8') : ''
+    // be-11-03 QA-fix test hook: models cmux's REAL live-verified behavior
+    // when retained backlog cannot satisfy --limit (or --name filtering
+    // narrows the match count below it) — `cmux events` BLOCKS streaming
+    // live frames rather than returning early with a partial snapshot (see
+    // cmuxctl.mjs's readEvents() header comment for the live capture this
+    // is modeling). FAKE_CMUX_EVENTS_HANG='1' prints whatever
+    // FAKE_CMUX_EVENTS holds (the "already-retained partial backlog") and
+    // then hangs indefinitely — the ONLY thing that can ever terminate
+    // this call is the caller's OWN spawnSync timeout, exactly like the
+    // real binary's under-satisfied-limit case.
+    if (process.env.FAKE_CMUX_EVENTS_HANG === '1') {
+      if (stdout) {
+        process.stdout.write(stdout.endsWith('\n') ? stdout : `${stdout}\n`)
+      }
+      logInvocation()
+      const sab = new SharedArrayBuffer(4)
+      Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+      process.exit(0)
+    }
     succeed(stdout)
     break
   }

@@ -72,3 +72,32 @@ test('cmux-dispatch.md corrects `top`: headerless hierarchical rollup, positiona
   assert.ok(doc.includes('no `--id-format` flag') || doc.includes('no --id-format flag'))
   assert.ok(!doc.includes('per-surface CPU'), 'the stale "per-surface CPU" description must be fully removed')
 })
+
+// ---------------------------------------------------------------------------
+// be-11-03 — automated stall triage doc-consistency (qa gate fix #8): the
+// doc previously described read-screen as "orchestrator-manual triage
+// only" and never mentioned the `attention` key or collapse-on-close at
+// all, while a stale test PINNED the "hand-types only ... read-screen ..."
+// sentence verbatim, passing while actively contradicting the code it
+// guards. Fixed: the doc now says read-screen is ALSO auto-fired, and this
+// suite asserts that correction plus the new attention-key/collapse-on-
+// close passages, rather than merely pinning old prose.
+// ---------------------------------------------------------------------------
+
+test('cmux-dispatch.md corrects read-screen: no longer "hand-typed only" — dispatch.mjs also auto-fires it on the transition into attention', () => {
+  assert.doesNotMatch(doc, /`read-screen` — diagnostics only, orchestrator-manual, never a result channel\./, 'the stale "orchestrator-manual, never a result channel" read-screen description must be corrected')
+  assert.match(doc, /dispatch\.mjs` ALSO invokes itself/)
+  assert.match(doc, /it auto-fires once per transition into attention/)
+})
+
+test('cmux-dispatch.md documents the `attention` key on both await return shapes and on status', () => {
+  assert.match(doc, /attention: \[\{dispatch_id, since, reason: 'quiet_after_turn_end'\}\]/)
+  assert.match(doc, /a dispatch listed there is STILL in `remaining` and NEVER in `resolved`/)
+  assert.match(doc, /`status` reports the same `attention` array from its own independent events read/)
+})
+
+test('cmux-dispatch.md documents collapse-on-close and its accepted cost, no longer claiming the terminal surface is unconditionally kept', () => {
+  assert.match(doc, /\*\*Collapse-on-close \(be-11-03\):\*\*/)
+  assert.match(doc, /re-verifies .* that a sibling doc-tab surface actually exists/)
+  assert.match(doc, /Accepted cost:\*\* once collapsed, the doc tab can never be re-mounted/)
+})

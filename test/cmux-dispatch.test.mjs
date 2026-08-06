@@ -33,6 +33,7 @@ const {
   parseArgs, buildContext, ensureWorktree, isDispatcherWorktree, removeWorktreeIfCleanAndMerged,
   writeCompletionNonce, adapterLaunchLine,
   preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd, phaseCmd,
+  readCmuxEnvFile, readEnvFileKeys,
   UsageError, OperationalError, main,
 } = await import(DISPATCH_PATH)
 
@@ -245,6 +246,22 @@ test('readExecutionMode throw message quotes the raw configured spelling, not th
 
 test('EXECUTION_MODES drift guard: widening the accepted set requires a deliberate test edit', () => {
   assert.deepEqual(EXECUTION_MODES, ['agent-tool', 'cmux'])
+})
+
+// QA fix (Must-Fix #1c): every existing config-reader test writes its OWN
+// fixture — which is exactly why be-11-05's doc-drift bug (a fenced example
+// in the REAL .claude/dev-team/config.md live-parsing as a value) shipped
+// green. This reads the repo's ACTUAL config.md and pins the safe default
+// for all three readers against it, so a future doc edit that reintroduces
+// a column-0 `cmux_env_file:`/`env_file_keys:`/`execution_mode:` line (bare,
+// even fenced) fails this test immediately instead of silently bricking the
+// `workspace` verb the next time this repo runs under execution_mode: cmux.
+test('doc-drift regression: the REAL .claude/dev-team/config.md never live-parses a documentation example as a value', () => {
+  const realConfigPath = join(ROOT, '.claude', 'dev-team', 'config.md')
+  const realConfigText = readFileSync(realConfigPath, 'utf8')
+  assert.equal(readExecutionMode(realConfigText), 'agent-tool', 'the real config.md carries no live execution_mode: line today')
+  assert.equal(readCmuxEnvFile(realConfigText), null, 'the real config.md documents cmux_env_file but must never live-parse it as a value')
+  assert.deepEqual(readEnvFileKeys(realConfigText), [], 'the real config.md documents env_file_keys but must never live-parse it as a value')
 })
 
 test('OUTCOME_MAPPING row exit-0-plus-invalid-return never yields ok (qa L-22)', () => {
@@ -3404,6 +3421,80 @@ test('ensureWorkspace --group NEGATIVE (nothing created): one retry without --gr
   assert.equal(matches.length, 1)
 })
 
+// QA fix (#8, coverage gap): --env-file must ride BOTH the --group retry
+// path and the --group adopt path — untested today, the code is correct
+// (withEnvFile threads through the retry; the adopt-existing branch returns
+// created:true, which stamps the fresh env_file block against the ADOPTED
+// workspace's real id) but nothing pinned it, and a future refactor
+// reverting the retry call to baseArgs would silently create a workspace
+// with NO env while workspace.json records a hash CLAIMING it has one — an
+// invisible-forever divergence-from-birth, exactly what the whole
+// discriminator table exists to prevent.
+test('QA fix #8(a): --group fails but created nothing — the un-grouped retry ALSO carries --env-file (env-file injection is not lost on degradation)', () => {
+  const { dir, env, ctx } = setUpWorkspace('group-fail-nothing-envfile')
+  const envFilePath = writeEnvFileFixture(dir, 'group-retry-env', 'FOO=1\n')
+  writeConfigMd(ctx.primaryCheckout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx2 = buildContext({
+    task: 'second-task-nothing-envfile', checkout: ctx.primaryCheckout, repo: ctx.repoSlug, root: join(dir, 'dev-team'), 'plugin-root': ROOT,
+  })
+  preflightCmd({}, ctx2)
+
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateGroupCreateFails = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const logBefore = readLog(env.logPath).length
+  const res = workspaceCmd({}, ctx2)
+  assert.equal(res.code, 0)
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const newWorkspaceAttempts = log.filter((e) => e.argv[0] === 'new-workspace')
+  assert.equal(newWorkspaceAttempts.length, 2)
+  for (const attempt of newWorkspaceAttempts) {
+    const idx = attempt.argv.indexOf('--env-file')
+    assert.notEqual(idx, -1, `expected --env-file present on new-workspace attempt: ${JSON.stringify(attempt.argv)}`)
+    assert.equal(attempt.argv[idx + 1], envFilePath)
+  }
+
+  const workspaceState = JSON.parse(readFileSync(join(ctx2.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal(workspaceState.env_file.path, envFilePath)
+  assert.equal(workspaceState.env_file.workspace_id, res.json.workspace_id)
+})
+
+test('QA fix #8(b): --group fails but the workspace was created anyway (adopt path) — the adopted workspace\'s stamped env_file.workspace_id equals the adopted id', () => {
+  const { dir, env, ctx } = setUpWorkspace('group-fail-created-envfile')
+  const envFilePath = writeEnvFileFixture(dir, 'group-adopt-env', 'FOO=1\n')
+  writeConfigMd(ctx.primaryCheckout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx2 = buildContext({
+    task: 'second-task-created-envfile', checkout: ctx.primaryCheckout, repo: ctx.repoSlug, root: join(dir, 'dev-team'), 'plugin-root': ROOT,
+  })
+  preflightCmd({}, ctx2)
+
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateGroupCreateFailsAfterCreating = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const logBefore = readLog(env.logPath).length
+  const res = workspaceCmd({}, ctx2)
+  assert.equal(res.code, 0)
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const newWorkspaceAttempts = log.filter((e) => e.argv[0] === 'new-workspace')
+  assert.equal(newWorkspaceAttempts.length, 1, 'the --group attempt that actually created the workspace is adopted — no retry')
+  const idx = newWorkspaceAttempts[0].argv.indexOf('--env-file')
+  assert.notEqual(idx, -1)
+  assert.equal(newWorkspaceAttempts[0].argv[idx + 1], envFilePath)
+
+  const liveTree = tree({ all: true })
+  const win = liveTree.windows.find((w) => w.id === res.json.window_id)
+  const adopted = win.workspaces.find((w) => w.title === ctx2.taskSlug)
+
+  const workspaceState = JSON.parse(readFileSync(join(ctx2.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal(workspaceState.env_file.workspace_id, adopted.id)
+  assert.equal(workspaceState.env_file.workspace_id, res.json.workspace_id)
+  assert.equal(workspaceState.env_file.path, envFilePath)
+})
+
 test('ensureWorkspace: with no group argument at all, a failing new-workspace still throws as before (no retry, no re-scan)', () => {
   const { env, ctx } = setUpWorkspace('group-none-fails')
   const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
@@ -3416,6 +3507,440 @@ test('ensureWorkspace: with no group argument at all, a failing new-workspace st
   delete process.env.FAKE_CMUX_FAIL
   const log = readLog(env.logPath).slice(logBefore)
   assert.equal(log.filter((e) => e.argv[0] === 'new-workspace').length, 1, 'no retry when group was never supplied')
+})
+
+// ---------------------------------------------------------------------------
+// be-11-05 (ADR-018) — opt-in workspace env-file injection.
+// ---------------------------------------------------------------------------
+
+function writeEnvFileFixture(dir, name, content) {
+  const p = join(dir, name)
+  writeFileSync(p, content)
+  return p
+}
+
+test('readCmuxEnvFile / readEnvFileKeys: absent, blank, single-line bracketed list, and the ambiguity doctrine', () => {
+  assert.equal(readCmuxEnvFile(''), null)
+  assert.equal(readCmuxEnvFile('other: stuff\n'), null)
+  assert.equal(readCmuxEnvFile('cmux_env_file: /abs/path/to/.env\n'), '/abs/path/to/.env')
+  assert.deepEqual(readEnvFileKeys(''), [])
+  assert.deepEqual(readEnvFileKeys('env_file_keys: [FOO, BAR]\n'), ['FOO', 'BAR'])
+  assert.deepEqual(readEnvFileKeys('env_file_keys: [FOO]\n'), ['FOO'])
+  assert.deepEqual(readEnvFileKeys('env_file_keys: []\n'), [])
+
+  assert.throws(
+    () => readCmuxEnvFile('cmux_env_file: /a\ncmux_env_file: /b\n'),
+    (e) => e instanceof OperationalError && /ambiguous/.test(e.message),
+  )
+  assert.throws(
+    () => readEnvFileKeys('env_file_keys: [FOO]\nenv_file_keys: [BAR]\n'),
+    (e) => e instanceof OperationalError && /ambiguous/.test(e.message),
+  )
+  assert.throws(
+    () => readEnvFileKeys('env_file_keys: FOO, BAR\n'),
+    (e) => e instanceof OperationalError && /single-line bracketed list/.test(e.message),
+  )
+})
+
+test('readCmuxEnvFile / readEnvFileKeys: a fenced ``` code block containing a column-0 example is IGNORED, never live-parsed (Must-Fix #1 hardening)', () => {
+  const docText = [
+    'Some prose.',
+    '',
+    '```',
+    'cmux_env_file: <absolute path>',
+    'env_file_keys: [KEY1, KEY2]',
+    '```',
+    '',
+    'More prose.',
+  ].join('\n')
+  assert.equal(readCmuxEnvFile(docText), null)
+  assert.deepEqual(readEnvFileKeys(docText), [])
+
+  // A REAL line outside the fence is still honored, and the fenced example
+  // does NOT count toward the ambiguity guard (only one REAL line exists).
+  const mixedText = [
+    'cmux_env_file: /real/path/.env',
+    '',
+    '```',
+    'cmux_env_file: <absolute path>',
+    '```',
+  ].join('\n')
+  assert.equal(readCmuxEnvFile(mixedText), '/real/path/.env')
+})
+
+test('readEnvFileKeys: a malformed entry (e.g. a missing comma) refuses at the config line, naming the bad entry, rather than surfacing later as a confusing "undeclared key"', () => {
+  assert.throws(
+    () => readEnvFileKeys('env_file_keys: [FOO BAR]\n'),
+    (e) => e instanceof OperationalError && /FOO BAR/.test(e.message),
+  )
+})
+
+test('ABSENT cmux_env_file reproduces today\'s behaviour exactly: no --env-file flag ever emitted, no env_file block written', () => {
+  const { env, ctx } = setUpWorkspace('envfile-absent')
+  const log = readLog(env.logPath)
+  const newWorkspaceEntry = log.find((e) => e.argv[0] === 'new-workspace')
+  assert.ok(newWorkspaceEntry)
+  assert.equal(newWorkspaceEntry.argv.includes('--env-file'), false)
+  const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal('env_file' in workspaceState, false)
+})
+
+test('REFUSAL — reserved key: refuses BEFORE any cmux invocation (zero fixture-log entries), naming the key, never the value', () => {
+  const cases = [
+    'ANTHROPIC_API_KEY', 'DEVTEAM_RETURN_PATH', 'PATH', 'NODE_OPTIONS',
+    'CLAUDE_BIN', 'CMUX_BIN', 'GIT_SSH_COMMAND', 'npm_config_script_shell',
+    'DYLD_INSERT_LIBRARIES', 'LD_PRELOAD',
+  ]
+  for (const key of cases) {
+    const env = freshCmuxEnv(`envfile-reserved-${key.toLowerCase().replace(/[^a-z]/g, '')}`)
+    const checkout = makeGitCheckout(env.dir)
+    const envFilePath = writeEnvFileFixture(env.dir, `${key}.env`, `${key}=super-secret-value\n`)
+    writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [${key}]\n`)
+    const ctx = buildTestCtx(env.dir, { checkout, task: 'reserved-task' })
+    preflightCmd({}, ctx)
+
+    const logBefore = readLog(env.logPath).length
+    let err
+    assert.throws(() => workspaceCmd({}, ctx), (e) => { err = e; return e instanceof OperationalError })
+    assert.match(err.message, new RegExp(key))
+    assert.equal(err.message.includes('super-secret-value'), false, 'the refusal must never carry the value')
+
+    const log = readLog(env.logPath).slice(logBefore)
+    assert.deepEqual(log, [], `expected ZERO cmux invocations for reserved key ${key}`)
+  }
+})
+
+test('REFUSAL — reserved beats declared: a key BOTH listed in env_file_keys AND matching the backstop still refuses', () => {
+  const env = freshCmuxEnv('envfile-reserved-declared')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'CMUX_BIN=/tmp/evil\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [CMUX_BIN]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reserved-declared-task' })
+  preflightCmd({}, ctx)
+  const logBefore = readLog(env.logPath).length
+  assert.throws(() => workspaceCmd({}, ctx), (e) => e instanceof OperationalError && /CMUX_BIN/.test(e.message))
+  assert.deepEqual(readLog(env.logPath).slice(logBefore), [])
+})
+
+test('REFUSAL — undeclared key: a key present in the file but absent from env_file_keys refuses, naming the key; zero cmux invocations', () => {
+  const env = freshCmuxEnv('envfile-undeclared')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\nUNDECLARED_KEY=2\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'undeclared-task' })
+  preflightCmd({}, ctx)
+  const logBefore = readLog(env.logPath).length
+  assert.throws(() => workspaceCmd({}, ctx), (e) => e instanceof OperationalError && /UNDECLARED_KEY/.test(e.message))
+  assert.deepEqual(readLog(env.logPath).slice(logBefore), [])
+})
+
+test('REFUSAL — env_file_keys entirely ABSENT from config.md (fail closed): cmux_env_file set with no env_file_keys line at all refuses every key in the file as undeclared, zero cmux invocations', () => {
+  const env = freshCmuxEnv('envfile-keys-absent')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  // No env_file_keys line at all — readEnvFileKeys defaults to [], so FOO is
+  // undeclared no matter what the file contains. This must fail closed, not
+  // silently inject with an implicit "declare nothing, allow everything".
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'keys-absent-task' })
+  preflightCmd({}, ctx)
+  const logBefore = readLog(env.logPath).length
+  assert.throws(() => workspaceCmd({}, ctx), (e) => e instanceof OperationalError && /not listed in env_file_keys/.test(e.message) && /FOO/.test(e.message))
+  assert.deepEqual(readLog(env.logPath).slice(logBefore), [])
+})
+
+test('REFUSAL — env_file_keys explicitly EMPTY ([]) with a non-empty env file: every key is undeclared, refuses naming the first offending key, zero cmux invocations', () => {
+  const env = freshCmuxEnv('envfile-keys-empty')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\nBAR=2\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: []\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'keys-empty-task' })
+  preflightCmd({}, ctx)
+  const logBefore = readLog(env.logPath).length
+  assert.throws(() => workspaceCmd({}, ctx), (e) => e instanceof OperationalError && /FOO/.test(e.message))
+  assert.deepEqual(readLog(env.logPath).slice(logBefore), [])
+})
+
+test('a DECLARED key absent from the file only warns and proceeds', () => {
+  const env = freshCmuxEnv('envfile-declared-absent')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO, BAR]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'declared-absent-task' })
+  preflightCmd({}, ctx)
+  let res
+  const stderr = captureStderr(() => { res = workspaceCmd({}, ctx) })
+  assert.equal(res.code, 0)
+  assert.match(stderr, /env_file_keys declares "BAR"/)
+})
+
+test('REFUSAL — parser: a malformed env file refuses the WHOLE file BEFORE any cmux invocation, naming only the line number', () => {
+  const env = freshCmuxEnv('envfile-parse-error')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO="quoted-secret"\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'parse-error-task' })
+  preflightCmd({}, ctx)
+  const logBefore = readLog(env.logPath).length
+  let err
+  assert.throws(() => workspaceCmd({}, ctx), (e) => { err = e; return e instanceof OperationalError })
+  assert.match(err.message, /line 1/)
+  assert.equal(err.message.includes('quoted-secret'), false)
+  assert.deepEqual(readLog(env.logPath).slice(logBefore), [])
+})
+
+test('REFUSAL — file: a non-absolute path, a missing file, a directory, a symlink, and an oversized file all refuse with the distinct env_file_unreadable reason', () => {
+  const env = freshCmuxEnv('envfile-unreadable')
+  const checkout = makeGitCheckout(env.dir)
+
+  function assertRefusesWithZeroCmuxCalls(testCtx) {
+    const logBefore = readLog(env.logPath).length
+    assert.throws(() => workspaceCmd({}, testCtx), (e) => e instanceof OperationalError && /env_file_unreadable/.test(e.message))
+    assert.deepEqual(readLog(env.logPath).slice(logBefore), [], 'this bad-file case must never reach cmux')
+  }
+
+  // non-absolute path
+  writeConfigMd(checkout, `cmux_env_file: relative/env\nenv_file_keys: [FOO]\n`)
+  let ctx = buildTestCtx(env.dir, { checkout, task: 'unreadable-relative' })
+  preflightCmd({}, ctx)
+  assertRefusesWithZeroCmuxCalls(ctx)
+
+  // missing file
+  writeConfigMd(checkout, `cmux_env_file: ${join(env.dir, 'does-not-exist.env')}\nenv_file_keys: [FOO]\n`)
+  ctx = buildTestCtx(env.dir, { checkout, task: 'unreadable-missing' })
+  preflightCmd({}, ctx)
+  assertRefusesWithZeroCmuxCalls(ctx)
+
+  // a directory, not a regular file
+  const dirPath = join(env.dir, 'a-directory-env')
+  mkdirSync(dirPath)
+  writeConfigMd(checkout, `cmux_env_file: ${dirPath}\nenv_file_keys: [FOO]\n`)
+  ctx = buildTestCtx(env.dir, { checkout, task: 'unreadable-dir' })
+  preflightCmd({}, ctx)
+  assertRefusesWithZeroCmuxCalls(ctx)
+
+  // a symlink — refused via lstatSync, never followed
+  const target = writeEnvFileFixture(env.dir, 'symlink-target-env', 'FOO=1\n')
+  const linkPath = join(env.dir, 'a-symlink-env')
+  symlinkSync(target, linkPath)
+  writeConfigMd(checkout, `cmux_env_file: ${linkPath}\nenv_file_keys: [FOO]\n`)
+  ctx = buildTestCtx(env.dir, { checkout, task: 'unreadable-symlink' })
+  preflightCmd({}, ctx)
+  assertRefusesWithZeroCmuxCalls(ctx)
+
+  // oversized (>64 KiB)
+  const bigPath = writeEnvFileFixture(env.dir, 'oversized-env', `FOO=${'x'.repeat(70 * 1024)}\n`)
+  writeConfigMd(checkout, `cmux_env_file: ${bigPath}\nenv_file_keys: [FOO]\n`)
+  ctx = buildTestCtx(env.dir, { checkout, task: 'unreadable-oversized' })
+  preflightCmd({}, ctx)
+  assertRefusesWithZeroCmuxCalls(ctx)
+})
+
+test('PASSTHROUGH: a clean, fully-declared env file produces exactly ONE --env-file <absolute path> argument on new-workspace, path only — never a re-composed --env flag', () => {
+  const env = freshCmuxEnv('envfile-passthrough')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\nBAR=2\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO, BAR]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'passthrough-task' })
+  preflightCmd({}, ctx)
+  const res = workspaceCmd({}, ctx)
+  assert.equal(res.code, 0)
+
+  const log = readLog(env.logPath)
+  const newWorkspaceEntry = log.find((e) => e.argv[0] === 'new-workspace')
+  assert.ok(newWorkspaceEntry)
+  const envFileIdx = newWorkspaceEntry.argv.indexOf('--env-file')
+  assert.notEqual(envFileIdx, -1)
+  assert.equal(newWorkspaceEntry.argv[envFileIdx + 1], envFilePath)
+  assert.equal(newWorkspaceEntry.argv.filter((a) => a === '--env-file').length, 1)
+
+  // Grep the ENTIRE fixture log for `--env` as an exact argv token — zero
+  // occurrences (only `--env-file`, never a re-composed `--env KEY=VALUE`).
+  const flatArgv = log.flatMap((e) => e.argv)
+  assert.equal(flatArgv.filter((token) => token === '--env').length, 0)
+
+  const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal(workspaceState.env_file.path, envFilePath)
+  assert.equal(workspaceState.env_file.workspace_id, res.json.workspace_id)
+  assert.match(workspaceState.env_file.sha256, /^[0-9a-f]{64}$/)
+  assert.ok(workspaceState.env_file.recorded_at)
+})
+
+test('REUSE BRANCH — the common case: a second workspace invocation with an UNCHANGED env file proceeds silently, no new-workspace call, env_file carried forward verbatim', () => {
+  const env = freshCmuxEnv('envfile-reuse-unchanged')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reuse-unchanged-task' })
+  preflightCmd({}, ctx)
+  const firstRes = workspaceCmd({}, ctx)
+  const firstState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+
+  const logBefore = readLog(env.logPath).length
+  let stderr
+  let secondRes
+  stderr = captureStderr(() => { secondRes = workspaceCmd({}, ctx) })
+  assert.equal(secondRes.code, 0)
+  assert.equal(secondRes.json.workspace_id, firstRes.json.workspace_id)
+
+  const log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'new-workspace').length, 0)
+  assert.doesNotMatch(stderr, /env_file/i, 'the steady-state reuse case must be silent — no env_file-related warning noise')
+
+  const secondState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.deepEqual(secondState.env_file, firstState.env_file, 'env_file must be carried forward VERBATIM, never re-stamped')
+})
+
+test('REUSE BRANCH — divergence: recorded-present + current-differs refuses, naming both hashes/paths and the remediation', () => {
+  const env = freshCmuxEnv('envfile-reuse-differs')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reuse-differs-task' })
+  preflightCmd({}, ctx)
+  workspaceCmd({}, ctx)
+
+  writeFileSync(envFilePath, 'FOO=2\n')
+  const logBefore = readLog(env.logPath).length
+  assert.throws(
+    () => workspaceCmd({}, ctx),
+    (e) => e instanceof OperationalError && /close the workspace and re-dispatch/.test(e.message) && e.message.includes(envFilePath),
+  )
+  // A reuse-branch divergence refusal happens AFTER ensureWorkspace's own
+  // read-only tree() lookups (needed to resolve workspaceId for the
+  // workspace_id-scoping check above), so `tree` calls are expected — the
+  // load-bearing guarantee is that it never issues a MUTATING call
+  // (new-workspace/new-pane/send/...), i.e. never creates or touches a
+  // second live workspace/pane on the way to refusing.
+  const log = readLog(env.logPath).slice(logBefore)
+  const mutating = log.filter((e) => !['tree', 'ping', 'identify', 'capabilities'].includes(e.argv[0]))
+  assert.deepEqual(mutating, [], 'a reuse-branch divergence refusal must issue zero MUTATING cmux invocations')
+})
+
+test('REUSE BRANCH — divergence: recorded-null + current-present refuses (cannot retroactively add env injection to a live workspace)', () => {
+  const env = freshCmuxEnv('envfile-reuse-add')
+  const checkout = makeGitCheckout(env.dir)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reuse-add-task' })
+  preflightCmd({}, ctx)
+  workspaceCmd({}, ctx) // no env file configured yet — recorded stays null
+
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  assert.throws(
+    () => workspaceCmd({}, ctx),
+    (e) => e instanceof OperationalError && /cannot retroactively add environment injection/.test(e.message),
+  )
+})
+
+test('REUSE BRANCH — divergence: recorded-present + current-absent refuses (cannot retroactively remove env injection from a live workspace)', () => {
+  const env = freshCmuxEnv('envfile-reuse-remove')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reuse-remove-task' })
+  preflightCmd({}, ctx)
+  workspaceCmd({}, ctx)
+
+  writeConfigMd(checkout, 'execution_mode: cmux\n') // cmux_env_file no longer configured
+  assert.throws(
+    () => workspaceCmd({}, ctx),
+    (e) => e instanceof OperationalError && /cannot retroactively remove environment injection/.test(e.message),
+  )
+})
+
+test('REUSE BRANCH — configured-but-unreadable on a reuse call refuses with the distinct env_file_unreadable reason, never a silent degrade', () => {
+  const env = freshCmuxEnv('envfile-reuse-unreadable')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reuse-unreadable-task' })
+  preflightCmd({}, ctx)
+  workspaceCmd({}, ctx)
+
+  writeConfigMd(checkout, `cmux_env_file: ${join(env.dir, 'now-missing.env')}\nenv_file_keys: [FOO]\n`)
+  assert.throws(
+    () => workspaceCmd({}, ctx),
+    (e) => e instanceof OperationalError && /env_file_unreadable/.test(e.message),
+  )
+})
+
+test('REUSE BRANCH — null/null: a second workspace invocation with cmux_env_file NEVER configured stays silently absent (the sixth discriminator row)', () => {
+  const env = freshCmuxEnv('envfile-reuse-null-null')
+  const checkout = makeGitCheckout(env.dir)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'reuse-null-null-task' })
+  preflightCmd({}, ctx)
+  const firstRes = workspaceCmd({}, ctx)
+  const firstState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal('env_file' in firstState, false)
+
+  const logBefore = readLog(env.logPath).length
+  let secondRes
+  const stderr = captureStderr(() => { secondRes = workspaceCmd({}, ctx) })
+  assert.equal(secondRes.code, 0)
+  assert.equal(secondRes.json.workspace_id, firstRes.json.workspace_id)
+  assert.equal(secondRes.json.env_file, null)
+  assert.doesNotMatch(stderr, /env_file/i, 'null/null must stay silent, no warning noise')
+
+  const log = readLog(env.logPath).slice(logBefore)
+  assert.equal(log.filter((e) => e.argv[0] === 'new-workspace').length, 0)
+
+  const secondState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal('env_file' in secondState, false, 'no env_file key is ever written when cmux_env_file was never configured')
+})
+
+test('workspace_id scoping: a recorded env_file block whose workspace_id no longer matches the freshly-found workspace is treated as NO hash recorded at all (stale block from a torn-down-and-recreated workspace)', () => {
+  const env = freshCmuxEnv('envfile-stale-workspace-id')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'stale-workspace-id-task' })
+  preflightCmd({}, ctx)
+  const firstRes = workspaceCmd({}, ctx)
+
+  // Simulate a torn-down-and-recreated workspace: hand-edit workspace.json so
+  // the recorded env_file block's workspace_id no longer matches the id
+  // ensureWorkspace will find on the next call (which — since the fake still
+  // has a workspace of that title — is the SAME workspace_id; we forge a
+  // DIFFERENT recorded workspace_id to simulate the staleness directly).
+  const statePath = join(ctx.paths.stateDir, 'workspace.json')
+  const state = JSON.parse(readFileSync(statePath, 'utf8'))
+  state.env_file.workspace_id = '99999999-9999-9999-9999-999999999999'
+  writeFileSync(statePath, JSON.stringify(state))
+
+  // QA fix (#7): with the recorded block now scoped to a different
+  // workspace_id, `recorded` is still correctly treated as no-hash-recorded
+  // (never silently trusting the stale block, never crashing on a hash
+  // mismatch message) — but the refusal now names this SPECIFIC case (the
+  // workspace was recreated under a new id) rather than the generic "never
+  // had an env file" message, since the two are not the same situation and
+  // conflating them used to produce a misleading (sometimes false) refusal.
+  assert.throws(
+    () => workspaceCmd({}, ctx),
+    (e) => (
+      e instanceof OperationalError
+      && /recreated/.test(e.message)
+      && e.message.includes('99999999-9999-9999-9999-999999999999')
+      && e.message.includes(firstRes.json.workspace_id)
+    ),
+  )
+  assert.equal(firstRes.code, 0)
+})
+
+test('workspace.json\'s tier field (be-11-02) still survives a later `workspace` invocation alongside an unchanged env_file (both fields carried forward)', () => {
+  const env = freshCmuxEnv('envfile-tier-carry')
+  const checkout = makeGitCheckout(env.dir)
+  const envFilePath = writeEnvFileFixture(env.dir, 'env', 'FOO=1\n')
+  writeConfigMd(checkout, `cmux_env_file: ${envFilePath}\nenv_file_keys: [FOO]\n`)
+  const ctx = buildTestCtx(env.dir, { checkout, task: 'tier-envfile-task' })
+  preflightCmd({}, ctx)
+  workspaceCmd({ tier: '2' }, ctx)
+
+  const laterRes = workspaceCmd({}, ctx)
+  assert.equal(laterRes.json.tier, 2, 'tier must still be carried forward')
+  const state = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+  assert.equal(state.tier, 2)
+  assert.ok(state.env_file, 'env_file must also be carried forward alongside tier')
+  assert.equal(state.env_file.path, envFilePath)
 })
 
 // ---------------------------------------------------------------------------

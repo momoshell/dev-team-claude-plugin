@@ -32,7 +32,7 @@ import { randomBytes } from 'node:crypto'
 
 import {
   resolveRoots, taskPaths, stemOf, specPathFor, renderPathFor, sidecarPaths, deriveWorktree, loadRoster,
-  snapshotDirFor,
+  snapshotDirFor, parseEnvFile,
 } from './resolve.mjs'
 import {
   snapshotWorkerPlugin, newDispatchId, isoMs, nextAttempt,
@@ -91,6 +91,98 @@ export function readExecutionMode(configText) {
     throw new Error(`readExecutionMode: unknown execution_mode value: ${JSON.stringify(raw)}`)
   }
   return value
+}
+
+// ---------------------------------------------------------------------------
+// be-11-05 (ADR-018) — env-file config-key readers, beside readExecutionMode.
+// Both follow the identical ambiguity doctrine (trust C2): more than one line
+// for the same key in config.md is ambiguous and refuses rather than
+// silently matching the first.
+//
+// QA fix (Must-Fix #1): unlike readExecutionMode — whose own fenced-example
+// ambiguity is a DELIBERATE, documented, already-tested behaviour (see
+// commands/onboard.md: "never inside a fenced code block... a second one
+// makes the config ambiguous", and the pinned 'trust C2' test) — these two
+// NEW readers strip fenced ``` code blocks before matching. This repo's own
+// config.md documents cmux_env_file/env_file_keys with prose examples, and a
+// fenced example at column 0 must never be mistaken for a live value the way
+// it deliberately IS for execution_mode. readExecutionMode's behaviour is
+// left untouched (changing it would revert an existing, intentional,
+// separately-pinned design — flagged to the orchestrator, not changed here).
+// ---------------------------------------------------------------------------
+
+// stripFencedCodeBlocks(text) -> text with every ``` ... ``` fenced block's
+// CONTENT blanked to spaces (line count preserved, so a 1-based line number
+// computed against the ORIGINAL text — e.g. a future caller error message —
+// would still line up). A config.md fenced example showing `key: value` at
+// column 0 must never be live-parsed as a real value.
+function stripFencedCodeBlocks(text) {
+  return (text || '').replace(/^```[^\n]*\n[\s\S]*?^```[ \t]*$/gm, (block) => block.replace(/[^\n]/g, ' '))
+}
+
+const CMUX_ENV_FILE_LINE_RE = /^cmux_env_file:\s*(.*)$/gm
+const ENV_FILE_KEYS_LINE_RE = /^env_file_keys:\s*(.*)$/gm
+const ENV_FILE_KEY_ENTRY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+// readCmuxEnvFile(configText) -> absolute path string | null. Absent or
+// blank reproduces today's behaviour exactly — no env-file injection at all.
+export function readCmuxEnvFile(configText) {
+  const matches = [...stripFencedCodeBlocks(configText).matchAll(CMUX_ENV_FILE_LINE_RE)]
+  if (matches.length > 1) {
+    throw new OperationalError(`refused: config text contains ${matches.length} 'cmux_env_file:' lines — ambiguous (a fenced example?), refusing`)
+  }
+  if (matches.length === 0) return null
+  const raw = matches[0][1].trim()
+  return raw === '' ? null : raw
+}
+
+// readEnvFileKeys(configText) -> string[] (possibly empty). A single-line
+// bracketed list, e.g. `env_file_keys: [KEY1, KEY2]` — the explicit, closed
+// allowlist that is the PRIMARY control (Layer 1) for env-file injection.
+// Every entry is shape-validated against the SAME charset parseEnvFile
+// enforces on a real KEY — a malformed entry (e.g. a missing comma
+// collapsing two names into one) refuses HERE, at the config line, rather
+// than surfacing later as a confusing "undeclared key" at dispatch time.
+export function readEnvFileKeys(configText) {
+  const matches = [...stripFencedCodeBlocks(configText).matchAll(ENV_FILE_KEYS_LINE_RE)]
+  if (matches.length > 1) {
+    throw new OperationalError(`refused: config text contains ${matches.length} 'env_file_keys:' lines — ambiguous (a fenced example?), refusing`)
+  }
+  if (matches.length === 0) return []
+  const raw = matches[0][1].trim()
+  if (raw === '') return []
+  const bracketMatch = /^\[(.*)\]$/.exec(raw)
+  if (!bracketMatch) {
+    throw new OperationalError(`refused: env_file_keys must be a single-line bracketed list (e.g. [KEY1, KEY2]), got: ${JSON.stringify(raw)}`)
+  }
+  const inner = bracketMatch[1].trim()
+  if (inner === '') return []
+  const entries = inner.split(',').map((s) => s.trim()).filter(Boolean)
+  for (const entry of entries) {
+    if (!ENV_FILE_KEY_ENTRY_RE.test(entry)) {
+      throw new OperationalError(`refused: env_file_keys entry ${JSON.stringify(entry)} fails ^[A-Za-z_][A-Za-z0-9_]*$ — fix the entry (a missing comma between two names is the common cause)`)
+    }
+  }
+  return entries
+}
+
+// formatEnvFileRefusal(parsed, configuredPath) -> string. Every refusal names
+// the concrete remediation and NEVER the offending value or line content —
+// env files carry secrets, the same hygiene class as never logging the
+// completion nonce.
+function formatEnvFileRefusal(parsed, configuredPath) {
+  switch (parsed.reason) {
+    case 'env_file_unreadable':
+      return `refused: env_file_unreadable — cmux_env_file (${configuredPath}) must be an absolute path to a regular, readable file no larger than 64 KiB; fix the path or its permissions in .claude/dev-team/config.md`
+    case 'env_file_reserved_key':
+      return `refused: cmux_env_file (${configuredPath}) declares reserved key ${parsed.key}, matched by the reserved family ${JSON.stringify(parsed.matched)} — it can never be overridden; remove it from the file`
+    case 'env_file_undeclared_key':
+      return `refused: cmux_env_file (${configuredPath}) contains key ${parsed.key}, which is not listed in env_file_keys — add it to env_file_keys in .claude/dev-team/config.md, or remove it from the file`
+    case 'env_file_parse_error':
+      return `refused: cmux_env_file (${configuredPath}) failed to parse at line ${parsed.line} — only blank lines, '#' comments, and KEY=VALUE (no export/quotes/continuation/control characters/duplicate keys) are accepted; fix line ${parsed.line}`
+    default:
+      return `refused: cmux_env_file (${configuredPath}) was rejected (${parsed.reason})`
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -573,6 +665,33 @@ export function workspaceCmd(args, ctx) {
     tier = parsed
   }
 
+  // be-11-05 (ADR-018): opt-in env-file injection. Every refusal below is
+  // resolved from config.md + the file on disk alone, BEFORE loadPreflightOrRefuse
+  // and the team-window tree() read further down — a bad env file issues
+  // ZERO cmux invocations. Absent cmux_env_file reproduces today's behaviour
+  // exactly: configuredEnvFilePath stays null, no --env-file is ever emitted,
+  // and no env_file block is ever added to workspace.json.
+  const configText = readConfigText(primaryCheckout)
+  const configuredEnvFilePath = readCmuxEnvFile(configText)
+  const declaredEnvFileKeys = readEnvFileKeys(configText)
+  // QA fix (TOCTOU): parseEnvFile now reads the file exactly once and
+  // returns the sha256 of the SAME bytes it validated — this hash (never a
+  // second, separate hashEnvFile call against the path) is what gets
+  // stamped into workspace.json below, so the record provably describes
+  // bytes this module actually parsed.
+  let parsedEnvFile = null
+  if (configuredEnvFilePath !== null) {
+    parsedEnvFile = parseEnvFile(configuredEnvFilePath, { declaredKeys: declaredEnvFileKeys })
+    if (!parsedEnvFile.ok) {
+      throw new OperationalError(formatEnvFileRefusal(parsedEnvFile, configuredEnvFilePath))
+    }
+  }
+  const currentEnvFileHash = parsedEnvFile ? parsedEnvFile.sha256 : null
+
+  const workspaceStatePath = join(paths.stateDir, 'workspace.json')
+  const priorState = readJsonOrWarn(workspaceStatePath, 'workspace.json')
+  const priorEnvFile = (priorState && priorState.env_file) || null
+
   const { cached, cachePath } = loadPreflightOrRefuse(paths)
 
   const windowId = ensureTeamWindow(cached)
@@ -580,9 +699,64 @@ export function workspaceCmd(args, ctx) {
     writeJsonAtomic(cachePath, { ...cached, team_window_id: windowId })
   }
 
-  const { workspaceId, initialSurfaceId } = ensureWorkspace({
-    windowId, taskSlug, cwd: primaryCheckout, group: slugify(repoSlug),
+  const { workspaceId, initialSurfaceId, created } = ensureWorkspace({
+    windowId, taskSlug, cwd: primaryCheckout, group: slugify(repoSlug), envFile: configuredEnvFilePath,
   })
+
+  // be-11-05: env_file block — stamped ONLY at creation (this is the
+  // FIRST time this workspace object exists, so there is nothing to diverge
+  // from yet); on the reuse branch it is carried forward VERBATIM per the
+  // reuse-branch discriminator table below, never re-stamped.
+  let resolvedEnvFile
+  if (created) {
+    resolvedEnvFile = configuredEnvFilePath
+      ? { path: configuredEnvFilePath, sha256: currentEnvFileHash, recorded_at: new Date().toISOString(), workspace_id: workspaceId }
+      : null
+    // A DECLARED key absent from the file only warns and proceeds — the
+    // undeclared direction (a file key absent from env_file_keys) is the one
+    // that refuses, inside parseEnvFile itself. QA fix: gated on `created`
+    // only — this is the FIRST dispatch's own warning about its own file;
+    // firing it again on every later steady-state reuse call would be
+    // ongoing stderr noise on a path the design wants silent (see the
+    // "common case" reuse branch below).
+    if (parsedEnvFile) {
+      for (const key of declaredEnvFileKeys) {
+        if (!parsedEnvFile.keys.includes(key)) {
+          log(`workspace: env_file_keys declares ${JSON.stringify(key)} but it is absent from ${configuredEnvFilePath} — proceeding`)
+        }
+      }
+    }
+  } else {
+    // QA fix: `recorded` used to collapse THREE distinct states into one
+    // (never had an env file / workspace.json missing-or-malformed
+    // (already handled upstream by readJsonOrWarn's own trust S5-E
+    // absent-plus-loud-warning treatment) / a recorded block that belongs
+    // to a DIFFERENT, now-dead workspace_id after a cmux restart recreated
+    // this workspace under a new id) — all three used to produce the SAME
+    // "no env_file was ever configured" refusal message, which is simply
+    // false for the third case. The workspace_id scoping itself stays
+    // correct (never trust a hash recorded against a dead workspace) but
+    // the refusal now names which of the two distinguishable cases fired.
+    const workspaceIdMismatch = priorEnvFile && priorEnvFile.workspace_id !== workspaceId
+    const recorded = priorEnvFile && !workspaceIdMismatch ? priorEnvFile : null
+    if (recorded === null && configuredEnvFilePath === null) {
+      // null/null — proceed. (Also covers a recreated workspace with no
+      // env file configured now: nothing to diverge from either way.)
+      resolvedEnvFile = null
+    } else if (recorded === null && configuredEnvFilePath !== null && workspaceIdMismatch) {
+      throw new OperationalError(`refused: this workspace appears to have been recreated (a prior env_file was recorded for workspace ${priorEnvFile.workspace_id}, but the live workspace is now ${workspaceId}) — cannot verify whether cmux_env_file (${configuredEnvFilePath}) matches the live workspace's actual environment; close the workspace and re-dispatch`)
+    } else if (recorded === null && configuredEnvFilePath !== null) {
+      throw new OperationalError(`refused: this already-created workspace has no recorded env_file, but cmux_env_file is now configured (${configuredEnvFilePath}) — cannot retroactively add environment injection to a live workspace; close the workspace and re-dispatch`)
+    } else if (recorded !== null && configuredEnvFilePath === null) {
+      throw new OperationalError(`refused: this workspace was created with env_file ${recorded.path} (sha256 ${recorded.sha256}) but cmux_env_file is no longer configured — cannot retroactively remove environment injection from a live workspace; close the workspace and re-dispatch`)
+    } else if (recorded.sha256 !== currentEnvFileHash || recorded.path !== configuredEnvFilePath) {
+      throw new OperationalError(`refused: cmux_env_file changed for an already-created workspace (recorded ${recorded.path} sha256 ${recorded.sha256}; current ${configuredEnvFilePath} sha256 ${currentEnvFileHash}) — close the workspace and re-dispatch to apply the new environment`)
+    } else {
+      // present/present, equal — the common case: proceed silently, carry
+      // the prior block forward verbatim (never re-stamped).
+      resolvedEnvFile = recorded
+    }
+  }
 
   const before = tree({ all: true })
   const win = (before.windows || []).find((w) => w.id === windowId)
@@ -600,17 +774,21 @@ export function workspaceCmd(args, ctx) {
   // be-11-02: workspace.json is rewritten WHOLESALE, so any field not
   // explicitly carried forward here is silently destroyed on a later
   // `workspace` run. `carried` is the single, obvious merge point for every
-  // such field — `tier` here, and a later spec's `env_file` block is meant
-  // to be a one-line addition to this same object, not a rewrite.
-  const workspaceStatePath = join(paths.stateDir, 'workspace.json')
-  const priorState = readJsonOrWarn(workspaceStatePath, 'workspace.json')
+  // such field — `tier` here, and be-11-05's `env_file` block below.
   const resolvedTier = tier !== null ? tier : (priorState?.tier ?? null)
   const carried = { tier: resolvedTier }
-  writeJsonAtomic(workspaceStatePath, {
+  const workspaceStateOut = {
     ...carried,
     window_id: windowId, workspace_id: workspaceId,
     initial_pane_id: initialPaneId, initial_surface_id: initialSurfaceId,
-  })
+  }
+  // be-11-05: no env_file key at all when null — this is what makes the
+  // absent-cmux_env_file case reproduce today's behaviour exactly (no block
+  // is EVER written), rather than an explicit `env_file: null`.
+  if (resolvedEnvFile !== null) {
+    workspaceStateOut.env_file = resolvedEnvFile
+  }
+  writeJsonAtomic(workspaceStatePath, workspaceStateOut)
 
   // be-11-02: the tier colour, when --tier is supplied. Cosmetics never
   // fail a verb — same swallow-and-log shape as setPhase('planning') below.
@@ -636,7 +814,7 @@ export function workspaceCmd(args, ctx) {
 
   return {
     code: 0,
-    json: { window_id: windowId, workspace_id: workspaceId, initial_surface_id: initialSurfaceId, tier: resolvedTier },
+    json: { window_id: windowId, workspace_id: workspaceId, initial_surface_id: initialSurfaceId, tier: resolvedTier, env_file: resolvedEnvFile },
   }
 }
 

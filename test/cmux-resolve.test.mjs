@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { ROOT } from './helpers.mjs'
@@ -11,6 +11,7 @@ import {
   loadRoster, resolveRole,
   expandGrants, composeProfile,
   assertValidationCommands, RefusalError,
+  parseEnvFile, hashEnvFile, ENV_FILE_RESERVED_EXACT, ENV_FILE_RESERVED_PREFIXES,
 } from '../scripts/cmux/resolve.mjs'
 
 const dispatchRecordSchema = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/dispatch-record.schema.json'), 'utf8'))
@@ -596,4 +597,327 @@ test('Rider D: validate() still accepts the terminate lifecycle fixture', async 
     outcome: 'ok',
   })
   assert.deepEqual(validate(dispatchRecordSchema, record), [])
+})
+
+// ---------------------------------------------------------------------------
+// be-11-05 (ADR-018) — parseEnvFile / hashEnvFile / the reserved-key backstop.
+// ---------------------------------------------------------------------------
+
+function writeEnvFile(dir, name, content) {
+  const p = join(dir, name)
+  writeFileSync(p, content)
+  return p
+}
+
+test('parseEnvFile: file-level refusals all share the distinct env_file_unreadable reason', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+
+  // non-absolute path
+  assert.deepEqual(parseEnvFile('relative/path', { declaredKeys: [] }), { ok: false, reason: 'env_file_unreadable' })
+
+  // missing file
+  assert.deepEqual(parseEnvFile(join(dir, 'does-not-exist'), { declaredKeys: [] }), { ok: false, reason: 'env_file_unreadable' })
+
+  // a directory is not a regular file
+  const subdir = join(dir, 'a-directory')
+  mkdirSync(subdir)
+  assert.deepEqual(parseEnvFile(subdir, { declaredKeys: [] }), { ok: false, reason: 'env_file_unreadable' })
+
+  // a symlink is refused via lstatSync, never followed
+  const target = writeEnvFile(dir, 'target-env', 'FOO=1\n')
+  const linkPath = join(dir, 'a-symlink')
+  symlinkSync(target, linkPath)
+  assert.deepEqual(parseEnvFile(linkPath, { declaredKeys: ['FOO'] }), { ok: false, reason: 'env_file_unreadable' })
+
+  // exceeds 64 KiB
+  const bigPath = writeEnvFile(dir, 'too-big-env', `FOO=${'x'.repeat(70 * 1024)}\n`)
+  assert.deepEqual(parseEnvFile(bigPath, { declaredKeys: ['FOO'] }), { ok: false, reason: 'env_file_unreadable' })
+
+  // unreadable (permission-denied) — best-effort: chmod 000 and restore after
+  const unreadablePath = writeEnvFile(dir, 'unreadable-env', 'FOO=1\n')
+  chmodSync(unreadablePath, 0o000)
+  try {
+    if (process.getuid && process.getuid() !== 0) {
+      assert.deepEqual(parseEnvFile(unreadablePath, { declaredKeys: ['FOO'] }), { ok: false, reason: 'env_file_unreadable' })
+    }
+  } finally {
+    chmodSync(unreadablePath, 0o644)
+  }
+})
+
+test('parseEnvFile: ACCEPTED forms — blank lines, # comments, KEY=VALUE, a leading BOM stripped, CRLF normalized to LF', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const content = '﻿# a comment\r\n\r\nFOO=bar\r\nBAZ=qux\r\n'
+  const p = writeEnvFile(dir, 'good-env', content)
+  const result = parseEnvFile(p, { declaredKeys: ['FOO', 'BAZ'] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, ['FOO', 'BAZ'])
+  assert.match(result.sha256, /^[0-9a-f]{64}$/)
+})
+
+// QA fix (Must-Fix #2, proven RCE): npm matches npm_config_* case-
+// INSENSITIVELY, so the backstop must too — every case below uses a
+// mixed/upper spelling deliberately.
+test('parseEnvFile: REFUSAL — reserved key, exact-match and every prefix family, table-driven, INCLUDING mixed/upper-case spellings (case-insensitive backstop)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const cases = [
+    'ANTHROPIC_API_KEY', 'ANTHROPIC_BASE_URL', 'CLAUDE_BIN', 'DEVTEAM_RETURN_PATH',
+    'PATH', 'NODE_OPTIONS', 'NODE_PATH', 'CMUX_BIN', 'GIT_SSH_COMMAND',
+    'npm_config_script_shell', 'DYLD_INSERT_LIBRARIES', 'LD_PRELOAD',
+    'BASH_ENV', 'ENV', 'SHELL', 'IFS',
+    'HOME', 'XDG_CONFIG_HOME', 'ZDOTDIR', 'PROMPT_COMMAND',
+    'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'SSL_CERT_FILE', 'CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE',
+    // proven-RCE regression: the COMMON CI spelling is upper-case, which a
+    // byte-exact prefix check would have missed entirely.
+    'NPM_CONFIG_SCRIPT_SHELL', 'NPM_CONFIG_NODE_OPTIONS',
+    // mixed case on an exact-match entry and on another prefix family.
+    'Path', 'Git_SSH_COMMAND', 'node_options', 'ld_preload',
+  ]
+  for (const key of cases) {
+    const p = writeEnvFile(dir, `reserved-${key.replace(/[^A-Za-z0-9]/g, '')}`, `${key}=whatever-secret-value\n`)
+    const result = parseEnvFile(p, { declaredKeys: [key] })
+    assert.equal(result.ok, false, `expected ${key} to be refused`)
+    assert.equal(result.reason, 'env_file_reserved_key', `case ${key}`)
+    assert.equal(result.key, key)
+    assert.ok(result.matched, `expected a matched reserved family for ${key}`)
+    // the refusal must never carry the value anywhere in the result
+    assert.equal(JSON.stringify(result).includes('whatever-secret-value'), false)
+  }
+})
+
+test('ENV_FILE_RESERVED_EXACT / ENV_FILE_RESERVED_PREFIXES drift guard — the exact frozen sets', () => {
+  assert.deepEqual(
+    [...ENV_FILE_RESERVED_EXACT].sort(),
+    [
+      'BASH_ENV', 'ENV', 'IFS', 'NODE_OPTIONS', 'NODE_PATH', 'PATH', 'SHELL',
+      'HOME', 'XDG_CONFIG_HOME', 'ZDOTDIR', 'PROMPT_COMMAND',
+      'HTTPS_PROXY', 'HTTP_PROXY', 'ALL_PROXY', 'SSL_CERT_FILE', 'CURL_CA_BUNDLE', 'REQUESTS_CA_BUNDLE',
+    ].sort(),
+  )
+  assert.deepEqual([...ENV_FILE_RESERVED_PREFIXES].sort(), ['ANTHROPIC_', 'CLAUDE_', 'CMUX_', 'DEVTEAM_', 'DYLD_', 'GIT_', 'LD_', 'NODE_', 'npm_config_'].sort())
+})
+
+test('parseEnvFile: REFUSAL — reserved beats declared even when the key is listed in env_file_keys', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'reserved-declared-env', 'CMUX_BIN=/tmp/evil\n')
+  const result = parseEnvFile(p, { declaredKeys: ['CMUX_BIN'] })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'env_file_reserved_key')
+  assert.equal(result.key, 'CMUX_BIN')
+})
+
+test('parseEnvFile: REFUSAL — undeclared key names the key; a declared key merely absent from the file is fine (ok:true, warns are the caller\'s job)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const undeclaredPath = writeEnvFile(dir, 'undeclared-env', 'FOO=1\nBAR=2\n')
+  const undeclaredResult = parseEnvFile(undeclaredPath, { declaredKeys: ['FOO'] })
+  assert.equal(undeclaredResult.ok, false)
+  assert.equal(undeclaredResult.reason, 'env_file_undeclared_key')
+  assert.equal(undeclaredResult.key, 'BAR')
+
+  const partialPath = writeEnvFile(dir, 'partial-env', 'FOO=1\n')
+  const partialResult = parseEnvFile(partialPath, { declaredKeys: ['FOO', 'BAR'] })
+  assert.equal(partialResult.ok, true)
+  assert.deepEqual(partialResult.keys, ['FOO'])
+})
+
+test('parseEnvFile: REFUSAL — parser, table-driven, each names ONLY the 1-based line number, never the value/content', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const cases = [
+    { name: 'export-form', content: 'FOO=1\nexport BAR=2\n', line: 2 },
+    { name: 'double-quoted', content: 'FOO="1"\n', line: 1 },
+    { name: 'single-quoted', content: "FOO='1'\n", line: 1 },
+    // QA fix (parser #4a): a backtick-quoted value — dotenv v16+ treats
+    // backtick as a third, multiline-supporting quote character.
+    { name: 'backtick-quoted', content: 'FOO=`1`\n', line: 1 },
+    { name: 'trailing-backslash', content: 'FOO=1\\\n', line: 1 },
+    // QA fix (parser #4b): a trailing backslash followed by a trailing
+    // SPACE must still refuse — a consumer that trims before testing for a
+    // continuation would otherwise read this as one.
+    { name: 'trailing-backslash-then-space', content: 'FOO=1\\ \n', line: 1 },
+    // JS escape only — never a literal NUL byte in the source file itself.
+    { name: 'embedded-control-char', content: 'FOO=1\x00\n', line: 1 },
+    // QA fix (parser #4c, whitelist not denylist): U+0085 (NEL) and
+    // U+2028 (LINE SEPARATOR) — both outside tab/printable-ASCII, both
+    // previously accepted by the old C0+DEL denylist.
+    { name: 'nel-control-char', content: 'FOO=1\u0085\n', line: 1 },
+    { name: 'line-separator-char', content: 'FOO=1\u2028\n', line: 1 },
+    { name: 'duplicate-key', content: 'FOO=1\nFOO=2\n', line: 2 },
+    { name: 'bad-key-charset', content: '1FOO=1\n', line: 1 },
+    { name: 'unmatched-line', content: 'this is not a valid line at all\n', line: 1 },
+  ]
+  for (const c of cases) {
+    const p = writeEnvFile(dir, `parse-${c.name}`, c.content)
+    const result = parseEnvFile(p, { declaredKeys: ['FOO', 'BAR'] })
+    assert.equal(result.ok, false, `expected ${c.name} to refuse`)
+    assert.equal(result.reason, 'env_file_parse_error', `case ${c.name}`)
+    assert.equal(result.line, c.line, `case ${c.name}`)
+    // never the raw content/value anywhere in the refusal result
+    assert.equal('content' in result, false)
+    assert.equal('value' in result, false)
+  }
+})
+
+// QA fix (Must-Fix #3, TOCTOU): parseEnvFile itself must return the sha256
+// of the SAME bytes it validated (one read), not force the caller to
+// re-read-and-hash the path separately.
+test('parseEnvFile: the returned sha256 matches an independently computed digest over the identical bytes', async () => {
+  const { createHash } = await import('node:crypto')
+  const dir = makeTmpDir('cmux-envfile-')
+  const content = 'FOO=bar\nBAZ=qux\n'
+  const p = writeEnvFile(dir, 'hash-env', content)
+  const expected = createHash('sha256').update(Buffer.from(content)).digest('hex')
+  const result = parseEnvFile(p, { declaredKeys: ['FOO', 'BAZ'] })
+  assert.equal(result.ok, true)
+  assert.equal(result.sha256, expected)
+})
+
+test('hashEnvFile: deterministic sha256 over the raw bytes, matching an independently computed digest (standalone utility, retained but no longer used by workspaceCmd\'s own TOCTOU-closed path)', async () => {
+  const { createHash } = await import('node:crypto')
+  const dir = makeTmpDir('cmux-envfile-')
+  const content = 'FOO=bar\nBAZ=qux\n'
+  const p = writeEnvFile(dir, 'hash-env', content)
+  const expected = createHash('sha256').update(Buffer.from(content)).digest('hex')
+  assert.equal(hashEnvFile(p), expected)
+  // deterministic across repeated calls
+  assert.equal(hashEnvFile(p), hashEnvFile(p))
+})
+
+test('hashEnvFile: a byte-for-byte different file hashes differently', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const a = writeEnvFile(dir, 'hash-a', 'FOO=1\n')
+  const b = writeEnvFile(dir, 'hash-b', 'FOO=2\n')
+  assert.notEqual(hashEnvFile(a), hashEnvFile(b))
+})
+
+// ---------------------------------------------------------------------------
+// be-11-05 GAP FILL — line-ending edges, KEY/multi-'=' edges, reserved-key
+// boundary cases, and hashEnvFile's deliberate pre-normalization stance.
+// ---------------------------------------------------------------------------
+
+test('parseEnvFile: a bare-CR (old-Mac) line ending is refused as a control character, not silently accepted as a line break', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  // No \n anywhere — old-Mac line endings are bare \r. raw.replace(/\r\n/g,
+  // '\n') does not touch this (there is no \r\n pair), so the whole file is
+  // ONE line for split('\n') purposes, and that line contains embedded \r
+  // control characters — refused at line 1, never silently mis-split into
+  // two accepted KEY=VALUE lines.
+  const p = writeEnvFile(dir, 'bare-cr-env', 'FOO=1\rBAR=2\r')
+  const result = parseEnvFile(p, { declaredKeys: ['FOO', 'BAR'] })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'env_file_parse_error')
+  assert.equal(result.line, 1)
+})
+
+test('parseEnvFile: a file with no trailing newline on the last line still parses that last line normally', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'no-trailing-newline-env', 'FOO=1\nBAR=2')
+  const result = parseEnvFile(p, { declaredKeys: ['FOO', 'BAR'] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, ['FOO', 'BAR'])
+})
+
+test('parseEnvFile: a BOM-only file (zero bytes after stripping) is accepted with zero keys — a degenerate but valid accept', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'bom-only-env', '﻿')
+  const result = parseEnvFile(p, { declaredKeys: [] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, [])
+})
+
+test('parseEnvFile: a genuinely empty (zero-byte) file is accepted with zero keys', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'empty-env', '')
+  const result = parseEnvFile(p, { declaredKeys: [] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, [])
+})
+
+test('parseEnvFile: a file containing only comments and blank lines is accepted with zero keys', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'comments-only-env', '# just a comment\n\n   \n# another\n')
+  const result = parseEnvFile(p, { declaredKeys: [] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, [])
+})
+
+test('parseEnvFile: KEY/VALUE with multiple "=" — the first "=" splits KEY from VALUE, so FOO=bar=baz is key FOO, value bar=baz (never a parse error)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'multi-eq-env', 'FOO=bar=baz\n')
+  const result = parseEnvFile(p, { declaredKeys: ['FOO'] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, ['FOO'])
+})
+
+test('parseEnvFile: a trailing space between the key and "=" (FOO =bar) fails the KEY=VALUE shape and refuses (space is not in the key charset)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'trailing-space-key-env', 'FOO =bar\n')
+  const result = parseEnvFile(p, { declaredKeys: ['FOO'] })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'env_file_parse_error')
+  assert.equal(result.line, 1)
+})
+
+test('parseEnvFile: a value containing "#" is NOT treated as an inline comment — the whole line is KEY=VALUE, "#" is just part of the value', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'hash-in-value-env', 'FOO=a#b\n')
+  const result = parseEnvFile(p, { declaredKeys: ['FOO'] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, ['FOO'])
+})
+
+test('parseEnvFile: reserved-key boundary — NODE_ENV is refused via the NODE_ prefix family (not just the two literal NODE_OPTIONS/NODE_PATH exact-list members)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'node-env-env', 'NODE_ENV=production\n')
+  const result = parseEnvFile(p, { declaredKeys: ['NODE_ENV'] })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'env_file_reserved_key')
+  assert.equal(result.key, 'NODE_ENV')
+  assert.equal(result.matched, 'NODE_')
+})
+
+test('parseEnvFile: reserved-key boundary — PATHOLOGICAL is NOT refused (PATH is an EXACT-match member, not a prefix; it must never accidentally prefix-match a longer key)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'pathological-env', 'PATHOLOGICAL=1\n')
+  const result = parseEnvFile(p, { declaredKeys: ['PATHOLOGICAL'] })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.keys, ['PATHOLOGICAL'])
+})
+
+// QA fix (Must-Fix #2, superseding the ORIGINAL gap-fill assumption below):
+// reserved matching is now case-INSENSITIVE (npm honours npm_config_* case-
+// insensitively, so the backstop must too) — a lowercase "path" therefore
+// DOES refuse now, exactly like uppercase "PATH". This inverts what an
+// earlier version of this test pinned; case-insensitivity is the fix, not
+// a regression.
+test('parseEnvFile: reserved-key boundary — lowercase "path" IS refused; reserved matching is case-INSENSITIVE (npm itself matches npm_config_* case-insensitively, so the backstop must too)', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const p = writeEnvFile(dir, 'lowercase-path-env', 'path=/usr/local/bin\n')
+  const result = parseEnvFile(p, { declaredKeys: ['path'] })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'env_file_reserved_key')
+  assert.equal(result.key, 'path')
+  assert.equal(result.matched, 'PATH')
+})
+
+test('hashEnvFile: a CRLF and an LF version of the SAME logical content hash DIFFERENTLY — a deliberate security choice (hashes raw pre-normalization bytes), even though parseEnvFile normalizes both to the identical key set', () => {
+  const dir = makeTmpDir('cmux-envfile-')
+  const crlfPath = writeEnvFile(dir, 'crlf-env', 'FOO=1\r\nBAR=2\r\n')
+  const lfPath = writeEnvFile(dir, 'lf-env', 'FOO=1\nBAR=2\n')
+
+  // parseEnvFile normalizes CRLF -> LF, so both parse to the identical keys.
+  const crlfResult = parseEnvFile(crlfPath, { declaredKeys: ['FOO', 'BAR'] })
+  const lfResult = parseEnvFile(lfPath, { declaredKeys: ['FOO', 'BAR'] })
+  assert.equal(crlfResult.ok, true)
+  assert.deepEqual(crlfResult.keys, ['FOO', 'BAR'])
+  assert.equal(lfResult.ok, true)
+  assert.deepEqual(lfResult.keys, ['FOO', 'BAR'])
+
+  // Both parseEnvFile's OWN returned sha256 (single-read, TOCTOU-closed) and
+  // the standalone hashEnvFile utility hash the RAW bytes, pre-normalization
+  // — the two files must hash differently despite being logically identical
+  // post-parse, and parseEnvFile's own hash must agree with hashEnvFile's.
+  assert.notEqual(crlfResult.sha256, lfResult.sha256)
+  assert.equal(crlfResult.sha256, hashEnvFile(crlfPath))
+  assert.equal(lfResult.sha256, hashEnvFile(lfPath))
+  assert.notEqual(hashEnvFile(crlfPath), hashEnvFile(lfPath))
 })

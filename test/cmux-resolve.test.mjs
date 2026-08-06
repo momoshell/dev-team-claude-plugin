@@ -109,7 +109,7 @@ test('renderPathFor is the single derivation site for returns/<stem>.md', () => 
   assert.equal(renderPathFor(record), '/abs/root/tasks/repo/task/returns/be-1a.1.json'.replace('.json', '.md'))
 })
 
-test('sidecarPaths returns the four flat, dispatch_id-keyed sidecar files under stateDir', () => {
+test('sidecarPaths returns the five flat, dispatch_id-keyed sidecar files under stateDir', () => {
   const roots = resolveRoots({ taskArtifactsRoot: '/abs/root' })
   const paths = taskPaths({ roots, repoSlug: 'repo', taskSlug: 'task' })
   const sidecars = sidecarPaths(paths, '11111111-1111-1111-1111-111111111111')
@@ -118,6 +118,8 @@ test('sidecarPaths returns the four flat, dispatch_id-keyed sidecar files under 
     gate: '/abs/root/state/repo/task/11111111-1111-1111-1111-111111111111.gate',
     nonce: '/abs/root/state/repo/task/11111111-1111-1111-1111-111111111111.nonce',
     signalLog: '/abs/root/state/repo/task/11111111-1111-1111-1111-111111111111.signal-log',
+    // be-11-03: the collapse-on-close skip gate.
+    collapsed: '/abs/root/state/repo/task/11111111-1111-1111-1111-111111111111.collapsed',
   })
 })
 

@@ -480,8 +480,11 @@ export function preflight({ roster = [], paths = {}, primaryCheckout, taskArtifa
     // availability is whatever readEvents() itself observes.
     const eventsAvailable = true
     if (!topAvailable) {
+      // be-11-03: the automated quiet/attention timer is driven entirely by
+      // agent.hook.Stop events (exact surface_id attribution), never by
+      // `top` — top_available:false no longer disables anything automated.
       // eslint-disable-next-line no-console
-      console.error('preflight: top is unavailable — top_available:false, the quiet timer is disabled downstream')
+      console.error('preflight: top is unavailable — top_available:false; only the orchestrator\'s manual triage rung 1 (top) is affected, the automated quiet/attention timer does not depend on it')
     }
 
     const preflightJson = {
@@ -1134,43 +1137,124 @@ export const TURN_END_EVENT_NAME = 'agent.hook.Stop'
  * that path are already lowercased — but this function runs surfaceId
  * through normalizeId() itself regardless of caller, so its output is
  * idempotently lowercase even when fed a raw, un-normalized event directly
- * (be-11-03
- * joins this against lowercase-persisted dispatch record UUIDs; an
- * uppercase mismatch there would silently break attribution).
+ * (be-11-03 joins this against lowercase-persisted dispatch record UUIDs;
+ * an uppercase mismatch there would silently break attribution). The
+ * payload.surface_id fallback is intentional (be-11-01's interface
+ * contract) but is a silent degradation from the authoritative top-level
+ * field to a less-trusted one when it's the ONLY source — one loud log
+ * line names it when actually taken (QA fix #10), never on the common
+ * top-level-present path. QA fix #9: occurredAt is re-serialized through
+ * `new Date(...).toISOString()` (the same normalize-at-ingestion treatment
+ * already given to surfaceId via normalizeId) rather than passed through
+ * verbatim — Date.parse is lenient about garbage-adjacent text, and a
+ * malformed-but-parseable value must never ride verbatim into `await`/
+ * `status` JSON or status.json on disk.
  */
 export function parseTurnEndEvent(rawEvent) {
   if (!rawEvent || rawEvent.name !== TURN_END_EVENT_NAME) return null
-  const surfaceId = rawEvent.surface_id ?? rawEvent.payload?.surface_id
+  const topLevelSurfaceId = rawEvent.surface_id
+  const surfaceId = topLevelSurfaceId ?? rawEvent.payload?.surface_id
   const occurredAt = rawEvent.occurred_at
   if (typeof surfaceId !== 'string' || surfaceId === '') return null
   if (typeof occurredAt !== 'string' || occurredAt === '' || Number.isNaN(Date.parse(occurredAt))) return null
-  return { surfaceId: normalizeId(surfaceId), occurredAt, seq: rawEvent.seq }
+  if (topLevelSurfaceId == null) {
+    // eslint-disable-next-line no-console
+    console.error(`parseTurnEndEvent: top-level surface_id absent — falling back to the less-trusted payload.surface_id for event seq ${rawEvent.seq}`)
+  }
+  return { surfaceId: normalizeId(surfaceId), occurredAt: new Date(occurredAt).toISOString(), seq: rawEvent.seq }
 }
 
 /**
- * readEvents({ afterSeq, limit, timeoutMs }) -> { events, seq } | { unavailable: true }
- * A single bounded call — the reconnect/await loop itself belongs to
- * be-1b-E, not this module.
+ * readEvents({ afterSeq, limit, timeoutMs, name }) -> { events, seq } | { unavailable: true }
+ *
+ * QA-fix (be-11-03 gate): `cmux events` is a STREAMING primitive, NOT a
+ * bounded-snapshot primitive — there is no CLI flag that means "give me
+ * what's retained now, don't wait for more." Live-verified against a real
+ * cmux 0.64.22 daemon (2026-08-05):
+ *   - `cmux events --after 0 --limit 1000/2000/4000 --no-ack --no-heartbeat`
+ *     (unfiltered) returned in well under a second, satisfied entirely from
+ *     retained backlog (~4096-event retention window observed).
+ *   - `cmux events --after 0 --limit 5000 ...` (unfiltered, exceeding that
+ *     retention window) BLOCKED for 2+ minutes waiting for enough LIVE
+ *     events to accumulate — it does not return early with a partial
+ *     snapshot.
+ *   - `cmux events --after 0 --name agent.hook.Stop --limit 40 ...`
+ *     BLOCKED after ~28 lines: `--limit` counts POST-FILTER matches, and
+ *     agent.hook.Stop (once per worker turn) is far rarer than the general
+ *     event stream, so a --name-filtered --limit is blocked-by-default in
+ *     practice, not an edge case.
+ *   - `cmux events --after <cursor> ...` with NOTHING new since <cursor>
+ *     also blocks (there is no seq-scoped equivalent of "return empty
+ *     immediately") — confirmed via a direct `--after <current-head>` read.
+ *   - `cmux events --after <cursor> --no-ack --no-heartbeat` with NEITHER
+ *     --limit nor --reconnect still never exits on its own once retained
+ *     backlog is exhausted — it keeps streaming live frames forever.
+ * The ONLY reliable bound is therefore the CALLER'S OWN spawnSync timeout,
+ * not `--limit`. Live-verified (Node 24, macOS) that when spawnSync's own
+ * `timeout` option kills the child, `result.error.code` is set to
+ * `'ETIMEDOUT'` specifically (a controlled --name-filtered read under a
+ * 1500ms timeout: signal 'SIGTERM', error.code 'ETIMEDOUT', 20 complete
+ * lines still recovered from stdout) and `result.stdout` STILL carries
+ * every complete line the child wrote before the kill. A timeout-triggered
+ * kill is therefore an EXPECTED, NORMAL termination path for this call,
+ * not a failure — this function bypasses the generic cmux() wrapper (which
+ * discards stdout on any spawn error) and parses result.stdout directly,
+ * keyed SPECIFICALLY on `result.error?.code === 'ETIMEDOUT'` (QA-fix round
+ * 2: the broader `result.signal != null` also conflated a genuine crash or
+ * an external kill — OOM SIGKILL, some other process's SIGTERM — with our
+ * own bound) to distinguish "our own timeout fired" (valid, possibly
+ * empty, partial read) from a genuine spawn failure (binary missing, a bad
+ * exit unrelated to our own timeout, a crash) — only the latter is
+ * `unavailable`.
+ * `--limit` is still passed as a soft cap (self-limiting memory/output, and
+ * lets a well-satisfied read exit early rather than waiting the full
+ * timeout) but is no longer load-bearing for correctness. `name`, when
+ * given, is passed as `--name <name>` — the fixture ignores it entirely
+ * (matching a genuinely unfiltered read for the "backlog satisfies the
+ * limit fast" case), which is exactly why every caller filtering on
+ * TURN_END_EVENT_NAME also re-filters client-side (parseTurnEndEvent
+ * already does, by construction) rather than trusting the server-side flag
+ * alone.
  */
-export function readEvents({ afterSeq, limit, timeoutMs } = {}) {
+export function readEvents({ afterSeq, limit, timeoutMs, name } = {}) {
   const args = []
   if (afterSeq != null) args.push('--after', String(afterSeq))
   if (limit != null) args.push('--limit', String(limit))
-  // Live-verified working combination (`cmux events --after 0 --limit 3
-  // --no-ack --no-heartbeat` exits 0): this is a single bounded call, not a
-  // subscription, so neither ack-tracking nor the heartbeat channel apply.
+  if (name != null) args.push('--name', name)
   args.push('--no-ack', '--no-heartbeat')
-  const res = cmux('events', args, { timeoutMs })
-  if (!res.ok) return { unavailable: true }
+  const result = runVerb('events', args, { timeoutMs })
+  const stdout = result.stdout ?? ''
   const events = []
-  for (const line of res.stdout.split('\n')) {
+  for (const line of stdout.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
     try {
       events.push(normalizeIds(JSON.parse(trimmed)))
     } catch {
-      // skip a malformed line rather than fail the whole read
+      // A partial trailing line from a timeout-triggered kill mid-write,
+      // or any other malformed line — skipped rather than failing the
+      // whole read.
     }
+  }
+  // QA-fix round 2 (#2): result.signal != null was too broad — it also
+  // conflates a genuine crash or an EXTERNAL kill (OOM SIGKILL, some other
+  // process's SIGTERM) with "our own timeout fired," silently turning a
+  // real failure into a fake "valid empty read". Node sets
+  // result.error.code === 'ETIMEDOUT' SPECIFICALLY when spawnSync's own
+  // `timeout` option is what triggered the kill (live-verified against
+  // real cmux 0.64.22: a controlled --name-filtered read under a 1500ms
+  // timeout came back with signal 'SIGTERM' AND error.code 'ETIMEDOUT',
+  // with 20 complete partial lines still recovered from stdout) — that
+  // specific code is the only thing this treats as a normal, bounded
+  // termination, never "unavailable" on its own, even when it produced
+  // zero events (a genuinely idle window with nothing new looks identical
+  // to a timeout-with-partial-data, and both are valid empty/partial
+  // reads). Anything else non-zero/erroring WITHOUT that specific code
+  // (cmux not running, an unsupported flag, a crash, an external kill,
+  // ...) is a genuine failure.
+  const killedByOwnTimeout = result.error?.code === 'ETIMEDOUT'
+  if (!killedByOwnTimeout && (result.error || result.status !== 0)) {
+    return { unavailable: true }
   }
   const seq = events.length ? events[events.length - 1].seq : (afterSeq ?? 0)
   return { events, seq }

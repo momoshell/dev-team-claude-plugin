@@ -45,10 +45,12 @@ import {
   closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
   PHASES, setPhase, readEvents, tree,
   TIERS, setWorkspaceColor, setProgress, clearProgress,
+  TURN_END_EVENT_NAME, parseTurnEndEvent, readScreen,
 } from './cmuxctl.mjs'
 import {
   collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn,
 } from './ladder.mjs'
+import { detectSignatures } from './triage.mjs'
 import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -974,6 +976,116 @@ function defaultSleep(ms) {
   Atomics.wait(new Int32Array(sab), 0, 0, ms)
 }
 
+// ---------------------------------------------------------------------------
+// be-11-03 — stateless stall triage. No persisted sidecar, no CPU polling: a
+// dispatch's turnEndAt is re-derived fresh on every await()/status() call
+// from a single bounded events read, attributed to a dispatch by an EXACT
+// surface_id match. A doorbell that names the sleeper (agent.hook.Stop DOES
+// carry a top-level UUID surface_id) still only triggers a rescan and an
+// advisory attention flag — never a completion decision; classify()'s
+// completion predicate is untouched.
+// ---------------------------------------------------------------------------
+
+// readTurnEndEvents() -> { events, seq } | { unavailable: true }. A single
+// bounded, cursor-free full-buffer read filtered server-side (best-effort —
+// the fixture ignores --name entirely, and even a real cmux daemon's --name
+// filtering only narrows WHICH events count toward --limit, see below) to
+// TURN_END_EVENT_NAME. Event ids/seqs are boot-scoped: a PERSISTED --after
+// cursor would silently suppress every new event for the rest of the task
+// across a cmux restart, so this never persists or reuses one across calls
+// — but it DOES pass `--after 0` explicitly every time (QA-fix round 2,
+// live-verified against cmux 0.64.22 — see cmuxctl.mjs's readEvents()):
+// omitting --after entirely is NOT the same as "replay everything
+// retained" — live-verified that a bare `cmux events --limit N` (no
+// --after at all) skips retained backlog completely and blocks waiting
+// ONLY for brand-new live events (a real capture: a live event that had
+// just fired 14.2s earlier was still not returned without --after, while
+// `--after 0 --limit N` against the identical backlog returned in 0.02s).
+// `--after 0` is boot-safe by construction — 0 is always a valid starting
+// point since ids/seqs restart from a low number on every boot, so
+// "replay from 0" is simply "replay everything currently retained,"
+// never stale, with no persisted-cursor cross-restart hazard at all.
+//
+// QA-fix (be-11-03 gate, live-verified against cmux 0.64.22 — see
+// cmuxctl.mjs's readEvents() for the full capture): `cmux events --limit N`
+// is a STREAMING primitive that BLOCKS until N frames are observed — it
+// does not return early with a partial snapshot when retained backlog has
+// fewer than N. A --name-filtered limit is blocked-by-default in practice
+// (agent.hook.Stop is far rarer than the general event stream), which is
+// exactly what made the ORIGINAL --limit 2000 / timeoutMs 5000 combination
+// here silently non-functional in production: every await() call would
+// burn the full 5s timeout twice (10s total) and declare events
+// permanently unavailable, because backlog essentially never contains 2000
+// matching Stop events. The fix: `--limit` here is now a soft cap only
+// (readEvents() treats the caller's own spawnSync timeout — not --limit
+// satisfaction — as the real, expected bound, and preserves whatever
+// partial output was captured before a timeout-triggered kill). `limit:
+// 500` stays for two reasons: it satisfies the fixture's "--after and/or
+// --limit required" gate, and it lets a well-satisfied unfiltered read
+// (the no---name retry) exit early rather than waiting the full timeout.
+// `timeoutMs: 2000` (down from 5000) bounds the worst-case per-attempt
+// wait to a value comfortably above every live-verified backlog-satisfied
+// read time (well under 1s for thousands of events) without imposing a
+// long stall on the genuinely-idle case. A --name-filtered call that comes
+// back `unavailable` (a REAL failure, never merely "timed out with
+// events") is retried ONCE without --name before events are declared
+// unavailable for this call.
+function readTurnEndEvents() {
+  let evRes = readEvents({ afterSeq: 0, name: TURN_END_EVENT_NAME, limit: 500, timeoutMs: 2000 })
+  if (evRes.unavailable) {
+    log('events: cmux events --name-filtered read failed — retrying once without --name before declaring events unavailable')
+    evRes = readEvents({ afterSeq: 0, limit: 500, timeoutMs: 2000 })
+  }
+  return evRes
+}
+
+// deriveTurnEndAt(records, rawEvents) -> { [dispatch_id]: isoOccurredAt }.
+// Attribution is an EXACT surface_id match against NON-TERMINAL records
+// (record.outcome === null && record.surface !== null) — never cwd, never a
+// workspace-wide "arm everyone" fallback. Two non-terminal records
+// constructed to share a surface_id fail CLOSED: NEITHER arms, and one
+// `surface_id_collision` line is logged — mirroring findDocTabSurface's own
+// ambiguity doctrine. Every matching event (both 'received' and 'completed'
+// phase, unfiltered — the phase enum is not verified closed) folds via
+// max(occurred_at); double-counting is harmless. The name filter is applied
+// PER EVENT via parseTurnEndEvent regardless of whether the server honored
+// --name (the fixture does not) — this is the mandatory client-side
+// re-filter, and it is what actually keeps a non-Stop event (e.g.
+// notification.requested, which also carries an id) from arming anything.
+function deriveTurnEndAt(records, rawEvents) {
+  const bySurface = new Map()
+  // QA fix (#14): count every non-terminal record sharing a surface_id, not
+  // just "two" — the fail-closed logic below already generalizes to N>=3,
+  // the log line now reports the real count instead of a hardcoded one.
+  const countBySurface = new Map()
+  for (const record of records) {
+    if (record.outcome !== null && record.outcome !== undefined) continue
+    if (!record.surface) continue
+    const sid = record.surface.surface_id
+    countBySurface.set(sid, (countBySurface.get(sid) || 0) + 1)
+    if (!bySurface.has(sid)) bySurface.set(sid, record.dispatch_id)
+  }
+  for (const [sid, count] of countBySurface) {
+    if (count > 1) {
+      bySurface.delete(sid)
+      log(`surface_id_collision: ${count} non-terminal dispatches share surface_id ${sid} — attention armed for none of them`)
+    }
+  }
+
+  const turnEndAt = {}
+  for (const rawEvent of rawEvents || []) {
+    const parsed = parseTurnEndEvent(rawEvent)
+    if (!parsed) continue
+    const dispatchId = bySurface.get(parsed.surfaceId)
+    if (!dispatchId) continue
+    const prior = turnEndAt[dispatchId]
+    if (!prior || Date.parse(parsed.occurredAt) > Date.parse(prior)) {
+      turnEndAt[dispatchId] = parsed.occurredAt
+    }
+  }
+  return turnEndAt
+}
+
 const AWAIT_TICK_MS_DEFAULT = 4000
 const AWAIT_CAP_DEFAULT_S = 120
 const AWAIT_CAP_MIN_S = 5
@@ -1063,18 +1175,62 @@ export function awaitCmd(args, ctx, deps = {}) {
   }
 
   try {
+    // cursorPath stays written at its existing sites below (never retired)
+    // but be-11-03 never passes it as --after — see readTurnEndEvents'
+    // header comment. It is read here only to preserve its prior value
+    // across a call that never touches events (eventsDisabled).
     let cursor = Number(readTextOrNull(paths.cursorPath)) || 0
     let eventsDisabled = false
     const remaining = new Set(ids)
+    // be-11-03: turnEndAt is derived ONCE per await() invocation (below) and
+    // reused across every internal tick of THIS call — there is no
+    // cross-invocation state, so "once per raise" (the read-screen
+    // transition fire, further down) is scoped to a single await() call.
+    let turnEndAt = {}
+    let previousAttentionIds = new Set()
 
     let isFirstTick = true
     // eslint-disable-next-line no-constant-condition
     while (true) {
+      // be-11-03: the bounded events catch-up now runs ABOVE the
+      // per-dispatch loop (it used to sit after it, its result discarded
+      // except for cursor advancement) so turnEndAt is available to THIS
+      // tick's classify() calls. Still gated to fire once per INVOCATION
+      // (on the first tick only, never once per internal polling tick) —
+      // the pinned call bound only holds if a chunked join's total cmux
+      // calls scale with the number of chunked await() calls, not with the
+      // number of ticks inside any one of them. `eventsDisabled` is
+      // write-only per call (set at most once) — its name describes "no
+      // more attempts this call", not an ongoing per-tick state machine.
+      if (isFirstTick && !eventsDisabled) {
+        const evRes = readTurnEndEvents()
+        if (evRes.unavailable) {
+          eventsDisabled = true
+          log("await: cmux events catch-up failed on this call's single attempt — the events channel (and attention triage with it) is unavailable for the rest of this call; every other classification is unaffected")
+        } else {
+          // QA fix (#7): cursorPath is vestigial (never passed as --after,
+          // see readTurnEndEvents' header comment) but MUST NOT regress —
+          // an empty/--name-filtered-to-empty read otherwise silently
+          // writes seq back to afterSeq ?? 0. Math.max keeps it
+          // monotonic even though nothing reads it today.
+          cursor = Math.max(cursor, evRes.seq)
+          // QA fix (#6): scan ALL non-terminal records in the task dir for
+          // surface_id-collision purposes (matching statusCmd's own scan),
+          // not just the ids in THIS await() call's `remaining` set — the
+          // fail-closed "arm neither on collision" guarantee must hold
+          // regardless of which verb happens to observe the collision.
+          const attributionRecords = listRecords(paths.dispatchDir)
+          turnEndAt = deriveTurnEndAt(attributionRecords, evRes.events)
+        }
+      }
+      isFirstTick = false
+
       // lifecycle S3: each id's record is re-read from disk EVERY tick
       // (never cached across the loop) — a record terminated concurrently
       // by `close` or the prep-abort path must be visible on the very next
       // tick, not invisible for the rest of the cap window.
       const resolvedNow = []
+      const currentAttentionIds = new Set()
       for (const id of [...remaining]) {
         const record = findRecordByDispatchId(paths.dispatchDir, id)
         if (!record) {
@@ -1083,34 +1239,31 @@ export function awaitCmd(args, ctx, deps = {}) {
         }
         const sidecars = sidecarPaths(paths, id)
         const fsState = collectFsState({ record, paths: { exitPath: sidecars.exit, gatePath: sidecars.gate } })
-        const classification = classify({ record, fsState, tree: null, now: now(), quietState: null, topIdle: null })
+        const classification = classify({ record, fsState, tree: null, now: now(), turnEndAt: turnEndAt[id] ?? null })
+        if (classification.state === 'attention') {
+          currentAttentionIds.add(id)
+          // be-11-03(F): read-screen fires ONLY on the TRANSITION into
+          // attention — once per raise, scoped to this invocation (compare
+          // against previousAttentionIds, carried across ticks of this same
+          // while loop only). The reduced {lines, last_line_sha256,
+          // matched[]} tuple is logged; it is never returned in JSON, never
+          // persisted, and the raw frame itself never leaves this scope —
+          // a screen-read failure (readScreen never throws) is silently
+          // skipped, mirroring presentReturn's own posture that a
+          // diagnostic failure is never a resolution failure.
+          if (!previousAttentionIds.has(id) && record.surface) {
+            const frame = readScreen(record.surface.surface_id, { lines: 40 })
+            if (frame != null) {
+              const sig = detectSignatures(frame)
+              log(`await: dispatch ${id} entered attention — screen signature scan lines=${sig.lines} last_line_sha256=${sig.last_line_sha256} matched=${JSON.stringify(sig.matched)}`)
+            }
+          }
+        }
         if (classification.state !== 'running' && classification.state !== 'attention') {
           resolvedNow.push({ id, record, classification, fsState })
         }
       }
-
-      // NOTE (deliberate, do not "fix" back): the spec's own criteria are
-      // mutually inconsistent here — one wording says the events catch-up
-      // runs "per tick", another pins the invocation bound at dispatches +
-      // ceil(elapsed/cap) + 2. This module keeps the bound: the bounded
-      // events catch-up runs ONCE per await() INVOCATION (on the first
-      // tick, after the fs collection above), never once per internal
-      // polling tick — the bound only holds if a chunked join's total cmux
-      // calls scale with the number of chunked await() calls, not with the
-      // number of ticks inside any one of them. `eventsDisabled` is
-      // therefore write-only per call (set at most once, on that single
-      // attempt) — its name describes "no more attempts this call", not an
-      // ongoing per-tick state machine.
-      if (isFirstTick && !eventsDisabled) {
-        const evRes = readEvents({ afterSeq: cursor, limit: 500, timeoutMs: 5000 })
-        if (evRes.unavailable) {
-          eventsDisabled = true
-          log("await: cmux events catch-up failed on this call's single attempt — the events channel (and the quiet timer with it) is unavailable for the rest of this call")
-        } else {
-          cursor = evRes.seq
-        }
-      }
-      isFirstTick = false
+      previousAttentionIds = currentAttentionIds
 
       if (resolvedNow.length > 0) {
         for (const r of resolvedNow) remaining.delete(r.id)
@@ -1137,6 +1290,11 @@ export function awaitCmd(args, ctx, deps = {}) {
           json: {
             resolved: resolvedNow.map((r) => ({ dispatch_id: r.id, state: r.classification.state, warnings: r.classification.warnings })),
             remaining: [...remaining],
+            // be-11-03: an attention dispatch stays in `remaining` and NEVER
+            // appears in `resolved` — attention never terminates a join and
+            // never removes a dispatch from `remaining` (ADR-017: wall-clock
+            // timeout_s is the only runaway bound).
+            attention: [...currentAttentionIds].map((id) => ({ dispatch_id: id, since: turnEndAt[id], reason: 'quiet_after_turn_end' })),
           },
         }
       }
@@ -1145,7 +1303,14 @@ export function awaitCmd(args, ctx, deps = {}) {
       if (elapsedMs >= capS * 1000) {
         writeTextAtomic(paths.cursorPath, String(cursor))
         reportProgress(ids.length - remaining.size, ids.length)
-        return { code: 0, json: { status: 'still-running', remaining: [...remaining] } }
+        return {
+          code: 0,
+          json: {
+            status: 'still-running',
+            remaining: [...remaining],
+            attention: [...currentAttentionIds].map((id) => ({ dispatch_id: id, since: turnEndAt[id], reason: 'quiet_after_turn_end' })),
+          },
+        }
       }
 
       sleep(Math.min(tickMs, Math.max(capS * 1000 - elapsedMs, 0)))
@@ -1190,6 +1355,69 @@ function paneExistsInTree(liveTree, paneId) {
     for (const ws of w.workspaces || []) {
       for (const p of ws.panes || []) {
         if (p.id === paneId) return true
+      }
+    }
+  }
+  return false
+}
+
+// safeTree(dispatchId, purpose) -> tree | null. QA fix round 2 (#3):
+// cmuxctl.mjs's tree() THROWS on failure rather than returning null — every
+// OTHER topology read in this file's closeCmd/statusCmd already tolerates a
+// wedged substrate (statusCmd wraps its own `tree({ all: true })` in a
+// try/catch; presentReturn never throws), but the three collapse-on-close
+// reads added by be-11-03 did not, and they all run AFTER the record is
+// already marked terminal — an unguarded throw there means closeCmd never
+// returns its JSON response even though the record was already correctly
+// finalized on disk. One loud line, then null; every call site below
+// already treats null the same as "can't confirm the doc-tab sibling" and
+// falls through to the fail-closed "keep the terminal surface" branch.
+function safeTree(dispatchId, purpose) {
+  try {
+    return tree({ all: true })
+  } catch (err) {
+    log(`close: dispatch ${dispatchId}: tree() failed while ${purpose} (${err.message}) — degrading to keep the terminal surface; cosmetics/collapse never fail close`)
+    return null
+  }
+}
+
+// findVerifiedDocTabSibling(t, {paneId, terminalSurfaceId}) -> { id, ambiguous }
+// QA fix (#11, security-lens warning 3): findDocTabSurface's own "fall back
+// to ANY remaining surface if no markdown one exists" behavior is fine
+// everywhere else this codebase uses it (mount/reorder decisions — a wrong
+// guess there only misdirects a panel, which is harmless) — but a positive
+// return HERE authorizes a PERMANENT closeSurface call on the dispatch's
+// terminal surface. This wrapper requires the resolved candidate to
+// actually be doc-tab-typed (`markdown`, from mountDocTab rungs 1/3, or
+// `browser`, from rung 2's file:// fallback) — never the broader "any
+// surface" fallback — for this one high-stakes decision only.
+function findVerifiedDocTabSibling(t, { paneId, terminalSurfaceId }) {
+  const found = findDocTabSurface(t, { paneId, terminalSurfaceId })
+  if (!found.id) return found
+  const surface = (t.windows || [])
+    .flatMap((w) => w.workspaces || [])
+    .flatMap((ws) => ws.panes || [])
+    .flatMap((p) => p.surfaces || [])
+    .find((s) => s.id === found.id)
+  if (!surface || (surface.type !== 'markdown' && surface.type !== 'browser')) {
+    return { id: null, ambiguous: false }
+  }
+  return found
+}
+
+// surfaceExistsInTree(liveTree, surfaceId) -> boolean. QA fix (#4): the only
+// honest way to confirm closeSurface() actually took effect, since it never
+// reports success/failure itself — used to gate the .collapsed sidecar
+// write on the terminal surface's CONFIRMED absence, never its mere
+// attempted closure.
+function surfaceExistsInTree(liveTree, surfaceId) {
+  if (!liveTree) return false
+  for (const w of liveTree.windows || []) {
+    for (const ws of w.workspaces || []) {
+      for (const p of ws.panes || []) {
+        for (const s of p.surfaces || []) {
+          if (s.id === surfaceId) return true
+        }
       }
     }
   }
@@ -1274,7 +1502,7 @@ export function closeCmd(args, ctx) {
   const recordPath = join(paths.dispatchDir, `${stemOf(record.slice_id, record.attempt)}.json`)
   const sidecars = sidecarPaths(paths, record.dispatch_id)
   const fsState = collectFsState({ record, paths: { exitPath: sidecars.exit, gatePath: sidecars.gate } })
-  const classification = classify({ record, fsState, tree: null, now: Date.now(), quietState: null, topIdle: null })
+  const classification = classify({ record, fsState, tree: null, now: Date.now() })
 
   let outcome
   let postconditionResult = null
@@ -1318,13 +1546,86 @@ export function closeCmd(args, ctx) {
   const roleDef = roleDefForRecovery(ctx, record.role)
   if (record.surface) {
     if (roleDef.doc_tab) {
-      // doc-tab roles keep the terminal surface; re-ordering the doc tab
-      // first is a within-pane selection (never focus-pane / window focus).
-      // S8: render + present the return one more time on close (idempotent
-      // — a no-op if presentReturn already ran from awaitCmd) so the doc
-      // tab is current even if `close` is invoked without a prior `await`.
-      presentReturn(record, roleDef)
-      log(`close: dispatch ${record.dispatch_id} is a doc-tab role — terminal surface kept`)
+      // be-11-03 STALE TERMINAL SURFACE: a prior close already collapsed
+      // this dispatch (terminal surface closed, sidecars.collapsed
+      // written). Skip entirely — presentReturn's reorder and any mount
+      // attempt would otherwise target a dead terminal surface id on every
+      // repeat close, logging spurious errors for nothing.
+      if (readTextOrNull(sidecars.collapsed) != null) {
+        log(`close: dispatch ${record.dispatch_id} was already collapsed on a prior close — skipping re-present/re-mount against the dead terminal surface`)
+      } else {
+        // doc-tab roles keep the terminal surface UNLESS a sibling doc-tab
+        // surface can be positively verified (spike S19: closing one of
+        // several sibling surfaces collapses the pane to its remaining
+        // tab(s); the pane itself only closes when its LAST surface
+        // closes). S8: render + present the return one more time on close
+        // (idempotent — a no-op if presentReturn already ran from
+        // awaitCmd) so the doc tab is current even if `close` is invoked
+        // without a prior `await` — and, crucially, so a sibling doc-tab
+        // surface that presentReturn itself just mounted is visible to the
+        // fresh tree read below.
+        presentReturn(record, roleDef)
+        // QA fix round 2 (#3): all three tree() reads below sit AFTER the
+        // record is already marked terminal (on disk). tree() THROWS
+        // rather than returning null on failure — on a wedged/unreachable
+        // substrate (exactly the scenario an orchestrator is closing a
+        // stalled pane in), an unguarded throw here would mean closeCmd
+        // never returns its {dispatch_id, outcome, warnings,
+        // postcondition} JSON at all, even though the record itself was
+        // already correctly finalized. safeTree() degrades every one of
+        // these three reads to "couldn't verify" (null) with one loud line
+        // instead — every caller below already treats a failed/negative
+        // verification as "keep the terminal surface," the same
+        // fail-closed posture as an ambiguous pane, so this never changes
+        // what a SUCCESSFUL collapse looks like, only what happens when
+        // the substrate can't even be asked.
+        const verifyTree = safeTree(record.dispatch_id, 'verifying the doc-tab sibling before collapse')
+        const found = verifyTree ? findVerifiedDocTabSibling(verifyTree, { paneId: record.surface.pane_id, terminalSurfaceId: record.surface.surface_id }) : { id: null, ambiguous: false }
+        if (found.id) {
+          // ACCEPTED COST: once the terminal surface is gone the doc tab
+          // can never be re-mounted for this dispatch again (mounting
+          // anchors on the terminal surface) — the parent-rendered
+          // returns/<stem>.md on disk is the recovery path from here.
+          // found.ambiguous also falls into the else branch below
+          // (findDocTabSurface fails closed on ambiguity — an ambiguous
+          // pane never gets its terminal closed either).
+          //
+          // QA fix (#5, correctness-lens W-3): re-verify the sibling doc
+          // tab is STILL present immediately before the close call —
+          // closeSurface() itself only re-validates the TERMINAL surface
+          // (virtually always still present), never the doc-tab sibling
+          // whose presence is the ENTIRE justification for closing it. If
+          // the doc tab vanished in the window between the check above and
+          // now, refuse to close rather than taking the whole pane down.
+          const reverifyTree = safeTree(record.dispatch_id, 're-verifying the doc-tab sibling immediately before close')
+          const reverifyFound = reverifyTree ? findVerifiedDocTabSibling(reverifyTree, { paneId: record.surface.pane_id, terminalSurfaceId: record.surface.surface_id }) : { id: null, ambiguous: false }
+          if (!reverifyFound.id) {
+            log(`close: dispatch ${record.dispatch_id}'s sibling doc-tab surface could not be re-verified present (disappeared, or the substrate is unreachable) — refusing to close the terminal surface (would take the whole pane down); terminal surface ${record.surface.surface_id} kept`)
+          } else {
+            closeSurface(record.surface.surface_id)
+            // QA fix (#4, correctness-lens W-4): closeSurface() never
+            // reports whether the underlying close actually succeeded —
+            // re-read a FRESH tree and gate the .collapsed sidecar write
+            // on the terminal surface's confirmed absence. Writing it
+            // unconditionally would permanently disable doc-tab
+            // recovery/reorder for a dispatch whose terminal surface was
+            // never actually closed (e.g. a transient close-surface
+            // failure). A tree() failure here degrades the SAME way — no
+            // confirmation, no write, safe to retry the collapse later.
+            const postCloseTree = safeTree(record.dispatch_id, 'confirming the terminal surface actually closed')
+            if (!postCloseTree) {
+              log(`close: dispatch ${record.dispatch_id}'s post-close verification could not run (substrate unreachable) — .collapsed NOT written; will retry the collapse on the next close`)
+            } else if (surfaceExistsInTree(postCloseTree, record.surface.surface_id)) {
+              log(`close: dispatch ${record.dispatch_id}'s close-surface call for the terminal surface did not take effect (still present on a fresh tree) — .collapsed NOT written; will retry the collapse on the next close`)
+            } else {
+              writeTextAtomic(sidecars.collapsed, new Date().toISOString())
+              log(`close: dispatch ${record.dispatch_id} collapsed to its doc tab — terminal surface ${record.surface.surface_id} closed`)
+            }
+          }
+        } else {
+          log(`close: dispatch ${record.dispatch_id} is a doc-tab role but no sibling doc-tab surface was verified — terminal surface ${record.surface.surface_id} kept so the pane survives`)
+        }
+      }
     } else {
       closeSurface(record.surface.surface_id)
     }
@@ -1381,7 +1682,19 @@ export function statusCmd(args, ctx) {
     liveTree = null
   }
 
-  const rows = reconcile({ records, fsState: fsStateByDispatch, tree: liveTree, now: Date.now() })
+  // be-11-03: status runs its OWN independent filtered events read (one
+  // extra cmux call in a manual, read-only verb is acceptable — unlike
+  // await's pinned per-invocation bound) to thread the same
+  // stateless/no-latch attention derivation into reconcile().
+  const turnEndAtEvRes = readTurnEndEvents()
+  let turnEndAt = {}
+  if (turnEndAtEvRes.unavailable) {
+    log('status: cmux events read unavailable — attention triage disabled for this call; every other classification is unaffected')
+  } else {
+    turnEndAt = deriveTurnEndAt(records, turnEndAtEvRes.events)
+  }
+
+  const rows = reconcile({ records, fsState: fsStateByDispatch, tree: liveTree, now: Date.now(), turnEndAt })
 
   // Re-mount doc tabs from files when the panel is gone (S20: markdown
   // panels do not survive a cmux restart). A role only reaches here with a
@@ -1391,15 +1704,28 @@ export function statusCmd(args, ctx) {
     const roleDef = roleDefForRecovery(ctx, record.role)
     if (!roleDef.doc_tab || !record.surface) continue
     if (!liveTree) continue
+    // be-11-03 STALE TERMINAL SURFACE: a prior close already collapsed this
+    // dispatch — the re-mount loop must not attempt to mount against a dead
+    // terminal surface id.
+    const collapsedSidecar = sidecarPaths(paths, record.dispatch_id).collapsed
+    if (readTextOrNull(collapsedSidecar) != null) continue
     const paneId = record.surface.pane_id
     const terminalSurfaceId = record.surface.surface_id
-    // Gate on pane liveness ALONE, never on record.outcome. closeCmd
-    // deliberately KEEPS a doc-tab role's terminal surface and pane (never
-    // closeSurface for those), so a record that already closed 'ok' can
-    // still have a perfectly live pane whose doc tab needs recovering after
-    // a cmux restart (S20) — "the architecture-package viewer stays open
-    // for the whole task" is a design invariant, not just a while-running
-    // one. The bound pane itself must still be present in the
+    // Gate on pane liveness ALONE, never on record.outcome. QA fix (#12):
+    // this used to say closeCmd "deliberately KEEPS a doc-tab role's
+    // terminal surface and pane (never closeSurface for those)" — that
+    // stopped being universally true the moment be-11-03 shipped
+    // collapse-on-close (immediately above, in the very check this comment
+    // sits under): closeCmd now closes the terminal surface whenever a
+    // sibling doc-tab surface is positively verified, and ONLY keeps it
+    // when no sibling was verified (the mount-chain-failed case). The
+    // `.collapsed`-sidecar skip above already handles the collapsed case;
+    // what THIS loop still legitimately recovers is a record whose
+    // terminal surface was KEPT (never collapsed) and whose doc tab alone
+    // went missing after a cmux restart (S20) — "the architecture-package
+    // viewer stays open for the whole task" remains the invariant for that
+    // surviving-terminal-surface case, not for every doc-tab record
+    // unconditionally. The bound pane itself must still be present in the
     // ALREADY-fetched liveTree — a pane gone from the tree (not just its
     // doc-tab surface) is nothing this loop can safely re-mount into, and
     // is exactly the noise case (a torn-down/aborted record) this check
@@ -1431,7 +1757,11 @@ export function statusCmd(args, ctx) {
     log(`status: unreadable record at ${u.path}: ${u.error}`)
   }
 
-  const statusJson = { task_slug: taskSlug, generated_at: new Date().toISOString(), rows, unreadable }
+  const attention = rows
+    .filter((row) => row.state === 'attention')
+    .map((row) => ({ dispatch_id: row.dispatch_id, since: turnEndAt[row.dispatch_id], reason: 'quiet_after_turn_end' }))
+
+  const statusJson = { task_slug: taskSlug, generated_at: new Date().toISOString(), rows, unreadable, attention }
   writeJsonAtomic(paths.statusPath, statusJson)
   return { code: 0, json: statusJson }
 }

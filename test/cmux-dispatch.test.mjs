@@ -14,7 +14,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, readdirSync, symlinkSync, cpSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, readdirSync, symlinkSync, cpSync, chmodSync,
 } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -45,6 +45,7 @@ const {
   ensureWorkspace, TIERS, TIER_COLORS, recoverNewId, cmux, findSurface,
   BROWSER_LOAD_STATE, browserVerb, browserOpen, browserGoto, browserWaitReady,
   browserErrorsClear, browserErrorsList, browserScreenshot,
+  BROWSER_OPEN_SPAWN_TIMEOUT_MS, BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS,
 } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
 const {
   readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
@@ -4555,6 +4556,108 @@ test('browserOpen: a hung `browser open` spawn is killed by its own 5000ms timeo
   assert.ok(elapsedMs < 9000, `expected the 5000ms spawn bound to be enforced well under 9000ms, took ${elapsedMs}ms`)
 })
 
+// be-12-02 fix-round item 6: browserGoto/browserWaitReady/browserErrorsClear/
+// browserErrorsList/browserScreenshot were previously covered only by a
+// source-text argv-regex check (proves the timeoutMs literal is TYPED, never
+// that it reaches spawnSync and is enforced). These five hang tests close
+// that gap, mirroring the browserOpen hang test's shape exactly.
+test('browserGoto: a hung `browser goto` spawn is killed by its own 20000ms timeoutMs, returns false, logs spawn_error — never hangs the caller', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-goto-hang')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserGotoHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const start = Date.now()
+  let result
+  const stderr = captureStderr(() => { result = browserGoto(opened.surfaceId, 'http://example.com/') })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(result, false)
+  assert.match(stderr, /spawn_error/)
+  assert.ok(elapsedMs < 25000, `expected the 20000ms spawn bound to be enforced well under 25000ms, took ${elapsedMs}ms`)
+})
+
+test('browserWaitReady: a hung `browser wait` spawn is killed by its own 25000ms timeoutMs, returns false, logs spawn_error — never hangs the caller', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-wait-hang')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserWaitHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const start = Date.now()
+  let result
+  const stderr = captureStderr(() => { result = browserWaitReady(opened.surfaceId) })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(result, false)
+  assert.match(stderr, /spawn_error/)
+  assert.ok(elapsedMs < 30000, `expected the 25000ms spawn bound to be enforced well under 30000ms, took ${elapsedMs}ms`)
+})
+
+test('browserErrorsClear: a hung `browser errors clear` spawn is killed by its own 10000ms timeoutMs, returns false, logs spawn_error — never hangs the caller', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-errors-clear-hang')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserErrorsClearHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const start = Date.now()
+  let result
+  const stderr = captureStderr(() => { result = browserErrorsClear(opened.surfaceId) })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(result, false)
+  assert.match(stderr, /spawn_error/)
+  assert.ok(elapsedMs < 15000, `expected the 10000ms spawn bound to be enforced well under 15000ms, took ${elapsedMs}ms`)
+})
+
+test('browserErrorsList: a hung `browser errors list` spawn is killed by its own 10000ms timeoutMs, returns null, logs spawn_error — never hangs the caller', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-errors-list-hang')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserErrorsListHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const start = Date.now()
+  let result
+  const stderr = captureStderr(() => { result = browserErrorsList(opened.surfaceId) })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(result, null)
+  assert.match(stderr, /spawn_error/)
+  assert.ok(elapsedMs < 15000, `expected the 10000ms spawn bound to be enforced well under 15000ms, took ${elapsedMs}ms`)
+})
+
+test('browserScreenshot: a hung `browser screenshot` spawn is killed by its own 20000ms timeoutMs, returns false, logs spawn_error — never hangs the caller', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-screenshot-hang')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const outPath = join(mkdtempSync(join(tmpdir(), 'browser-shot-hang-')), 'verify.png')
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserScreenshotHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const start = Date.now()
+  let result
+  const stderr = captureStderr(() => { result = browserScreenshot(opened.surfaceId, outPath) })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(result, false)
+  assert.equal(existsSync(outPath), false)
+  assert.match(stderr, /spawn_error/)
+  assert.ok(elapsedMs < 25000, `expected the 20000ms spawn bound to be enforced well under 25000ms, took ${elapsedMs}ms`)
+})
+
 test('tree(): a hung read is killed by its own explicit timeoutMs (never hangs the caller), and the underlying spawn error code is spawn_error', () => {
   const { env } = setUpWorkspace('browser-tree-hang')
   const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
@@ -4603,7 +4706,7 @@ test('source-text: every browser wrapper logs the error CODE only, never `.messa
 
 test('source-text: every browser wrapper passes an explicit timeoutMs to browserVerb, matching its IC-2 bound', () => {
   const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'), 'utf8')
-  assert.match(src, /browserVerb\('open', \[url, '--workspace', workspaceId, '--focus', 'false'\], \{ timeoutMs: 5000 \}\)/)
+  assert.match(src, /browserVerb\('open', \[url, '--workspace', workspaceId, '--focus', 'false'\], \{ timeoutMs: BROWSER_OPEN_SPAWN_TIMEOUT_MS \}\)/)
   assert.match(src, /browserVerb\('goto', \[surfaceId, url\], \{ timeoutMs: 20000 \}\)/)
   assert.match(src, /browserVerb\('wait', \[surfaceId, '--load-state', BROWSER_LOAD_STATE, '--timeout-ms', '20000'\], \{ timeoutMs \}\)/)
   assert.match(src, /browserVerb\('errors', \['clear', surfaceId\], \{ timeoutMs: 10000 \}\)/)
@@ -4622,7 +4725,6 @@ const PREVIEW_URL = 'http://localhost:3000/'
 function setUpPreviewWorkspace(prefix, opts = {}) {
   const built = setUpWorkspace(prefix, opts)
   writeConfigMd(built.ctx.primaryCheckout, `cmux_preview_url: ${PREVIEW_URL}\n`)
-  addBrowserOpenToPreflightCache(built.ctx)
   return built
 }
 
@@ -4710,20 +4812,6 @@ function reorderPanesInState(env, workspaceId) {
   }
   saveFakeState(env, state)
 }
-
-// addBrowserOpenToPreflightCache(ctx) -> void. The fake's LIVE_METHODS
-// (be-12-01, frozen, out of this slice's scope) does not carry a literal
-// 'browser.open' RPC method name — hand-append it to the already-cached
-// preflight.json (isValidPreflightCache only checks shape, never content)
-// so dispatch-level integration tests can exercise trigger conjunct 4 held
-// true without touching the fixture.
-function addBrowserOpenToPreflightCache(ctx) {
-  const p = join(ctx.paths.stateDir, 'preflight.json')
-  const cached = JSON.parse(readFileSync(p, 'utf8'))
-  writeFileSync(p, JSON.stringify({ ...cached, methods: [...cached.methods, 'browser.open'] }))
-}
-
-const CACHED_METHODS_WITH_BROWSER_OPEN = { methods: ['browser.open', 'workspace.close'] }
 
 // ---------------------------------------------------------------------------
 // readCmuxPreviewUrl + validator (D8, errata untouched)
@@ -4901,27 +4989,24 @@ test('trigger conjunct 3: dropping isolation===\'worktree\' must fail a test (re
   assert.equal('preview' in primaryRes.json, false)
 })
 
-test('trigger conjunct 4: preflight cache missing browser.open (the fixture\'s frozen LIVE_METHODS carries no such literal by default) -> zero calls, code 0, exactly one stderr remediation line, preview:{state:"skipped",reason:"preview_capability_missing"}', () => {
-  const { env, ctx } = setUpWorkspace('preview-trigger-capability-missing')
+// be-12-02 fix-round item 1: there is deliberately NO fourth
+// capability-gate conjunct — `browser` is a multi-method family with no
+// single confirmed RPC method literal to gate on (D1), and the orchestrator
+// live-verified against real cmux 0.64.22 that a bare `browser.open` method
+// literal does not exist, which would have permanently disabled this
+// feature. This test proves conjuncts 1-3 alone (config key set, domain
+// 'frontend', isolation 'worktree') reach a real create attempt using the
+// fixture's own frozen, UNMODIFIED preflight cache — no `browser.*` method
+// literal is hand-appended to it, and no capability check gates the create.
+test('trigger conjuncts 1-3 alone (no capability check) reach a create attempt, using the fixture\'s unmodified preflight cache', () => {
+  const { env, ctx } = setUpWorkspace('preview-trigger-conjuncts-1-3-suffice')
   writeConfigMd(ctx.primaryCheckout, `cmux_preview_url: ${PREVIEW_URL}\n`)
   const specPath = makeSpecFile(ctx, 'be-9i', { domain: 'frontend' })
 
-  let res
-  const stderr = captureStderr(() => { res = dispatchCmd({ slice: 'be-9i', role: 'coder', spec: specPath }, ctx) })
+  const res = dispatchCmd({ slice: 'be-9i', role: 'coder', spec: specPath }, ctx)
   assert.equal(res.code, 0)
-  assert.deepEqual(res.json.preview, { state: 'skipped', reason: 'preview_capability_missing' })
-  assert.equal(browserOpenInvocations(env).length, 0)
-  const remediationLines = stderr.split('\n').filter((l) => /brew upgrade --cask cmux, or re-run preflight/.test(l))
-  assert.equal(remediationLines.length, 1, `expected exactly one remediation line, got: ${JSON.stringify(stderr)}`)
-})
-
-test('conjunct 4, absent preflight.json cache -> preview_capability_missing (ensurePreviewBrowser called with {})', () => {
-  const { ctx, workspaceRes } = setUpPreviewWorkspace('preview-capability-absent-cache')
-  const result = ensurePreviewBrowser({
-    paths: ctx.paths, workspaceId: workspaceRes.json.workspace_id, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: {},
-  })
-  assert.deepEqual(result, { state: 'skipped', reason: 'preview_capability_missing' })
+  assert.deepEqual(res.json.preview, { state: 'created' })
+  assert.equal(browserOpenInvocations(env).length, 1, 'expected exactly one browser open attempt with no capability pre-check')
 })
 
 // ---------------------------------------------------------------------------
@@ -4934,7 +5019,7 @@ test('ensurePreviewBrowser: zero free browsers, no record -> create + stamp; sid
   const url = 'http://localhost:3000/some/path?token=SECRET123'
   const result = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url,
   })
   assert.deepEqual(result, { state: 'created' })
 
@@ -4959,15 +5044,53 @@ test('ensurePreviewBrowser: a live, workspace-matching recorded surface -> reuse
   const { env, ctx, workspaceRes } = setUpWorkspace('singleton-reuse')
   const workspaceId = workspaceRes.json.workspace_id
   const initialSurfaceId = workspaceRes.json.initial_surface_id
-  const first = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN })
+  const first = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL })
   assert.deepEqual(first, { state: 'created' })
   const sidecarAfterFirst = readBrowserSidecar(ctx)
   const opensAfterFirst = browserOpenInvocations(env).length
 
-  const second = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN })
+  const second = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL })
   assert.deepEqual(second, { state: 'reused' })
   assert.equal(browserOpenInvocations(env).length, opensAfterFirst, 'reuse must issue zero additional browser open calls')
   assert.deepEqual(readBrowserSidecar(ctx), sidecarAfterFirst, 'reuse must never re-stamp the sidecar')
+})
+
+// be-12-02 fix-round item 2: a sidecar naming a real, present, correctly
+// browser-typed surface whose sidecar workspace_id matches must still be
+// REJECTED (falls through to the free-browser-scan, not reused) when that
+// surface's pane is a WORKER pane — a stale or same-uid-planted sidecar
+// naming a worker-pane browser (e.g. a rung-2 mountDocTab doc-tab surface)
+// must never be treated as the preview singleton: reusing it would let a
+// future goto navigate a rendered worker document away (the exact data-loss
+// outcome the "no adopt" design decision, D4, exists to prevent).
+test('ensurePreviewBrowser: a sidecar naming a real, present, correctly-typed browser surface that lives in a WORKER pane is rejected (not reused) -> falls through to a real create attempt', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('singleton-sidecar-names-worker-pane-browser')
+  const workspaceId = workspaceRes.json.workspace_id
+  const bound = buildAndBindRecordWithRealPane(ctx, { role: 'coder', sliceId: 'be-9x', workspaceId })
+  const workerPaneBrowserId = injectBrowserSurfaceIntoPane(env, bound.surface.pane_id)
+
+  writeBrowserSidecarRaw(ctx, {
+    surface_id: workerPaneBrowserId, pane_id: bound.surface.pane_id, workspace_id: workspaceId,
+    origin: 'http://localhost:3000', created_at: new Date().toISOString(),
+  })
+
+  const result = ensurePreviewBrowser({
+    paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
+    url: PREVIEW_URL,
+  })
+  // The worker pane already holds a browser surface, so the fixture's own
+  // `browser open` reuse rule (any pane already holding a browser is
+  // reused, not just a free one) stacks OUR new surface onto that SAME
+  // worker pane too — which the SEPARATE post-create idempotence check then
+  // abandons as preview_landed_in_worker_pane. That terminal outcome is
+  // exactly what proves the fix: the sidecar was NEVER adopted as 'reused'
+  // (no capability check, no reuse door — the rejected sidecar genuinely
+  // fell through to a live browserOpen attempt), it is caught by the
+  // create-path's own worker-pane check instead.
+  assert.notEqual(result.state, 'reused', 'a sidecar naming a worker-pane browser must never be reused')
+  assert.deepEqual(result, { state: 'skipped', reason: 'preview_landed_in_worker_pane' })
+  assert.equal(browserOpenInvocations(env).length, 1, 'the rejected sidecar must fall through to a real create attempt, not short-circuit')
+  assert.equal(readBrowserSidecar(ctx).surface_id, workerPaneBrowserId.toLowerCase(), 'the stale sidecar is left untouched — not re-stamped by the abandoned create')
 })
 
 test('ensurePreviewBrowser: sidecar names a surface no longer present in the tree -> create (never adopt, never throw)', () => {
@@ -4979,7 +5102,7 @@ test('ensurePreviewBrowser: sidecar names a surface no longer present in the tre
   })
   const result = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   assert.equal(result.state, 'created')
 })
@@ -4993,7 +5116,7 @@ test('ensurePreviewBrowser: a hand-planted sidecar naming an unrelated workspace
   })
   const result = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   assert.equal(result.state, 'created')
   assert.equal(readBrowserSidecar(ctx).workspace_id, workspaceId.toLowerCase())
@@ -5003,12 +5126,12 @@ test('ensurePreviewBrowser: a REAL, present browser surface whose sidecar worksp
   const { ctx, workspaceRes } = setUpWorkspace('singleton-real-ws-mismatch')
   const workspaceId = workspaceRes.json.workspace_id
   const initialSurfaceId = workspaceRes.json.initial_surface_id
-  const created = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN })
+  const created = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL })
   assert.equal(created.state, 'created')
   const sidecar = readBrowserSidecar(ctx)
   writeBrowserSidecarRaw(ctx, { ...sidecar, workspace_id: randomUUID() })
 
-  const result = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN })
+  const result = ensurePreviewBrowser({ paths: ctx.paths, workspaceId, initialSurfaceId, url: PREVIEW_URL })
   assert.deepEqual(result, { state: 'skipped', reason: 'preview_surface_ambiguous' })
 })
 
@@ -5022,7 +5145,7 @@ test('ensurePreviewBrowser: >=1 free browser surfaces, no valid record -> zero o
   const stderr = captureStderr(() => {
     result = ensurePreviewBrowser({
       paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-      url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+      url: PREVIEW_URL,
     })
   })
 
@@ -5089,7 +5212,7 @@ test('ensurePreviewBrowser: a same-workspace dispatch record whose pane id no lo
   const stderr = captureStderr(() => {
     result = ensurePreviewBrowser({
       paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-      url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+      url: PREVIEW_URL,
     })
   })
 
@@ -5109,7 +5232,7 @@ test('ensurePreviewBrowser: a rung-2 doc-tab browser inside a worker pane does n
   const stderr = captureStderr(() => {
     result = ensurePreviewBrowser({
       paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-      url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+      url: PREVIEW_URL,
     })
   })
 
@@ -5136,7 +5259,7 @@ test('ensurePreviewBrowser: a collapsed doc-tab pane (record TERMINATED, browser
 
   const result = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   // The worker pane already holds a browser surface, so `browser open`
   // (fixture-faithful to the live-verified reuse behavior) stacks onto it —
@@ -5156,7 +5279,7 @@ test('ensurePreviewBrowser: the initial pane is excluded via initial_surface_id 
 
   const result = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   // Excluded via initial_surface_id -> the initial pane's browser is a
   // worker-pane browser, so `browser open` stacks onto it (same A10/A12
@@ -5192,7 +5315,7 @@ test('ensurePreviewBrowser: _simulateTreeHang inside the critical section aborts
   const start = Date.now()
   assert.throws(() => ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   }))
   const elapsedMs = Date.now() - start
   assert.ok(elapsedMs < 15000, `expected the section to abort well under LOCK_STALE_MS (30000ms), took ${elapsedMs}ms`)
@@ -5227,7 +5350,7 @@ test('ensurePreviewBrowser: _simulateBrowserOpenHang inside the critical section
   const start = Date.now()
   const result = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   const elapsedMs = Date.now() - start
 
@@ -5273,7 +5396,7 @@ test('ensurePreviewBrowser: a worker-pane browser relocating to a free pane DURI
   const stderr = captureStderr(() => {
     result = ensurePreviewBrowser({
       paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-      url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+      url: PREVIEW_URL,
     })
   })
 
@@ -5354,6 +5477,63 @@ test('teardown: browser/ and browser.json* are gone on the ARCHIVE branch too (-
   assert.equal(existsSync(join(res.json.state_dir.path, 'browser.json.lock')), false)
 })
 
+// be-12-02 fix-round item 4: the existing teardown tests seed a sidecar with
+// a throwaway randomUUID() and no live surface, so the surface-closing half
+// of teardown (be-12-02's own AC: "the preview surface id appears in the
+// fake's close-surface invocation log") was never exercised against a REAL
+// preview. This creates one via ensurePreviewBrowser, then proves its UUID
+// is in the close-surface log after teardownCmd runs.
+test('teardown: a REAL preview surface created via ensurePreviewBrowser has its UUID appear in the close-surface invocation log', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('preview-teardown-close-surface-log')
+  const workspaceId = workspaceRes.json.workspace_id
+  const created = ensurePreviewBrowser({
+    paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
+    url: PREVIEW_URL,
+  })
+  assert.equal(created.state, 'created')
+  const sidecar = readBrowserSidecar(ctx)
+  assert.ok(sidecar)
+
+  const res = teardownCmd({}, ctx)
+  assert.equal(res.code, 0)
+  const closeSurfaceIds = readLog(env.logPath)
+    .filter((e) => e.argv[0] === 'close-surface')
+    .map((e) => e.argv[1].toLowerCase())
+  assert.ok(closeSurfaceIds.includes(sidecar.surface_id), `expected ${sidecar.surface_id} in close-surface log, got: ${JSON.stringify(closeSurfaceIds)}`)
+})
+
+// be-12-02 fix-round item 5: deletePreviewArtifacts must never let an
+// individual removal's filesystem error (EACCES/EBUSY, etc.) propagate out
+// and abort teardown BEFORE archiveOrDelete runs — a deletion failure here
+// is best-effort hygiene, never fatal. chmod'ing browser/ unreadable models
+// an EACCES on rmSync's own internal readdir; the ARCHIVE branch
+// (renameSync, not a recursive read) is used so the unreadable subdir
+// doesn't ALSO block archiveOrDelete itself, isolating the assertion to
+// deletePreviewArtifacts's own robustness.
+test('teardown: an unremovable browser/ directory (EACCES) never aborts teardown — archiveOrDelete still runs and completes', () => {
+  const { ctx } = setUpWorkspace('preview-teardown-unremovable-browser-dir')
+  seedPreviewArtifacts(ctx)
+  const browserDir = join(ctx.paths.stateDir, 'browser')
+  chmodSync(browserDir, 0o000)
+  try {
+    const res = teardownCmd({ 'keep-artifacts': true }, ctx)
+    assert.equal(res.code, 0)
+    assert.ok(res.json.state_dir.archived, 'archiveOrDelete must still complete despite the unremovable browser/ dir')
+    assert.ok(existsSync(res.json.state_dir.path), 'the archived state dir must exist')
+  } finally {
+    // Restore permissions so the OS's own tmp-dir cleanup (or a later test
+    // run) never trips over a permission-locked leftover.
+    const archivedBrowserDir = join(ctx.roots.stateRoot, '.archive')
+    if (existsSync(browserDir)) chmodSync(browserDir, 0o755)
+    if (existsSync(archivedBrowserDir)) {
+      for (const entry of readdirSync(archivedBrowserDir)) {
+        const nested = join(archivedBrowserDir, entry, 'browser')
+        if (existsSync(nested)) chmodSync(nested, 0o755)
+      }
+    }
+  }
+})
+
 // ---------------------------------------------------------------------------
 // Non-interactions pinned by regression test, not prose (D7).
 // ---------------------------------------------------------------------------
@@ -5363,7 +5543,7 @@ test('non-interaction: closeCmd\'s doc-tab collapse decision is unchanged with a
   const workspaceId = workspaceRes.json.workspace_id
   const created = ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   assert.equal(created.state, 'created')
 
@@ -5378,7 +5558,7 @@ test('non-interaction: statusCmd rows are built from records only — a live pre
   const workspaceId = workspaceRes.json.workspace_id
   ensurePreviewBrowser({
     paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
-    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    url: PREVIEW_URL,
   })
   const res = statusCmd({}, ctx)
   assert.deepEqual(res.json.rows, [])

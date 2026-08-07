@@ -46,7 +46,7 @@ import {
   PHASES, setPhase, readEvents, tree,
   TIERS, setWorkspaceColor, setProgress, clearProgress,
   TURN_END_EVENT_NAME, parseTurnEndEvent, readScreen,
-  browserOpen,
+  browserOpen, BROWSER_OPEN_SPAWN_TIMEOUT_MS, BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS,
 } from './cmuxctl.mjs'
 import {
   collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn,
@@ -942,11 +942,14 @@ const PREVIEW_BROWSER_SIDECAR_NAME = 'browser.json'
 // 19000ms of margin under record.mjs's LOCK_STALE_MS (30000ms, record.mjs:807
 // — not exported and record.mjs is out of files_in_scope for this slice, so
 // the value is duplicated here as a literal rather than imported). Exported
-// so a test can assert the sum without re-typing the addends.
+// so a test can assert the sum without re-typing the addends. be-12-02
+// fix-round item 3: the browserOpen-owned bounds are no longer re-typed here
+// — they are imported from cmuxctl.mjs (the module that actually owns and
+// consumes them), so a change to browserOpen's real spawn timeouts moves
+// this sum instead of silently desyncing from it. Only the scan tree's own
+// bound (dispatch.mjs's own spawn, not browserOpen's) stays local.
 export const PREVIEW_LOCK_SCAN_TREE_TIMEOUT_MS = 3000
-export const PREVIEW_LOCK_BROWSER_OPEN_TIMEOUT_MS = 5000
-export const PREVIEW_LOCK_AFTER_TREE_TIMEOUT_MS = 3000
-export const PREVIEW_LOCK_WORST_CASE_MS = PREVIEW_LOCK_SCAN_TREE_TIMEOUT_MS + PREVIEW_LOCK_BROWSER_OPEN_TIMEOUT_MS + PREVIEW_LOCK_AFTER_TREE_TIMEOUT_MS
+export const PREVIEW_LOCK_WORST_CASE_MS = PREVIEW_LOCK_SCAN_TREE_TIMEOUT_MS + BROWSER_OPEN_SPAWN_TIMEOUT_MS + BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS
 
 // findWorkspaceInTree(t, workspaceId) -> workspace node | null.
 function findWorkspaceInTree(t, workspaceId) {
@@ -1034,17 +1037,25 @@ function freeBrowserSurfaceIds(t, workspaceId, workerPaneIds, excludeSurfaceId) 
   return free
 }
 
-// isValidSidecarSurface(t, sidecar, workspaceId) -> boolean. Outcome 1 (D4):
-// the recorded surface must be corroborated against a FRESH tree (never
-// trust the sidecar alone — errata E8) AND its workspace_id must equal the
-// live binding (errata E8) — a stale sidecar left by a recreated workspace
-// must never be trusted just because the file parses.
-function isValidSidecarSurface(t, sidecar, workspaceId) {
+// isValidSidecarSurface(t, sidecar, workspaceId, workerPaneIds) -> boolean.
+// Outcome 1 (D4): the recorded surface must be corroborated against a FRESH
+// tree (never trust the sidecar alone — errata E8) AND its workspace_id must
+// equal the live binding (errata E8) — a stale sidecar left by a recreated
+// workspace must never be trusted just because the file parses. be-12-02
+// fix-round item 2: a sidecar surface whose pane is IN the worker-pane set
+// (e.g. a stale/planted sidecar naming a rung-2 mountDocTab doc-tab surface)
+// must also be rejected — reusing it would reach the exact data-loss outcome
+// (a future goto navigating a rendered worker document away) the "no adopt"
+// design decision (architecture-package-v2.md §3 D4) exists to prevent,
+// through the reuse door instead of the create door.
+function isValidSidecarSurface(t, sidecar, workspaceId, workerPaneIds) {
   if (!sidecar || sidecar.workspace_id !== workspaceId) return false
   const ws = findWorkspaceInTree(t, workspaceId)
   if (!ws) return false
   const found = findSurfaceInWorkspace(ws, sidecar.surface_id)
-  return Boolean(found && found.surface.type === 'browser')
+  if (!found || found.surface.type !== 'browser') return false
+  if (workerPaneIds.has(found.pane.id)) return false
+  return true
 }
 
 // formatPreviewFailClosedLine({ strayUuids, unresolvablePaneId }) -> string.
@@ -1061,20 +1072,22 @@ export function formatPreviewFailClosedLine({ strayUuids, unresolvablePaneId }) 
   return `ensurePreviewBrowser: ${leading}${strayUuids.length} browser surface(s) outside this workspace's worker panes and no valid preview record — refusing to create a second (two stacked browser surfaces are both undrivable). Preview is disabled for this task until they are closed: ${closeCommands}`
 }
 
-// ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url,
-// cachedMethods }) -> { state: 'reused'|'created'|'skipped', reason? }.
-// Never throws for an ordinary singleton outcome — RecordLockError is caught
-// here and mapped to preview_lock_contended; any OTHER error (e.g. a bounded
-// tree/browserOpen spawn failing inside the section) propagates to the
-// caller, which is itself wrapped in a try/catch that logs and continues
-// (dispatchCmd) — a preview failure never fails a dispatch.
-export function ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url, cachedMethods }) {
-  const methods = cachedMethods && Array.isArray(cachedMethods.methods) ? cachedMethods.methods : null
-  if (!methods || !methods.includes('browser.open')) {
-    log('ensurePreviewBrowser: cached preflight methods do not include browser.open — preview disabled for this dispatch (brew upgrade --cask cmux, or re-run preflight)')
-    return { state: 'skipped', reason: 'preview_capability_missing' }
-  }
-
+// ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url }) ->
+// { state: 'reused'|'created'|'skipped', reason? }. Never throws for an
+// ordinary singleton outcome — RecordLockError is caught here and mapped to
+// preview_lock_contended; any OTHER error (e.g. a bounded tree/browserOpen
+// spawn failing inside the section) propagates to the caller, which is
+// itself wrapped in a try/catch that logs and continues (dispatchCmd) — a
+// preview failure never fails a dispatch. be-12-02 fix-round item 1: there
+// is deliberately NO capability pre-check here — `browser` is a multi-method
+// family with no single confirmed RPC method literal to gate on (D1,
+// architecture-package-v2.md §3; a verb whose RPC method is unconfirmed is
+// "unverifiable-by-capabilities, never gated" per architecture-notes.md's
+// ratified doctrine). If browser support is genuinely absent on some cmux
+// install, `browserOpen` (cmuxctl.mjs) fails its spawn/parse and returns
+// null, which is handled below by returning { state: 'skipped' } with no
+// reason — that fallback is the ONLY gate.
+export function ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url }) {
   const sidecarPath = join(paths.stateDir, PREVIEW_BROWSER_SIDECAR_NAME)
 
   let result
@@ -1085,7 +1098,7 @@ export function ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url
       const { paneIds: workerPaneIds, unresolvablePaneId } = computeWorkerPaneIds(scanTree, workspaceId, initialSurfaceId, listRecords(paths.dispatchDir))
 
       const sidecar = readJsonOrWarn(sidecarPath, PREVIEW_BROWSER_SIDECAR_NAME)
-      if (isValidSidecarSurface(scanTree, sidecar, workspaceId)) {
+      if (isValidSidecarSurface(scanTree, sidecar, workspaceId, workerPaneIds)) {
         return { state: 'reused' }
       }
 
@@ -1137,7 +1150,10 @@ export function ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url
 
   if (result.abandon) {
     // The abandonOrphan shape: "close attempted", never "closed" (errata
-    // E2) — deliberately outside the critical section.
+    // E2) — deliberately outside the critical section. closeSurface itself
+    // is unbounded by design (accepted residual A14, architecture-package-
+    // v2.md errata E11) — this call is best-effort and never awaited on a
+    // bound.
     closeSurface(result.surfaceId)
     const label = result.reason === 'preview_landed_in_worker_pane' ? 'landed inside a worker pane (stacked onto a doc tab)' : 'a racer won despite the lock'
     log(`ensurePreviewBrowser: abandoning newly-created surface ${result.surfaceId} — ${label}; close attempted (${result.reason})`)
@@ -1431,11 +1447,12 @@ export function dispatchCmd(args, ctx) {
   }
 
   // (10.5) issue #12/D7 (ADR-019) — the opt-in browser preview singleton.
-  // Four conjuncts, ALL required: (1) cmux_preview_url resolves to a URL,
+  // Three conjuncts, ALL required: (1) cmux_preview_url resolves to a URL,
   // (2) spec.domain === 'frontend' EXACTLY, (3) this role's isolation is
-  // 'worktree', (4) 'browser.open' is in the cached preflight methods. This
-  // whole block is inside a try/catch that logs and continues — a preview
-  // failure NEVER fails a dispatch. Per errata E6, `preview` stays
+  // 'worktree'. be-12-02 fix-round item 1: there is deliberately no fourth
+  // capability-gate conjunct — see ensurePreviewBrowser's own header comment.
+  // This whole block is inside a try/catch that logs and continues — a
+  // preview failure NEVER fails a dispatch. Per errata E6, `preview` stays
   // `undefined` (and is therefore OMITTED from the returned JSON below)
   // unless conjuncts 1-3 all hold — i.e. unless an attempt was actually
   // made. This is what keeps AC1's byte-identity when cmux_preview_url is
@@ -1446,13 +1463,11 @@ export function dispatchCmd(args, ctx) {
     const previewUrl = readCmuxPreviewUrl(configText)
     if (previewUrl && spec?.domain === 'frontend' && resolved.isolation === 'worktree') {
       try {
-        const previewPreflightCache = readPreflightCache(join(paths.stateDir, 'preflight.json')) || {}
         preview = ensurePreviewBrowser({
           paths,
           workspaceId: workspaceState.workspace_id,
           initialSurfaceId: workspaceState.initial_surface_id,
           url: previewUrl,
-          cachedMethods: previewPreflightCache,
         })
       } catch (err) {
         log(`dispatch: browser preview setup failed — continuing without a preview: ${err.message}`)
@@ -2313,19 +2328,31 @@ export function statusCmd(args, ctx) {
 // force — absent is a no-op) plus every `<stateDir>/browser.json*` sibling
 // (the sidecar itself and any stranded `browser.json.lock`). See the E7
 // call-site comment in teardownCmd for why this glob is load-bearing and why
-// the deletion is unconditional.
+// the deletion is unconditional. be-12-02 fix-round item 5: every individual
+// removal is best-effort — a filesystem error (EACCES/EBUSY, etc.) on any ONE
+// of these must never propagate and abort teardown BEFORE archiveOrDelete
+// runs; it is logged (code only, cosmetic-zone pattern) and swallowed.
 function deletePreviewArtifacts(stateDir) {
-  rmSync(join(stateDir, 'browser'), { recursive: true, force: true })
+  try {
+    rmSync(join(stateDir, 'browser'), { recursive: true, force: true })
+  } catch (err) {
+    log(`teardown: deletePreviewArtifacts: failed to remove browser/ — continuing (${err.code || err.message})`)
+  }
   let entries
   try {
     entries = readdirSync(stateDir)
   } catch (err) {
     if (err.code === 'ENOENT') return
-    throw err
+    log(`teardown: deletePreviewArtifacts: failed to list ${stateDir} — continuing (${err.code || err.message})`)
+    return
   }
   for (const name of entries) {
     if (name.startsWith('browser.json')) {
-      rmSync(join(stateDir, name), { recursive: true, force: true })
+      try {
+        rmSync(join(stateDir, name), { recursive: true, force: true })
+      } catch (err) {
+        log(`teardown: deletePreviewArtifacts: failed to remove ${name} — continuing (${err.code || err.message})`)
+      }
     }
   }
 }

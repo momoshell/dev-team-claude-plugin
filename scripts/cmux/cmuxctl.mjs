@@ -924,6 +924,13 @@ const BROWSER_SUBVERBS = Object.freeze(['open', 'goto', 'wait', 'errors', 'scree
 // else in this directory.
 export const BROWSER_LOAD_STATE = 'complete'
 
+// The two real spawn bounds `browserOpen` enforces internally — exported so
+// dispatch.mjs's PREVIEW_LOCK_WORST_CASE_MS invariant reads THESE, never a
+// re-typed literal (be-12-02 fix-round item 3): a change to either bound here
+// must move the invariant, never silently desync from it.
+export const BROWSER_OPEN_SPAWN_TIMEOUT_MS = 5000
+export const BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS = 3000
+
 // Exported ONLY so the frozen-allowlist guard itself is directly testable —
 // every wrapper below calls this with its OWN hardcoded sub literal
 // (never a caller-supplied one), so `eval`/`state`/`console`/`snapshot`/
@@ -986,14 +993,14 @@ export function browserOpen(url, { workspaceId, treeBefore } = {}) {
   if (treeBefore === null || typeof treeBefore !== 'object') {
     throw new Error('browserOpen: treeBefore is required')
   }
-  const res = browserVerb('open', [url, '--workspace', workspaceId, '--focus', 'false'], { timeoutMs: 5000 })
+  const res = browserVerb('open', [url, '--workspace', workspaceId, '--focus', 'false'], { timeoutMs: BROWSER_OPEN_SPAWN_TIMEOUT_MS })
   if (!res.ok) {
     logBrowserError('open', workspaceId, res.error?.code)
     return null
   }
   const match = res.stdout.match(/placement=(\w+)/)
   const placement = match ? match[1] : null
-  const treeAfter = tree({ all: true, timeoutMs: 3000 })
+  const treeAfter = tree({ all: true, timeoutMs: BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS })
   const surfaceId = recoverNewId(treeBefore, treeAfter, 'surface')
   const paneId = locate(treeAfter, surfaceId)?.pane?.id ?? null
   return { surfaceId, paneId, placement, treeAfter }

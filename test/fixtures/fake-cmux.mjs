@@ -770,6 +770,16 @@ switch (verb) {
     }
 
     if (sub === 'goto') {
+      // be-12-02 fix-round item 6 hook: mirrors _simulateBrowserOpenHang's
+      // shape exactly — state-flag driven, no new env switch. Proves
+      // browserGoto's own 20000ms spawn bound is genuinely enforced, not
+      // merely typed.
+      if (state._simulateBrowserGotoHang) {
+        logInvocation()
+        const sab = new SharedArrayBuffer(4)
+        Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+        process.exit(0)
+      }
       const surfaceId = argv[2]
       const url = argv[3]
       const found = findSurfaceEntry(state, surfaceId)
@@ -794,6 +804,23 @@ switch (verb) {
     if (sub === 'errors') {
       const action = argv[2]
       const surfaceId = argv[3]
+      // be-12-02 fix-round item 6 hooks: mirror _simulateBrowserOpenHang's
+      // shape exactly — state-flag driven, no new env switch, one flag per
+      // sub-action so clear/list never interfere with each other. Prove
+      // browserErrorsClear/browserErrorsList's own 10000ms spawn bounds are
+      // genuinely enforced, not merely typed.
+      if (action === 'clear' && state._simulateBrowserErrorsClearHang) {
+        logInvocation()
+        const sab = new SharedArrayBuffer(4)
+        Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+        process.exit(0)
+      }
+      if (action === 'list' && state._simulateBrowserErrorsListHang) {
+        logInvocation()
+        const sab = new SharedArrayBuffer(4)
+        Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+        process.exit(0)
+      }
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')
       // Stacked surfaces (>=2 browser-typed surfaces sharing one pane) are
@@ -814,6 +841,16 @@ switch (verb) {
     }
 
     if (sub === 'wait') {
+      // be-12-02 fix-round item 6 hook: mirrors _simulateBrowserOpenHang's
+      // shape exactly — state-flag driven, no new env switch. Proves
+      // browserWaitReady's own 25000ms spawn bound is genuinely enforced,
+      // not merely typed.
+      if (state._simulateBrowserWaitHang) {
+        logInvocation()
+        const sab = new SharedArrayBuffer(4)
+        Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+        process.exit(0)
+      }
       const surfaceId = argv[2]
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')
@@ -832,6 +869,16 @@ switch (verb) {
     }
 
     if (sub === 'screenshot') {
+      // be-12-02 fix-round item 6 hook: mirrors _simulateBrowserOpenHang's
+      // shape exactly — state-flag driven, no new env switch. Proves
+      // browserScreenshot's own 20000ms spawn bound is genuinely enforced,
+      // not merely typed.
+      if (state._simulateBrowserScreenshotHang) {
+        logInvocation()
+        const sab = new SharedArrayBuffer(4)
+        Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+        process.exit(0)
+      }
       const surfaceId = argv[2]
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')

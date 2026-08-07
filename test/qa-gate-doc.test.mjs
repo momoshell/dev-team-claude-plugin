@@ -145,9 +145,22 @@ test('qa-gate.md and agents/qa-lead.md state the floor rule identically on every
   assert.match(normGate, /Adversarial panel/)
   assert.match(normLead, /Deep triggers \(any\):/)
 
-  const tokens = ['100 changed lines', 'max(semantic_row', 'suppression-blind', 'reviewer lane', 'test-engineer']
+  const tokens = [
+    'more than 100 changed lines',
+    'max(semantic_row',
+    'suppression-blind',
+    'reviewer lane',
+    'test-engineer',
+  ]
   for (const token of tokens) {
     assert.ok(normGate.includes(token), `qa-gate.md ladder section missing drift-pinned token: ${token}`)
     assert.ok(normLead.includes(token), `qa-lead.md step-3 block missing drift-pinned token: ${token}`)
   }
+
+  // The raise-only clause must hold on both sides, not just qa-gate.md (test 2
+  // only asserts it there) — a future edit that drops "raises, never lowers"
+  // from qa-lead.md's copy would otherwise go undetected.
+  const raiseOnly = /only ever raise|never lower|only raise/i
+  assert.match(normGate, raiseOnly, 'qa-gate.md ladder section missing the raise-only clause')
+  assert.match(normLead, raiseOnly, 'qa-lead.md step-3 block missing the raise-only clause')
 })

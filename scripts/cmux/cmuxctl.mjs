@@ -26,7 +26,7 @@ export const VERBS = Object.freeze([
   'ping', 'identify', 'capabilities', 'tree', 'new-window', 'new-workspace', 'new-pane',
   'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab',
   'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config', 'wait-for',
-  'new-surface', 'read-screen', 'clear-progress', 'workspace-action', 'set-progress',
+  'new-surface', 'read-screen', 'clear-progress', 'workspace-action', 'set-progress', 'browser',
 ])
 
 // Live `capabilities --json` (cmux 0.64.20) returns 255 RPC-style DOTTED
@@ -61,6 +61,20 @@ export const VERB_METHODS = Object.freeze({
   // (e.g. read-screen -> surface.read_text) hard-stops every real run if the
   // guess is wrong, while every test still passes against the fixture. They
   // land in UNVERIFIABLE_VERBS instead and are never capability-gated.
+  //
+  // browser (be-12-01, issue #12/D1) is excluded for a second, DECISIVE
+  // reason beyond the cosmetic-verb policy above: this map is a one-CLI-verb
+  // -> one-RPC-method mapping, and `browser` spans FIVE RPC methods
+  // (browser.open, browser.goto, browser.wait_for, browser.errors,
+  // browser.screenshot) behind its own frozen BROWSER_SUBVERBS allowlist —
+  // no single entry here could represent the family without gating all five
+  // capabilities on one guessed name. The preview is also non-load-bearing
+  // (no dispatch-lifecycle decision, completion outcome, or gate verdict
+  // depends on it), so it degrades loudly at the point of use — reading the
+  // cached preflight.json `methods` array directly, the same shape
+  // `close_workspace_available` already uses — rather than hard-stopping
+  // preflight on every dispatch, including backend-only ones that will never
+  // open a browser.
 })
 
 // The five remediation messages, BYTE-FOR-BYTE, single definition site.
@@ -221,10 +235,19 @@ function checkVersion() {
 // Tree + id recovery.
 // ---------------------------------------------------------------------------
 
-export function tree({ all = false } = {}) {
+/**
+ * tree({ all, timeoutMs }) -> treeJson
+ * `timeoutMs` is OPTIONAL (be-12-01, issue #12/D4): default `undefined`,
+ * which spawnSync treats as unbounded — byte-for-byte today's behavior at
+ * every existing call site above. It exists so a bounded caller
+ * (`ensurePreviewBrowser`'s critical-section scan/after-tree reads, be-12-02)
+ * can pass an explicit bound without every other `tree()` caller in this
+ * module changing shape.
+ */
+export function tree({ all = false, timeoutMs } = {}) {
   const args = ['--json', '--id-format', 'uuids']
   if (all) args.push('--all')
-  const res = cmux('tree', args, { json: true })
+  const res = cmux('tree', args, { json: true, timeoutMs })
   if (!res.ok) throw new Error(`tree: cmux tree failed: ${res.error?.message}`)
   return res.json
 }
@@ -877,6 +900,215 @@ export function closeSurface(id) {
 export function closeWorkspace(id) {
   if (!requireTargetPresent('workspace', id, 'closeWorkspace')) return
   cmux('close-workspace', [id])
+}
+
+// ---------------------------------------------------------------------------
+// Browser preview family (be-12-01, issue #12/D1 + D2, ADR-019).
+//
+// `browser` is ONE `VERBS` entry; its five sub-verbs ride as argv tokens
+// (`cmux browser <sub> ...`, the `markdown open` shape already precedented
+// above) and are guarded one level down by a MODULE-PRIVATE frozen
+// allowlist. browserVerb() throws BEFORE any spawn on anything outside it —
+// the same shape runVerb() applies to VERBS itself — so `eval`, `state`,
+// `console`, `snapshot`, `viewport` and every interaction verb are
+// structurally unreachable from this module, regardless of what a caller
+// asks for.
+// ---------------------------------------------------------------------------
+const BROWSER_SUBVERBS = Object.freeze(['open', 'goto', 'wait', 'errors', 'screenshot'])
+
+// The only accepted --load-state value on cmux 0.64.22 — the shorter,
+// unsuffixed alternative is INVALID, live-verified (see
+// architecture-package-v2.md §2.1). Frozen single definition site: no
+// caller ever supplies its own load-state value, and that shorter,
+// four-letter alternative must never appear as a string literal anywhere
+// else in this directory.
+export const BROWSER_LOAD_STATE = 'complete'
+
+// The two real spawn bounds `browserOpen` enforces internally — exported so
+// dispatch.mjs's PREVIEW_LOCK_WORST_CASE_MS invariant reads THESE, never a
+// re-typed literal (be-12-02 fix-round item 3): a change to either bound here
+// must move the invariant, never silently desync from it.
+export const BROWSER_OPEN_SPAWN_TIMEOUT_MS = 5000
+export const BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS = 3000
+
+// Exported ONLY so the frozen-allowlist guard itself is directly testable —
+// every wrapper below calls this with its OWN hardcoded sub literal
+// (never a caller-supplied one), so `eval`/`state`/`console`/`snapshot`/
+// `viewport`/every interaction verb is structurally unreachable through the
+// public wrapper surface regardless of this export; BROWSER_SUBVERBS stays
+// the module-private frozen constant.
+export function browserVerb(sub, args, opts) {
+  if (!BROWSER_SUBVERBS.includes(sub)) {
+    throw new Error(`browserVerb: refusing to invoke a browser sub-verb outside the frozen BROWSER_SUBVERBS allowlist: ${sub}`)
+  }
+  return cmux('browser', [sub, ...args], opts)
+}
+
+// Deliberate divergence from this module's house `err.message` logging
+// pattern (setStatus, clearProgress, setWorkspaceColor, setProgress,
+// readScreen, sendLine, renameTab, mountDocTab, ...): every browser sub-verb
+// failure's DETAIL is page-influenced (it is the content of whatever the
+// previewed app rendered/threw), and dispatch.mjs's stderr is an
+// orchestrator-context ingress — a hostile page could smuggle a
+// prompt-injection payload into an orchestrator's transcript via
+// `error.message` alone. Only the cmux-authored error CODE is logged, and
+// only after it is shape-checked against a closed pattern, so the
+// closed-vocabulary claim is structural rather than trusted: an out-of-shape
+// code (never observed live, but not provably impossible) logs the literal
+// `<unparsed>` instead of riding through unchecked.
+const BROWSER_ERROR_CODE_RE = /^[a-z_]{1,32}$/
+
+function logBrowserError(subLabel, surfaceId, code) {
+  const safeCode = typeof code === 'string' && BROWSER_ERROR_CODE_RE.test(code) ? code : '<unparsed>'
+  // eslint-disable-next-line no-console
+  console.error(`browser ${subLabel}: ${surfaceId}: ${safeCode}`)
+}
+
+/**
+ * browserOpen(url, { workspaceId, treeBefore }) ->
+ * { surfaceId, paneId, placement, treeAfter } | null
+ * Spawn bound 5 000 ms (measured live 0.06 s; 80x headroom). Throws BEFORE
+ * any spawn on a missing workspaceId/treeBefore. `--focus false` always —
+ * no browser wrapper ever issues a focus verb. The printed line
+ * (`OK surface=surface:N pane=pane:N placement=split|reuse`) carries
+ * POSITIONAL refs, which this repo never persists and which renumber
+ * mid-session — only `placement=(\w+)` is parsed from stdout, and only to be
+ * logged; `surface=`/`pane=` tokens are never read, not even as a
+ * cross-check. The real id comes from a tree diff instead: this wrapper
+ * takes the caller's own `treeBefore` (its scan tree, already bounded) and
+ * performs exactly ONE bounded tree read of its own (3 000 ms) as
+ * `treeAfter`, then recovers the surface via `recoverNewId` and locates its
+ * pane in `treeAfter`. `treeAfter` is returned to the caller for the
+ * post-create idempotence and pane checks — two `tree` spawns per create,
+ * total, across caller + this wrapper (errata E1). An id-recovery ambiguity
+ * (`recoverNewId`, e.g. under `_simulateConcurrentCreate`) is surfaced by
+ * throwing rather than guessed at — this is NOT the "never throw on a cmux
+ * failure" degrade path; it is the same id-recovery-ambiguity class that
+ * aborts mountDocTab's rung chain.
+ */
+export function browserOpen(url, { workspaceId, treeBefore } = {}) {
+  if (typeof workspaceId !== 'string' || workspaceId === '') {
+    throw new Error('browserOpen: workspaceId is required')
+  }
+  if (treeBefore === null || typeof treeBefore !== 'object') {
+    throw new Error('browserOpen: treeBefore is required')
+  }
+  const res = browserVerb('open', [url, '--workspace', workspaceId, '--focus', 'false'], { timeoutMs: BROWSER_OPEN_SPAWN_TIMEOUT_MS })
+  if (!res.ok) {
+    logBrowserError('open', workspaceId, res.error?.code)
+    return null
+  }
+  const match = res.stdout.match(/placement=(\w+)/)
+  const placement = match ? match[1] : null
+  const treeAfter = tree({ all: true, timeoutMs: BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS })
+  const surfaceId = recoverNewId(treeBefore, treeAfter, 'surface')
+  const paneId = locate(treeAfter, surfaceId)?.pane?.id ?? null
+  return { surfaceId, paneId, placement, treeAfter }
+}
+
+/**
+ * browserGoto(surfaceId, url) -> boolean
+ * Spawn bound 20 000 ms — cmux self-bounds a dead-port navigation at ~15.5 s
+ * (`navigation_timeout`), so this exceeds that bound and stays
+ * distinguishable from our own spawn kill (`spawn_error`). Throws before any
+ * spawn on a missing surfaceId; degrades loudly (code-only stderr line,
+ * `false`) on a cmux failure — never throws on one.
+ */
+export function browserGoto(surfaceId, url) {
+  if (typeof surfaceId !== 'string' || surfaceId === '') {
+    throw new Error('browserGoto: surfaceId is required')
+  }
+  const res = browserVerb('goto', [surfaceId, url], { timeoutMs: 20000 })
+  if (!res.ok) {
+    logBrowserError('goto', surfaceId, res.error?.code)
+    return false
+  }
+  return true
+}
+
+/**
+ * browserWaitReady(surfaceId, { timeoutMs = 25000 }) -> boolean
+ * cmux-side `--load-state complete --timeout-ms 20000` (BROWSER_LOAD_STATE —
+ * the shorter, unsuffixed value is invalid on 0.64.22 and never supplied by
+ * any caller); the
+ * wrapper's OWN spawn bound defaults to 25 000 ms, exceeding cmux's own
+ * 20 000 ms bound, so a spawn kill stays distinguishable from cmux's own
+ * timeout. `timeoutMs` is overridable only for bounded testing of the spawn
+ * bound itself (the `topTsv` shape) — no production caller supplies one.
+ * Throws before any spawn on a missing surfaceId; degrades loudly on a cmux
+ * failure, never throws on one.
+ */
+export function browserWaitReady(surfaceId, { timeoutMs = 25000 } = {}) {
+  if (typeof surfaceId !== 'string' || surfaceId === '') {
+    throw new Error('browserWaitReady: surfaceId is required')
+  }
+  const res = browserVerb('wait', [surfaceId, '--load-state', BROWSER_LOAD_STATE, '--timeout-ms', '20000'], { timeoutMs })
+  if (!res.ok) {
+    logBrowserError('wait', surfaceId, res.error?.code)
+    return false
+  }
+  return true
+}
+
+/**
+ * browserErrorsClear(surfaceId) -> boolean
+ * Spawn bound 10 000 ms. Throws before any spawn on a missing surfaceId;
+ * degrades loudly on a cmux failure, never throws on one.
+ */
+export function browserErrorsClear(surfaceId) {
+  if (typeof surfaceId !== 'string' || surfaceId === '') {
+    throw new Error('browserErrorsClear: surfaceId is required')
+  }
+  const res = browserVerb('errors', ['clear', surfaceId], { timeoutMs: 10000 })
+  if (!res.ok) {
+    logBrowserError('errors_clear', surfaceId, res.error?.code)
+    return false
+  }
+  return true
+}
+
+/**
+ * browserErrorsList(surfaceId) -> string | null
+ * Spawn bound 10 000 ms. Returns RAW page bytes — the sole wrapper in this
+ * family that does — with `reduceBrowserErrors` (be-12-03) as its single
+ * legal consumer; this module never inspects the payload itself. Throws
+ * before any spawn on a missing surfaceId; degrades loudly on a cmux
+ * failure, never throws on one.
+ */
+export function browserErrorsList(surfaceId) {
+  if (typeof surfaceId !== 'string' || surfaceId === '') {
+    throw new Error('browserErrorsList: surfaceId is required')
+  }
+  const res = browserVerb('errors', ['list', surfaceId], { timeoutMs: 10000 })
+  if (!res.ok) {
+    logBrowserError('errors_list', surfaceId, res.error?.code)
+    return null
+  }
+  return res.stdout
+}
+
+/**
+ * browserScreenshot(surfaceId, outPath) -> boolean
+ * Spawn bound 20 000 ms. Returns only whether the cmux call itself
+ * succeeded — cmux's own `OK <path>` line is NEVER trusted as proof of a
+ * write (0.64.22 prints `OK` and a full-size blank PNG even on a surface
+ * that never became ready); the caller confirms via an independent
+ * `existsSync` (be-12-03). Throws before any spawn on a missing
+ * surfaceId/outPath; degrades loudly on a cmux failure, never throws on one.
+ */
+export function browserScreenshot(surfaceId, outPath) {
+  if (typeof surfaceId !== 'string' || surfaceId === '') {
+    throw new Error('browserScreenshot: surfaceId is required')
+  }
+  if (typeof outPath !== 'string' || outPath === '') {
+    throw new Error('browserScreenshot: outPath is required')
+  }
+  const res = browserVerb('screenshot', [surfaceId, '--out', outPath], { timeoutMs: 20000 })
+  if (!res.ok) {
+    logBrowserError('screenshot', surfaceId, res.error?.code)
+    return false
+  }
+  return true
 }
 
 /**

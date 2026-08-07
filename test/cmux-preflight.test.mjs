@@ -250,10 +250,15 @@ test('preflight succeeds end-to-end and caches to <taskArtifactsRoot>/preflight.
   // deliberately no VERB_METHODS entry (cosmetic/diagnostic verbs — see the
   // comment at VERB_METHODS's definition site), so they join this same
   // unverifiable set. be-11-02 adds set-progress alongside them for the same
-  // reason.
+  // reason. be-12-01 adds `browser` for a second, DECISIVE reason on top of
+  // the cosmetic-verb policy: VERB_METHODS is a one-verb-to-one-RPC-method
+  // map and `browser` spans five methods, so no single entry could
+  // represent the family — it lands in this same unverifiable set (this
+  // deepEqual going red on the `browser` addition is expected and tracked,
+  // not a regression).
   assert.deepEqual(
     result.unverifiable_verbs,
-    ['clear-progress', 'config', 'events', 'new-surface', 'read-screen', 'set-progress', 'set-status', 'wait-for', 'workspace-action'],
+    ['browser', 'clear-progress', 'config', 'events', 'new-surface', 'read-screen', 'set-progress', 'set-status', 'wait-for', 'workspace-action'],
   )
 
   const artifactsRoot = join(dir, 'artifacts')

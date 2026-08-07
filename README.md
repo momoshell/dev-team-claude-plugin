@@ -220,6 +220,7 @@ agents/                  the 14 agent definitions
 commands/                /dev-team:team, :onboard, :next, :ship, :pr-review
 scripts/trello.sh        Trello task-source helper (credential resolution + board I/O)
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
+scripts/wrap-external.mjs  external-content envelope: strips forged tags and wraps author-authored text before it enters a prompt
 scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)
 scripts/pr-review-window.sh  gh-dash keybinding target: Ghostty window + worktrunk PR worktree + /dev-team:pr-review (see § PR review)
 scripts/cmux/roster.schema.json          roster contract (schema)

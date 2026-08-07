@@ -4788,6 +4788,15 @@ test('validator: refuses \'@\' (userinfo), hostless forms, out-of-range port, a 
   assert.equal(readLog(env.logPath).length, logBefore, 'every refusal above must be BEFORE any spawn')
 })
 
+// test-engineer (PR-1 QA pass): the negatives test above only exercises
+// port 99999 — far past the 65535 boundary, so an off-by-one on the bound
+// itself (`> 65536` instead of `> 65535`) survives it silently (mutated,
+// confirmed: 0 failures). Pin the exact boundary on both sides, paired with
+// the existing "65535 accepted" positive at :4801.
+test('validator: the port bound is exactly 65535 — 65536 (one past the documented positive boundary) is refused', () => {
+  assert.throws(() => readCmuxPreviewUrl('cmux_preview_url: http://localhost:65536/\n'), OperationalError)
+})
+
 test('validator: refuses a value with a VALID prefix but trailing garbage after it (proves the trailing $ anchor is load-bearing, not just the leading ^)', () => {
   // Without the trailing anchor, a regex match only needs a valid PREFIX —
   // `http://localhost:3000/ok` alone would satisfy an unanchored pattern,
@@ -5025,6 +5034,39 @@ test('ensurePreviewBrowser: >=1 free browser surfaces, no valid record -> zero o
   assert.match(stderr, new RegExp(`cmux close-surface ${stray2}`))
 })
 
+// test-engineer (PR-1 vacuity audit): every existing assertion of the E3
+// remediation line compares `stderr` against `formatPreviewFailClosedLine(...)`
+// — the SAME function under test, called a second time to build the
+// "expected" value. That is self-referential: a mutation to the function's
+// OWN composition (e.g. swapping the ' · ' separator for ', ', or dropping
+// the "two stacked browser surfaces are both undrivable" clause) changes
+// both sides identically and is invisible to every test above (mutated,
+// confirmed: 0 failures suite-wide). This test hand-types the frozen
+// errata E3 shape as an independent literal — the actual byte-pin the
+// mutation doctrine requires (qa-notes 2026-08-02).
+test('BYTE-PIN (independent of formatPreviewFailClosedLine): the frozen errata-E3 remediation line matches a hand-typed literal, not a re-typed call to the function under test', () => {
+  const strayId = '11111111-1111-1111-1111-111111111111'
+  const line = formatPreviewFailClosedLine({ strayUuids: [strayId], unresolvablePaneId: null })
+  assert.equal(
+    line,
+    "ensurePreviewBrowser: 1 browser surface(s) outside this workspace's worker panes and no valid preview record — refusing to create a second (two stacked browser surfaces are both undrivable). Preview is disabled for this task until they are closed: cmux close-surface 11111111-1111-1111-1111-111111111111",
+  )
+
+  const strayId2 = '22222222-2222-2222-2222-222222222222'
+  const twoStrays = formatPreviewFailClosedLine({ strayUuids: [strayId, strayId2], unresolvablePaneId: null })
+  assert.equal(
+    twoStrays,
+    "ensurePreviewBrowser: 2 browser surface(s) outside this workspace's worker panes and no valid preview record — refusing to create a second (two stacked browser surfaces are both undrivable). Preview is disabled for this task until they are closed: cmux close-surface 11111111-1111-1111-1111-111111111111 · cmux close-surface 22222222-2222-2222-2222-222222222222",
+  )
+
+  const ghostPane = '33333333-3333-3333-3333-333333333333'
+  const withUnresolvable = formatPreviewFailClosedLine({ strayUuids: [strayId], unresolvablePaneId: ghostPane })
+  assert.equal(
+    withUnresolvable,
+    "ensurePreviewBrowser: dispatch record's pane 33333333-3333-3333-3333-333333333333 no longer resolves in the live tree; 1 browser surface(s) outside this workspace's worker panes and no valid preview record — refusing to create a second (two stacked browser surfaces are both undrivable). Preview is disabled for this task until they are closed: cmux close-surface 11111111-1111-1111-1111-111111111111",
+  )
+})
+
 test('ensurePreviewBrowser: a same-workspace dispatch record whose pane id no longer resolves in the live tree, plus a free browser -> preview_topology_unverifiable, naming the unresolvable pane id', () => {
   const { env, ctx, workspaceRes } = setUpWorkspace('singleton-topology-unverifiable')
   const workspaceId = workspaceRes.json.workspace_id
@@ -5157,6 +5199,44 @@ test('ensurePreviewBrowser: _simulateTreeHang inside the critical section aborts
   assert.equal(existsSync(join(ctx.paths.stateDir, 'browser.json.lock')), false, 'the lock must be released even though fn() threw')
 })
 
+// test-engineer (PR-1 vacuity audit, item 2): the worst-case budget sum
+// (11000ms = two bounded tree reads + one bounded browserOpen) is "only
+// non-vacuous in combination with the per-call hang tests" per the invariant
+// test's own comment — but the ONLY hang test at the ensurePreviewBrowser
+// (lock/critical-section) level uses `_simulateTreeHang`, which hangs EVERY
+// `tree` call including the one browserOpen would issue AFTER its own open
+// spawn — so the scan tree (the FIRST spawn) always aborts the section
+// first. `browserOpen`'s own 5000ms bound (the SECOND spawn,
+// PREVIEW_LOCK_BROWSER_OPEN_TIMEOUT_MS) was previously only proven to
+// self-bound in ISOLATION (the standalone cmuxctl-level
+// `_simulateBrowserOpenHang` test), never through the lock — so a
+// regression that let a hung `browser open` escape the critical section
+// unbounded had no test that would catch it via ensurePreviewBrowser
+// itself. This closes that pairing gap. Unlike a tree hang (tree() throws
+// on a failed spawn), a hung `browser open` degrades gracefully — cmux()
+// returns `{ok:false, error:{code:'spawn_error'}}` and browserOpen returns
+// null — so ensurePreviewBrowser returns `{state:'skipped'}` rather than
+// throwing.
+test('ensurePreviewBrowser: _simulateBrowserOpenHang inside the critical section (the SECOND bounded spawn, not the tree reads) aborts on browserOpen\'s own 5000ms bound, well under LOCK_STALE_MS, and releases the lock', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('preview-browser-open-hang-in-lock')
+  const workspaceId = workspaceRes.json.workspace_id
+  const state = loadFakeState(env)
+  state._simulateBrowserOpenHang = true
+  saveFakeState(env, state)
+
+  const start = Date.now()
+  const result = ensurePreviewBrowser({
+    paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
+    url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+  })
+  const elapsedMs = Date.now() - start
+
+  assert.deepEqual(result, { state: 'skipped' }, 'a hung browser open degrades to skipped, never throws')
+  assert.ok(elapsedMs < 15000, `expected the section to abort well under LOCK_STALE_MS (30000ms), took ${elapsedMs}ms`)
+  assert.equal(existsSync(join(ctx.paths.stateDir, 'browser.json.lock')), false, 'the lock must be released')
+  assert.equal(existsSync(join(ctx.paths.stateDir, 'browser.json')), false, 'nothing was created, nothing is stamped')
+})
+
 test('source-text: the abandon close (closeSurface) is sited AFTER the withRecordLock call returns, never inside it (errata E2)', () => {
   const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'dispatch.mjs'), 'utf8')
   const lockCallIdx = src.indexOf('result = withRecordLock(sidecarPath')
@@ -5167,14 +5247,59 @@ test('source-text: the abandon close (closeSurface) is sited AFTER the withRecor
   assert.ok(closeCallIdx > abandonBranchIdx, 'closeSurface(result.surfaceId) must be sited inside the result.abandon branch, after withRecordLock has already returned')
 })
 
-// The idempotence check's two sub-conditions ("our new surface is not alone
-// in its pane" / "a second free browser now exists elsewhere") can ONLY
-// fire on a genuine cross-process race inside the critical section — the
-// frozen be-12-01 fixture (out of this slice's scope) has no hook that lets
-// a single synchronous test process manufacture that race (see the coder's
-// final report). This source-text test is the fallback the mutation
-// doctrine still requires: it proves the check's CODE exists, even though
-// no behavioral test here can drive it red end-to-end.
+// test-engineer (PR-1 QA pass): the "second free browser now exists
+// elsewhere" sub-condition IS reachable behaviorally — `_simulateConcurrentCreate`
+// only models a brand-new racer surface, which recoverNewId's before/after
+// diff always intercepts first (ambiguity throw) before this check ever
+// runs. `_simulateFreeBrowserAppearsMidCreate` (fake-cmux.mjs) instead
+// RELOCATES an already-existing worker-pane browser surface to a fresh,
+// unclassified pane during the `browser open` call itself, before the
+// fixture's own reuse-detection runs — the surface's id is preserved, so
+// recoverNewId still finds exactly one new surface (ours) and browserOpen
+// returns successfully, letting treeAfter show a second free browser this
+// process never created. This is the "a racer won despite the lock" case
+// materialized without a second OS process.
+test('ensurePreviewBrowser: a worker-pane browser relocating to a free pane DURING the open call is detected by the post-create idempotence check — abandon, no stamp, close attempted for OUR surface only, preview_double_create_detected', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('singleton-idempotence-relocate')
+  const workspaceId = workspaceRes.json.workspace_id
+  const bound = buildAndBindRecordWithRealPane(ctx, { role: 'coder', sliceId: 'be-9v', workspaceId })
+  const docTabBrowserId = injectBrowserSurfaceIntoPane(env, bound.surface.pane_id)
+
+  const state = loadFakeState(env)
+  state._simulateFreeBrowserAppearsMidCreate = true
+  saveFakeState(env, state)
+
+  let result
+  const stderr = captureStderr(() => {
+    result = ensurePreviewBrowser({
+      paths: ctx.paths, workspaceId, initialSurfaceId: workspaceRes.json.initial_surface_id,
+      url: PREVIEW_URL, cachedMethods: CACHED_METHODS_WITH_BROWSER_OPEN,
+    })
+  })
+
+  assert.equal(result.state, 'skipped')
+  assert.equal(result.reason, 'preview_double_create_detected')
+  assert.equal(readBrowserSidecar(ctx), null, 'no stamp on an abandon verdict')
+  assert.match(stderr, /preview_double_create_detected/)
+  assert.match(stderr, /close attempted/)
+  assert.doesNotMatch(stderr, /\bclosed\b/, 'the abandonOrphan shape is "close attempted", never "closed"')
+  assert.doesNotMatch(stderr, new RegExp(docTabBrowserId), 'the relocated doc-tab browser must never be named as ours to close')
+
+  const closeSurfaceEntries = readLog(env.logPath).filter((e) => e.argv[0] === 'close-surface')
+  assert.equal(closeSurfaceEntries.length, 1, 'exactly one close-surface, for OUR abandoned surface only')
+  assert.notEqual(closeSurfaceEntries[0].argv[1], docTabBrowserId)
+  const openInvocations = browserOpenInvocations(env)
+  assert.equal(openInvocations.length, 1, 'exactly one browser open attempted')
+})
+
+// The pane-alone sub-condition ("our new surface is not alone in its pane")
+// remains covered only by the source-text test below: every reachable path
+// that stacks a second browser into OUR OWN pane also lands that pane in
+// the worker-pane set first (preview_landed_in_worker_pane fires before
+// this branch is reached) — see the coder's final report. The relocation
+// hook above closes the sibling "second free browser elsewhere" branch
+// behaviorally; this source-text test remains the mutation-doctrine
+// fallback for the not-alone-in-pane branch specifically.
 test('source-text: the post-create idempotence check (not-alone-in-pane OR a second free browser elsewhere) exists inside the critical section, decided on treeAfter', () => {
   const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'dispatch.mjs'), 'utf8')
   const lockCallIdx = src.indexOf('result = withRecordLock(sidecarPath')

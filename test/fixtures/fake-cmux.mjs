@@ -696,6 +696,44 @@ switch (verb) {
       } catch {
         // leave hostname blank on an unparsable url — never throws the fake
       }
+      // test-engineer hook (PR-1 idempotence-check coverage gap): a
+      // PRE-SEEDED state flag, never a new env switch. Models a genuine
+      // concurrent topology shift the lock's spawn budget cannot prevent —
+      // an EXISTING browser surface, previously excluded as a worker-pane
+      // browser (e.g. a rung-2 doc-tab), silently RELOCATES out of its pane
+      // into a brand-new, unclassified pane DURING this `browser open`
+      // call, BEFORE the reuse-detection below runs (so this open still
+      // creates a fresh split pane for OUR surface rather than stacking
+      // onto the now-vacated worker pane). This must fire before
+      // reuse-detection: if the pre-existing browser were still sitting in
+      // its original pane at that point, `browser open` would stack onto
+      // it and land OUR surface in a worker pane instead (a different,
+      // already-covered outcome). Unlike `_simulateConcurrentCreate` (a
+      // brand-new surface id, deliberately caught by recoverNewId's
+      // before/after ambiguity check BEFORE browserOpen ever returns), a
+      // RELOCATION preserves the surface's existing id, so recoverNewId
+      // still finds exactly one new surface (ours) and browserOpen returns
+      // successfully — the only way to drive treeAfter into showing a
+      // second free browser without recoverNewId intercepting first. This
+      // is what makes ensurePreviewBrowser's post-create idempotence check
+      // ("a second free browser now exists elsewhere") reachable from a
+      // single synchronous test process.
+      if (state._simulateFreeBrowserAppearsMidCreate) {
+        for (const pane of entry.workspace.panes) {
+          const idx = (pane.surfaces || []).findIndex((s) => s.type === 'browser')
+          if (idx >= 0) {
+            const [surf] = pane.surfaces.splice(idx, 1)
+            pane.surface_ids = (pane.surface_ids || []).filter((sid) => sid.toLowerCase() !== surf.id.toLowerCase())
+            const relocatedPaneId = nextId(state)
+            surf.pane_id = relocatedPaneId
+            entry.workspace.panes.push({
+              id: relocatedPaneId, workspace_id: entry.workspace.id, surface_ids: [surf.id],
+              selected_surface_id: surf.id, surfaces: [surf], _pos: nextPos(state),
+            })
+            break
+          }
+        }
+      }
       // `browser open --workspace` REUSES an existing browser pane rather
       // than creating a second (live-verified) — a second open in a
       // workspace already holding a browser surface prints placement=reuse

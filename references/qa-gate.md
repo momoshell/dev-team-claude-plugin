@@ -92,6 +92,70 @@ Adversarial panel: the majority is counted, not judged. Pass = a strict majority
 
 Reviewers report coverage-first — you are the filter. They surface every finding, including uncertain and low-severity ones, tagged with severity + confidence. Only critical blocks. Don't ask for a narrower report; filter it here.
 
+## Gate memory — re-review awareness with no new persisted ledger
+
+No new storage exists for this. Three existing carriers do the whole job, each covering a different span of time:
+
+1. **In-loop re-review (same gate loop, no `/clear`).** You (the orchestrator) already hold the gate report you just produced in context — compose the Prior findings block below straight from it when you dispatch a re-review after a bounce.
+2. **Across windows, in respond mode.** GitHub itself is the store: `commands/pr-review.md`'s respond-mode section reads disposition back out of `reviewThreads.comments`, the same query it already runs.
+3. **Past the task.** A disposition worth generalizing beyond this one task stops being gate memory and becomes an ordinary `conventions.md`/`qa-notes.md` entry — nothing here special-cases that path.
+
+**Frozen carry-forward shape.** Compose this table into any re-review dispatch, verbatim in shape:
+
+```
+## Prior findings (dispositioned — do not re-litigate)
+| finding | prior severity | disposition | note |
+| scripts/foo.mjs:42 missing null check | critical | fixed (<short-sha>) | verify the fix; report a NEW finding only if the fix is wrong |
+| scripts/bar.mjs:7 naming            | suggestion | wont-fix (user) | settled |
+| scripts/baz.mjs:19 retry race       | warning | open | re-report if still present |
+```
+
+**The disposition enum is closed at exactly five members** — `fixed` · `open` · `wont-fix (user)` · `disagreed (user)` · `deferred (issue #N)` — nothing else is a valid value in this column. Per-disposition rule:
+
+- `fixed (<short-sha>)` — verify the fix landed. Re-reporting the SAME finding is a consolidation-drop (§ below); a fix that turns out wrong is a NEW finding, not a re-raise of the old one.
+- `open` — re-emit if the underlying condition is still present.
+- `wont-fix (user)` / `disagreed (user)` — settled. Never re-raised without genuinely new evidence, and the finding must say what's new.
+- `deferred (issue #N)` — parked, not resolved; still not re-litigated in-task, but not "settled" in the same sense — it's expected to resurface via the linked issue.
+
+**Only the user may author a `(user)` disposition.** You (the orchestrator) may author `deferred (issue #N)` on the user's behalf — deferring is just scheduling — but you must never write `wont-fix (user)` or `disagreed (user)` yourself. Consent cannot be manufactured: a gate that can put words in the user's mouth can silence any finding it doesn't like, and there would be no way to tell a real disposition from a fabricated one just by reading the table.
+
+**The gate-report file — closing the one real gap: a mid-task `/clear`.** Whenever a gate bounces, write the gate report as plain markdown to `.claude/dev-team/tasks/issue-<N>/gate-report-r<k>.md` (`<N>` the task's issue number, `<k>` the 1-based bounce round) — this directory is git-tracked in this repo, so the file survives a cleared window. A re-review dispatch after a `/clear` cites that path instead of trying to reconstruct the Prior findings block purely from conversational memory that may no longer exist.
+
+This file is **plain markdown, human-readable, and never a parsed contract.** No schema is defined for it, nothing in this repo parses it, and nothing should start: the moment anything parses it you have quietly rebuilt the persisted-ledger design this approach deliberately rejected.
+
+## The consolidation pass — after all panel members return, before you act
+
+Run this after every panel member (or reviewer bundle member) has returned, before you take any action on their findings. Six ordered steps:
+
+**0. Freeze the verdict arithmetic first**, exactly as § Reviewer verdicts already defines it, off the raw returns: majority count of the literal token `pass`; a single `critical` anywhere blocks regardless of that count; `inconclusive` counts as non-pass. Nothing below in steps 1–5 is allowed to touch this frozen number directly — only step 6's escalation logic reads it back.
+
+**1. Normalize.** Turn every member's findings into one flat list of `(member, severity, file, line, summary)` — the same five keys as the frozen `findings[]` entry plus the member. If a member returned no parseable block (prose-only, agent-tool mode with no verdict token, etc.), mark it `unstructured` rather than dropping it silently. Marking a member `unstructured` records that its findings were prose-only — it does **not** license reading a verdict out of that prose; the inconclusive/re-run rule above still governs whether that member's *verdict* counts.
+
+**2. Dedup.** Merge two findings **iff** same normalized `file` **and** same non-null `line` **and** same defect. A merged finding takes the **highest** severity present among the merged set and lists **every** member that raised it — the agreement count is preserved, never collapsed away. A null `line` on either side is **never** merged (nothing to anchor the identity check on). Honest limitation, inherited from § Panel lenses above: cross-reviewer dedup under-merges in practice — two reviewers citing different lines for the same defect (a call site vs. its definition) won't merge, so an agreement count will often read 1/3 even for a real shared finding. This is an accepted v1 limitation, not a bug to chase.
+
+**3. Re-categorize.** Check each finding's severity against the fixed severity->band table in § Reviewer verdicts — nothing else. Record a reason for every re-categorization. Upgrades are unrestricted. An upgrade INTO `critical` flows through to the frozen arithmetic and blocks the gate even though step 0 already froze the count (see step 6). A **downgrade of an existing `critical` is forbidden** — a critical that no longer belongs is handled as a step-4 drop, with cited evidence, never as a quiet demotion here.
+
+**4. Reasonableness filter for drops.** A finding may be dropped only by citing one of three conditions, and **a `critical` is never dropped** — a critical that meets a drop condition is escalated to the user instead, always.
+   - **(a) Contradicts a specific `conventions.md`/`qa-notes.md` entry.** Quote the entry's text, not just its name — naming alone isn't auditable.
+   - **(b) Re-raises a carry-forward finding already dispositioned `wont-fix (user)`/`disagreed (user)`, with no new evidence.** Cite the concrete artifact where that disposition actually lives — the task-dir gate-report file (`gate-report-r<k>.md`) or a memory entry — by path/location. If no such artifact exists, this condition does not apply and the finding cannot be dropped on this basis, however confident you are that "it was already discussed."
+   - **(c) Factually false against the diff.** Name the specific line that disproves it.
+
+**5. Report — with a mandatory audit line.** Its absence is itself an escalation to the user, never an optional nicety, in this exact shape:
+
+```
+consolidated N findings from M members (P of M supplied structured findings) -> K (X merged, Y dropped, Z re-categorized); drops cited below
+```
+
+`P of M` is the structured-supplier denominator from step 1's `unstructured` marking — required, not decorative. The report also flags any finding whose review only happened because the mechanical size floor (§ Review ladder) promoted it into Deep/panel review, rather than genuine semantic risk, so a reader can tell size-promoted findings from risk-driven ones.
+
+**6. Escalation runs in both directions.**
+   - If the frozen arithmetic (step 0) said **block**, the gate still blocks even if every one of the blocking findings was later dropped in step 4 — report it and ask the user rather than quietly flipping to pass.
+   - If step 3 upgrades a finding into `critical`, the gate blocks even though step 0's raw count said pass — same escalate-and-report treatment.
+
+**The governing invariant is stricter, never looser — not a claim that the frozen number is immutable.** A literal "nothing ever changes" reading would contradict § Reviewer verdicts' own rule that a `verdict:pass` carrying a critical finding is a contradiction, not a pass. State it in both directions instead: an upgrade INTO `critical` can flip a frozen pass into a block (step 6, second bullet); a downgrade of an existing critical is forbidden (step 3); nothing in consolidation may turn a frozen block into a pass (step 6, first bullet). Consolidation may only make the gate **stricter**, never **looser**.
+
+**Two distinct drop vocabularies — do not merge them.** `commands/pr-review.md`'s pre-existing rule to drop anything speculative you can't ground in a concrete line is outward-facing draft hygiene for a human reviewer reading your reply — a different situation entirely. This section's step-4 drops are internal ship/no-ship gate mechanics, gated on citation, with a hard floor that a `critical` is never dropped. They are two independently-scoped rules for two different situations and must not be merged into one.
+
 ## The human patch view (cmux diff)
 
 When you want eyes on the actual patch at the gate, open it: cmux diff [<patch-file>|-] [--source unstaged|staged|branch|last-turn] [--workspace <id>] [--surface <id>]. It is orchestrator-invoked from the interactive session — a human-facing surface, not a worker capability — so it needs no CMUX_ALLOWS entry (that constant stays the frozen two-element allow list in scripts/cmux/contract.mjs; widening it is a permission change, not a convenience). It is a viewer, not a verdict: it never substitutes for a reviewer's parsed block. Apply the noise exclusions above when you open it — same shared list, same suppression rule, same one-line excluded-paths header.

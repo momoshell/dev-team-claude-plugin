@@ -116,6 +116,18 @@ test('command onboard.md: step 5 lists the four new config keys', () => {
   assert.match(md, /cmux_preview_url/)
 })
 
+test('command pr-review.md: respond mode treats an author-dispositioned thread as settled', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /already carrying a disposition reply from the PR author is settled/)
+  assert.match(md, /reviewer replied again \*after\* that disposition reply/)
+})
+
+test('command pr-review.md: the reviewThreads query fetches the NEWEST comments', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /comments\(last:/)
+  assert.equal(/comments\(first:/.test(md), false)
+})
+
 test('command onboard.md: seeds the project roster', () => {
   const md = readFileSync(join(ROOT, 'commands', 'onboard.md'), 'utf8')
   assert.match(md, /roster\.default\.json/)

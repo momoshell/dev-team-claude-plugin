@@ -105,12 +105,23 @@ export const SRC_FIELD_MAP = {
   // (changeType is an enum string: added/modified/removed/renamed/copied,
   // present on every file entry of every PR); and
   // `gh pr view --json reviews` — reviews[] {id, author.login,
-  // authorAssociation, state, submittedAt}, plus reactionGroups[].content if
+  // authorAssociation, state, submittedAt, commit.oid} (commit.oid is the
+  // commit SHA the review was made against — populated on every real PR
+  // review, same category as headRefOid), plus reactionGroups[].content if
   // review/comment bodies carry reactions.
+  //
+  // The walk below is key-based, not path-based (wrapValue/wrapString match
+  // on bare property name), so adding `oid` here structurally permits ANY
+  // string keyed `oid` anywhere in a github-pr payload, not just
+  // reviews[].commit.oid — e.g. a future `--json commits` addition's
+  // commits[].oid would also pass through untouched. That's accepted here
+  // (oid is a commit SHA in every GitHub shape it appears in, never author
+  // prose), not fixed with a path-scoped check — flagging it here instead of
+  // silently widening scope.
   'github-pr': {
     text: new Set(['title', 'body']),
     exempt: new Set(['name', 'description']),
-    structural: new Set(['id', 'login', 'headRefOid', 'state', 'url', 'path', 'changeType', 'authorAssociation', 'submittedAt', 'content']),
+    structural: new Set(['id', 'login', 'headRefOid', 'state', 'url', 'path', 'changeType', 'authorAssociation', 'submittedAt', 'content', 'oid']),
   },
   // No exemption needed: the GraphQL review-thread shape has no other
   // sentinel-named key at all. Structural: reviewThreads.nodes[]
@@ -205,7 +216,7 @@ function wrapString(value, key, path, ctx) {
     return stripped
   }
   if (structural.has(key)) return value
-  usage(`unmapped string field at ${path} (key "${key === null ? '<array root>' : key}") for --src ${ctx.src} — not in the text set, exempt set, or structural allowlist; refusing rather than passing it through unwrapped`)
+  usage(`unmapped string field at ${path} (key "${key === null ? '<array root>' : key}") for --src ${ctx.src} — not in this src's text set, exempt set, or structural allowlist; refusing rather than passing it through unwrapped`)
 }
 
 function parseArgs(argv) {

@@ -899,16 +899,18 @@ export function closeSurface(id) {
 
 export function closeWorkspace(id) {
   if (!requireTargetPresent('workspace', id, 'closeWorkspace')) return
-  cmux('close-workspace', [id])
+  cmux('close-workspace', ['--workspace', id])
 }
 
 // ---------------------------------------------------------------------------
 // Browser preview family (be-12-01, issue #12/D1 + D2, ADR-019).
 //
 // `browser` is ONE `VERBS` entry; its five sub-verbs ride as argv tokens
-// (`cmux browser <sub> ...`, the `markdown open` shape already precedented
-// above) and are guarded one level down by a MODULE-PRIVATE frozen
-// allowlist. browserVerb() throws BEFORE any spawn on anything outside it —
+// (`cmux browser <surface> <sub> ...` — surface FIRST, live-verified on
+// 0.64.22, see live-pass-findings.md F1; `open` alone is surface-less and
+// rides at `cmux browser open ...`) and are guarded one level down by a
+// MODULE-PRIVATE frozen allowlist. browserVerb() throws BEFORE any spawn on
+// anything outside it —
 // the same shape runVerb() applies to VERBS itself — so `eval`, `state`,
 // `console`, `snapshot`, `viewport` and every interaction verb are
 // structurally unreachable from this module, regardless of what a caller
@@ -941,7 +943,12 @@ export function browserVerb(sub, args, opts) {
   if (!BROWSER_SUBVERBS.includes(sub)) {
     throw new Error(`browserVerb: refusing to invoke a browser sub-verb outside the frozen BROWSER_SUBVERBS allowlist: ${sub}`)
   }
-  return cmux('browser', [sub, ...args], opts)
+  // Real grammar is surface-FIRST (live-verified, F1): `open` alone is
+  // surface-less, so it stays `browser open ...`; every other sub-verb's
+  // caller passes its surfaceId as args[0], which moves ahead of `sub`
+  // here rather than trailing it.
+  const argv = sub === 'open' ? [sub, ...args] : [args[0], sub, ...args.slice(1)]
+  return cmux('browser', argv, opts)
 }
 
 // Deliberate divergence from this module's house `err.message` logging
@@ -1059,7 +1066,7 @@ export function browserErrorsClear(surfaceId) {
   if (typeof surfaceId !== 'string' || surfaceId === '') {
     throw new Error('browserErrorsClear: surfaceId is required')
   }
-  const res = browserVerb('errors', ['clear', surfaceId], { timeoutMs: 10000 })
+  const res = browserVerb('errors', [surfaceId, 'clear'], { timeoutMs: 10000 })
   if (!res.ok) {
     logBrowserError('errors_clear', surfaceId, res.error?.code)
     return false
@@ -1079,7 +1086,7 @@ export function browserErrorsList(surfaceId) {
   if (typeof surfaceId !== 'string' || surfaceId === '') {
     throw new Error('browserErrorsList: surfaceId is required')
   }
-  const res = browserVerb('errors', ['list', surfaceId], { timeoutMs: 10000 })
+  const res = browserVerb('errors', [surfaceId, 'list'], { timeoutMs: 10000 })
   if (!res.ok) {
     logBrowserError('errors_list', surfaceId, res.error?.code)
     return null

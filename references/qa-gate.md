@@ -79,3 +79,19 @@ Reviewers report coverage-first — you are the filter. They surface every findi
 ## The human patch view (cmux diff)
 
 When you want eyes on the actual patch at the gate, open it: cmux diff [<patch-file>|-] [--source unstaged|staged|branch|last-turn] [--workspace <id>] [--surface <id>]. It is orchestrator-invoked from the interactive session — a human-facing surface, not a worker capability — so it needs no CMUX_ALLOWS entry (that constant stays the frozen two-element allow list in scripts/cmux/contract.mjs; widening it is a permission change, not a convenience). It is a viewer, not a verdict: it never substitutes for a reviewer's parsed block. Apply the noise exclusions above when you open it — same shared list, same suppression rule, same one-line excluded-paths header.
+
+## An optional gate adjunct: browser-verify evidence (issue #12/D5, ADR-019)
+
+Beside `cmux diff` above — same shape, same reasoning: `node dispatch.mjs browser-verify --task <slug>` is orchestrator-invoked only, never a worker capability, so it needs no CMUX_ALLOWS entry either. Available whenever `cmux_preview_url` is configured and a preview singleton is live for the task; run it before the gate when you want console-error and screenshot captured evidence for a frontend slice.
+
+**This is evidence, never a verdict input.** The gate still branches on the parsed `{verdict, findings}` enum alone — browser-verify's JSON is never fed into that decision, and a dirty console or `load_state_confirmed: false` never blocks the gate on its own; read it, then let the reviewer's parsed verdict decide.
+
+Total wall-clock budget: <= 90 000 ms (<= 90s) for the whole verb. Every field it reports is origin-only (`scheme://host[:port]`, never a full URL with path or query) — the same discipline the preview singleton itself follows.
+
+**Caveats before you read a screenshot as a rendering claim:** cmux 0.64.22 still prints its own `OK` line and writes a full-size PNG even on a surface that never became ready — a blank/white PNG is a REACHABLE outcome, not a bug, and `console_errors: {clean:true, count:0}` on a never-loaded page is equally reachable (a page that never navigated has nothing to log an error about). A screenshot captured and a clean console together prove only that the verb ran; they are never a stand-in for a human actually looking at the patch and deciding for themselves whether the change is good.
+
+**Cross-read rule:** a gate-time `no_preview_recorded` from browser-verify should be read against the dispatch JSON's own `preview.reason` — the dispatch-time enum is closed at five members (`preview_lock_contended`, `preview_surface_ambiguous`, `preview_topology_unverifiable`, `preview_double_create_detected`, `preview_landed_in_worker_pane`); if dispatch never even attempted a preview for one of those reasons, browser-verify reporting `no_preview_recorded` is the expected, consistent downstream consequence, not a second, independent failure to chase.
+
+**browser-verify's own gate-time enum is closed at three members**, distinct from the five dispatch-time members above: `preview_disabled` (`cmux_preview_url` is not configured — the feature is inert), `no_preview_recorded` (no sidecar exists, or it was malformed — cross-read against `preview.reason` per the rule above), `preview_surface_gone` (a sidecar exists but fails corroboration against a fresh tree: gone, wrong workspace, or not browser-typed).
+
+**Credentials:** log the preview into dev/staging accounts only, never production or admin credentials — the same rule the preview singleton's own config-key documentation states.

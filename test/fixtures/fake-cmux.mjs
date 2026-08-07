@@ -579,7 +579,11 @@ switch (verb) {
   }
 
   case 'close-workspace': {
-    const id = argv[1]
+    // build 102 (F5, live-pass-findings.md) REFUSES a positional id — the
+    // legacy verb is now an alias for `workspace close` and requires
+    // `--workspace <id>`.
+    const id = argAfter('--workspace')
+    if (!id) fail('bad_args', 'close-workspace requires --workspace')
     const state = loadState()
     for (const w of state.windows || []) {
       const idx = (w.workspaces || []).findIndex((ws) => ws.id.toLowerCase() === (id || '').toLowerCase())
@@ -660,15 +664,22 @@ switch (verb) {
     break
   }
 
-  // be-12-01, issue #12/D1-D2: the `browser` verb family. Sub-verb rides as
-  // argv[1] (the `markdown open` shape); an unknown sub-verb is a bad_args
-  // failure (browserVerb's own frozen allowlist already refuses everything
-  // else before any spawn, so this default only ever fires on a genuinely
-  // malformed invocation). All frozen live captures below (0.64.22), all
-  // state-flag driven — no new env switches.
+  // be-12-01, issue #12/D1-D2, corrected fix-round-2 (F1, live-pass-findings.md):
+  // the `browser` verb family's REAL grammar is surface-FIRST —
+  // `browser [--surface <id>|<surface>] <subcommand> [args]`. `open` is the
+  // sole surface-less sub-verb and rides directly at argv[1]; every other
+  // invocation carries the surface handle at argv[1] and the sub-verb at
+  // argv[2]. A sub-verb-first invocation (the pre-fix-round-2 bug) lands a
+  // non-sub-verb token in the argv[2] slot, which falls through to the
+  // "Unsupported browser subcommand" failure below — the SAME failure the
+  // real binary produces (live-verified byte-for-byte), so a wrapper
+  // regression to the old order is structurally fatal here, not merely
+  // pin-dependent.
   case 'browser': {
-    const sub = argv[1]
     const state = loadState()
+    const isOpen = argv[1] === 'open'
+    const surfaceId = isOpen ? null : argv[1]
+    const sub = isOpen ? 'open' : argv[2]
 
     // be-12-01 qa hooks: PRE-SEEDED state flags (never a new env switch).
     if (sub === 'open' && state._simulateBrowserOpenHang) {
@@ -780,7 +791,6 @@ switch (verb) {
         Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
         process.exit(0)
       }
-      const surfaceId = argv[2]
       const url = argv[3]
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')
@@ -802,8 +812,7 @@ switch (verb) {
     }
 
     if (sub === 'errors') {
-      const action = argv[2]
-      const surfaceId = argv[3]
+      const action = argv[3]
       // be-12-02 fix-round item 6 hooks: mirror _simulateBrowserOpenHang's
       // shape exactly — state-flag driven, no new env switch, one flag per
       // sub-action so clear/list never interfere with each other. Prove
@@ -824,7 +833,11 @@ switch (verb) {
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')
       // Stacked surfaces (>=2 browser-typed surfaces sharing one pane) are
-      // BOTH UNDRIVABLE (live-verified, both directions) — errors list/clear
+      // Stacked-pair js_error rule, retained as the modeled WORST CASE:
+      // live-verified pre-build-102; build 102 observed both members fully
+      // drivable (live-pass-findings.md F3). The fail-closed singleton does
+      // not depend on undrivability, so the fake keeps the stricter
+      // behavior — errors list/clear
       // AND wait all fail identically on either one.
       const browserSiblings = (found.pane.surfaces || []).filter((s) => s.type === 'browser')
       if (browserSiblings.length >= 2) {
@@ -833,7 +846,16 @@ switch (verb) {
       if (action === 'clear') {
         succeed('')
       } else if (action === 'list') {
-        succeed('No browser errors')
+        // be-12-03 hook: a PRE-SEEDED state flag (never a new env switch)
+        // that returns an arbitrary raw payload verbatim instead of the
+        // frozen clean literal — the only way to produce a dirty console
+        // through this fixture. The clean literal stays the default so
+        // every existing test is unaffected. `??`, never `||` (fix-round
+        // panel-2 S6): an EMPTY payload (`''`) is a legitimate, distinct
+        // seed a test must be able to produce — `||` would silently coerce
+        // it back to the clean literal, masking the reducer's genuine
+        // unrecognized-on-empty-string behaviour.
+        succeed(state._simulateBrowserErrorsPayload ?? 'No browser errors')
       } else {
         fail('bad_args', `browser errors: unknown action ${action}`)
       }
@@ -851,7 +873,6 @@ switch (verb) {
         Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
         process.exit(0)
       }
-      const surfaceId = argv[2]
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')
       const loadStateArg = argAfter('--load-state')
@@ -879,7 +900,6 @@ switch (verb) {
         Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
         process.exit(0)
       }
-      const surfaceId = argv[2]
       const found = findSurfaceEntry(state, surfaceId)
       if (!found) fail('not_found', 'Surface not found')
       const outPath = argAfter('--out')
@@ -887,7 +907,13 @@ switch (verb) {
       // full-size blank PNG) even on a stacked/never-ready surface —
       // existsSync proves a file, never a render.
       if (!state._simulateScreenshotOkNoWrite && outPath) {
-        writeFileSync(outPath, 'fake-png-bytes')
+        // fix-round (panel-1 S6/panel-2 S5) hook: a PRE-SEEDED state flag
+        // (never a new env switch) that writes a genuinely EMPTY file
+        // instead of the usual fake bytes — distinct from
+        // _simulateScreenshotOkNoWrite (no file at all): this one proves
+        // statSync(...).size > 0 catches a zero-byte write that a bare
+        // existsSync would wrongly call a success.
+        writeFileSync(outPath, state._simulateScreenshotZeroByteWrite ? '' : 'fake-png-bytes')
       }
       // `_simulateScreenshotOkNoWrite` prints OK WITHOUT writing the file —
       // proves a caller that trusts the OK line instead of existsSync fails.
@@ -895,7 +921,13 @@ switch (verb) {
       break
     }
 
-    fail('bad_args', `browser: unknown sub-verb ${sub}`)
+    // Real error shape, live-verified byte-for-byte (F1): the code segment
+    // IS the message prefix — there is no separate `code:` token on this
+    // failure, so `fail`'s own `code`/`message` split is deliberately used
+    // here to reproduce that exact two-part line, `Error: Unsupported
+    // browser subcommand: <token>`, rather than the usual `Error: <code>:
+    // <message>` shape every other fixture failure uses.
+    fail('Unsupported browser subcommand', sub)
     break
   }
 

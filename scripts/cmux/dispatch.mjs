@@ -1,17 +1,22 @@
 #!/usr/bin/env node
 // The cmux dispatcher CLI: wires resolve.mjs (paths/roster), record.mjs
-// (dispatch-record lifecycle), cmuxctl.mjs (the cmux boundary) and ladder.mjs
-// (evidence/outcome) into the seven lifecycle verbs. This is the ONLY file in
-// the repo that spawns processes, touches git, or measures wall-clock time.
+// (dispatch-record lifecycle), cmuxctl.mjs (the cmux boundary), ladder.mjs
+// (evidence/outcome) and browser-evidence.mjs (browser-console reduction)
+// into the verbs COMMANDS holds (named with no fixed count here, so this
+// header can't go stale again — see COMMANDS below for the closed set).
+// This is the ONLY file in the repo that spawns processes, touches git, or
+// measures wall-clock time.
 //
 // usage:
-//   node dispatch.mjs preflight  --task <slug> [--force]
-//   node dispatch.mjs workspace  --task <slug>
-//   node dispatch.mjs dispatch   --task <slug> --slice <slice_id> --role <role> --spec <path> [--attempt N] [--settle-ms N]
-//   node dispatch.mjs await      --task <slug> --all <dispatch_id...> [--max-block-s N]
-//   node dispatch.mjs close      --task <slug> --dispatch <dispatch_id>
-//   node dispatch.mjs status     --task <slug>
-//   node dispatch.mjs teardown   --task <slug> [--keep-artifacts]
+//   node dispatch.mjs preflight      --task <slug> [--force]
+//   node dispatch.mjs workspace      --task <slug>
+//   node dispatch.mjs dispatch       --task <slug> --slice <slice_id> --role <role> --spec <path> [--attempt N] [--settle-ms N]
+//   node dispatch.mjs await          --task <slug> --all <dispatch_id...> [--max-block-s N]
+//   node dispatch.mjs close          --task <slug> --dispatch <dispatch_id>
+//   node dispatch.mjs status         --task <slug>
+//   node dispatch.mjs teardown       --task <slug> [--keep-artifacts]
+//   node dispatch.mjs phase          --task <slug> --set <planning|building|gate>
+//   node dispatch.mjs browser-verify --task <slug>
 //
 // Common options: --checkout <primary-checkout-dir> --repo <repo-slug>
 //   --root <task-artifacts-root> --config <path-to-json>
@@ -24,7 +29,7 @@
 import { spawnSync, execFileSync } from 'node:child_process'
 import {
   existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, chmodSync,
-  unlinkSync, rmSync, realpathSync, readdirSync,
+  unlinkSync, rmSync, realpathSync, readdirSync, statSync,
 } from 'node:fs'
 import { dirname, join, resolve as resolvePath, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -47,11 +52,13 @@ import {
   TIERS, setWorkspaceColor, setProgress, clearProgress,
   TURN_END_EVENT_NAME, parseTurnEndEvent, readScreen,
   browserOpen, BROWSER_OPEN_SPAWN_TIMEOUT_MS, BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS,
+  browserErrorsClear, browserGoto, browserWaitReady, browserErrorsList, browserScreenshot,
 } from './cmuxctl.mjs'
 import {
   collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn,
 } from './ladder.mjs'
 import { detectSignatures } from './triage.mjs'
+import { reduceBrowserErrors } from './browser-evidence.mjs'
 import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -664,7 +671,13 @@ export function writeCompletionNonce(noncePath) {
 // (or '' if absent) — readExecutionMode owns the parse.
 // ---------------------------------------------------------------------------
 
-const MUTATING_VERBS = new Set(['workspace', 'dispatch', 'await', 'close', 'teardown', 'phase'])
+// browser-verify's membership here is NOT "mutates a record" (it mutates
+// nothing — it is a read-only consumer of <stateDir>/browser.json and
+// writes only a screenshot PNG); this set's real meaning is "requires
+// execution_mode: cmux" (its only consumer is assertExecutionModeCmux
+// below), which IS browser-verify's entire execution-mode authorization
+// gate (issue #12/D3, ADR-019) — not a lifecycle-record concern at all.
+const MUTATING_VERBS = new Set(['workspace', 'dispatch', 'await', 'close', 'teardown', 'phase', 'browser-verify'])
 
 function assertExecutionModeCmux(verb, configText) {
   if (!MUTATING_VERBS.has(verb)) return
@@ -1068,8 +1081,17 @@ export function formatPreviewFailClosedLine({ strayUuids, unresolvablePaneId }) 
   const leading = unresolvablePaneId
     ? `dispatch record's pane ${unresolvablePaneId} no longer resolves in the live tree; `
     : ''
-  const closeCommands = strayUuids.map((id) => `cmux close-surface ${id}`).join(' · ')
-  return `ensurePreviewBrowser: ${leading}${strayUuids.length} browser surface(s) outside this workspace's worker panes and no valid preview record — refusing to create a second (two stacked browser surfaces are both undrivable). Preview is disabled for this task until they are closed: ${closeCommands}`
+  // `cmux close-surface <uuid>` never closes a browser surface on 0.64.22
+  // (invalid_state: Cannot close the last surface, live-verified in every
+  // configuration, see live-pass-findings.md F2); `browser <uuid> tab
+  // close` succeeds in every configuration.
+  const closeCommands = strayUuids.map((id) => `cmux browser ${id} tab close`).join(' · ')
+  // The justification clause is deliberately build-agnostic: "both
+  // undrivable" was live-falsified on 0.64.22 build 102 (F3) — the
+  // fail-closed rule stands on the stacking itself (a second create lands
+  // as a tab in an existing pane; a wrong adopt could navigate a rendered
+  // document away, ADR-019).
+  return `ensurePreviewBrowser: ${leading}${strayUuids.length} browser surface(s) outside this workspace's worker panes and no valid preview record — refusing to create a second (it would stack into an existing pane; fail-closed per ADR-019). Preview is disabled for this task until they are closed: ${closeCommands}`
 }
 
 // ensurePreviewBrowser({ paths, workspaceId, initialSurfaceId, url }) ->
@@ -2483,6 +2505,190 @@ export function phaseCmd(args, ctx) {
 }
 
 // ---------------------------------------------------------------------------
+// browser-verify — issue #12/D5, ADR-019. Orchestrator-invoked gate-evidence
+// verb, exactly like `cmux diff`: not a worker capability, no CMUX_ALLOWS
+// entry (conventions.md 2026-08-04, "cmux diff is the orchestrator's human
+// patch view"). Runs the FIXED D5 verb sequence against be-12-02's preview
+// singleton (read-only consumer of <stateDir>/browser.json — never
+// rewritten here) and reports a closed-shape evidence record.
+//
+// browser-verify NEVER judges: it exits 0 whenever it ran, including a
+// dirty console, load_state_confirmed:false, and preview_present:false —
+// the gate still branches on the parsed {verdict, findings} enum alone
+// (D17); "fixing" this verb into a control-flow branch on browser evidence
+// is the predictable regression this comment exists to head off. Exit 1
+// only on an operational failure (no workspace bound, cmux unreachable);
+// exit 2 on a usage error.
+//
+// Total wall-clock budget <= 90 000 ms, enumerated: this verb's own bounded
+// `tree` call (BROWSER_VERIFY_TREE_TIMEOUT_MS, 3 000) + browserErrorsClear
+// (10 000) + browserGoto (20 000) + browserWaitReady (25 000) +
+// browserErrorsList (10 000) + browserScreenshot (20 000) = 88 000 ms.
+// ---------------------------------------------------------------------------
+
+// Frozen, dispatcher-authored, closed warning vocabulary (D5 deliberate
+// divergence): no cmux error detail, no cmux error code, no page bytes ever
+// rides in here — the shipped IC-2 wrappers return boolean/null and log the
+// code only at the cmuxctl boundary (cmuxctl.mjs's logBrowserError), so the
+// code is not even available to this module. Every warning this verb emits
+// must be a member of this exact array.
+export const BROWSER_VERIFY_WARNINGS = Object.freeze([
+  'browser_wait_not_confirmed',
+  'browser_screenshot_missing',
+  'browser_errors_list_unavailable',
+  'browser_configured_origin_differs_from_recorded',
+  'browser_goto_failed',
+  'browser_errors_clear_failed',
+])
+
+// This verb's own only spawn (the corroboration tree read) — never re-typed
+// elsewhere; the budget test extracts this literal by name.
+const BROWSER_VERIFY_TREE_TIMEOUT_MS = 3000
+
+// Shape-guard for the sidecar's recorded origin, mirroring cmuxctl.mjs's
+// logBrowserError precedent (BROWSER_ERROR_CODE_RE, cmuxctl.mjs:959-965):
+// browser.json is a file this process reads but the sidecar-writing side
+// (be-12-02's ensurePreviewBrowser) is fed a URL that itself passed through
+// validatePreviewUrl, so a hostile origin value should never occur in
+// practice — but "should never occur" is not a structural guarantee, and
+// this value rides into an interpolated stderr line and the JSON output. A
+// value not FULLY matching this closed pattern is never interpolated raw;
+// it is replaced by a fixed placeholder, exactly like the out-of-shape
+// cmux error code case above.
+const BROWSER_VERIFY_ORIGIN_RE = /^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?$/
+const BROWSER_VERIFY_UNPARSED_ORIGIN_PLACEHOLDER = '<unparsed origin>'
+
+// screenshotFileName(date) -> 'verify-<compact ISO, digits only>.png'. Never
+// carries any part of the configured URL — only a timestamp.
+function screenshotFileName(date) {
+  return `verify-${date.toISOString().replace(/[^0-9]/g, '')}.png`
+}
+
+export function browserVerifyCmd(args, ctx) {
+  const { paths, primaryCheckout } = ctx
+
+  // Workspace binding is SITED, not assumed — the exact shape phaseCmd uses.
+  const workspaceState = readJsonOrWarn(join(paths.stateDir, 'workspace.json'), 'workspace.json')
+  if (!workspaceState) {
+    throw new OperationalError('refused: no workspace bound for this task — run `workspace` first')
+  }
+
+  const configText = readConfigText(primaryCheckout)
+  const configuredUrl = readCmuxPreviewUrl(configText)
+  if (!configuredUrl) {
+    return { code: 0, json: { preview_present: false, reason: 'preview_disabled', warnings: [] } }
+  }
+
+  const sidecarPath = join(paths.stateDir, PREVIEW_BROWSER_SIDECAR_NAME)
+  const sidecar = readJsonOrWarn(sidecarPath, PREVIEW_BROWSER_SIDECAR_NAME)
+  if (!sidecar) {
+    return { code: 0, json: { preview_present: false, reason: 'no_preview_recorded', warnings: [] } }
+  }
+
+  // Corroborate against a FRESH tree (never trust the sidecar alone) AND
+  // workspace_id equality with the live binding — a stale sidecar from a
+  // recreated workspace must never be trusted just because it parses. This
+  // predicate is DELIBERATELY WEAKER than isValidSidecarSurface (:1064) —
+  // it has no worker-pane-exclusion conjunct — and that is intentional, not
+  // an oversight: be-12-02's worker-pane rejection exists to stop a *reuse*
+  // that would abandon/close a rung-2 mountDocTab surface out from under a
+  // running worker (D4), a hazard specific to the create/reuse decision
+  // ensurePreviewBrowser makes. browser-verify never reuses or creates
+  // anything — a doc-tab surface would also fail the `type !== 'browser'`
+  // check above regardless — and this spec scoped any additional
+  // worker-pane recomputation out of browser-verify entirely. A future
+  // reader should not "fix" this by importing computeWorkerPaneIds here in
+  // either direction.
+  //
+  // No record lock is taken here (deliberate, not an oversight): browser
+  // -verify only ever READS <stateDir>/browser.json and never writes it, so
+  // there is nothing for withRecordLock to protect against a concurrent
+  // writer racing this read — the worst case is a torn read that
+  // readJsonOrWarn already degrades to "absent" (-> no_preview_recorded),
+  // never a throw.
+  if (sidecar.workspace_id !== workspaceState.workspace_id) {
+    return { code: 0, json: { preview_present: false, reason: 'preview_surface_gone', warnings: [] } }
+  }
+  const scanTree = tree({ all: true, timeoutMs: BROWSER_VERIFY_TREE_TIMEOUT_MS })
+  const ws = findWorkspaceInTree(scanTree, workspaceState.workspace_id)
+  const found = ws ? findSurfaceInWorkspace(ws, sidecar.surface_id) : null
+  if (!found || found.surface.type !== 'browser') {
+    return { code: 0, json: { preview_present: false, reason: 'preview_surface_gone', warnings: [] } }
+  }
+
+  const surfaceId = sidecar.surface_id
+  const warnings = []
+
+  // Fixed D5 sequence, no additions, always run in full regardless of any
+  // intermediate boolean — this verb reports, it never short-circuits on a
+  // degraded step.
+  const clearOk = browserErrorsClear(surfaceId)
+  if (!clearOk) {
+    warnings.push('browser_errors_clear_failed')
+  }
+  const gotoOk = browserGoto(surfaceId, configuredUrl)
+  if (!gotoOk) {
+    warnings.push('browser_goto_failed')
+  }
+  const loadStateConfirmed = browserWaitReady(surfaceId)
+  if (!loadStateConfirmed) {
+    warnings.push('browser_wait_not_confirmed')
+  }
+  const rawErrors = browserErrorsList(surfaceId)
+  if (rawErrors === null) {
+    warnings.push('browser_errors_list_unavailable')
+  }
+  const consoleErrors = reduceBrowserErrors(rawErrors)
+
+  const screenshotPath = join(paths.stateDir, 'browser', screenshotFileName(new Date()))
+  mkdirSync(dirname(screenshotPath), { recursive: true })
+  browserScreenshot(surfaceId, screenshotPath)
+  // Success is confirmed by an INDEPENDENT statSync(...).size > 0 — cmux's
+  // own `OK <path>` stdout line is never trusted as proof of a write (0.64.22
+  // prints OK plus a full-size blank PNG even on a surface that never
+  // became ready). statSync (not existsSync) also catches a zero-byte write
+  // (a file that exists but never received any bytes) — panel-1 S6/panel-2
+  // S5 fix-round finding: existsSync alone cannot distinguish "written" from
+  // "created empty".
+  let screenshotWritten
+  try {
+    screenshotWritten = statSync(screenshotPath).size > 0
+  } catch {
+    screenshotWritten = false
+  }
+  if (!screenshotWritten) {
+    warnings.push('browser_screenshot_missing')
+  }
+
+  // ORIGIN-ONLY (D8): the full configured URL exists in exactly three places
+  // — .claude/dev-team/config.md, browserOpen's argv at dispatch time
+  // (ensurePreviewBrowser), and browserGoto's argv array above. Every
+  // output path from here on carries scheme://host[:port] only.
+  const configuredOrigin = originOf(configuredUrl)
+  const recordedOriginRaw = sidecar.origin
+  const recordedOrigin = typeof recordedOriginRaw === 'string' && BROWSER_VERIFY_ORIGIN_RE.test(recordedOriginRaw)
+    ? recordedOriginRaw
+    : BROWSER_VERIFY_UNPARSED_ORIGIN_PLACEHOLDER
+  if (configuredOrigin !== recordedOrigin) {
+    warnings.push('browser_configured_origin_differs_from_recorded')
+    log(`browser-verify: configured origin ${configuredOrigin} differs from the recorded origin ${recordedOrigin} — navigated to the configured origin (browser.json is never rewritten by this verb)`)
+  }
+
+  return {
+    code: 0,
+    json: {
+      preview_present: true,
+      surface_id: surfaceId,
+      origin: configuredOrigin,
+      load_state_confirmed: loadStateConfirmed,
+      console_errors: consoleErrors,
+      screenshot_path: screenshotWritten ? screenshotPath : null,
+      warnings,
+    },
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI entry point.
 // ---------------------------------------------------------------------------
 
@@ -2495,6 +2701,7 @@ const COMMANDS = {
   status: statusCmd,
   teardown: teardownCmd,
   phase: phaseCmd,
+  'browser-verify': browserVerifyCmd,
 }
 
 function printResult(result) {

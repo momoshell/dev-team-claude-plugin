@@ -1,0 +1,70 @@
+{
+  "task_id": "be-12-03-fixround",
+  "domain": "backend",
+  "goal": "Apply the consolidated PR-2 adversarial-panel findings to the uncommitted be-12-03 work: close the sidecar-origin stderr injection channel, surface silent browserGoto/browserErrorsClear failures as closed-vocabulary warnings, correct the four doc-coherence defects (onboard.md consumer scoping, --load-state overclaim, duplicate-key refusal claim, full-URL exposure count), document the gate-time enum, update README's mutating-verb list, and harden the flagged vacuous/narrow test pins.",
+  "files_in_scope": [
+    "scripts/cmux/dispatch.mjs",
+    "scripts/cmux/browser-evidence.mjs",
+    "test/cmux-dispatch.test.mjs",
+    "test/cmux-dispatch-doc.test.mjs",
+    "test/cmux-browser-evidence.test.mjs",
+    "test/fixtures/fake-cmux.mjs",
+    "test/commands.test.mjs",
+    "references/qa-gate.md",
+    "references/cmux-dispatch.md",
+    "commands/onboard.md",
+    ".claude/dev-team/config.md",
+    "README.md"
+  ],
+  "constraints": [
+    "scripts/cmux/contract.mjs and scripts/cmux/cmuxctl.mjs stay byte-identical (`git diff --stat` empty for both). No new cmux capabilities, no wrapper edits — every fix lands in dispatch.mjs, the reducer, tests, or docs.",
+    "BROWSER_VERIFY_WARNINGS stays a frozen, closed, dispatcher-authored vocabulary — the two new members are added to the frozen array, and the existing membership test must cover them automatically (it asserts membership generically).",
+    "The shape-guard for sidecar.origin follows the logBrowserError precedent (cmuxctl.mjs:959-965): validate against a closed pattern, emit a fixed placeholder on mismatch, never the raw value. The guard lives in dispatch.mjs (cmuxctl.mjs is frozen).",
+    "Doc edits keep every existing doc-pin green; NEW doc claims that get their own pins follow red-first where the pin is new (write assertion, observe fail, edit doc, observe green).",
+    "Mutations added by this round (if any) observed red then reverted from saved byte copies, never `git checkout --` (uncommitted work).",
+    "The D5 sequence itself is unchanged: still exactly errors clear → goto → wait → errors list → screenshot, all five always run (a failed goto pushes a warning and CONTINUES — evidence, never a verdict; exit stays 0).",
+    "README.md and test/commands.test.mjs are in scope ONLY for the two named edits (mutating-verb list; test-name count fix) — nothing else in those files."
+  ],
+  "acceptance_criteria": [
+    "M1 (panel-1 warning, injection channel): the origin-divergence warning never interpolates an unvalidated sidecar.origin — a value not fully matching ^https?:\\/\\/[A-Za-z0-9.-]+(:\\d{1,5})?$ is replaced by a fixed placeholder (e.g. <unparsed origin>). New test: hand-write a browser.json whose origin field is a unique hostile marker string (valid surface_id/workspace_id so corroboration passes) with a differing configured origin → the marker appears in NEITHER stderr NOR the produced JSON; the placeholder appears instead; exit 0. Mutation: remove the shape-guard, observe the marker leak test go red, revert.",
+    "M2 (panel-2 W1): BROWSER_VERIFY_WARNINGS gains 'browser_goto_failed'; browserGoto's return value is captured and false pushes the warning; the sequence still completes all five calls. Test: _simulateGotoNavigationTimeout (fake-cmux.mjs:789-area) → warnings contains browser_goto_failed, code 0, all five browser calls still in the log.",
+    "M3 (panel-2 W2): BROWSER_VERIFY_WARNINGS gains 'browser_errors_clear_failed'; browserErrorsClear's false pushes it. Test via the errors-clear hang/fail flag → warning present, code 0, sequence completes.",
+    "M4 (panel-3 #1): commands/onboard.md's cmux_preview_url bullet no longer tells the onboarding agent to keep the key fenced/bulleted in the CONSUMER project's config — it now states plainly that a real project enabling the preview writes cmux_preview_url as its own bare top-level line (same as execution_mode:), and that it is THIS PLUGIN REPO's own config.md that deliberately leaves the key unset. The dev/staging-credentials line stays. Doc-pin updated accordingly and the new claim pinned (bare-top-level-line instruction present) red-first.",
+    "M5 (panel-3 #2): references/cmux-dispatch.md's --load-state text no longer claims 'complete' is the only accepted value — corrected to: the only value this repo ever supplies; cmux 0.64.22 also accepts 'interactive'; the unsuffixed 'load' is invalid.",
+    "M6 (panel-3 #3): .claude/dev-team/config.md's cmux_preview_url section correctly states the duplicate-key behavior split: browser-verify refuses loudly (exit 1) while dispatch degrades to no-preview with a stderr line and an omitted preview key; the misleading fenced-duplicate parenthetical is fixed (a fenced line is stripped before matching, so it can never contribute to ambiguity).",
+    "M7 (panel-3 #4): config.md's exposure sentence counts THREE full-URL sites: the config line itself, browser open's argv (dispatch-time, dispatch.mjs:1125), and browser goto's argv (gate-time). No other claim of 'exactly two places' survives anywhere in the diff set.",
+    "S1 (panel-3 #5): references/qa-gate.md names the three gate-time enum members (preview_disabled | no_preview_recorded | preview_surface_gone) beside the five dispatch-time members, with one-clause meanings.",
+    "S2 (panel-3 #6): README.md:250's execution-mode-gated verb enumeration includes phase and browser-verify (or is replaced by a pointer to MUTATING_VERBS in dispatch.mjs).",
+    "S3 (panel-3 #8): a doesNotMatch pin asserts 'preview_capability_missing' appears in NEITHER scripts/cmux/dispatch.mjs NOR references/qa-gate.md NOR references/cmux-dispatch.md.",
+    "S4 (panel-3 #9): the qa-gate.md budget pin binds the doc's number to the computed sum from the extracted constants (the doc must state the real ≤90s bound derived from the 88000 sum, not merely match /<= ?90/).",
+    "S5 (panel-2 S1): a malformed-sidecar test ('{' written to browser.json) asserts no_preview_recorded with exit 0 (not a throw).",
+    "S6 (panel-2 S2): the screenshot argv pin asserts argv.length === 5.",
+    "S7 (panel-2 S3): the no-branch source-text pin also rejects the negated form — loadStateConfirmed may appear only in the warnings-push line(s) and the returned object, asserted structurally.",
+    "S8 (panel-2 S4): the sequence test also filters the invocation log for argv[0] === 'tree' and asserts exactly 1 — pinning the verb's own spawn count that the 88000 budget assumes.",
+    "S9 (panel-2 S6): fake-cmux's payload fallback uses ?? instead of ||, and a new end-to-end test seeds an EMPTY payload and asserts console_errors.shape === 'unrecognized', clean === false.",
+    "S10 (panel-1 S1): the direction-1 firewall test also rejects dynamic import and re-export forms — add assert.doesNotMatch(src, /\\bfrom ['\"]\\.\\.?\\//) and a dynamic-import pattern check.",
+    "S11 (panel-1 S2): the agent-tool refusal test pins the refusal reason (assert.match on the execution-mode message), not just code !== 0.",
+    "S12 (panel-1 S6 + panel-2 S5): screenshot confirmation upgraded from existsSync to statSync(...).size > 0 (catches zero-byte writes); the drop-existsSync mutation still goes red against _simulateScreenshotOkNoWrite.",
+    "S13 (panel-1 W2): a comment at the corroboration site (dispatch.mjs:2565-area) records that this predicate is deliberately weaker than isValidSidecarSurface (no worker-pane conjunct) and why (be-12-02 abandons+closes worker-pane landings; doc tabs fail the type check; the spec scoped the recomputation out) — so a future reader doesn't 'fix' it in either direction. Sibling one-sentence comment for the deliberate no-lock choice (panel-2 S8).",
+    "S14 (panel-3 #10): the cmux-dispatch.md §2-row doc-test assertions are section-scoped — slice the row/paragraph first, assert within it (model: the qa-gate doc-test's section slicing) — covering --load-state complete, js_error, navigation_timeout, and the §1 'browser preview singleton' match.",
+    "S15 (panel-3 #11): the dev/staging-credentials assertion is applied to onboardDoc as well as configDoc.",
+    "S16 (panel-3 #12+#13): cmux-dispatch.md attributes navigation_timeout to goto (not wait/errors), and the §1 paragraph names all THREE preview outcomes (reuse, create, fail-closed skip).",
+    "S17 (panel-3 #15): test/commands.test.mjs's 'three new config keys' test name says four.",
+    "S18 (panel-1 S5): browser-evidence.mjs carries a one-line note that count is page-influenced as a magnitude (a number, never text) — the deliberate residual stated at the definition.",
+    "REGRESSION: the full lane passes — node --test test/cmux-browser-evidence.test.mjs test/cmux-dispatch.test.mjs test/cmux-dispatch-doc.test.mjs test/commands.test.mjs test/cmux-contract.test.mjs — and git diff --stat for contract.mjs + cmuxctl.mjs is empty. Every mutation applied is observed red and reverted from a saved byte copy, reported per-mutation."
+  ],
+  "validation_commands": [
+    "node --test test/cmux-browser-evidence.test.mjs test/cmux-dispatch.test.mjs test/cmux-dispatch-doc.test.mjs test/commands.test.mjs test/cmux-contract.test.mjs",
+    "git diff --stat -- scripts/cmux/contract.mjs scripts/cmux/cmuxctl.mjs"
+  ],
+  "discovery_context": "This is a fix round on the UNCOMMITTED be-12-03 work (branch feat/cmux-4b-browser-preview) after the 3-reviewer adversarial panel (2 pass / 1 changes-needed, zero criticals). The base spec is .claude/dev-team/tasks/issue-12/be-12-03.spec.json — its constraints still bind except where a criterion above supersedes. Key sites (verified this session): browserVerifyCmd dispatch.mjs:2545-2614 (divergence warning :2611-2614; corroboration :2565-2575; sequence :2581-2607; screenshot existsSync :2595-2603); MUTATING_VERBS :680; COMMANDS :2644; assertExecutionModeCmux gate on main() :2676→:2685; BROWSER_VERIFY_TREE_TIMEOUT_MS :2535; dispatch-time trigger try/catch :1475-1492; browserOpen full-URL site :1125; isValidSidecarSurface :1064-1072 (the stronger predicate S13's comment contrasts). fake-cmux.mjs: _simulateGotoNavigationTimeout :789-area, _simulateBrowserErrorsClearHang :812-area, payload flag fallback :842 (the || to change), load-state rejection :864-867 (do not touch). Doc-test models: qa-gate section-slicing in test/cmux-dispatch-doc.test.mjs:142-147 (the pattern S14 copies); real-parser config pin :189-192. logBrowserError shape-guard precedent: cmuxctl.mjs:959-965 (BROWSER_ERROR_CODE_RE ^[a-z_]{1,32}$) — M1's guard mirrors it in dispatch.mjs with an origin-shaped pattern. README.md:250 carries the stale verb list. test/commands.test.mjs:111 carries the stale 'three keys' name; its onboard pins :102-116 must stay green through M4's onboard.md edit — adjust them only as far as M4 requires. Line numbers may drift a few lines as you edit — re-grep before citing in your return.",
+  "out_of_scope": [
+    "scripts/cmux/contract.mjs, scripts/cmux/cmuxctl.mjs — byte-frozen; M1's guard and every warning push land in dispatch.mjs.",
+    "Any change to the D5 sequence semantics, exit-code policy (0 on every reporting outcome), or the never-judges rule.",
+    "Any .claude/dev-team/memory/* edit (conventions.md:61's stale availability sentence is the orchestrator's to fix at memory-commit time).",
+    "Panel suggestions deliberately NOT taken this round: UsageError on stray browser-verify flags (panel-2 S7 — consistent with phaseCmd's laxness, recorded); a count cap in the reducer beyond S18's note; reflow-proofing config.md's inline example beyond the existing real-parser pin (panel-1 S4).",
+    "Version bump — plugin.json is already 0.1.64; a fix round on uncommitted work does not bump again."
+  ],
+  "depends_on": ["be-12-03"],
+  "interface_contract": "BROWSER_VERIFY_WARNINGS grows to include 'browser_goto_failed' and 'browser_errors_clear_failed' — still frozen, still closed, still dispatcher-authored; the IC-4 output shape is otherwise unchanged (same key set, origin-only, exit-code policy intact). The divergence warning's stderr line now structurally cannot carry non-origin-shaped bytes from the sidecar: any sidecar.origin not fully matching the origin pattern renders as a fixed placeholder. Gate-time enum unchanged: preview_disabled | no_preview_recorded | preview_surface_gone — now also documented in references/qa-gate.md. Dispatch-time enum unchanged (five members) — now negatively pinned (preview_capability_missing asserted absent)."
+}

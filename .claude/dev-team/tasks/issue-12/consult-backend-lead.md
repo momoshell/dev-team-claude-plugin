@@ -1,0 +1,34 @@
+# Backend-lead consult — issue #12, 2026-08-07
+
+NOTE (orchestrator): consulted on v1 concurrently with the v1.1 amendment; `load_state_reached` converges with v1.1's `load_state_confirmed`. The sidecar recommendation (§1-A) largely obsoletes v1.1's candidate-pane adopt arm — the lost-record scenario it defends against (workspaceCmd's wholesale rewrite wiping the block) disappears when the block lives outside workspace.json. Lead must reconcile in v1.2.
+
+## 1. Siting + concurrency
+- Wrappers → `cmuxctl.mjs`; `ensurePreviewBrowser` → `dispatch.mjs` (it reads paths/state and composes policy; post-A3 there's no resolution routine substantial enough for a cmuxctl home). **Must take its own fresh `tree({all:true})`, never the stale `liveTree` from `:921`** (predates this dispatch's own createPane/mountDocTab surfaces).
+- **Parallel `dispatchCmd` against one workspace is reachable today** (non-blocking dispatch return; nothing serializes two processes; await lock covers `await` only; parallelism is repo doctrine per RECREATION-SPEC.md:362). `workspace.json` has exactly ONE writer (`workspaceCmd:791`) + five readers; `writeJsonAtomic` prevents torn writes, NOT lost updates. A dispatchCmd second writer = duplicate preview (both stamp; stacked = both undrivable; loser's surface orphaned + undetected), lost updates vs `workspace --tier`, and two merge doctrines.
+- **Recommendation (A, preferred): `<stateDir>/browser.json` sidecar, single-writer, whole resolve→create→stamp in `withRecordLock`.** workspaceCmd needs NO edit; `carried` untouched; IC-1's carry clause evaporates; stateDir teardown sweep covers it; the workspace_id equality check (every consumer already owes it) invalidates stale records after a cmux restart. (B) if it must stay in workspace.json: workspaceCmd must JOIN the same lock (load-bearing behavioral change to a core verb for a cosmetic feature — the argument for A). (C) as-written: only defensible if parallel dispatch is impossible; it isn't.
+- Lock mechanics: `withRecordLock` (`record.mjs:834`, already imported at `dispatch.mjs:39`; non-record precedent: worktrees.json at `dispatch.mjs:485,550`). Throws `RecordLockError` immediately on contention (never waits) → in the cosmetic zone, catch → log → skip. **Lock must span read→decide→`browser open`→stamp** — locking only the write leaves both racers having created. `LOCK_STALE_MS` = 30s and the lock is held across cmux calls → `browserOpen` needs an explicit spawn `timeoutMs` well under 30s or a hung load lets a second dispatch steal the lock and duplicate anyway. Lock needs its own guard-removal mutation test.
+
+## 2. IC-2 wrapper shapes — fit confirmed; changes in priority order
+1. Delete `PREVIEW_TAB_TITLE` + renameTab step (matches v1.1). Singleton becomes record-only; **the lock is now the only thing preventing duplicate surfaces** — the single most important structural coupling. Record "rename-tab is terminal-surfaces-only on 0.64.22" in references/cmux-dispatch.md.
+2. **Browser wrappers must NOT log `res.error?.message` (house pattern)** — js_error details are page-influenced and AC7 forbids page bytes on stderr. Log `res.error?.code` ONLY (cmux-authored closed vocabulary) + verb + surface id; state the deliberate divergence at the definition site. [CONFLICTS with v1.1's `safeDetail` (sanitized 120-char detail) — code-only is consistent with AC7; lead reconciles.] Surface the code upward: IC-4 `warnings` carries `js_error` so wedged ≠ gone.
+3. **Every browser wrapper passes explicit spawn `timeoutMs`, exceeding any cmux-side `--timeout-ms`** (e.g. 25000 over 20000) so spawn-kill (`spawn_error`) stays distinguishable from cmux's own timeout (`js_error`). [Converges with the architect's blocking item.]
+4. `browserOpen` parses ONLY `placement=(\w+)` — never surface=/pane= tokens, not even as a cross-check (JSDoc: log-only, never persisted, never branched on).
+5. `browserWaitReady` freezes `complete` as a module constant — no caller-supplied load state.
+6. IC-4 `load_state_reached` boolean — delivered by v1.1 as `load_state_confirmed`. ✓
+7. Firewall test also asserts `browserErrorsList` has exactly ONE call site outside its definition (JSDoc is a comment, not a control).
+
+## 3. D8 URL validator — consistent; three named parser-divergence traps
+- **Accept-path secrets leak (the package contradicts itself):** D8 refuses to echo the value because dev URLs carry token query params — then IC-4 emits `url` and every report line prints it in full. **IC-4's `url` and all report lines carry the ORIGIN only (`scheme://host[:port]`), never the full URL.** Refuse `@` outright (userinfo never needed; `https://user:token@host/` currently passes).
+- **Hostless URLs full-match** (`https://?`, `https://#`, `https://@`). Tightened shape: `^https?:\/\/[A-Za-z0-9.-]+(:\d{1,5})?(\/[A-Za-z0-9._~:\/?#\[\]!$&'()*+,;=%-]*)?$`.
+- **`%` needs well-formedness:** refuse a `%` not followed by two hex digits (predict-never-repair).
+- Comment the two deliberate exclusions so nobody "fixes" them: backslash (WHATWG treats `\` as `/` in special schemes) and case-sensitive `https?` anchor. `.trim()` strips trailing `\r` — one test. Configured-vs-recorded divergence warning also prints origins only.
+
+## 4. Slice adjustments (keep 3 slices / 2 PRs)
+(a) Under (A): be-12-02 loses the workspaceCmd edit entirely. (b) No production workspace.json reader needs changes (five readers, named fields only), BUT `test/cmux-dispatch.test.mjs` deepEquals the whole state object at ~12 sites (3459, 3492, 3500, 3584, 3762, 3777, 3790, 3873, 3887, 3940, 4110, 4142) — under (A) these stay green (no new key in workspace.json); put the grep note in discovery_context regardless. (c) `spec.domain` is a required closed enum in the schema, but dispatchCmd never schema-validates — exact-match negatives for `'Frontend'` and `'frontend '`; accepted consequence: a full-stack slice authored backend gets no preview. (e) teardown claim verified — verify pass at `:1972` has no assertion, zero red risk. (f) MUTATING_VERBS has exactly one consumer — safe. (g) Add the lock-contention negative (pre-created lock → zero opens + skip log) + guard-removal mutation; drop the dead title tests.
+
+## Proposed backend-notes deltas (4, verbatim in consult output): workspace.json single-writer/sidecar rule; cmux() no-default-timeout rule; withRecordLock span + RecordLockError semantics; code-only logging for page-influenced error families.
+
+## New runtime unknowns
+- How long does `browser open <url>` block when nothing listens? (sets timeoutMs + lock headroom; the common first-dispatch case) → ORCHESTRATOR RESOLVING LIVE.
+- Userinfo URL acceptance — moot if `@` refusal is adopted.
+- Screenshot behavior in a stacked pane vs undrivable — partially observed (blank + OK); load_state flag is the mitigation either way.

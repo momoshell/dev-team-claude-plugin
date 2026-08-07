@@ -1,0 +1,52 @@
+{
+  "task_id": "be-12-03-fixround2",
+  "domain": "backend",
+  "goal": "Live-acceptance fix round (see .claude/dev-team/tasks/issue-12/live-pass-findings.md, the governing evidence record): correct the be-12-01 browser wrapper argv to real cmux 0.64.22 grammar (surface FIRST, then sub-verb), make fake-cmux accept ONLY that grammar and reject sub-verb-first loudly, update every argv pin, fix E3's human remediation command to the verb that actually works on browser surfaces (cmux browser <uuid> tab close), and fix the closeWorkspace wrapper's now-refused positional id (--workspace flag).",
+  "files_in_scope": [
+    "scripts/cmux/cmuxctl.mjs",
+    "scripts/cmux/dispatch.mjs",
+    "test/fixtures/fake-cmux.mjs",
+    "test/cmux-dispatch.test.mjs",
+    "test/cmux-preflight.test.mjs",
+    "references/cmux-dispatch.md",
+    "references/qa-gate.md"
+  ],
+  "constraints": [
+    "THE cmuxctl.mjs BYTE-FREEZE IS DELIBERATELY LIFTED for exactly two edits: (1) the browser wrapper argv order, (2) closeWorkspace's --workspace flag. Nothing else in the file changes — no new exports, no timeout changes, no logging changes. scripts/cmux/contract.mjs remains byte-identical (`git diff --stat` empty).",
+    "Real grammar, live-verified end to end (live-pass-findings.md F1): `cmux browser <surface> <subcommand> [args]` for every surface-taking sub-verb; `open` stays surface-less (`browser open <url> --workspace <id> --focus false` — UNCHANGED, it is correct). Corrected argv shapes: [surfaceId,'goto',url] · [surfaceId,'wait','--load-state','complete','--timeout-ms','20000'] · [surfaceId,'errors','clear'] · [surfaceId,'errors','list'] · [surfaceId,'screenshot','--out',path] — each prefixed by 'browser'.",
+    "fake-cmux.mjs models the REAL grammar only (frozen-live-capture doctrine, qa-notes 2026-08-02): the browser case dispatches on surface-first parsing, and a sub-verb-first invocation (the OLD wrong order) must FAIL loudly the way real cmux does — `Error: Unsupported browser subcommand: <token>` — so any wrapper regression to the old order fails every test, not just a pin. All existing per-sub-verb state flags (_simulate*Hang, _simulateGotoNavigationTimeout, _simulateBrowserErrorsPayload, _simulateScreenshotOkNoWrite, _simulateScreenshotZeroByteWrite, the stacked js_error rule, the --load-state rejection) keep identical semantics under the new grammar.",
+    "closeWorkspace (cmuxctl.mjs:902): `cmux('close-workspace', ['--workspace', id])` — build 102 REFUSES the positional id ('close-workspace requires --workspace'). Update its argv pins wherever teardown tests assert them. closeSurface (:897) is UNCHANGED this round — its browser-surface refusal is a recorded residual (F2), not fixed here.",
+    "E3 remediation line (dispatch.mjs:1084): the human command template changes from `cmux close-surface <uuid>` to `cmux browser <uuid> tab close` — live evidence: close-surface returns invalid_state on a browser surface in EVERY configuration, tab close works in every one. Update the frozen message shape and every byte-pin of it. The log line's structure (every stray UUID named, one command per stray) is unchanged.",
+    "Docs: references/cmux-dispatch.md's browser row shows the real grammar (`browser <surface> goto|wait|errors clear|errors list|screenshot …`, `open` surface-less); the close-workspace row notes the required --workspace flag; the new-workspace row notes the workspace-create alias (one clause, F5). references/qa-gate.md's browser-verify invocation/remediation prose updated only where it names the old close-surface command or the old grammar. Doc pins updated red-first where new claims get new pins.",
+    "Every mutation observed red then reverted from saved byte copies, never `git checkout --` (uncommitted work).",
+    "NO version bump — 0.1.64 already set on this uncommitted tree.",
+    "Deferred by explicit decision, do NOT implement: a browserTabClose wrapper or any BROWSER_SUBVERBS widening; switching abandon/teardown per-surface closes off closeSurface; any new-surface --pane investigation (F5's not_found quirk). These are named follow-ups in live-pass-findings.md."
+  ],
+  "acceptance_criteria": [
+    "All five surface-taking wrappers emit surface-first argv, asserted by updated deepEqual pins at test/cmux-dispatch.test.mjs:4259/4279/4295/4312/4330 (wrapper-level) and :5675-5679 (browser-verify sequence) — exact arrays, element by element, plus the existing length assertion on screenshot.",
+    "GRAMMAR REGRESSION IS STRUCTURALLY FATAL: a test invokes the fake with the OLD sub-verb-first order and asserts it fails with the real error shape (Unsupported browser subcommand). Mutation: revert ONE wrapper (e.g. browserGoto) to sub-verb-first, observe MULTIPLE tests red (its behavioral tests, not only the argv pin), revert.",
+    "The browser-verify end-to-end tests (sequence, warnings, leak, key-set, origin-only) all pass under the new grammar with NO weakening — same assertions, new argv.",
+    "closeWorkspace emits ['close-workspace','--workspace',<id>]; teardown tests' argv pins updated; the teardown close-workspace invocation still appears exactly where it did.",
+    "The E3 remediation stderr line names `cmux browser <uuid> tab close` for every stray; its byte-pins updated; the preview_surface_ambiguous and preview_topology_unverifiable tests both assert the new command shape.",
+    "fake-cmux rejects a wrong --load-state value and a sub-verb-first invocation; all _simulate* flags behave identically under the new grammar (hang tests still enforce every bound — the Atomics.wait hang tests must still pass unchanged in intent).",
+    "references/cmux-dispatch.md row shows surface-first grammar and no doc anywhere still shows `browser goto <surface>` order; the qa-gate.md browser-verify section carries no stale close-surface remediation.",
+    "contract.mjs byte-identical; cmuxctl.mjs diff contains ONLY the wrapper-argv and closeWorkspace edits (reviewer will read the whole cmuxctl diff).",
+    "Full lane green: node --test test/cmux-browser-evidence.test.mjs test/cmux-dispatch.test.mjs test/cmux-dispatch-doc.test.mjs test/commands.test.mjs test/cmux-contract.test.mjs AND node --test test/cmux-preflight.test.mjs."
+  ],
+  "validation_commands": [
+    "node --test test/cmux-browser-evidence.test.mjs test/cmux-dispatch.test.mjs test/cmux-dispatch-doc.test.mjs test/commands.test.mjs test/cmux-contract.test.mjs",
+    "node --test test/cmux-preflight.test.mjs",
+    "git diff --stat -- scripts/cmux/contract.mjs"
+  ],
+  "discovery_context": "Governing evidence: .claude/dev-team/tasks/issue-12/live-pass-findings.md (F1 grammar, F2 close semantics, F5 close-workspace flag) — read it first; it contains the verbatim live CLI outputs. Wrapper argv construction is centralized at cmuxctl.mjs:944 `cmux('browser', [sub, ...args], opts)` — the five wrappers (browserGoto :1017, browserWaitReady :1041, browserErrorsClear :1058, browserErrorsList :1078, browserScreenshot :1099) each pass sub-first today; reorder at the call sites (or thread a surface-first arg through the helper) WITHOUT changing timeouts, return types, or logging. browserOpen :989 is correct as-is. closeWorkspace :902, closeSurface :897. E3 line: dispatch.mjs:1084 `strayUuids.map((id) => \\`cmux close-surface ${id}\\`)`. fake-cmux browser case :663-899 — its dispatch currently keys on argv[1] as the sub-verb; rework to: argv[1] is the surface handle unless it is one of the surface-less sub-verbs (open/open-split/new), argv[2] is the sub-verb; unknown/misplaced token → the real error string. The real CLI help (captured live this session): `Usage: cmux browser [--surface <id|ref|index> | <surface>] <subcommand> [args]`; errors has `errors <list|clear>`; wait has `--load-state <interactive|complete>` and `--timeout-ms`. Line numbers may have drifted ±20 from the fix rounds — re-grep before editing.",
+  "out_of_scope": [
+    "contract.mjs, all schemas, roster — frozen (ADR-013).",
+    "Any BROWSER_SUBVERBS change, any new wrapper, any closeSurface change.",
+    "scripts/cmux/browser-evidence.mjs — the reducer is grammar-independent; do not touch.",
+    "commands/onboard.md, .claude/dev-team/config.md, README.md — no claims there depend on argv order.",
+    "Any memory-file edit (ADR-019's factual amendments are the orchestrator's).",
+    "Version bump."
+  ],
+  "depends_on": ["be-12-03-fixround"],
+  "interface_contract": "IC-2 (be-12-01 wrappers) argv changes shape but NOT signature: browserGoto(surfaceId, url) -> boolean (20 000 ms), browserWaitReady(surfaceId, {timeoutMs=25000}) -> boolean, browserErrorsClear(surfaceId) -> boolean (10 000 ms), browserErrorsList(surfaceId) -> string|null (10 000 ms, sole consumer reduceBrowserErrors), browserScreenshot(surfaceId, outPath) -> boolean (20 000 ms) — all unchanged for callers; only the emitted argv order moves to surface-first. closeWorkspace(id) signature unchanged; argv gains --workspace. The E3 remediation message template changes its command literal to `cmux browser <uuid> tab close` — consumers of the message shape (tests, docs) update in lockstep in this same round."
+}

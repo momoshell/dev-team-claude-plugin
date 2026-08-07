@@ -70,7 +70,7 @@ node -p 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")).globs.ma
 
 **The floor moves the reviewer lane only.** It never adds `dev-team:test-engineer`; that member keeps its own trigger — new or altered behavior not already covered. Read *behavior* there as including **doc-prose behavior**: in this repo a large diff is often prose that itself carries tested behavior (required headings, config keys, doc-embedded shell snippets asserted by structural tests), so a big doc diff that changes such behavior does call for `test-engineer` — via that trigger, not via this floor. Read it as code-only and large doc diffs slip both lanes.
 
-**Two options considered and rejected — don't re-add either by symmetry.** *A panel floor:* diff size is evidence of volume, never of *stacked* risk, and the panel spends three opus windows; only stacked semantic triggers buy those. *A `>50 changed files` arm:* nearly unreachable without also crossing 100 lines, except in pure rename/move refactors — exactly the change class where a deep opus read buys least, and where the unfiltered scope-compliance check above is already the control that matters.
+**Two options considered and rejected — don't re-add either by symmetry.** *A panel floor, rejected:* diff size is evidence of volume, never *stacked* risk; the panel costs three opus windows. *A `>50 changed files` arm, also rejected:* nearly unreachable without also crossing 100 lines, except in pure rename/move refactors — exactly the change class where a deep opus read buys least, and where the unfiltered scope-compliance check above is already the control that matters.
 
 ## Reviewer verdicts — branch on the parsed enum, never on prose
 

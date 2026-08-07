@@ -222,6 +222,7 @@ scripts/trello.sh        Trello task-source helper (credential resolution + boar
 scripts/spec-lint.mjs    mechanical Handover Spec lint (paths, file:line refs, runnable commands)
 scripts/wrap-external.mjs  external-content envelope: strips forged tags and wraps author-authored text before it enters a prompt
 scripts/task-cost.mjs    per-task cost readout for a custom statusLine (see § Per-task cost)
+scripts/task-cost-log.mjs  per-task cost ledger: orchestrator window + every subagent sidecar -> ~/.claude/dev-team/task-cost/log.jsonl
 scripts/pr-review-window.sh  gh-dash keybinding target: Ghostty window + worktrunk PR worktree + /dev-team:pr-review (see § PR review)
 scripts/cmux/roster.schema.json          roster contract (schema)
 scripts/cmux/roster.default.json         shipped zero-config roster: 3 profiles + 12 roles
@@ -301,6 +302,8 @@ This isn't auto-installed as your statusLine — add it to your own `statusLine`
 If you already have a custom statusLine script, just call `node <plugin-root>/scripts/task-cost.mjs` with the same stdin JSON your script receives and splice the result into your existing line — the script only ever writes a bare `$X.XX` (or nothing, on any error) to stdout, so it's safe to embed.
 
 The pricing table is a maintenance point — see `scripts/task-cost.mjs`'s `PRICING` object when new models ship or an introductory rate expires.
+
+The statusline figure above and `scripts/task-cost-log.mjs`'s ledger are **different metrics on purpose**: the statusline mirrors Claude Code's own built-in `$` figure (main window only, since a `/clear` marker), while the ledger — invoked as a `/dev-team:ship` step — sums that same window plus every subagent sidecar transcript and de-duplicates by message id before pricing, appending one JSON line per task to `~/.claude/dev-team/task-cost/log.jsonl`. Don't expect the two numbers to match.
 
 ---
 

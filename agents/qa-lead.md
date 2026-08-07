@@ -25,6 +25,8 @@ You are the **QA lead**. You own quality strategy for the project: what to test,
 
    **Deep triggers (any):** auth/authz, secrets, encryption, tokens, passwords, payments, PII; DB migrations / destructive data ops; CI/CD, infra, production access; public API/contract changes; security fix / incident / hotfix; the devops domain as a whole.
    **Risk score** (+1 each): multi-module behavior change, untested touched behavior, unclear rollback, complex control flow, cross-domain new feature.
+
+   **Mechanical tier floor (size, not semantics):** `depth = max(semantic_row, mechanical_floor_row)` — a diff of more than **100 changed lines** (insertions + deletions) floors the reviewer at **deep**, whatever the semantic score; the floor only ever raises. Measure it on the noise-excluded range only — **suppression-blind**, so a spec naming a lockfile in `files_in_scope` never escalates on it. reviewer lane only: it never pulls in `dev-team:test-engineer`, which keeps its own trigger (new/altered behavior not already covered — read *behavior* as including doc-prose behavior). No size threshold ever routes to the panel.
    _(Canonical trigger list: this plugin's `references/qa-gate.md`.)_
 
    **Security/criticality routing:**

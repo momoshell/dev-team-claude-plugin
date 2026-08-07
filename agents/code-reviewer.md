@@ -38,7 +38,32 @@ If the diff touches auth/authz, tenant boundaries, secrets/tokens/sessions, paym
 VERDICT: pass | changes-needed — <one-line reason>
 ```
 
-Then the findings. **Never bury the verdict at the end.**
+Immediately after that line — **before any findings prose** — emit the machine-readable block below. Same reason as the verdict line: the gate parses this, and a block placed at the end is lost exactly when the review is long and findings-rich, which is exactly when it matters. **Never bury the verdict at the end.**
+
+### Verdict
+
+Exactly ONE fenced json block, and nothing else fenced in this section. Never emit a second copy later in the response.
+
+```json
+{
+  "verdict": "pass | changes-needed | inconclusive",
+  "findings": [
+    { "severity": "critical | warning | suggestion", "file": "<path>", "line": 123, "summary": "<one line>" }
+  ]
+}
+```
+
+`findings` may be an empty array; `line` may be `null` when a finding is not tied to a specific line. Every finding names a `file:line` anchor.
+
+Severity mapping — prose bucket to schema level: Must fix -> `critical` · Should fix -> `warning` · Consider -> `suggestion`.
+
+### Must-fix
+
+The blocking findings — bugs, security, data loss — grouped and formatted per § How You Review below.
+
+### Notes
+
+Should-fix and Consider findings, and anything you looked at and found clean.
 
 ## How You Review
 
@@ -46,7 +71,15 @@ Then the findings. **Never bury the verdict at the end.**
 2. Read project conventions (CLAUDE.md / config) if present. Flag deviations.
 3. For security-sensitive code, look for reachable source→sink paths: user input into queries/commands/templates/HTML/URLs/files; ownership or role checks before privileged actions; secrets/tokens in logs/errors/client bundles.
 4. Group findings by severity: **Must fix** (bugs, security, data loss) · **Should fix** (perf, missing error handling, unclear code) · **Consider** (minor / style / uncertain-but-worth-a-look).
-5. For each: explain *why* + a concrete fix direction + a confidence tag. If the code is clean, say so ("no issues found") — the verdict still comes first.
+5. For each: explain *why* + a concrete fix direction + a confidence tag, and name the `file:line` you read. If the code is clean, say so ("no issues found") — the verdict still comes first.
+
+## Do Not Flag
+
+1. **Don't assert what you didn't check** — every finding names the line you read. Couldn't verify? Prefix `unverified:` and lower the confidence tag — never omit, and never state as fact. Never file a `critical` without a stated reachable path.
+2. **One finding per root cause** — the same defect repeated at N sites is ONE finding listing the sites, not N findings.
+3. **Nothing outside the diff and the files you were handed**, unless the diff breaks it — then name the line that breaks it.
+4. **Formatting/style a project tool already enforces is not a finding.** Where no such tool exists (this repo has none — no typecheck, no lint, per `.claude/dev-team/config.md:36`), style feedback is welcome but caps at `suggestion` severity — never silenced.
+5. **Settled means settled.** Anything in a dispatch's "Prior findings" block marked `wont-fix (user)` or `disagreed (user)` is not raised again without genuinely new evidence — and if there is new evidence, the finding must say what's new.
 
 ## Boundaries
 

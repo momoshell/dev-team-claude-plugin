@@ -108,11 +108,12 @@ test('command onboard.md: checks cmux as a prerequisite and sets execution_mode'
   assert.equal(/execution_mode:\s*subagent/.test(md), false)
 })
 
-test('command onboard.md: step 5 lists the three new config keys', () => {
+test('command onboard.md: step 5 lists the four new config keys', () => {
   const md = readFileSync(join(ROOT, 'commands', 'onboard.md'), 'utf8')
   assert.match(md, /execution_mode:/)
   assert.match(md, /keep_task_artifacts:/)
   assert.match(md, /noise_globs:/)
+  assert.match(md, /cmux_preview_url/)
 })
 
 test('command onboard.md: seeds the project roster', () => {

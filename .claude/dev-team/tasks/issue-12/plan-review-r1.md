@@ -1,0 +1,27 @@
+# Plan review round 1 — issue #12 package (v1 + v1.1 + v1.2), 2026-08-07
+
+**VERDICT: REVISE.**
+
+## Must Fix
+1. **Lock hold unbounded → the double-create path survives.** The critical section contains ≥3 unbounded `tree()` spawns (the scan's fresh tree + browserOpen's before/after diff); `tree()` (`cmuxctl.mjs:224-230`) passes no timeoutMs (`:152` → spawnSync unbounded). `withRecordLock` STEALS any lock older than LOCK_STALE_MS=30s (`record.mjs:807-873`) without checking holder liveness. Reachable: A's tree hangs >30s → B steals → both create → stacked → both undrivable. AC17 not established. Fix: bound every spawn inside the critical section with a stated total budget < 30s at the lock site, or post-acquire re-scan + post-create idempotence check that detects the stolen-lock loser and abandons rather than stamps. (backend-lead flagged the shape; v1.2 answered only the browser-wrapper half.)
+2. **"Swept for free" is false on the archive path.** `teardownCmd:1998` → `archiveOrDelete` (`:2015-2027`) RENAMES stateDir into `<stateRoot>/.archive/...` when archiving, and `shouldArchive` (`contract.mjs:253-259`) returns true if ANY record's outcome !== 'ok' (common on bounced tasks). Screenshots of an authenticated dev app persist indefinitely. Fix: unlink `browser/` + `browser.json` before archiveOrDelete (or explicitly accept+document retention beside the dev/staging line). D5/D7 "swept for free" and AC9 "zero teardown-specific new code" must be corrected — mutually exclusive with the fix as written.
+3. **Orphaned contradictory clauses across the stack.** v1.2's supersession sentence names only "v1.1 §A1 + safeDetail" but actually invalidates: v1 §D4 + §6 IC-1 (workspace.json/carried), v1 §D4's PREVIEW_TAB_TITLE/renameTab (deleted by v1.1 §A1 which v1.2 "supersedes" — literal reading RESTORES the falsified title mechanism), v1 §6 IC-2 (browserWaitLoad/title constant), v1 §D8/§6 IC-4 + v1.1 §A3's JSON (full `url` vs origin), v1 §7 be-12-02's carried work item, v1 §8 AC1/AC9. Fix: ONE consolidated normative package (or a precise supersession table); Handover Specs generated from the consolidated text, never from "read three files in order."
+
+## Should Fix
+4. Wrapper RETURN TYPES are a leak channel: `cmux()` returns `error.message` (page-influenced); IC-2's boolean returns are load-bearing but unstated. Add to AC20: every browser wrapper's return type is boolean/{ids}/null except browserErrorsList, asserted by test.
+5. `preview_lock_contended` has no observability at the gate — IC-4's reason enum lacks it (a persistently contended lock reads as "feature off"). Add the member or justify the four existing.
+6. browser-verify's workspace-binding is asserted, never sited — post-sidecar it must read workspace.json for the live workspace_id equality check. Follow phaseCmd's shape (`dispatch.mjs:2043-2046`); name it in be-12-03's work items.
+7. The ADR-019 + conventions memory writes are in NO slice's files_in_scope and have no validation lane (v1 §2 assigns to doc-writer post-review) — make it an explicit slice-0/named orchestrator step with its own commit. Also: dispatch.mjs:8-14 usage block already missing `phase`; adding browser-verify without touching it makes it 2-of-9 stale (one line, be-12-03).
+8. cmux-restart edge on the scan: post-restart, record `surface.pane_id`s are dead; if the workspace was reused by title with NEW pane ids, a rung-2 doc-tab browser in a new pane id is NOT excluded and becomes an adopt candidate → goto navigates a rendered return doc away. Name the case and its arm.
+9. Doc-test is literal-pin-only — new doc claims need their own explicit assertions, stated as a red-first requirement.
+10. The issue-#12 comment must carry FOUR items, not two: D3 reinterpretation, D6 descope, placement best-effort (no anchor-pane on 0.64.22), and opt-in/off-by-default inertness in this repo.
+11. A9 answered definitively: NO test references MUTATING_VERBS (grep across test/) — say so rather than leaving it unverified-in-one-doc/closed-in-another.
+12. The defer-PR-2 fallback (architect's counter) has no written cost if the C7 live pass fails.
+
+## Reviewer's unverified list — ORCHESTRATOR CONFIRMS ALL FIRSTHAND (this session or prior):
+ADR-019 unclaimed ✓ (epic #39 grep: only ADR-007; architecture-notes read in full). Rider E text ✓ (architecture-notes 2026-08-02 entry: "nonce confidentiality is bounded by lifetime, not achieved by location"). ADR-005 addendum wording ✓ (tasks/issue-10/epic15-c9-adr005-addendum.md read). 2026-08-04 pane-flip revert entry ✓ (read in full). CMUX_WIRED_SURFACES onboard.md membership ✓ (test/cmux-contract.test.mjs:614-619 read). test/cmux-preflight.test.mjs:242-255 unverifiable_verbs deepEqual ✓ (grep'd).
+
+## Reviewer verified firsthand (settled): withRecordLock/LOCK_STALE_MS semantics; tree() unbounded; VERBS/VERB_METHODS; MUTATING_VERBS single consumer; carried merge point; initial_pane_id no reader; teardown flatMap + archiveOrDelete rename; shouldArchive; spec.domain dropped; phaseCmd binding-refusal shape; doc-test literal-pin-only nature.
+
+## Endorsed
+Slice boundaries/dependency order sound; 2-panel justification holds; C1 scan sound vs concurrent-dispatch, record-lost, workspace-rerun (restart = the one exception, item 8); the rejection of "adopt arm evaporates" is the strongest reasoning in the package; C7 live-pass gate is the single best change v1.2 made — keep as a hard merge condition.

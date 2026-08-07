@@ -39,7 +39,9 @@ const {
 
 const {
   PREFLIGHT_MESSAGES, formatPreflightMessage, closeSurface, tree, findDocTabSurface, createPane, mountDocTab,
-  ensureWorkspace, TIERS, TIER_COLORS,
+  ensureWorkspace, TIERS, TIER_COLORS, recoverNewId, cmux, findSurface,
+  BROWSER_LOAD_STATE, browserVerb, browserOpen, browserGoto, browserWaitReady,
+  browserErrorsClear, browserErrorsList, browserScreenshot,
 } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
 const {
   readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
@@ -4195,4 +4197,413 @@ test('workspace --tier: Number()-coercible-to-a-valid-tier strings ("1.0", "+1",
   preflightCmd({}, ctx2)
   const res2 = workspaceCmd({ tier: ' 2' }, ctx2)
   assert.equal(res2.json.tier, 2)
+})
+
+// ---------------------------------------------------------------------------
+// be-12-01 (issue #12/D1+D2, ADR-019) — the cmuxctl `browser` family.
+// Lives HERE, not a new test file: this file owns setUpWorkspace/
+// freshCmuxEnv/makeSpecFile, and importing a test file re-registers its
+// whole suite (backend-notes 2026-08-01). Positives first, per E-P1's own
+// anti-vacuity shape; argv asserted element-by-element with exact counts.
+// ---------------------------------------------------------------------------
+
+function findPaneInTree(t, paneId) {
+  for (const w of t.windows || []) {
+    for (const ws of w.workspaces || []) {
+      for (const p of ws.panes || []) {
+        if (p.id === paneId) return p
+      }
+    }
+  }
+  return null
+}
+
+test('browserOpen: happy path — argv element-by-element exact, --focus false present, returns {surfaceId, paneId, placement, treeAfter}', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-open-happy')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const logBefore = readLog(env.logPath).length
+
+  const result = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+
+  const log = readLog(env.logPath).slice(logBefore)
+  const openEntries = log.filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'open')
+  assert.equal(openEntries.length, 1, `expected exactly one browser open invocation, got ${openEntries.length}`)
+  assert.deepEqual(openEntries[0].argv, ['browser', 'open', 'http://localhost:3000/', '--workspace', workspaceId, '--focus', 'false'])
+
+  assert.equal(result.placement, 'split')
+  assert.match(result.surfaceId, /^[0-9a-f-]{36}$/)
+  assert.match(result.paneId, /^[0-9a-f-]{36}$/)
+  assert.equal(typeof result.treeAfter, 'object')
+  assert.notEqual(result.treeAfter, null)
+})
+
+test('browserGoto: happy path — argv element-by-element exact, returns true; the surface title updates to the new URL\'s hostname', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-goto-happy')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const logBefore = readLog(env.logPath).length
+
+  const ok = browserGoto(opened.surfaceId, 'http://example.com/path')
+
+  assert.equal(ok, true)
+  const log = readLog(env.logPath).slice(logBefore)
+  const gotoEntries = log.filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'goto')
+  assert.equal(gotoEntries.length, 1, `expected exactly one browser goto invocation, got ${gotoEntries.length}`)
+  assert.deepEqual(gotoEntries[0].argv, ['browser', 'goto', opened.surfaceId, 'http://example.com/path'])
+
+  const after = tree({ all: true })
+  assert.equal(findSurface(after, opened.surfaceId).title, 'example.com')
+})
+
+test('browserWaitReady: happy path — argv element-by-element exact (--load-state complete --timeout-ms 20000), returns true', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-wait-happy')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const logBefore = readLog(env.logPath).length
+
+  assert.equal(BROWSER_LOAD_STATE, 'complete')
+  const ok = browserWaitReady(opened.surfaceId)
+
+  assert.equal(ok, true)
+  const log = readLog(env.logPath).slice(logBefore)
+  const waitEntries = log.filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'wait')
+  assert.equal(waitEntries.length, 1, `expected exactly one browser wait invocation, got ${waitEntries.length}`)
+  assert.deepEqual(waitEntries[0].argv, ['browser', 'wait', opened.surfaceId, '--load-state', BROWSER_LOAD_STATE, '--timeout-ms', '20000'])
+})
+
+test('browserErrorsClear: happy path — argv element-by-element exact, returns true', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-errors-clear-happy')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const logBefore = readLog(env.logPath).length
+
+  const ok = browserErrorsClear(opened.surfaceId)
+
+  assert.equal(ok, true)
+  const log = readLog(env.logPath).slice(logBefore)
+  const clearEntries = log.filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'errors' && e.argv[2] === 'clear')
+  assert.equal(clearEntries.length, 1, `expected exactly one browser errors clear invocation, got ${clearEntries.length}`)
+  assert.deepEqual(clearEntries[0].argv, ['browser', 'errors', 'clear', opened.surfaceId])
+})
+
+test('browserErrorsList: happy path — argv element-by-element exact, returns the RAW clean literal string (the sole wrapper returning a string)', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-errors-list-happy')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const logBefore = readLog(env.logPath).length
+
+  const result = browserErrorsList(opened.surfaceId)
+
+  assert.equal(typeof result, 'string')
+  assert.equal(result.trim(), 'No browser errors')
+  const log = readLog(env.logPath).slice(logBefore)
+  const listEntries = log.filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'errors' && e.argv[2] === 'list')
+  assert.equal(listEntries.length, 1, `expected exactly one browser errors list invocation, got ${listEntries.length}`)
+  assert.deepEqual(listEntries[0].argv, ['browser', 'errors', 'list', opened.surfaceId])
+})
+
+test('browserScreenshot: happy path — argv element-by-element exact, returns true, and existsSync proves an actual write (never trusting the OK line alone)', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-screenshot-happy')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const outPath = join(mkdtempSync(join(tmpdir(), 'browser-shot-')), 'verify.png')
+  const logBefore = readLog(env.logPath).length
+
+  const ok = browserScreenshot(opened.surfaceId, outPath)
+
+  assert.equal(ok, true)
+  assert.ok(existsSync(outPath))
+  const log = readLog(env.logPath).slice(logBefore)
+  const shotEntries = log.filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'screenshot')
+  assert.equal(shotEntries.length, 1, `expected exactly one browser screenshot invocation, got ${shotEntries.length}`)
+  assert.deepEqual(shotEntries[0].argv, ['browser', 'screenshot', opened.surfaceId, '--out', outPath])
+})
+
+test('return-type contract: only browserErrorsList returns a string; browserOpen returns {ids,...}|null; the other four return boolean', () => {
+  const { workspaceRes } = setUpWorkspace('browser-return-types')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  assert.equal(typeof opened, 'object')
+  assert.notEqual(opened, null)
+  assert.equal(typeof opened.surfaceId, 'string')
+  assert.equal(typeof opened.paneId, 'string')
+  assert.equal(typeof opened.placement, 'string')
+  assert.equal(typeof opened.treeAfter, 'object')
+
+  assert.equal(typeof browserGoto(opened.surfaceId, 'http://example.com/'), 'boolean')
+  assert.equal(typeof browserWaitReady(opened.surfaceId), 'boolean')
+  assert.equal(typeof browserErrorsClear(opened.surfaceId), 'boolean')
+  assert.equal(typeof browserErrorsList(opened.surfaceId), 'string')
+  const outPath = join(mkdtempSync(join(tmpdir(), 'browser-shot-')), 'verify.png')
+  assert.equal(typeof browserScreenshot(opened.surfaceId, outPath), 'boolean')
+})
+
+test('every browser wrapper throws BEFORE any spawn on a missing/malformed id — zero fixture invocation-log entries', () => {
+  const env = freshCmuxEnv('browser-missing-id')
+  assert.throws(() => browserOpen('http://x/', {}), /workspaceId is required/)
+  assert.throws(() => browserOpen('http://x/', { workspaceId: 'w' }), /treeBefore is required/)
+  assert.throws(() => browserGoto(undefined, 'http://x/'), /surfaceId is required/)
+  assert.throws(() => browserGoto('', 'http://x/'), /surfaceId is required/)
+  assert.throws(() => browserWaitReady(''), /surfaceId is required/)
+  assert.throws(() => browserWaitReady(null), /surfaceId is required/)
+  assert.throws(() => browserErrorsClear(null), /surfaceId is required/)
+  assert.throws(() => browserErrorsList(123), /surfaceId is required/)
+  assert.throws(() => browserScreenshot('surface-1', ''), /outPath is required/)
+  assert.throws(() => browserScreenshot('', '/tmp/x.png'), /surfaceId is required/)
+  assert.equal(readLog(env.logPath).length, 0, 'zero cmux invocations for every one of these refusals')
+})
+
+test('browserVerb: an out-of-allowlist sub-verb throws BEFORE any spawn — zero fixture invocation-log entries (eval/state/console/snapshot/viewport unreachable)', () => {
+  const env = freshCmuxEnv('browser-subverb-guard')
+  assert.throws(() => browserVerb('eval', ['1+1'], {}), /BROWSER_SUBVERBS/)
+  assert.throws(() => browserVerb('state', ['save'], {}), /BROWSER_SUBVERBS/)
+  assert.throws(() => browserVerb('console', ['list'], {}), /BROWSER_SUBVERBS/)
+  assert.throws(() => browserVerb('snapshot', [], {}), /BROWSER_SUBVERBS/)
+  assert.throws(() => browserVerb('viewport', ['set'], {}), /BROWSER_SUBVERBS/)
+  assert.equal(readLog(env.logPath).length, 0, 'zero cmux invocations for every one of these refusals')
+})
+
+test('open prints POSITIONAL refs (surface=surface:<n> pane=pane:<n>), never uuids — parsing the printed id instead of diffing would fail', () => {
+  const { workspaceRes } = setUpWorkspace('browser-positional')
+  const workspaceId = workspaceRes.json.workspace_id
+  const res = browserVerb('open', ['http://localhost:3000/', '--workspace', workspaceId, '--focus', 'false'], { timeoutMs: 5000 })
+  assert.equal(res.ok, true)
+  assert.match(res.stdout, /^OK surface=surface:\d+ pane=pane:\d+ placement=split$/m)
+  const surfaceToken = res.stdout.match(/surface=surface:(\d+)/)[1]
+  assert.doesNotMatch(surfaceToken, /[0-9a-f]{8}-[0-9a-f]{4}/)
+})
+
+test('a second open into a workspace already holding a browser surface prints placement=reuse and STACKS a second surface into the SAME pane', () => {
+  const { workspaceRes } = setUpWorkspace('browser-stack')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const first = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  assert.equal(first.placement, 'split')
+
+  const second = browserOpen('http://localhost:3001/', { workspaceId, treeBefore: first.treeAfter })
+  assert.equal(second.placement, 'reuse')
+  assert.equal(second.paneId, first.paneId)
+
+  const pane = findPaneInTree(second.treeAfter, first.paneId)
+  const browserSurfaces = pane.surfaces.filter((s) => s.type === 'browser')
+  assert.equal(browserSurfaces.length, 2)
+})
+
+test('wait/errors on a surface in a pane holding >=2 browser surfaces fail(js_error, "...become ready"); screenshot there still succeeds (models the blank-PNG reality)', () => {
+  const { workspaceRes } = setUpWorkspace('browser-stack-drivability')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const first = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  browserOpen('http://localhost:3001/', { workspaceId, treeBefore: first.treeAfter })
+
+  assert.equal(browserWaitReady(first.surfaceId), false)
+  assert.equal(browserErrorsList(first.surfaceId), null)
+  assert.equal(browserErrorsClear(first.surfaceId), false)
+
+  const outPath = join(mkdtempSync(join(tmpdir(), 'browser-shot-')), 'verify.png')
+  assert.equal(browserScreenshot(first.surfaceId, outPath), true)
+  assert.ok(existsSync(outPath))
+})
+
+test('the fixture --load-state guard rejects the shorter, unsuffixed value; only interactive|complete succeed (live-verified, cmux 0.64.22)', () => {
+  const { workspaceRes } = setUpWorkspace('browser-load-state-guard')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+
+  const badRes = browserVerb('wait', [opened.surfaceId, '--load-state', 'load', '--timeout-ms', '20000'], { timeoutMs: 5000 })
+  assert.equal(badRes.ok, false)
+  assert.equal(badRes.error.code, 'js_error')
+
+  const okRes = browserVerb('wait', [opened.surfaceId, '--load-state', 'interactive', '--timeout-ms', '20000'], { timeoutMs: 5000 })
+  assert.equal(okRes.ok, true)
+})
+
+test('browserGoto degrades (false, never throws) on a simulated navigation_timeout, logging the CODE only — the detail string is absent from stderr', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-goto-degrade')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateGotoNavigationTimeout = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  let result
+  const stderr = captureStderr(() => { result = browserGoto(opened.surfaceId, 'http://dead.example/') })
+
+  assert.equal(result, false)
+  assert.match(stderr, /navigation_timeout/)
+  assert.doesNotMatch(stderr, /Timed out waiting/)
+})
+
+test('browserWaitReady/browserErrorsList degrade (never throw) on a stacked-pane js_error, logging the CODE only — the detail string is absent from stderr', () => {
+  const { workspaceRes } = setUpWorkspace('browser-degrade-detail-absent')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const first = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  browserOpen('http://localhost:3001/', { workspaceId, treeBefore: first.treeAfter })
+
+  let waitResult
+  const waitStderr = captureStderr(() => { waitResult = browserWaitReady(first.surfaceId) })
+  assert.equal(waitResult, false)
+  assert.match(waitStderr, /js_error/)
+  assert.doesNotMatch(waitStderr, /Timed out waiting/)
+
+  let listResult
+  const listStderr = captureStderr(() => { listResult = browserErrorsList(first.surfaceId) })
+  assert.equal(listResult, null)
+  assert.match(listStderr, /js_error/)
+  assert.doesNotMatch(listStderr, /Timed out waiting/)
+})
+
+test('an out-of-vocabulary error code (fails the ^[a-z_]{1,32}$ shape guard) logs the literal <unparsed> instead of riding through unchecked', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-unparsed-code')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserUnknownErrorCode = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  let result
+  const stderr = captureStderr(() => { result = browserErrorsList(opened.surfaceId) })
+
+  assert.equal(result, null)
+  assert.match(stderr, /<unparsed>/)
+})
+
+test('browserOpen under _simulateConcurrentCreate surfaces the recoverNewId ambiguity rather than guessing', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-concurrent-create')
+  const workspaceId = workspaceRes.json.workspace_id
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateConcurrentCreate = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+  const treeBefore = tree({ all: true })
+
+  assert.throws(() => browserOpen('http://localhost:3000/', { workspaceId, treeBefore }), /expected exactly 1 new surface/)
+})
+
+test('rename-tab fails not_found on a non-terminal (browser) surface (fixture fidelity fix); succeeds on the workspace\'s terminal surface', () => {
+  const { workspaceRes } = setUpWorkspace('browser-rename-tab-fidelity')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+
+  const browserRenameRes = cmux('rename-tab', [opened.surfaceId, 'preview'])
+  assert.equal(browserRenameRes.ok, false)
+  assert.equal(browserRenameRes.error.code, 'not_found')
+
+  const terminalSurfaceId = workspaceRes.json.initial_surface_id
+  const terminalRenameRes = cmux('rename-tab', [terminalSurfaceId, 'my terminal'])
+  assert.equal(terminalRenameRes.ok, true)
+})
+
+test('_simulateScreenshotOkNoWrite: cmux prints OK WITHOUT writing the file — a caller trusting the OK line instead of existsSync would be fooled', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-screenshot-no-write')
+  const workspaceId = workspaceRes.json.workspace_id
+  const treeBefore = tree({ all: true })
+  const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateScreenshotOkNoWrite = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+  const outPath = join(mkdtempSync(join(tmpdir(), 'browser-shot-')), 'never-written.png')
+
+  const rawRes = cmux('browser', ['screenshot', opened.surfaceId, '--out', outPath])
+  assert.equal(rawRes.ok, true)
+  assert.match(rawRes.stdout, /^OK /)
+  assert.ok(!existsSync(outPath), 'the fixture must print OK without actually writing the file under this flag')
+
+  // The real wrapper is unaffected by this raw-cmux distinction: it still
+  // only reports on the cmux call's own ok/fail, never on existsSync — that
+  // confirmation is be-12-03's job (browser-verify), not this wrapper's.
+  assert.equal(browserScreenshot(opened.surfaceId, outPath), true)
+})
+
+test('an out-of-allowlist sub-verb in the FIXTURE itself (reachable only by bypassing browserVerb) fails bad_args, never silently succeeds', () => {
+  const { workspaceRes } = setUpWorkspace('browser-fixture-unknown-subverb')
+  const workspaceId = workspaceRes.json.workspace_id
+  const res = cmux('browser', ['eval', workspaceRes.json.initial_surface_id, '1+1'])
+  assert.equal(res.ok, false)
+  assert.equal(res.error.code, 'bad_args')
+})
+
+test('browserOpen: a hung `browser open` spawn is killed by its own 5000ms timeoutMs, returns null, logs spawn_error — never hangs the caller', () => {
+  const { env, workspaceRes } = setUpWorkspace('browser-open-hang')
+  const workspaceId = workspaceRes.json.workspace_id
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateBrowserOpenHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+  const treeBefore = tree({ all: true })
+
+  const start = Date.now()
+  let result
+  const stderr = captureStderr(() => { result = browserOpen('http://localhost:3000/', { workspaceId, treeBefore }) })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(result, null)
+  assert.match(stderr, /spawn_error/)
+  assert.ok(elapsedMs < 9000, `expected the 5000ms spawn bound to be enforced well under 9000ms, took ${elapsedMs}ms`)
+})
+
+test('tree(): a hung read is killed by its own explicit timeoutMs (never hangs the caller), and the underlying spawn error code is spawn_error', () => {
+  const { env } = setUpWorkspace('browser-tree-hang')
+  const state = JSON.parse(readFileSync(env.statePath, 'utf8'))
+  state._simulateTreeHang = true
+  writeFileSync(env.statePath, JSON.stringify(state))
+
+  const start = Date.now()
+  const res = cmux('tree', ['--json', '--id-format', 'uuids', '--all'], { timeoutMs: 3000 })
+  const elapsedMs = Date.now() - start
+
+  assert.equal(res.ok, false)
+  assert.equal(res.error.code, 'spawn_error')
+  assert.ok(elapsedMs < 8000, `expected the 3000ms bound to be enforced well under 8000ms, took ${elapsedMs}ms`)
+
+  // tree() itself throws (losing the raw code in its own generic message,
+  // unchanged behavior) but must still be BOUNDED by the same timeoutMs —
+  // proving the optional param actually reaches spawnSync, not merely
+  // accepted and ignored.
+  const start2 = Date.now()
+  assert.throws(() => tree({ all: true, timeoutMs: 3000 }))
+  const elapsedMs2 = Date.now() - start2
+  assert.ok(elapsedMs2 < 8000, `expected tree()'s own bound to be enforced well under 8000ms, took ${elapsedMs2}ms`)
+})
+
+test('source-text: the literal load (the invalid --load-state value) never appears as a quoted string anywhere under scripts/cmux/', () => {
+  const scriptsDir = join(ROOT, 'scripts', 'cmux')
+  const files = readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs'))
+  assert.ok(files.length > 0)
+  for (const f of files) {
+    const src = readFileSync(join(scriptsDir, f), 'utf8')
+    assert.doesNotMatch(src, /'load'/, `${f} must never contain the quoted string literal 'load'`)
+    assert.doesNotMatch(src, /"load"/, `${f} must never contain the quoted string literal "load"`)
+  }
+})
+
+test('source-text: every browser wrapper logs the error CODE only, never `.message` — the deliberate divergence from the house err.message pattern', () => {
+  const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'), 'utf8')
+  const start = src.indexOf('// Browser preview family')
+  const end = src.indexOf(' * findDocTabSurface(t')
+  assert.ok(start > -1, 'expected to find the browser preview family section marker')
+  assert.ok(end > start, 'expected to find the section end marker (findDocTabSurface)')
+  const section = src.slice(start, end)
+  assert.doesNotMatch(section, /res\.error\?\.message/, 'a browser wrapper must never log res.error?.message')
+  assert.match(section, /logBrowserError/, 'expected the code-only logging helper to be used in this section')
+})
+
+test('source-text: every browser wrapper passes an explicit timeoutMs to browserVerb, matching its IC-2 bound', () => {
+  const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'), 'utf8')
+  assert.match(src, /browserVerb\('open', \[url, '--workspace', workspaceId, '--focus', 'false'\], \{ timeoutMs: 5000 \}\)/)
+  assert.match(src, /browserVerb\('goto', \[surfaceId, url\], \{ timeoutMs: 20000 \}\)/)
+  assert.match(src, /browserVerb\('wait', \[surfaceId, '--load-state', BROWSER_LOAD_STATE, '--timeout-ms', '20000'\], \{ timeoutMs \}\)/)
+  assert.match(src, /browserVerb\('errors', \['clear', surfaceId\], \{ timeoutMs: 10000 \}\)/)
+  assert.match(src, /browserVerb\('errors', \['list', surfaceId\], \{ timeoutMs: 10000 \}\)/)
+  assert.match(src, /browserVerb\('screenshot', \[surfaceId, '--out', outPath\], \{ timeoutMs: 20000 \}\)/)
 })

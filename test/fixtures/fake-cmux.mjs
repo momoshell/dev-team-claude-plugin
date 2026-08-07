@@ -144,6 +144,16 @@ function nextId(state) {
   return `${first}-Ec2C-40d7-932c-F3610adfE581`
 }
 
+// A SEPARATE monotonic counter for `browser open`'s printed POSITIONAL refs
+// (be-12-01, issue #12/D2) — `surface:<n>`/`pane:<n>` in the live capture are
+// NOT uuids and never derived from nextId's uuid-shaped ids, so an
+// implementation that tried to parse the printed line as an id would get a
+// bare integer and fail (the frozen fixture-fidelity requirement).
+function nextPos(state) {
+  state._posSeq = (state._posSeq || 0) + 1
+  return state._posSeq
+}
+
 function findSurfaceEntry(state, id) {
   const needle = (id || '').toLowerCase()
   for (const w of state.windows || []) {
@@ -298,7 +308,21 @@ switch (verb) {
     if (!argv.includes('--json') || !argv.includes('--id-format')) {
       fail('bad_args', 'tree requires --json --id-format uuids')
     }
-    succeed(JSON.stringify(loadState()))
+    const state = loadState()
+    // be-12-01 qa hook: a PRE-SEEDED state flag (never a new env switch),
+    // simulating tree() itself hanging inside a bounded caller (the
+    // ensurePreviewBrowser critical-section scan/after-tree reads, be-12-02)
+    // — the FAKE_CMUX_EVENTS_HANG precedent's Atomics.wait shape, reused
+    // here so a bounded `tree({ timeoutMs })` caller can only ever be
+    // released by its OWN spawnSync timeout, exactly like the real
+    // `events` blocking behavior this precedent already models.
+    if (state._simulateTreeHang) {
+      logInvocation()
+      const sab = new SharedArrayBuffer(4)
+      Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+      process.exit(0)
+    }
+    succeed(JSON.stringify(state))
     break
   }
 
@@ -523,6 +547,16 @@ switch (verb) {
   }
 
   case 'rename-tab': {
+    // be-12-01 general fidelity fix (live-verified, cmux 0.64.22): rename-tab
+    // is TERMINAL-surfaces-only — a browser (or any non-terminal) surface
+    // fails not_found. No production caller is affected: every existing
+    // caller in this repo only ever renames a terminal surface.
+    const surfaceId = argv[1]
+    const state = loadState()
+    const found = findSurfaceEntry(state, surfaceId)
+    if (found && found.surface.type !== 'terminal') {
+      fail('not_found', 'Tab not found')
+    }
     succeed('')
     break
   }
@@ -623,6 +657,160 @@ switch (verb) {
   case 'config': {
     if (argv[1] !== 'doctor') fail('bad_args', 'config: only "doctor" is supported')
     succeed('cmux config doctor: all checks passed')
+    break
+  }
+
+  // be-12-01, issue #12/D1-D2: the `browser` verb family. Sub-verb rides as
+  // argv[1] (the `markdown open` shape); an unknown sub-verb is a bad_args
+  // failure (browserVerb's own frozen allowlist already refuses everything
+  // else before any spawn, so this default only ever fires on a genuinely
+  // malformed invocation). All frozen live captures below (0.64.22), all
+  // state-flag driven — no new env switches.
+  case 'browser': {
+    const sub = argv[1]
+    const state = loadState()
+
+    // be-12-01 qa hooks: PRE-SEEDED state flags (never a new env switch).
+    if (sub === 'open' && state._simulateBrowserOpenHang) {
+      logInvocation()
+      const sab = new SharedArrayBuffer(4)
+      Atomics.wait(new Int32Array(sab), 0, 0, 60_000) // far longer than any test's own timeoutMs
+      process.exit(0)
+    }
+    // Simulates a cmux-authored error code that does NOT match the
+    // `^[a-z_]{1,32}$` shape guard cmuxctl.mjs's browser wrappers apply
+    // before ever logging one — proves the <unparsed> fallback fires on a
+    // genuinely out-of-shape code rather than being trusted blindly.
+    if (state._simulateBrowserUnknownErrorCode) {
+      fail('Weird Code!', 'simulated out-of-vocabulary error code')
+    }
+
+    if (sub === 'open') {
+      const url = argv[2]
+      const workspaceId = argAfter('--workspace')
+      const entry = findWorkspaceEntry(state, workspaceId)
+      if (!entry) fail('not_found', 'Workspace not found')
+      let hostname = ''
+      try {
+        hostname = new URL(url).hostname
+      } catch {
+        // leave hostname blank on an unparsable url — never throws the fake
+      }
+      // `browser open --workspace` REUSES an existing browser pane rather
+      // than creating a second (live-verified) — a second open in a
+      // workspace already holding a browser surface prints placement=reuse
+      // and STACKS a second surface into that pane.
+      let targetPane = entry.workspace.panes.find((p) => (p.surfaces || []).some((s) => s.type === 'browser'))
+      const placement = targetPane ? 'reuse' : 'split'
+      if (!targetPane) {
+        const paneId = nextId(state)
+        targetPane = {
+          id: paneId, workspace_id: entry.workspace.id, surface_ids: [], selected_surface_id: null,
+          surfaces: [], _pos: nextPos(state),
+        }
+        entry.workspace.panes.push(targetPane)
+      }
+      const newSurf = nextId(state)
+      const surfPos = nextPos(state)
+      targetPane.surfaces.push({ id: newSurf, pane_id: targetPane.id, type: 'browser', tty: null, title: hostname, _pos: surfPos })
+      targetPane.surface_ids.push(newSurf)
+      targetPane.selected_surface_id = newSurf
+      // qa should-fix test hook: a PRE-SEEDED state flag, reusing the same
+      // `_simulateConcurrentCreate` key the `markdown open` case already
+      // uses (fake-cmux.mjs precedent) so browserOpen's before/after tree
+      // diff finds TWO new surfaces instead of one — recoverNewId's own
+      // "expected exactly 1 new surface, found 2" ambiguity path.
+      if (state._simulateConcurrentCreate) {
+        const raceSurf = nextId(state)
+        const racePos = nextPos(state)
+        targetPane.surfaces.push({ id: raceSurf, pane_id: targetPane.id, type: 'browser', tty: null, title: hostname, _pos: racePos })
+        targetPane.surface_ids.push(raceSurf)
+      }
+      saveState(state)
+      succeed(`OK surface=surface:${surfPos} pane=pane:${targetPane._pos} placement=${placement}`)
+      break
+    }
+
+    if (sub === 'goto') {
+      const surfaceId = argv[2]
+      const url = argv[3]
+      const found = findSurfaceEntry(state, surfaceId)
+      if (!found) fail('not_found', 'Surface not found')
+      // Simulates a dead-port navigation self-bounding at ~15.5s live —
+      // modeled alongside js_error, not merged into it.
+      if (state._simulateGotoNavigationTimeout) {
+        fail('navigation_timeout', 'Timed out waiting for the browser document to become ready')
+      }
+      // A browser surface's title TRACKS THE URL HOSTNAME — set on open,
+      // updated on goto (live-verified, dynamic/navigation-controlled).
+      try {
+        found.surface.title = new URL(url).hostname
+      } catch {
+        // leave the existing title alone on an unparsable url
+      }
+      saveState(state)
+      succeed('')
+      break
+    }
+
+    if (sub === 'errors') {
+      const action = argv[2]
+      const surfaceId = argv[3]
+      const found = findSurfaceEntry(state, surfaceId)
+      if (!found) fail('not_found', 'Surface not found')
+      // Stacked surfaces (>=2 browser-typed surfaces sharing one pane) are
+      // BOTH UNDRIVABLE (live-verified, both directions) — errors list/clear
+      // AND wait all fail identically on either one.
+      const browserSiblings = (found.pane.surfaces || []).filter((s) => s.type === 'browser')
+      if (browserSiblings.length >= 2) {
+        fail('js_error', 'Timed out waiting for the browser document to become ready')
+      }
+      if (action === 'clear') {
+        succeed('')
+      } else if (action === 'list') {
+        succeed('No browser errors')
+      } else {
+        fail('bad_args', `browser errors: unknown action ${action}`)
+      }
+      break
+    }
+
+    if (sub === 'wait') {
+      const surfaceId = argv[2]
+      const found = findSurfaceEntry(state, surfaceId)
+      if (!found) fail('not_found', 'Surface not found')
+      const loadStateArg = argAfter('--load-state')
+      // --load-state REJECTS wrong values — only interactive|complete
+      // succeed on cmux 0.64.22 (live-verified).
+      if (loadStateArg !== 'interactive' && loadStateArg !== 'complete') {
+        fail('js_error', `Wait condition could not be evaluated: unsupported --load-state value ${loadStateArg}`)
+      }
+      const browserSiblings = (found.pane.surfaces || []).filter((s) => s.type === 'browser')
+      if (browserSiblings.length >= 2) {
+        fail('js_error', 'Timed out waiting for the browser document to become ready')
+      }
+      succeed('')
+      break
+    }
+
+    if (sub === 'screenshot') {
+      const surfaceId = argv[2]
+      const found = findSurfaceEntry(state, surfaceId)
+      if (!found) fail('not_found', 'Surface not found')
+      const outPath = argAfter('--out')
+      // Models the live reality that `screenshot` still succeeds (writes a
+      // full-size blank PNG) even on a stacked/never-ready surface —
+      // existsSync proves a file, never a render.
+      if (!state._simulateScreenshotOkNoWrite && outPath) {
+        writeFileSync(outPath, 'fake-png-bytes')
+      }
+      // `_simulateScreenshotOkNoWrite` prints OK WITHOUT writing the file —
+      // proves a caller that trusts the OK line instead of existsSync fails.
+      succeed(`OK ${outPath}`)
+      break
+    }
+
+    fail('bad_args', `browser: unknown sub-verb ${sub}`)
     break
   }
 

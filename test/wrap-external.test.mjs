@@ -186,10 +186,10 @@ test('COMPLETENESS SCAN: any unmapped string key is refused — not just the old
 })
 
 test('COMPLETENESS SCAN: a structural-allowlist key with a string value is fine, never flagged', () => {
-  const res = runWrap(SCRIPT, ['--src', 'github-review-thread'], JSON.stringify({ body: 'x', url: 'https://example.com' }))
+  const res = runWrap(SCRIPT, ['--src', 'github-review-thread'], JSON.stringify({ body: 'x', path: 'src/foo.js' }))
   assert.equal(res.status, 0)
   const out = JSON.parse(res.stdout)
-  assert.equal(out.url, 'https://example.com')
+  assert.equal(out.path, 'src/foo.js')
 })
 
 test('COMPLETENESS SCAN: near-miss GraphQL-shaped key (bodyText) is refused, not silently passed through', () => {
@@ -286,6 +286,69 @@ test('trello-card: name/desc/checklist names/item names/comment text enveloped; 
   assert.deepEqual(out.labels, ['bug', 'urgent'])
   assert.equal(out.comments[0].who, 'alice')
   assert.equal(out.checklists[0].items[0].state, 'incomplete')
+})
+
+// REAL-SHAPE REGRESSION: `gh pr view --json ...,files` — every PR has a
+// non-empty files[] array and `changeType` is present on every entry (a
+// string enum: added/modified/removed/renamed/copied). Reproduces the M1
+// production break: `changeType` was unmapped, so this fixture used to exit
+// 2 on $.files[0].changeType.
+test('REAL-SHAPE REGRESSION: github-pr files[] with changeType exits 0, changeType passes through raw', () => {
+  const input = {
+    author: { login: 'octocat' },
+    title: 'Fix the thing',
+    body: 'This PR fixes the thing.',
+    headRefOid: 'abc1234',
+    state: 'OPEN',
+    url: 'https://github.com/o/r/pull/1',
+    files: [
+      { path: 'src/foo.js', additions: 10, deletions: 2, changeType: 'MODIFIED' },
+      { path: 'src/bar.js', additions: 5, deletions: 0, changeType: 'ADDED' },
+    ],
+  }
+  const res = runWrap(SCRIPT, ['--src', 'github-pr'], JSON.stringify(input))
+  assert.equal(res.status, 0)
+  const out = JSON.parse(res.stdout)
+  assert.equal(out.files[0].changeType, 'MODIFIED')
+  assert.equal(out.files[1].changeType, 'ADDED')
+  assert.equal(out.files[0].path, 'src/foo.js')
+  assert.equal(out.files[0].additions, 10)
+  assert.match(out.body, /^\[external-content/)
+})
+
+// REAL-SHAPE REGRESSION: `gh issue view --json comments` — comments[] always
+// carries `reactionGroups[]` (empty when nobody reacted, which is why the
+// original test suite missed this). `content` is a string enum
+// (THUMBS_UP/THUMBS_DOWN/LAUGH/HOORAY/CONFUSED/HEART/ROCKET/EYES).
+// Reproduces the M2 production break: `content` was unmapped, so this
+// fixture used to exit 2 on $.comments[0].reactionGroups[0].content.
+test('REAL-SHAPE REGRESSION: github-issue comments[].reactionGroups[].content exits 0, content passes through raw', () => {
+  const input = {
+    title: 't',
+    body: 'b',
+    labels: [],
+    comments: [
+      {
+        id: 'IC_1',
+        author: { login: 'octocat' },
+        authorAssociation: 'MEMBER',
+        body: 'a comment',
+        createdAt: '2026-01-01T00:00:00Z',
+        url: 'https://github.com/o/r/issues/1#issuecomment-1',
+        reactionGroups: [
+          { content: 'THUMBS_UP', users: { totalCount: 3 } },
+          { content: 'HEART', users: { totalCount: 1 } },
+        ],
+      },
+    ],
+  }
+  const res = runWrap(SCRIPT, ['--src', 'github-issue'], JSON.stringify(input))
+  assert.equal(res.status, 0)
+  const out = JSON.parse(res.stdout)
+  assert.equal(out.comments[0].reactionGroups[0].content, 'THUMBS_UP')
+  assert.equal(out.comments[0].reactionGroups[1].content, 'HEART')
+  assert.equal(out.comments[0].reactionGroups[0].users.totalCount, 3)
+  assert.match(out.comments[0].body, /^\[external-content/)
 })
 
 test('any src, absent text field -> exit 0, fields=0', () => {

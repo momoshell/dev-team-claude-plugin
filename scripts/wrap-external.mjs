@@ -24,11 +24,13 @@
 //      below): strip forged tags (cheap, closes the "forged tag survives
 //      via a raw display field" gap) but return the stripped text raw,
 //      never enveloped.
-//   3. STRUCTURAL — a fixed, reviewed allowlist (STRUCTURAL_ALLOWLIST
-//      below) of key names that are genuinely API structure across all four
-//      `--src` shapes (ids, refs, logins, timestamps, enum-like values):
+//   3. STRUCTURAL — the src's closed structural set (SRC_FIELD_MAP below)
+//      of key names that are genuinely API structure for THAT `--src`'s
+//      documented shape (ids, refs, logins, timestamps, enum-like values):
 //      pass through completely untouched, no strip — some of these (`path`)
-//      must stay byte-identical for a downstream API call.
+//      must stay byte-identical for a downstream API call. Scoped per-src,
+//      not shared, so `--src trello-card` can't accept a github-only field
+//      (e.g. `headRefOid`) just because another src needs it.
 // A string whose key falls in none of the three buckets is unmapped: refuse
 // loudly (exit 2, naming the JSON path) rather than silently passing it
 // through unwrapped or guessing. This holds for every string, not just ones
@@ -75,38 +77,60 @@ function usage(msg) {
 // string values get stripped + enveloped. exempt = sentinel-named keys
 // deliberately left raw, with the reason stated inline (never silently
 // widened — a rename or addition here is a deliberate edit, not a fallback).
+// structural = key names that are genuinely API structure for THIS src's
+// documented `--json`/GraphQL shape (ids, refs, logins, enum-like values,
+// timestamps): pass through completely untouched, no strip — some of these
+// (`path`) must stay byte-identical for a downstream API call. Scoped
+// per-src (not a single global set) so a field only meaningful to one src
+// (e.g. `headRefOid`) can't be silently accepted by another just because it
+// shares the flat set — an addition here is a deliberate edit, reviewed
+// against that src's real fetch shape, never a fallback.
 export const SRC_FIELD_MAP = {
   // labels[].name / labels[].description and author.name are matched or
   // attributed mechanically (e.g. next.md's epic filter, the triage table's
   // author line) — never folded in as prose, so they stay raw.
-  'github-issue': { text: new Set(['title', 'body']), exempt: new Set(['name', 'description']) },
-  'github-pr': { text: new Set(['title', 'body']), exempt: new Set(['name', 'description']) },
+  // Structural: `gh issue view --json title,body,labels,comments` — labels[]
+  // {id, color} (name/description are exempt above); comments[] {id, url,
+  // authorAssociation, createdAt, minimizedReason} and author.login;
+  // comments[].reactionGroups[].content (an enum string: THUMBS_UP,
+  // THUMBS_DOWN, LAUGH, HOORAY, CONFUSED, HEART, ROCKET, EYES — present on
+  // every comment, empty array when nobody reacted).
+  'github-issue': {
+    text: new Set(['title', 'body']),
+    exempt: new Set(['name', 'description']),
+    structural: new Set(['id', 'login', 'color', 'createdAt', 'url', 'authorAssociation', 'minimizedReason', 'content']),
+  },
+  // Structural: `gh pr view --json author,title,body,headRefOid,state,url,files`
+  // — author.login, headRefOid, state, url, files[] {path, changeType}
+  // (changeType is an enum string: added/modified/removed/renamed/copied,
+  // present on every file entry of every PR); and
+  // `gh pr view --json reviews` — reviews[] {id, author.login,
+  // authorAssociation, state, submittedAt}, plus reactionGroups[].content if
+  // review/comment bodies carry reactions.
+  'github-pr': {
+    text: new Set(['title', 'body']),
+    exempt: new Set(['name', 'description']),
+    structural: new Set(['id', 'login', 'headRefOid', 'state', 'url', 'path', 'changeType', 'authorAssociation', 'submittedAt', 'content']),
+  },
   // No exemption needed: the GraphQL review-thread shape has no other
-  // sentinel-named key at all.
-  'github-review-thread': { text: new Set(['body']), exempt: new Set() },
+  // sentinel-named key at all. Structural: reviewThreads.nodes[]
+  // {isResolved, path, line}, comments.nodes[] {id, databaseId, author.login}.
+  'github-review-thread': {
+    text: new Set(['body']),
+    exempt: new Set(),
+    structural: new Set(['id', 'databaseId', 'login', 'path', 'line', 'isResolved']),
+  },
   // `labels` is trello.sh's card projection already reduced to a plain
   // string array (matched/filtered mechanically, never prose) — exempt, not
-  // text, same reasoning as github's labels[].name. `who`/`state` are
-  // structural (see STRUCTURAL_ALLOWLIST), not sentinel keys.
-  'trello-card': { text: new Set(['name', 'desc', 'text']), exempt: new Set(['labels']) },
+  // text, same reasoning as github's labels[].name. Structural: card {id,
+  // due, url}, checklist items {state}, comments {who}.
+  'trello-card': {
+    text: new Set(['name', 'desc', 'text']),
+    exempt: new Set(['labels']),
+    structural: new Set(['id', 'due', 'url', 'who', 'state']),
+  },
 }
 const SRC_ENUM = Object.keys(SRC_FIELD_MAP)
-
-// STRUCTURAL_ALLOWLIST — key names that are genuinely safe API structure
-// (ids, refs, logins, enum-like values, timestamps) across all four `--src`
-// shapes, enumerated from the exact `--json`/GraphQL field lists documented
-// in orchestration.md, commands/pr-review.md and commands/next.md. A string
-// hanging off any of these keys passes through completely untouched — never
-// stripped, since `path` in particular must stay byte-identical for the
-// downstream API calls that key off it (commands/pr-review.md). This is a
-// fixed, reviewed list, not "anything not text or exempt" — an addition here
-// is a deliberate edit, same discipline as SRC_FIELD_MAP.
-const STRUCTURAL_ALLOWLIST = new Set([
-  'id', 'databaseId', 'login', 'path', 'line', 'isResolved', 'headRefOid',
-  'state', 'url', 'due', 'who', 'color', 'number', 'event', 'side',
-  'authorAssociation', 'minimizedReason',
-  'createdAt', 'updatedAt', 'submittedAt', 'closedAt', 'mergedAt', 'publishedAt',
-])
 
 // This repo's own single-member tag vocabulary, and only that — never
 // general markup, never HTML. Case-insensitive so a hostile body can't dodge
@@ -165,7 +189,7 @@ function wrapValue(value, key, path, ctx) {
 }
 
 function wrapString(value, key, path, ctx) {
-  const { text, exempt } = ctx.fieldSets
+  const { text, exempt, structural } = ctx.fieldSets
   if (text.has(key)) {
     const { stripped, neutralized } = stripForgedTags(value)
     ctx.fieldsEnveloped += 1
@@ -180,7 +204,7 @@ function wrapString(value, key, path, ctx) {
     ctx.totalNeutralized += neutralized
     return stripped
   }
-  if (STRUCTURAL_ALLOWLIST.has(key)) return value
+  if (structural.has(key)) return value
   usage(`unmapped string field at ${path} (key "${key === null ? '<array root>' : key}") for --src ${ctx.src} — not in the text set, exempt set, or structural allowlist; refusing rather than passing it through unwrapped`)
 }
 

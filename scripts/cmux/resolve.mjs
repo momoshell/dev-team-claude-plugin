@@ -271,7 +271,9 @@ function assertKeysSafe(obj, label) {
 //   <pluginRoot>/scripts/cmux/roster.default.json
 //   <home>/.claude/dev-team/roster.json (optional)
 //   <primaryCheckout>/.claude/dev-team/roster.json (optional)
-//   session (object or null; reserved — null is a no-op)
+//   session (object or null; exposed by `/dev-team:team roster <role>=<agent>:<model>`
+//     as the `session` key of dispatch.mjs's `--config` JSON sidecar; session-scoped
+//     only — no on-disk home, does not survive /clear; null is a no-op)
 // A malformed merged roster (schema violation) throws, naming the
 // Violation's path and keyword.
 export function loadRoster({ pluginRoot, home, primaryCheckout, session }) {

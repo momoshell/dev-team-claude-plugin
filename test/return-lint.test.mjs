@@ -14,10 +14,13 @@ import { resolveRoots, taskPaths, resolveRole } from '../scripts/cmux/resolve.mj
 import { newDispatchId, buildRecord, snapshotWorkerPlugin } from '../scripts/cmux/record.mjs'
 import { validateReturn } from '../scripts/cmux/ladder.mjs'
 import {
-  main, lintReturn, writeBlockedReturn, sanitizeReasonForMarkdown,
+  main, lintReturn, writeBlockedReturn, sanitizeReasonForMarkdown, extractVerdictBlock,
   RETURN_PATH_NOT_REGULAR_FILE, STALE_OR_ABSENT_RETURN,
-  VERDICT_SECTION_MISSING, VERDICT_BLOCK_MISSING, VERDICT_BLOCK_MULTIPLE,
-  VERDICT_BLOCK_UNPARSEABLE, VERDICT_BLOCK_INVALID,
+  VERDICT_SECTION_MISSING, VERDICT_SECTION_MISSING_MESSAGE,
+  VERDICT_BLOCK_MISSING, VERDICT_BLOCK_MISSING_MESSAGE,
+  VERDICT_BLOCK_MULTIPLE, VERDICT_BLOCK_MULTIPLE_MESSAGE,
+  VERDICT_BLOCK_UNPARSEABLE, VERDICT_BLOCK_UNPARSEABLE_MESSAGE,
+  VERDICT_BLOCK_INVALID, VERDICT_BLOCK_INVALID_MESSAGE,
   USAGE_MESSAGE, RECORD_UNREADABLE_MESSAGE, RECORD_INVALID_MESSAGE,
   RETURN_PATH_ESCAPES_TASK_DIR_MESSAGE,
 } from '../scripts/cmux/return-lint.mjs'
@@ -484,6 +487,86 @@ test('negative: two untagged fenced blocks (none json-tagged) still falls back t
   const body = `## Verdict\n\n\`\`\`\n${one}\n\`\`\`\n\n\`\`\`\n${one}\n\`\`\`\n`
   writeReturnFile(record, envelopeText(record, body))
   assert.ok(keywords(lintReturn(record)).includes(VERDICT_BLOCK_MULTIPLE))
+})
+
+// ---------------------------------------------------------------------------
+// extractVerdictBlock(body) — the composed extractor be-28-03's gates.mjs
+// imports directly. Positives first (qa-notes 2026-08-02).
+//
+// Degenerate-stub check: a stub `extractVerdictBlock` that always returned
+// `{ ok: true, verdict: 'pass', findings: [] }` would still pass the FIRST
+// positive below (verdict happens to be 'pass', findings happens to be
+// empty) but would FAIL: the "real block wins over a fenced fake" positive
+// (asserts verdict 'changes-needed', not 'pass'), the enum round-trip
+// positive for 'changes-needed'/'inconclusive', and every one of the five
+// negative keyword cases (a stub returning ok:true never returns
+// ok:false at all).
+// ---------------------------------------------------------------------------
+
+test('positive: extractVerdictBlock parses a real Verdict section with one json block', () => {
+  const body = `## Verdict\n\n\`\`\`json\n${JSON.stringify({ verdict: 'pass', findings: [] })}\n\`\`\`\n`
+  assert.deepEqual(extractVerdictBlock(body), { ok: true, verdict: 'pass', findings: [] })
+})
+
+test('positive: extractVerdictBlock returns the REAL Verdict section, not a fenced example containing a fake "## Verdict" heading', () => {
+  const finding = { severity: 'warning', file: 'a.ts', line: 3, summary: 'x' }
+  const body = [
+    '```md',
+    '## Verdict',
+    '```json',
+    JSON.stringify({ verdict: 'pass', findings: [] }),
+    '```',
+    '```',
+    '',
+    '## Verdict',
+    '',
+    '```json',
+    JSON.stringify({ verdict: 'changes-needed', findings: [finding] }),
+    '```',
+    '',
+  ].join('\n')
+  assert.deepEqual(extractVerdictBlock(body), { ok: true, verdict: 'changes-needed', findings: [finding] })
+})
+
+test('positive: extractVerdictBlock disambiguates a json-tagged block from an untagged illustrative block', () => {
+  const body = `## Verdict\n\n\`\`\`json\n${JSON.stringify({ verdict: 'inconclusive', findings: [] })}\n\`\`\`\n\n\`\`\`\nnot the real block\n\`\`\`\n`
+  assert.deepEqual(extractVerdictBlock(body), { ok: true, verdict: 'inconclusive', findings: [] })
+})
+
+for (const verdict of ['pass', 'changes-needed', 'inconclusive']) {
+  test(`positive: extractVerdictBlock round-trips VERDICT_ENUM value '${verdict}'`, () => {
+    const body = `## Verdict\n\n\`\`\`json\n${JSON.stringify({ verdict, findings: [] })}\n\`\`\`\n`
+    assert.deepEqual(extractVerdictBlock(body), { ok: true, verdict, findings: [] })
+  })
+}
+
+test('negative: extractVerdictBlock reports verdict_section_missing when no real Verdict heading exists', () => {
+  const body = 'no headings here at all\n'
+  assert.deepEqual(extractVerdictBlock(body), { ok: false, keyword: VERDICT_SECTION_MISSING, message: VERDICT_SECTION_MISSING_MESSAGE })
+})
+
+test('negative: extractVerdictBlock reports verdict_block_missing when the Verdict section carries no fenced block', () => {
+  const body = '## Verdict\n\nNo fenced block here.\n'
+  assert.deepEqual(extractVerdictBlock(body), { ok: false, keyword: VERDICT_BLOCK_MISSING, message: VERDICT_BLOCK_MISSING_MESSAGE })
+})
+
+test('negative: extractVerdictBlock reports verdict_block_multiple when two json blocks are present', () => {
+  const one = JSON.stringify({ verdict: 'pass', findings: [] })
+  const body = `## Verdict\n\n\`\`\`json\n${one}\n\`\`\`\n\n\`\`\`json\n${one}\n\`\`\`\n`
+  assert.deepEqual(extractVerdictBlock(body), { ok: false, keyword: VERDICT_BLOCK_MULTIPLE, message: VERDICT_BLOCK_MULTIPLE_MESSAGE })
+})
+
+test('negative: extractVerdictBlock reports verdict_block_unparseable for invalid JSON', () => {
+  const body = '## Verdict\n\n```json\n{ not json\n```\n'
+  const err = (() => { try { JSON.parse('{ not json') } catch (e) { return e } return null })()
+  assert.deepEqual(extractVerdictBlock(body), { ok: false, keyword: VERDICT_BLOCK_UNPARSEABLE, message: `${VERDICT_BLOCK_UNPARSEABLE_MESSAGE}: ${err.message}` })
+})
+
+test('negative: extractVerdictBlock reports verdict_block_invalid for a bad verdict enum value', () => {
+  const bad = { verdict: 'maybe', findings: [] }
+  const body = `## Verdict\n\n\`\`\`json\n${JSON.stringify(bad)}\n\`\`\`\n`
+  const detail = '$.verdict (enum)'
+  assert.deepEqual(extractVerdictBlock(body), { ok: false, keyword: VERDICT_BLOCK_INVALID, message: `${VERDICT_BLOCK_INVALID_MESSAGE}: ${detail}` })
 })
 
 // ---------------------------------------------------------------------------

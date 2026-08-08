@@ -116,6 +116,48 @@ test('command onboard.md: step 5 lists the four new config keys', () => {
   assert.match(md, /cmux_preview_url/)
 })
 
+test('command pr-review.md: respond mode treats a wont-fix/disagreed-shaped disposition reply as settled, but a fixed-shaped reply still needs light verification', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /closed 5-shape enum/)
+  assert.match(md, /wont-fix`\/`disagreed`-shaped reply, from the PR author, settles the thread — skip it/)
+  assert.match(md, /reviewer replied again \*after\* that reply/)
+  assert.match(md, /genuinely new evidence.*reopen it and say what's new/)
+  assert.match(md, /fixed \(<hash>\)`-shaped reply from the PR author is NOT settled the same way/)
+  assert.match(md, /never simply skipped on sight/)
+})
+
+test('command pr-review.md: a disposition reply must also be FROM THE PR AUTHOR, not just shape-matched', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /Shape alone is never enough — the reply must also be FROM THE PR AUTHOR/)
+  assert.match(md, /compare the comment's `author\.login` against the PR author fetched in step 1/)
+  assert.match(md, /posted by anyone else \(a bot, a third party, even the reviewer replying to their own thread\) is not a disposition reply and does not settle the thread/)
+})
+
+test('command pr-review.md: open never settles a thread; deferred requires the same authorship check and is not permanently settled', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /`open` never settles a thread — it's the opposite of settled/)
+  assert.match(md, /triage the thread normally, the same as if no disposition reply existed at all/)
+  assert.match(md, /`deferred \(issue #N\)`, on a thread flagging what would be a `\[blocking\]`-severity concern, requires the same PR-author-authorship check as any other disposition above/)
+  assert.match(md, /don't treat it as permanently settled the way `wont-fix`\/`disagreed` are/)
+})
+
+test('command pr-review.md: the 5-shape enum is stated as the same five dispositions as qa-gate.md, without the (user) marker, and why', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /the same five dispositions as `references\/qa-gate\.md`'s carry-forward table, spelled without the `\(user\)` marker because GitHub's own comment authorship supplies that verification here/)
+})
+
+test('command pr-review.md: the speculative-drop rule states it runs second, not first, on the panel path', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /this drop rule runs second, not first/)
+  assert.match(md, /independently-scoped for different situations/)
+})
+
+test('command pr-review.md: the reviewThreads query fetches the NEWEST comments', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(md, /comments\(last:/)
+  assert.equal(/comments\(first:/.test(md), false)
+})
+
 test('command onboard.md: seeds the project roster', () => {
   const md = readFileSync(join(ROOT, 'commands', 'onboard.md'), 'utf8')
   assert.match(md, /roster\.default\.json/)

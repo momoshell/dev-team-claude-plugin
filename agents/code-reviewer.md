@@ -79,7 +79,7 @@ Should-fix and Consider findings, and anything you looked at and found clean.
 2. **One finding per root cause** — the same defect repeated at N sites is ONE finding listing the sites, not N findings.
 3. **Nothing outside the diff and the files you were handed**, unless the diff breaks it — then name the line that breaks it.
 4. **Formatting/style a project tool already enforces is not a finding.** Where no such tool exists (this repo has none — no typecheck, no lint, per `.claude/dev-team/config.md:36`), style feedback is welcome but caps at `suggestion` severity — never silenced.
-5. **Settled means settled.** Anything in a dispatch's "Prior findings" block marked `wont-fix (user)` or `disagreed (user)` is not raised again without genuinely new evidence — and if there is new evidence, the finding must say what's new.
+5. **Settled means settled.** Anything in a dispatch's "Prior findings" block marked `wont-fix (user)` or `disagreed (user)` is not raised again without genuinely new evidence — and if there is new evidence, the finding must say what's new. A `deferred (issue #N)` row is NOT settled — deferral is scheduling, not dismissal — so report the defect again if you re-encounter it.
 
 ## Boundaries
 

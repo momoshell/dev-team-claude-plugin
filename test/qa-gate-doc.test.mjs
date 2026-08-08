@@ -34,8 +34,17 @@ function extractSection(markdown, headingLine) {
     throw new Error(`heading not found: ${JSON.stringify(headingLine)}`)
   }
   let end = lines.length
+  let inFence = false
   for (let i = start + 1; i < lines.length; i++) {
-    if (lines[i].startsWith('## ')) {
+    if (lines[i].startsWith('```')) {
+      inFence = !inFence
+      continue
+    }
+    // A frozen worked-example table can embed a literal "## " heading line
+    // inside a fenced block (qa-13-a3's carry-forward shape) — that is
+    // fixture content, not a real section boundary, so it must not end the
+    // slice early.
+    if (!inFence && lines[i].startsWith('## ')) {
       end = i
       break
     }
@@ -296,4 +305,320 @@ test('qa-gate.md still states the agent-tool-mode literal-token-match fallback, 
   assert.match(qaGateMd, /VERDICT: pass \| changes-needed/)
   assert.match(qaGateMd, /literal token match/)
   assert.match(qaGateMd, /inconclusive is never a pass/)
+})
+
+// qa-13-a3: gate memory (carry-forward, no new ledger) + the consolidation pass
+// -------------------------------------------------------------------------
+
+const GATE_MEMORY_HEADING = '## Gate memory — re-review awareness with no new persisted ledger'
+const CONSOLIDATION_HEADING = '## The consolidation pass — after all panel members return, before you act'
+
+// --- 20. gate-memory: frozen carry-forward table shape + worked examples ---
+test('qa-gate.md: gate-memory section carries the frozen Prior findings table with its three worked example rows', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /## Prior findings \(dispositioned — do not re-litigate\)/)
+  assert.match(section, /\| finding \| prior severity \| disposition \| note \|/)
+  assert.match(section, /fixed \(<short-sha>\)/)
+  assert.match(section, /critical/)
+  assert.match(section, /wont-fix \(user\)/)
+  assert.match(section, /suggestion/)
+  assert.match(section, /\| open \|/)
+  assert.match(section, /warning/)
+})
+
+// --- 21. disposition enum closed at five members ---
+test('qa-gate.md: the disposition enum is stated as closed at exactly five members', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /closed at exactly five members/)
+  for (const token of ['`fixed`', '`open`', '`wont-fix (user)`', '`disagreed (user)`', '`deferred (issue #N)`']) {
+    assert.ok(section.includes(token), `gate-memory section missing disposition token: ${token}`)
+  }
+})
+
+// --- 22. per-disposition rules ---
+test('qa-gate.md: each disposition rule is stated (fixed/open/settled/deferred)', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /verify the fix/i)
+  assert.match(section, /a fix that turns out wrong is a NEW finding/i)
+  assert.match(section, /re-emit if the underlying condition is still present|re-report if still present/i)
+  assert.match(section, /[Nn]ever re-raised without genuinely new evidence/)
+  assert.match(section, /the finding must say what's new/)
+})
+
+// --- 23. only-the-user-authors-(user) rule ---
+test('qa-gate.md: only the user may author a (user) disposition, with the suppression-safety reason', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /[Oo]nly the user may author a `\(user\)` disposition/)
+  assert.match(section, /must never write `wont-fix \(user\)` or `disagreed \(user\)` yourself/)
+  assert.match(section, /[Cc]onsent cannot be manufactured/)
+  assert.match(section, /silence any finding/)
+})
+
+// --- 24. three carriers documented, no-new-storage rationale ---
+test('qa-gate.md: the three gate-memory carriers are documented with the no-new-storage rationale', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /No new storage exists for this/)
+  assert.match(section, /[Ii]n-loop re-review/)
+  assert.match(section, /[Aa]cross windows, in respond mode/)
+  assert.match(section, /GitHub itself is the store/)
+  assert.match(section, /reviewThreads\.comments/)
+  assert.match(section, /conventions\.md.*qa-notes\.md|qa-notes\.md.*conventions\.md/)
+})
+
+// --- 25. gate-report file path + never-parsed statement ---
+test('qa-gate.md: the gate-report path is documented and stated as plain markdown, never a parsed contract', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /\.claude\/dev-team\/tasks\/issue-<N>\/gate-report-r<k>\.md/)
+  assert.match(section, /gate-report-r<k>\.md/)
+  assert.match(section, /plain markdown, human-readable, and never a parsed contract/)
+  assert.match(section, /mid-task `\/clear`|mid-task \/clear/)
+})
+
+// --- 26. consolidation: six-step ordering ---
+test('qa-gate.md: consolidation pass states six steps in strictly increasing order', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  const markers = [
+    '**0. Freeze the verdict arithmetic first**',
+    '**1. Normalize.**',
+    '**2. Dedup.**',
+    '**3. Re-categorize.**',
+    '**4. Reasonableness filter for drops.**',
+    '**5. Report',
+  ]
+  const indices = markers.map((m) => {
+    const i = section.indexOf(m)
+    assert.notEqual(i, -1, `consolidation section missing step marker: ${m}`)
+    return i
+  })
+  for (let i = 1; i < indices.length; i++) {
+    assert.ok(indices[i] > indices[i - 1], `step markers out of order at index ${i}: ${markers[i]}`)
+  }
+})
+
+// --- 27. dedup rule exact statement ---
+test('qa-gate.md: dedup rule states same-file+non-null-line+same-defect, highest severity, agreement preserved, null-line never merged', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /same normalized `file`/)
+  assert.match(section, /same non-null `line`/)
+  assert.match(section, /same defect/)
+  assert.match(section, /highest\*\* severity/)
+  assert.match(section, /agreement count is preserved, never collapsed away/)
+  assert.match(section, /never\*\* merged/)
+  assert.match(section, /under-merges in practice/)
+  assert.match(section, /accepted v1 limitation/)
+})
+
+// --- 28. stricter-never-looser phrasing, no surviving never-changes absolute ---
+test('qa-gate.md: the governing invariant is stricter/looser, not an arithmetic-never-changes absolute', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /stricter, never looser/)
+  assert.equal(/never changes the arithmetic/i.test(qaGateMd), false)
+})
+
+// --- 29. three drop conditions + critical-never-dropped absolute ---
+test('qa-gate.md: the three drop conditions each require a citation, and a critical is never dropped', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /a `critical` is never dropped/)
+  assert.match(section, /escalated to the user instead, always/)
+  assert.match(section, /[Qq]uote the entry's text, not just its name/)
+  assert.match(section, /[Cc]ite the concrete artifact/)
+  assert.match(section, /this condition does not apply/)
+  assert.match(section, /[Nn]ame the specific line that disproves it/)
+})
+
+// --- 30. mandatory audit line shape ---
+test('qa-gate.md: the audit line is mandatory and includes the P of M denominator and the floor-promotion flag', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /absence is itself an escalation to the user/)
+  assert.match(section, /consolidated N findings from M members \(P of M supplied structured findings\) -> K \(X merged, Y dropped, Z re-categorized\); drops cited below/)
+  assert.match(section, /mechanical size floor/)
+  assert.match(section, /size-promoted findings from risk-driven ones/)
+})
+
+// --- 31. both escalation directions ---
+test('qa-gate.md: escalation runs in both directions', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /said \*\*block\*\*, the gate still blocks even if every one of the blocking findings was later dropped/)
+  assert.match(section, /upgrades a finding into `critical`, the gate blocks even though step 0's raw count said pass/)
+})
+
+// --- 32. two drop vocabularies reconciled ---
+test('qa-gate.md: the two drop vocabularies (pr-review speculative-drop vs. consolidation step-4) are explicitly reconciled', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /pr-review\.md/)
+  assert.match(section, /speculative/)
+  assert.match(section, /independently-scoped rules for two different situations/)
+  assert.match(section, /must not be merged/)
+})
+
+// --- 33. drift: agents/qa-lead.md carries the invariant + absolute + authorship rule ---
+test('agents/qa-lead.md carries the stricter-never-looser invariant, the critical-never-dropped absolute, and the (user)-authorship rule, without contradicting qa-gate.md', () => {
+  assert.match(qaLeadMd, /consolidation may only make the gate stricter, never looser/i)
+  assert.match(qaLeadMd, /a `critical` is never dropped, only escalated to the user/)
+  assert.match(qaLeadMd, /[Oo]nly the user may author a `\(user\)` disposition/)
+  assert.match(qaLeadMd, /never `wont-fix \(user\)`\/`disagreed \(user\)` on the user's behalf/)
+})
+
+// --- 34. drift: qa-lead.md's dedup restatement says "normalized" too ---
+test('agents/qa-lead.md restates the dedup key as "normalized `file`", matching qa-gate.md', () => {
+  assert.match(qaGateMd, /same normalized `file`/)
+  assert.match(qaLeadMd, /same normalized `file`/)
+})
+
+// --- 35. drift: the mandatory audit-line shape is verbatim-identical ---
+test('qa-gate.md and agents/qa-lead.md carry the identical mandatory audit-line shape', () => {
+  const AUDIT_LINE = 'consolidated N findings from M members (P of M supplied structured findings) -> K (X merged, Y dropped, Z re-categorized); drops cited below'
+  assert.ok(qaGateMd.includes(AUDIT_LINE), 'qa-gate.md missing the frozen audit-line shape')
+  assert.ok(qaLeadMd.includes(AUDIT_LINE), 'qa-lead.md missing the frozen audit-line shape')
+})
+
+// --- 36. drift: the five-member disposition enum is verbatim-identical ---
+test('qa-gate.md and agents/qa-lead.md carry the identical five-member disposition enum', () => {
+  const ENUM_TOKENS = ['`fixed`', '`open`', '`wont-fix (user)`', '`disagreed (user)`', '`deferred (issue #N)`']
+  for (const token of ENUM_TOKENS) {
+    assert.ok(qaGateMd.includes(token), `qa-gate.md missing disposition enum token: ${token}`)
+    assert.ok(qaLeadMd.includes(token), `qa-lead.md missing disposition enum token: ${token}`)
+  }
+})
+
+// qa-13-a3 round-3 panel fix-round: test-pin every new safety rule
+// -------------------------------------------------------------------------
+
+// --- 37. step 0's restored qualifiers ---
+test('qa-gate.md: step 0 states strict majority and the still-inconclusive-after-bounded-re-runs qualifier', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*0\. Freeze the verdict arithmetic first\*\*/)
+  assert.match(section, /\*\*strict majority\*\* count of the literal token `pass`/)
+  assert.match(section, /\(still inconclusive after its bounded re-runs\)/)
+  assert.match(section, /re-run loop.*must complete BEFORE step 0 freezes anything/)
+})
+
+// --- 38. critical-row deferral authorship bar ---
+test('qa-gate.md: gate-memory forbids the orchestrator from authoring deferred on a critical row', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /A `critical`-severity row may only carry `deferred \(issue #N\)` if the USER authored the deferral/)
+  assert.match(section, /the orchestrator may never author `deferred` on a critical row/)
+})
+
+// --- 39. critical-row restatement duty ---
+test('qa-gate.md: every critical-severity carry-forward row must be restated each round, never silently rolled forward', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /Every `critical`-severity row in a carry-forward table must be RESTATED, not silently rolled forward/)
+})
+
+// --- 40. deferred-is-not-a-don't-re-raise carve-out ---
+test('qa-gate.md: deferred is not a dont-re-raise instruction for the reviewer, unlike wont-fix/disagreed', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /A `deferred` row is not a "don't re-raise" instruction for the reviewer, unlike `wont-fix \(user\)`\/`disagreed \(user\)`/)
+  assert.match(section, /SHOULD still report it, since deferral is scheduling, not dismissal/)
+})
+
+// --- 41. unstructured-member prose-critical MUST BLOCK rule, never weakened ---
+test('qa-gate.md: an unstructured members prose-critical MUST BLOCK PENDING ESCALATION, never weakened to "may block"', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /it MUST BLOCK PENDING ESCALATION exactly as a structured `critical` finding would — never weakened to "may block"/)
+})
+
+// --- 42. dedup content-preserving clause, per-finding wording ---
+test('qa-gate.md: dedup is content-preserving and retains every merged findings summary text, per-finding not per-member', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*A merge is content-preserving:\*\* the merged entry retains every \*\*merged finding's\*\* `summary` text as a list, none discarded/)
+  assert.match(section, /a member may appear more than once in the list if it raised multiple distinct findings that all merged into this group/)
+  assert.match(section, /this is per-finding, not per-member/)
+})
+
+// --- 43. under-merging-is-safe clause ---
+test('qa-gate.md: when same-defect is uncertain, do not merge — under-merging is the safe direction', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*When "same defect" is uncertain, do not merge\*\* — under-merging \(an extra finding surfaces\) is the safe direction, over-merging \(content lost\) is not/)
+})
+
+// --- 44. per-member-severity retention clause ---
+test('qa-gate.md: dedup records the severity each member individually assigned it', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /the severity \*\*each of those members individually assigned it\*\*/)
+})
+
+// --- 45. normalized-file definition ---
+test('qa-gate.md: normalized file is a repo-relative POSIX path, and a non-normalizable basename never merges', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*Normalized `file`, for this key:\*\* a repo-relative POSIX path, stripping a leading `\.\/`/)
+  assert.match(section, /a bare basename that cannot be resolved to a unique tracked path is not normalizable and never merges with anything/)
+})
+
+// --- 46. worktree-anchor stripping (S2) ---
+test('qa-gate.md: file normalization strips both the repo-root prefix and a per-agent worktree segment', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /strip any leading `<repo-root>\/` and, for a dispatch running inside this repo's own per-agent worktree layout, any leading `\.claude\/worktrees\/<id>\/` segment too/)
+  assert.match(section, /relative to the reviewer's own repo\/worktree root/)
+})
+
+// --- 47. clique construction, not connected-component over-merging (S1) ---
+test('qa-gate.md: a merged group must be a clique of the pairwise relation, not a connected component that over-merges under certainty', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*A merged group must be a CLIQUE of that pairwise relation, not merely a connected component:\*\*/)
+  assert.match(section, /never merges all three into one group \(that would be over-merging under certainty, directly contradicting the under-merging-is-safe rule below\)/)
+})
+
+// --- 48. drop condition (a) pre-dating + (b) actual-words tightening ---
+test('qa-gate.md: drop condition (a) requires the cited entry pre-date the round, and (b) requires quoting the users actual words', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /The cited entry must PRE-DATE this gate round \(cite its date\)/)
+  assert.match(section, /quote the USER'S ACTUAL WORDS and say where they said them/)
+})
+
+// --- 49. step 5 counting-units clarification + coverage-declaration gap ---
+test('qa-gate.md: step 5 states counting units explicitly and flags a shared coverage-declaration gap', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*Counting units, made explicit:\*\* `X` \(merged\) counts findings ABSORBED by a merge/)
+  assert.match(section, /\*\*Coverage-declaration gap\.\*\* If every panel member's coverage declaration/)
+})
+
+// --- 50. drop-vocabulary sequencing softening, reciprocal in both files ---
+test('qa-gate.md and pr-review.md both state the speculative-drop rule runs second, not first, on the panel path', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /pr-review\.md`'s speculative-drop rule runs second, not first/)
+  const prReviewMd = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
+  assert.match(prReviewMd, /this drop rule runs second, not first/)
+})
+
+// --- 51. M1: prior-severity-is-not-independently-chosen rule ---
+test('qa-gate.md: prior severity in the carry-forward table must reproduce the actual severity, never independently chosen or lowered', () => {
+  const section = extractSection(qaGateMd, GATE_MEMORY_HEADING)
+  assert.match(section, /\*\*`prior severity` reproduces the finding's actual severity from the round it was raised — it is NEVER independently chosen or lowered when composing the table\.\*\*/)
+  assert.match(section, /sidesteps the bar entirely, since it never triggers/)
+  assert.match(section, /legitimate only via the consolidation pass's own step-3 re-categorization/)
+})
+
+// --- 52: S4 merged entry is report-only, never a fenced verdict json block ---
+test('qa-gate.md: a merged entry is a gate-report/audit-line construct only, never emitted into a fenced verdict json block', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /\*\*A merged entry is a gate-report\/audit-line construct only, never emitted into a fenced verdict JSON block\*\*/)
+  assert.match(section, /additionalProperties.*false/)
+})
+
+// --- 53: S5 four-keys-plus-member off-by-one fix ---
+test('qa-gate.md: normalize step states four keys (not five) plus the member', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /the same four keys as the frozen `findings\[\]` entry, plus the member/)
+  assert.equal(/the same five keys as the frozen `findings\[\]` entry plus the member/.test(qaGateMd), false)
+})
+
+// --- 54: S8 landing point — critical row forces a gate-report file even on a clean pass ---
+test('qa-gate.md: a critical carry-forward row forces the gate-report file to be written even on a clean pass', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /if the carry-forward table contains any `critical`-severity row, write the gate-report file even when this round's gate PASSES clean/)
+})
+
+// --- 55: S9 landing point — unstructured-member prose-critical in step 6's escalation paths ---
+test('qa-gate.md: step 6 names the unstructured-member prose-critical case as a third escalation path', () => {
+  const section = extractSection(qaGateMd, CONSOLIDATION_HEADING)
+  assert.match(section, /A third path lands here too: step 1's unstructured-member prose-critical case/)
+})
+
+// --- 56: S6 reviewer role files carry the deferred-not-settled carve-out ---
+test('agents/code-reviewer.md and code-reviewer-deep.md state that a deferred row is not settled', () => {
+  for (const [name, body] of [['code-reviewer.md', codeReviewerMd], ['code-reviewer-deep.md', codeReviewerDeepMd]]) {
+    assert.match(body, /A `deferred \(issue #N\)` row is NOT settled — deferral is scheduling, not dismissal — so report the defect again if you re-encounter it\./, `${name}: missing deferred-not-settled carve-out`)
+  }
 })

@@ -16,6 +16,7 @@ import {
 
 const dispatchRecordSchema = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/dispatch-record.schema.json'), 'utf8'))
 const rosterDefault = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/roster.default.json'), 'utf8'))
+const rosterSchema = JSON.parse(readFileSync(join(ROOT, 'scripts/cmux/roster.schema.json'), 'utf8'))
 const RULE_RE = new RegExp(dispatchRecordSchema.properties.profile.properties.allow.items.pattern)
 
 function makeTmpDir(prefix) {
@@ -920,4 +921,30 @@ test('hashEnvFile: a CRLF and an LF version of the SAME logical content hash DIF
   assert.equal(crlfResult.sha256, hashEnvFile(crlfPath))
   assert.equal(lfResult.sha256, hashEnvFile(lfPath))
   assert.notEqual(hashEnvFile(crlfPath), hashEnvFile(lfPath))
+})
+
+// ---------------------------------------------------------------------------
+// be-30-01 (issue #30, U-3) — the two 'RESERVED' comments #7 (PR #31)
+// invalidated by shipping `/dev-team:team roster <role>=<agent>:<model>`.
+// Prose-only pins: no code changed, schema_version stays 1.
+// ---------------------------------------------------------------------------
+
+test('be-30-01: roster.schema.json top-level description no longer claims the session layer is RESERVED / unreachable', () => {
+  const description = rosterSchema.description
+  assert.equal(/reserved/i.test(description), false)
+  assert.equal(description.includes('no command exposes it yet'), false)
+  assert.equal(description.includes('/dev-team:team roster'), true)
+  assert.equal(description.includes('--config'), true)
+  assert.equal(description.includes('does not survive /clear'), true)
+})
+
+test('be-30-01: roster.schema.json schema_version const is unchanged at 1 (mechanical proof the edit was prose-only)', () => {
+  assert.equal(rosterSchema.properties.schema_version.const, 1)
+})
+
+test('be-30-01: resolve.mjs loadRoster header comment no longer calls the session layer reserved and documents the roster verb', () => {
+  const src = readFileSync(join(ROOT, 'scripts/cmux/resolve.mjs'), 'utf8')
+  const block = src.slice(src.indexOf('// loadRoster({'), src.indexOf('export function loadRoster'))
+  assert.equal(/reserved/i.test(block), false)
+  assert.equal(block.includes('/dev-team:team roster'), true)
 })

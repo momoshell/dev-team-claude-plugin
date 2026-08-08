@@ -42,6 +42,25 @@ test('command team.md: frontmatter description lists roster', () => {
   assert.match(m[1], /description:.*\broster\b/)
 })
 
+test('command team.md: roster bullet points at the two persistent roster.json layers and states no session layer persists', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  const m = md.match(/roster <role>=<agent>:<model>[\s\S]*?(?=\n- \*\*|$)/)
+  assert.ok(m, 'has a roster bullet')
+  assert.match(m[0], /~\/\.claude\/dev-team\/roster\.json/)
+  assert.match(m[0], /<project>\/\.claude\/dev-team\/roster\.json/)
+})
+
+test('command team.md: roster bullet no longer claims a bogus <model> throws, and documents the snapshot-freeze exception to /clear', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  const m = md.match(/roster <role>=<agent>:<model>[\s\S]*?(?=\n- \*\*|$)/)
+  assert.ok(m, 'has a roster bullet')
+  assert.equal(m[0].includes('or if `<model>` isn\'t one of the recognized model aliases or a `claude-*` id — either makes the merged roster schema-invalid'), false)
+  assert.match(m[0], /`<model>` has no equivalent merge-time check/)
+  assert.match(m[0], /roster\.snapshot\.json/)
+  assert.match(m[0], /keeps the override through `\/clear`/)
+  assert.match(m[0], /no persisted session layer/)
+})
+
 test('command team.md: workflow carve-out states cmux panes are conversational-only', () => {
   const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
   const m = md.match(/workflow <goal>[\s\S]*?(?=\n- \*\*|$)/)

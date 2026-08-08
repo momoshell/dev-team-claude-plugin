@@ -709,6 +709,13 @@ task, branch `dt/<task-id>`, recorded as durable artifacts). The dispatch record
 paths; no path resolution happens inside the pane (locality is lost on re-dispatch). Every re-dispatch
 re-resolves paths from the plugin's running root, so stale references cannot accumulate.
 
+### Factory subsystem run mirror (optional layer)
+
+A separate, optional factory layer records run history as an append-only JSONL raw record paired
+with a queryable SQLite (WAL) projection. It carries its own scoped Node floor, independent of the
+rest of the plugin. The JSONL file is the permanent, authoritative record; the database is a
+rebuildable projection that may be deleted and fully replayed from it at any time.
+
 ---
 
 ## Appendix A — Canonical schemas

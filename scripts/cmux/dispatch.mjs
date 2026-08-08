@@ -1353,7 +1353,16 @@ export function dispatchCmd(args, ctx) {
   // grant (judgment/validator today) takes a byte-identical path to before
   // this change.
   const profileDef = roster.profiles[resolved.profile]
-  const isWriteCapable = Boolean(profileDef && Array.isArray(profileDef.allow) && profileDef.allow.includes('worktree_write'))
+  if (!profileDef) {
+    // Mirrors record.mjs's buildRecord (~line 505-508), which throws on the
+    // identical missing-profile condition — a role pointing at a profile
+    // name that isn't a key of roster.profiles is an internal-consistency
+    // failure, not a "not write-capable" signal. Failing open here (treating
+    // it as ungated) would let a malformed roster override silently skip
+    // this gate for a role that was actually meant to be write-capable.
+    throw new OperationalError(`refused: role ${JSON.stringify(role)} references unknown profile ${JSON.stringify(resolved.profile)}`)
+  }
+  const isWriteCapable = Array.isArray(profileDef.allow) && profileDef.allow.includes('worktree_write')
   let specWarnings
   if (isWriteCapable) {
     // Before lintSpec: a non-plain-object spec (e.g. a spec file that parses
@@ -1367,7 +1376,7 @@ export function dispatchCmd(args, ctx) {
     // TypeError on anything else — this guard restores that contract from
     // the caller side without editing spec-lint.mjs (out of scope).
     if (typeof spec !== 'object' || spec === null || Array.isArray(spec)) {
-      throw new SpecSchemaError([{ check: 'schema', detail: 'spec must be a JSON object' }])
+      throw new SpecSchemaError([{ check: SPEC_LINT_SCHEMA_CHECK, detail: 'spec must be a JSON object' }])
     }
     // A lintSpec THROW past this point is a packaging error (a corrupt
     // shipped schema file or noise-globs.json), the one thing the guard
@@ -2899,9 +2908,8 @@ export function main(argv) {
 // compared false under plain resolvePath and this guard silently no-oped.
 // Local copy of the realpathOr shape (scripts/spec-lint.mjs:49-55) — one of
 // several sites with this same shape across this repo's scripts/. Promoting
-// it to a shared helper is deferred (contract.mjs is contract-frozen with a
-// closed export manifest) — see the out_of_scope reasoning in the original
-// spec for this change.
+// it to a shared helper is deferred: contract.mjs is contract-frozen with a
+// closed export manifest, so adding this would pull it into that scope.
 function realpathOr(path) {
   try {
     return realpathSync(path)

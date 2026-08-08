@@ -70,12 +70,12 @@ const { lintSpec } = await import(join(ROOT, 'scripts', 'spec-lint.mjs'))
 // A2 (#27) fix-round item 8 — the makeTmpDir/TMP_DIRS-and-after-cleanup
 // convention test/cmux-ladder.test.mjs and test/claude-adapter.test.mjs both
 // use for THEIR fixture dirs. This file otherwise builds every fixture dir
-// via freshCmuxEnv/buildTestCtx (whose tmpdirs are already registered for
-// cleanup indirectly through the dir returned to each test, none of which
-// this fix round touches) or raw mkdtempSync calls that predate this fix
-// round and are out of scope here. Only the two NEW tmpdirs added by this
-// fix round (the symlink-invocation regression test and the cross-file
-// check-name-agreement test) are registered below.
+// via freshCmuxEnv/buildTestCtx or raw mkdtempSync calls that predate this
+// fix round; NOTHING removes those tmpdirs (nor FAKE_BIN_DIR) — this is a
+// pre-existing leak, out of scope for this change, not "already handled".
+// Only the two NEW tmpdirs added by this fix round (the symlink-invocation
+// regression test and the cross-file check-name-agreement test) are
+// registered below.
 const A2_FIX_ROUND_TMP_DIRS = []
 
 function makeTmpDir(prefix) {
@@ -5215,24 +5215,35 @@ test('A/B: cmux_preview_url SET, frontend spec, but role isolation is NOT worktr
 // valid enum members — it does NOT stand in for exactness-under-normalization
 // coverage, despite an earlier version of this comment claiming it did.
 //
-// Could exactness still be tested directly, via a role whose profile isn't
-// write-capable (so the schema floor doesn't gate it)? No default-roster role
-// satisfies pane:true + isolation:'worktree' + a non-write-capable profile
-// simultaneously (the two judgment-profile worktree roles in
-// roster.default.json are both pane:false, and dispatchCmd refuses any
-// pane:false role before reaching the preview block at all) — so there is
-// currently no reachable path to unit-test the comparison's exactness
-// in isolation. Documented as a real, currently-unfillable gap rather than
-// papered over with a test that doesn't actually exercise the comparison.
-test("trigger conjunct 2: domain 'Frontend' and 'frontend ' (not an exact match) -> refused by the schema floor before the preview trigger's domain comparison is ever evaluated, zero browser calls", () => {
-  const { env, ctx } = setUpPreviewWorkspace('preview-trigger-domain-case')
+// Fix-round-2 item 1: exactness CAN still be tested directly, via a session
+// roster override that gives `coder` a non-write-capable profile while
+// leaving pane:true + isolation:'worktree' untouched. `validator` is exactly
+// such a profile — roster.default.json already ships it paired with
+// isolation:'worktree' on `build-validator`, so this is a legal, supported
+// shape, not a fabricated one — and the fix-round-1 capability-gate test
+// (grep "A2 fix-round #3") already proves a session `--config` sidecar
+// override reaching dispatchCmd via buildContext -> loadRoster({session}) ->
+// deepMergeRoster is a real, exercised code path. Overriding ONLY
+// coder.profile to 'validator' keeps pane:true/isolation:'worktree' from the
+// default role and swaps in a profile whose `allow` list has no
+// 'worktree_write', so the schema floor (isWriteCapable) does NOT gate this
+// dispatch — the preview trigger's `spec?.domain === 'frontend'` comparison
+// is reached and its outcome is observable via browserOpenInvocations. This
+// restores the original exactness proof (no case-folding, no trim),
+// correctly scoped to a role that isn't gated by the new schema floor.
+test("trigger conjunct 2: domain 'Frontend' and 'frontend ' (not an exact match) -> zero browser calls, via a coder role overridden to a non-write-capable profile so the schema floor doesn't intercept the dispatch first", () => {
+  const { env, ctx } = setUpPreviewWorkspace('preview-trigger-domain-case', {
+    configOverrides: { session: { roles: { coder: { profile: 'validator' } } } },
+  })
+  assert.equal(ctx.roster.roles.coder.profile, 'validator', "sanity: the session override actually swapped coder's profile")
+  assert.equal(ctx.roster.roles.coder.pane, true, 'sanity: pane:true is preserved from the default role')
+  assert.equal(ctx.roster.roles.coder.isolation, 'worktree', "sanity: isolation:'worktree' is preserved from the default role")
+
   for (const [sliceId, domain] of [['be-9e', 'Frontend'], ['be-9f', 'frontend ']]) {
     const specPath = makeSpecFile(ctx, sliceId, { domain })
-    assert.throws(
-      () => dispatchCmd({ slice: sliceId, role: 'coder', spec: specPath }, ctx),
-      (err) => err instanceof SpecSchemaError,
-      `domain ${JSON.stringify(domain)} must be schema-refused, not reach the preview block`,
-    )
+    const res = dispatchCmd({ slice: sliceId, role: 'coder', spec: specPath }, ctx)
+    assert.equal(res.code, 0, `domain ${JSON.stringify(domain)} must not be schema-refused under the non-write-capable override`)
+    assert.equal('preview' in res.json, false, `domain ${JSON.stringify(domain)} must not trigger a preview`)
   }
   assert.equal(browserOpenInvocations(env).length, 0)
 })
@@ -6524,6 +6535,15 @@ test('A2 fix-round #1: a schema violation detail containing a control character 
   for (const f of json.failures) {
     assert.doesNotMatch(f.detail, rawControlBytesRe, `JSON failures[].detail must contain no raw control bytes, got: ${JSON.stringify(f.detail)}`)
   }
+
+  // Fix-round-2 item 2: the same line-count invariant the CLI-wiring test
+  // above already uses (one "FAIL schema: " stderr line per failures[]
+  // entry) — this fails immediately if the embedded newline smuggled an
+  // extra apparent line, which the two checks above (no raw control bytes;
+  // no standalone forged line) would NOT catch on their own if only the ESC
+  // codes were stripped while the newline itself survived unescaped.
+  const failLineCount = (res.stderr.match(/^FAIL schema: /gm) || []).length
+  assert.equal(failLineCount, json.failures.length, 'expected exactly one "FAIL schema: ..." stderr line per failure, even with a hostile embedded newline in the detail')
 })
 
 // Fix-round item 6 (unbounded output amplification): both the stderr FAIL
@@ -6561,6 +6581,48 @@ test('A2 fix-round #6: a spec with many schema violations produces a capped fail
 
   const failLineCount = (res.stderr.match(/^FAIL schema: /gm) || []).length
   assert.equal(failLineCount, json.failures.length, 'stderr FAIL line count must match the capped failures[] length exactly')
+})
+
+// Fix-round-2 item 4: the fix-round-1 MAX_DETAIL_LENGTH truncation path
+// (sanitizeDetail, dispatch.mjs) had no test exercising a single detail
+// string over the length cap — only the count-cap (500 violations, fix-round
+// item 6 above) was tested. A single hostile-length key name (350 chars,
+// echoed twice into contract.mjs's "unexpected property" message) produces
+// exactly one schema failure whose detail comfortably exceeds
+// MAX_DETAIL_LENGTH (300).
+test('A2 fix-round #4: a single schema violation whose detail exceeds MAX_DETAIL_LENGTH is truncated with a "<truncated, N chars total>" marker, and the truncated length stays bounded', () => {
+  const { dir, ctx } = setUpWorkspace('a2-long-detail')
+  const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'config.md'), 'execution_mode: cmux\n')
+
+  const longKey = 'x'.repeat(350)
+  const specPath = specPathFor(ctx.paths, 'be-27-longdetail')
+  mkdirSync(dirname(specPath), { recursive: true })
+  writeFileSync(specPath, JSON.stringify({
+    task_id: 'be-1b-E-test', domain: 'backend', goal: 'g',
+    files_in_scope: ['f.mjs'], constraints: [], acceptance_criteria: ['works'],
+    validation_commands: ['node --test'], discovery_context: 'ctx',
+    out_of_scope: [], depends_on: [], interface_contract: 'none',
+    [longKey]: 'x',
+  }))
+
+  const res = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'dispatch',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT,
+    '--slice', 'be-27-longdetail', '--role', 'coder', '--spec', specPath,
+  ], { encoding: 'utf8' })
+
+  assert.equal(res.status, 1, `expected exit 1, got ${res.status} — stderr: ${res.stderr}`)
+  const json = JSON.parse(res.stdout.trim())
+  assert.equal(json.failures.length, 1, `expected exactly one schema failure, got ${JSON.stringify(json.failures)}`)
+  const [failure] = json.failures
+  assert.match(failure.detail, /<truncated, \d+ chars total>$/, `expected a truncation marker, got: ${failure.detail}`)
+  assert.ok(failure.detail.length < 400, `expected the truncated detail to stay bounded, got length ${failure.detail.length}`)
+
+  const failLineCount = (res.stderr.match(/^FAIL schema: /gm) || []).length
+  assert.equal(failLineCount, 1, 'expected exactly one "FAIL schema: ..." stderr line for the single truncated failure')
 })
 
 test('A2 negative #1 (PATH): a coder dispatch whose validation_commands names a binary absent from PATH still exits 0 with exactly one new-pane, demoted to a warnings[] entry with check:"validation_commands" severity:"fail"', () => {

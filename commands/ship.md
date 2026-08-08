@@ -29,7 +29,13 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
      `Closes #N` still closes the issue itself — this additionally syncs the board's `Status` field, which closing alone doesn't touch. Clear the `current_task:` line from `config.md` after. Non-fatal: if it fails, report it and continue — the PR is the source of truth.
    - Trello (config has a `current_task:` card) → `"${CLAUDE_PLUGIN_ROOT}/scripts/trello.sh" comment <card-id> "<PR URL>"` then `trello.sh move <card-id> <done-list-id>`, and clear the `current_task:` line from `config.md`. Non-fatal: if the board update fails, report it and continue — the PR is the source of truth.
 
-6. **Tear down the cmux session** (only when `execution_mode: cmux` is set in `.claude/dev-team/config.md`; **skip this step entirely** when `execution_mode` is `agent-tool` or absent). Runs after step 4's PR and step 3's memory commit, so the durable record is already in git before anything is deleted, and after step 5 so the board is already synced:
+6. **Log task cost** (best-effort, non-fatal):
+   ```
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/task-cost-log.mjs" --tier <1|2|3> --gate-depth <none|standard|deep|panel> --task <id>
+   ```
+   `tier`, `gate_depth` and `task` are **self-reported and unaudited** — this call records your own read of the session, it doesn't verify it against anything. This is non-fatal: an exit 2 here (e.g. `session_id_unavailable`) is reported in the final Report step and never un-ships the PR. If it exits 2 with `session_id_unavailable`, re-run once with an explicit session id: `--session-id $(printenv CLAUDE_CODE_SESSION_ID)`.
+
+7. **Tear down the cmux session** (only when `execution_mode: cmux` is set in `.claude/dev-team/config.md`; **skip this step entirely** when `execution_mode` is `agent-tool` or absent). Runs after step 4's PR and step 3's memory commit, so the durable record is already in git before anything is deleted, and after step 5 so the board is already synced:
    - **Refusal clause:** if the `--task <slug>` used for this task's workspace/dispatch calls earlier in this run isn't known, **never guess a slug** — skip teardown and report that it was skipped.
    - Otherwise invoke the existing teardown verb:
      ```
@@ -40,6 +46,6 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
    - **Worktrees:** removed only when clean **and** merged — never `--force`. Leftovers are kept and reported as `leftover_worktrees`.
    - Non-fatal: a teardown failure never un-ships the PR — report it and continue.
 
-7. **Report** the branch, the PR URL, the gate verdict, any task-source update, and (if teardown ran) its outcome including any `leftover_worktrees`. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
+8. **Report** the branch, the PR URL, the gate verdict, any task-source update, the task-cost logging outcome (including any `session_id_unavailable` remediation taken), and (if teardown ran) its outcome including any `leftover_worktrees`. End the report by recommending **`/clear` before the next task** — the transcript's job is done (memory, config, and the board carry everything forward), and a fresh window keeps per-turn cost flat instead of compounding.
 
 **Input:** $ARGUMENTS

@@ -63,12 +63,23 @@ test('the set of roles with pane true equals PANE_ROLES exactly', () => {
 //       specification, not by call. If S1's predicate ever changes, this
 //       regex must be changed to match by hand — that hand-edit is the
 //       review checkpoint.
-// No role is exempted: all six pane+markdown roles must pass this guard as
-// written; if one does not, the roster value is wrong, not the guard.
-test('every pane+markdown role\'s required_sections is authored in its agents/<role>.md (independent oracle)', () => {
+// No role is exempted: every markdown-returning role must pass this guard as
+// written — pane-dispatched or not — because required_sections is a return-
+// shape contract on the MARKDOWN RETURN, not on the dispatch mechanism. This
+// guard used to skip non-pane markdown roles (`role.pane !== true`), which
+// let build-validator, code-reviewer and code-reviewer-deep — all markdown-
+// returning, all `verdict_block: true`, none ever pane-dispatched (absent
+// from PANE_ROLES; scripts/cmux/dispatch.mjs throws on a non-PANE_ROLES pane
+// dispatch) — through unchecked. The roster declared their required_sections
+// correctly the whole time; no role file authored them. That's the defect
+// this guard now closes: if a markdown role's required_sections aren't
+// authored as real headings, the roster value is wrong, not the guard.
+test('every markdown-returning role\'s required_sections is authored in its agents/<role>.md (independent oracle)', () => {
   const HEADING_RE = /^#{2,6}[ \t]+(.+?)[ \t]*$/gm
+  const checked = new Set()
   for (const [name, role] of Object.entries(roster.roles)) {
-    if (role.pane !== true || role.return.kind !== 'markdown') continue
+    if (role.return.kind !== 'markdown') continue
+    checked.add(name)
     const body = readFileSync(join(ROOT, 'agents', `${name}.md`), 'utf8')
     const authored = [...body.matchAll(HEADING_RE)].map((m) => m[1].trim())
     for (const req of role.return.required_sections) {
@@ -76,6 +87,13 @@ test('every pane+markdown role\'s required_sections is authored in its agents/<r
       const satisfied = authored.some((h) => h.toLowerCase().startsWith(needle))
       assert.ok(satisfied, `role ${name} required_sections entry ${JSON.stringify(req)} is not authored as a heading in agents/${name}.md`)
     }
+  }
+  // Completeness: a loop whose predicate silently empties would make this
+  // guard pass vacuously — the exact failure mode that let the live defect
+  // through undetected. Assert the never-pane-dispatched roles this task
+  // exists to cover are actually in the checked set.
+  for (const name of ['build-validator', 'code-reviewer', 'code-reviewer-deep']) {
+    assert.ok(checked.has(name), `expected ${name} to be checked by the widened markdown-return guard, but it was skipped`)
   }
 })
 

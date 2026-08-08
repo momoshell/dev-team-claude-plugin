@@ -102,7 +102,14 @@ test('command ship.md: documents keep_task_artifacts -> --keep-artifacts and alw
   const step = teardownStep(md)
   assert.match(step, /keep_task_artifacts/)
   assert.match(step, /--keep-artifacts/)
-  assert.match(step, /archiv/i)
+  assert.match(step, /non-zero\/non-ok dispatch is always archived/)
+})
+
+test('command ship.md: documents --outcome refused as a third, independent archival trigger', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'ship.md'), 'utf8')
+  const step = teardownStep(md)
+  assert.match(step, /--outcome refused/)
+  assert.match(step, /independent of `keep_task_artifacts` or dispatch status/)
 })
 
 test('command ship.md: reports leftover_worktrees and never force-removes', () => {

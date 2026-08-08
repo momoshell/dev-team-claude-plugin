@@ -34,6 +34,7 @@ const {
   parseArgs, buildContext, ensureWorktree, isDispatcherWorktree, removeWorktreeIfCleanAndMerged,
   writeCompletionNonce, adapterLaunchLine,
   preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd, phaseCmd,
+  TEARDOWN_OUTCOMES, DEFAULT_TEARDOWN_OUTCOME,
   readCmuxEnvFile, readEnvFileKeys,
   readCmuxPreviewUrl, ensurePreviewBrowser, formatPreviewFailClosedLine,
   PREVIEW_LOCK_WORST_CASE_MS,
@@ -2324,6 +2325,151 @@ test('--keep-artifacts always archives, even with an all-ok outcome', () => {
 
   const res = teardownCmd({ 'keep-artifacts': true }, ctx)
   assert.equal(res.json.task_dir.archived, true)
+})
+
+test('TEARDOWN_OUTCOMES drift guard: widening the accepted set requires a deliberate test edit', () => {
+  assert.deepEqual(TEARDOWN_OUTCOMES, ['ok', 'refused'])
+  assert.ok(Object.isFrozen(TEARDOWN_OUTCOMES))
+  assert.equal(DEFAULT_TEARDOWN_OUTCOME, 'ok')
+})
+
+test('teardown --outcome refused archives both task dir and state dir even when every dispatch is ok', () => {
+  const { dir, ctx } = setUpWorkspace('teardown-outcome-refused')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+  closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+
+  const res = teardownCmd({ outcome: 'refused' }, ctx)
+  assert.equal(res.json.task_dir.archived, true)
+  assert.match(res.json.task_dir.path, /\.archive\/sample-task-/)
+  assert.equal(existsSync(ctx.paths.taskDir), false)
+  assert.equal(res.json.state_dir.archived, true)
+  assert.equal(existsSync(ctx.paths.stateDir), false)
+  assert.ok(existsSync(res.json.state_dir.path))
+})
+
+test('teardown --outcome ok on an all-ok fixture deletes exactly as today (no flag)', () => {
+  const { dir, ctx } = setUpWorkspace('teardown-outcome-ok')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+  closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+
+  const res = teardownCmd({ outcome: 'ok' }, ctx)
+  assert.equal(res.json.task_dir.archived, false)
+  assert.equal(res.json.task_dir.deleted, true)
+  assert.equal(res.json.state_dir.archived, false)
+  assert.equal(res.json.state_dir.deleted, true)
+})
+
+test('teardown with no --outcome flag is byte-for-byte identical to --outcome ok on equivalent fixtures', () => {
+  const noFlag = setUpWorkspace('teardown-outcome-noflag')
+  const noFlagSpec = makeSpecFile(noFlag.ctx)
+  const noFlagDispatch = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: noFlagSpec }, noFlag.ctx)
+  writeValidReturn(readRecord(join(noFlag.ctx.paths.dispatchDir, 'be-1a.1.json')))
+  closeCmd({ dispatch: noFlagDispatch.json.dispatch_id }, noFlag.ctx)
+  const noFlagRes = teardownCmd({}, noFlag.ctx)
+
+  const withFlag = setUpWorkspace('teardown-outcome-explicitok')
+  const withFlagSpec = makeSpecFile(withFlag.ctx)
+  const withFlagDispatch = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: withFlagSpec }, withFlag.ctx)
+  writeValidReturn(readRecord(join(withFlag.ctx.paths.dispatchDir, 'be-1a.1.json')))
+  closeCmd({ dispatch: withFlagDispatch.json.dispatch_id }, withFlag.ctx)
+  const withFlagRes = teardownCmd({ outcome: 'ok' }, withFlag.ctx)
+
+  assert.equal(noFlagRes.json.task_dir.archived, withFlagRes.json.task_dir.archived)
+  assert.equal(noFlagRes.json.task_dir.deleted, withFlagRes.json.task_dir.deleted)
+  assert.equal(noFlagRes.json.state_dir.archived, withFlagRes.json.state_dir.archived)
+  assert.equal(noFlagRes.json.state_dir.deleted, withFlagRes.json.state_dir.deleted)
+})
+
+test('teardown --outcome <bogus value> refuses as UsageError before any side effect', () => {
+  const badValues = ['bogus', 'OK', '', 'refused ']
+  for (const badValue of badValues) {
+    const { env, ctx } = setUpWorkspace(`teardown-outcome-bad-${badValues.indexOf(badValue)}`)
+    const specPath = makeSpecFile(ctx)
+    const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+    writeValidReturn(record)
+    closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+
+    const beforeCount = readLog(env.logPath).length
+    assert.throws(
+      () => teardownCmd({ outcome: badValue }, ctx),
+      (err) => err instanceof UsageError
+        && err.message.includes(TEARDOWN_OUTCOMES.join('|'))
+        && err.message.includes(JSON.stringify(badValue)),
+    )
+    const afterCount = readLog(env.logPath).length
+    assert.equal(afterCount, beforeCount, 'an out-of-enum --outcome must issue zero cmux invocations')
+    assert.equal(existsSync(ctx.paths.taskDir), true, 'a refused --outcome must delete nothing')
+    assert.equal(existsSync(ctx.paths.stateDir), true, 'a refused --outcome must delete nothing')
+  }
+})
+
+test('--keep-artifacts always archives regardless of --outcome, on an all-ok fixture', () => {
+  const okRun = setUpWorkspace('teardown-keep-outcome-ok')
+  const okSpec = makeSpecFile(okRun.ctx)
+  const okDispatch = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: okSpec }, okRun.ctx)
+  writeValidReturn(readRecord(join(okRun.ctx.paths.dispatchDir, 'be-1a.1.json')))
+  closeCmd({ dispatch: okDispatch.json.dispatch_id }, okRun.ctx)
+  const okRes = teardownCmd({ 'keep-artifacts': true, outcome: 'ok' }, okRun.ctx)
+  assert.equal(okRes.json.task_dir.archived, true)
+
+  const refusedRun = setUpWorkspace('teardown-keep-outcome-refused')
+  const refusedSpec = makeSpecFile(refusedRun.ctx)
+  const refusedDispatch = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: refusedSpec }, refusedRun.ctx)
+  writeValidReturn(readRecord(join(refusedRun.ctx.paths.dispatchDir, 'be-1a.1.json')))
+  closeCmd({ dispatch: refusedDispatch.json.dispatch_id }, refusedRun.ctx)
+  const refusedRes = teardownCmd({ 'keep-artifacts': true, outcome: 'refused' }, refusedRun.ctx)
+  assert.equal(refusedRes.json.task_dir.archived, true)
+})
+
+test('source-text guard: the teardown call site resolves --outcome, never a hardcoded ok literal', () => {
+  const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'dispatch.mjs'), 'utf8')
+  assert.doesNotMatch(src, /shouldArchive\(\s*\{\s*outcome:\s*'ok'\s*\}/)
+  assert.match(src, /shouldArchive\(\s*\{\s*outcome\s*\}/)
+})
+
+// The tests above all call teardownCmd(...) directly, never crossing the real
+// CLI entrypoint (parseArgs -> buildContext -> main()). This pins that the
+// real `node dispatch.mjs teardown --outcome ...` path (which main() gates on
+// execution_mode: cmux via assertExecutionModeCmux) archives on refused and
+// refuses a bogus outcome with exit code 2 — mirroring runPreflightInSubprocess's
+// real-child-process technique above, since main()'s exit code is only
+// observable from a genuine subprocess.
+test('CLI end-to-end: `teardown --outcome refused` over a real subprocess archives; `--outcome bogus` exits 2', () => {
+  const { dir, ctx } = setUpWorkspace('teardown-cli-outcome')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+  closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+
+  // main() gates every mutating verb on execution_mode: cmux — teardownCmd()
+  // called directly (above) never crosses that gate, but the real CLI does.
+  const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'config.md'), 'execution_mode: cmux\n')
+
+  const refusedRes = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'teardown',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT, '--outcome', 'refused',
+  ], { encoding: 'utf8' })
+  assert.equal(refusedRes.status, 0, `expected exit 0, got ${refusedRes.status} — stderr: ${refusedRes.stderr}`)
+  const refusedJson = JSON.parse(refusedRes.stdout.trim())
+  assert.equal(refusedJson.task_dir.archived, true)
+
+  const bogusRes = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'teardown',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT, '--outcome', 'bogus',
+  ], { encoding: 'utf8' })
+  assert.equal(bogusRes.status, 2, `expected exit 2, got ${bogusRes.status} — stderr: ${bogusRes.stderr}`)
 })
 
 test('teardown keeps and reports a leftover worktree that is dirty or unmerged (never --force)', () => {

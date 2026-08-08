@@ -42,7 +42,7 @@ Ship the work currently in progress. `$ARGUMENTS` may give a PR title / issue re
      node "${CLAUDE_PLUGIN_ROOT}/scripts/cmux/dispatch.mjs" teardown --task <task-slug> [--keep-artifacts]
      ```
      Pass `--keep-artifacts` iff config has `keep_task_artifacts: true`. For the full teardown order (surface/workspace close sequence, verification pass), see `references/cmux-dispatch.md` — don't restate the cmux verbs here.
-   - **Archival:** regardless of `keep_task_artifacts`, a task with any non-zero/non-ok dispatch is always archived (never deleted) — its logs are the trail worth keeping. Archived tasks land at `<task-artifacts-root>/tasks/.archive/<task-slug>-<date>/` (default root `~/.dev-team`; never `.claude/...`).
+   - **Archival:** regardless of `keep_task_artifacts`, a task with any non-zero/non-ok dispatch is always archived (never deleted) — its logs are the trail worth keeping. Archival is also forced by passing `--outcome refused` to teardown, independent of `keep_task_artifacts` or dispatch status (this ship flow doesn't pass `--outcome` on the invocation above yet — tracked as issue #66). Archived tasks land at `<task-artifacts-root>/tasks/.archive/<task-slug>-<date>/` (default root `~/.dev-team`; never `.claude/...`).
    - **Worktrees:** removed only when clean **and** merged — never `--force`. Leftovers are kept and reported as `leftover_worktrees`.
    - Non-fatal: a teardown failure never un-ships the PR — report it and continue.
 

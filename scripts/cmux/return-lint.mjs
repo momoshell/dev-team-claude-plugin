@@ -210,22 +210,26 @@ function extractFencedBlocks(text) {
   return blocks
 }
 
-// verdictBlockViolations(record, envelope) -> violations[]. Only meaningful
-// for a markdown-kind, verdict_block-true role with a string body to
-// inspect; a null envelope or non-string body means validateReturn already
-// failed for an unrelated reason, so this reports nothing further.
-function verdictBlockViolations(record, envelope) {
-  if (!record.return.verdict_block) return []
-  if (!envelope || record.return.kind !== 'markdown' || typeof envelope.body !== 'string') return []
-
-  const section = extractSection(envelope.body, 'Verdict')
+// extractVerdictBlock(body) -> { ok: true, verdict, findings } |
+// { ok: false, keyword, message }. The parse/validate guts of the
+// verdict-block rule, taking a bare markdown body string — never the
+// (record, envelope) pair, and never throwing on worker data (backend-notes
+// 2026-08-01: throw on contract-author error, return violations on data
+// error). Exported so a caller (be-28-03's gates.mjs) can read a reviewer's
+// parsed {verdict, findings} without re-parsing markdown itself; the
+// realHeadings/extractSection/extractFencedBlocks trio stays module-private
+// and is never exported individually (backend-notes.md:16's accept-a-fake
+// hole — exporting the primitives invites a future caller to recombine them
+// differently).
+export function extractVerdictBlock(body) {
+  const section = extractSection(body, 'Verdict')
   if (section === null) {
-    return [{ keyword: VERDICT_SECTION_MISSING, message: VERDICT_SECTION_MISSING_MESSAGE }]
+    return { ok: false, keyword: VERDICT_SECTION_MISSING, message: VERDICT_SECTION_MISSING_MESSAGE }
   }
 
   const blocks = extractFencedBlocks(section)
   if (blocks.length === 0) {
-    return [{ keyword: VERDICT_BLOCK_MISSING, message: VERDICT_BLOCK_MISSING_MESSAGE }]
+    return { ok: false, keyword: VERDICT_BLOCK_MISSING, message: VERDICT_BLOCK_MISSING_MESSAGE }
   }
 
   // SF2: a Verdict section legitimately carries an illustrative fenced block
@@ -239,7 +243,7 @@ function verdictBlockViolations(record, envelope) {
   if (blocks.length > 1) {
     const jsonTagged = blocks.filter((b) => b.info === 'json')
     if (jsonTagged.length !== 1) {
-      return [{ keyword: VERDICT_BLOCK_MULTIPLE, message: VERDICT_BLOCK_MULTIPLE_MESSAGE }]
+      return { ok: false, keyword: VERDICT_BLOCK_MULTIPLE, message: VERDICT_BLOCK_MULTIPLE_MESSAGE }
     }
     candidate = jsonTagged[0]
   }
@@ -248,16 +252,28 @@ function verdictBlockViolations(record, envelope) {
   try {
     parsed = JSON.parse(candidate.content)
   } catch (err) {
-    return [{ keyword: VERDICT_BLOCK_UNPARSEABLE, message: `${VERDICT_BLOCK_UNPARSEABLE_MESSAGE}: ${err.message}` }]
+    return { ok: false, keyword: VERDICT_BLOCK_UNPARSEABLE, message: `${VERDICT_BLOCK_UNPARSEABLE_MESSAGE}: ${err.message}` }
   }
 
   const schemaViolations = validate(VERDICT_SCHEMA, parsed)
   if (schemaViolations.length > 0) {
     const detail = schemaViolations.map((v) => `${v.path} (${v.keyword})`).join(', ')
-    return [{ keyword: VERDICT_BLOCK_INVALID, message: `${VERDICT_BLOCK_INVALID_MESSAGE}: ${detail}` }]
+    return { ok: false, keyword: VERDICT_BLOCK_INVALID, message: `${VERDICT_BLOCK_INVALID_MESSAGE}: ${detail}` }
   }
 
-  return []
+  return { ok: true, verdict: parsed.verdict, findings: parsed.findings }
+}
+
+// verdictBlockViolations(record, envelope) -> violations[]. Only meaningful
+// for a markdown-kind, verdict_block-true role with a string body to
+// inspect; a null envelope or non-string body means validateReturn already
+// failed for an unrelated reason, so this reports nothing further.
+function verdictBlockViolations(record, envelope) {
+  if (!record.return.verdict_block) return []
+  if (!envelope || record.return.kind !== 'markdown' || typeof envelope.body !== 'string') return []
+
+  const res = extractVerdictBlock(envelope.body)
+  return res.ok ? [] : [{ keyword: res.keyword, message: res.message }]
 }
 
 // ---------------------------------------------------------------------------

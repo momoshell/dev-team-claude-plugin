@@ -46,6 +46,7 @@ Deep review by default for:
 - `scripts/cmux/*.mjs` (`resolve.mjs`, `record.mjs`, `cmuxctl.mjs`, `ladder.mjs`, `dispatch.mjs`) — the 1b dispatcher runtime; every one encodes a permission, path, or completion-evidence boundary (adversarial 3-reviewer panel was required at 1b, not just deep review).
 - `scripts/pr-review-window.sh` — spawns windows/processes and does worktree teardown.
 - `scripts/factory/*.mjs` — the run-trace mirror (#40): trace-fact-bearing, and #59 will retire hand-written run prose in favour of these rows, so a defect here silently corrupts the record of what actually happened.
+- `scripts/chain/*.mjs` (#28: `gates.mjs`, `evidence.mjs`) — the gates CLI: agent-controlled command execution (`tests_pass`'s spawn of a spec's `validation_commands`) plus the ADR-016 memory-single-writer mechanical backstop (`scope_compliance`'s protected-path `hard_fail`), same blast-radius class as the cmux dispatcher.
 
 ## current_task
 

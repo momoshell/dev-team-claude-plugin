@@ -311,6 +311,7 @@ The statusline figure above and `scripts/task-cost-log.mjs`'s ledger are **diffe
 
 - **Claude Code** with plugin support.
 - **Node.js** — used by the Workflow tool to run `team-build.workflow.mjs` (workflow mode only), and by `scripts/spec-lint.mjs`.
+- **Node.js >= 24** — required *only* by `scripts/factory/*` (the run-trace mirror). Below that floor the mirror is simply absent, not broken; everything else in this plugin keeps its Node 20 floor.
 - **jq** — required by the bundled `SessionStart` hook that injects `orchestration.md` into context (degrades gracefully with a stderr warning if missing), and by `scripts/trello.sh` (Trello task source only).
 - **curl** — used by `scripts/trello.sh` (Trello task source only).
 

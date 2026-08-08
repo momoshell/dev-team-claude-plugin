@@ -8,3 +8,9 @@
 # Editor / OS noise
 *.swp
 Thumbs.db
+
+# Run-trace mirror artifacts
+*.db
+*.db-wal
+*.db-shm
+*.db-journal

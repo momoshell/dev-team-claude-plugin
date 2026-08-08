@@ -45,6 +45,7 @@ Deep review by default for:
 - `scripts/cmux/*.schema.json`, `scripts/cmux/roster.default.json`, `scripts/cmux/contract.mjs` — the cmux execution-mode contract freeze (slice 1a); same blast-radius class as the root schemas, plus it encodes a permission/security boundary.
 - `scripts/cmux/*.mjs` (`resolve.mjs`, `record.mjs`, `cmuxctl.mjs`, `ladder.mjs`, `dispatch.mjs`) — the 1b dispatcher runtime; every one encodes a permission, path, or completion-evidence boundary (adversarial 3-reviewer panel was required at 1b, not just deep review).
 - `scripts/pr-review-window.sh` — spawns windows/processes and does worktree teardown.
+- `scripts/factory/*.mjs` — the run-trace mirror (#40): trace-fact-bearing, and #59 will retire hand-written run prose in favour of these rows, so a defect here silently corrupts the record of what actually happened.
 
 ## current_task
 

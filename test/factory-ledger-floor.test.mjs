@@ -145,19 +145,21 @@ test('S9: at exactly NODE_FLOOR the CLI is NOT below floor (exit 0, not 2)', () 
   assert.equal(res.status, 0, `expected exit 0 at exactly NODE_FLOOR, got ${res.status}: ${res.stderr}`)
 })
 
-test('AC-8(c): the sessions verb surfaces degraded:true when reachable (an open-time failure on an at-or-above-floor runtime, not the below-floor early-exit path)', () => {
+test('AC-8(c): the sessions verb surfaces degraded:true when reachable (an open-time failure, not the below-floor early-exit path)', () => {
   // The below-floor early-exit path in main() refuses (exit 2) BEFORE ever
   // opening a ledger or reaching the `sessions` verb's JSON output — so
   // degraded:true can only be OBSERVED in that output via a DIFFERENT
-  // degradation cause: an open-time failure on a runtime that is itself
-  // at or above NODE_FLOOR. Simulate one by pointing DEVTEAM_LEDGER_DB at
-  // a path whose parent component is a FILE, not a directory, so the
-  // lazy open's mkdirSync throws (ENOTDIR) inside ensureDb's catch-all,
-  // never touching the version-check branch at all.
+  // degradation cause: an open-time failure. This file runs in full on
+  // every matrix leg, so the fake-version seam pins the floor check open
+  // on every runtime; the open then fails one of two ways,
+  // both open-time failures: on >= NODE_FLOOR runtimes the blocking-file
+  // trick below makes the lazy open's mkdirSync throw (ENOTDIR); on
+  // below-floor runtimes the node:sqlite require itself fails despite the
+  // (faked) floor check passing, which degrades identically by design.
   const blockingFile = join(fixture, 'blocking-file')
   writeFileSync(blockingFile, 'not a directory')
   const dbPath = join(blockingFile, 'sub', 'ledger.db')
-  const res = run(['sessions'], { DEVTEAM_LEDGER_DB: dbPath })
+  const res = run(['sessions'], { DEVTEAM_LEDGER_DB: dbPath, DEVTEAM_LEDGER_FAKE_NODE_VERSION: NODE_FLOOR })
   assert.equal(res.status, 0, `expected the CLI to still succeed (degraded, not refused): ${res.stderr}`)
   const payload = JSON.parse(res.stdout)
   assert.equal(payload.degraded, true)

@@ -116,10 +116,14 @@ test('command onboard.md: step 5 lists the four new config keys', () => {
   assert.match(md, /cmux_preview_url/)
 })
 
-test('command pr-review.md: respond mode treats an author-dispositioned thread as settled', () => {
+test('command pr-review.md: respond mode treats a wont-fix/disagreed-shaped disposition reply as settled, but a fixed-shaped reply still needs light verification', () => {
   const md = readFileSync(join(ROOT, 'commands', 'pr-review.md'), 'utf8')
-  assert.match(md, /already carrying a disposition reply from the PR author is settled/)
-  assert.match(md, /reviewer replied again \*after\* that disposition reply/)
+  assert.match(md, /closed 5-shape enum/)
+  assert.match(md, /wont-fix`\/`disagreed`-shaped reply settles the thread — skip it/)
+  assert.match(md, /reviewer replied again \*after\* that reply/)
+  assert.match(md, /genuinely new evidence.*reopen it and say what's new/)
+  assert.match(md, /fixed \(<hash>\)`-shaped reply is NOT settled the same way/)
+  assert.match(md, /never simply skipped on sight/)
 })
 
 test('command pr-review.md: the reviewThreads query fetches the NEWEST comments', () => {

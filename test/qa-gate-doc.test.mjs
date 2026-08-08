@@ -458,3 +458,25 @@ test('agents/qa-lead.md carries the stricter-never-looser invariant, the critica
   assert.match(qaLeadMd, /[Oo]nly the user may author a `\(user\)` disposition/)
   assert.match(qaLeadMd, /never `wont-fix \(user\)`\/`disagreed \(user\)` on the user's behalf/)
 })
+
+// --- 34. drift: qa-lead.md's dedup restatement says "normalized" too ---
+test('agents/qa-lead.md restates the dedup key as "normalized `file`", matching qa-gate.md', () => {
+  assert.match(qaGateMd, /same normalized `file`/)
+  assert.match(qaLeadMd, /same normalized `file`/)
+})
+
+// --- 35. drift: the mandatory audit-line shape is verbatim-identical ---
+test('qa-gate.md and agents/qa-lead.md carry the identical mandatory audit-line shape', () => {
+  const AUDIT_LINE = 'consolidated N findings from M members (P of M supplied structured findings) -> K (X merged, Y dropped, Z re-categorized); drops cited below'
+  assert.ok(qaGateMd.includes(AUDIT_LINE), 'qa-gate.md missing the frozen audit-line shape')
+  assert.ok(qaLeadMd.includes(AUDIT_LINE), 'qa-lead.md missing the frozen audit-line shape')
+})
+
+// --- 36. drift: the five-member disposition enum is verbatim-identical ---
+test('qa-gate.md and agents/qa-lead.md carry the identical five-member disposition enum', () => {
+  const ENUM_TOKENS = ['`fixed`', '`open`', '`wont-fix (user)`', '`disagreed (user)`', '`deferred (issue #N)`']
+  for (const token of ENUM_TOKENS) {
+    assert.ok(qaGateMd.includes(token), `qa-gate.md missing disposition enum token: ${token}`)
+    assert.ok(qaLeadMd.includes(token), `qa-lead.md missing disposition enum token: ${token}`)
+  }
+})

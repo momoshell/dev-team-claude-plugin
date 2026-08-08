@@ -125,6 +125,18 @@ test('qa-gate.md: scope-compliance section stays unfiltered (no :! and no noise-
   assert.doesNotMatch(section, /noise-globs/)
 })
 
+// --- 11b. issue #19: unrequested test file is the same bounce class, not an
+// innocent bonus, with the two lead-sanctioned amend routes named and the
+// #28 forward-reference kept honest (not yet shipped).
+test('qa-gate.md: scope-compliance section classifies an unrequested test file as the same violation and names both lead amend routes', () => {
+  const section = extractSection(qaGateMd, SCOPE_HEADING)
+  assert.match(section, /A test file is this violation, not an innocent bonus/)
+  assert.match(section, /add the named test file to `files_in_scope`, or name `dev-team:test-engineer` in `acceptance_criteria`/)
+  assert.match(section, /the lead picks the mechanism, not the coder/)
+  assert.match(section, /scope_compliance.*gates CLI/)
+  assert.match(section, /issue #28's scope, not yet shipped/)
+})
+
 // --- 12. single-source guard ---
 // Counts ':!' occurrences across the whole noise section (not just fenced
 // blocks) so the node-fallback example — which composes ':!' the same way

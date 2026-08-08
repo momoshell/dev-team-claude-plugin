@@ -1,12 +1,16 @@
 // Owner of references/qa-gate.md's Review ladder / Reviewer verdicts /
-// consolidation sections. Two sections of the same file are owned elsewhere
+// consolidation sections. Three sections of the same file are owned elsewhere
 // and must NOT be re-asserted here:
 //   - '## Noise filtering'  -> test/noise-globs.test.mjs (incl. the `:!`
 //     placement guard at :135-144, which already covers THIS section by
 //     asserting the token appears nowhere outside the noise section).
+//   - '## Scope compliance is verified by git, not the coder's self-report'
+//     -> test/noise-globs.test.mjs (SCOPE_HEADING; the noise-suppression
+//     negative and the issue #19 test-file-classification content pin both
+//     live there).
 //   - '## An optional gate adjunct: browser-verify evidence'
 //     -> test/cmux-dispatch-doc.test.mjs:206-231.
-// Add qa-gate.md assertions here or to those two files — never to a third.
+// Add qa-gate.md assertions here or to those three files — never to a fourth.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'

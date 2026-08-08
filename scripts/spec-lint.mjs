@@ -204,6 +204,37 @@ function packageScripts(root) {
   }
 }
 
+// readValidateFullCommand(root) -> string | null. Per-project INSTANCE data
+// (unlike loadSchema/loadNoiseGlobs, which read PACKAGED plugin assets) —
+// must never throw for any input (absent file, unreadable file, directory
+// in place of a file, no "## validate" heading, no fenced block, no "full:"
+// line, empty value all return null) and must NEVER be memoized: a
+// memoized value would leak across two lintSpec calls with different roots
+// in one process (see the CROSS-CONTAMINATION test).
+function readValidateFullCommand(root) {
+  let raw
+  try {
+    raw = readFileSync(join(root, '.claude', 'dev-team', 'config.md'), 'utf8')
+  } catch {
+    return null
+  }
+  const headingMatch = /^##\s+validate\s*$/m.exec(raw)
+  if (!headingMatch) return null
+  const rest = raw.slice(headingMatch.index + headingMatch[0].length)
+  const nextHeadingMatch = /^##\s/m.exec(rest)
+  const section = nextHeadingMatch ? rest.slice(0, nextHeadingMatch.index) : rest
+  const fenceMatch = /```[^\n]*\n([\s\S]*?)```/.exec(section)
+  if (!fenceMatch) return null
+  // First "full:" wins on a duplicate — this reader is advisory, so
+  // ambiguity degrades to the first value rather than refusing (the
+  // opposite of readExecutionMode's refuse-on-ambiguity, which gates a
+  // real dispatch).
+  const fullMatch = /^\s*full:\s*(.+)$/m.exec(fenceMatch[1])
+  if (!fullMatch) return null
+  const value = fullMatch[1].trim()
+  return value || null
+}
+
 // lintSpec(spec, root) -> { ok, failures, warnings }. Pure with respect to
 // process state — no stdout/stderr, no process.exit. The accumulators live
 // in this call's own closure so two calls in one process cannot
@@ -406,10 +437,55 @@ export function lintSpec(spec, root) {
     }
   }
 
+  // The config-side value is compared trimmed only, never re-tokenized —
+  // odd internal whitespace in config.md yields a false NEGATIVE (silence)
+  // rather than a false positive, the safe direction for an advisory check.
+  function checkValidationLane(spec, root) {
+    if (!Array.isArray(spec.validation_commands)) return
+    const full = readValidateFullCommand(root)
+    if (!full) return
+    for (const cmd of spec.validation_commands) {
+      if (typeof cmd !== 'string') continue
+      const tokens = cmd.trim().split(/\s+/).filter((t) => !/^[A-Za-z_][A-Za-z0-9_]*=/.test(t))
+      if (!tokens.length) continue
+      if (tokens.join(' ') === full) {
+        warn('validation_lane', `"${cmd}" matches config.validate.full verbatim — the full suite runs once at /dev-team:ship, not per coder; use the scoped fast lane narrowed to files_in_scope instead`)
+      }
+    }
+  }
+
+  // check (b) treats exactly two things as ownership signals — a test file
+  // in files_in_scope, and the literal substring 'dev-team:test-engineer' in
+  // any criterion (ADR-025) — never a schema field. At most one diagnostic
+  // per spec.
+  function checkTestOwnership(spec) {
+    if (!Array.isArray(spec.acceptance_criteria)) return
+    let mentionsTest = false
+    let namesGateOwner = false
+    for (const c of spec.acceptance_criteria) {
+      if (typeof c !== 'string') continue
+      if (c.includes('dev-team:test-engineer')) namesGateOwner = true
+      const stripped = c.replace(/"[^"]*"|`[^`]*`/g, ' ')
+      if (/\b(test|tests|testing|coverage|tested)\b/i.test(stripped)) mentionsTest = true
+    }
+    if (!mentionsTest || namesGateOwner) return
+    const hasTestFile = Array.isArray(spec.files_in_scope) && spec.files_in_scope.some((p) => {
+      if (typeof p !== 'string') return false
+      return /(^|\/)(tests?|__tests__)\//i.test(p) ||
+        /(^|\/)[^/]*\.(test|spec)\.[A-Za-z0-9]+$/i.test(p) ||
+        /(^|\/)test_[^/]*\.[A-Za-z0-9]+$/i.test(p) ||
+        /(^|\/)[^/]*_test\.[A-Za-z0-9]+$/i.test(p)
+    })
+    if (hasTestFile) return
+    warn('test_ownership', 'acceptance_criteria mentions test coverage but no owner is named (no test file in files_in_scope, and dev-team:test-engineer not named) — see handover-spec.md\'s completeness checklist')
+  }
+
   checkSchema(spec)
   checkFilesInScope(spec, resolvedRoot)
   checkDiscoveryRefs(spec, resolvedRoot)
   checkValidationCommands(spec, resolvedRoot)
+  checkValidationLane(spec, resolvedRoot)
+  checkTestOwnership(spec)
 
   return { ok: failures.length === 0, failures, warnings }
 }

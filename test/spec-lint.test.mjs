@@ -14,7 +14,9 @@
 //     caught by: 'schema: missing required field ...' (expects exactly one schema FAIL),
 //                'missing file with missing parent dir fails' (expects exit 1 / one FAIL),
 //                '5c: citing a multi-dot filename ...' and other exact-count assertions
-//                that pin a specific WARN, not merely "no FAIL".
+//                that pin a specific WARN, not merely "no FAIL",
+//                'validation_lane negative: an entry matching config.validate.full verbatim warns exactly once, naming the command',
+//                'test_ownership negative: a coverage-mentioning criterion with no owner warns exactly once'.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync, cpSync, readFileSync, realpathSync } from 'node:fs'
@@ -49,6 +51,8 @@ writeFileSync(join(fixture, 'scripts', 'run.sh'), '#!/bin/sh\necho hi\n')
 writeFileSync(join(fixture, 'dist', 'bundle.js'), 'console.log(1)\n')
 writeFileSync(join(fixture, 'packages', 'app', 'dist', 'bundle.js'), 'console.log(1)\n')
 writeFileSync(join(fixture, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc', lint: 'eslint .' } }))
+mkdirSync(join(fixture, 'test'), { recursive: true })
+writeFileSync(join(fixture, 'test', 'items.test.ts'), 'export {}\n')
 
 // A second project tree, entirely outside `fixture`, for the 5b out-of-root case.
 const outsideDir = makeTmpDir('spec-lint-outside-')
@@ -59,6 +63,34 @@ writeFileSync(join(outsideDir, 'external.ts'), 'export {}\n'.repeat(5))
 const noPkgFixture = makeTmpDir('spec-lint-nopkg-')
 mkdirSync(join(noPkgFixture, 'src', 'api'), { recursive: true })
 writeFileSync(join(noPkgFixture, 'src', 'api', 'items.ts'), 'export {}\n'.repeat(80))
+
+// A fourth project tree, mirroring the shared fixture's minimum, carrying a
+// `.claude/dev-team/config.md` with a "## validate" section — kept separate
+// from the shared `fixture` so every existing exact-count assertion against
+// `fixture` stays untouched (constraints: no config.md on the shared fixture).
+const configFixture = makeTmpDir('spec-lint-config-')
+mkdirSync(join(configFixture, 'src', 'api'), { recursive: true })
+mkdirSync(join(configFixture, '.claude', 'dev-team'), { recursive: true })
+writeFileSync(join(configFixture, 'src', 'api', 'items.ts'), 'export {}\n'.repeat(80))
+writeFileSync(join(configFixture, 'package.json'), JSON.stringify({ scripts: { test: 'node --test', typecheck: 'tsc', lint: 'eslint .' } }))
+writeFileSync(join(configFixture, '.claude', 'dev-team', 'config.md'), ['## validate', '', '```', 'fast: node --test', 'full: node --test', '```', ''].join('\n'))
+
+// A fifth project tree: config.md exists but has no "## validate" heading at all.
+const noValidateHeadingFixture = makeTmpDir('spec-lint-config-noheading-')
+mkdirSync(join(noValidateHeadingFixture, '.claude', 'dev-team'), { recursive: true })
+writeFileSync(join(noValidateHeadingFixture, '.claude', 'dev-team', 'config.md'), '## task_source\n\nno validate section here\n')
+
+// A sixth project tree: "## validate" section exists with a fenced block, but
+// the block has a "fast:" line and no "full:" line.
+const noFullLineFixture = makeTmpDir('spec-lint-config-nofull-')
+mkdirSync(join(noFullLineFixture, '.claude', 'dev-team'), { recursive: true })
+writeFileSync(join(noFullLineFixture, '.claude', 'dev-team', 'config.md'), ['## validate', '', '```', 'fast: node --test', '```', ''].join('\n'))
+
+// A seventh project tree: a "full:" line appears in a fenced block, but under
+// a DIFFERENT "##" heading only — section scoping must not pick it up.
+const wrongSectionFixture = makeTmpDir('spec-lint-config-wrongsection-')
+mkdirSync(join(wrongSectionFixture, '.claude', 'dev-team'), { recursive: true })
+writeFileSync(join(wrongSectionFixture, '.claude', 'dev-team', 'config.md'), ['## validate', '', 'no fenced block here', '', '## other', '', '```', 'full: node --test', '```', ''].join('\n'))
 
 const baseSpec = {
   task_id: 'be-01',
@@ -457,20 +489,22 @@ test('5c negative (d): the same multi-dot file mentioned once bare and once cite
 // CHECK-NAME MANIFEST
 // ---------------------------------------------------------------------------
 
-test('CHECK-NAME MANIFEST: lintSpec only ever emits {schema, files_in_scope, discovery_context, validation_commands}', () => {
+test('CHECK-NAME MANIFEST: lintSpec only ever emits {discovery_context, files_in_scope, schema, test_ownership, validation_commands, validation_lane}', () => {
   const seen = new Set()
   const specs = [
-    baseSpec,
-    { ...baseSpec, files_in_scope: [] },
-    { ...baseSpec, files_in_scope: ['src/nowhere/new.ts'] },
-    { ...baseSpec, discovery_context: 'Mirror the pattern at src/api/missing.ts:10.' },
-    { ...baseSpec, validation_commands: ['definitely-not-a-real-cmd-xyz --flag'] },
+    [baseSpec, fixture],
+    [{ ...baseSpec, files_in_scope: [] }, fixture],
+    [{ ...baseSpec, files_in_scope: ['src/nowhere/new.ts'] }, fixture],
+    [{ ...baseSpec, discovery_context: 'Mirror the pattern at src/api/missing.ts:10.' }, fixture],
+    [{ ...baseSpec, validation_commands: ['definitely-not-a-real-cmd-xyz --flag'] }, fixture],
+    [{ ...baseSpec, validation_commands: ['node --test'] }, configFixture],
+    [{ ...baseSpec, acceptance_criteria: ['coverage for the bad-enum path is handled'] }, fixture],
   ]
-  for (const s of specs) {
-    const r = lintSpec(s, fixture)
+  for (const [s, root] of specs) {
+    const r = lintSpec(s, root)
     for (const d of [...r.failures, ...r.warnings]) seen.add(d.check)
   }
-  assert.deepEqual([...seen].sort(), ['discovery_context', 'files_in_scope', 'schema', 'validation_commands'])
+  assert.deepEqual([...seen].sort(), ['discovery_context', 'files_in_scope', 'schema', 'test_ownership', 'validation_commands', 'validation_lane'])
 })
 
 // ---------------------------------------------------------------------------
@@ -542,6 +576,116 @@ test('validation_commands: missing package.json at project root -> exactly one F
   assert.equal(r.failures.length, 1)
   assert.equal(r.failures[0].check, 'validation_commands')
   assert.match(r.failures[0].detail, /no readable package\.json/)
+})
+
+// ---------------------------------------------------------------------------
+// validation_lane (WARN — a spec's validation_commands entry matches
+// config.md's `## validate` `full:` lane verbatim)
+// ---------------------------------------------------------------------------
+
+test('validation_lane negative: an entry matching config.validate.full verbatim warns exactly once, naming the command', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['node --test'] }, configFixture)
+  assert.equal(r.failures.length, 0)
+  assert.equal(r.warnings.length, 1)
+  assert.equal(r.warnings[0].check, 'validation_lane')
+  assert.match(r.warnings[0].detail, /matches config\.validate\.full/)
+  assert.match(r.warnings[0].detail, /node --test/)
+})
+
+test('validation_lane env-prefix normalization: an env-prefixed full-lane command still warns (tokenization is reused, not re-implemented)', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['CI=1 node --test'] }, configFixture)
+  assert.equal(r.failures.length, 0)
+  assert.equal(r.warnings.filter((w) => w.check === 'validation_lane').length, 1)
+})
+
+test('validation_lane positive (a): a scoped command narrower than the full lane produces no validation_lane diagnostic', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['node --test test/spec-lint.test.mjs'] }, configFixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'validation_lane').length, 0)
+})
+
+test('validation_lane positive (b): the exact full-lane command against a root with no config.md at all (the null path) does not throw and does not warn', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['node --test'] }, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'validation_lane').length, 0)
+})
+
+test('validation_lane positive (c): a config.md with no "## validate" heading does not throw and does not warn', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['node --test'] }, noValidateHeadingFixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'validation_lane').length, 0)
+})
+
+test('validation_lane positive (d): a "## validate" fenced block with a "fast:" line but no "full:" line does not warn', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['node --test'] }, noFullLineFixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'validation_lane').length, 0)
+})
+
+test('validation_lane positive (e): a "full:" line under a DIFFERENT "##" heading only is not picked up (section scoping)', () => {
+  const r = lintSpec({ ...baseSpec, validation_commands: ['node --test'] }, wrongSectionFixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'validation_lane').length, 0)
+})
+
+// ---------------------------------------------------------------------------
+// test_ownership (WARN — acceptance_criteria mentions test coverage but
+// names no owner)
+// ---------------------------------------------------------------------------
+
+test('test_ownership negative: a coverage-mentioning criterion with no owner warns exactly once', () => {
+  const r = lintSpec({ ...baseSpec, acceptance_criteria: ['coverage for the bad-enum path is handled'] }, fixture)
+  assert.equal(r.failures.length, 0)
+  assert.equal(r.warnings.length, 1)
+  assert.equal(r.warnings[0].check, 'test_ownership')
+  assert.match(r.warnings[0].detail, /no owner is named/)
+})
+
+test('test_ownership false-positive guard: quoted command text is stripped before keyword matching (double quotes)', () => {
+  const r = lintSpec({ ...baseSpec, acceptance_criteria: ['"npm test -- items" passes'] }, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 0)
+})
+
+test('test_ownership false-positive guard: quoted command text is stripped before keyword matching (backticks)', () => {
+  const r = lintSpec({ ...baseSpec, acceptance_criteria: ['`node --test` passes'] }, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 0)
+})
+
+test('test_ownership positive (a): a test-mentioning criterion with a test file present in files_in_scope does not warn', () => {
+  const r = lintSpec({ ...baseSpec, files_in_scope: [...baseSpec.files_in_scope, 'test/items.test.ts'], acceptance_criteria: ['coverage for the bad-enum path is handled'] }, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 0)
+})
+
+test('test_ownership positive (b): a criterion naming dev-team:test-engineer as gate owner does not warn, even with no test file in scope', () => {
+  const r = lintSpec({ ...baseSpec, acceptance_criteria: ["coverage for the 400 path is dev-team:test-engineer's job at the gate"] }, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 0)
+})
+
+test('test_ownership positive (c): the golden baseSpec, which mentions nothing, does not warn', () => {
+  const r = lintSpec(baseSpec, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 0)
+})
+
+test('test_ownership detection matrix: each files_in_scope pattern that should suppress or not suppress the warning', () => {
+  const suppressing = ['test/spec-lint.test.mjs', 'tests/foo.py', '__tests__/a.js', 'pkg/foo_test.go', 'pkg/test_foo.py', 'src/api/items.spec.ts']
+  const nonSuppressing = ['src/api/items.ts', 'src/api/latest.ts', 'contest/foo.js']
+  for (const p of suppressing) {
+    const r = lintSpec({ ...baseSpec, files_in_scope: [p], acceptance_criteria: ['coverage for the bad-enum path is handled'] }, fixture)
+    assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 0, `expected ${p} to suppress`)
+  }
+  for (const p of nonSuppressing) {
+    const r = lintSpec({ ...baseSpec, files_in_scope: [p], acceptance_criteria: ['coverage for the bad-enum path is handled'] }, fixture)
+    assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 1, `expected ${p} NOT to suppress`)
+  }
+})
+
+test('test_ownership: three test-mentioning criteria with no owner produce exactly ONE warning, not three', () => {
+  const r = lintSpec({
+    ...baseSpec,
+    acceptance_criteria: ['coverage for path A', 'this needs tests too', 'testing the third path'],
+  }, fixture)
+  assert.equal(r.warnings.filter((w) => w.check === 'test_ownership').length, 1)
+})
+
+test('test_ownership severity is WARN at the CLI surface: exits 0, prints WARN test_ownership and the PASS summary', () => {
+  const r = lint({ acceptance_criteria: ['coverage for the bad-enum path is handled'] })
+  assertSummary(r, 0, 1)
+  assert.match(r.stdout, /WARN test_ownership:/)
 })
 
 test('invalid JSON exits 2', () => {

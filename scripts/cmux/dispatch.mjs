@@ -60,8 +60,7 @@ import {
 import { detectSignatures } from './triage.mjs'
 import { reduceBrowserErrors } from './browser-evidence.mjs'
 import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
-// A2 (#27) — the first `../` import in scripts/cmux/*; precedent:
-// scripts/chain/gates.mjs:39 does the same `../spec-lint.mjs` import.
+// A2 (#27) — the first `../` import in scripts/cmux/*.
 import { lintSpec } from '../spec-lint.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -361,6 +360,39 @@ export class SpecSchemaError extends Error {
 // Whitelist of one — a heuristic check added to spec-lint later is
 // non-refusing by construction, with no edit to this file.
 const SPEC_LINT_SCHEMA_CHECK = 'schema'
+
+// A2 (#27) fix-round items 1/6 — every SpecSchemaError failure detail is
+// sanitized and capped before it reaches stderr or the returned JSON.
+// `detail` is spec-lint's `${v.path}: ${v.message}`, which echoes back
+// arbitrary JSON key names from the spec file verbatim — including control
+// characters and ANSI escape sequences a hostile or malformed spec could
+// embed to forge terminal output or fake standalone lines in the
+// orchestrator's own Bash-tool context. Stripping every Cc/Cf codepoint
+// (control + format characters, which includes ESC and every line-break
+// character) neutralizes both. The failure COUNT is capped separately so a
+// spec with thousands of violations — or one enormous single detail string —
+// cannot balloon the same context window.
+const MAX_RENDERED_FAILURES = 20
+const MAX_DETAIL_LENGTH = 300
+const CONTROL_OR_FORMAT_CHARS_RE = /[\p{Cc}\p{Cf}]/gu
+
+function sanitizeDetail(detail) {
+  const stripped = String(detail).replace(CONTROL_OR_FORMAT_CHARS_RE, '')
+  if (stripped.length <= MAX_DETAIL_LENGTH) return stripped
+  return `${stripped.slice(0, MAX_DETAIL_LENGTH)}...<truncated, ${stripped.length} chars total>`
+}
+
+// capFailuresForOutput(failures) -> a new array, every detail sanitized, at
+// most MAX_RENDERED_FAILURES entries plus a synthetic "...and N more" tail
+// entry when truncated. Never mutates `failures` — callers (e.g. dispatchCmd
+// tests) still see the original, uncapped err.failures.
+function capFailuresForOutput(failures) {
+  const sanitized = failures.map((f) => ({ ...f, detail: sanitizeDetail(f.detail) }))
+  if (sanitized.length <= MAX_RENDERED_FAILURES) return sanitized
+  const kept = sanitized.slice(0, MAX_RENDERED_FAILURES)
+  kept.push({ check: SPEC_LINT_SCHEMA_CHECK, detail: `...and ${sanitized.length - MAX_RENDERED_FAILURES} more` })
+  return kept
+}
 
 function log(line) {
   process.stderr.write(`${line}\n`)
@@ -1306,15 +1338,44 @@ export function dispatchCmd(args, ctx) {
   // stylistic: the workspace-liveness check makes a real `tree({all:true})`
   // cmux call, and writeRecord/ensureWorktree/snapshotWorkerPlugin all run
   // further down. Gating here is what makes a schema-invalid dispatch a
-  // ZERO-cmux-invocation, no-record-on-disk refusal. Runs only for
-  // executor-profile roles (today: only `coder`) — a judgment/validator
-  // dispatch takes a byte-identical path to before this change.
+  // ZERO-cmux-invocation, no-record-on-disk refusal.
+  //
+  // Gated on the resolved profile's CAPABILITY, not its name.
+  // roster.schema.json leaves `profile` an open string (no enum) — a
+  // project/user roster override could rename/redefine whatever profile a
+  // role points at while leaving the role pane-enabled, which would let the
+  // literal string 'executor' be silently bypassed. buildRecord (record.mjs,
+  // ~line 505) resolves the identical roster.profiles[resolved.profile]
+  // lookup to read profile.allow; this mirrors that lookup rather than
+  // re-deriving it. A role whose resolved profile grants 'worktree_write' —
+  // the same allow-list literal record.mjs treats as write-capable — is
+  // gated here regardless of what its profile is named; a role without that
+  // grant (judgment/validator today) takes a byte-identical path to before
+  // this change.
+  const profileDef = roster.profiles[resolved.profile]
+  const isWriteCapable = Boolean(profileDef && Array.isArray(profileDef.allow) && profileDef.allow.includes('worktree_write'))
   let specWarnings
-  if (resolved.profile === 'executor') {
-    // A lintSpec THROW is a packaging error (corrupt shipped schema /
-    // noise-globs.json) — deliberately NOT caught. Unlike gates.mjs:611,
-    // which downgrades the same throw to a soft check, catching it here
-    // would open the gate. A gate that fails open is not a gate.
+  if (isWriteCapable) {
+    // Before lintSpec: a non-plain-object spec (e.g. a spec file that parses
+    // as JSON `null`, a bare array, or a bare number/string — a truncated or
+    // corrupted spec file can produce any of these from otherwise-valid
+    // JSON) is refused directly here, synthesizing the same SpecSchemaError
+    // shape lintSpec's own schema check would produce, instead of calling
+    // lintSpec at all. spec-lint.mjs's documented contract is "instance data
+    // problems are always returned as diagnostics, never thrown", but its
+    // schema check assumes an object-shaped instance and throws a raw
+    // TypeError on anything else — this guard restores that contract from
+    // the caller side without editing spec-lint.mjs (out of scope).
+    if (typeof spec !== 'object' || spec === null || Array.isArray(spec)) {
+      throw new SpecSchemaError([{ check: 'schema', detail: 'spec must be a JSON object' }])
+    }
+    // A lintSpec THROW past this point is a packaging error (a corrupt
+    // shipped schema file or noise-globs.json), the one thing the guard
+    // above does not cover — deliberately NOT caught. This IS the gate, so
+    // catching it here would fail it open; a different consumer of lintSpec
+    // might reasonably choose to downgrade the same throw to an advisory
+    // report, but that tradeoff does not apply to a gate whose whole job is
+    // to fail closed.
     const lint = lintSpec(spec, primaryCheckout)
     const refusals = lint.failures.filter((f) => f.check === SPEC_LINT_SCHEMA_CHECK)
     if (refusals.length > 0) throw new SpecSchemaError(refusals)
@@ -2819,8 +2880,9 @@ export function main(argv) {
     }
     if (err instanceof SpecSchemaError) {
       log(err.message)
-      for (const f of err.failures) log(`FAIL ${f.check}: ${f.detail}`)
-      printResult({ code: 1, json: { error: err.code, failures: err.failures } })
+      const rendered = capFailuresForOutput(err.failures)
+      for (const f of rendered) log(`FAIL ${f.check}: ${f.detail}`)
+      printResult({ code: 1, json: { error: err.code, failures: rendered } })
       return 1
     }
     log(`error: ${err.message}`)
@@ -2835,10 +2897,11 @@ export function main(argv) {
 // A2 (#27) — realpathSync BOTH sides. The ESM loader realpaths
 // import.meta.url while argv[1] stays literal, so a symlinked invocation
 // compared false under plain resolvePath and this guard silently no-oped.
-// Local copy of the realpathOr shape (scripts/spec-lint.mjs:49-55) — this is
-// the 4th site of this pattern; promoting it to a shared helper is a named
-// follow-up, deferred (contract.mjs is contract-frozen with a closed export
-// manifest).
+// Local copy of the realpathOr shape (scripts/spec-lint.mjs:49-55) — one of
+// several sites with this same shape across this repo's scripts/. Promoting
+// it to a shared helper is deferred (contract.mjs is contract-frozen with a
+// closed export manifest) — see the out_of_scope reasoning in the original
+// spec for this change.
 function realpathOr(path) {
   try {
     return realpathSync(path)

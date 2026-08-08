@@ -11,10 +11,11 @@
 // this file is vacuous until E-P1 passes — a fake wired wrong, a CMUX_BIN
 // that never runs, or a helper that swallows invocations would otherwise
 // make the whole failure suite green for the wrong reason.
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, readdirSync, symlinkSync, cpSync, chmodSync,
+  rmSync,
 } from 'node:fs'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -65,6 +66,29 @@ const { lintSpec } = await import(join(ROOT, 'scripts', 'spec-lint.mjs'))
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
 // ---------------------------------------------------------------------------
+
+// A2 (#27) fix-round item 8 — the makeTmpDir/TMP_DIRS-and-after-cleanup
+// convention test/cmux-ladder.test.mjs and test/claude-adapter.test.mjs both
+// use for THEIR fixture dirs. This file otherwise builds every fixture dir
+// via freshCmuxEnv/buildTestCtx (whose tmpdirs are already registered for
+// cleanup indirectly through the dir returned to each test, none of which
+// this fix round touches) or raw mkdtempSync calls that predate this fix
+// round and are out of scope here. Only the two NEW tmpdirs added by this
+// fix round (the symlink-invocation regression test and the cross-file
+// check-name-agreement test) are registered below.
+const A2_FIX_ROUND_TMP_DIRS = []
+
+function makeTmpDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  A2_FIX_ROUND_TMP_DIRS.push(dir)
+  return dir
+}
+
+after(() => {
+  for (const dir of A2_FIX_ROUND_TMP_DIRS) {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 function freshCmuxEnv(prefix) {
   const dir = mkdtempSync(join(tmpdir(), `cmux-dispatch-${prefix}-`))
@@ -5178,13 +5202,29 @@ test('A/B: cmux_preview_url SET, frontend spec, but role isolation is NOT worktr
 // A2 (#27): 'Frontend' and 'frontend ' both violate handover-spec.schema.json's
 // domain enum (["frontend","backend","devops","qa"]), so a `coder` (executor)
 // dispatch with either now refuses via SpecSchemaError before the preview
-// block is ever reached — a non-enum domain can no longer reach the preview
-// block at all for an executor role. Conjunct 2's exactness among
-// SCHEMA-VALID domains stays proven by the existing `domain: 'backend'` test
-// above (A/B: cmux_preview_url SET but domain is backend). We keep this
-// test's `browserOpenInvocations(env).length === 0` conclusion by asserting
-// the refusal instead of a preview-key check.
-test("trigger conjunct 2: domain 'Frontend' and 'frontend ' (not an exact match) -> refused before preview, zero browser calls", () => {
+// block is ever reached. This test proves exactly that structural fact — a
+// non-enum domain value is refused by the schema floor before the preview
+// trigger's `spec?.domain === 'frontend'` comparison is ever evaluated — and
+// nothing more. It does NOT prove that comparison's own exactness (no
+// case-folding, no trim) the way the pre-#27 version of this test did: for a
+// write-capable (worktree_write-granted) role, domain is now a closed enum
+// one layer up, so no non-enum value can reach that comparison anymore, and
+// the exactness property is structurally unreachable rather than tested.
+// The existing `domain: 'backend'` test above (A/B: cmux_preview_url SET but
+// domain is backend) only proves inequality-rejection between two different
+// valid enum members — it does NOT stand in for exactness-under-normalization
+// coverage, despite an earlier version of this comment claiming it did.
+//
+// Could exactness still be tested directly, via a role whose profile isn't
+// write-capable (so the schema floor doesn't gate it)? No default-roster role
+// satisfies pane:true + isolation:'worktree' + a non-write-capable profile
+// simultaneously (the two judgment-profile worktree roles in
+// roster.default.json are both pane:false, and dispatchCmd refuses any
+// pane:false role before reaching the preview block at all) — so there is
+// currently no reachable path to unit-test the comparison's exactness
+// in isolation. Documented as a real, currently-unfillable gap rather than
+// papered over with a test that doesn't actually exercise the comparison.
+test("trigger conjunct 2: domain 'Frontend' and 'frontend ' (not an exact match) -> refused by the schema floor before the preview trigger's domain comparison is ever evaluated, zero browser calls", () => {
   const { env, ctx } = setUpPreviewWorkspace('preview-trigger-domain-case')
   for (const [sliceId, domain] of [['be-9e', 'Frontend'], ['be-9f', 'frontend ']]) {
     const specPath = makeSpecFile(ctx, sliceId, { domain })
@@ -6374,6 +6414,38 @@ test('A2 refusal: a schema-invalid spec (missing required field, empty required 
   }
 })
 
+// Fix-round item 4 (should-fix, reproduced): lintSpec(nonObject, root) throws
+// a raw TypeError instead of returning the documented {check:'schema',
+// detail} diagnostic — a truncated/corrupted spec file can parse as JSON
+// `null`, a bare array, or a bare number/string. dispatchCmd now guards this
+// BEFORE calling lintSpec, so the gate still fails closed AND produces the
+// documented spec_schema_invalid shape rather than a raw error message.
+test('A2 fix-round #4: a spec file containing literal null (or a bare array/number) still produces the spec_schema_invalid SpecSchemaError shape, not a raw TypeError', () => {
+  const cases = [
+    ['be-27n1', null],
+    ['be-27n2', []],
+    ['be-27n3', 42],
+    ['be-27n4', 'a bare string'],
+  ]
+  for (const [sliceId, badSpecValue] of cases) {
+    const { ctx } = setUpWorkspace(`a2-nonobject-${sliceId}`)
+    const specPath = specPathFor(ctx.paths, sliceId)
+    mkdirSync(dirname(specPath), { recursive: true })
+    writeFileSync(specPath, JSON.stringify(badSpecValue))
+
+    assert.throws(
+      () => dispatchCmd({ slice: sliceId, role: 'coder', spec: specPath }, ctx),
+      (err) => {
+        assert.ok(err instanceof SpecSchemaError, `expected SpecSchemaError for spec value ${JSON.stringify(badSpecValue)}, got ${err}`)
+        assert.equal(err.code, SPEC_SCHEMA_REFUSAL_CODE)
+        assert.ok(err.failures.length > 0)
+        assert.ok(err.failures.every((f) => f.check === 'schema'))
+        return true
+      },
+    )
+  }
+})
+
 test('A2 CLI wiring: `main([\'dispatch\', ...])` for a schema-invalid spec returns exit 1, prints exactly one {error, failures} JSON object on stdout, and FAIL lines on stderr', () => {
   const { dir, ctx } = setUpWorkspace('a2-cli-wiring')
   const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
@@ -6401,6 +6473,94 @@ test('A2 CLI wiring: `main([\'dispatch\', ...])` for a schema-invalid spec retur
   assert.match(res.stderr, /^refused: /m)
   const failLineCount = (res.stderr.match(/^FAIL schema: /gm) || []).length
   assert.equal(failLineCount, json.failures.length, 'expected one "FAIL schema: ..." stderr line per failure')
+})
+
+// Fix-round item 1 (MUST FIX, security): f.detail echoes back arbitrary JSON
+// key names from the spec verbatim (contract.mjs's `unexpected property
+// ${key}` / `${path}.${key}`) — a hostile key containing an ANSI escape and a
+// newline must never reach stderr raw, since it would forge terminal output
+// or fake standalone "FAIL"/dispatcher lines into the orchestrator's own
+// Bash-tool context.
+test('A2 fix-round #1: a schema violation detail containing a control character (ESC + newline, embedded via a hostile additionalProperties key) never reaches stderr as a raw control byte', () => {
+  const { dir, ctx } = setUpWorkspace('a2-hostile-detail')
+  const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'config.md'), 'execution_mode: cmux\n')
+
+  const hostileKey = '\x1b[31mFAKE\n[FAKE] forged dispatcher line\x1b[0m'
+  const specPath = specPathFor(ctx.paths, 'be-27z')
+  mkdirSync(dirname(specPath), { recursive: true })
+  writeFileSync(specPath, JSON.stringify({
+    task_id: 'be-1b-E-test', domain: 'backend', goal: 'g',
+    files_in_scope: ['f.mjs'], constraints: [], acceptance_criteria: ['works'],
+    validation_commands: ['node --test'], discovery_context: 'ctx',
+    out_of_scope: [], depends_on: [], interface_contract: 'none',
+    [hostileKey]: 'x',
+  }))
+
+  const res = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'dispatch',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT,
+    '--slice', 'be-27z', '--role', 'coder', '--spec', specPath,
+  ], { encoding: 'utf8' })
+
+  assert.equal(res.status, 1, `expected exit 1, got ${res.status} — stderr: ${res.stderr}`)
+  // No raw ESC byte (or any other C0/C1 control/format character) anywhere
+  // in stderr — the only acceptable trace of the hostile key is its VISIBLE
+  // characters, with the control/format codepoints stripped.
+  const rawControlBytesRe = new RegExp('[\\x00-\\x08\\x0b\\x0c\\x0e-\\x1f\\x7f]')
+  assert.doesNotMatch(res.stderr, rawControlBytesRe, `stderr must contain no raw control bytes (ESC etc, excluding tab/newline/CR), got: ${JSON.stringify(res.stderr)}`)
+  // The visible remnant of the hostile key survives (proves we sanitized
+  // rather than silently dropped the whole detail).
+  assert.match(res.stderr, /FAKE/)
+  // The forged "[FAKE] forged dispatcher line" text must NOT appear on its
+  // own stderr line (i.e. the embedded newline must not have survived to
+  // split it onto a standalone line distinct from the FAIL line it belongs to).
+  const forgedStandalone = res.stderr.split('\n').some((line) => line.trim() === '[FAKE] forged dispatcher line')
+  assert.equal(forgedStandalone, false, 'the embedded newline must not produce a standalone forged stderr line')
+
+  const json = JSON.parse(res.stdout.trim())
+  for (const f of json.failures) {
+    assert.doesNotMatch(f.detail, rawControlBytesRe, `JSON failures[].detail must contain no raw control bytes, got: ${JSON.stringify(f.detail)}`)
+  }
+})
+
+// Fix-round item 6 (unbounded output amplification): both the stderr FAIL
+// lines and the returned JSON failures[] must be capped, never growing
+// linearly with an attacker-controlled number of schema violations.
+test('A2 fix-round #6: a spec with many schema violations produces a capped failures[] (with a "...and N more" tail entry) and a matching capped stderr line count', () => {
+  const { dir, ctx } = setUpWorkspace('a2-many-violations')
+  const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'config.md'), 'execution_mode: cmux\n')
+
+  const manyExtraProps = {}
+  for (let i = 0; i < 500; i += 1) manyExtraProps[`unexpected_prop_${i}`] = 'x'
+  const specPath = specPathFor(ctx.paths, 'be-27y')
+  mkdirSync(dirname(specPath), { recursive: true })
+  writeFileSync(specPath, JSON.stringify({
+    task_id: 'be-1b-E-test', domain: 'backend', goal: 'g',
+    files_in_scope: ['f.mjs'], constraints: [], acceptance_criteria: ['works'],
+    validation_commands: ['node --test'], discovery_context: 'ctx',
+    out_of_scope: [], depends_on: [], interface_contract: 'none',
+    ...manyExtraProps,
+  }))
+
+  const res = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'dispatch',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT,
+    '--slice', 'be-27y', '--role', 'coder', '--spec', specPath,
+  ], { encoding: 'utf8' })
+
+  assert.equal(res.status, 1, `expected exit 1, got ${res.status} — stderr: ${res.stderr}`)
+  const json = JSON.parse(res.stdout.trim())
+  assert.ok(json.failures.length < 500, `expected a capped failures[] well under 500, got ${json.failures.length}`)
+  assert.ok(json.failures.some((f) => /\.\.\.and \d+ more/.test(f.detail)), `expected a "...and N more" tail entry, got ${JSON.stringify(json.failures)}`)
+
+  const failLineCount = (res.stderr.match(/^FAIL schema: /gm) || []).length
+  assert.equal(failLineCount, json.failures.length, 'stderr FAIL line count must match the capped failures[] length exactly')
 })
 
 test('A2 negative #1 (PATH): a coder dispatch whose validation_commands names a binary absent from PATH still exits 0 with exactly one new-pane, demoted to a warnings[] entry with check:"validation_commands" severity:"fail"', () => {
@@ -6458,6 +6618,44 @@ test('A2 never-widen: a backend-lead (judgment profile) dispatch with the SAME s
   assert.throws(() => dispatchCmd({ slice: 'be-27h-nospec', role: 'backend-lead' }, ctx), UsageError)
 })
 
+// Fix-round item 3 (should-fix, 3 reviewers converged): roster.schema.json
+// leaves `profile` an open string (no enum) — gating on the literal name
+// 'executor' would let a session/project/user roster override rename the
+// profile `coder` points at (while keeping it pane-enabled and granting the
+// same worktree_write capability) and silently bypass the schema floor. This
+// proves the gate keys on the CAPABILITY (profile.allow includes
+// 'worktree_write'), not the name: a role whose profile is renamed to
+// something other than 'executor' but whose resolved profile definition
+// still carries worktree_write is still gated on the same schema-invalid
+// spec that refuses under the default roster.
+test("A2 fix-round #3: a role whose profile is renamed away from 'executor' but still grants worktree_write is still gated on a schema-invalid spec", () => {
+  const renamedProfile = {
+    description: 'same capability as executor, different name',
+    permission_mode: 'dontAsk',
+    allow: ['returns_write', 'signals_append', 'worktree_write', 'validation_commands'],
+    postcondition: 'changes_expected',
+  }
+  const { ctx } = setUpWorkspace('a2-capability-gate', {
+    configOverrides: {
+      session: {
+        profiles: { 'renamed-executor': renamedProfile },
+        roles: { coder: { profile: 'renamed-executor' } },
+      },
+    },
+  })
+  assert.equal(ctx.roster.roles.coder.profile, 'renamed-executor', 'sanity: the session override actually renamed the profile')
+
+  const specPath = makeSpecFile(ctx, 'be-27-cap', { acceptance_criteria: [] })
+  assert.throws(
+    () => dispatchCmd({ slice: 'be-27-cap', role: 'coder', spec: specPath }, ctx),
+    (err) => {
+      assert.ok(err instanceof SpecSchemaError, `expected SpecSchemaError under a renamed-but-still-write-capable profile, got ${err}`)
+      assert.equal(err.code, SPEC_SCHEMA_REFUSAL_CODE)
+      return true
+    },
+  )
+})
+
 test('A2 message drift guard: SPEC_SCHEMA_REFUSAL_MESSAGE (the imported constant) occurs verbatim exactly once across scripts/cmux/*.mjs + test/cmux-*.test.mjs, has the "refused: " prefix and names handover-spec.schema.json; SPEC_SCHEMA_REFUSAL_CODE is byte-pinned', () => {
   const scriptsDir = join(ROOT, 'scripts', 'cmux')
   const testDir = HERE
@@ -6481,7 +6679,7 @@ test('A2 symlink-invocation regression: invoking dispatch.mjs through a symlinke
   assert.equal(direct.status, 2)
   assert.match(direct.stderr, /usage: node dispatch\.mjs </)
 
-  const linkDir = mkdtempSync(join(tmpdir(), 'cmux-dispatch-symlink-'))
+  const linkDir = makeTmpDir('cmux-dispatch-symlink-')
   const linkPath = join(linkDir, 'dispatch-link.mjs')
   symlinkSync(DISPATCH_PATH, linkPath)
   const viaLink = spawnSync(process.execPath, [linkPath], { encoding: 'utf8' })
@@ -6490,7 +6688,7 @@ test('A2 symlink-invocation regression: invoking dispatch.mjs through a symlinke
 })
 
 test('A2 cross-file check-name agreement: lintSpec (imported directly from spec-lint.mjs) produces a check:"schema" failure for a missing required field, and a check:"validation_commands" failure for a nonexistent binary', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'cmux-dispatch-lintspec-'))
+  const dir = makeTmpDir('cmux-dispatch-lintspec-')
   const checkout = makeGitCheckout(dir)
   const baseSpec = {
     task_id: 't', domain: 'backend', goal: 'g',

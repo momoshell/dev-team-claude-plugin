@@ -2329,6 +2329,7 @@ test('--keep-artifacts always archives, even with an all-ok outcome', () => {
 
 test('TEARDOWN_OUTCOMES drift guard: widening the accepted set requires a deliberate test edit', () => {
   assert.deepEqual(TEARDOWN_OUTCOMES, ['ok', 'refused'])
+  assert.ok(Object.isFrozen(TEARDOWN_OUTCOMES))
   assert.equal(DEFAULT_TEARDOWN_OUTCOME, 'ok')
 })
 
@@ -2431,6 +2432,44 @@ test('source-text guard: the teardown call site resolves --outcome, never a hard
   const src = readFileSync(join(ROOT, 'scripts', 'cmux', 'dispatch.mjs'), 'utf8')
   assert.doesNotMatch(src, /shouldArchive\(\s*\{\s*outcome:\s*'ok'\s*\}/)
   assert.match(src, /shouldArchive\(\s*\{\s*outcome\s*\}/)
+})
+
+// The tests above all call teardownCmd(...) directly, never crossing the real
+// CLI entrypoint (parseArgs -> buildContext -> main()). This pins that the
+// real `node dispatch.mjs teardown --outcome ...` path (which main() gates on
+// execution_mode: cmux via assertExecutionModeCmux) archives on refused and
+// refuses a bogus outcome with exit code 2 — mirroring runPreflightInSubprocess's
+// real-child-process technique above, since main()'s exit code is only
+// observable from a genuine subprocess.
+test('CLI end-to-end: `teardown --outcome refused` over a real subprocess archives; `--outcome bogus` exits 2', () => {
+  const { dir, ctx } = setUpWorkspace('teardown-cli-outcome')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+  closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+
+  // main() gates every mutating verb on execution_mode: cmux — teardownCmd()
+  // called directly (above) never crosses that gate, but the real CLI does.
+  const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'config.md'), 'execution_mode: cmux\n')
+
+  const refusedRes = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'teardown',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT, '--outcome', 'refused',
+  ], { encoding: 'utf8' })
+  assert.equal(refusedRes.status, 0, `expected exit 0, got ${refusedRes.status} — stderr: ${refusedRes.stderr}`)
+  const refusedJson = JSON.parse(refusedRes.stdout.trim())
+  assert.equal(refusedJson.task_dir.archived, true)
+
+  const bogusRes = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'teardown',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT, '--outcome', 'bogus',
+  ], { encoding: 'utf8' })
+  assert.equal(bogusRes.status, 2, `expected exit 2, got ${bogusRes.status} — stderr: ${bogusRes.stderr}`)
 })
 
 test('teardown keeps and reports a leftover worktree that is dirty or unmerged (never --force)', () => {

@@ -14,7 +14,7 @@
 //   node dispatch.mjs await          --task <slug> --all <dispatch_id...> [--max-block-s N]
 //   node dispatch.mjs close          --task <slug> --dispatch <dispatch_id>
 //   node dispatch.mjs status         --task <slug>
-//   node dispatch.mjs teardown       --task <slug> [--keep-artifacts]
+//   node dispatch.mjs teardown       --task <slug> [--outcome <ok|refused>] [--keep-artifacts]
 //   node dispatch.mjs phase          --task <slug> --set <planning|building|gate>
 //   node dispatch.mjs browser-verify --task <slug>
 //

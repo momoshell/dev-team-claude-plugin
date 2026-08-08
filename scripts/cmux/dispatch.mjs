@@ -2383,8 +2383,23 @@ function deletePreviewArtifacts(stateDir) {
 // teardown
 // ---------------------------------------------------------------------------
 
+// canonical accepted values (whitelist, not a blacklist) — widening this
+// requires a deliberate edit to the TEARDOWN_OUTCOMES drift-guard test too.
+export const TEARDOWN_OUTCOMES = Object.freeze(['ok', 'refused'])
+export const DEFAULT_TEARDOWN_OUTCOME = 'ok'
+
 export function teardownCmd(args, ctx) {
   const { roots, paths, primaryCheckout, taskSlug } = ctx
+
+  // absent => DEFAULT_TEARDOWN_OUTCOME ('ok'), preserving today's behaviour
+  // byte-for-byte. Present-but-out-of-enum REFUSES — never coerced, never
+  // defaulted on a typo. Hoisted above the surface-closing block below so a
+  // bad flag closes nothing and deletes nothing.
+  const outcome = args.outcome ?? DEFAULT_TEARDOWN_OUTCOME
+  if (!TEARDOWN_OUTCOMES.includes(outcome)) {
+    throw new UsageError(`teardown: --outcome must be one of ${TEARDOWN_OUTCOMES.join('|')}, got ${JSON.stringify(args.outcome)}`)
+  }
+
   const preflightCache = readPreflightCache(join(paths.stateDir, 'preflight.json')) || {}
   const workspaceState = readJsonOrWarn(join(paths.stateDir, 'workspace.json'), 'workspace.json')
 
@@ -2408,7 +2423,7 @@ export function teardownCmd(args, ctx) {
   }
 
   const records = listRecords(paths.dispatchDir)
-  const archive = Boolean(args['keep-artifacts']) || shouldArchive({ outcome: 'ok' }, records)
+  const archive = Boolean(args['keep-artifacts']) || shouldArchive({ outcome }, records)
 
   // The worktree index lives under stateDir — it MUST be read and
   // reconciled before stateDir itself is archived/deleted below.

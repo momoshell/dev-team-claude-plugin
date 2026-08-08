@@ -203,6 +203,15 @@ test('cmux-dispatch.md never adds browser-verify to the lifecycle-order line', (
   assert.doesNotMatch(lifecycleLine, /browser-verify/)
 })
 
+test('cmux-dispatch.md teardown-order line names --outcome, its default, and the --keep-artifacts override', () => {
+  const teardownOrderLine = doc.split('\n').find((l) => l.includes('Teardown order at ship'))
+  assert.ok(teardownOrderLine, 'expected to find the teardown-order line')
+  assert.match(teardownOrderLine, /--outcome <ok\|refused>/)
+  assert.match(teardownOrderLine, /defaults to `ok`/)
+  assert.match(teardownOrderLine, /`refused` archives instead of deleting/)
+  assert.match(teardownOrderLine, /--keep-artifacts` forces archival regardless of `--outcome`/)
+})
+
 test('qa-gate.md: the browser-verify gate-adjunct section states "screenshot captured", the <= 90s budget, origin-only, dev/staging-only credentials, the white-PNG/clean-on-never-loaded caveat, that this is evidence never a verdict input, and the preview.reason cross-read rule', () => {
   const start = qaGateDoc.indexOf('## An optional gate adjunct: browser-verify evidence')
   assert.ok(start > -1, 'expected to find the browser-verify gate-adjunct section heading')

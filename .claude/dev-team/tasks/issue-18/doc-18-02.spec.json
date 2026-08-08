@@ -1,0 +1,59 @@
+{
+  "task_id": "doc-18-02",
+  "domain": "qa",
+  "goal": "Append one byte-identical 'one deliverable, then return' bullet to the final section of all 14 agents/*.md files (a shared role-boundary norm closing issue #18's second half), and pin it as a complete-manifest invariant by extending test/role-boundaries.test.mjs (created by doc-18-01, which must land first).",
+  "files_in_scope": [
+    "agents/architect.md",
+    "agents/architecture-lead.md",
+    "agents/backend-lead.md",
+    "agents/build-validator.md",
+    "agents/code-reviewer.md",
+    "agents/code-reviewer-deep.md",
+    "agents/coder.md",
+    "agents/devops-lead.md",
+    "agents/doc-writer.md",
+    "agents/frontend-lead.md",
+    "agents/plan-reviewer.md",
+    "agents/qa-lead.md",
+    "agents/test-engineer.md",
+    "agents/trd-reviewer.md",
+    "test/role-boundaries.test.mjs"
+  ],
+  "constraints": [
+    "The bullet text is BYTE-IDENTICAL in all 14 files. Copy it from interface_contract below verbatim -- never retype, re-punctuate, or paraphrase. The test pin is a literal substring match; an em-dash turned into a hyphen fails it.",
+    "Exactly ONE bullet appended per file. Do not reword, reorder, or restructure any existing bullet or heading in any of the 14 files. git diff --numstat must show 0 deletions across all 14 agents/*.md files.",
+    "agents/coder.md: append the bullet to its existing '## Boundaries' section (the section itself and its 3 existing bullets are untouched from doc-18-01's prior edit -- do not touch anything else in this file).",
+    "agents/qa-lead.md: append the bullet to its existing '## Boundaries' section. Note doc-18-01 already edited one bullet inside this same section (the test-attribution line) -- leave that edited bullet exactly as-is, only append the new one after it.",
+    "3 of these 14 files end in a section literally named '## Rules', not '## Boundaries': agents/build-validator.md, agents/plan-reviewer.md, agents/trd-reviewer.md. Append the bullet as the last bullet of THAT section (whatever it's named) in every file -- i.e. always the file's actual final section, not literally the string '## Boundaries'.",
+    "Append after the specific anchor bullet named for each file in discovery_context's table -- this pins the insertion point precisely so parallel/future edits to the same files don't collide on line numbers.",
+    "test/role-boundaries.test.mjs already exists (created by doc-18-01) with 8 tests. Extend it -- append new test() blocks at the end of the file; do not touch, reorder, or rewrite the existing 8 tests.",
+    "This spec depends on doc-18-01 having already landed (agents/coder.md's '## Boundaries' section and agents/qa-lead.md's '## Boundaries' bullet must already be in their post-doc-18-01 state before you start)."
+  ],
+  "acceptance_criteria": [
+    "All 14 agents/*.md files listed in files_in_scope contain the exact bullet text from interface_contract, each as the last bullet of that file's actual final section.",
+    "grep -c for the bullet's distinctive substring 'One deliverable, then return' across agents/*.md returns exactly 14.",
+    "git diff --numstat -- agents/ shows 0 deletions total and each of the 14 files shows between 1 and 2 insertions (a lone new bullet line, possibly plus a leading blank line if the section had none).",
+    "test/role-boundaries.test.mjs gains: (a) one test() per agents/*.md file (14 separate test() calls, not one loop-wrapped assertion, so a single missing file fails independently) asserting that file contains the exact bullet text; (b) a non-vacuity guard asserting listAgents() (from test/helpers.mjs) returns >= 14 entries, so a deleted/renamed agent file can't make the per-file loop trivially pass; (c) a structural test that in every agents/*.md file, the bullet's text appears strictly after that file's last top-level '## ' heading line (proves it lives in the final section, not some earlier one).",
+    "node --test test/role-boundaries.test.mjs test/agents.test.mjs test/roster.test.mjs test/claude-adapter.test.mjs all pass (the latter three prove frontmatter parsing, the roster's required-sections check, and the claude adapter's frontmatter reads are unaffected by the new bullets).",
+    "Full suite (node --test, no filter) passes.",
+    "git diff --name-only lists exactly the 15 files in files_in_scope, nothing else.",
+    "Reviewed by dev-team:code-reviewer-deep as part of the combined QA gate (orchestrator dispatches this after this spec lands -- not part of your task)."
+  ],
+  "validation_commands": [
+    "node --test test/role-boundaries.test.mjs test/agents.test.mjs test/roster.test.mjs test/claude-adapter.test.mjs",
+    "git diff --numstat -- agents/",
+    "git diff --name-only"
+  ],
+  "discovery_context": "The shared bullet (copy verbatim, also given in interface_contract):\n'- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.'\n\nAnchor table -- append the bullet immediately after the bullet whose text STARTS WITH the given fragment, in each file's final section:\n| File | Final section heading | Anchor bullet starts with |\n|---|---|---|\n| agents/architect.md | ## Boundaries | \"You don't over-architect.\" |\n| agents/architecture-lead.md | ## Boundaries | \"Single-domain work isn't yours\" |\n| agents/backend-lead.md | ## Boundaries | \"Flag frontend/devops dependencies\" |\n| agents/build-validator.md | ## Rules | \"Don't run tests — that's test-engineer's job.\" |\n| agents/code-reviewer.md | ## Boundaries | \"You don't rewrite entire functions.\" |\n| agents/code-reviewer-deep.md | ## Boundaries | \"Don't block on style\" |\n| agents/coder.md | ## Boundaries | \"Don't deviate from scope.\" |\n| agents/devops-lead.md | ## Boundaries | \"Flag app-code dependencies\" |\n| agents/doc-writer.md | ## Boundaries | \"Don't create boilerplate nobody asked for.\" |\n| agents/frontend-lead.md | ## Boundaries | \"Flag cross-domain dependencies\" |\n| agents/plan-reviewer.md | ## Rules | \"Keep reviews focused.\" |\n| agents/qa-lead.md | ## Boundaries | \"Never rubber-stamp.\" |\n| agents/test-engineer.md | ## Boundaries | \"Don't write tests dependent on execution order\" |\n| agents/trd-reviewer.md | ## Rules | \"Keep reviews focused.\" |\n\nFor agents/qa-lead.md specifically: doc-18-01 already changed the '## Boundaries' bullet that used to read \"you don't write tests or fix code (that's dev-team:test-engineer / coder)\" to instead read \"...that's dev-team:test-engineer, or the coder when the spec lists a test file in files_in_scope\". The anchor bullet for THIS spec's insertion is still the LAST bullet in that section, 'Never rubber-stamp. If risk warrants deep review, route it there.' -- append after that one, not after the edited test-attribution bullet.\n\ntest/helpers.mjs exports ROOT and listAgents() (a directory scan over agents/*.md, returns file paths) -- reuse listAgents() for the non-vacuity guard rather than hardcoding a count. test/agents.test.mjs (existing, do not edit) already has a `for (const file of listAgents())` loop pattern at roughly line 18 you can read for the iteration idiom, but write your new tests in test/role-boundaries.test.mjs, not there. test/role-boundaries.test.mjs's existing ownership-header comment (from doc-18-01) already states it owns doctrine pins for coder.md/qa-lead.md/handover-spec.md plus (as of this task) the all-14-file shared-norm manifest -- you do not need to rewrite that comment, just add to the file below it.",
+  "out_of_scope": [
+    "any wording change to an existing bullet in any of the 14 files",
+    "agents/qa-lead.md's test-attribution bullet (already correct from doc-18-01 -- do not touch it)",
+    "agents/coder.md's non-Boundaries sections (already correct from doc-18-01 -- do not touch them)",
+    "code-reviewer.md:70 / code-reviewer-deep.md:103's missing-tests finding wording (deferred to issue #19)",
+    "handover-spec.schema.json, coder-return.schema.json, references/**",
+    "plugin.json version bump",
+    "commits, PR creation, board moves (orchestrator-side)"
+  ],
+  "depends_on": ["doc-18-01"],
+  "interface_contract": "The shared bullet text, byte-exact, produced and owned by this spec for all 14 files (including agents/coder.md and agents/qa-lead.md, whose OTHER content doc-18-01 already landed and this spec must not touch):\n'- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.'"
+}

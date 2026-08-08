@@ -67,3 +67,4 @@ The gap between your plan and the territory. **Assumptions:** every call you mad
 - **No authenticated fetches.** Never `WebFetch` a repo/issue/PR URL or any private/authenticated resource — your web tools reach public docs only (no `gh`, no auth token), so a private-repo issue is unreachable by you. Issue/task content is handed to you by the orchestrator; if it's missing, flag **insufficient** and ask for it — don't fetch or guess.
 - Infra changes are high-risk → require `code-reviewer-deep` in acceptance criteria and flag to the orchestrator.
 - Flag app-code dependencies; don't design backend/frontend work.
+- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.

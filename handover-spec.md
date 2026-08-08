@@ -9,7 +9,7 @@ The contract a **lead emits** and a **coder consumes**. Conversational mode uses
 - **task_id** — stable id (e.g. `be-01`)
 - **domain** — `frontend` | `backend` | `devops` | `qa`
 - **goal** — one paragraph: what to achieve
-- **files_in_scope** — explicit paths the coder may touch
+- **files_in_scope** — explicit paths the coder may touch. **This field is also the test-ownership decision:** a test file listed here means the coder authors/updates those tests; with no test file listed the coder must not create or modify one, and any coverage the change needs is named in `acceptance_criteria` as `dev-team:test-engineer`'s job at the gate. There is no `test_ownership` field — this is the only way to express it.
 - **constraints** — conventions/patterns to match (cite `conventions.md` entries)
 - **acceptance_criteria** — how "done" is verified
 - **validation_commands** — exact commands, **scoped to `files_in_scope` — the narrowest run that still covers the change** (e.g. `npm test -- items`, `pytest tests/foo -k thing`), plus typecheck/lint. Draw from `config.validate.fast`, **never the full `config.validate.full` suite** — the coder runs these as a self-check and the orchestrator re-runs them inline per dispatch, so a full slow suite here runs tens of minutes on every coder. The full suite runs once at `/dev-team:ship`, not here.
@@ -54,7 +54,7 @@ A weak spec costs an amend→rebuild loop — verify each spec against this bar 
 - [ ] `discovery_context` names every symbol the coder calls but doesn't define + its file, the pattern to mirror as an inline excerpt + `file:line`, and any gotcha — so the coder never searches beyond scope.
 - [ ] Generated/vendored content (lockfiles, dist/**, vendored trees) stays out of discovery_context, and a noise path appears in files_in_scope only when changing it is the point — naming one there switches off the gate's noise filtering for it (references/qa-gate.md).
 - [ ] `acceptance_criteria` are verifiable (a command or an observable result), not vibes.
-- [ ] every `acceptance_criteria` entry is covered by a `validation_commands` entry or an explicitly named reviewer/manual check — a criterion nothing verifies is a vibe with punctuation.
+- [ ] every `acceptance_criteria` entry is covered by a `validation_commands` entry or an explicitly named reviewer/manual check — a criterion nothing verifies is a vibe with punctuation. **Test coverage specifically:** name at least one owner — a test file in `files_in_scope` (the coder authors it) and/or the criterion naming `dev-team:test-engineer` at the gate (the gate owner is mandatory on any deep-trigger spec per `references/qa-gate.md`, whether or not a test file is also in scope); naming neither is the actual gap this catches.
 - [ ] Risky paths name their required negative/security checks: authz/tenant boundaries, input validation/encoding, secret handling, rollback/idempotency, or public contract compatibility as applicable.
 - [ ] `validation_commands` actually run in this project **and are scoped to the change** — a targeted/filtered run from `config.validate.fast`, not the full `config.validate.full` suite (which runs once at ship, not per coder).
 - [ ] `interface_contract` is filled if the task shares a shape with another task; the producing domain owns it.
@@ -69,7 +69,7 @@ domain: backend
 goal: Add a priority (low|med|high, default med) field to items and expose it in the create + list endpoints.
 files_in_scope: [src/api/items.ts]
 constraints: [Match the existing handler style in items.ts; validate at the boundary with the zod schema in src/schemas.ts (conventions.md "validation-at-boundary").]
-acceptance_criteria: [POST /items accepts priority and rejects values outside the enum with 400; GET /items returns priority; "npm test -- items" passes.]
+acceptance_criteria: [POST /items accepts priority and rejects values outside the enum with 400; GET /items returns priority; "npm test -- items" passes; coverage for the 400-on-bad-enum path is dev-team:test-engineer's at the gate — no test file is in scope, so the coder writes none.]
 validation_commands: [npm run typecheck, npm test -- items]
 discovery_context: |
   Handlers live in src/api/items.ts (createItem ~L40, listItems ~L72). Pattern to mirror (src/api/items.ts:40):

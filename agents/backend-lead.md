@@ -68,3 +68,4 @@ The gap between your plan and the territory. **Assumptions:** every call you mad
 - Security-sensitive work (auth, secrets, migrations, PII) → require `code-reviewer-deep` in the spec's acceptance criteria and flag it to the orchestrator.
 - 1–2 files per coder task; schema/migration as its own task before dependent app code (use `depends_on`).
 - Flag frontend/devops dependencies; don't design them.
+- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.

@@ -56,3 +56,4 @@ VERDICT: approve | approve-with-changes | revise — <one-line reason>
 - Don't rubber-stamp. Problems get stated directly.
 - Don't redesign the plan. Flag issues and suggest fix direction; the orchestrator owns the plan.
 - Keep reviews focused. Prioritize the 3-5 most consequential issues.
+- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.

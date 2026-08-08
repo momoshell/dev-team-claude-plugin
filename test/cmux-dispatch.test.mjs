@@ -40,6 +40,7 @@ const {
   PREVIEW_LOCK_WORST_CASE_MS,
   browserVerifyCmd, BROWSER_VERIFY_WARNINGS,
   UsageError, OperationalError, main,
+  SpecSchemaError, SPEC_SCHEMA_REFUSAL_MESSAGE, SPEC_SCHEMA_REFUSAL_CODE,
 } = await import(DISPATCH_PATH)
 
 const {
@@ -55,6 +56,11 @@ const {
 const { specPathFor, sidecarPaths } = await import(join(ROOT, 'scripts', 'cmux', 'resolve.mjs'))
 const { writeBlockedReturn } = await import(join(ROOT, 'scripts', 'cmux', 'return-lint.mjs'))
 const { slugify } = await import(join(ROOT, 'scripts', 'cmux', 'contract.mjs'))
+// A2 (#27) cross-file check-name agreement test — imported directly, not
+// through dispatch.mjs, to prove the two partitions dispatch.mjs relies on
+// are real, behavioural facts (safe: no I/O, its own invokedDirectly guard
+// is false under the test runner).
+const { lintSpec } = await import(join(ROOT, 'scripts', 'spec-lint.mjs'))
 
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
@@ -5169,12 +5175,24 @@ test('A/B: cmux_preview_url SET, frontend spec, but role isolation is NOT worktr
 // Trigger conjuncts, one at a time with the others held true (AC per §5/§6).
 // ---------------------------------------------------------------------------
 
-test("trigger conjunct 2: domain 'Frontend' and 'frontend ' (not an exact match) -> zero browser calls", () => {
+// A2 (#27): 'Frontend' and 'frontend ' both violate handover-spec.schema.json's
+// domain enum (["frontend","backend","devops","qa"]), so a `coder` (executor)
+// dispatch with either now refuses via SpecSchemaError before the preview
+// block is ever reached — a non-enum domain can no longer reach the preview
+// block at all for an executor role. Conjunct 2's exactness among
+// SCHEMA-VALID domains stays proven by the existing `domain: 'backend'` test
+// above (A/B: cmux_preview_url SET but domain is backend). We keep this
+// test's `browserOpenInvocations(env).length === 0` conclusion by asserting
+// the refusal instead of a preview-key check.
+test("trigger conjunct 2: domain 'Frontend' and 'frontend ' (not an exact match) -> refused before preview, zero browser calls", () => {
   const { env, ctx } = setUpPreviewWorkspace('preview-trigger-domain-case')
   for (const [sliceId, domain] of [['be-9e', 'Frontend'], ['be-9f', 'frontend ']]) {
     const specPath = makeSpecFile(ctx, sliceId, { domain })
-    const res = dispatchCmd({ slice: sliceId, role: 'coder', spec: specPath }, ctx)
-    assert.equal('preview' in res.json, false, `domain ${JSON.stringify(domain)} must not trigger a preview`)
+    assert.throws(
+      () => dispatchCmd({ slice: sliceId, role: 'coder', spec: specPath }, ctx),
+      (err) => err instanceof SpecSchemaError,
+      `domain ${JSON.stringify(domain)} must be schema-refused, not reach the preview block`,
+    )
   }
   assert.equal(browserOpenInvocations(env).length, 0)
 })
@@ -6302,4 +6320,191 @@ test('S9: an EMPTY seeded errors-list payload (fake-cmux `??` fallback) reduces 
   const res = browserVerifyCmd({}, ctx)
   assert.equal(res.code, 0)
   assert.deepEqual(res.json.console_errors, { clean: false, count: null, shape: 'unrecognized' })
+})
+
+// ---------------------------------------------------------------------------
+// A2 (#27) — the unskippable schema-derived spec floor: dispatchCmd refuses
+// an `executor`-profile dispatch on a schema-derived spec violation only;
+// every other spec-lint diagnostic passes through as warnings[]. Positive
+// first (anti-vacuity anchor, mirrors E-P1), per the handover spec.
+// ---------------------------------------------------------------------------
+
+test('A2 positive: a valid spec dispatched to coder still exits 0 with exactly one new-pane, and clean warnings:[] for a spec whose files_in_scope names README.md with no validation_commands', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('a2-positive')
+  const specPath = makeSpecFile(ctx, 'be-27a', { files_in_scope: ['README.md'], validation_commands: [] })
+
+  const res = dispatchCmd({ slice: 'be-27a', role: 'coder', spec: specPath }, ctx)
+  assert.equal(res.code, 0)
+  assert.ok(Array.isArray(res.json.warnings))
+  assert.deepEqual(res.json.warnings, [])
+
+  const log = readLog(env.logPath)
+  const newPaneEntries = log.filter((e) => e.argv[0] === 'new-pane')
+  assert.equal(newPaneEntries.length, 1, `expected exactly one new-pane invocation, got ${newPaneEntries.length}: ${JSON.stringify(log)}`)
+  assert.deepEqual(newPaneEntries[0].argv, ['new-pane', '--workspace', workspaceRes.json.workspace_id])
+})
+
+test('A2 refusal: a schema-invalid spec (missing required field, empty required array, wrong-typed field) refuses a coder dispatch with ZERO cmux invocations of ANY verb and no on-disk trace', () => {
+  const cases = [
+    ['be-27b', { acceptance_criteria: undefined }],
+    ['be-27c', { acceptance_criteria: [] }],
+    ['be-27d', { files_in_scope: 'f.mjs' }],
+  ]
+  for (const [sliceId, overrides] of cases) {
+    const { env, ctx } = setUpWorkspace(`a2-refusal-${sliceId}`)
+    const specPath = makeSpecFile(ctx, sliceId, overrides)
+    const logBefore = readLog(env.logPath)
+
+    assert.throws(
+      () => dispatchCmd({ slice: sliceId, role: 'coder', spec: specPath }, ctx),
+      (err) => {
+        assert.ok(err instanceof SpecSchemaError, `expected SpecSchemaError for ${JSON.stringify(overrides)}, got ${err}`)
+        assert.equal(err.message, SPEC_SCHEMA_REFUSAL_MESSAGE)
+        assert.equal(err.code, SPEC_SCHEMA_REFUSAL_CODE)
+        assert.ok(err.failures.length > 0)
+        assert.ok(err.failures.every((f) => f.check === 'schema'))
+        return true
+      },
+    )
+
+    const newEntries = readLog(env.logPath).slice(logBefore.length)
+    assert.deepEqual(newEntries, [], `expected ZERO cmux invocations of any verb after a schema refusal, got: ${JSON.stringify(newEntries)}`)
+    assert.equal(existsSync(join(ctx.paths.dispatchDir, `${sliceId}.1.json`)), false, 'no record file must exist for a refused dispatch')
+    assert.equal(existsSync(ctx.paths.worktreesIndexPath), false, 'no worktree/branch/index entry must exist for a refused dispatch')
+  }
+})
+
+test('A2 CLI wiring: `main([\'dispatch\', ...])` for a schema-invalid spec returns exit 1, prints exactly one {error, failures} JSON object on stdout, and FAIL lines on stderr', () => {
+  const { dir, ctx } = setUpWorkspace('a2-cli-wiring')
+  const configDir = join(ctx.primaryCheckout, '.claude', 'dev-team')
+  mkdirSync(configDir, { recursive: true })
+  writeFileSync(join(configDir, 'config.md'), 'execution_mode: cmux\n')
+  const specPath = makeSpecFile(ctx, 'be-27e', { acceptance_criteria: [] })
+
+  const res = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'dispatch',
+    '--task', 'sample-task', '--checkout', ctx.primaryCheckout, '--repo', ctx.repoSlug,
+    '--root', join(dir, 'dev-team'), '--plugin-root', ROOT,
+    '--slice', 'be-27e', '--role', 'coder', '--spec', specPath,
+  ], { encoding: 'utf8' })
+
+  assert.equal(res.status, 1, `expected exit 1, got ${res.status} — stderr: ${res.stderr}`)
+  const lines = res.stdout.trim().split('\n')
+  assert.equal(lines.length, 1, `expected exactly one stdout line, got: ${JSON.stringify(res.stdout)}`)
+  const json = JSON.parse(lines[0])
+  assert.equal(json.error, 'spec_schema_invalid')
+  assert.ok(Array.isArray(json.failures) && json.failures.length > 0)
+  for (const f of json.failures) {
+    assert.equal(f.check, 'schema')
+    assert.equal(typeof f.detail, 'string')
+  }
+  assert.match(res.stderr, /^refused: /m)
+  const failLineCount = (res.stderr.match(/^FAIL schema: /gm) || []).length
+  assert.equal(failLineCount, json.failures.length, 'expected one "FAIL schema: ..." stderr line per failure')
+})
+
+test('A2 negative #1 (PATH): a coder dispatch whose validation_commands names a binary absent from PATH still exits 0 with exactly one new-pane, demoted to a warnings[] entry with check:"validation_commands" severity:"fail"', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('a2-negative-path')
+  const specPath = makeSpecFile(ctx, 'be-27f', {
+    files_in_scope: ['README.md'],
+    validation_commands: ['definitely-not-on-path-xyz --check'],
+  })
+
+  const res = dispatchCmd({ slice: 'be-27f', role: 'coder', spec: specPath }, ctx)
+  assert.equal(res.code, 0)
+
+  const log = readLog(env.logPath)
+  const newPaneEntries = log.filter((e) => e.argv[0] === 'new-pane')
+  assert.equal(newPaneEntries.length, 1, `expected exactly one new-pane invocation, got ${newPaneEntries.length}: ${JSON.stringify(log)}`)
+
+  const finding = res.json.warnings.find((w) => w.check === 'validation_commands')
+  assert.ok(finding, `expected a warnings[] entry with check:"validation_commands", got ${JSON.stringify(res.json.warnings)}`)
+  assert.equal(finding.severity, 'fail')
+})
+
+test('A2 negative #2 (stale citation): a coder dispatch whose discovery_context cites README.md:99999 still exits 0 with exactly one new-pane, demoted to a warnings[] entry with check:"discovery_context"', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('a2-negative-stale-citation')
+  const specPath = makeSpecFile(ctx, 'be-27g', {
+    files_in_scope: ['README.md'],
+    discovery_context: 'see README.md:99999 for the exact shape',
+  })
+
+  const res = dispatchCmd({ slice: 'be-27g', role: 'coder', spec: specPath }, ctx)
+  assert.equal(res.code, 0)
+
+  const log = readLog(env.logPath)
+  const newPaneEntries = log.filter((e) => e.argv[0] === 'new-pane')
+  assert.equal(newPaneEntries.length, 1, `expected exactly one new-pane invocation, got ${newPaneEntries.length}: ${JSON.stringify(log)}`)
+
+  const finding = res.json.warnings.find((w) => w.check === 'discovery_context')
+  assert.ok(finding, `expected a warnings[] entry with check:"discovery_context", got ${JSON.stringify(res.json.warnings)}`)
+})
+
+test('A2 never-widen: a backend-lead (judgment profile) dispatch with the SAME schema-invalid spec that refuses for coder still exits 0 with exactly one new-pane and no warnings key at all', () => {
+  const { env, ctx, workspaceRes } = setUpWorkspace('a2-never-widen')
+  const specPath = makeSpecFile(ctx, 'be-27h', { acceptance_criteria: [] })
+
+  const res = dispatchCmd({ slice: 'be-27h', role: 'backend-lead', spec: specPath }, ctx)
+  assert.equal(res.code, 0)
+  assert.equal('warnings' in res.json, false, 'a non-executor dispatch must not be linted at all')
+
+  const log = readLog(env.logPath)
+  const newPaneEntries = log.filter((e) => e.argv[0] === 'new-pane')
+  assert.equal(newPaneEntries.length, 1, `expected exactly one new-pane invocation, got ${newPaneEntries.length}: ${JSON.stringify(log)}`)
+
+  // Cheap pre-existing-behavior regression (NOT a property of the new
+  // gate): a backend-lead dispatch with no --spec at all still throws
+  // UsageError from dispatch.mjs, exactly as it did before this change.
+  assert.throws(() => dispatchCmd({ slice: 'be-27h-nospec', role: 'backend-lead' }, ctx), UsageError)
+})
+
+test('A2 message drift guard: SPEC_SCHEMA_REFUSAL_MESSAGE (the imported constant) occurs verbatim exactly once across scripts/cmux/*.mjs + test/cmux-*.test.mjs, has the "refused: " prefix and names handover-spec.schema.json; SPEC_SCHEMA_REFUSAL_CODE is byte-pinned', () => {
+  const scriptsDir = join(ROOT, 'scripts', 'cmux')
+  const testDir = HERE
+  const scriptFiles = readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs')).map((f) => join(scriptsDir, f))
+  const testFiles = readdirSync(testDir).filter((f) => f.startsWith('cmux-') && f.endsWith('.test.mjs')).map((f) => join(testDir, f))
+  const combined = [...scriptFiles, ...testFiles].map((p) => readFileSync(p, 'utf8')).join('\n---\n')
+
+  const occurrences = combined.split(SPEC_SCHEMA_REFUSAL_MESSAGE).length - 1
+  assert.equal(occurrences, 1, `SPEC_SCHEMA_REFUSAL_MESSAGE must appear verbatim exactly once across scripts/cmux/*.mjs + test/cmux-*.test.mjs (found ${occurrences}) — a re-typed copy anywhere (including this test file) is drift`)
+
+  assert.ok(SPEC_SCHEMA_REFUSAL_MESSAGE.startsWith('refused: '))
+  assert.ok(SPEC_SCHEMA_REFUSAL_MESSAGE.includes('handover-spec.schema.json'))
+  assert.equal(SPEC_SCHEMA_REFUSAL_CODE, 'spec_schema_invalid')
+})
+
+test('A2 symlink-invocation regression: invoking dispatch.mjs through a symlinked path still runs main() (realpathSync fix on the invokedDirectly guard)', () => {
+  // Paired positive: the same spawn against DISPATCH_PATH itself also exits
+  // 2 with the same stderr, proving this assertion is about symlink
+  // resolution and not about a broken spawn.
+  const direct = spawnSync(process.execPath, [DISPATCH_PATH], { encoding: 'utf8' })
+  assert.equal(direct.status, 2)
+  assert.match(direct.stderr, /usage: node dispatch\.mjs </)
+
+  const linkDir = mkdtempSync(join(tmpdir(), 'cmux-dispatch-symlink-'))
+  const linkPath = join(linkDir, 'dispatch-link.mjs')
+  symlinkSync(DISPATCH_PATH, linkPath)
+  const viaLink = spawnSync(process.execPath, [linkPath], { encoding: 'utf8' })
+  assert.equal(viaLink.status, 2)
+  assert.match(viaLink.stderr, /usage: node dispatch\.mjs </)
+})
+
+test('A2 cross-file check-name agreement: lintSpec (imported directly from spec-lint.mjs) produces a check:"schema" failure for a missing required field, and a check:"validation_commands" failure for a nonexistent binary', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'cmux-dispatch-lintspec-'))
+  const checkout = makeGitCheckout(dir)
+  const baseSpec = {
+    task_id: 't', domain: 'backend', goal: 'g',
+    files_in_scope: ['README.md'], constraints: [], acceptance_criteria: ['works'],
+    validation_commands: ['node --test'], discovery_context: 'ctx',
+    out_of_scope: [], depends_on: [], interface_contract: 'none',
+  }
+
+  const missingFieldSpec = { ...baseSpec }
+  delete missingFieldSpec.acceptance_criteria
+  const schemaResult = lintSpec(missingFieldSpec, checkout)
+  assert.ok(schemaResult.failures.some((f) => f.check === 'schema'), `expected a check:"schema" failure, got ${JSON.stringify(schemaResult.failures)}`)
+
+  const badBinSpec = { ...baseSpec, validation_commands: ['definitely-not-on-path-xyz --check'] }
+  const validationResult = lintSpec(badBinSpec, checkout)
+  assert.ok(validationResult.failures.some((f) => f.check === 'validation_commands'), `expected a check:"validation_commands" failure, got ${JSON.stringify(validationResult.failures)}`)
 })

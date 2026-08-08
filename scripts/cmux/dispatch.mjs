@@ -60,6 +60,9 @@ import {
 import { detectSignatures } from './triage.mjs'
 import { reduceBrowserErrors } from './browser-evidence.mjs'
 import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
+// A2 (#27) — the first `../` import in scripts/cmux/*; precedent:
+// scripts/chain/gates.mjs:39 does the same `../spec-lint.mjs` import.
+import { lintSpec } from '../spec-lint.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_PLUGIN_ROOT = resolvePath(HERE, '..', '..')
@@ -336,6 +339,28 @@ export class OperationalError extends Error {
     this.name = 'OperationalError'
   }
 }
+
+// A2 (#27) — the schema-derived dispatch floor. The refusing class is
+// EXACTLY the violations contract.validate() returns via spec-lint's
+// checkSchema (scripts/spec-lint.mjs:251-256); every other spec-lint
+// diagnostic is environment- or timing-dependent and can never refuse.
+export const SPEC_SCHEMA_REFUSAL_CODE = 'spec_schema_invalid'
+export const SPEC_SCHEMA_REFUSAL_MESSAGE = 'refused: the Handover Spec violates handover-spec.schema.json — a schema-invalid spec is never dispatched to an executor role; fix the spec and re-dispatch (heuristic spec-lint findings never refuse a dispatch)'
+
+export class SpecSchemaError extends Error {
+  constructor(failures) {
+    super(SPEC_SCHEMA_REFUSAL_MESSAGE)
+    this.name = 'SpecSchemaError'
+    this.code = SPEC_SCHEMA_REFUSAL_CODE
+    this.failures = failures // [{ check: 'schema', detail: string }, ...]
+  }
+}
+
+// The one spec-lint check name whose failures refuse. Definition site:
+// scripts/spec-lint.mjs:251-256 (the ONLY caller of fail('schema', ...)).
+// Whitelist of one — a heuristic check added to spec-lint later is
+// non-refusing by construction, with no edit to this file.
+const SPEC_LINT_SCHEMA_CHECK = 'schema'
 
 function log(line) {
   process.stderr.write(`${line}\n`)
@@ -1276,6 +1301,29 @@ export function dispatchCmd(args, ctx) {
   }
   const spec = JSON.parse(readFileSync(specPath, 'utf8'))
 
+  // A2 (#27) — the unskippable schema-derived spec floor, hoisted above the
+  // workspace.json read below. This placement is load-bearing, not
+  // stylistic: the workspace-liveness check makes a real `tree({all:true})`
+  // cmux call, and writeRecord/ensureWorktree/snapshotWorkerPlugin all run
+  // further down. Gating here is what makes a schema-invalid dispatch a
+  // ZERO-cmux-invocation, no-record-on-disk refusal. Runs only for
+  // executor-profile roles (today: only `coder`) — a judgment/validator
+  // dispatch takes a byte-identical path to before this change.
+  let specWarnings
+  if (resolved.profile === 'executor') {
+    // A lintSpec THROW is a packaging error (corrupt shipped schema /
+    // noise-globs.json) — deliberately NOT caught. Unlike gates.mjs:611,
+    // which downgrades the same throw to a soft check, catching it here
+    // would open the gate. A gate that fails open is not a gate.
+    const lint = lintSpec(spec, primaryCheckout)
+    const refusals = lint.failures.filter((f) => f.check === SPEC_LINT_SCHEMA_CHECK)
+    if (refusals.length > 0) throw new SpecSchemaError(refusals)
+    specWarnings = [
+      ...lint.failures.filter((f) => f.check !== SPEC_LINT_SCHEMA_CHECK).map((f) => ({ ...f, severity: 'fail' })),
+      ...lint.warnings.map((w) => ({ ...w, severity: 'warn' })),
+    ]
+  }
+
   // lifecycle M1/M2-E: the workspace.json read AND a fresh-tree liveness
   // check are hoisted ABOVE any record write. A no-workspace dispatch or a
   // dispatch against a workspace.json left stale by a cmux restart now
@@ -1522,6 +1570,7 @@ export function dispatchCmd(args, ctx) {
       attn_parent: bound.attn_parent,
       timeout_s: bound.timeout_s,
       ...(preview !== undefined ? { preview } : {}),
+      ...(specWarnings !== undefined ? { warnings: specWarnings } : {}),
     },
   }
 }
@@ -2768,6 +2817,12 @@ export function main(argv) {
       printResult({ code: 1, json: { error: err.code, message: err.message } })
       return 1
     }
+    if (err instanceof SpecSchemaError) {
+      log(err.message)
+      for (const f of err.failures) log(`FAIL ${f.check}: ${f.detail}`)
+      printResult({ code: 1, json: { error: err.code, failures: err.failures } })
+      return 1
+    }
     log(`error: ${err.message}`)
     printResult({ code: 1, json: { error: err.message } })
     return 1
@@ -2777,7 +2832,22 @@ export function main(argv) {
   return result.code
 }
 
-const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === resolvePath(fileURLToPath(import.meta.url))
+// A2 (#27) — realpathSync BOTH sides. The ESM loader realpaths
+// import.meta.url while argv[1] stays literal, so a symlinked invocation
+// compared false under plain resolvePath and this guard silently no-oped.
+// Local copy of the realpathOr shape (scripts/spec-lint.mjs:49-55) — this is
+// the 4th site of this pattern; promoting it to a shared helper is a named
+// follow-up, deferred (contract.mjs is contract-frozen with a closed export
+// manifest).
+function realpathOr(path) {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolvePath(path)
+  }
+}
+
+const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
 if (invokedDirectly) {
   process.exit(main(process.argv.slice(2)))
 }

@@ -132,3 +132,4 @@ For security findings, include: Source → trust boundary → sink → impact �
 - Use `git show` or `git diff` via Bash — never checkout branches.
 - You don't run tests/builds.
 - Don't block on style unless it creates reliability/security risk.
+- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.

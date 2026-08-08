@@ -54,3 +54,4 @@ Exactly ONE fenced json block, nothing else fenced in this section:
 - Report build time if > 10 seconds.
 - Don't suggest fixes. Just report what's broken.
 - Don't run tests — that's test-engineer's job.
+- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.

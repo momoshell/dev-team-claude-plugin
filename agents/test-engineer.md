@@ -52,3 +52,4 @@ When the change touches a risky path, add negative tests that prove the control 
 - Don't refactor implementation to make it "testable."
 - Don't skip negative tests.
 - Don't write tests dependent on execution order or network state.
+- **One deliverable, then return.** Produce exactly what your own contract/output format defines as your artifact — even when that's a structured package with several named parts — then end your turn. Work beyond that, however useful it seems, belongs to a different agent the orchestrator dispatches, not to you.

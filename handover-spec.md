@@ -2,7 +2,7 @@
 
 The contract a **lead emits** and a **coder consumes**. Conversational mode uses this markdown; workflow mode uses `handover-spec.schema.json` (and `coder-return.schema.json` for the result) — same directory.
 
-**Conventions:** array fields (`files_in_scope`, `constraints`, `acceptance_criteria`, `validation_commands`, `out_of_scope`, `depends_on`) use an empty list for "none"; string fields (`discovery_context`, `interface_contract`) use `none`. Workflow mode requires every field present (empty is fine). For security-sensitive work, state the required review depth (e.g. `code-reviewer-deep`) in `acceptance_criteria`. **Insufficiency cap:** conversational mode allows up to **2** amend→rebuild cycles then escalates to the user; workflow mode does **one** amend-retry.
+**Conventions:** array fields split into two classes — `constraints`, `validation_commands`, `out_of_scope`, `depends_on` use an empty list for "none"; **`files_in_scope` and `acceptance_criteria` require at least one entry** (`handover-spec.schema.json`'s `minItems: 1` — a task with nothing in scope or nothing to verify isn't a task, and since #27 the dispatcher's schema-derived floor hard-refuses an empty one with no override). String fields (`discovery_context`, `interface_contract`) use `none`. Workflow mode requires every field present (empty is fine **for the first class only**). For security-sensitive work, state the required review depth (e.g. `code-reviewer-deep`) in `acceptance_criteria`. **Insufficiency cap:** conversational mode allows up to **2** amend→rebuild cycles then escalates to the user; workflow mode does **one** amend-retry.
 
 ## Fields
 
@@ -15,7 +15,7 @@ The contract a **lead emits** and a **coder consumes**. Conversational mode uses
 - **validation_commands** — exact commands, **scoped to `files_in_scope` — the narrowest run that still covers the change** (e.g. `npm test -- items`, `pytest tests/foo -k thing`), plus typecheck/lint. Draw from `config.validate.fast`, **never the full `config.validate.full` suite** — the coder runs these as a self-check and the orchestrator re-runs them inline per dispatch, so a full slow suite here runs tens of minutes on every coder. The full suite runs once at `/dev-team:ship`, not here.
 - **discovery_context** — what the lead already found, so the coder never re-scouts. **Complete when it names:** every symbol/function the coder will call but not define + the file it lives in; the exact pattern to mirror — **paste the key excerpt (~5–10 lines) inline, plus its `file:line`** (a bare pointer costs the coder a Read and drifts when parallel edits shift lines; pointers alone are fine for everything *other* than the one pattern to mirror); any gotcha that would otherwise need a grep; the relevant existing conventions. If the coder would have to search beyond `files_in_scope` to proceed, it's incomplete.
 - **out_of_scope** — explicit don'ts
-- **depends_on** — prerequisite task_ids (or —)
+- **depends_on** — prerequisite task_ids (or an empty list)
 - **interface_contract** — shared shapes (API payloads, types, props) for cross-domain coherence (or `none`). **Required (non-`none`) whenever this task shares a shape with another task in the batch.** The lead whose domain *produces* the shape is authoritative; the consuming task references it and must not redefine it.
 
 ## Coder return

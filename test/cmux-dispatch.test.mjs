@@ -8056,4 +8056,708 @@ test('be-41-04 REWORK must-fix #5: LOCK GIVE-UP NEVER BLOCKS TEARDOWN — a pre-
   assert.ok(capturedEmitter, 'expected the emitter opener seam to have been invoked')
   assert.ok(capturedEmitter.stats().lock_giveups > 0, `expected at least one lock give-up, got stats() = ${JSON.stringify(capturedEmitter.stats())}`)
 })
+// ---------------------------------------------------------------------------
+// be-41-05 (issue #41, epic #39) — closeCmd's own ledger-mirror wiring: the
+// ensureAgentSession fallback, the return envelope, agent_end, endAgentSession
+// (all ten fields), the tool_call back-fill (ONE seq reservation for the
+// whole batch, ADR-027) and the reconcile-boundary decision row. Same
+// NEVER-LOAD-BEARING discipline as be-41-04's own block above: every
+// assertion below is either a positive read against the sidecar's real
+// db_path (never dispatch.mjs internals) or a negative proof that a hostile
+// emitter changes nothing observable.
+// ---------------------------------------------------------------------------
+
+// A minimal Claude-transcript-shaped JSONL builder — one assistant
+// tool_use/usage line paired with one user tool_result line, at explicit
+// HISTORICAL timestamps (never "now") — placed at the exact path
+// resolveTranscript (be-41-02) scans for: <projectsDir>/<any-dir>/<dispatch_id>.jsonl.
+function writeFakeTranscript(projectsDir, dispatchId, toolCalls, usage) {
+  const projectDir = join(projectsDir, 'proj')
+  mkdirSync(projectDir, { recursive: true })
+  const transcriptPath = join(projectDir, `${dispatchId}.jsonl`)
+  const lines = []
+  toolCalls.forEach((call, i) => {
+    const toolUseId = `toolu_${i}`
+    lines.push(JSON.stringify({
+      type: 'assistant',
+      timestamp: call.started_at,
+      message: {
+        id: `msg_${i}`,
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: toolUseId, name: call.tool, input: {} }],
+        usage: usage || { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
+      },
+    }))
+    lines.push(JSON.stringify({
+      type: 'user',
+      timestamp: call.ended_at,
+      message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: toolUseId, content: 'ok', is_error: !call.ok }] },
+    }))
+  })
+  writeFileSync(transcriptPath, `${lines.join('\n')}\n`)
+  return transcriptPath
+}
+
+// closeCmd({dispatch}, ctx, { projectsDir }) — a fresh dispatch + valid
+// return, never awaited, ready for the ensureAgentSession fallback path.
+function setUpCloseDispatch(prefix) {
+  const { env, ctx } = setUpWorkspace(prefix)
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+  return { env, ctx, dispatchId, record }
+}
+
+test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript sightable at close time): exactly one agent_sessions row with the resolved transcript_path', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-ensure-session')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-projects-')
+  const transcriptPath = writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Read', ok: true, started_at: '2020-01-01T00:00:00.000Z', ended_at: '2020-01-01T00:00:01.000Z' },
+  ])
+
+  const closeRes = closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+  assert.equal(closeRes.code, 0)
+
+  const sidecar = readRunSidecar(ctx)
+  const dumped = dumpLedgerTablesInSubprocess(sidecar, ['agent_sessions'])
+  const rows = dumped.agent_sessions.filter((r) => r.claude_session_id === dispatchId)
+  assert.equal(rows.length, 1, 'expected exactly one agent_sessions row')
+  assert.equal(rows[0].transcript_path, transcriptPath)
+  assert.notEqual(rows[0].ended_at, null, 'endAgentSession must have landed on the SAME row the fallback just created')
+
+  const sidecarEntry = readRunSidecar(ctx).dispatches[dispatchId]
+  assert.equal(sidecarEntry.session_started, true)
+  assert.equal(sidecarEntry.ended, true, 'AMENDED POST-be-41-04: close must set ended:true on the same sidecar entry')
+})
+
+test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript never sightable): exactly one agent_sessions row with explicit null transcript_path', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-ensure-session-null')
+  const emptyProjectsDir = makeTmpDir('cmux-dispatch-close-empty-projects-')
+
+  const closeRes = closeCmd({ dispatch: dispatchId }, ctx, { projectsDir: emptyProjectsDir })
+  assert.equal(closeRes.code, 0)
+
+  const sidecar = readRunSidecar(ctx)
+  const dumped = dumpLedgerTablesInSubprocess(sidecar, ['agent_sessions'])
+  const rows = dumped.agent_sessions.filter((r) => r.claude_session_id === dispatchId)
+  assert.equal(rows.length, 1, 'expected exactly one agent_sessions row even with no sightable transcript')
+  assert.equal(rows[0].transcript_path, null, 'explicit null, never omitted')
+  assert.equal(rows[0].context_tokens, null)
+  assert.equal(rows[0].raw_read_tokens, null)
+  assert.equal(rows[0].billed_input_tokens, null)
+})
+
+test('be-41-05 ENSURE-SESSION FALLBACK IS IDEMPOTENT: a dispatch whose await already started its agent session gets NO second agent_sessions row on close, and started_at/transcript_path are unchanged (row COUNT, not "a row exists")', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-ensure-session-idempotent')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-idempotent-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Read', ok: true, started_at: '2020-01-01T00:00:00.000Z', ended_at: '2020-01-01T00:00:01.000Z' },
+  ])
+
+  // awaitCmd's own per-tick resolution starts the session FIRST.
+  awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, { sleep: NO_SLEEP, projectsDir })
+  const sidecarAfterAwait = readRunSidecar(ctx)
+  assert.equal(sidecarAfterAwait.dispatches[dispatchId].session_started, true)
+
+  const beforeClose = dumpLedgerTablesInSubprocess(sidecarAfterAwait, ['agent_sessions']).agent_sessions
+    .filter((r) => r.claude_session_id === dispatchId)
+  assert.equal(beforeClose.length, 1)
+
+  const closeRes = closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+  assert.equal(closeRes.code, 0)
+
+  const sidecar = readRunSidecar(ctx)
+  const afterClose = dumpLedgerTablesInSubprocess(sidecar, ['agent_sessions']).agent_sessions
+    .filter((r) => r.claude_session_id === dispatchId)
+  assert.equal(afterClose.length, 1, 'expected NO second agent_sessions row — the fallback must be gated on session_started, never on INSERT OR IGNORE alone')
+  assert.equal(afterClose[0].started_at, beforeClose[0].started_at, 'started_at must be unchanged by close (never a second startAgentSession)')
+  assert.equal(afterClose[0].transcript_path, beforeClose[0].transcript_path)
+})
+
+test('be-41-05 REPEAT CLOSE is idempotent for the agent_sessions row AND the tool_call/decision back-fill (must-fix #3): a second close call on an already-ended dispatch produces no additional agent_sessions row, no additional tool_call rows, and no additional decision row — only agent_end is mirrored again', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-repeat-idempotent')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-repeat-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Bash', ok: true, started_at: '2020-01-01T00:00:00.000Z', ended_at: '2020-01-01T00:00:01.000Z' },
+  ], { input_tokens: 11, output_tokens: 22, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 })
+
+  closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+  const sidecarAfterFirst = readRunSidecar(ctx)
+  const firstRow = dumpLedgerTablesInSubprocess(sidecarAfterFirst, ['agent_sessions']).agent_sessions
+    .find((r) => r.claude_session_id === dispatchId)
+  assert.notEqual(firstRow.billed_input_tokens, null)
+  const eventsAfterFirst = dumpLedgerTablesInSubprocess(sidecarAfterFirst, ['events']).events
+  const toolCallsAfterFirst = eventsAfterFirst.filter((e) => e.type === 'tool_call')
+  const decisionsAfterFirst = eventsAfterFirst.filter((e) => e.type === 'decision')
+  const agentEndsAfterFirst = eventsAfterFirst.filter((e) => e.type === 'agent_end')
+  assert.equal(toolCallsAfterFirst.length, 1, 'sanity: the first close must have back-filled the one tool_call tuple')
+  assert.equal(decisionsAfterFirst.length, 1, 'sanity: the first close must have emitted exactly one decision row')
+
+  // A repeat close (already-terminal branch) must never throw and must
+  // never re-run endAgentSession for a dispatch already marked `ended`.
+  assert.doesNotThrow(() => closeCmd({ dispatch: dispatchId }, ctx, { projectsDir }))
+  const sidecarAfterSecond = readRunSidecar(ctx)
+  const rows = dumpLedgerTablesInSubprocess(sidecarAfterSecond, ['agent_sessions']).agent_sessions
+    .filter((r) => r.claude_session_id === dispatchId)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0], firstRow, 'a repeat close must never mutate the already-ended agent_sessions row')
+
+  const eventsAfterSecond = dumpLedgerTablesInSubprocess(sidecarAfterSecond, ['events']).events
+  assert.equal(eventsAfterSecond.filter((e) => e.type === 'tool_call').length, toolCallsAfterFirst.length, 'must-fix #3: a repeat close must NEVER re-back-fill tool_call rows for an already-ended dispatch')
+  assert.equal(eventsAfterSecond.filter((e) => e.type === 'decision').length, decisionsAfterFirst.length, 'must-fix #3: a repeat close must NEVER re-emit the decision row for an already-ended dispatch')
+  assert.equal(eventsAfterSecond.filter((e) => e.type === 'agent_end').length, agentEndsAfterFirst.length + 1, 'agent_end IS mirrored again on every close — deliberate, unrelated to must-fix #3\'s gate')
+})
+
+test('be-41-05 ENVELOPE MIRRORED: a valid return lands recordEnvelope with all eleven fields, valid:1, violation_names empty', () => {
+  const { ctx, dispatchId, record } = setUpCloseDispatch('close-envelope-valid')
+  closeCmd({ dispatch: dispatchId }, ctx)
+
+  const sidecar = readRunSidecar(ctx)
+  const row = dumpLedgerTablesInSubprocess(sidecar, ['envelopes']).envelopes.find((r) => r.dispatch_id === dispatchId)
+  assert.ok(row, 'expected an envelopes row for this dispatch')
+  assert.equal(row.slice_id, record.slice_id)
+  assert.equal(row.attempt, record.attempt)
+  assert.equal(row.role, record.role)
+  assert.equal(row.body_kind, record.return.kind)
+  assert.equal(row.valid, 1)
+  assert.deepEqual(JSON.parse(row.violation_names), [])
+  assert.notEqual(row.produced_at, null)
+  assert.equal(row.schema_version, 1)
+})
+
+test('be-41-05 ENVELOPE MIRRORED (invalid/absent return): violation_names is built as `${path}:${keyword}` — NEVER a validator message', () => {
+  const { ctx } = setUpWorkspace('close-envelope-invalid')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  // No writeValidReturn call — return_path is absent.
+
+  closeCmd({ dispatch: dispatchId }, ctx)
+
+  const sidecar = readRunSidecar(ctx)
+  const row = dumpLedgerTablesInSubprocess(sidecar, ['envelopes']).envelopes.find((r) => r.dispatch_id === dispatchId)
+  assert.ok(row)
+  assert.equal(row.valid, 0)
+  const violationNames = JSON.parse(row.violation_names)
+  assert.ok(violationNames.length > 0)
+  for (const name of violationNames) {
+    assert.match(name, /^[^\s]{1,200}:[^\s]{1,80}$/, `violation name ${JSON.stringify(name)} must be the closed path:keyword shape, never a message`)
+    assert.doesNotMatch(name, /does not match|missing required|expected type/, 'must never be a validator message string')
+  }
+})
+
+test('be-41-05 agent_end CARRIES THE RECORD\'S TERMINAL OUTCOME: payload is exactly {role, outcome, dispatch_id} where outcome is closeCmd\'s own resolved value, never re-derived — proven across both the fresh and already-terminal branches', () => {
+  const { ctx, dispatchId, record } = setUpCloseDispatch('close-agent-end-outcome')
+
+  const closeRes = closeCmd({ dispatch: dispatchId }, ctx)
+  assert.equal(closeRes.json.outcome, 'ok')
+
+  let sidecar = readRunSidecar(ctx)
+  let events = dumpLedgerTablesInSubprocess(sidecar, ['events']).events.filter((e) => e.type === 'agent_end')
+  assert.equal(events.length, 1)
+  let payload = JSON.parse(events[0].payload_json)
+  assert.deepEqual(Object.keys(payload).sort(), ['dispatch_id', 'outcome', 'role'])
+  assert.equal(payload.outcome, 'ok')
+  assert.equal(payload.role, record.role)
+  assert.equal(payload.dispatch_id, dispatchId)
+
+  // Already-terminal branch: a repeat close reads record.outcome VERBATIM
+  // (never re-derived) — still 'ok' here, and still mirrored faithfully.
+  closeCmd({ dispatch: dispatchId }, ctx)
+  sidecar = readRunSidecar(ctx)
+  events = dumpLedgerTablesInSubprocess(sidecar, ['events']).events.filter((e) => e.type === 'agent_end')
+  assert.equal(events.length, 2, 'a repeat close mirrors its own agent_end again — never suppressed, never deduplicated by this slice')
+  payload = JSON.parse(events[1].payload_json)
+  assert.equal(payload.outcome, 'ok')
+})
+
+test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (transcript present, deduped)', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-endagentsession-usage')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-usage-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Read', ok: true, started_at: '2020-01-01T00:00:00.000Z', ended_at: '2020-01-01T00:00:01.000Z' },
+  ], { input_tokens: 100, output_tokens: 20, cache_creation_input_tokens: 5, cache_read_input_tokens: 50 })
+
+  closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+
+  const sidecar = readRunSidecar(ctx)
+  const row = dumpLedgerTablesInSubprocess(sidecar, ['agent_sessions']).agent_sessions
+    .find((r) => r.claude_session_id === dispatchId)
+  assert.ok(row)
+  assert.notEqual(row.ended_at, null)
+  assert.equal(row.context_window, null, 'U-4: context_window is always null')
+  assert.equal(row.billed_input_tokens, 100)
+  assert.equal(row.billed_output_tokens, 20)
+  assert.equal(row.billed_cache_write_tokens, 5)
+  assert.equal(row.billed_cache_read_tokens, 50)
+  assert.equal(row.raw_written_tokens, 20)
+  assert.equal(row.raw_read_tokens, 105, 'raw_read_tokens = input + cache_creation, cache_read EXCLUDED')
+  assert.equal(row.context_tokens, 155, 'context_tokens = last message input + cache_read + cache_creation')
+})
+
+test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (never-sighted transcript: all ten explicit null)', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-endagentsession-null')
+  const emptyProjectsDir = makeTmpDir('cmux-dispatch-close-null-usage-projects-')
+
+  closeCmd({ dispatch: dispatchId }, ctx, { projectsDir: emptyProjectsDir })
+
+  const sidecar = readRunSidecar(ctx)
+  const row = dumpLedgerTablesInSubprocess(sidecar, ['agent_sessions']).agent_sessions
+    .find((r) => r.claude_session_id === dispatchId)
+  assert.ok(row)
+  assert.notEqual(row.ended_at, null)
+  for (const field of ['context_tokens', 'context_window', 'raw_read_tokens', 'raw_written_tokens', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+    assert.equal(row[field], null, `expected explicit null for ${field}`)
+  }
+})
+
+test('be-41-05 TOOL_CALL BACK-FILL WITH HISTORICAL TIMESTAMPS: N tuples produce N tool_call rows whose timestamps come from the transcript (never now()), consuming exactly ONE seq reservation for the whole batch (ADR-027)', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-toolcall-backfill')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-toolcall-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Read', ok: true, started_at: '2019-06-01T00:00:00.000Z', ended_at: '2019-06-01T00:00:01.000Z' },
+    { tool: 'Bash', ok: false, started_at: '2019-06-01T00:00:02.000Z', ended_at: '2019-06-01T00:00:03.000Z' },
+    { tool: 'Write', ok: true, started_at: '2019-06-01T00:00:04.000Z', ended_at: '2019-06-01T00:00:05.000Z' },
+  ])
+
+  const beforeSidecar = readRunSidecar(ctx)
+  const reservedBefore = beforeSidecar.seq.event.reserved_through
+
+  const testStart = Date.now()
+  const closeRes = closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+  assert.equal(closeRes.code, 0)
+
+  const sidecar = readRunSidecar(ctx)
+  // ONE reservation covering the whole batch: agent_end + 3 tool_call +
+  // decision = 5 seq numbers advanced in a single jump, never 5 separate
+  // reservations.
+  assert.equal(sidecar.seq.event.reserved_through - reservedBefore, 5)
+
+  const events = dumpLedgerTablesInSubprocess(sidecar, ['events']).events
+  const toolCalls = events.filter((e) => e.type === 'tool_call')
+  assert.equal(toolCalls.length, 3, 'expected every tuple to survive as its own row, not just the first')
+  const started = toolCalls.map((e) => e.started_at).sort()
+  assert.deepEqual(started, ['2019-06-01T00:00:00.000Z', '2019-06-01T00:00:02.000Z', '2019-06-01T00:00:04.000Z'])
+  for (const e of toolCalls) {
+    assert.ok(Date.parse(e.started_at) < testStart, 'stored started_at must be the transcript\'s historical time, never the test clock\'s now')
+    const payload = JSON.parse(e.payload_json)
+    assert.deepEqual(Object.keys(payload).sort(), ['ok', 'tool'])
+  }
+  const okValues = toolCalls.map((e) => JSON.parse(e.payload_json).ok).sort()
+  assert.deepEqual(okValues, [false, true, true])
+})
+
+test('be-41-05 QA REWORK must-fix #1: a transcript with 70 tool_call tuples (over the 60-row back-fill cap) still lands agent_end AND exactly one decision row, back-fills only the most recent 60 tool_call rows, and makes the drop VISIBLE via both a stderr line and the decision row\'s alternatives', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-toolcall-cap')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-toolcall-cap-projects-')
+  // readToolCalls (transcript.mjs) normalizes every `tool` name down to a
+  // closed vocabulary (an unrecognized name like `Tool7` reduces to
+  // 'other') — tuples are identified below by their unique started_at
+  // timestamp instead, which readToolCalls passes through verbatim.
+  const tuples = []
+  for (let i = 0; i < 70; i += 1) {
+    tuples.push({
+      tool: 'Read',
+      ok: true,
+      started_at: new Date(Date.UTC(2019, 5, 1, 0, 0, i * 2)).toISOString(),
+      ended_at: new Date(Date.UTC(2019, 5, 1, 0, 0, i * 2 + 1)).toISOString(),
+    })
+  }
+  writeFakeTranscript(projectsDir, dispatchId, tuples)
+
+  const stderr = captureStderr(() => {
+    const closeRes = closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+    assert.equal(closeRes.code, 0)
+  })
+  assert.match(stderr, /70 tool_call tuples.*most recent 60.*dropped 10/, `expected a visible drop line, got stderr: ${JSON.stringify(stderr)}`)
+
+  const sidecar = readRunSidecar(ctx)
+  const events = dumpLedgerTablesInSubprocess(sidecar, ['events']).events
+  const agentEnds = events.filter((e) => e.type === 'agent_end')
+  const toolCalls = events.filter((e) => e.type === 'tool_call')
+  const decisions = events.filter((e) => e.type === 'decision')
+  assert.equal(agentEnds.length, 1, 'agent_end must always land, regardless of tool-call count')
+  assert.equal(toolCalls.length, 60, 'exactly the capped 60 tool_call rows must land, never all 70 and never zero')
+  assert.equal(decisions.length, 1, 'the decision row must always land, regardless of tool-call count')
+
+  const survivingStartedAts = toolCalls.map((e) => e.started_at)
+  for (let i = 0; i < 10; i += 1) {
+    assert.ok(!survivingStartedAts.includes(tuples[i].started_at), `tuple ${i} is among the oldest 10 dropped tuples and must not have landed`)
+  }
+  for (let i = 10; i < 70; i += 1) {
+    assert.ok(survivingStartedAts.includes(tuples[i].started_at), `tuple ${i} is among the most recent 60 tuples and must have landed`)
+  }
+
+  const decisionPayload = JSON.parse(decisions[0].payload_json)
+  assert.ok(decisionPayload.alternatives.includes('tool_calls_dropped:10'), `expected the decision row's alternatives to fold in the drop count, got ${JSON.stringify(decisionPayload.alternatives)}`)
+})
+
+test('be-41-05 QA REWORK must-fix #2(a): a hostile top-level return-envelope key (ANSI escape + control bytes) reaches violation_names sanitized, never a raw control byte', () => {
+  const { ctx } = setUpWorkspace('close-envelope-hostile-key')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const hostileKey = '\x1B[31mFAKE\x07\x00path'
+  const envelope = {
+    schema_version: 1,
+    dispatch_id: record.dispatch_id,
+    slice_id: record.slice_id,
+    attempt: record.attempt,
+    role: record.role,
+    produced_at: new Date().toISOString(),
+    body: { status: 'done', reason: 'ok', changes: ['f.mjs — impl'], validation: 'node --test' },
+    [hostileKey]: 'x',
+  }
+  mkdirSync(dirname(record.return_path), { recursive: true })
+  writeFileSync(record.return_path, JSON.stringify(envelope))
+
+  closeCmd({ dispatch: dispatchId }, ctx)
+
+  const sidecar = readRunSidecar(ctx)
+  const row = dumpLedgerTablesInSubprocess(sidecar, ['envelopes']).envelopes.find((r) => r.dispatch_id === dispatchId)
+  assert.ok(row)
+  const violationNames = JSON.parse(row.violation_names)
+  const hostileNames = violationNames.filter((n) => n.includes('FAKE'))
+  assert.ok(hostileNames.length > 0, `expected a violation name derived from the hostile key to survive sanitized, got ${JSON.stringify(violationNames)}`)
+  const rawControlBytesRe = /[\x00-\x1F\x7F]/
+  for (const name of hostileNames) {
+    assert.doesNotMatch(name, rawControlBytesRe, `violation name ${JSON.stringify(name)} must contain no raw control/ANSI bytes`)
+    assert.match(name, /^[^\s]{1,200}:[^\s]{1,80}$/, 'must still be the closed path:keyword shape after sanitizing')
+  }
+})
+
+test('be-41-05 QA REWORK must-fix #2(b): a hostile record.return_path reaches envelope_path sanitized the SAME way transcript_path already is (control-byte-stripped)', () => {
+  const { ctx } = setUpWorkspace('close-envelope-path-hostile')
+  const record = buildAndBindRecord(ctx, { role: 'code-reviewer', sliceId: 'be-1b' })
+  writeValidReturn(record)
+
+  // record.return_path is worker-writable (same uid, G13) but is only ever
+  // READ by closeCmd (never itself written hostile in real life) — this
+  // test proves the SANITIZER runs on whatever string sits there, by
+  // planting one directly on the on-disk record, mirroring the equivalent
+  // transcript_path hostile-path tests elsewhere in this file. The suffix is
+  // kept short (a real filesystem path component has an OS-enforced length
+  // ceiling well under sanitizeTranscriptPathForLedger's own 1024-char cap —
+  // that capping behavior is already proven for this exact helper by the
+  // transcript_path tests elsewhere in this file; this test's own job is
+  // only the control/ANSI-byte stripping, applied to a NEW call site).
+  const recordPath = join(ctx.paths.dispatchDir, `${record.slice_id}.${record.attempt}.json`)
+  // \x00 is deliberately excluded — a real null byte in a path argument
+  // throws at the fs layer (ERR_INVALID_ARG_VALUE) before this test's own
+  // control-byte assertions would ever run; \x1B/\x07 alone are sufficient
+  // to prove the sanitizer strips control/ANSI bytes.
+  const HOSTILE_SUFFIX = '\x1B[31mHOSTILE\x07'
+  const hostilePath = `${record.return_path}${HOSTILE_SUFFIX}`
+  // The hostile path itself must not exist on disk — return_path is read
+  // via readTextOrNull, which degrades a missing file to null (never a
+  // throw) — this test only cares about what reaches envelope_path, not
+  // about a genuinely valid return body surviving alongside it.
+  const onDisk = readRecord(recordPath)
+  writeFileSync(recordPath, JSON.stringify({ ...onDisk, return_path: hostilePath }, null, 2))
+
+  closeCmd({ dispatch: record.dispatch_id }, ctx)
+
+  const sidecar = readRunSidecar(ctx)
+  const row = dumpLedgerTablesInSubprocess(sidecar, ['envelopes']).envelopes.find((r) => r.dispatch_id === record.dispatch_id)
+  assert.ok(row)
+  assert.doesNotMatch(row.envelope_path, /[\x00-\x1F\x7F]/, 'envelope_path must contain no raw control/ANSI bytes')
+  assert.match(row.envelope_path, /HOSTILE/, 'the visible remnant of the hostile suffix must survive (sanitized, not silently dropped)')
+})
+
+test('be-41-05 QA REWORK must-fix #4: the SECOND close of an already-ended dispatch invokes startAgentSession/endAgentSession/recordEvent(tool_call) ZERO additional times — proves the application-level `entry.ended` guard is actually exercised, not just that SQLite\'s UNIQUE constraint absorbs a redundant insert', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-repeat-invocation-spy')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-repeat-spy-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Bash', ok: true, started_at: '2020-01-01T00:00:00.000Z', ended_at: '2020-01-01T00:00:01.000Z' },
+  ], { input_tokens: 5, output_tokens: 5, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 })
+
+  const calls = { startAgentSession: 0, endAgentSession: 0, tool_call: 0 }
+  _setEmitterOpenerForTest((opts) => {
+    const emitter = openRun(opts)
+    const realEmit = emitter.emit
+    return {
+      ...emitter,
+      emit: (fn) => realEmit((handle, nextSeq) => {
+        const spiedHandle = {
+          ...handle,
+          startAgentSession: (...a) => { calls.startAgentSession += 1; return handle.startAgentSession(...a) },
+          endAgentSession: (...a) => { calls.endAgentSession += 1; return handle.endAgentSession(...a) },
+          recordEvent: (...a) => {
+            if (a[0] && a[0].type === 'tool_call') calls.tool_call += 1
+            return handle.recordEvent(...a)
+          },
+        }
+        return fn(spiedHandle, nextSeq)
+      }),
+    }
+  })
+
+  try {
+    closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+    const callsAfterFirst = { ...calls }
+    assert.ok(callsAfterFirst.startAgentSession >= 1, 'sanity: the first close must invoke startAgentSession at least once')
+    assert.ok(callsAfterFirst.endAgentSession >= 1, 'sanity: the first close must invoke endAgentSession at least once')
+    assert.equal(callsAfterFirst.tool_call, 1, 'sanity: the first close must invoke recordEvent(tool_call) once')
+
+    closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+    assert.equal(calls.startAgentSession, callsAfterFirst.startAgentSession, 'must-fix #4: the second close must invoke startAgentSession ZERO additional times')
+    assert.equal(calls.endAgentSession, callsAfterFirst.endAgentSession, 'must-fix #4: the second close must invoke endAgentSession ZERO additional times')
+    assert.equal(calls.tool_call, callsAfterFirst.tool_call, 'must-fix #4: the second close must invoke recordEvent(tool_call) ZERO additional times')
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+})
+
+test('be-41-05 QA REWORK must-fix #5: closeCmd\'s tool_call/agent_end/decision back-fill consumes exactly ONE reserveSeq call for the whole batch (n === eventCount), never N separate reservations (ADR-027 anti-pattern the mutation pass proved untested)', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-reserveseq-callcount')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-reserveseq-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Read', ok: true, started_at: '2019-06-01T00:00:00.000Z', ended_at: '2019-06-01T00:00:01.000Z' },
+    { tool: 'Bash', ok: false, started_at: '2019-06-01T00:00:02.000Z', ended_at: '2019-06-01T00:00:03.000Z' },
+    { tool: 'Write', ok: true, started_at: '2019-06-01T00:00:04.000Z', ended_at: '2019-06-01T00:00:05.000Z' },
+  ])
+
+  const reserveSeqCalls = []
+  _setEmitterOpenerForTest((opts) => {
+    const emitter = openRun(opts)
+    const realReserveSeq = emitter.reserveSeq
+    return {
+      ...emitter,
+      reserveSeq: (kind, n) => { reserveSeqCalls.push({ kind, n }); return realReserveSeq(kind, n) },
+    }
+  })
+
+  try {
+    const closeRes = closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+    assert.equal(closeRes.code, 0)
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  const eventReservations = reserveSeqCalls.filter((c) => c.kind === 'event')
+  assert.equal(eventReservations.length, 1, `expected EXACTLY ONE 'event' reserveSeq call for the whole back-fill batch, got ${eventReservations.length}: ${JSON.stringify(eventReservations)}`)
+  assert.equal(eventReservations[0].n, 5, 'expected n === eventCount (agent_end + 3 tool_call + decision = 5), not N separate reservations of 1')
+})
+
+test('be-41-05 RECONCILE EVIDENCE AS A decision ROW: payload is dispatcher-authored closed vocabulary plus counts — a hostile reconcile warning (ANSI escapes, embedded newline, 5000 chars) reaches NO ledger row, NO stderr line and NO file under stateDir', () => {
+  const { ctx } = setUpWorkspace('close-decision-hostile')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  writeValidReturn(record)
+
+  // The .exit sentinel is worker-writable (same uid) — classify() folds its
+  // raw content into a warning string verbatim
+  // (`exit_nonzero:${fsState.exitSentinel} despite a valid return`).
+  const MARKER = `\x1B[31mHOSTILE${'A'.repeat(5000)}\nB\x1B[0m`
+  const exitPath = join(ctx.paths.stateDir, `${dispatchId}.exit`)
+  writeFileSync(exitPath, `0 ${MARKER}`)
+
+  let res
+  const captured = captureStderr(() => { res = closeCmd({ dispatch: dispatchId }, ctx) })
+  assert.equal(res.code, 0)
+
+  const sidecar = readRunSidecar(ctx)
+  const dumped = dumpLedgerTablesInSubprocess(sidecar, ['events'])
+  const jsonlKinds = readJsonlKinds(sidecar.jsonl_path)
+  const allLedgerText = `${JSON.stringify(dumped)}${JSON.stringify(jsonlKinds)}`
+  assert.doesNotMatch(allLedgerText, /HOSTILE/, 'the hostile marker must reach NO ledger row')
+  assert.doesNotMatch(captured, /HOSTILE/, 'the hostile marker must reach NO stderr line')
+
+  // NO file under stateDir carries the marker either (the ANSI/newline
+  // string never even transits a mirror path) — EXCEPT the .exit sentinel
+  // itself, which is the worker-writable SOURCE of the marker (the file
+  // this test deliberately seeded), never a mirror artifact.
+  function walk(dir) {
+    let found = false
+    for (const name of readdirSync(dir)) {
+      const p = join(dir, name)
+      if (p === exitPath) continue
+      const st = statSync(p)
+      if (st.isDirectory()) {
+        if (walk(p)) found = true
+      } else if (st.isFile()) {
+        if (readFileSync(p, 'utf8').includes('HOSTILE')) found = true
+      }
+    }
+    return found
+  }
+  assert.equal(walk(ctx.paths.stateDir), false, 'the hostile marker must reach NO file under stateDir OTHER than the .exit sentinel that seeded it')
+
+  const decisionEvents = dumped.events.filter((e) => e.type === 'decision')
+  assert.equal(decisionEvents.length, 1)
+  const payload = JSON.parse(decisionEvents[0].payload_json)
+  assert.deepEqual(Object.keys(payload).sort(), ['alternatives', 'decided', 'why'])
+  assert.equal(payload.decided, 'ok')
+  assert.equal(typeof payload.why, 'string')
+  assert.ok(Array.isArray(payload.alternatives))
+  for (const alt of payload.alternatives) {
+    assert.match(alt, /^(terminal_outcome_uncorroborated|exit_nonzero|postcondition_unverifiable|other):\d+$/)
+  }
+})
+
+test('be-41-05 JSON SURFACE FROZEN: closeCmd\'s {code, json} is byte-identical across ok, refused_postcondition, already-terminal (forged ok, uncorroborated) and no_return branches, whether or not the ledger mirror runs', () => {
+  function runOkBranch() {
+    const { ctx, dispatchId } = setUpCloseDispatch('close-frozen-ok')
+    return closeCmd({ dispatch: dispatchId }, ctx)
+  }
+  function runRefusedPostconditionBranch() {
+    const { ctx } = setUpWorkspace('close-frozen-refused-postcondition')
+    const record = buildAndBindRecord(ctx, { role: 'code-reviewer', sliceId: 'be-1b' })
+    writeValidReturn(record)
+    writeFileSync(join(record.worktree.path, 'dirty.txt'), 'uncommitted')
+    return closeCmd({ dispatch: record.dispatch_id }, ctx)
+  }
+  function runAlreadyTerminalUncorroboratedBranch() {
+    const { ctx } = setUpWorkspace('close-frozen-uncorroborated')
+    const specPath = makeSpecFile(ctx)
+    const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    const recordPath = join(ctx.paths.dispatchDir, 'be-1a.1.json')
+    const record = readRecord(recordPath)
+    const forged = { ...record, outcome: 'ok', ended_at: new Date().toISOString() }
+    writeFileSync(recordPath, JSON.stringify(forged, null, 2))
+    return closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  }
+  function runNoReturnBranch() {
+    const { ctx } = setUpWorkspace('close-frozen-no-return')
+    const specPath = makeSpecFile(ctx)
+    const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    return closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
+  }
+
+  function redact(res) {
+    return { code: res.code, json: { ...res.json, dispatch_id: '<dispatch_id>' } }
+  }
+
+  const okHealthy = redact(runOkBranch())
+  // The fresh (non-already-terminal) branch always evaluates the
+  // postcondition against a real `git status --porcelain` read, regardless
+  // of the mapped outcome — a clean checkout with no postcondition_ignore
+  // entries yields {ignored: [], offending: [], ok: true} (never null;
+  // null is reserved for the already-terminal short-circuit branch, which
+  // never evaluates a postcondition at all).
+  assert.deepEqual(okHealthy, { code: 0, json: { dispatch_id: '<dispatch_id>', outcome: 'ok', warnings: [], postcondition: { ignored: [], offending: [], ok: true } } })
+
+  const refusedPostconditionHealthy = redact(runRefusedPostconditionBranch())
+  // QA REWORK (should-fix D): the postcondition's `offending` field is
+  // dispatcher-derived relative porcelain lines (git status --porcelain
+  // against the worktree, ladder.mjs's evaluatePostcondition) — never
+  // worker-influenced free text and never path-variant across machines
+  // (relative to the worktree root), so this branch is just as fully
+  // freezable as the other three below; only `code`/`outcome` were pinned
+  // before this rework.
+  assert.deepEqual(refusedPostconditionHealthy, {
+    code: 1,
+    json: { dispatch_id: '<dispatch_id>', outcome: 'refused_postcondition', warnings: [], postcondition: { ignored: [], offending: ['?? dirty.txt'], ok: false } },
+  })
+
+  const uncorroboratedHealthy = redact(runAlreadyTerminalUncorroboratedBranch())
+  assert.deepEqual(uncorroboratedHealthy, {
+    code: 1,
+    json: { dispatch_id: '<dispatch_id>', outcome: 'ok', warnings: ['terminal_outcome_uncorroborated'], postcondition: null },
+  })
+
+  const noReturnHealthy = redact(runNoReturnBranch())
+  assert.deepEqual(noReturnHealthy, { code: 1, json: { dispatch_id: '<dispatch_id>', outcome: 'no_return', warnings: [], postcondition: { ignored: [], offending: [], ok: true } } })
+
+  // Same four branches again, this time with every ledger writer throwing —
+  // {code, json} must be byte-identical to the healthy run above.
+  installHostileEmitterOpener()
+  let okDegraded, refusedPostconditionDegraded, uncorroboratedDegraded, noReturnDegraded
+  try {
+    okDegraded = redact(runOkBranch())
+    refusedPostconditionDegraded = redact(runRefusedPostconditionBranch())
+    uncorroboratedDegraded = redact(runAlreadyTerminalUncorroboratedBranch())
+    noReturnDegraded = redact(runNoReturnBranch())
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+  assert.deepEqual(okDegraded, okHealthy)
+  assert.deepEqual(refusedPostconditionDegraded, refusedPostconditionHealthy)
+  assert.deepEqual(uncorroboratedDegraded, uncorroboratedHealthy)
+  assert.deepEqual(noReturnDegraded, noReturnHealthy)
+})
+
+test('be-41-05 NEVER LOAD-BEARING (mutation): close returns byte-identical {code, json}, terminates the record identically on disk, unlinks the nonce identically, and makes the same number of cmux invocations whether the ledger is healthy or every writer throws', () => {
+  function runScenario(prefix) {
+    const { env, ctx } = setUpWorkspace(prefix)
+    const specPath = makeSpecFile(ctx)
+    const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    const dispatchId = dispatchRes.json.dispatch_id
+    const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+    writeValidReturn(record)
+    const nonceExistedBefore = existsSync(sidecarPaths(ctx.paths, dispatchId).nonce)
+    const closeRes = closeCmd({ dispatch: dispatchId }, ctx)
+    const terminatedRecord = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+    return {
+      redactedRes: { code: closeRes.code, json: { ...closeRes.json, dispatch_id: '<dispatch_id>' } },
+      terminatedOutcome: terminatedRecord.outcome,
+      terminatedEndedAtIsSet: terminatedRecord.ended_at !== null,
+      nonceExistedBefore,
+      nonceGoneAfter: !existsSync(sidecarPaths(ctx.paths, dispatchId).nonce),
+      invocationCount: readLog(env.logPath).length,
+    }
+  }
+
+  const healthy = runScenario('close-mutation-healthy')
+
+  installHostileEmitterOpener()
+  let hostile
+  try {
+    hostile = runScenario('close-mutation-hostile')
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+  assert.deepEqual(hostile, healthy)
+})
+
+test('be-41-05 AMENDED POST-be-41-04: after closeCmd runs, a subsequent teardownCmd does NOT re-emit endAgentSession for that dispatch — the sqlite row\'s token fields are unchanged by teardown', () => {
+  const { ctx, dispatchId } = setUpCloseDispatch('close-then-teardown-ended')
+  const projectsDir = makeTmpDir('cmux-dispatch-close-teardown-ended-projects-')
+  writeFakeTranscript(projectsDir, dispatchId, [
+    { tool: 'Read', ok: true, started_at: '2020-01-01T00:00:00.000Z', ended_at: '2020-01-01T00:00:01.000Z' },
+  ], { input_tokens: 42, output_tokens: 7, cache_creation_input_tokens: 1, cache_read_input_tokens: 2 })
+
+  closeCmd({ dispatch: dispatchId }, ctx, { projectsDir })
+
+  const sidecarAfterClose = readRunSidecar(ctx)
+  assert.equal(sidecarAfterClose.dispatches[dispatchId].ended, true)
+  const rowAfterClose = dumpLedgerTablesInSubprocess(sidecarAfterClose, ['agent_sessions']).agent_sessions
+    .find((r) => r.claude_session_id === dispatchId)
+  assert.equal(rowAfterClose.billed_input_tokens, 42)
+  assert.notEqual(rowAfterClose.ended_at, null)
+
+  // If the AMENDED `ended` guard were missing, teardownCmd's reconciliation
+  // loop would see `session_started && !ended` as still-open and re-emit
+  // endAgentSession with all ten fields explicit null (a real UPDATE, not a
+  // merge) — clobbering the real figures just recorded above.
+  const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  assert.equal(teardownRes.code, 0)
+
+  // teardownCmd's archiveOrDelete RENAMES stateDir — the sidecar's own
+  // db_path/jsonl_path fields are stamped at CREATE time and are never
+  // rewritten by a later archive, so they still name the PRE-archive
+  // location. Recompute the real post-archive paths (be-41-04's own
+  // post-teardown assertions do the exact same thing).
+  const archivedStateDir = teardownRes.json.state_dir.path
+  const sidecarAfterTeardown = JSON.parse(readFileSync(join(archivedStateDir, 'ledger', 'run.json'), 'utf8'))
+  const archivedLedgerPaths = {
+    ...sidecarAfterTeardown,
+    db_path: join(archivedStateDir, 'ledger', 'ledger.db'),
+    jsonl_path: join(archivedStateDir, 'ledger', 'ledger.jsonl'),
+  }
+  const rowAfterTeardown = dumpLedgerTablesInSubprocess(archivedLedgerPaths, ['agent_sessions']).agent_sessions
+    .find((r) => r.claude_session_id === dispatchId)
+  assert.ok(rowAfterTeardown, 'expected the agent_sessions row to still exist after teardown')
+  assert.equal(rowAfterTeardown.billed_input_tokens, 42, 'teardown must NEVER re-emit endAgentSession for an already-ended dispatch — token fields must be unchanged, not just "teardown ran without error"')
+  assert.equal(rowAfterTeardown.billed_output_tokens, 7)
+  assert.equal(rowAfterTeardown.billed_cache_write_tokens, 1)
+  assert.equal(rowAfterTeardown.billed_cache_read_tokens, 2)
+  assert.equal(rowAfterTeardown.ended_at, rowAfterClose.ended_at, 'ended_at itself must also be unchanged (proves no second UPDATE ran at all, not merely that the values happened to match)')
+})
 

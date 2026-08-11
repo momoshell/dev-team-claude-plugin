@@ -70,7 +70,7 @@ import { lintSpec } from '../spec-lint.mjs'
 // only: scripts/factory/emit.mjs and scripts/factory/transcript.mjs are out
 // of this slice's scope (ADR-026: unedited by #41).
 import { openRun } from '../factory/emit.mjs'
-import { resolveTranscript, readUsage } from '../factory/transcript.mjs'
+import { resolveTranscript, readUsage, readToolCalls } from '../factory/transcript.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_PLUGIN_ROOT = resolvePath(HERE, '..', '..')
@@ -2685,7 +2685,124 @@ function presentReturn(record, roleDef) {
   }
 }
 
-export function closeCmd(args, ctx) {
+// ---------------------------------------------------------------------------
+// #41 (SF-2, be-41-05) — closeCmd's ledger-mirror helpers. Module-local,
+// never exported to workers, never load-bearing (every call site below is
+// wrapped in the same try/catch convention every other verb's mirror uses).
+// ---------------------------------------------------------------------------
+
+// mirrorViolationNameRe MIRRORS ledger.mjs's own recordSourceError shape
+// guard (ledger.mjs:112) — recordEnvelope's own violation_names field has NO
+// equivalent built-in filter, so THIS call site must apply the same
+// `path:keyword`, no-whitespace, bounded-length shape check itself before a
+// violation ever reaches the ledger. This matters concretely: contract.mjs's
+// walk() builds an additionalProperties violation's `path` by interpolating
+// the OFFENDING PROPERTY NAME verbatim (contract.mjs:213, `${path}.${key}`
+// where `key` is `Object.keys(value)` off the worker-authored JSON) — a
+// worker return whose envelope carries a hostile top-level key (an embedded
+// newline, thousands of characters) would otherwise walk straight through
+// recordEnvelope's own key-only allowlist and land in the mirror unfiltered.
+// Any candidate failing this shape check is dropped (violation_names becomes
+// incomplete, never hostile) rather than truncated.
+//
+// QA REWORK (must-fix #2a): the `[^\s]` shape test alone does NOT strip
+// control bytes or ANSI-CSI escape sequences — `\x1B`, `\x07`, `\x00` are all
+// non-whitespace and pass it untouched. The `path` half (the worker-supplied
+// half of `${path}:${keyword}` — `keyword` is already closed-vocabulary from
+// contract.mjs's own validator, per the interface_contract, and needs no
+// sanitizing) is now run through sanitizeAgentIdentityField first — the SAME
+// ANSI-CSI-whole-sequence-then-C0/DEL strip this file already uses for
+// record.model/record.role, reused here rather than reimplemented, which
+// also incidentally caps the path half at SIGNAL_LIMITS.message_max_chars
+// (200) matching this regex's own `{1,200}` bound.
+const MIRROR_VIOLATION_NAME_RE = /^[^\s]{1,200}:[^\s]{1,80}$/
+// QA REWORK (must-fix #2a): a hostile return file with enough additional-
+// properties keys could otherwise produce an unbounded violation_names
+// array; capped the same way capFailuresForOutput above caps spec-lint
+// failures — kept entries plus one synthetic "...and N more" tail.
+const MIRROR_VIOLATION_NAME_MAX_ENTRIES = 50
+function buildEnvelopeViolationNames(violations) {
+  const names = (violations || [])
+    .map((v) => `${sanitizeAgentIdentityField(v.path)}:${v.keyword}`)
+    .filter((name) => MIRROR_VIOLATION_NAME_RE.test(name))
+  if (names.length <= MIRROR_VIOLATION_NAME_MAX_ENTRIES) return names
+  const kept = names.slice(0, MIRROR_VIOLATION_NAME_MAX_ENTRIES)
+  kept.push(`...and ${names.length - MIRROR_VIOLATION_NAME_MAX_ENTRIES} more`)
+  return kept
+}
+
+// resolveEnvelopeProducedAtMs(envelope) -> epoch ms. recordEnvelope's own
+// `produced_at` parameter is epoch-ms/Date (isoMs's contract, ledger.mjs),
+// but the worker-authored envelope's own `produced_at` is an ISO STRING
+// (return-envelope.schema.json) — Date.parse converts it to a plain number
+// so no worker-authored string byte ever crosses into the ledger call
+// itself; a missing/unparseable value degrades to this call's own close
+// time rather than throwing inside recordEnvelope (NEVER LOAD-BEARING).
+function resolveEnvelopeProducedAtMs(envelope) {
+  if (envelope && typeof envelope.produced_at === 'string') {
+    const parsedMs = Date.parse(envelope.produced_at)
+    if (Number.isFinite(parsedMs)) return parsedMs
+  }
+  return Date.now()
+}
+
+// toolCallTimestampMs(iso) -> epoch ms | null. readToolCalls (be-41-02)
+// returns HISTORICAL ISO-string timestamps; recordEvent/isoMs wants
+// epoch-ms/Date, never a string (isoMs throws on a string). Every call site
+// below passes the RESULT of this helper explicitly (never omits the key) —
+// recordEvent defaults BOTH started_at/ended_at to now() for type 'tool_call'
+// only when the key itself is absent (ledger.mjs:809-810); an explicit null
+// here means "the reducer itself recorded no timestamp" (e.g. a truncated
+// transcript's unmatched tool_use, transcript.mjs's own documented
+// unsafe-reading fallback) and is left to that same now()-fallback rather
+// than fabricated a second time at this layer.
+function toolCallTimestampMs(iso) {
+  if (typeof iso !== 'string') return null
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? ms : null
+}
+
+// RECONCILE EVIDENCE (decision row) — closed-vocabulary mapping, C4: this is
+// its OWN mapping (classify()'s string[] `warnings` shape), never a generic
+// "mirror the warnings array" helper. Every classify()/evaluatePostcondition
+// warning string may itself embed worker-influenced bytes (fsState.exitSentinel
+// is a worker-writable sidecar file's content, ladder.mjs's
+// `exit_nonzero:${fsState.exitSentinel} despite a valid return`) — this
+// closed prefix whitelist plus a per-prefix COUNT is what "dispatcher-authored,
+// closed-vocabulary values plus counts" (never a reason string, never a
+// transcript excerpt) means in practice: the free-text tail after the first
+// ':' is never read here, only the prefix before it, and only when that
+// prefix is itself one of these four literals.
+const RECONCILE_WARNING_PREFIXES = Object.freeze(['terminal_outcome_uncorroborated', 'exit_nonzero', 'postcondition_unverifiable', 'other'])
+function summarizeReconcileWarnings(warnings) {
+  const counts = new Map()
+  for (const w of warnings || []) {
+    const prefix = typeof w === 'string' ? w.split(':')[0] : 'other'
+    const key = RECONCILE_WARNING_PREFIXES.includes(prefix) ? prefix : 'other'
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  return RECONCILE_WARNING_PREFIXES.filter((k) => counts.has(k)).map((k) => `${k}:${counts.get(k)}`)
+}
+
+// resolveReconcileDecisionReason -> a closed-enum `why`, never classify()'s
+// own free-text warning strings. Reuses the SAME `terminal_outcome_uncorroborated`
+// warning classify() already pushes (ladder.mjs) rather than re-deriving a
+// second signal for the same fact.
+function resolveReconcileDecisionReason({ record, uncorroborated, postconditionResult, warnings }) {
+  if (record.outcome !== null) return uncorroborated ? 'terminal_uncorroborated' : 'terminal_trusted'
+  if ((warnings || []).some((w) => typeof w === 'string' && w.startsWith('postcondition_unverifiable'))) return 'postcondition_unverifiable'
+  if (!postconditionResult) return 'postcondition_not_evaluated'
+  return postconditionResult.ok ? 'postcondition_verified' : 'postcondition_violated'
+}
+
+// deps.projectsDir is a TEST SEAM ONLY (mirrors awaitCmd's own identical
+// deps.projectsDir override) — production callers never pass `deps` at all
+// (COMMANDS[verb](args, ctx) calls every verb with exactly two arguments),
+// so the real ~/.claude/projects default below is exercised in production
+// exactly as before this slice. Never a new CLI flag, never a change to
+// closeCmd's outcome resolution/postcondition/nonce-unlink/doc-tab logic —
+// this is purely the ledger-mirror block's own resolveTranscript lookup dir.
+export function closeCmd(args, ctx, deps = {}) {
   const { paths } = ctx
   if (!args.dispatch) {
     throw new UsageError('close requires --dispatch <dispatch_id>')
@@ -2824,6 +2941,259 @@ export function closeCmd(args, ctx) {
     } else {
       closeSurface(record.surface.surface_id)
     }
+  }
+
+  // #41 (SF-2, be-41-05): mirror this close into the ledger — runs AFTER the
+  // record is already terminal on disk and never reorders or conditions any
+  // of the above. NEVER LOAD-BEARING: openEmitter/every emitter method never
+  // throws by be-41-01's contract; wrapped anyway as defense against a bug
+  // in this glue code — see workspaceCmd's identical wrapping note. Nothing
+  // in this block may change `outcome`, `postconditionResult`,
+  // `classification.warnings`, or the frozen return object built below.
+  try {
+    const emitter = openEmitter(ctx)
+    const sidecarSnapshot = emitter.sidecar()
+    const entry = sidecarSnapshot && sidecarSnapshot.dispatches ? sidecarSnapshot.dispatches[record.dispatch_id] : null
+    const phaseId = sidecarSnapshot && sidecarSnapshot.phase ? sidecarSnapshot.phase.phase_id : null
+    const projectsDir = deps.projectsDir || join(homedir(), '.claude', 'projects')
+
+    // 1. ensureAgentSession FALLBACK — idempotent: gated on the sidecar's
+    // own session_started flag (never on "does a row already exist", which
+    // agent_sessions' UNIQUE(adw_id, claude_session_id) + INSERT OR IGNORE
+    // would silently swallow either way). A dispatch never awaited (or
+    // whose transcript only appeared at the very end) gets exactly ONE row
+    // here, with the resolved transcript_path when sightable now and
+    // explicit null when it is not — unlike await's own per-tick
+    // resolveAgentSessionTick, this NEVER skips the row for an unresolved
+    // transcript: close is the last chance, and endAgentSession's UPDATE
+    // below needs a row to land on.
+    let transcriptPath = entry ? entry.transcript_path : null
+    if (entry && !entry.session_started) {
+      // QA REWORK (should-fix B): forward the resolution stats into
+      // emitter.bumpStat the same way resolveAgentSessionTick (be-41-04)
+      // does — `stats: {}` thrown away silently means a missing/ambiguous
+      // resolution here is invisible to stats() forever.
+      const closeStats = {}
+      const resolved = resolveTranscript({ record, projectsDir, stats: closeStats })
+      if (closeStats.resolution_missing) emitter.bumpStat('resolution_missing', closeStats.resolution_missing)
+      if (closeStats.resolution_ambiguous) emitter.bumpStat('resolution_ambiguous', closeStats.resolution_ambiguous)
+      transcriptPath = resolved ? resolved.transcript_path : null
+      emitter.emit((handle) => {
+        handle.startAgentSession({
+          adw_id: emitter.adwId,
+          dispatch_id: record.dispatch_id,
+          role: sanitizeAgentIdentityField(record.role),
+          model: sanitizeAgentIdentityField(record.model),
+          claude_session_id: record.dispatch_id, // be-41-03: claude_session_id === dispatch_id, always
+          transcript_path: resolved ? sanitizeTranscriptPathForLedger(resolved.transcript_path) : null,
+        })
+      })
+      const sessionStartPersistedOk = emitter.updateSidecar((draft) => {
+        const e = draft.dispatches && draft.dispatches[record.dispatch_id]
+        // Compare-and-set (mirrors resolveAgentSessionTick's own guard): a
+        // concurrent caller that already pinned this session first must
+        // never be overwritten.
+        if (e && !e.session_started) {
+          e.session_started = true
+          e.transcript_path = resolved ? resolved.transcript_path : null
+          e.sighted_at = resolved ? isoMs(Date.now()) : null
+        }
+      })
+      // QA REWORK (should-fix A): mirrors resolveAgentSessionTick's own
+      // give-up log — a discarded persist result here would silently leave
+      // the sidecar's session_started flag stuck false forever.
+      if (!sessionStartPersistedOk) {
+        log(`close: session-start sidecar persist failed for dispatch ${record.dispatch_id} (lock give-up?)`)
+      }
+    } else if (!entry) {
+      // QA REWORK (should-fix A): a missing sidecar entry (never dispatched
+      // through this run's own sidecar, or a sidecar that failed to persist
+      // at dispatch time) makes the ensureAgentSession fallback above a
+      // silent no-op — log it so the skip is diagnosable instead of just
+      // "no agent_sessions row appeared".
+      log(`close: no sidecar entry for dispatch ${record.dispatch_id} — skipping the ensureAgentSession fallback and the tool_call/decision back-fill`)
+    }
+
+    // 2. ENVELOPE MIRRORED — re-read/re-validate record.return_path
+    // read-only (never trust an earlier tick's classification, matching
+    // presentReturn's own discipline). violation_names is built as
+    // `${path}:${keyword}` — NEVER `.message` (contract.mjs embeds the
+    // offending value verbatim into every message) — and additionally
+    // shape-filtered (buildEnvelopeViolationNames) since recordEnvelope has
+    // no built-in guard of its own for this field.
+    const closeReturnText = readTextOrNull(record.return_path)
+    const closeValidation = validateReturn(record, closeReturnText)
+    const envelope = closeValidation.envelope
+    emitter.emit((handle) => {
+      handle.recordEnvelope({
+        adw_id: emitter.adwId,
+        dispatch_id: record.dispatch_id,
+        slice_id: record.slice_id,
+        attempt: record.attempt,
+        role: sanitizeAgentIdentityField(record.role),
+        produced_at: resolveEnvelopeProducedAtMs(envelope),
+        schema_version: envelope && Number.isInteger(envelope.schema_version) ? envelope.schema_version : null,
+        // QA REWORK (must-fix #2b): record.return_path is worker-writable
+        // (same uid, G13) exactly like transcript_path — sanitized through
+        // the SAME helper (sanitizeTranscriptPathForLedger) before it
+        // reaches the ledger's envelope_path column, never raw.
+        envelope_path: sanitizeTranscriptPathForLedger(record.return_path),
+        body_kind: record.return ? record.return.kind : null,
+        valid: closeValidation.ok,
+        violation_names: buildEnvelopeViolationNames(closeValidation.violations),
+      })
+    })
+
+    // 3/5/6. ONE seq reservation for the whole event back-fill (ADR-027):
+    // agent_end + (on the FIRST close only, see backfillHistory below) every
+    // back-filled tool_call row and the reconcile-evidence decision row —
+    // never one reservation per row.
+    //
+    // QA REWORK (must-fix #3): the tool_call back-fill and the decision row
+    // are gated on the SAME `entry && !entry.ended` condition guarding
+    // endAgentSession (item 4, below) — a repeat close on an already-`ended`
+    // dispatch re-reads the same transcript and must never re-emit a second
+    // batch of tool_call rows or a second decision row: nothing dedupes
+    // them, so every downstream tool-usage count would silently double.
+    // agent_end is deliberately NOT gated this way — it is mirrored again on
+    // every close (see the "agent_end CARRIES THE RECORD'S TERMINAL OUTCOME"
+    // test, which pins this as intentional and unrelated to this gate).
+    const backfillHistory = Boolean(entry) && !entry.ended
+    const rawToolTuples = backfillHistory && transcriptPath && isSafeTranscriptFileForTeardownRead(transcriptPath)
+      ? readToolCalls({ transcriptPath })
+      : []
+    // QA REWORK (must-fix #1): reserveSeq refuses any n > MAX_SEQ_RESERVE_N
+    // (64, emit.mjs-private) and returns [] — without a cap, a single
+    // dispatch with 63+ tool calls (routine for a real coder dispatch) would
+    // make the `else` branch below skip EVERYTHING for that close: no
+    // agent_end, no tool_call rows, no decision row. Capping the
+    // BACK-FILLED tool_call rows at a bound comfortably under the ceiling
+    // (60, leaving room for agent_end + decision => at most 62 < 64)
+    // guarantees agent_end and the decision row always land, regardless of
+    // tool-call count. The most RECENT 60 tuples are kept (not the first
+    // 60): the decision row landing right after them reasons about how the
+    // dispatch ENDED, and the tail of the transcript is the evidence
+    // closest to that ending. The drop is made VISIBLE two ways: a stderr
+    // line here, and a `tool_calls_dropped:<n>` entry folded into the
+    // decision row's own closed-vocabulary `alternatives` list below (never
+    // a raw count anywhere else — matching that field's existing
+    // count-only convention).
+    const TOOL_CALL_BACKFILL_CAP = 60
+    const toolTuples = rawToolTuples.length > TOOL_CALL_BACKFILL_CAP
+      ? rawToolTuples.slice(-TOOL_CALL_BACKFILL_CAP)
+      : rawToolTuples
+    const droppedToolCallCount = rawToolTuples.length - toolTuples.length
+    if (droppedToolCallCount > 0) {
+      log(`close: dispatch ${record.dispatch_id} transcript had ${rawToolTuples.length} tool_call tuples — backfilling only the most recent ${TOOL_CALL_BACKFILL_CAP} (dropped ${droppedToolCallCount}) to stay under the ledger's per-close seq-reservation ceiling`)
+    }
+    const eventCount = backfillHistory ? toolTuples.length + 2 : 1 // agent_end, [+tool_calls, +decision]
+    const seqs = emitter.reserveSeq('event', eventCount)
+    if (seqs.length === eventCount) {
+      let seqIdx = 0
+
+      // 3. agent_end CARRIES THE RECORD'S TERMINAL OUTCOME — closeCmd's own
+      // resolved `outcome`, never re-derived.
+      emitter.emit((handle) => {
+        handle.recordEvent({
+          adw_id: emitter.adwId, type: 'agent_end', seq: seqs[seqIdx], phase_id: phaseId,
+          payload: { role: sanitizeAgentIdentityField(record.role), outcome, dispatch_id: record.dispatch_id },
+        })
+      })
+      seqIdx += 1
+
+      if (backfillHistory) {
+        // 5. N back-filled tool_call rows with HISTORICAL timestamps from
+        // the reducer (never now() — see toolCallTimestampMs's header
+        // comment).
+        for (const tuple of toolTuples) {
+          const seq = seqs[seqIdx]
+          seqIdx += 1
+          emitter.emit((handle) => {
+            handle.recordEvent({
+              adw_id: emitter.adwId, type: 'tool_call', seq, phase_id: phaseId,
+              started_at: toolCallTimestampMs(tuple.started_at),
+              ended_at: toolCallTimestampMs(tuple.ended_at),
+              payload: { tool: tuple.tool, ok: tuple.ok },
+            })
+          })
+        }
+
+        // 6. RECONCILE EVIDENCE AS A decision ROW — dispatcher-authored
+        // closed-vocabulary values plus counts only (see the two helpers'
+        // header comments); never classify()'s own raw warning strings.
+        const alternatives = summarizeReconcileWarnings(classification.warnings)
+        if (droppedToolCallCount > 0) alternatives.push(`tool_calls_dropped:${droppedToolCallCount}`)
+        emitter.emit((handle) => {
+          handle.recordEvent({
+            adw_id: emitter.adwId, type: 'decision', seq: seqs[seqIdx], phase_id: phaseId,
+            payload: {
+              decided: outcome,
+              why: resolveReconcileDecisionReason({ record, uncorroborated: classification.warnings.some((w) => w.includes('terminal_outcome_uncorroborated')), postconditionResult, warnings: classification.warnings }),
+              alternatives,
+            },
+          })
+        })
+      }
+    } else {
+      log(`close: dispatch ${record.dispatch_id} ledger seq reservation gave up — skipping this close's event back-fill (agent_end${backfillHistory ? '/tool_call/decision' : ''})`)
+    }
+
+    // 4. endAgentSession LANDS ALL TEN FIELDS — gated on the SAME
+    // `backfillHistory` (`entry` existing and not yet `ended`) as the
+    // tool_call/decision back-fill above (idempotent across a repeat
+    // close): explicit null for every unknown figure (never omitted —
+    // endAgentSession's requireFields rejects only `undefined`, and
+    // omission here would refuse the whole call rather than record
+    // "unknown").
+    if (backfillHistory) {
+      const rawUsage = transcriptPath && isSafeTranscriptFileForTeardownRead(transcriptPath)
+        ? readUsage({ transcriptPath })
+        : null
+      // QA-mirrors teardownCmd's own should-fix B: message_count===0 AND
+      // dropped_lines===0 together means "nothing at all could be read from
+      // this path" (transcript.mjs's own never-throw contract), not a
+      // genuine zero-usage reading — fall back to explicit null the same
+      // way a never-sighted transcript does.
+      const usage = rawUsage && (rawUsage.message_count > 0 || rawUsage.dropped_lines > 0) ? rawUsage : null
+      const endedOk = emitter.emit((handle) => {
+        handle.endAgentSession({
+          adw_id: emitter.adwId,
+          claude_session_id: record.dispatch_id,
+          context_tokens: usage ? usage.context_tokens : null,
+          context_window: null, // U-4: no verified source in #41
+          raw_read_tokens: usage ? usage.raw_read_tokens : null,
+          raw_written_tokens: usage ? usage.raw_written_tokens : null,
+          billed_input_tokens: usage ? usage.billed_input_tokens : null,
+          billed_output_tokens: usage ? usage.billed_output_tokens : null,
+          billed_cache_write_tokens: usage ? usage.billed_cache_write_tokens : null,
+          billed_cache_read_tokens: usage ? usage.billed_cache_read_tokens : null,
+        })
+      })
+      if (endedOk) {
+        // AMENDED POST-be-41-04 (orchestrator note): mark `ended` so
+        // teardownCmd's reconciliation loop (session_started && !ended)
+        // never sees this dispatch as still open and re-emits
+        // endAgentSession for the same claude_session_id — which, because
+        // endAgentSession is an unconditional UPDATE of all ten fields (not
+        // a merge), would overwrite the real figures just recorded above
+        // with the never-sighted branch's explicit nulls.
+        const endedPersistedOk = emitter.updateSidecar((draft) => {
+          if (draft.dispatches && draft.dispatches[record.dispatch_id]) {
+            draft.dispatches[record.dispatch_id].ended = true
+          }
+        })
+        // QA REWORK (should-fix A): mirrors resolveAgentSessionTick's own
+        // give-up log — a discarded persist result here means a future
+        // close/teardown could re-run endAgentSession against a real row
+        // that was already correctly ended, without anything logging why.
+        if (!endedPersistedOk) {
+          log(`close: 'ended' sidecar persist failed for dispatch ${record.dispatch_id} (lock give-up?) — a future close/teardown may re-attempt endAgentSession for this dispatch`)
+        }
+      }
+    }
+    emitter.dispose()
+  } catch (err) {
+    log(`close: ledger mirror failed — continuing (${err.message})`)
   }
 
   const uncorroborated = classification.warnings.some((w) => w.includes('terminal_outcome_uncorroborated'))

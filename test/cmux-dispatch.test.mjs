@@ -67,8 +67,21 @@ const { lintSpec } = await import(join(ROOT, 'scripts', 'spec-lint.mjs'))
 // and the emit.mjs facade this file consumes (imported directly here ONLY
 // to build a hostile `_openLedger` override for the mutation/never-load-
 // bearing tests below — never to bypass the facade in dispatch.mjs itself).
-const { openLedger } = await import(join(ROOT, 'scripts', 'factory', 'ledger.mjs'))
+const { openLedger, NODE_FLOOR } = await import(join(ROOT, 'scripts', 'factory', 'ledger.mjs'))
 const { openRun } = await import(join(ROOT, 'scripts', 'factory', 'emit.mjs'))
+
+// be-41-04/be-41-05 — a real `node:sqlite` row is only observable on a
+// runtime that actually HAS the node:sqlite builtin. ledger.mjs's own
+// NODE_FLOOR (ADR-024) is the single source of truth for that boundary —
+// imported above, not re-declared, so this can't drift from the production
+// floor. Below that floor, ensureDb() catches the require('node:sqlite')
+// throw and degrades the mirror to a no-op (by design), so any test that
+// asserts a real sqlite-backed row exists is structurally unobservable
+// there; those specific tests are skipped with this reason rather than
+// failing on a fact about the host runtime, not the code under test.
+const NODE_MAJOR = Number(process.versions.node.split('.')[0])
+const BELOW_LEDGER_FLOOR = NODE_MAJOR < Number(NODE_FLOOR.split('.')[0])
+const SQLITE_SKIP_REASON = `node:sqlite is unavailable on Node ${process.versions.node} (repo floor: Node >= ${NODE_FLOOR}, ADR-024) — this assertion can only be observed on a runtime where the module exists`
 
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
@@ -6961,7 +6974,7 @@ test('be-41-04 TEARDOWN NEVER TOUCHES ~/.dev-team/factory/: teardownCmd never re
   assert.match(teardownBody, /openEmitter\(ctx\)/)
 })
 
-test('be-41-04 WORKSPACE -> PLANNING, DISPATCH -> BUILDING (idempotent, no duplicate), PHASE --set gate -> GATE, in order', () => {
+test('be-41-04 WORKSPACE -> PLANNING, DISPATCH -> BUILDING (idempotent, no duplicate), PHASE --set gate -> GATE, in order', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('ledger-phases')
   const specA = makeSpecFile(ctx, 'be-1a')
   const dispatchA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
@@ -7155,7 +7168,7 @@ test('be-41-04 NEVER LOAD-BEARING (mutation): await returns byte-identical {code
   assert.equal(healthy.invocationCount, degraded.invocationCount)
 })
 
-test('be-41-04 RESOLUTION: incremental and first-sighting-wins — a transcript appearing after the first tick pins exactly one agent session; a later second match never changes the pinned path', () => {
+test('be-41-04 RESOLUTION: incremental and first-sighting-wins — a transcript appearing after the first tick pins exactly one agent session; a later second match never changes the pinned path', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('await-resolution')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7222,7 +7235,7 @@ test('be-41-04 RESOLUTION: incremental and first-sighting-wins — a transcript 
   })
 })
 
-test('be-41-04 REWORK must-fix #3: a hostile record.model (5000 ANSI-laden chars with embedded newlines) is stripped and length-capped before it reaches agent_start\'s payload AND agent_sessions.model, since the record is worker-writable and the schema\'s model pattern is unanchored', () => {
+test('be-41-04 REWORK must-fix #3: a hostile record.model (5000 ANSI-laden chars with embedded newlines) is stripped and length-capped before it reaches agent_start\'s payload AND agent_sessions.model, since the record is worker-writable and the schema\'s model pattern is unanchored', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('hostile-record-model')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7262,7 +7275,7 @@ test('be-41-04 REWORK must-fix #3: a hostile record.model (5000 ANSI-laden chars
   })
 })
 
-test('be-41-04 REWORK round 2, must-fix #2(a): an ALREADY-hostile record.model at DISPATCH TIME (not mutated afterward) is stripped and capped in the agent_start payload dispatchCmd itself builds — a distinct call site from startAgentSession\'s own sanitizer, which the test above only exercises via a POST-dispatch mutation', () => {
+test('be-41-04 REWORK round 2, must-fix #2(a): an ALREADY-hostile record.model at DISPATCH TIME (not mutated afterward) is stripped and capped in the agent_start payload dispatchCmd itself builds — a distinct call site from startAgentSession\'s own sanitizer, which the test above only exercises via a POST-dispatch mutation', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const hostileModel = `\x1b[31m${'m\n'.repeat(2500)}\x07`
   const { ctx } = setUpWorkspace('hostile-model-at-dispatch-time', {
     configOverrides: { session: { roles: { coder: { model: hostileModel } } } },
@@ -7343,7 +7356,7 @@ test('be-41-04 RESOLUTION: zero matches increments resolution_missing and logs n
   })
 })
 
-test('be-41-04 ensureAgentSession BEFORE THE FIRST HEARTBEAT, throttled >= 15s per session, independently per session', () => {
+test('be-41-04 ensureAgentSession BEFORE THE FIRST HEARTBEAT, throttled >= 15s per session, independently per session', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('await-heartbeat')
   const specA = makeSpecFile(ctx, 'be-1a')
   const dispatchA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
@@ -7437,7 +7450,7 @@ test('be-41-04 REWORK should-fix E: ensureAgentSession fires strictly BEFORE the
   assert.ok(firstStart < firstHeartbeat, `startAgentSession (index ${firstStart}) must be called strictly before the first heartbeat (index ${firstHeartbeat}) — call order: ${JSON.stringify(callOrder)}`)
 })
 
-test('be-41-04 SIGNALS THROUGH C5, RELAY NEVER FIRED: a hostile signals fixture produces capped, level-clamped log rows; the non-string-message entry is dropped and counted; zero notify-shaped cmux invocations', () => {
+test('be-41-04 SIGNALS THROUGH C5, RELAY NEVER FIRED: a hostile signals fixture produces capped, level-clamped log rows; the non-string-message entry is dropped and counted; zero notify-shaped cmux invocations', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { env, ctx } = setUpWorkspace('await-signals')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7484,7 +7497,7 @@ test('be-41-04 SIGNALS THROUGH C5, RELAY NEVER FIRED: a hostile signals fixture 
   })
 })
 
-test('be-41-04 REWORK must-fix #4: the signals mirror cursor is a PERSISTED byte offset in the sidecar (never a function-local line count) — a SECOND awaitCmd() call over the SAME already-mirrored signals file never re-mirrors those lines', () => {
+test('be-41-04 REWORK must-fix #4: the signals mirror cursor is a PERSISTED byte offset in the sidecar (never a function-local line count) — a SECOND awaitCmd() call over the SAME already-mirrored signals file never re-mirrors those lines', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('signals-cursor-persistence')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7580,7 +7593,7 @@ test('be-41-04 REWORK round 2, must-fix #1: a non-stale sidecar lock held THROUG
   assert.equal(emitCallCount, 1, `expected exactly ONE emit() attempt for the single signal line across every tick of this call, got ${emitCallCount} — a persisted-offset-only design (no in-process fallback) would re-attempt this on every tick that the held lock defeats the persist`)
 })
 
-test('be-41-04 REWORK round 2, must-fix #2(b): a signals file that shrinks below the persisted mirror offset resets the cursor to 0 and re-mirrors from the (now shorter) file, rather than silently mirroring nothing forever', () => {
+test('be-41-04 REWORK round 2, must-fix #2(b): a signals file that shrinks below the persisted mirror offset resets the cursor to 0 and re-mirrors from the (now shorter) file, rather than silently mirroring nothing forever', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('signals-shrink-reset')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7632,7 +7645,7 @@ test('be-41-04 REWORK round 2, must-fix #2(b): a signals file that shrinks below
   assert.ok(sidecarAfterSecond.signal_offsets[dispatchId] < offsetAfterFirst, 'the new offset must reflect the shorter rewritten file, not remain stuck at the old, now-invalid, offset')
 })
 
-test('be-41-04 REWORK round 2, must-fix #2(c): per-dispatch try/catch isolation in the heartbeat+signals tick loop — one dispatch throwing during its own pass never skips that SAME tick\'s work for another dispatch', () => {
+test('be-41-04 REWORK round 2, must-fix #2(c): per-dispatch try/catch isolation in the heartbeat+signals tick loop — one dispatch throwing during its own pass never skips that SAME tick\'s work for another dispatch', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('await-tick-isolation')
   const specA = makeSpecFile(ctx, 'be-1a')
   const dispatchA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
@@ -7689,7 +7702,7 @@ test('be-41-04 REWORK round 2, must-fix #2(c): per-dispatch try/catch isolation 
   })
 })
 
-test('be-41-04 REWORK round 2, should-fix C: a per-tick cap on signal-mirroring volume defers overflow lines to a SECOND tick rather than performing an unbounded number of lock+insert cycles in one tick', () => {
+test('be-41-04 REWORK round 2, should-fix C: a per-tick cap on signal-mirroring volume defers overflow lines to a SECOND tick rather than performing an unbounded number of lock+insert cycles in one tick', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('signals-per-tick-cap')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7739,7 +7752,7 @@ test('be-41-04 REWORK round 2, should-fix B: reconcileProgressCursor takes the m
   assert.equal(reconcileProgressCursor(Date.parse('not-a-real-date'), 1234), 1234, 'a malformed ISO timestamp (Date.parse -> NaN) must degrade to absent, exactly the heartbeat-pass scenario this helper exists for')
 })
 
-test('be-41-04 TEARDOWN RECONCILES OPEN AGENT SESSIONS and logs the final drop-counter snapshot', () => {
+test('be-41-04 TEARDOWN RECONCILES OPEN AGENT SESSIONS and logs the final drop-counter snapshot', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('await-teardown-reconcile')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7795,7 +7808,7 @@ test('be-41-04 TEARDOWN RECONCILES OPEN AGENT SESSIONS and logs the final drop-c
   assert.deepEqual(Object.keys(snapshotPayload).sort(), ['level', 'message'])
 })
 
-test('be-41-04 REWORK should-fix B: a sighted-but-now-unreadable transcript at teardown time passes explicit null for all ten usage fields, never a confident all-zero reading', () => {
+test('be-41-04 REWORK should-fix B: a sighted-but-now-unreadable transcript at teardown time passes explicit null for all ten usage fields, never a confident all-zero reading', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('await-teardown-transcript-gone')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7843,7 +7856,7 @@ test('be-41-04 REWORK should-fix B: a sighted-but-now-unreadable transcript at t
   }
 })
 
-test('be-41-04 REWORK round 2, should-fix D: a transcript_path resolved from a control-character-laden project directory name reaches agent_sessions.transcript_path stripped, while the SIDECAR (and teardown\'s real read) keeps the raw, unmodified path', () => {
+test('be-41-04 REWORK round 2, should-fix D: a transcript_path resolved from a control-character-laden project directory name reaches agent_sessions.transcript_path stripped, while the SIDECAR (and teardown\'s real read) keeps the raw, unmodified path', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('transcript-path-hostile-dirname')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7886,7 +7899,7 @@ test('be-41-04 REWORK round 2, should-fix D: a transcript_path resolved from a c
   assert.equal(session.raw_read_tokens, 1, 'teardown must have successfully read the RAW (unsanitized) sidecar path — proving the sanitizer only ever touched the ledger column, never the operational path actually used for the real read')
 })
 
-test('be-41-04 REWORK round 2, should-fix E: teardown never reads a pinned transcript_path that is not a plain, size-bounded regular file — a directory sitting at that path (standing in for a worker pointing it at a FIFO/socket) is treated as unreadable, never opened', () => {
+test('be-41-04 REWORK round 2, should-fix E: teardown never reads a pinned transcript_path that is not a plain, size-bounded regular file — a directory sitting at that path (standing in for a worker pointing it at a FIFO/socket) is treated as unreadable, never opened', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('teardown-transcript-not-a-file')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -7928,7 +7941,7 @@ test('be-41-04 REWORK round 2, should-fix E: teardown never reads a pinned trans
   assert.equal(session.raw_read_tokens, null, 'a non-regular-file at the pinned path must degrade to explicit null, never a confident zero/partial reading, and must never be opened at all')
 })
 
-test('be-41-04 SESSION_STATUSES mapping: teardown maps outcome ok -> \'ok\' and refused -> \'aborted\', never \'fail\'', () => {
+test('be-41-04 SESSION_STATUSES mapping: teardown maps outcome ok -> \'ok\' and refused -> \'aborted\', never \'fail\'', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('teardown-outcome-mapping')
   const specPath = makeSpecFile(ctx)
   dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -8110,7 +8123,7 @@ function setUpCloseDispatch(prefix) {
   return { env, ctx, dispatchId, record }
 }
 
-test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript sightable at close time): exactly one agent_sessions row with the resolved transcript_path', () => {
+test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript sightable at close time): exactly one agent_sessions row with the resolved transcript_path', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-ensure-session')
   const projectsDir = makeTmpDir('cmux-dispatch-close-projects-')
   const transcriptPath = writeFakeTranscript(projectsDir, dispatchId, [
@@ -8132,7 +8145,7 @@ test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript sightable at c
   assert.equal(sidecarEntry.ended, true, 'AMENDED POST-be-41-04: close must set ended:true on the same sidecar entry')
 })
 
-test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript never sightable): exactly one agent_sessions row with explicit null transcript_path', () => {
+test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript never sightable): exactly one agent_sessions row with explicit null transcript_path', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-ensure-session-null')
   const emptyProjectsDir = makeTmpDir('cmux-dispatch-close-empty-projects-')
 
@@ -8149,7 +8162,7 @@ test('be-41-05 ENSURE-SESSION FALLBACK (never awaited, transcript never sightabl
   assert.equal(rows[0].billed_input_tokens, null)
 })
 
-test('be-41-05 ENSURE-SESSION FALLBACK IS IDEMPOTENT: a dispatch whose await already started its agent session gets NO second agent_sessions row on close, and started_at/transcript_path are unchanged (row COUNT, not "a row exists")', () => {
+test('be-41-05 ENSURE-SESSION FALLBACK IS IDEMPOTENT: a dispatch whose await already started its agent session gets NO second agent_sessions row on close, and started_at/transcript_path are unchanged (row COUNT, not "a row exists")', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-ensure-session-idempotent')
   const projectsDir = makeTmpDir('cmux-dispatch-close-idempotent-projects-')
   writeFakeTranscript(projectsDir, dispatchId, [
@@ -8176,7 +8189,7 @@ test('be-41-05 ENSURE-SESSION FALLBACK IS IDEMPOTENT: a dispatch whose await alr
   assert.equal(afterClose[0].transcript_path, beforeClose[0].transcript_path)
 })
 
-test('be-41-05 REPEAT CLOSE is idempotent for the agent_sessions row AND the tool_call/decision back-fill (must-fix #3): a second close call on an already-ended dispatch produces no additional agent_sessions row, no additional tool_call rows, and no additional decision row — only agent_end is mirrored again', () => {
+test('be-41-05 REPEAT CLOSE is idempotent for the agent_sessions row AND the tool_call/decision back-fill (must-fix #3): a second close call on an already-ended dispatch produces no additional agent_sessions row, no additional tool_call rows, and no additional decision row — only agent_end is mirrored again', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-repeat-idempotent')
   const projectsDir = makeTmpDir('cmux-dispatch-close-repeat-projects-')
   writeFakeTranscript(projectsDir, dispatchId, [
@@ -8210,7 +8223,7 @@ test('be-41-05 REPEAT CLOSE is idempotent for the agent_sessions row AND the too
   assert.equal(eventsAfterSecond.filter((e) => e.type === 'agent_end').length, agentEndsAfterFirst.length + 1, 'agent_end IS mirrored again on every close — deliberate, unrelated to must-fix #3\'s gate')
 })
 
-test('be-41-05 ENVELOPE MIRRORED: a valid return lands recordEnvelope with all eleven fields, valid:1, violation_names empty', () => {
+test('be-41-05 ENVELOPE MIRRORED: a valid return lands recordEnvelope with all eleven fields, valid:1, violation_names empty', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId, record } = setUpCloseDispatch('close-envelope-valid')
   closeCmd({ dispatch: dispatchId }, ctx)
 
@@ -8227,7 +8240,7 @@ test('be-41-05 ENVELOPE MIRRORED: a valid return lands recordEnvelope with all e
   assert.equal(row.schema_version, 1)
 })
 
-test('be-41-05 ENVELOPE MIRRORED (invalid/absent return): violation_names is built as `${path}:${keyword}` — NEVER a validator message', () => {
+test('be-41-05 ENVELOPE MIRRORED (invalid/absent return): violation_names is built as `${path}:${keyword}` — NEVER a validator message', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('close-envelope-invalid')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -8248,7 +8261,7 @@ test('be-41-05 ENVELOPE MIRRORED (invalid/absent return): violation_names is bui
   }
 })
 
-test('be-41-05 agent_end CARRIES THE RECORD\'S TERMINAL OUTCOME: payload is exactly {role, outcome, dispatch_id} where outcome is closeCmd\'s own resolved value, never re-derived — proven across both the fresh and already-terminal branches', () => {
+test('be-41-05 agent_end CARRIES THE RECORD\'S TERMINAL OUTCOME: payload is exactly {role, outcome, dispatch_id} where outcome is closeCmd\'s own resolved value, never re-derived — proven across both the fresh and already-terminal branches', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId, record } = setUpCloseDispatch('close-agent-end-outcome')
 
   const closeRes = closeCmd({ dispatch: dispatchId }, ctx)
@@ -8273,7 +8286,7 @@ test('be-41-05 agent_end CARRIES THE RECORD\'S TERMINAL OUTCOME: payload is exac
   assert.equal(payload.outcome, 'ok')
 })
 
-test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (transcript present, deduped)', () => {
+test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (transcript present, deduped)', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-endagentsession-usage')
   const projectsDir = makeTmpDir('cmux-dispatch-close-usage-projects-')
   writeFakeTranscript(projectsDir, dispatchId, [
@@ -8297,7 +8310,7 @@ test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (transcript present, deduped
   assert.equal(row.context_tokens, 155, 'context_tokens = last message input + cache_read + cache_creation')
 })
 
-test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (never-sighted transcript: all ten explicit null)', () => {
+test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (never-sighted transcript: all ten explicit null)', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-endagentsession-null')
   const emptyProjectsDir = makeTmpDir('cmux-dispatch-close-null-usage-projects-')
 
@@ -8313,7 +8326,7 @@ test('be-41-05 endAgentSession LANDS ALL TEN FIELDS (never-sighted transcript: a
   }
 })
 
-test('be-41-05 TOOL_CALL BACK-FILL WITH HISTORICAL TIMESTAMPS: N tuples produce N tool_call rows whose timestamps come from the transcript (never now()), consuming exactly ONE seq reservation for the whole batch (ADR-027)', () => {
+test('be-41-05 TOOL_CALL BACK-FILL WITH HISTORICAL TIMESTAMPS: N tuples produce N tool_call rows whose timestamps come from the transcript (never now()), consuming exactly ONE seq reservation for the whole batch (ADR-027)', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-toolcall-backfill')
   const projectsDir = makeTmpDir('cmux-dispatch-close-toolcall-projects-')
   writeFakeTranscript(projectsDir, dispatchId, [
@@ -8349,7 +8362,7 @@ test('be-41-05 TOOL_CALL BACK-FILL WITH HISTORICAL TIMESTAMPS: N tuples produce 
   assert.deepEqual(okValues, [false, true, true])
 })
 
-test('be-41-05 QA REWORK must-fix #1: a transcript with 70 tool_call tuples (over the 60-row back-fill cap) still lands agent_end AND exactly one decision row, back-fills only the most recent 60 tool_call rows, and makes the drop VISIBLE via both a stderr line and the decision row\'s alternatives', () => {
+test('be-41-05 QA REWORK must-fix #1: a transcript with 70 tool_call tuples (over the 60-row back-fill cap) still lands agent_end AND exactly one decision row, back-fills only the most recent 60 tool_call rows, and makes the drop VISIBLE via both a stderr line and the decision row\'s alternatives', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-toolcall-cap')
   const projectsDir = makeTmpDir('cmux-dispatch-close-toolcall-cap-projects-')
   // readToolCalls (transcript.mjs) normalizes every `tool` name down to a
@@ -8394,7 +8407,7 @@ test('be-41-05 QA REWORK must-fix #1: a transcript with 70 tool_call tuples (ove
   assert.ok(decisionPayload.alternatives.includes('tool_calls_dropped:10'), `expected the decision row's alternatives to fold in the drop count, got ${JSON.stringify(decisionPayload.alternatives)}`)
 })
 
-test('be-41-05 QA REWORK must-fix #2(a): a hostile top-level return-envelope key (ANSI escape + control bytes) reaches violation_names sanitized, never a raw control byte', () => {
+test('be-41-05 QA REWORK must-fix #2(a): a hostile top-level return-envelope key (ANSI escape + control bytes) reaches violation_names sanitized, never a raw control byte', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('close-envelope-hostile-key')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -8430,7 +8443,7 @@ test('be-41-05 QA REWORK must-fix #2(a): a hostile top-level return-envelope key
   }
 })
 
-test('be-41-05 QA REWORK must-fix #2(b): a hostile record.return_path reaches envelope_path sanitized the SAME way transcript_path already is (control-byte-stripped)', () => {
+test('be-41-05 QA REWORK must-fix #2(b): a hostile record.return_path reaches envelope_path sanitized the SAME way transcript_path already is (control-byte-stripped)', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('close-envelope-path-hostile')
   const record = buildAndBindRecord(ctx, { role: 'code-reviewer', sliceId: 'be-1b' })
   writeValidReturn(record)
@@ -8543,7 +8556,7 @@ test('be-41-05 QA REWORK must-fix #5: closeCmd\'s tool_call/agent_end/decision b
   assert.equal(eventReservations[0].n, 5, 'expected n === eventCount (agent_end + 3 tool_call + decision = 5), not N separate reservations of 1')
 })
 
-test('be-41-05 RECONCILE EVIDENCE AS A decision ROW: payload is dispatcher-authored closed vocabulary plus counts — a hostile reconcile warning (ANSI escapes, embedded newline, 5000 chars) reaches NO ledger row, NO stderr line and NO file under stateDir', () => {
+test('be-41-05 RECONCILE EVIDENCE AS A decision ROW: payload is dispatcher-authored closed vocabulary plus counts — a hostile reconcile warning (ANSI escapes, embedded newline, 5000 chars) reaches NO ledger row, NO stderr line and NO file under stateDir', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx } = setUpWorkspace('close-decision-hostile')
   const specPath = makeSpecFile(ctx)
   const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
@@ -8716,7 +8729,7 @@ test('be-41-05 NEVER LOAD-BEARING (mutation): close returns byte-identical {code
   assert.deepEqual(hostile, healthy)
 })
 
-test('be-41-05 AMENDED POST-be-41-04: after closeCmd runs, a subsequent teardownCmd does NOT re-emit endAgentSession for that dispatch — the sqlite row\'s token fields are unchanged by teardown', () => {
+test('be-41-05 AMENDED POST-be-41-04: after closeCmd runs, a subsequent teardownCmd does NOT re-emit endAgentSession for that dispatch — the sqlite row\'s token fields are unchanged by teardown', { skip: BELOW_LEDGER_FLOOR ? SQLITE_SKIP_REASON : false }, () => {
   const { ctx, dispatchId } = setUpCloseDispatch('close-then-teardown-ended')
   const projectsDir = makeTmpDir('cmux-dispatch-close-teardown-ended-projects-')
   writeFakeTranscript(projectsDir, dispatchId, [

@@ -17,7 +17,7 @@ import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync, readdirSync, symlinkSync, cpSync, chmodSync,
   rmSync,
 } from 'node:fs'
-import { execFileSync, spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join, delimiter } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +42,7 @@ const {
   browserVerifyCmd, BROWSER_VERIFY_WARNINGS,
   UsageError, OperationalError, main,
   SpecSchemaError, SPEC_SCHEMA_REFUSAL_MESSAGE, SPEC_SCHEMA_REFUSAL_CODE,
+  SIGNAL_LEVELS, _setEmitterOpenerForTest, reconcileProgressCursor,
 } = await import(DISPATCH_PATH)
 
 const {
@@ -52,16 +53,22 @@ const {
   BROWSER_OPEN_SPAWN_TIMEOUT_MS, BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS,
 } = await import(join(ROOT, 'scripts', 'cmux', 'cmuxctl.mjs'))
 const {
-  readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin,
+  readRecord, terminateRecord, buildRecord, writeRecord, bindRecord, newDispatchId, snapshotWorkerPlugin, isoMs,
 } = await import(join(ROOT, 'scripts', 'cmux', 'record.mjs'))
 const { specPathFor, sidecarPaths } = await import(join(ROOT, 'scripts', 'cmux', 'resolve.mjs'))
 const { writeBlockedReturn } = await import(join(ROOT, 'scripts', 'cmux', 'return-lint.mjs'))
-const { slugify } = await import(join(ROOT, 'scripts', 'cmux', 'contract.mjs'))
+const { slugify, SIGNAL_LIMITS } = await import(join(ROOT, 'scripts', 'cmux', 'contract.mjs'))
 // A2 (#27) cross-file check-name agreement test — imported directly, not
 // through dispatch.mjs, to prove the two partitions dispatch.mjs relies on
 // are real, behavioural facts (safe: no I/O, its own invokedDirectly guard
 // is false under the test runner).
 const { lintSpec } = await import(join(ROOT, 'scripts', 'spec-lint.mjs'))
+// be-41-04 — read-only inspection of the ledger mirror this file wires in,
+// and the emit.mjs facade this file consumes (imported directly here ONLY
+// to build a hostile `_openLedger` override for the mutation/never-load-
+// bearing tests below — never to bypass the facade in dispatch.mjs itself).
+const { openLedger } = await import(join(ROOT, 'scripts', 'factory', 'ledger.mjs'))
+const { openRun } = await import(join(ROOT, 'scripts', 'factory', 'emit.mjs'))
 
 // ---------------------------------------------------------------------------
 // Fixture plumbing.
@@ -6768,3 +6775,1285 @@ test('A2 cross-file check-name agreement: lintSpec (imported directly from spec-
   const validationResult = lintSpec(badBinSpec, checkout)
   assert.ok(validationResult.failures.some((f) => f.check === 'validation_commands'), `expected a check:"validation_commands" failure, got ${JSON.stringify(validationResult.failures)}`)
 })
+
+// ---------------------------------------------------------------------------
+// be-41-04 (issue #41, epic #39) — lifecycle ledger emission wiring into
+// workspaceCmd, dispatchCmd, phaseCmd, awaitCmd, teardownCmd. NEVER
+// LOAD-BEARING throughout: every test below is either a positive proof that
+// the mirror actually landed (readable via a real ledger reader against the
+// sidecar's own db_path — never dispatch.mjs's internals) or a negative
+// proof that a hostile/degraded emitter changes nothing observable.
+// ---------------------------------------------------------------------------
+
+const DISPATCH_SOURCE = readFileSync(DISPATCH_PATH, 'utf8')
+
+function readRunSidecar(ctx) {
+  return JSON.parse(readFileSync(join(ctx.paths.stateDir, 'ledger', 'run.json'), 'utf8'))
+}
+
+function withLedgerReader(ctx, fn) {
+  const sidecar = readRunSidecar(ctx)
+  const ledger = openLedger({ dbPath: sidecar.db_path, jsonlPath: sidecar.jsonl_path })
+  try {
+    return fn(ledger, sidecar)
+  } finally {
+    ledger.close()
+  }
+}
+
+// dumpLedgerTablesInSubprocess: a same-process openLedger() read against a
+// db_path this SAME process just closed a connection to (teardownCmd's own
+// emitter.dispose()) moments earlier — especially right after that
+// directory was ALSO renamed by archiveOrDelete — unreliably observes an
+// empty WAL-mode mirror even though the JSONL (and a genuinely separate
+// process reading the identical path) both see every row. Reading through a
+// real child process for every POST-teardown assertion sidesteps that
+// same-process artifact entirely and is also the more honest proof anyway:
+// production teardownCmd and any later inspector are always separate
+// processes, never one process handing a connection to itself.
+const LEDGER_READER_SCRIPT = join(makeTmpDir('cmux-dispatch-ledger-reader-'), 'reader.mjs')
+writeFileSync(LEDGER_READER_SCRIPT, [
+  `import { openLedger } from ${JSON.stringify(join(ROOT, 'scripts', 'factory', 'ledger.mjs'))}`,
+  'const [, , dbPath, jsonlPath, tableNamesJson] = process.argv',
+  'const ledger = openLedger({ dbPath, jsonlPath })',
+  'const out = {}',
+  'for (const t of JSON.parse(tableNamesJson)) out[t] = ledger.dumpTable(t)',
+  'process.stdout.write(JSON.stringify(out))',
+].join('\n'))
+
+function dumpLedgerTablesInSubprocess(sidecar, tableNames) {
+  const out = execFileSync(process.execPath, [
+    LEDGER_READER_SCRIPT, sidecar.db_path, sidecar.jsonl_path, JSON.stringify(tableNames),
+  ], { encoding: 'utf8' })
+  return JSON.parse(out)
+}
+
+function readJsonlKinds(jsonlPath) {
+  if (!existsSync(jsonlPath)) return []
+  return readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l))
+}
+
+// A ledger handle whose EVERY writer throws — models "a ledger handle whose
+// every writer throws" (be-41-04's own NEVER-LOAD-BEARING acceptance
+// criterion) via emit.mjs's own documented `_openLedger` TEST SEAM, never by
+// touching emit.mjs or ledger.mjs themselves.
+function hostileLedgerHandle() {
+  const boom = () => { throw new Error('hostile ledger writer (be-41-04 mutation test)') }
+  return {
+    startSession: boom, endSession: boom, startPhase: boom, endPhase: boom,
+    recordEvent: boom, recordEnvelope: boom, recordGateResult: boom,
+    startProcess: boom, endProcess: boom, heartbeat: boom,
+    startAgentSession: boom, endAgentSession: boom, recordSourceError: boom,
+    listSessions: () => [], listEvents: () => [], getSession: () => null, dumpTable: () => [],
+    stats: () => ({ degraded: false, mirror_errors: 0 }),
+    close: () => {}, installFinalizer: () => ({ uninstall: () => {} }),
+  }
+}
+
+function installHostileEmitterOpener() {
+  _setEmitterOpenerForTest((opts) => openRun({ ...opts, _openLedger: hostileLedgerHandle }))
+}
+
+after(() => { _setEmitterOpenerForTest(null) })
+
+test('be-41-04 SIGNAL_LEVELS/SIGNAL_LIMITS SOURCING: SIGNAL_LIMITS is imported from ./contract.mjs (never re-declared); SIGNAL_LEVELS is derived from signal-record.schema.json\'s own level enum (never a hand-written literal, never imported from ladder.mjs); both match ladder.mjs\'s own runtime behaviour on the same hostile fixture', () => {
+  assert.match(DISPATCH_SOURCE, /import\s*\{[^}]*SIGNAL_LIMITS[^}]*\}\s*from\s*'\.\/contract\.mjs'/s)
+  assert.doesNotMatch(DISPATCH_SOURCE, /const\s+SIGNAL_LIMITS\s*=/)
+  assert.match(DISPATCH_SOURCE, /signal-record\.schema\.json/)
+  assert.doesNotMatch(DISPATCH_SOURCE, /const\s+SIGNAL_LEVELS\s*=\s*\[/)
+
+  const ladderSchema = JSON.parse(readFileSync(join(ROOT, 'scripts', 'cmux', 'signal-record.schema.json'), 'utf8'))
+  assert.deepEqual([...SIGNAL_LEVELS], ladderSchema.properties.level.enum)
+  assert.deepEqual(SIGNAL_LIMITS, { max_relayed_per_dispatch: 5, min_interval_s: 30, message_max_chars: 200 })
+})
+
+test('be-41-04 STATUS VERB STAYS EMISSION-FREE: statusCmd\'s own function body makes no emitter call', () => {
+  const match = DISPATCH_SOURCE.match(/export function statusCmd\(args, ctx\) \{[\s\S]*?\n\}\n/)
+  assert.ok(match, 'could not locate statusCmd\'s function body in dispatch.mjs source')
+  assert.doesNotMatch(match[0], /openEmitter/)
+})
+
+test('be-41-04 REWORK must-fix #1: installFinalizer() is called from NOWHERE in dispatch.mjs, AND no hand-rolled process.on(\'SIG...\') listener reproduces the identical suppression bug without ever calling installFinalizer', () => {
+  assert.doesNotMatch(DISPATCH_SOURCE, /\.installFinalizer\(\)/)
+  assert.doesNotMatch(DISPATCH_SOURCE, /process\.on\(\s*['"]SIG/)
+})
+
+test('be-41-04 REWORK must-fix #3: a real-subprocess SIGINT during a hung await kills the process promptly (exit signal SIGINT, well within a short bound), proving Ctrl-C is never silently swallowed now that no finalizer is installed', async () => {
+  const { env, ctx } = setUpWorkspace('await-sigint-regression')
+  const specPath = makeSpecFile(ctx)
+  dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+
+  const script = join(makeTmpDir('cmux-dispatch-sigint-'), 'run-await.mjs')
+  writeFileSync(script, [
+    `process.env.CMUX_BIN = ${JSON.stringify(FIXTURE)}`,
+    `process.env.FAKE_CMUX_LOG = ${JSON.stringify(env.logPath)}`,
+    `process.env.FAKE_CMUX_STATE = ${JSON.stringify(env.statePath)}`,
+    `const { awaitCmd, buildContext } = await import(${JSON.stringify(DISPATCH_PATH)})`,
+    `const ctx = buildContext(${JSON.stringify({
+      task: ctx.taskSlug, checkout: ctx.primaryCheckout, repo: ctx.repoSlug, root: ctx.roots.root, 'plugin-root': ROOT,
+    })})`,
+    // A short --max-block-s (must-fix #3a): if the SIGINT-suppression bug
+    // were reintroduced, this test must fail FAST and legibly rather than
+    // reading as a hung CI job for up to the full 600s cap.
+    // A record with no matching id ever resolves — this hangs until SIGINT
+    // (or, if the bug is back, until the 5s cap).
+    `awaitCmd({ all: ['nonexistent-dispatch-id'], 'max-block-s': '5' }, ctx, {})`,
+  ].join('\n'))
+
+  // spawnSync has no way to deliver a signal mid-run — use the async spawn
+  // API so SIGINT can be sent once the child is definitely blocked in the
+  // poll loop. stderr is piped (must-fix #3c) so a failure is debuggable
+  // rather than silent.
+  const proc = spawn(process.execPath, [script], { stdio: ['ignore', 'ignore', 'pipe'] })
+  let stderrOut = ''
+  proc.stderr.on('data', (chunk) => { stderrOut += chunk.toString() })
+
+  // must-fix #3c: the exit listener is attached BEFORE any sleep/wait — a
+  // child that dies early (e.g. a startup error) must still resolve this
+  // promise instead of hanging the test forever waiting on an 'exit' event
+  // that already fired and was missed.
+  const exitPromise = new Promise((resolve) => {
+    proc.on('exit', (code, signal) => resolve({ code, signal }))
+  })
+
+  // must-fix #3b: a readiness handshake (poll for await.lock, the file
+  // awaitCmd creates the instant it acquires its lock, right before
+  // entering the poll loop) rather than a fixed sleep — a fixed sleep gives
+  // no guarantee the child has reached the vulnerable point in awaitCmd yet;
+  // sending SIGINT too early would let Node's default disposition kill the
+  // child instantly regardless of whether the bug is present, making the
+  // test pass even WITH the regression reintroduced.
+  const lockPath = ctx.paths.lockPath
+  const deadline = Date.now() + 5000
+  while (!existsSync(lockPath) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 20))
+  }
+  assert.ok(existsSync(lockPath), `expected the child to create its await.lock (readiness signal) before the deadline; stderr so far: ${stderrOut}`)
+
+  const sigintSentAt = Date.now()
+  proc.kill('SIGINT')
+  const exitInfo = await exitPromise
+  const elapsedMs = Date.now() - sigintSentAt
+
+  // Node's default disposition on an uncaught SIGINT: process exits with
+  // code null and signal 'SIGINT' (exit 128+2=130 at the shell) — asserting
+  // the signal (not a numeric 130, which is a shell convention, not
+  // something Node itself reports via the 'exit' event) is what proves the
+  // default disposition was never overridden by a finalizer's own listener.
+  assert.equal(exitInfo.signal, 'SIGINT', `expected the process to die of SIGINT with no override, got ${JSON.stringify(exitInfo)}; stderr: ${stderrOut}`)
+  // must-fix #3a: a short, legible timing bound — a regression fails fast
+  // instead of only failing after the full (now 5s, not 600s) await cap.
+  assert.ok(elapsedMs < 5000, `expected the process to die within 5s of SIGINT (Node's default disposition kills instantly), got ${elapsedMs}ms; stderr: ${stderrOut}`)
+})
+
+test('be-41-04 TEARDOWN NEVER TOUCHES ~/.dev-team/factory/: teardownCmd never resolves a db path outside paths.stateDir', () => {
+  const teardownBodyStart = DISPATCH_SOURCE.indexOf('export function teardownCmd(args, ctx) {')
+  assert.ok(teardownBodyStart >= 0)
+  const nextExportStart = DISPATCH_SOURCE.indexOf('\nexport function', teardownBodyStart + 10)
+  const teardownBody = DISPATCH_SOURCE.slice(teardownBodyStart, nextExportStart)
+  // teardownCmd never calls homedir() (or defaultDbPath()) itself — the only
+  // way a real db path could ever resolve to ~/.dev-team/factory/ (ledger.
+  // mjs's OWN CLI-only default, out of scope) is through one of those two
+  // calls, and openEmitter's own dbPath always derives from paths.stateDir.
+  // Checked against the CODE, not the prose — this comment block itself
+  // legitimately spells out the literal path fragment-free-form.
+  assert.doesNotMatch(teardownBody, /homedir\(|defaultDbPath\(/)
+  assert.match(teardownBody, /openEmitter\(ctx\)/)
+})
+
+test('be-41-04 WORKSPACE -> PLANNING, DISPATCH -> BUILDING (idempotent, no duplicate), PHASE --set gate -> GATE, in order', () => {
+  const { ctx } = setUpWorkspace('ledger-phases')
+  const specA = makeSpecFile(ctx, 'be-1a')
+  const dispatchA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
+  assert.equal(dispatchA.code, 0)
+  const specB = makeSpecFile(ctx, 'be-1b')
+  const dispatchB = dispatchCmd({ slice: 'be-1b', role: 'coder', spec: specB }, ctx)
+  assert.equal(dispatchB.code, 0)
+  const phaseRes = phaseCmd({ set: 'gate' }, ctx)
+  assert.equal(phaseRes.code, 0)
+
+  withLedgerReader(ctx, (ledger, sidecar) => {
+    const phases = ledger.dumpTable('phases').filter((p) => p.adw_id === sidecar.adw_id)
+    assert.deepEqual(phases.map((p) => p.name), ['planning', 'building', 'gate'])
+    assert.equal(phases.filter((p) => p.name === 'building').length, 1, 'a second dispatch must never produce a duplicate building phase row')
+
+    const agentStarts = ledger.dumpTable('events').filter((e) => e.adw_id === sidecar.adw_id && e.type === 'agent_start')
+    assert.equal(agentStarts.length, 2, 'exactly one agent_start per dispatch')
+    for (const row of agentStarts) {
+      const payload = JSON.parse(row.payload_json)
+      assert.deepEqual(Object.keys(payload).sort(), ['dispatch_id', 'model', 'role'], 'agent_start payload must be exactly {role, model, dispatch_id} — payload discipline')
+      assert.equal(payload.role, 'coder')
+    }
+
+    assert.equal(Object.keys(sidecar.dispatches).length, 2)
+    for (const [dispatchId, entry] of Object.entries(sidecar.dispatches)) {
+      assert.deepEqual(entry, {
+        claude_session_id: dispatchId, transcript_path: null, session_started: false, sighted_at: null, ended: false,
+      }, 'sidecar dispatches entry recorded at dispatch time')
+    }
+  })
+})
+
+test('be-41-04 REWORK must-fix #2: workspace/dispatch/phase/await/teardown HEALTHY-PATH JSON each compared via assert.deepEqual against a FROZEN literal expected object (not a key-subset check, and distinct from the healthy-vs-degraded mutation tests below — a leaked key present in both the healthy and degraded run would slip through THOSE tests but is caught here)', () => {
+  const { ctx } = setUpWorkspace('frozen-shape')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+
+  // window_id/workspace_id/pane_id/surface_id are NOT random — fake-cmux.mjs
+  // mints them deterministically (sequential) from a fresh
+  // FAKE_CMUX_STATE/FAKE_CMUX_LOG pair, which freshCmuxEnv() gives every test
+  // its own of. Only dispatch_id (a real crypto.randomBytes UUID minted by
+  // record.mjs's newDispatchId) is genuinely random per run — it and
+  // attn_parent (which embeds it) are the only two fields redacted below.
+  assert.deepEqual(dispatchRes.json, {
+    dispatch_id: dispatchId,
+    workspace_id: '00000006-ec2c-40d7-932c-f3610adfe581',
+    pane_id: '00000009-ec2c-40d7-932c-f3610adfe581',
+    surface_id: '0000000a-ec2c-40d7-932c-f3610adfe581',
+    attempt: 1,
+    attn_parent: `devteam-${dispatchId}-attn`,
+    timeout_s: 1800,
+    warnings: [{ check: 'files_in_scope', detail: '"f.mjs" does not exist — treated as a new file (parent dir exists)', severity: 'warn' }],
+  })
+  assert.equal(dispatchRes.code, 0)
+
+  const workspaceRes = workspaceCmd({}, ctx)
+  assert.deepEqual(workspaceRes.json, {
+    window_id: '00000005-ec2c-40d7-932c-f3610adfe581',
+    workspace_id: '00000006-ec2c-40d7-932c-f3610adfe581',
+    initial_surface_id: '00000008-ec2c-40d7-932c-f3610adfe581',
+    tier: null,
+    env_file: null,
+  })
+  assert.equal(workspaceRes.code, 0)
+
+  const phaseRes = phaseCmd({ set: 'gate' }, ctx)
+  assert.deepEqual(phaseRes.json, { phase: 'gate' })
+  assert.equal(phaseRes.code, 0)
+
+  // Force the very first cap-check to already be past the (floor-clamped)
+  // 5s cap — deterministic 'still-running' with no real/fake sleep call and
+  // no real ~/.claude/projects touch (should-fix C: explicit deps.projectsDir).
+  let nowCalls = 0
+  const awaitRes = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, {
+    now: () => { nowCalls += 1; return nowCalls === 1 ? 0 : 6000 },
+    sleep: () => { throw new Error('sleep must never be called — the cap check must already be past the floor on tick 1') },
+    projectsDir: makeTmpDir('cmux-dispatch-frozen-shape-projects-'),
+  })
+  assert.deepEqual(awaitRes.json, { status: 'still-running', remaining: [dispatchId], attention: [] })
+  assert.equal(awaitRes.code, 0)
+
+  const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  const normalizedTeardownJson = JSON.parse(JSON.stringify(teardownRes.json))
+  delete normalizedTeardownJson.task_dir.path
+  delete normalizedTeardownJson.state_dir.path
+  assert.deepEqual(normalizedTeardownJson, {
+    task_dir: { archived: true },
+    state_dir: { archived: true },
+    leftover_worktrees: [],
+  })
+  assert.equal(teardownRes.code, 0)
+})
+
+test('be-41-04 NEVER LOAD-BEARING (mutation): workspace/dispatch/phase(gate) return byte-identical {code, json} and the same cmux invocation count whether the ledger is healthy or every writer throws', () => {
+  function runScenario() {
+    const { env, ctx } = setUpWorkspace('ledger-mutation')
+    const specPath = makeSpecFile(ctx)
+    const workspaceRes = workspaceCmd({}, ctx)
+    const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    const phaseRes = phaseCmd({ set: 'gate' }, ctx)
+    return { workspaceRes, dispatchRes, phaseRes, invocationCount: readLog(env.logPath).length }
+  }
+
+  const healthy = runScenario()
+  installHostileEmitterOpener()
+  let degraded
+  try {
+    degraded = runScenario()
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  // window_id/workspace_id/pane_id/surface_id are freshly minted per call —
+  // strip those before the deepEqual, keeping every OTHER key byte-identical
+  // (the "not a key-subset check" requirement: every key not stripped here
+  // is compared in full, and the stripped set is the same across both runs).
+  function normalize(res) {
+    const clone = JSON.parse(JSON.stringify(res))
+    delete clone.workspaceRes.json.window_id
+    delete clone.workspaceRes.json.workspace_id
+    delete clone.workspaceRes.json.initial_surface_id
+    delete clone.dispatchRes.json.dispatch_id
+    delete clone.dispatchRes.json.workspace_id
+    delete clone.dispatchRes.json.pane_id
+    delete clone.dispatchRes.json.surface_id
+    delete clone.dispatchRes.json.attn_parent
+    return clone
+  }
+  assert.deepEqual(normalize(healthy), normalize(degraded))
+  assert.equal(healthy.invocationCount, degraded.invocationCount)
+})
+
+test('be-41-04 NEVER LOAD-BEARING (mutation): teardown returns byte-identical {code, json} whether the ledger is healthy or every writer throws', () => {
+  function runScenario(prefix) {
+    const { env, ctx } = setUpWorkspace(prefix)
+    const specPath = makeSpecFile(ctx)
+    dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+    return { teardownRes, invocationCount: readLog(env.logPath).length }
+  }
+
+  const healthy = runScenario('ledger-teardown-mutation-healthy')
+  installHostileEmitterOpener()
+  let degraded
+  try {
+    degraded = runScenario('ledger-teardown-mutation-degraded')
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  function normalize(res) {
+    const clone = JSON.parse(JSON.stringify(res))
+    delete clone.teardownRes.json.task_dir.path
+    delete clone.teardownRes.json.state_dir.path
+    return clone
+  }
+  assert.deepEqual(normalize(healthy), normalize(degraded))
+  assert.equal(healthy.invocationCount, degraded.invocationCount)
+})
+
+test('be-41-04 NEVER LOAD-BEARING (mutation): await returns byte-identical {code, json} (dispatch_id redacted — it is a fresh UUID per run) whether the ledger is healthy or every writer throws', () => {
+  function runScenario(prefix) {
+    const { env, ctx } = setUpWorkspace(prefix)
+    const specPath = makeSpecFile(ctx)
+    const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+    const dispatchId = dispatchRes.json.dispatch_id
+    let now = Date.now()
+    // QA should-fix C: an explicit deps.projectsDir (never the real
+    // ~/.claude/projects) — this scenario runs twice per test invocation
+    // and neither run has any business touching the real home directory.
+    const res = awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 1000, projectsDir: makeTmpDir('cmux-dispatch-await-mutation-projects-'),
+    })
+    // Redact the one value that is legitimately different across two
+    // separate runs (a fresh newDispatchId() UUID) — every OTHER key/value
+    // is compared in full, never a subset.
+    const redacted = JSON.parse(JSON.stringify(res).split(dispatchId).join('<dispatch_id>'))
+    return { redacted, invocationCount: readLog(env.logPath).length }
+  }
+
+  const healthy = runScenario('ledger-await-mutation-healthy')
+  installHostileEmitterOpener()
+  let degraded
+  try {
+    degraded = runScenario('ledger-await-mutation-degraded')
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+  assert.deepEqual(healthy.redacted, degraded.redacted)
+  assert.equal(healthy.invocationCount, degraded.invocationCount)
+})
+
+test('be-41-04 RESOLUTION: incremental and first-sighting-wins — a transcript appearing after the first tick pins exactly one agent session; a later second match never changes the pinned path', () => {
+  const { ctx } = setUpWorkspace('await-resolution')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+
+  const projectsDir = makeTmpDir('cmux-dispatch-projects-')
+  const firstProjectDir = join(projectsDir, 'proj-a')
+  mkdirSync(firstProjectDir, { recursive: true })
+  const firstTranscriptPath = join(firstProjectDir, `${dispatchId}.jsonl`)
+
+  const initialNow = Date.now()
+  let now = initialNow
+  let sleepCalls = 0
+  const res = awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, {
+    now: () => now,
+    sleep: (ms) => {
+      sleepCalls += 1
+      if (sleepCalls === 1) {
+        // Invisible on tick 1's resolution attempt; visible from tick 2 on.
+        writeFileSync(firstTranscriptPath, '')
+      }
+      now += ms
+    },
+    tickMs: 400,
+    projectsDir,
+  })
+  assert.equal(res.code, 0)
+  assert.deepEqual(res.json.status, 'still-running')
+  assert.ok(sleepCalls >= 2, 'expected at least two ticks so the file becomes visible before the cap is reached')
+
+  const sidecar = readRunSidecar(ctx)
+  const entry = sidecar.dispatches[dispatchId]
+  assert.equal(entry.session_started, true)
+  assert.equal(entry.transcript_path, firstTranscriptPath)
+  assert.ok(sidecar.stats.resolution_missing >= 1, 'the tick before the file existed must have counted resolution_missing')
+  // QA should-fix F: sighted_at reflects the INJECTED clock at the moment of
+  // resolution (tick 2, right after exactly one sleep(tickMs) call already
+  // advanced it), never a real wall-clock read — pinned against the actual
+  // value the test's own deps.now would have returned at that point, not a
+  // hand-derived arithmetic guess.
+  assert.equal(entry.sighted_at, isoMs(initialNow + 400))
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const sessions = ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id)
+    assert.equal(sessions.length, 1, 'exactly one startAgentSession row')
+    assert.equal(sessions[0].claude_session_id, dispatchId)
+    assert.equal(sessions[0].transcript_path, firstTranscriptPath)
+  })
+
+  // A SECOND matching transcript appearing later must never change the
+  // pinned path — the sidecar value is never re-resolved.
+  const secondProjectDir = join(projectsDir, 'proj-b')
+  mkdirSync(secondProjectDir, { recursive: true })
+  writeFileSync(join(secondProjectDir, `${dispatchId}.jsonl`), '')
+  let now2 = now
+  awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, {
+    now: () => now2, sleep: (ms) => { now2 += ms }, tickMs: 400, projectsDir,
+  })
+  const sidecarAfter = readRunSidecar(ctx)
+  assert.equal(sidecarAfter.dispatches[dispatchId].transcript_path, firstTranscriptPath)
+  withLedgerReader(ctx, (ledger, sc) => {
+    const sessions = ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id)
+    assert.equal(sessions.length, 1, 'still exactly one row — never re-resolved')
+  })
+})
+
+test('be-41-04 REWORK must-fix #3: a hostile record.model (5000 ANSI-laden chars with embedded newlines) is stripped and length-capped before it reaches agent_start\'s payload AND agent_sessions.model, since the record is worker-writable and the schema\'s model pattern is unanchored', () => {
+  const { ctx } = setUpWorkspace('hostile-record-model')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const recordPath = join(ctx.paths.dispatchDir, 'be-1a.1.json')
+
+  // Mutate the record's model field BETWEEN dispatch and the resolving tick —
+  // models a worker (same uid, G13) rewriting its own record.
+  const hostileModel = `\x1b[31m${'m\n'.repeat(2500)}\x07`
+  const record = readRecord(recordPath)
+  record.model = hostileModel
+  writeFileSync(recordPath, `${JSON.stringify(record, null, 2)}\n`)
+
+  // agent_start's payload was ALREADY built and recorded at dispatch time
+  // (before this mutation), against the clean 'claude-*' model dispatchCmd
+  // resolved — so it is unaffected by this post-dispatch mutation. This test
+  // targets the OTHER writer: startAgentSession, fired by the awaitCmd
+  // resolving tick below, which re-reads the record fresh from disk and
+  // therefore DOES see the poisoned value.
+  const projectsDir = makeTmpDir('cmux-dispatch-hostile-model-projects-')
+  const sub = join(projectsDir, 'proj-a')
+  mkdirSync(sub, { recursive: true })
+  writeFileSync(join(sub, `${dispatchId}.jsonl`), '')
+
+  // Resolve on tick 1 (staged return) so exactly one resolution pass runs
+  // and the call returns without ever needing a real/fake sleep.
+  writeValidReturn(record)
+  awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, { sleep: NO_SLEEP, projectsDir })
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const sessions = ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id)
+    assert.equal(sessions.length, 1)
+    const storedModel = sessions[0].model
+    assert.doesNotMatch(storedModel, /[\x00-\x1F\x7F]/, 'every control character (including the embedded newlines and the ANSI ESC/BEL bytes) must be stripped')
+    assert.doesNotMatch(storedModel, /\x1b\[31m/, 'the ANSI CSI sequence itself must be stripped whole, not just its leading ESC byte')
+    assert.ok(storedModel.length <= SIGNAL_LIMITS.message_max_chars, `model must be capped at ${SIGNAL_LIMITS.message_max_chars} chars, got ${storedModel.length}`)
+  })
+})
+
+test('be-41-04 REWORK round 2, must-fix #2(a): an ALREADY-hostile record.model at DISPATCH TIME (not mutated afterward) is stripped and capped in the agent_start payload dispatchCmd itself builds — a distinct call site from startAgentSession\'s own sanitizer, which the test above only exercises via a POST-dispatch mutation', () => {
+  const hostileModel = `\x1b[31m${'m\n'.repeat(2500)}\x07`
+  const { ctx } = setUpWorkspace('hostile-model-at-dispatch-time', {
+    configOverrides: { session: { roles: { coder: { model: hostileModel } } } },
+  })
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  assert.equal(dispatchRes.code, 0)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  assert.equal(record.model, hostileModel, 'sanity: the record ITSELF carries the hostile model unsanitized at dispatch time — buildRecord is not this slice\'s sanitization point, dispatchCmd\'s own agent_start call site is')
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const events = ledger.dumpTable('events').filter((e) => e.adw_id === sc.adw_id && e.type === 'agent_start')
+    assert.equal(events.length, 1)
+    const payload = JSON.parse(events[0].payload_json)
+    assert.doesNotMatch(payload.model, /[\x00-\x1F\x7F]/, 'every control character must be stripped from agent_start\'s own payload, built inside dispatchCmd')
+    assert.doesNotMatch(payload.model, /\x1b\[31m/, 'the ANSI CSI sequence itself must be stripped whole, not just its leading ESC byte')
+    assert.ok(payload.model.length <= SIGNAL_LIMITS.message_max_chars, `model must be capped at ${SIGNAL_LIMITS.message_max_chars} chars, got ${payload.model.length}`)
+    assert.equal(payload.dispatch_id, dispatchId)
+  })
+})
+
+test('be-41-04 RESOLUTION: two simultaneous transcript matches produce NO agent-session row, increment resolution_ambiguous, and log exactly one line for that single resolution attempt', () => {
+  const { ctx } = setUpWorkspace('await-resolution-ambiguous')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  // Resolve on tick 1 for an UNRELATED reason (a staged return) so exactly
+  // one resolution attempt happens this whole call — resolveTranscript logs
+  // once PER CALL while ambiguous, so a multi-tick call would log once per
+  // tick for as long as the ambiguity persists; that per-call behaviour is
+  // be-41-02's own tested contract, not what this wiring test is proving.
+  writeValidReturn(record)
+
+  const projectsDir = makeTmpDir('cmux-dispatch-projects-ambiguous-')
+  for (const name of ['proj-a', 'proj-b']) {
+    const sub = join(projectsDir, name)
+    mkdirSync(sub, { recursive: true })
+    writeFileSync(join(sub, `${dispatchId}.jsonl`), '')
+  }
+
+  const stderr = captureStderr(() => {
+    awaitCmd({ all: [dispatchId] }, ctx, { sleep: NO_SLEEP, projectsDir })
+  })
+  const ambiguousLines = stderr.split('\n').filter((l) => l.includes('ambiguous transcript resolution'))
+  assert.equal(ambiguousLines.length, 1, `expected exactly one ambiguity log line, got: ${JSON.stringify(ambiguousLines)}`)
+
+  const sidecar = readRunSidecar(ctx)
+  assert.equal(sidecar.dispatches[dispatchId].session_started, false)
+  assert.ok(sidecar.stats.resolution_ambiguous >= 1)
+  withLedgerReader(ctx, (ledger, sc) => {
+    const sessions = ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id)
+    assert.equal(sessions.length, 0)
+  })
+})
+
+test('be-41-04 RESOLUTION: zero matches increments resolution_missing and logs nothing', () => {
+  const { ctx } = setUpWorkspace('await-resolution-missing')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const projectsDir = makeTmpDir('cmux-dispatch-projects-missing-')
+
+  let now = Date.now()
+  const stderr = captureStderr(() => {
+    awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, {
+      now: () => now, sleep: (ms) => { now += ms }, tickMs: 400, projectsDir,
+    })
+  })
+  assert.doesNotMatch(stderr, /transcript resolution/)
+
+  const sidecar = readRunSidecar(ctx)
+  assert.equal(sidecar.dispatches[dispatchId].session_started, false)
+  assert.ok(sidecar.stats.resolution_missing >= 1)
+  withLedgerReader(ctx, (ledger, sc) => {
+    assert.equal(ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id).length, 0)
+  })
+})
+
+test('be-41-04 ensureAgentSession BEFORE THE FIRST HEARTBEAT, throttled >= 15s per session, independently per session', () => {
+  const { ctx } = setUpWorkspace('await-heartbeat')
+  const specA = makeSpecFile(ctx, 'be-1a')
+  const dispatchA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
+  const specB = makeSpecFile(ctx, 'be-1b')
+  const dispatchB = dispatchCmd({ slice: 'be-1b', role: 'coder', spec: specB }, ctx)
+  const idA = dispatchA.json.dispatch_id
+  const idB = dispatchB.json.dispatch_id
+
+  const projectsDir = makeTmpDir('cmux-dispatch-projects-heartbeat-')
+  for (const id of [idA, idB]) {
+    const sub = join(projectsDir, `proj-${id}`)
+    mkdirSync(sub, { recursive: true })
+    writeFileSync(join(sub, `${id}.jsonl`), '')
+  }
+
+  let now = Date.now()
+  let ticks = 0
+  const res = awaitCmd({ all: [idA, idB], 'max-block-s': '45' }, ctx, {
+    now: () => now, sleep: (ms) => { ticks += 1; now += ms }, tickMs: 4000, projectsDir,
+  })
+  assert.deepEqual(res.json.status, 'still-running')
+  assert.ok(ticks >= 10, `expected many ticks over the 45s cap, got ${ticks}`)
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const sessions = ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id)
+    assert.equal(sessions.length, 2)
+    for (const session of sessions) {
+      // ensureAgentSession ran before any heartbeat could land — assert the
+      // COLUMN actually advanced, not just that the call was made (a
+      // heartbeat emitted first would silently update zero rows).
+      assert.notEqual(session.last_heartbeat_at, null)
+    }
+
+    const jsonlLines = readJsonlKinds(sc.jsonl_path)
+    const heartbeatsA = jsonlLines.filter((l) => l.kind === 'heartbeat' && l.args.claude_session_id === idA)
+    const heartbeatsB = jsonlLines.filter((l) => l.kind === 'heartbeat' && l.args.claude_session_id === idB)
+    // Throttled: strictly fewer heartbeats than ticks (never one-per-tick),
+    // but at least a couple across a 45s span at a 15s floor — and each
+    // session's own count is independent of the other's.
+    for (const hbs of [heartbeatsA, heartbeatsB]) {
+      assert.ok(hbs.length >= 2, `expected at least 2 heartbeats over 45s at a 15s floor, got ${hbs.length}`)
+      assert.ok(hbs.length < ticks, `heartbeats (${hbs.length}) must be throttled below the tick count (${ticks})`)
+    }
+  })
+})
+
+test('be-41-04 REWORK should-fix E: ensureAgentSession fires strictly BEFORE the first heartbeat, proven by instrumenting the REAL call order — not by a long run whose eventual backfill would still pass even if the order were inverted (an independent mutation-testing gap)', () => {
+  const { ctx } = setUpWorkspace('heartbeat-ordering')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const projectsDir = makeTmpDir('cmux-dispatch-heartbeat-order-projects-')
+  const sub = join(projectsDir, 'proj-a')
+  mkdirSync(sub, { recursive: true })
+  writeFileSync(join(sub, `${dispatchId}.jsonl`), '')
+
+  // Resolve on tick 1 (staged return) so exactly one heartbeat/resolution
+  // pass runs — a short run is what makes an order inversion (heartbeat
+  // pass textually before the resolution pass) actually observable: with a
+  // long run, the inverted order still eventually backfills
+  // last_heartbeat_at on a LATER tick once the row exists, hiding the bug.
+  writeValidReturn(record)
+
+  const callOrder = []
+  _setEmitterOpenerForTest((opts) => openRun({
+    ...opts,
+    _openLedger: () => {
+      const real = openLedger({
+        dbPath: join(ctx.paths.stateDir, 'ledger', 'ledger.db'),
+        jsonlPath: join(ctx.paths.stateDir, 'ledger', 'ledger.jsonl'),
+      })
+      return {
+        ...real,
+        startAgentSession: (...callArgs) => { callOrder.push('startAgentSession'); return real.startAgentSession(...callArgs) },
+        heartbeat: (...callArgs) => { callOrder.push('heartbeat'); return real.heartbeat(...callArgs) },
+      }
+    },
+  }))
+  try {
+    awaitCmd({ all: [dispatchId] }, ctx, { sleep: NO_SLEEP, projectsDir })
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  const firstStart = callOrder.indexOf('startAgentSession')
+  const firstHeartbeat = callOrder.indexOf('heartbeat')
+  assert.ok(firstStart !== -1, 'expected at least one startAgentSession call')
+  assert.ok(firstHeartbeat !== -1, 'expected at least one heartbeat call')
+  assert.ok(firstStart < firstHeartbeat, `startAgentSession (index ${firstStart}) must be called strictly before the first heartbeat (index ${firstHeartbeat}) — call order: ${JSON.stringify(callOrder)}`)
+})
+
+test('be-41-04 SIGNALS THROUGH C5, RELAY NEVER FIRED: a hostile signals fixture produces capped, level-clamped log rows; the non-string-message entry is dropped and counted; zero notify-shaped cmux invocations', () => {
+  const { env, ctx } = setUpWorkspace('await-signals')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const longMessage = 'x'.repeat(5000)
+  const hostileLines = [
+    JSON.stringify({ ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: 'hello', escalate_to: 'lead' }),
+    JSON.stringify({ ts: '2026-08-01T00:00:01.000Z', level: 'urgent-unknown-level', message: 'unknown level', escalate_to: 'lead' }),
+    JSON.stringify({ ts: '2026-08-01T00:00:02.000Z', level: 'progress', message: '\x1b[31mred\ntext\x07', escalate_to: 'lead' }),
+    JSON.stringify({ ts: '2026-08-01T00:00:03.000Z', level: 'progress', message: longMessage, escalate_to: 'lead' }),
+    JSON.stringify({ ts: '2026-08-01T00:00:04.000Z', level: 'progress', message: 12345, escalate_to: 'lead' }),
+  ]
+  mkdirSync(dirname(record.signals_path), { recursive: true })
+  writeFileSync(record.signals_path, `${hostileLines.join('\n')}\n`)
+
+  // Resolve on tick 1 (staged return) so exactly one signals pass runs.
+  writeValidReturn(record)
+  // QA should-fix C: an explicit deps.projectsDir — never the real
+  // ~/.claude/projects.
+  awaitCmd({ all: [dispatchRes.json.dispatch_id] }, ctx, { sleep: NO_SLEEP, projectsDir: makeTmpDir('cmux-dispatch-signals-projects-') })
+
+  const log = readLog(env.logPath)
+  // QA should-fix D: assert the log itself is non-empty FIRST — otherwise
+  // the zero-notify count below would pass vacuously if the fake-cmux log
+  // were missing/misconfigured for the wrong reason (an empty array's
+  // filter().length is trivially 0 regardless of whether anything real ran).
+  assert.ok(log.length > 0, 'expected the fake-cmux invocation log to be non-empty (the dispatch itself makes several calls) — a zero-length log would make the notify-count assertion below vacuous')
+  assert.equal(log.filter((e) => String(e.argv[0]).includes('notify')).length, 0, 'the relay side effect must never be performed')
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const logRows = ledger.dumpTable('events').filter((e) => e.adw_id === sc.adw_id && e.type === 'log')
+    assert.equal(logRows.length, 4, 'the non-string-message entry is dropped, not recorded')
+    const payloads = logRows.map((r) => JSON.parse(r.payload_json))
+    for (const p of payloads) {
+      assert.deepEqual(Object.keys(p).sort(), ['level', 'message'], 'payload discipline: log is exactly {level, message}')
+      assert.ok(SIGNAL_LEVELS.includes(p.level), `level must be clamped to a SIGNAL_LEVELS member, got ${p.level}`)
+      assert.ok(p.message.length <= SIGNAL_LIMITS.message_max_chars, `message must be capped at ${SIGNAL_LIMITS.message_max_chars} chars, got ${p.message.length}`)
+    }
+    assert.equal(payloads[1].level, 'progress', 'an unknown level clamps to progress')
+    assert.doesNotMatch(payloads[2].message, /[\x00-\x1F\x7F]/, 'control characters (ANSI, newline, bell) are stripped')
+    assert.equal(payloads[3].message.length, SIGNAL_LIMITS.message_max_chars, 'a 5000-char message is capped to the limit')
+    assert.ok(sc.stats.dropped >= 1, 'the non-string-message drop is counted')
+  })
+})
+
+test('be-41-04 REWORK must-fix #4: the signals mirror cursor is a PERSISTED byte offset in the sidecar (never a function-local line count) — a SECOND awaitCmd() call over the SAME already-mirrored signals file never re-mirrors those lines', () => {
+  const { ctx } = setUpWorkspace('signals-cursor-persistence')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const lines = [
+    JSON.stringify({ ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: 'first', escalate_to: 'lead' }),
+    JSON.stringify({ ts: '2026-08-01T00:00:01.000Z', level: 'progress', message: 'second', escalate_to: 'lead' }),
+  ]
+  mkdirSync(dirname(record.signals_path), { recursive: true })
+  writeFileSync(record.signals_path, `${lines.join('\n')}\n`)
+
+  // Force exactly one tick per call (the cap check is already past the
+  // floor by the time it is evaluated) — matches the frozen-shape test's
+  // own trick above, so this test never depends on a real/fake sleep.
+  function forceOneTickDeps() {
+    let calls = 0
+    return {
+      now: () => { calls += 1; return calls === 1 ? 0 : 6000 },
+      sleep: () => { throw new Error('sleep must never be called — the cap check must already be past the floor on tick 1') },
+      projectsDir: makeTmpDir('cmux-dispatch-signals-cursor-projects-'),
+    }
+  }
+
+  const res1 = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, forceOneTickDeps())
+  assert.deepEqual(res1.json.status, 'still-running')
+
+  const countLogRows = () => withLedgerReader(ctx, (ledger, sc) => ledger.dumpTable('events').filter((e) => e.adw_id === sc.adw_id && e.type === 'log').length)
+  const countAfterFirst = countLogRows()
+  assert.ok(countAfterFirst >= 2, `expected the first call to mirror both signal lines, got ${countAfterFirst} log rows`)
+
+  const sidecarAfterFirst = readRunSidecar(ctx)
+  // QA REWORK round 2, must-fix #1: the byte offset now lives in the
+  // sidecar's own TOP-LEVEL `signal_offsets` map (mirroring the existing
+  // top-level `heartbeats` map), never inside the per-dispatch entry.
+  assert.ok(sidecarAfterFirst.signal_offsets[dispatchId] > 0, 'the byte offset must be persisted in the sidecar\'s top-level signal_offsets map, not held only in a function-local variable that a fresh awaitCmd() call would never see')
+
+  // A SECOND, entirely fresh awaitCmd() call — models the normal
+  // orchestrator pattern of polling repeatedly until resolved. With a
+  // function-local line-count cursor (the pre-rework design), this call
+  // would re-read the ENTIRE signals file from byte 0 and double every row.
+  const res2 = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, forceOneTickDeps())
+  assert.deepEqual(res2.json.status, 'still-running')
+
+  const countAfterSecond = countLogRows()
+  assert.equal(countAfterSecond, countAfterFirst, 'a second awaitCmd() call over the SAME unread-past-offset signals file must never re-mirror already-mirrored lines')
+})
+
+test('be-41-04 REWORK round 2, must-fix #1: a non-stale sidecar lock held THROUGHOUT the whole call still lets the signal-offset cursor advance via the in-process fallback — a signals file that would otherwise re-mirror on every tick is only ATTEMPTED once across many ticks', () => {
+  const { ctx } = setUpWorkspace('signal-offset-lock-fallback')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  mkdirSync(dirname(record.signals_path), { recursive: true })
+  writeFileSync(record.signals_path, `${JSON.stringify({ ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: 'only-once', escalate_to: 'lead' })}\n`)
+
+  // Never resolved (no transcript match, no return file) — heartbeat never
+  // fires (session_started stays false) and the only source of emit() calls
+  // is mirrorSignalsTick's own per-row recordEvent, so counting emit() calls
+  // is a clean proxy for "how many times the signals pass actually found
+  // new, unconsumed lines to process" — independent of whether the persist
+  // under the held lock ever actually succeeds.
+  let emitCallCount = 0
+  _setEmitterOpenerForTest((opts) => {
+    const emitter = openRun(opts)
+    plantLockAfterRealOpen(opts.stateDir) // never released — every subsequent lock-needing call gives up, for the WHOLE call.
+    const realEmit = emitter.emit
+    return {
+      ...emitter,
+      emit: (fn) => { emitCallCount += 1; return realEmit(fn) },
+    }
+  })
+
+  let now = 0
+  let ticks = 0
+  let res
+  try {
+    res = awaitCmd({ all: [dispatchId], 'max-block-s': '45' }, ctx, {
+      now: () => now,
+      sleep: (ms) => { ticks += 1; now += ms },
+      tickMs: 4000,
+      projectsDir: makeTmpDir('cmux-dispatch-signal-offset-lock-projects-'),
+    })
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  assert.deepEqual(res.json.status, 'still-running')
+  assert.ok(ticks >= 10, `expected many ticks over the 45s cap, got ${ticks}`)
+  assert.equal(emitCallCount, 1, `expected exactly ONE emit() attempt for the single signal line across every tick of this call, got ${emitCallCount} — a persisted-offset-only design (no in-process fallback) would re-attempt this on every tick that the held lock defeats the persist`)
+})
+
+test('be-41-04 REWORK round 2, must-fix #2(b): a signals file that shrinks below the persisted mirror offset resets the cursor to 0 and re-mirrors from the (now shorter) file, rather than silently mirroring nothing forever', () => {
+  const { ctx } = setUpWorkspace('signals-shrink-reset')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  mkdirSync(dirname(record.signals_path), { recursive: true })
+  // A deliberately LONG first line — long enough that the persisted offset
+  // after mirroring it will exceed the SHORT rewritten file's total length.
+  writeFileSync(record.signals_path, `${JSON.stringify({ ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: 'a'.repeat(300), escalate_to: 'lead' })}\n`)
+
+  function forceOneTickDeps(projectsDir) {
+    let calls = 0
+    return {
+      now: () => { calls += 1; return calls === 1 ? 0 : 6000 },
+      sleep: () => { throw new Error('sleep must never be called — the cap check must already be past the floor on tick 1') },
+      projectsDir,
+    }
+  }
+
+  const res1 = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, forceOneTickDeps(makeTmpDir('cmux-dispatch-shrink-projects-1-')))
+  assert.deepEqual(res1.json.status, 'still-running')
+
+  const countLogRows = () => withLedgerReader(ctx, (ledger, sc) => ledger.dumpTable('events').filter((e) => e.adw_id === sc.adw_id && e.type === 'log').length)
+  const countAfterFirst = countLogRows()
+  assert.equal(countAfterFirst, 1)
+
+  const sidecarAfterFirst = readRunSidecar(ctx)
+  const offsetAfterFirst = sidecarAfterFirst.signal_offsets[dispatchId]
+  assert.ok(offsetAfterFirst > 0)
+
+  // Truncate-and-rewrite the file to something SHORTER (in total bytes) than
+  // the persisted offset — models a worker truncating and rewriting its own
+  // signals file.
+  writeFileSync(record.signals_path, `${JSON.stringify({ ts: '2026-08-01T00:00:01.000Z', level: 'progress', message: 'short', escalate_to: 'lead' })}\n`)
+  assert.ok(readFileSync(record.signals_path).length < offsetAfterFirst, 'sanity: the rewritten file must genuinely be shorter than the persisted offset for this test to be meaningful')
+
+  const stderr = captureStderr(() => {
+    const res2 = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, forceOneTickDeps(makeTmpDir('cmux-dispatch-shrink-projects-2-')))
+    assert.deepEqual(res2.json.status, 'still-running')
+  })
+  assert.match(stderr, /resetting the mirror cursor to 0/)
+
+  const countAfterSecond = countLogRows()
+  assert.equal(countAfterSecond, countAfterFirst + 1, 'the shrunk-and-rewritten file must be re-mirrored from offset 0, not silently produce nothing')
+
+  const sidecarAfterSecond = readRunSidecar(ctx)
+  assert.ok(sidecarAfterSecond.signal_offsets[dispatchId] > 0)
+  assert.ok(sidecarAfterSecond.signal_offsets[dispatchId] < offsetAfterFirst, 'the new offset must reflect the shorter rewritten file, not remain stuck at the old, now-invalid, offset')
+})
+
+test('be-41-04 REWORK round 2, must-fix #2(c): per-dispatch try/catch isolation in the heartbeat+signals tick loop — one dispatch throwing during its own pass never skips that SAME tick\'s work for another dispatch', () => {
+  const { ctx } = setUpWorkspace('await-tick-isolation')
+  const specA = makeSpecFile(ctx, 'be-1a')
+  const dispatchA = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specA }, ctx)
+  const specB = makeSpecFile(ctx, 'be-1b')
+  const dispatchB = dispatchCmd({ slice: 'be-1b', role: 'coder', spec: specB }, ctx)
+  const idA = dispatchA.json.dispatch_id
+  const idB = dispatchB.json.dispatch_id
+  const recordA = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+  const recordB = readRecord(join(ctx.paths.dispatchDir, 'be-1b.1.json'))
+
+  const POISON_MARKER = 'poison-marker-for-A-only'
+  mkdirSync(dirname(recordA.signals_path), { recursive: true })
+  writeFileSync(recordA.signals_path, `${JSON.stringify({ ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: POISON_MARKER, escalate_to: 'lead' })}\n`)
+  mkdirSync(dirname(recordB.signals_path), { recursive: true })
+  writeFileSync(recordB.signals_path, `${JSON.stringify({ ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: 'B is healthy', escalate_to: 'lead' })}\n`)
+
+  _setEmitterOpenerForTest((opts) => {
+    const emitter = openRun(opts)
+    const realMap = emitter.mapSignalLogEntries
+    return {
+      ...emitter,
+      // Forces a throw for dispatch A's own signals pass ONLY — B's content
+      // never matches the marker and maps normally.
+      mapSignalLogEntries: (entries, mapOpts) => {
+        if (entries.some((e) => e && e.message === POISON_MARKER)) {
+          throw new Error('forced failure for dispatch A only (must-fix #2(c) isolation test)')
+        }
+        return realMap(entries, mapOpts)
+      },
+    }
+  })
+
+  let res
+  let calls = 0
+  const stderr = captureStderr(() => {
+    try {
+      res = awaitCmd({ all: [idA, idB], 'max-block-s': '1' }, ctx, {
+        now: () => { calls += 1; return calls === 1 ? 0 : 6000 },
+        sleep: () => { throw new Error('sleep must never be called — the cap check must already be past the floor on tick 1') },
+        projectsDir: makeTmpDir('cmux-dispatch-tick-isolation-projects-'),
+      })
+    } finally {
+      _setEmitterOpenerForTest(null)
+    }
+  })
+  assert.deepEqual(res.json.status, 'still-running')
+  assert.match(stderr, new RegExp(`ledger heartbeat/signals mirror failed for ${idA}`), 'expected A\'s forced failure to be logged and swallowed, never propagated')
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const logRows = ledger.dumpTable('events').filter((e) => e.adw_id === sc.adw_id && e.type === 'log')
+    assert.equal(logRows.length, 1, 'dispatch B\'s signal line must still be mirrored in the SAME tick despite A throwing')
+    const payload = JSON.parse(logRows[0].payload_json)
+    assert.equal(payload.message, 'B is healthy')
+  })
+})
+
+test('be-41-04 REWORK round 2, should-fix C: a per-tick cap on signal-mirroring volume defers overflow lines to a SECOND tick rather than performing an unbounded number of lock+insert cycles in one tick', () => {
+  const { ctx } = setUpWorkspace('signals-per-tick-cap')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const lineCount = 120 // > SIGNALS_MAX_LINES_PER_TICK (100)
+  const lines = Array.from({ length: lineCount }, (_, i) => JSON.stringify({
+    ts: '2026-08-01T00:00:00.000Z', level: 'progress', message: `line-${i}`, escalate_to: 'lead',
+  }))
+  mkdirSync(dirname(record.signals_path), { recursive: true })
+  writeFileSync(record.signals_path, `${lines.join('\n')}\n`)
+
+  function forceOneTickDeps(projectsDir) {
+    let calls = 0
+    return {
+      now: () => { calls += 1; return calls === 1 ? 0 : 6000 },
+      sleep: () => { throw new Error('sleep must never be called — the cap check must already be past the floor on tick 1') },
+      projectsDir,
+    }
+  }
+
+  const countLogRows = () => withLedgerReader(ctx, (ledger, sc) => ledger.dumpTable('events').filter((e) => e.adw_id === sc.adw_id && e.type === 'log').length)
+
+  const stderr = captureStderr(() => {
+    const res1 = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, forceOneTickDeps(makeTmpDir('cmux-dispatch-cap-projects-1-')))
+    assert.deepEqual(res1.json.status, 'still-running')
+  })
+  const countAfterFirst = countLogRows()
+  assert.ok(countAfterFirst < lineCount, `expected the first tick to mirror FEWER than all ${lineCount} lines, got ${countAfterFirst}`)
+  assert.match(stderr, /signal mirror capped at/, 'the overflow must be logged, never silent')
+
+  const res2 = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, forceOneTickDeps(makeTmpDir('cmux-dispatch-cap-projects-2-')))
+  assert.deepEqual(res2.json.status, 'still-running')
+  const countAfterSecond = countLogRows()
+  assert.equal(countAfterSecond, lineCount, 'the deferred overflow lines must be mirrored on a SECOND tick, never dropped')
+})
+
+test('be-41-04 REWORK round 2, should-fix B: reconcileProgressCursor takes the more-advanced of a persisted value and an in-process fallback, treating a NaN/malformed persisted value as absent rather than poisoning the comparison', () => {
+  assert.equal(reconcileProgressCursor(undefined, undefined), -Infinity)
+  assert.equal(reconcileProgressCursor(null, null), -Infinity)
+  assert.equal(reconcileProgressCursor(NaN, 5), 5, 'a NaN persisted value must degrade to absent, never poison the comparison via Math.max(NaN, x) === NaN')
+  assert.equal(reconcileProgressCursor(5, NaN), 5, 'a NaN fallback value must degrade to absent')
+  assert.equal(reconcileProgressCursor(10, 3), 10, 'the persisted value wins when it is more advanced')
+  assert.equal(reconcileProgressCursor(3, 10), 10, 'the fallback wins when it is more advanced')
+  assert.equal(reconcileProgressCursor(7, 7), 7, 'a tie is stable')
+  assert.equal(reconcileProgressCursor(Date.parse('not-a-real-date'), 1234), 1234, 'a malformed ISO timestamp (Date.parse -> NaN) must degrade to absent, exactly the heartbeat-pass scenario this helper exists for')
+})
+
+test('be-41-04 TEARDOWN RECONCILES OPEN AGENT SESSIONS and logs the final drop-counter snapshot', () => {
+  const { ctx } = setUpWorkspace('await-teardown-reconcile')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const projectsDir = makeTmpDir('cmux-dispatch-projects-teardown-')
+  const sub = join(projectsDir, 'proj-a')
+  mkdirSync(sub, { recursive: true })
+  writeFileSync(join(sub, `${dispatchId}.jsonl`), '')
+
+  writeValidReturn(record)
+  awaitCmd({ all: [dispatchId] }, ctx, { sleep: NO_SLEEP, projectsDir })
+
+  const beforeTeardown = readRunSidecar(ctx)
+  assert.equal(beforeTeardown.dispatches[dispatchId].session_started, true)
+  assert.equal(beforeTeardown.dispatches[dispatchId].ended, false)
+
+  const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  assert.equal(teardownRes.code, 0)
+
+  // teardown archives stateDir (--keep-artifacts) — read the sidecar from
+  // its archived location, never assuming the pre-archive path still exists.
+  // The sidecar's OWN db_path/jsonl_path fields are stamped at CREATE time
+  // and are never rewritten by a later archive/rename, so they still name
+  // the pre-archive location — recompute the real post-archive db/jsonl
+  // paths relative to archivedStateDir instead of trusting those fields.
+  const archivedStateDir = teardownRes.json.state_dir.path
+  const sidecarAfter = JSON.parse(readFileSync(join(archivedStateDir, 'ledger', 'run.json'), 'utf8'))
+  assert.equal(sidecarAfter.dispatches[dispatchId].ended, true)
+  const archivedLedgerPaths = {
+    ...sidecarAfter,
+    db_path: join(archivedStateDir, 'ledger', 'ledger.db'),
+    jsonl_path: join(archivedStateDir, 'ledger', 'ledger.jsonl'),
+  }
+
+  const dumped = dumpLedgerTablesInSubprocess(archivedLedgerPaths, ['agent_sessions', 'sessions', 'phases', 'events'])
+  const sessions = dumped.agent_sessions.filter((s) => s.adw_id === sidecarAfter.adw_id)
+  assert.equal(sessions.length, 1)
+  assert.notEqual(sessions[0].ended_at, null)
+
+  const sessionRow = dumped.sessions.find((s) => s.adw_id === sidecarAfter.adw_id)
+  assert.ok(sessionRow)
+  assert.equal(sessionRow.status, 'ok')
+  assert.notEqual(sessionRow.ended_at, null)
+
+  const openPhases = dumped.phases.filter((p) => p.adw_id === sidecarAfter.adw_id && p.status === 'running')
+  assert.equal(openPhases.length, 0, 'endRun must close the open phase')
+
+  const logRows = dumped.events.filter((e) => e.adw_id === sidecarAfter.adw_id && e.type === 'log')
+  assert.ok(logRows.length >= 1, 'the stats snapshot is recorded as a log event')
+  const snapshotPayload = JSON.parse(logRows[logRows.length - 1].payload_json)
+  assert.deepEqual(Object.keys(snapshotPayload).sort(), ['level', 'message'])
+})
+
+test('be-41-04 REWORK should-fix B: a sighted-but-now-unreadable transcript at teardown time passes explicit null for all ten usage fields, never a confident all-zero reading', () => {
+  const { ctx } = setUpWorkspace('await-teardown-transcript-gone')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const projectsDir = makeTmpDir('cmux-dispatch-projects-teardown-gone-')
+  const sub = join(projectsDir, 'proj-a')
+  mkdirSync(sub, { recursive: true })
+  const transcriptPath = join(sub, `${dispatchId}.jsonl`)
+  // A REAL usage-bearing line at resolution time — the session IS sighted
+  // with a genuine, non-trivial transcript, never an empty placeholder
+  // (which would be ambiguous with "became unreadable" by construction).
+  writeFileSync(transcriptPath, `${JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 10, output_tokens: 5 } } })}\n`)
+
+  writeValidReturn(record)
+  awaitCmd({ all: [dispatchId] }, ctx, { sleep: NO_SLEEP, projectsDir })
+
+  const sidecarBefore = readRunSidecar(ctx)
+  assert.equal(sidecarBefore.dispatches[dispatchId].session_started, true)
+  assert.equal(sidecarBefore.dispatches[dispatchId].transcript_path, transcriptPath)
+
+  // The transcript is gone by teardown time — models a worktree/tmp cleanup
+  // race, or any other reason the file no longer resolves.
+  rmSync(transcriptPath, { force: true })
+
+  const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  assert.equal(teardownRes.code, 0)
+
+  const archivedStateDir = teardownRes.json.state_dir.path
+  const sidecarAfter = JSON.parse(readFileSync(join(archivedStateDir, 'ledger', 'run.json'), 'utf8'))
+  const archivedLedgerPaths = {
+    ...sidecarAfter,
+    db_path: join(archivedStateDir, 'ledger', 'ledger.db'),
+    jsonl_path: join(archivedStateDir, 'ledger', 'ledger.jsonl'),
+  }
+  const dumped = dumpLedgerTablesInSubprocess(archivedLedgerPaths, ['agent_sessions'])
+  const session = dumped.agent_sessions.find((s) => s.adw_id === sidecarAfter.adw_id)
+  assert.ok(session)
+  for (const field of [
+    'context_tokens', 'context_window', 'raw_read_tokens', 'raw_written_tokens',
+    'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens',
+  ]) {
+    assert.equal(session[field], null, `expected ${field} to be explicit null (transcript became unreadable), got ${session[field]}`)
+  }
+})
+
+test('be-41-04 REWORK round 2, should-fix D: a transcript_path resolved from a control-character-laden project directory name reaches agent_sessions.transcript_path stripped, while the SIDECAR (and teardown\'s real read) keeps the raw, unmodified path', () => {
+  const { ctx } = setUpWorkspace('transcript-path-hostile-dirname')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const projectsDir = makeTmpDir('cmux-dispatch-hostile-dirname-projects-')
+  // A worker-writable directory NAME (not file content) carrying a control
+  // character — resolveTranscript scans directory names, never file content.
+  const hostileDirName = 'proj-\x1b[31mred'
+  const sub = join(projectsDir, hostileDirName)
+  mkdirSync(sub, { recursive: true })
+  const rawTranscriptPath = join(sub, `${dispatchId}.jsonl`)
+  writeFileSync(rawTranscriptPath, `${JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 1, output_tokens: 1 } } })}\n`)
+
+  writeValidReturn(record)
+  awaitCmd({ all: [dispatchId], 'max-block-s': '5' }, ctx, { sleep: NO_SLEEP, projectsDir })
+
+  const sidecar = readRunSidecar(ctx)
+  assert.equal(sidecar.dispatches[dispatchId].transcript_path, rawTranscriptPath, 'the SIDECAR keeps the raw, resolveTranscript-verified path — the ledger-column sanitizer never touches this operational copy')
+
+  withLedgerReader(ctx, (ledger, sc) => {
+    const sessions = ledger.dumpTable('agent_sessions').filter((s) => s.adw_id === sc.adw_id)
+    assert.equal(sessions.length, 1)
+    assert.doesNotMatch(sessions[0].transcript_path, /\x1b/, 'the ledger column must have the control character stripped')
+    assert.ok(sessions[0].transcript_path.includes('proj-'), 'the rest of the real path content must survive the strip')
+  })
+
+  const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  assert.equal(teardownRes.code, 0)
+  const archivedStateDir = teardownRes.json.state_dir.path
+  const archivedSidecar = JSON.parse(readFileSync(join(archivedStateDir, 'ledger', 'run.json'), 'utf8'))
+  const archivedLedgerPaths = {
+    ...archivedSidecar,
+    db_path: join(archivedStateDir, 'ledger', 'ledger.db'),
+    jsonl_path: join(archivedStateDir, 'ledger', 'ledger.jsonl'),
+  }
+  const dumped = dumpLedgerTablesInSubprocess(archivedLedgerPaths, ['agent_sessions'])
+  const session = dumped.agent_sessions.find((s) => s.adw_id === archivedSidecar.adw_id)
+  assert.equal(session.raw_read_tokens, 1, 'teardown must have successfully read the RAW (unsanitized) sidecar path — proving the sanitizer only ever touched the ledger column, never the operational path actually used for the real read')
+})
+
+test('be-41-04 REWORK round 2, should-fix E: teardown never reads a pinned transcript_path that is not a plain, size-bounded regular file — a directory sitting at that path (standing in for a worker pointing it at a FIFO/socket) is treated as unreadable, never opened', () => {
+  const { ctx } = setUpWorkspace('teardown-transcript-not-a-file')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+  const record = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
+
+  const projectsDir = makeTmpDir('cmux-dispatch-teardown-not-a-file-projects-')
+  const sub = join(projectsDir, 'proj-a')
+  mkdirSync(sub, { recursive: true })
+  const transcriptPath = join(sub, `${dispatchId}.jsonl`)
+  writeFileSync(transcriptPath, `${JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: { input_tokens: 10, output_tokens: 5 } } })}\n`)
+
+  writeValidReturn(record)
+  awaitCmd({ all: [dispatchId] }, ctx, { sleep: NO_SLEEP, projectsDir })
+
+  const sidecarBefore = readRunSidecar(ctx)
+  assert.equal(sidecarBefore.dispatches[dispatchId].transcript_path, transcriptPath)
+
+  // Replace the FILE with a DIRECTORY of the same name by teardown time — a
+  // portable, safe stand-in for "a worker pointed the pinned path at
+  // something other than a plain file" (a FIFO/socket would hang a naive
+  // readFileSync; a directory exercises the same isFile() guard safely).
+  rmSync(transcriptPath, { force: true })
+  mkdirSync(transcriptPath, { recursive: true })
+
+  const teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  assert.equal(teardownRes.code, 0)
+
+  const archivedStateDir = teardownRes.json.state_dir.path
+  const sidecarAfter = JSON.parse(readFileSync(join(archivedStateDir, 'ledger', 'run.json'), 'utf8'))
+  const archivedLedgerPaths = {
+    ...sidecarAfter,
+    db_path: join(archivedStateDir, 'ledger', 'ledger.db'),
+    jsonl_path: join(archivedStateDir, 'ledger', 'ledger.jsonl'),
+  }
+  const dumped = dumpLedgerTablesInSubprocess(archivedLedgerPaths, ['agent_sessions'])
+  const session = dumped.agent_sessions.find((s) => s.adw_id === sidecarAfter.adw_id)
+  assert.ok(session)
+  assert.equal(session.raw_read_tokens, null, 'a non-regular-file at the pinned path must degrade to explicit null, never a confident zero/partial reading, and must never be opened at all')
+})
+
+test('be-41-04 SESSION_STATUSES mapping: teardown maps outcome ok -> \'ok\' and refused -> \'aborted\', never \'fail\'', () => {
+  const { ctx } = setUpWorkspace('teardown-outcome-mapping')
+  const specPath = makeSpecFile(ctx)
+  dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const teardownRes = teardownCmd({ outcome: 'refused', 'keep-artifacts': true }, ctx)
+  assert.equal(teardownRes.code, 0)
+  const archivedStateDir = teardownRes.json.state_dir.path
+  const sidecarAfter = JSON.parse(readFileSync(join(archivedStateDir, 'ledger', 'run.json'), 'utf8'))
+  const archivedLedgerPaths = {
+    ...sidecarAfter,
+    db_path: join(archivedStateDir, 'ledger', 'ledger.db'),
+    jsonl_path: join(archivedStateDir, 'ledger', 'ledger.jsonl'),
+  }
+  const dumped = dumpLedgerTablesInSubprocess(archivedLedgerPaths, ['sessions'])
+  const sessionRow = dumped.sessions.find((s) => s.adw_id === sidecarAfter.adw_id)
+  assert.equal(sessionRow.status, 'aborted')
+})
+
+test('be-41-04 LOCK GIVE-UP NEVER BLOCKS A VERB: a pre-planted non-stale emit.mjs sidecar lock still lets workspace return normally, with the sidecar never created under it', () => {
+  // freshCmuxEnv + buildTestCtx + preflightCmd only — NOT setUpWorkspace,
+  // which itself calls workspaceCmd once already (that would create the
+  // sidecar BEFORE the lock is even planted, defeating this test's setup).
+  const env = freshCmuxEnv('lock-giveup')
+  const ctx = buildTestCtx(env.dir)
+  const preflightRes = preflightCmd({}, ctx)
+  assert.equal(preflightRes.code, 0)
+
+  // Plant a FRESH (non-stale) run.lock at the emit.mjs sidecar path this
+  // workspaceCmd call will target — its own bounded retry budget (~1s) must
+  // give up rather than block workspaceCmd itself.
+  const lockPath = join(ctx.paths.stateDir, 'ledger', 'run.lock')
+  mkdirSync(dirname(lockPath), { recursive: true })
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }))
+
+  const stderr = captureStderr(() => {
+    const res = workspaceCmd({}, ctx)
+    assert.equal(res.code, 0)
+    assert.ok(res.json.workspace_id)
+  })
+  assert.match(stderr, /lock give-up during sidecar create-or-adopt/)
+
+  const sidecarPath = join(ctx.paths.stateDir, 'ledger', 'run.json')
+  assert.equal(existsSync(sidecarPath), false, 'the sidecar could never even be created under a held lock')
+})
+
+// planted immediately after the emitter's OWN open call succeeds (never
+// before) — the sidecar create-or-adopt step needs the lock too, so planting
+// it any earlier would degrade the WHOLE emitter at open time (a distinct,
+// already-covered scenario, the one the test just above exercises) and
+// stats().lock_giveups would live on a discarded, brand-new degraded
+// closure's own zeroed counter instead of the real, capturable one. Planting
+// it via the _setEmitterOpenerForTest seam, right after delegating to the
+// real opener, means the OPEN succeeds normally (a real, non-degraded
+// emitter, whose stats() this test can actually capture) and every
+// SUBSEQUENT updateSidecar/emit call this SAME verb call makes is what gives
+// up.
+function plantLockAfterRealOpen(stateDir) {
+  const lockPath = join(stateDir, 'ledger', 'run.lock')
+  mkdirSync(dirname(lockPath), { recursive: true })
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }))
+  return lockPath
+}
+
+test('be-41-04 REWORK must-fix #5: LOCK GIVE-UP NEVER BLOCKS AWAIT — a pre-planted non-stale sidecar lock held longer than the retry budget still lets await return within its normal bounds with unchanged JSON, and stats().lock_giveups is non-zero', () => {
+  const { ctx } = setUpWorkspace('lock-giveup-await')
+  const specPath = makeSpecFile(ctx)
+  const dispatchRes = dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+  const dispatchId = dispatchRes.json.dispatch_id
+
+  const projectsDir = makeTmpDir('cmux-dispatch-lock-giveup-await-projects-')
+  const sub = join(projectsDir, 'proj-a')
+  mkdirSync(sub, { recursive: true })
+  writeFileSync(join(sub, `${dispatchId}.jsonl`), '') // resolvable — guarantees at least one lock-needing emission this tick.
+
+  let capturedEmitter = null
+  _setEmitterOpenerForTest((opts) => {
+    const emitter = openRun(opts)
+    capturedEmitter = emitter
+    plantLockAfterRealOpen(opts.stateDir)
+    return emitter
+  })
+
+  let res
+  try {
+    let calls = 0
+    res = awaitCmd({ all: [dispatchId], 'max-block-s': '1' }, ctx, {
+      now: () => { calls += 1; return calls === 1 ? 0 : 6000 },
+      sleep: () => { throw new Error('sleep must never be called — the cap check must already be past the floor on tick 1') },
+      projectsDir,
+    })
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  assert.equal(res.code, 0)
+  assert.deepEqual(res.json, { status: 'still-running', remaining: [dispatchId], attention: [] }, 'a lock give-up must never change await\'s JSON')
+  assert.ok(capturedEmitter, 'expected the emitter opener seam to have been invoked')
+  assert.ok(capturedEmitter.stats().lock_giveups > 0, `expected at least one lock give-up, got stats() = ${JSON.stringify(capturedEmitter.stats())}`)
+})
+
+test('be-41-04 REWORK must-fix #5: LOCK GIVE-UP NEVER BLOCKS TEARDOWN — a pre-planted non-stale sidecar lock held longer than the retry budget still lets teardown return within its normal bounds with unchanged JSON, and stats().lock_giveups is non-zero', () => {
+  const { ctx } = setUpWorkspace('lock-giveup-teardown')
+  const specPath = makeSpecFile(ctx)
+  dispatchCmd({ slice: 'be-1a', role: 'coder', spec: specPath }, ctx)
+
+  let capturedEmitter = null
+  _setEmitterOpenerForTest((opts) => {
+    const emitter = openRun(opts)
+    capturedEmitter = emitter
+    plantLockAfterRealOpen(opts.stateDir)
+    return emitter
+  })
+
+  let teardownRes
+  try {
+    teardownRes = teardownCmd({ 'keep-artifacts': true }, ctx)
+  } finally {
+    _setEmitterOpenerForTest(null)
+  }
+
+  assert.equal(teardownRes.code, 0)
+  const normalized = JSON.parse(JSON.stringify(teardownRes.json))
+  delete normalized.task_dir.path
+  delete normalized.state_dir.path
+  assert.deepEqual(normalized, { task_dir: { archived: true }, state_dir: { archived: true }, leftover_worktrees: [] }, 'a lock give-up must never change teardown\'s JSON')
+  assert.ok(capturedEmitter, 'expected the emitter opener seam to have been invoked')
+  assert.ok(capturedEmitter.stats().lock_giveups > 0, `expected at least one lock give-up, got stats() = ${JSON.stringify(capturedEmitter.stats())}`)
+})
+

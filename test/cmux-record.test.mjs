@@ -151,6 +151,100 @@ test('hard rule 3: each permission rule is its own argv element (element-count a
   assert.deepEqual(argv.slice(start, end), rec.profile.allow)
 })
 
+// ---------------------------------------------------------------------------
+// --session-id (be-41-03): the worker's Claude session id is a parent-side
+// fact, reused verbatim from record.dispatch_id (never re-minted) and placed
+// BEFORE --permission-mode and every variadic flag — those flags greedily
+// consume a following positional, so a flag placed after them is silently
+// swallowed (SessionStart fires, UserPromptSubmit never does).
+// ---------------------------------------------------------------------------
+
+test('--session-id: emitted value is byte-identical to record.dispatch_id', () => {
+  const rec = buildValidRecord()
+  const argv = buildArgv(rec)
+  const idx = argv.indexOf('--session-id')
+  assert.ok(idx >= 0, 'expected --session-id to be present in argv')
+  assert.equal(argv[idx + 1], rec.dispatch_id)
+})
+
+test('--session-id: source text contains no second UUID mint (buildArgv never calls randomUUID/newDispatchId)', () => {
+  const src = readFileSync(join(ROOT, 'scripts/cmux/record.mjs'), 'utf8')
+  const fnMatch = src.match(/export function buildArgv\(record\) \{[\s\S]*?\n\}\n/)
+  assert.ok(fnMatch, 'expected to locate the buildArgv function body in scripts/cmux/record.mjs')
+  const body = fnMatch[0]
+  assert.doesNotMatch(body, /randomUUID\(/)
+  assert.doesNotMatch(body, /newDispatchId\(/)
+  assert.match(body, /argv\.push\('--session-id',\s*record\.dispatch_id\)/)
+})
+
+test('--session-id: placed after --model and before --permission-mode and every variadic flag (--tools, --allowedTools, --disallowedTools, --add-dir), far before the bare --', () => {
+  const rec = buildValidRecord()
+  const argv = buildArgv(rec)
+  const sessionIdIdx = argv.indexOf('--session-id')
+  assert.ok(sessionIdIdx >= 0)
+  assert.ok(sessionIdIdx > argv.indexOf('--model'))
+  assert.ok(sessionIdIdx < argv.indexOf('--permission-mode'))
+  assert.ok(sessionIdIdx < argv.indexOf('--tools'))
+  assert.ok(sessionIdIdx < argv.indexOf('--allowedTools'))
+  assert.ok(sessionIdIdx < argv.indexOf('--disallowedTools'))
+  assert.ok(sessionIdIdx < argv.indexOf('--add-dir'))
+  assert.ok(sessionIdIdx < argv.indexOf('--'))
+})
+
+test('--session-id: still placed correctly when record.effort is null (omitted --effort does not shift the ordering guarantee)', () => {
+  const rec = buildValidRecord()
+  const withNullEffort = { ...rec, effort: null }
+  const argv = buildArgv(withNullEffort)
+  assert.equal(argv.includes('--effort'), false)
+  const sessionIdIdx = argv.indexOf('--session-id')
+  assert.ok(sessionIdIdx > argv.indexOf('--model'))
+  assert.ok(sessionIdIdx < argv.indexOf('--permission-mode'))
+  assert.equal(argv[sessionIdIdx + 1], withNullEffort.dispatch_id)
+})
+
+test('--session-id: newline sweep still refuses a hostile dispatch_id occupying the new element\'s position', () => {
+  const rec = buildValidRecord()
+  const hostile = { ...rec, dispatch_id: `${rec.dispatch_id}\n` }
+  assert.throws(() => buildArgv(hostile), /newline or carriage return/)
+})
+
+test('--session-id: NONCE_PREFIX appears in no argv element on the success path', () => {
+  const rec = buildValidRecord()
+  const argv = buildArgv(rec)
+  for (const el of argv) {
+    assert.equal(el.includes(NONCE_PREFIX), false, `argv element carries NONCE_PREFIX: ${JSON.stringify(el)}`)
+  }
+})
+
+test('--session-id: dispatch_id\'s schema pattern (anchored UUID) forecloses it from ever carrying a nonce, so the newline-sweep refusal path can only ever reach buildArgv through dispatch_id in a way validate() would already reject', () => {
+  const rec = buildValidRecord()
+  const nonceBearingDispatchId = { ...rec, dispatch_id: `${NONCE_PREFIX}deadbeef` }
+  const errors = validate(dispatchRecordSchema, nonceBearingDispatchId)
+  assert.ok(errors.length > 0, 'expected a nonce-bearing dispatch_id to fail dispatch-record.schema.json validation')
+})
+
+test('--session-id: newline-sweep refusal error message does not leak a nonce-bearing, newline-carrying argv element verbatim (model field, unanchored \\S pattern, is the reachable carrier)', () => {
+  const rec = buildValidRecord()
+  const hostile = { ...rec, model: `${NONCE_PREFIX}deadbeef\n` }
+  let caught = null
+  try {
+    buildArgv(hostile)
+  } catch (e) {
+    caught = e
+  }
+  assert.ok(caught, 'expected buildArgv to throw on the hostile model value')
+  assert.equal(caught.message.includes(NONCE_PREFIX), false, `refusal error message leaked the nonce verbatim: ${JSON.stringify(caught.message)}`)
+  assert.equal(caught.message.includes(hostile.model), false, `refusal error message embedded the raw offending argv element verbatim: ${JSON.stringify(caught.message)}`)
+})
+
+test('NO SCHEMA CHANGE: dispatch-record.schema.json still pins schema_version 2, no new record field, and flags stays the closed two-boolean object', () => {
+  assert.equal(dispatchRecordSchema.properties.schema_version.const, 2)
+  assert.deepEqual(Object.keys(dispatchRecordSchema.properties.flags.properties).sort(), ['disable_slash_commands', 'strict_mcp_config'])
+  assert.equal(dispatchRecordSchema.properties.flags.additionalProperties, false)
+  assert.deepEqual([...dispatchRecordSchema.properties.flags.required].sort(), ['disable_slash_commands', 'strict_mcp_config'])
+  assert.equal(Object.prototype.hasOwnProperty.call(dispatchRecordSchema.properties, 'session_id'), false)
+})
+
 test('hard rule 4: every path rule in profile.allow is //-anchored', () => {
   const rec = buildValidRecord()
   for (const rule of rec.profile.allow) {

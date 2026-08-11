@@ -84,9 +84,11 @@
 
 import {
   writeFileSync, unlinkSync, linkSync, renameSync, readFileSync, mkdirSync, chmodSync, statSync, existsSync,
+  realpathSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 import {
   openLedger, isoMs, SESSION_STATUSES,
 } from './ledger.mjs'
@@ -1121,4 +1123,318 @@ export function _resetNoticeGuardsForTest() {
   ledgerDegradedNoticeRelayed = false
   facadeFailureNoticeWritten = false
   degradedOpenRunNoticeWritten = false
+}
+
+// ---------------------------------------------------------------------------
+// CLI (be-41-06, issue #41): `gate --report <path> --state-dir <dir>`
+// mirrors a scripts/chain/gates.mjs --json report into the #40 ledger;
+// `stats --state-dir <dir>` reads the run sidecar's drop counters. gates.mjs
+// itself is NOT imported or edited — its report is consumed purely as data
+// read from the path on argv.
+//
+// LIBRARY vs CLI (mirrors ledger.mjs:34-41): everything above this comment
+// is a pure library — importing this file performs no I/O. `main(argv) ->
+// exitCode` never calls process.exit anywhere, including from a helper (a
+// piped stdout can be truncated by process.exit's synchronous teardown,
+// reproduced in this codebase at exactly 65536 bytes) — the `invokedDirectly`
+// guard at the bottom sets `process.exitCode` instead. Exit codes: 0 ok, 1
+// unexpected internal error, 2 usage/refusal.
+// ---------------------------------------------------------------------------
+
+// A refusal cause, tagged so main's own catch can map it to exit 2 without
+// conflating it with an unexpected internal throw (mapped to 1). Mirrors
+// ledger.mjs's own LedgerUsageError precedent exactly — thrown for CALLER
+// BUGS / instance-data refusals only (a missing/unreadable/unparseable/
+// structurally-wrong report file, a missing --report/--state-dir, no run
+// sidecar), never for an operational ledger-mirror failure, which the
+// never-throwing emit() facade already counts as `dropped` instead.
+export class EmitUsageError extends Error {
+  constructor(message, reason = 'usage') {
+    super(message)
+    this.reason = reason
+  }
+}
+
+function refuseUsage(message, reason = 'usage') {
+  throw new EmitUsageError(`emit: ${message}`, reason)
+}
+
+// --json is the one boolean (no-value) flag in this CLI's vocabulary —
+// mirrors ledger.mjs's own BOOLEAN_FLAGS/parseArgs shape (ledger.mjs:1479).
+const CLI_BOOLEAN_FLAGS = new Set(['json'])
+
+function parseCliArgs(argv) {
+  const [verb, ...rest] = argv
+  const positional = []
+  const flags = {}
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]
+    if (a.startsWith('--')) {
+      const name = a.slice(2)
+      if (CLI_BOOLEAN_FLAGS.has(name)) {
+        flags[name] = true
+      } else {
+        flags[name] = rest[i + 1]
+        i += 1
+      }
+    } else {
+      positional.push(a)
+    }
+  }
+  return { verb, positional, flags }
+}
+
+// This module never resolves a default state dir the way ledger.mjs's own
+// CLI resolves a default db path (module header, "#40 written obligation")
+// — --state-dir always travels explicitly on argv, never a homedir-derived
+// guess, since a wrong guess would silently mirror into (or read stats
+// from) the wrong run entirely.
+function requireStateDir(flags, verb) {
+  const stateDir = flags['state-dir']
+  if (typeof stateDir !== 'string' || !stateDir) {
+    refuseUsage(`${verb}: --state-dir <dir> is required`)
+  }
+  return stateDir
+}
+
+function readSidecarJsonOrRefuse(stateDir, verb) {
+  const sidecarPath = join(stateDir, 'ledger', 'run.json')
+  if (!existsSync(sidecarPath)) {
+    // Assumption (discovery_context #2): a gate/stats invocation targets a
+    // run whose sidecar already exists. openRun()'s own create-or-adopt
+    // would happily MINT a fresh one if allowed to run first — this
+    // existence check runs BEFORE openRun() is ever called, specifically so
+    // an absent run is refused rather than silently originating a new one.
+    refuseUsage(`${verb}: no run sidecar found at ${sidecarPath} — start a run before invoking this verb`, 'no_run')
+  }
+  let raw
+  try {
+    raw = readFileSync(sidecarPath, 'utf8')
+  } catch (err) {
+    refuseUsage(`${verb}: could not read run sidecar at ${sidecarPath} (${err.code || err.message})`, 'no_run')
+  }
+  try {
+    return JSON.parse(raw)
+  } catch {
+    refuseUsage(`${verb}: run sidecar at ${sidecarPath} is not valid JSON`, 'corrupt_sidecar')
+    return undefined // unreachable — refuseUsage always throws; keeps linters happy.
+  }
+}
+
+// gate --report <path> --state-dir <dir> [--json]: mirrors a
+// scripts/chain/gates.mjs buildReport()-shaped report (interface_contract
+// C1) into ledger.recordGateResult, supplying the four keys the report
+// itself never carries. Never throws with respect to the LEDGER — a failed
+// mirror only shows up in `stats`' dropped counter — but MAY refuse loudly
+// on its own usage errors (backend-notes.md 2026-08-08,
+// loader-severity-by-provenance: instance data on a gating path refuses
+// rather than degrades).
+function gateVerb(flags, stdout, stderr) {
+  const reportPath = flags.report
+  if (typeof reportPath !== 'string' || !reportPath) {
+    refuseUsage('gate: --report <path> is required')
+  }
+  const stateDir = requireStateDir(flags, 'gate')
+
+  let raw
+  try {
+    raw = readFileSync(reportPath, 'utf8')
+  } catch (err) {
+    refuseUsage(`gate: could not read report file ${reportPath} (${err.code || err.message})`, 'unreadable_report')
+  }
+  let report
+  try {
+    report = JSON.parse(raw)
+  } catch {
+    refuseUsage(`gate: report file ${reportPath} is not valid JSON`, 'unparseable_report')
+  }
+  if (!report || typeof report !== 'object' || Array.isArray(report)) {
+    refuseUsage(`gate: report file ${reportPath} did not parse to an object`, 'malformed_report')
+  }
+  if (typeof report.slice !== 'string' || !report.slice) {
+    refuseUsage(`gate: report file ${reportPath} is missing a non-empty 'slice' field`, 'malformed_report')
+  }
+  if (!Array.isArray(report.checks)) {
+    refuseUsage(`gate: report file ${reportPath}'s 'checks' field must be an array`, 'malformed_report')
+  }
+  // (a) checks.length===0: buildReport (scripts/chain/gates.mjs) deliberately
+  // NEVER produces an empty checks array — even its "nothing applicable"
+  // branches push an explicit {ok:true, note:'...'} check rather than
+  // leaving checks empty (gates.mjs:689-694), specifically so an
+  // evaluated-nothing state is never confused with a vacuous [].every(...)
+  // PASS. A checks:[] report is therefore structurally wrong, not a
+  // legitimate real-world shape — refuse rather than silently fabricate ok:
+  // true.
+  if (report.checks.length === 0) {
+    refuseUsage(`gate: report file ${reportPath}'s 'checks' array is empty — a well-formed report always carries at least one check`, 'malformed_report')
+  }
+  // (b) a malformed check element (null, missing/non-boolean `ok`) must be
+  // caught here, as a tagged usage refusal (exit 2), rather than let
+  // report.checks.every(c => c.ok) throw a raw TypeError that main's
+  // catch-all would map to exit 1 (unexpected internal error).
+  for (const check of report.checks) {
+    if (!check || typeof check !== 'object' || typeof check.ok !== 'boolean') {
+      refuseUsage(`gate: report file ${reportPath} has a malformed check element (each check must be an object with a boolean 'ok' key)`, 'malformed_report')
+    }
+  }
+  const violations = report.violations === undefined ? [] : report.violations
+  if (!Array.isArray(violations)) {
+    refuseUsage(`gate: report file ${reportPath}'s 'violations' field must be an array when present`, 'malformed_report')
+  }
+
+  // Refuses (never mints) an absent run — see readSidecarJsonOrRefuse. The
+  // parsed sidecar is captured here — BEFORE openRun() runs — so that a
+  // LATER ledger-side degradation (a lock give-up during openRun's own
+  // create-or-adopt, an unusable lock path, a no-hardlink filesystem) can
+  // never turn an already-proven-readable run into a gate refusal (ADR-026
+  // clause 1: a mirror failure must never alter the gate's own verdict).
+  // Only the sidecar file's own absence/unreadability/unparseability — the
+  // TRUE no_run case — refuses here.
+  const preSidecar = readSidecarJsonOrRefuse(stateDir, 'gate')
+  const adwId = preSidecar.adw_id
+  // Explicit null when degraded — never omitted (requireFields rejects
+  // only undefined, ledger.mjs:665-675).
+  const phaseId = preSidecar.phase && preSidecar.phase.phase_id != null ? preSidecar.phase.phase_id : null
+  // MUST include the slice: gate_results has UNIQUE(adw_id, gate_name,
+  // attempt) + INSERT OR IGNORE, so a slice-less name would let two slices'
+  // results silently collapse into one row (interface_contract C1). The
+  // slice is caller/report-supplied — stripped of control/ANSI bytes before
+  // it reaches the ledger's gate_name column or this CLI's own printed
+  // summary (same bug class already fixed twice in be-41-04/05).
+  const cleanSlice = stripControlAndAnsi(report.slice)
+  const gateName = `${cleanSlice}/chain-check`
+  // hard_fail stays inside the verbatim checks below — never hoisted into
+  // this boolean. Every check element was already validated above.
+  const ok = report.checks.every((c) => c.ok)
+
+  const emitter = openRun({ stateDir, stderr })
+  try {
+    // 1-based per-gate_name counter, incremented INSIDE bumpGateAttempt's
+    // own critical section — never derived from a mirror read (ADR-024).
+    // bumpGateAttempt's own documented contract returns 0 SPECIFICALLY to
+    // signal a lock give-up (or, via buildDegradedEmitter, a fully-degraded
+    // openRun) — never a real 1-based counter value. Recording a
+    // gate_results row with attempt:0 unchecked would collide under
+    // UNIQUE(adw_id, gate_name, attempt) + INSERT OR IGNORE on a SECOND
+    // give-up for the same gate_name, silently dropping it — the exact
+    // failure mode slice-qualified gate_name was built to prevent,
+    // relocated to attempt. So attempt===0 skips the mirror entirely: the
+    // give-up is already counted by the facade itself (lock_giveups inside
+    // withLock, or dropped inside buildDegradedEmitter), the gate's own
+    // exit code/verdict is untouched, and no row is ever written.
+    const attempt = emitter.bumpGateAttempt(gateName)
+    let mirrored = false
+    if (attempt === 0) {
+      stderr.write(`emit: gate attempt allocation gave up for ${gateName} — skipping the mirror for this invocation (see stats)\n`)
+    } else {
+      const args = {
+        adw_id: adwId,
+        phase_id: phaseId,
+        gate_name: gateName,
+        attempt,
+        ok,
+        // checks/violations pass through VERBATIM — never re-shaped,
+        // re-ordered, filtered or summarized (ledger.mjs:859-863 + ADR-024).
+        checks: report.checks,
+        violations,
+      }
+      mirrored = emitter.emit((handle) => {
+        handle.recordGateResult(args)
+      })
+    }
+    // emit() only updates this INSTANCE's in-memory localStats — the CLI is
+    // one-shot per process, so nothing else would ever trigger the withLock
+    // flush that normally persists a stats delta to the sidecar (every
+    // other real caller's next lifecycle call does this incidentally; this
+    // CLI has none, so it flushes explicitly via a no-op updateSidecar
+    // mutation rather than skip persisting emitted/dropped altogether). If
+    // THAT flush itself gives up under lock contention, the drop counter
+    // this very invocation just recorded never reaches disk — warn on
+    // stderr (never altering the gate's own exit code) so a later `stats`
+    // read isn't silently missing a drop this run actually incurred.
+    const flushed = emitter.updateSidecar(() => {})
+    if (!flushed) {
+      stderr.write(`emit: stats flush to the run sidecar failed after gate ${gateName} — a drop this invocation counted may not be durable yet (retry \`emit.mjs stats\` or re-run)\n`)
+    }
+
+    if (flags.json) {
+      stdout.write(`${JSON.stringify({
+        adw_id: adwId, phase_id: phaseId, gate_name: gateName, attempt, ok, mirrored,
+      })}\n`)
+    } else {
+      stdout.write(`emit gate: ${gateName} attempt=${attempt} ok=${ok} mirrored=${mirrored}\n`)
+    }
+    stderr.write(`emit: gate result for ${gateName} attempt ${attempt} ${mirrored ? 'mirrored' : 'dropped (see stats)'}\n`)
+    return 0
+  } finally {
+    emitter.dispose()
+  }
+}
+
+// stats [--json] --state-dir <dir>: reads the run sidecar's drop counters
+// and prints them. Never opens an emitter, never touches the ledger — this
+// verb emits NOTHING to it (interface_contract, CLI SURFACE).
+function statsVerb(flags, stdout) {
+  const stateDir = requireStateDir(flags, 'stats')
+  const sidecar = readSidecarJsonOrRefuse(stateDir, 'stats')
+  const rawStats = sidecar.stats && typeof sidecar.stats === 'object' ? sidecar.stats : {}
+  const out = {}
+  for (const key of STAT_FIELDS) {
+    out[key] = Number.isFinite(rawStats[key]) ? rawStats[key] : 0
+  }
+  if (flags.json) {
+    stdout.write(`${JSON.stringify(out)}\n`)
+  } else {
+    stdout.write(
+      `emit stats: emitted=${out.emitted} dropped=${out.dropped} lock_giveups=${out.lock_giveups} `
+      + `resolution_ambiguous=${out.resolution_ambiguous} resolution_missing=${out.resolution_missing} `
+      + `payload_keys_dropped=${out.payload_keys_dropped}\n`,
+    )
+  }
+  return 0
+}
+
+export function main(argv) {
+  const stdout = process.stdout
+  const stderr = process.stderr
+  try {
+    const { verb, flags } = parseCliArgs(argv)
+    if (!verb) {
+      refuseUsage('a verb is required: gate | stats')
+    }
+    if (verb === 'gate') {
+      return gateVerb(flags, stdout, stderr)
+    }
+    if (verb === 'stats') {
+      return statsVerb(flags, stdout)
+    }
+    refuseUsage(`unknown verb: ${verb}`)
+    return 2
+  } catch (err) {
+    if (err instanceof EmitUsageError) {
+      stderr.write(`${err.message} [reason: ${err.reason}]\n`)
+      return 2
+    }
+    stderr.write(`${err && err.stack}\n`)
+    return 1
+  }
+}
+
+// realpath both sides: the ESM loader realpaths import.meta.url while
+// argv[1] stays literal, so under a symlinked path component a literal
+// compare is silently false and the CLI would no-op (mirrors
+// dispatch.mjs's own realpathOr / invokedDirectly shape exactly).
+function realpathOr(path) {
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
+  }
+}
+
+const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+if (invokedDirectly) {
+  // process.exitCode, not process.exit: a piped stdout can be truncated by
+  // process.exit's synchronous teardown (reproduced at exactly 65536 bytes).
+  process.exitCode = main(process.argv.slice(2))
 }

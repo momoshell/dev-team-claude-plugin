@@ -34,6 +34,7 @@ import {
 import { dirname, join, resolve as resolvePath, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomBytes } from 'node:crypto'
+import { homedir } from 'node:os'
 
 import {
   resolveRoots, taskPaths, stemOf, specPathFor, renderPathFor, sidecarPaths, deriveWorktree, loadRoster,
@@ -55,16 +56,101 @@ import {
   browserErrorsClear, browserGoto, browserWaitReady, browserErrorsList, browserScreenshot,
 } from './cmuxctl.mjs'
 import {
-  collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn,
+  collectFsState, classify, reconcile, evaluatePostcondition, validateReturn, renderReturn, relaySignals,
 } from './ladder.mjs'
 import { detectSignatures } from './triage.mjs'
 import { reduceBrowserErrors } from './browser-evidence.mjs'
-import { shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES } from './contract.mjs'
+import {
+  shouldArchive, slugify, NONCE_PREFIX, PANE_ROLES, WORKER_BLOCKED_STATUSES, SIGNAL_LIMITS,
+} from './contract.mjs'
 // A2 (#27) — the first `../` import in scripts/cmux/*.
 import { lintSpec } from '../spec-lint.mjs'
+// #41 (SF-2, epic #39) — the never-throwing ledger-mirror facade (be-41-01)
+// and the import-firewalled transcript reducer (be-41-02). Consumed here
+// only: scripts/factory/emit.mjs and scripts/factory/transcript.mjs are out
+// of this slice's scope (ADR-026: unedited by #41).
+import { openRun } from '../factory/emit.mjs'
+import { resolveTranscript, readUsage, readToolCalls } from '../factory/transcript.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 export const DEFAULT_PLUGIN_ROOT = resolvePath(HERE, '..', '..')
+
+// SIGNAL_LEVELS SOURCING (be-41-04 constraint): ladder.mjs derives its own
+// module-private SIGNAL_LEVELS the SAME way, from signal-record.schema.json's
+// own `level` enum (ladder.mjs:18-19) — never exported (editing ladder.mjs to
+// export one constant is out of this slice's scope). Deriving it again here,
+// from the SAME schema file, keeps exactly one source of truth (the schema)
+// even though there are now two read sites; never a hand-written literal that
+// could drift silently if the schema's enum ever changes.
+const SIGNAL_SCHEMA_FOR_LEVELS = JSON.parse(readFileSync(join(HERE, 'signal-record.schema.json'), 'utf8'))
+export const SIGNAL_LEVELS = Object.freeze(SIGNAL_SCHEMA_FOR_LEVELS.properties.level.enum)
+
+// ---------------------------------------------------------------------------
+// QA REWORK (adversarial panel, must-fix #3) — record.model/record.role
+// sanitization before either reaches the ledger. The dispatch record is
+// worker-writable (same uid, G13) and signal-record.schema.json's own
+// `model` pattern is unanchored (`\S`, no maxLength, no charset restriction),
+// so a worker could otherwise put arbitrary ANSI escapes/newlines/huge
+// strings into `model` and have them land unstripped/unbounded in the
+// ledger's agent_start payload and agent_sessions.model column.
+//
+// Mirrors emit.mjs's own module-private stripControlAndAnsi technique
+// (two passes: whole ANSI CSI sequences first, then every remaining control
+// character — a bare control-character strip alone would leave the
+// printable remainder of an ANSI sequence, e.g. "31m", behind as visible
+// garbage) — duplicated here rather than imported because emit.mjs's
+// function is module-private and emit.mjs is out of this slice's scope to
+// edit for one helper. The cap reuses SIGNAL_LIMITS.message_max_chars (200)
+// rather than a new local constant: it is already imported into this file as
+// the house-wide "capped worker-influenced prose" bound (C5's signal
+// messages), and record.model/role are the exact same class of
+// worker-influenced-bytes-reaching-the-ledger hazard, so reusing it keeps
+// one bound for that whole class instead of inventing a second number that
+// could drift from it.
+function sanitizeAgentIdentityField(value) {
+  const str = typeof value === 'string' ? value : String(value ?? '')
+  // eslint-disable-next-line no-control-regex
+  const withoutAnsi = str.replace(/\x1B\[[0-9;]*[A-Za-z]/g, '')
+  // eslint-disable-next-line no-control-regex
+  const stripped = withoutAnsi.replace(/[\x00-\x1F\x7F]/g, '')
+  return stripped.slice(0, SIGNAL_LIMITS.message_max_chars)
+}
+
+// ---------------------------------------------------------------------------
+// #41 (SF-2) — the ledger-mirror emitter opener. NEVER LOAD-BEARING: every
+// caller of openEmitter() below treats its return value as a facade whose
+// methods never throw (be-41-01's contract) — a degraded or failing emitter
+// changes no verb's exit code, returned JSON keys, or cmux invocation count.
+//
+// _setEmitterOpenerForTest is a TEST SEAM ONLY (mirrors emit.mjs's own
+// `_openLedger`/`_resetNoticeGuardsForTest` seams): it lets a test substitute
+// how every verb opens its emitter — e.g. to inject a hostile `_openLedger`
+// that throws on every writer, or a below-floor degraded handle — without
+// changing any verb's public signature. No real call site ever calls it.
+let _emitterOpenerOverride = null
+export function _setEmitterOpenerForTest(fn) {
+  _emitterOpenerOverride = fn
+}
+
+// openEmitter(ctx, { now } = {}) -> the be-41-01 emitter for this task's run.
+// stateDir-scoped (never ~/.dev-team/factory/ — #40's written obligation):
+// openRun's own dbPath default is join(stateDir, 'ledger', 'ledger.db'),
+// which this call never overrides, so the mirror always lives under THIS
+// task's own state directory and is swept by teardown's existing wholesale
+// stateDir archive/delete. `now` is threaded through ONLY by awaitCmd, so the
+// emitter's own clock matches the poll loop's injected deps.now in tests —
+// no verb ever supplies a real wall-clock timer of its own (ADR-027 aside:
+// this is unrelated to seq allocation, which is always explicit regardless).
+function openEmitter(ctx, { now } = {}) {
+  const opener = _emitterOpenerOverride || openRun
+  return opener({
+    stateDir: ctx.paths.stateDir,
+    repoSlug: ctx.repoSlug,
+    taskSlug: ctx.taskSlug,
+    nodeVersion: process.versions.node,
+    ...(now ? { now } : {}),
+  })
+}
 
 // ---------------------------------------------------------------------------
 // EXECUTION MODE (A10 config-key half).
@@ -971,6 +1057,20 @@ export function workspaceCmd(args, ctx) {
     log(`workspace: setPhase('planning') failed — phase pill not updated: ${err.message}`)
   }
 
+  // #41 (SF-2): mirror this run into the ledger — create-or-adopt the run
+  // sidecar and fire startSession + startPhase('planning'). emitter.startRun()
+  // is idempotent (be-41-01: gated on the sidecar's own run_started flag
+  // under lock), so a second `workspace` call in the same run never
+  // double-emits. NEVER LOAD-BEARING: wrapped anyway, matching this
+  // function's own setWorkspaceColor/setPhase cosmetic-swallow pattern —
+  // every method on the emitter this returns is already never-throwing, so
+  // this catch only guards against a bug in this glue code itself.
+  try {
+    openEmitter(ctx).startRun()
+  } catch (err) {
+    log(`workspace: ledger mirror failed — continuing (${err.message})`)
+  }
+
   return {
     code: 0,
     json: { window_id: windowId, workspace_id: workspaceId, initial_surface_id: initialSurfaceId, tier: resolvedTier, env_file: resolvedEnvFile },
@@ -1628,6 +1728,36 @@ export function dispatchCmd(args, ctx) {
     log(`dispatch: setPhase('building') failed — phase pill not updated: ${err.message}`)
   }
 
+  // #41 (SF-2): mirror this dispatch into the ledger. emitter.phaseTransition
+  // is idempotent across processes — a SECOND dispatch in the same run never
+  // produces a duplicate 'building' phase row. Exactly one agent_start per
+  // dispatch, payload discipline PAYLOAD_KEYS.agent_start = ['role', 'model',
+  // 'dispatch_id'] (never a return body, never a spec/prose field). The
+  // sidecar dispatches[dispatch_id] entry recorded here is what awaitCmd's
+  // per-tick resolution (be-41-02's resolveTranscript) and teardownCmd's
+  // reconciliation both key off of. NEVER LOAD-BEARING — see workspaceCmd's
+  // identical wrapping note.
+  try {
+    const emitter = openEmitter(ctx)
+    const { phase_id: phaseId } = emitter.phaseTransition('building')
+    emitter.emit((handle, nextSeq) => {
+      handle.recordEvent({
+        adw_id: emitter.adwId,
+        type: 'agent_start',
+        seq: nextSeq('event'),
+        phase_id: phaseId,
+        payload: { role: sanitizeAgentIdentityField(record.role), model: sanitizeAgentIdentityField(record.model), dispatch_id: record.dispatch_id },
+      })
+    })
+    emitter.updateSidecar((draft) => {
+      draft.dispatches[record.dispatch_id] = {
+        claude_session_id: record.dispatch_id, transcript_path: null, session_started: false, sighted_at: null, ended: false,
+      }
+    })
+  } catch (err) {
+    log(`dispatch: ledger mirror failed — continuing (${err.message})`)
+  }
+
   // (11) print result and exit — non-blocking, never waits for the worker.
   return {
     code: 0,
@@ -1791,6 +1921,12 @@ const AWAIT_CAP_MIN_S = 5
 const AWAIT_CAP_MAX_S = 600
 const AWAIT_LOCK_STALE_MULTIPLIER = 2
 
+// #41 (SF-2): heartbeat cadence is caller-driven, never a timer — the await
+// poll loop (ticks driven by deps.tickMs/deps.now/deps.sleep, never a real
+// wall-clock wait) is the only clock that decides when >= 15s has elapsed
+// per claude_session_id.
+const AGENT_HEARTBEAT_MIN_INTERVAL_MS = 15000
+
 // lifecycle S2: the await lock is acquired via exclusive-create ('wx'), the
 // same primitive record.mjs's withRecordLock uses for a record's own lock —
 // no check-then-act window. A lock that is missing, unparseable, or older
@@ -1817,6 +1953,262 @@ function tryAcquireAwaitLock(lockPath, holder, capS) {
     }
   }
   return { acquired: false, holder: readJsonOrWarn(lockPath, 'await.lock') }
+}
+
+// QA REWORK (should-fix B): the single pure "take the more-advanced of a
+// persisted value and an in-process fallback" rule, shared by the heartbeat
+// pass's timestamp reconciliation (below) and the signal-offset pass's
+// byte-offset reconciliation (mirrorSignalsTick) — both progress cursors
+// only ever move forward, and both need the exact same non-finite-is-absent
+// treatment. Extracted so a NaN/malformed persisted value (e.g. a corrupt
+// sidecar `heartbeats` timestamp that fails Date.parse) is unit-testable in
+// isolation, without forcing it through the full awaitCmd integration path:
+// `Math.max(NaN, x)` is NaN, which would otherwise silently defeat whichever
+// throttle/cursor consumed it for the rest of the run. Non-finite (NaN,
+// undefined, null, Infinity is never a real value here either) on EITHER
+// side degrades to "absent" (-Infinity), never to a comparison that itself
+// produces NaN.
+export function reconcileProgressCursor(persisted, fallback) {
+  const p = Number.isFinite(persisted) ? persisted : -Infinity
+  const f = Number.isFinite(fallback) ? fallback : -Infinity
+  return Math.max(p, f)
+}
+
+// QA REWORK (should-fix D): transcript_path reaches agent_sessions'
+// transcript_path column from a worker-writable directory LISTING under
+// ~/.claude/projects (resolveTranscript scans directory NAMES, not file
+// contents — a worker could still name a project directory to embed control
+// characters ahead of a genuine transcript ever existing). Strip control
+// characters ONLY (no ANSI-CSI-whole-sequence strip, no aggressive cap) —
+// this is a real filesystem path a later process reads by that exact string;
+// corrupting a legitimate path (unlike a display string) would break a real
+// read, so the cap here is deliberately generous and separate from
+// SIGNAL_LIMITS.message_max_chars (that bound is for capped worker PROSE,
+// not for a path). This sanitizes only the COPY that reaches the ledger's
+// own column — the sidecar's own transcript_path (what teardown's readUsage
+// actually opens) is never touched by this helper and stays the raw,
+// resolveTranscript-verified path.
+const TRANSCRIPT_PATH_LEDGER_MAX_CHARS = 1024
+function sanitizeTranscriptPathForLedger(value) {
+  const str = typeof value === 'string' ? value : String(value ?? '')
+  // eslint-disable-next-line no-control-regex
+  const stripped = str.replace(/[\x00-\x1F\x7F]/g, '')
+  return stripped.slice(0, TRANSCRIPT_PATH_LEDGER_MAX_CHARS)
+}
+
+// #41 (SF-2) — per-tick resolution: incremental and first-sighting-wins.
+// Only ever called for a dispatch whose sidecar entry is NOT session_started
+// yet — a session, once pinned, is never re-resolved (be-41-02's own
+// contract: resolveTranscript is called once per unresolved dispatch per
+// tick, the result PINNED on first success). NEVER LOAD-BEARING: every
+// caller wraps this in a try/catch of its own.
+function resolveAgentSessionTick({ emitter, record, projectsDir, nowFn, localSessionStartFallback }) {
+  const localStats = {}
+  const resolved = resolveTranscript({ record, projectsDir, stats: localStats })
+  if (localStats.resolution_missing) emitter.bumpStat('resolution_missing', localStats.resolution_missing)
+  if (localStats.resolution_ambiguous) emitter.bumpStat('resolution_ambiguous', localStats.resolution_ambiguous)
+  if (!resolved) return
+  emitter.emit((handle) => {
+    handle.startAgentSession({
+      adw_id: emitter.adwId,
+      dispatch_id: record.dispatch_id,
+      role: sanitizeAgentIdentityField(record.role),
+      model: sanitizeAgentIdentityField(record.model),
+      claude_session_id: resolved.claude_session_id,
+      transcript_path: sanitizeTranscriptPathForLedger(resolved.transcript_path),
+    })
+  })
+  // QA should-fix A: mark this dispatch as started in an in-process,
+  // this-call-only fallback BEFORE attempting the sidecar persist below —
+  // a lock give-up on the persist must never make the caller re-attempt
+  // resolveTranscript/startAgentSession again later in the SAME call (which
+  // would re-emit startAgentSession a second time for the same session).
+  localSessionStartFallback.add(record.dispatch_id)
+  const persistedOk = emitter.updateSidecar((draft) => {
+    const entry = draft.dispatches && draft.dispatches[record.dispatch_id]
+    // Compare-and-set: a concurrent caller (never happens within one
+    // awaitCmd process today, but this is the cheap guard anyway) that
+    // already pinned this session first must never be overwritten.
+    if (entry && !entry.session_started) {
+      entry.transcript_path = resolved.transcript_path
+      entry.session_started = true
+      entry.sighted_at = isoMs(nowFn())
+    }
+  })
+  if (!persistedOk) {
+    log(`await: session-start sidecar persist failed for dispatch ${record.dispatch_id} (lock give-up?) — idempotence for the rest of this call is held by an in-process fallback only`)
+  }
+}
+
+// #41 (SF-2) — per-tick heartbeat pass: throttled >= 15s PER SESSION via the
+// sidecar's own heartbeats map (caller-driven cadence, no timer — the await
+// poll loop IS the clock). ensureAgentSession always runs first (the
+// resolution pass above, earlier in the SAME tick) so a session's
+// agent_sessions row exists before its first heartbeat lands — heartbeat()
+// is an UPDATE ... WHERE claude_session_id = ?, so a heartbeat with no
+// matching row silently updates zero rows rather than erroring.
+function heartbeatAgentSessionsTick({ emitter, dispatchIds, nowFn, localHeartbeatFallback }) {
+  const sidecar = emitter.sidecar()
+  if (!sidecar) return
+  const nowMs = nowFn()
+  for (const dispatchId of dispatchIds) {
+    const entry = sidecar.dispatches && sidecar.dispatches[dispatchId]
+    if (!entry || !entry.session_started) continue
+    const claudeSessionId = entry.claude_session_id
+    const persisted = sidecar.heartbeats && sidecar.heartbeats[claudeSessionId]
+    // QA REWORK (should-fix B): Date.parse on a malformed/corrupt persisted
+    // timestamp is NaN, not -Infinity — feeding NaN into reconcileProgressCursor
+    // (rather than a raw Math.max) is what keeps that case degrading to
+    // "absent" instead of silently poisoning the whole comparison.
+    const persistedMs = persisted ? Date.parse(persisted) : undefined
+    // QA should-fix A: a prior lock give-up on the sidecar's heartbeat
+    // persist must never re-disable the throttle for the rest of THIS call —
+    // take whichever clock (the persisted sidecar value, or this call's own
+    // in-process fallback) is more recent.
+    const fallbackMs = localHeartbeatFallback.get(claudeSessionId)
+    const lastMs = reconcileProgressCursor(persistedMs, fallbackMs)
+    if (!Number.isFinite(lastMs) || nowMs - lastMs >= AGENT_HEARTBEAT_MIN_INTERVAL_MS) {
+      const at = isoMs(nowMs)
+      emitter.emit((handle) => {
+        handle.heartbeat({ adw_id: emitter.adwId, target: 'agent_session', claude_session_id: claudeSessionId, at })
+      })
+      localHeartbeatFallback.set(claudeSessionId, nowMs)
+      const persistedOk = emitter.updateSidecar((draft) => {
+        if (!draft.heartbeats) draft.heartbeats = {}
+        draft.heartbeats[claudeSessionId] = at
+      })
+      if (!persistedOk) {
+        log(`await: heartbeat sidecar persist failed for session ${claudeSessionId} (lock give-up?) — throttle continuity for the rest of this call is held by an in-process fallback only`)
+      }
+      // No need to reflect `at` back into this tick's local `sidecar` read
+      // (which is deep-frozen — mutating it would throw): claude_session_id
+      // is 1:1 with dispatch_id, so no two dispatchIds in this SAME pass can
+      // ever share a session to re-throttle against.
+    }
+  }
+}
+
+// QA REWORK (should-fix C): per-tick cap on the number of signal LINES
+// consumed (mirrored into ledger events) per dispatch — relaySignals(...).
+// recorded has no upper bound of its own, so a worker writing e.g. 100k
+// signal lines in one go would otherwise make one tick perform 100k
+// lock+insert cycles synchronously while holding the await lock, blowing
+// past that tick's own time budget. Deliberately more generous than
+// SIGNAL_LIMITS.max_relayed_per_dispatch (5) — that constant throttles the
+// unbuilt RELAY side effect (an escalation-worthy notify, meant to stay
+// rare), whereas this cap bounds plain ingestion volume for a legitimate
+// high-signal session, a materially different intent. The byte-offset
+// design already supports "not all-or-nothing" naturally: whatever this cap
+// leaves unconsumed is picked up on the NEXT tick, never dropped.
+const SIGNALS_MAX_LINES_PER_TICK = 100
+
+// #41 (SF-2) — per-tick signals pass: worker signals mirrored as capped,
+// level-clamped log rows via C5's mapping (ladder.mjs's relaySignals().recorded
+// ONLY — never the relay side effect).
+//
+// QA REWORK (must-fix #4, and REWORK round 2 must-fix #1): the dedup cursor
+// is a BYTE OFFSET persisted in the sidecar's OWN TOP-LEVEL `signal_offsets`
+// map (`{"<dispatch_id>": <byte offset>}`), structurally mirroring the
+// sidecar's existing top-level `heartbeats` map — NOT a field on the
+// per-dispatch `dispatches[<id>]` entry (round 1's design) and NOT a
+// function-local line count scoped to one awaitCmd() call. Three problems
+// the top-level-map-plus-fallback design fixes at once: (a) a function-local
+// cursor is discarded when the call returns, so every SUBSEQUENT awaitCmd()
+// invocation (the normal orchestrator pattern: poll repeatedly until
+// resolved) re-mirrored the ENTIRE signals file from the start, creating
+// unbounded duplicate ledger rows; (b) a LINE count let a worker
+// truncate-and-rewrite its signals file to the SAME line count and either
+// suppress everything after that point from ever being mirrored, or cause
+// already-mirrored lines to be silently skipped on a legitimate rewrite; (c)
+// living inside the per-dispatch entry made it a 6th undocumented field on a
+// shape be-41-01 documents as 4 (plus round 1's `ended`) — and dispatchCmd
+// already assigns a WHOLE FRESH entry object (never a merge), a precedent a
+// future slice would copy and silently drop this field from. A persisted
+// byte offset survives across calls and reads only the bytes actually
+// beyond it; the offset only ever advances by the number of bytes belonging
+// to WHOLE lines actually consumed (a read that catches a partial trailing
+// line never advances past it). A file that has shrunk below the persisted
+// offset (a worker truncated and rewrote it) is treated as a reset to 0 —
+// logged once, never a crash.
+//
+// The persist itself can still lose the sidecar lock race (same as the
+// heartbeat/session-start passes) — `localSignalOffsetFallback` (this-call-
+// only, mirroring localHeartbeatFallback/localSessionStartFallback exactly)
+// is written to BEFORE the persist is even attempted, and read back via
+// reconcileProgressCursor's take-the-max-progress rule, so a lock give-up on
+// ONE tick's persist never makes a LATER tick in the SAME call re-mirror
+// already-mirrored lines. Never guarded on the per-dispatch entry existing
+// (unlike the round-1 design) — the top-level map has no such precondition.
+function mirrorSignalsTick({ emitter, record, phaseId, nowFn, localSignalOffsetFallback }) {
+  const dispatchId = record.dispatch_id
+  let buffer
+  try {
+    buffer = readFileSync(record.signals_path)
+  } catch {
+    buffer = Buffer.alloc(0)
+  }
+
+  const persistedOffset = emitter.sidecar()?.signal_offsets?.[dispatchId]
+  const fallbackOffset = localSignalOffsetFallback.get(dispatchId)
+  let offset = reconcileProgressCursor(persistedOffset, fallbackOffset)
+  offset = Number.isFinite(offset) ? offset : 0
+  if (offset < 0 || offset > buffer.length) {
+    log(`await: signals file for ${dispatchId} is shorter than its persisted mirror offset (${offset} > ${buffer.length}) — a worker likely truncated-and-rewrote it; resetting the mirror cursor to 0`)
+    offset = 0
+  }
+
+  const slice = buffer.subarray(offset)
+  // QA REWORK should-fix C: scan for every newline up front so the CAP can
+  // be applied by line count, not merely by "the whole slice up to the last
+  // newline" — a read that catches a partial trailing line still never
+  // advances past it (lastNewlineIndex-style behaviour is preserved via the
+  // capped index below).
+  const newlineIndices = []
+  for (let i = 0; i < slice.length; i += 1) {
+    if (slice[i] === 0x0A) newlineIndices.push(i)
+  }
+  if (newlineIndices.length === 0) return
+
+  const consumedLineCount = Math.min(newlineIndices.length, SIGNALS_MAX_LINES_PER_TICK)
+  const overflowLineCount = newlineIndices.length - consumedLineCount
+  const lastConsumedNewlineIndex = newlineIndices[consumedLineCount - 1]
+
+  const consumedBytes = lastConsumedNewlineIndex + 1
+  const newOffset = offset + consumedBytes
+  const newLines = slice.subarray(0, consumedBytes).toString('utf8').split('\n').filter(Boolean)
+
+  if (overflowLineCount > 0) {
+    // emit.mjs's bumpStat only accepts a closed set of names (resolution_missing,
+    // resolution_ambiguous, payload_keys_dropped — none of which describe
+    // "deferred to next tick", and widening that set is emit.mjs's call, out
+    // of this slice's scope) — logging is this pass's own visibility
+    // mechanism for the overflow instead of a silent truncation.
+    log(`await: signal mirror capped at ${SIGNALS_MAX_LINES_PER_TICK} lines for dispatch ${dispatchId} this tick — ${overflowLineCount} line(s) deferred to a later tick`)
+  }
+
+  // QA REWORK must-fix #1: written BEFORE the persist attempt below, and
+  // never guarded on any per-dispatch entry existing.
+  localSignalOffsetFallback.set(dispatchId, newOffset)
+  const persistedOk = emitter.updateSidecar((draft) => {
+    if (!draft.signal_offsets) draft.signal_offsets = {}
+    draft.signal_offsets[dispatchId] = newOffset
+  })
+  if (!persistedOk) {
+    log(`await: signal-offset sidecar persist failed for dispatch ${dispatchId} (lock give-up?) — cursor continuity for the rest of this call is held by an in-process fallback only`)
+  }
+
+  if (newLines.length === 0) return
+  const { recorded } = relaySignals(record, newLines, {}, nowFn())
+  const mapped = emitter.mapSignalLogEntries(recorded, {
+    levels: SIGNAL_LEVELS, messageMaxChars: SIGNAL_LIMITS.message_max_chars,
+  })
+  for (const row of mapped) {
+    emitter.emit((handle, nextSeq) => {
+      handle.recordEvent({
+        adw_id: emitter.adwId, type: 'log', seq: nextSeq('event'), phase_id: phaseId, payload: row,
+      })
+    })
+  }
 }
 
 // awaitCmd(args, ctx, deps) -> { code, json }. deps = { now, sleep, tickMs }
@@ -1855,6 +2247,62 @@ export function awaitCmd(args, ctx, deps = {}) {
   if (!acquireResult.acquired) {
     return { code: 2, json: { error: 'lock_held', holder: acquireResult.holder } }
   }
+
+  // #41 (SF-2): awaitCmd is the ONE verb with a long-lived process and an
+  // open agent session (up to AWAIT_CAP_MAX_S=600s). `now` is threaded into
+  // the emitter so its own clock matches this call's injected deps.now — the
+  // await poll loop stays the only clock, never a real timer.
+  //
+  // QA REWORK (adversarial panel, must-fix #1): this verb deliberately
+  // installs NO abnormal-exit finalizer. awaitCmd's poll loop is fully
+  // synchronous (Atomics.wait / execFileSync / readFileSync — the event loop
+  // never turns while a tick is running), so a SIGINT/SIGTERM listener
+  // registered here could never actually fire mid-tick; merely REGISTERING
+  // one would still suppress Node's default terminate-on-signal disposition,
+  // turning an instant Ctrl-C kill into up to AWAIT_CAP_MAX_S (600s) of the
+  // signal being silently swallowed while the lock stays held. Descoped
+  // deliberately (orchestrator decision) rather than redesigned into a
+  // working interruptible-sleep mechanism in this pass — SIGINT/SIGTERM
+  // behavior here is IDENTICAL to before be-41-04 touched this file: Node's
+  // default disposition still kills the process instantly.
+  // NEVER LOAD-BEARING: openEmitter never throws; wrapped anyway as defense
+  // against a bug in this glue code.
+  // Inert no-op fallback (mirrors emit.mjs's own degraded-emitter shape) —
+  // reachable only if this glue code itself misbehaves, since openEmitter's
+  // own openRun() never throws by contract.
+  const noopEmitter = {
+    adwId: null,
+    sidecar: () => null,
+    phaseTransition: () => ({ phase_id: null }),
+    reserveSeq: () => [],
+    updateSidecar: () => false,
+    bumpGateAttempt: () => 0,
+    bumpStat: () => false,
+    emit: () => false,
+    mapSignalLogEntries: () => [],
+    startRun: () => {},
+    endRun: () => {},
+    stats: () => ({}),
+    statsSnapshot: () => ({ level: 'warn', message: 'emit stats: unavailable' }),
+    dispose: () => {},
+  }
+  let emitter = noopEmitter
+  try {
+    emitter = openEmitter(ctx, { now })
+  } catch (err) {
+    log(`await: ledger mirror init failed — continuing (${err.message})`)
+    emitter = noopEmitter
+  }
+  const projectsDir = deps.projectsDir || join(homedir(), '.claude', 'projects')
+  // QA should-fix A: this-call-only in-process fallbacks so a sidecar lock
+  // give-up on ONE persist attempt never silently defeats the throttle
+  // (heartbeat) or idempotence (session-start) guard for the REST of this
+  // awaitCmd() call — see heartbeatAgentSessionsTick/resolveAgentSessionTick.
+  const localHeartbeatFallback = new Map()
+  const localSessionStartFallback = new Set()
+  // QA REWORK (must-fix #1): this-call-only in-process fallback for the
+  // signal-offset cursor — same rationale/shape as the two fallbacks above.
+  const localSignalOffsetFallback = new Map()
 
   // be-11-02: workspace-scoped progress. `await` is the only place that
   // knows numerator (resolved) and denominator (total ids) — read the
@@ -1936,6 +2384,17 @@ export function awaitCmd(args, ctx, deps = {}) {
           remaining.delete(id)
           continue
         }
+        // #41 (SF-2): resolution is incremental and first-sighting-wins —
+        // only attempted while this dispatch's sidecar entry is still
+        // unresolved (session_started false). NEVER LOAD-BEARING.
+        try {
+          const dispatchesNow = emitter.sidecar()?.dispatches
+          if (dispatchesNow && dispatchesNow[id] && !dispatchesNow[id].session_started && !localSessionStartFallback.has(id)) {
+            resolveAgentSessionTick({ emitter, record, projectsDir, nowFn: now, localSessionStartFallback })
+          }
+        } catch (err) {
+          log(`await: ledger transcript resolution failed for ${id} — continuing (${err.message})`)
+        }
         const sidecars = sidecarPaths(paths, id)
         const fsState = collectFsState({ record, paths: { exitPath: sidecars.exit, gatePath: sidecars.gate } })
         const classification = classify({ record, fsState, tree: null, now: now(), turnEndAt: turnEndAt[id] ?? null })
@@ -1963,6 +2422,32 @@ export function awaitCmd(args, ctx, deps = {}) {
         }
       }
       previousAttentionIds = currentAttentionIds
+
+      // #41 (SF-2): the heartbeat pass and the signals pass — both AFTER the
+      // per-dispatch loop above, BEFORE the sleep, so they run every tick
+      // regardless of whether this tick ends in an early return below.
+      // NEVER LOAD-BEARING.
+      //
+      // QA should-fix G: isolated PER DISPATCH (matching the resolution
+      // pass's own per-dispatch try/catch above) — a single shared try/catch
+      // around every dispatch's heartbeat+signals work meant one dispatch's
+      // failure could skip that work for every OTHER dispatch in the same
+      // tick, silently degrading mirror completeness for unrelated
+      // dispatches.
+      {
+        const currentPhaseId = emitter.sidecar()?.phase?.phase_id ?? null
+        const tickIds = [...remaining]
+        for (const id of tickIds) {
+          try {
+            heartbeatAgentSessionsTick({ emitter, dispatchIds: [id], nowFn: now, localHeartbeatFallback })
+            const record = findRecordByDispatchId(paths.dispatchDir, id)
+            if (!record) continue
+            mirrorSignalsTick({ emitter, record, phaseId: currentPhaseId, nowFn: now, localSignalOffsetFallback })
+          } catch (err) {
+            log(`await: ledger heartbeat/signals mirror failed for ${id} — continuing (${err.message})`)
+          }
+        }
+      }
 
       if (resolvedNow.length > 0) {
         for (const r of resolvedNow) remaining.delete(r.id)
@@ -2021,6 +2506,17 @@ export function awaitCmd(args, ctx, deps = {}) {
     const current = readJsonOrWarn(lockPath, 'await.lock')
     if (current && current.pid === holder.pid && current.started_at === holder.started_at) {
       unlinkIfExists(lockPath)
+    }
+    // #41 (SF-2): close this call's cached ledger handle — every awaitCmd()
+    // call (in-process test or real CLI subprocess) opens its OWN emitter
+    // instance, so this must run every time this verb returns, not just on
+    // the eventual process exit. No finalizer is ever installed here (see the
+    // QA rework note above), so dispose() has nothing finalizer-related to
+    // uninstall — it only closes the cached ledger handle.
+    try {
+      emitter.dispose()
+    } catch (err) {
+      log(`await: ledger emitter dispose failed — continuing (${err.message})`)
     }
   }
 }
@@ -2189,7 +2685,124 @@ function presentReturn(record, roleDef) {
   }
 }
 
-export function closeCmd(args, ctx) {
+// ---------------------------------------------------------------------------
+// #41 (SF-2, be-41-05) — closeCmd's ledger-mirror helpers. Module-local,
+// never exported to workers, never load-bearing (every call site below is
+// wrapped in the same try/catch convention every other verb's mirror uses).
+// ---------------------------------------------------------------------------
+
+// mirrorViolationNameRe MIRRORS ledger.mjs's own recordSourceError shape
+// guard (ledger.mjs:112) — recordEnvelope's own violation_names field has NO
+// equivalent built-in filter, so THIS call site must apply the same
+// `path:keyword`, no-whitespace, bounded-length shape check itself before a
+// violation ever reaches the ledger. This matters concretely: contract.mjs's
+// walk() builds an additionalProperties violation's `path` by interpolating
+// the OFFENDING PROPERTY NAME verbatim (contract.mjs:213, `${path}.${key}`
+// where `key` is `Object.keys(value)` off the worker-authored JSON) — a
+// worker return whose envelope carries a hostile top-level key (an embedded
+// newline, thousands of characters) would otherwise walk straight through
+// recordEnvelope's own key-only allowlist and land in the mirror unfiltered.
+// Any candidate failing this shape check is dropped (violation_names becomes
+// incomplete, never hostile) rather than truncated.
+//
+// QA REWORK (must-fix #2a): the `[^\s]` shape test alone does NOT strip
+// control bytes or ANSI-CSI escape sequences — `\x1B`, `\x07`, `\x00` are all
+// non-whitespace and pass it untouched. The `path` half (the worker-supplied
+// half of `${path}:${keyword}` — `keyword` is already closed-vocabulary from
+// contract.mjs's own validator, per the interface_contract, and needs no
+// sanitizing) is now run through sanitizeAgentIdentityField first — the SAME
+// ANSI-CSI-whole-sequence-then-C0/DEL strip this file already uses for
+// record.model/record.role, reused here rather than reimplemented, which
+// also incidentally caps the path half at SIGNAL_LIMITS.message_max_chars
+// (200) matching this regex's own `{1,200}` bound.
+const MIRROR_VIOLATION_NAME_RE = /^[^\s]{1,200}:[^\s]{1,80}$/
+// QA REWORK (must-fix #2a): a hostile return file with enough additional-
+// properties keys could otherwise produce an unbounded violation_names
+// array; capped the same way capFailuresForOutput above caps spec-lint
+// failures — kept entries plus one synthetic "...and N more" tail.
+const MIRROR_VIOLATION_NAME_MAX_ENTRIES = 50
+function buildEnvelopeViolationNames(violations) {
+  const names = (violations || [])
+    .map((v) => `${sanitizeAgentIdentityField(v.path)}:${v.keyword}`)
+    .filter((name) => MIRROR_VIOLATION_NAME_RE.test(name))
+  if (names.length <= MIRROR_VIOLATION_NAME_MAX_ENTRIES) return names
+  const kept = names.slice(0, MIRROR_VIOLATION_NAME_MAX_ENTRIES)
+  kept.push(`...and ${names.length - MIRROR_VIOLATION_NAME_MAX_ENTRIES} more`)
+  return kept
+}
+
+// resolveEnvelopeProducedAtMs(envelope) -> epoch ms. recordEnvelope's own
+// `produced_at` parameter is epoch-ms/Date (isoMs's contract, ledger.mjs),
+// but the worker-authored envelope's own `produced_at` is an ISO STRING
+// (return-envelope.schema.json) — Date.parse converts it to a plain number
+// so no worker-authored string byte ever crosses into the ledger call
+// itself; a missing/unparseable value degrades to this call's own close
+// time rather than throwing inside recordEnvelope (NEVER LOAD-BEARING).
+function resolveEnvelopeProducedAtMs(envelope) {
+  if (envelope && typeof envelope.produced_at === 'string') {
+    const parsedMs = Date.parse(envelope.produced_at)
+    if (Number.isFinite(parsedMs)) return parsedMs
+  }
+  return Date.now()
+}
+
+// toolCallTimestampMs(iso) -> epoch ms | null. readToolCalls (be-41-02)
+// returns HISTORICAL ISO-string timestamps; recordEvent/isoMs wants
+// epoch-ms/Date, never a string (isoMs throws on a string). Every call site
+// below passes the RESULT of this helper explicitly (never omits the key) —
+// recordEvent defaults BOTH started_at/ended_at to now() for type 'tool_call'
+// only when the key itself is absent (ledger.mjs:809-810); an explicit null
+// here means "the reducer itself recorded no timestamp" (e.g. a truncated
+// transcript's unmatched tool_use, transcript.mjs's own documented
+// unsafe-reading fallback) and is left to that same now()-fallback rather
+// than fabricated a second time at this layer.
+function toolCallTimestampMs(iso) {
+  if (typeof iso !== 'string') return null
+  const ms = Date.parse(iso)
+  return Number.isFinite(ms) ? ms : null
+}
+
+// RECONCILE EVIDENCE (decision row) — closed-vocabulary mapping, C4: this is
+// its OWN mapping (classify()'s string[] `warnings` shape), never a generic
+// "mirror the warnings array" helper. Every classify()/evaluatePostcondition
+// warning string may itself embed worker-influenced bytes (fsState.exitSentinel
+// is a worker-writable sidecar file's content, ladder.mjs's
+// `exit_nonzero:${fsState.exitSentinel} despite a valid return`) — this
+// closed prefix whitelist plus a per-prefix COUNT is what "dispatcher-authored,
+// closed-vocabulary values plus counts" (never a reason string, never a
+// transcript excerpt) means in practice: the free-text tail after the first
+// ':' is never read here, only the prefix before it, and only when that
+// prefix is itself one of these four literals.
+const RECONCILE_WARNING_PREFIXES = Object.freeze(['terminal_outcome_uncorroborated', 'exit_nonzero', 'postcondition_unverifiable', 'other'])
+function summarizeReconcileWarnings(warnings) {
+  const counts = new Map()
+  for (const w of warnings || []) {
+    const prefix = typeof w === 'string' ? w.split(':')[0] : 'other'
+    const key = RECONCILE_WARNING_PREFIXES.includes(prefix) ? prefix : 'other'
+    counts.set(key, (counts.get(key) || 0) + 1)
+  }
+  return RECONCILE_WARNING_PREFIXES.filter((k) => counts.has(k)).map((k) => `${k}:${counts.get(k)}`)
+}
+
+// resolveReconcileDecisionReason -> a closed-enum `why`, never classify()'s
+// own free-text warning strings. Reuses the SAME `terminal_outcome_uncorroborated`
+// warning classify() already pushes (ladder.mjs) rather than re-deriving a
+// second signal for the same fact.
+function resolveReconcileDecisionReason({ record, uncorroborated, postconditionResult, warnings }) {
+  if (record.outcome !== null) return uncorroborated ? 'terminal_uncorroborated' : 'terminal_trusted'
+  if ((warnings || []).some((w) => typeof w === 'string' && w.startsWith('postcondition_unverifiable'))) return 'postcondition_unverifiable'
+  if (!postconditionResult) return 'postcondition_not_evaluated'
+  return postconditionResult.ok ? 'postcondition_verified' : 'postcondition_violated'
+}
+
+// deps.projectsDir is a TEST SEAM ONLY (mirrors awaitCmd's own identical
+// deps.projectsDir override) — production callers never pass `deps` at all
+// (COMMANDS[verb](args, ctx) calls every verb with exactly two arguments),
+// so the real ~/.claude/projects default below is exercised in production
+// exactly as before this slice. Never a new CLI flag, never a change to
+// closeCmd's outcome resolution/postcondition/nonce-unlink/doc-tab logic —
+// this is purely the ledger-mirror block's own resolveTranscript lookup dir.
+export function closeCmd(args, ctx, deps = {}) {
   const { paths } = ctx
   if (!args.dispatch) {
     throw new UsageError('close requires --dispatch <dispatch_id>')
@@ -2328,6 +2941,259 @@ export function closeCmd(args, ctx) {
     } else {
       closeSurface(record.surface.surface_id)
     }
+  }
+
+  // #41 (SF-2, be-41-05): mirror this close into the ledger — runs AFTER the
+  // record is already terminal on disk and never reorders or conditions any
+  // of the above. NEVER LOAD-BEARING: openEmitter/every emitter method never
+  // throws by be-41-01's contract; wrapped anyway as defense against a bug
+  // in this glue code — see workspaceCmd's identical wrapping note. Nothing
+  // in this block may change `outcome`, `postconditionResult`,
+  // `classification.warnings`, or the frozen return object built below.
+  try {
+    const emitter = openEmitter(ctx)
+    const sidecarSnapshot = emitter.sidecar()
+    const entry = sidecarSnapshot && sidecarSnapshot.dispatches ? sidecarSnapshot.dispatches[record.dispatch_id] : null
+    const phaseId = sidecarSnapshot && sidecarSnapshot.phase ? sidecarSnapshot.phase.phase_id : null
+    const projectsDir = deps.projectsDir || join(homedir(), '.claude', 'projects')
+
+    // 1. ensureAgentSession FALLBACK — idempotent: gated on the sidecar's
+    // own session_started flag (never on "does a row already exist", which
+    // agent_sessions' UNIQUE(adw_id, claude_session_id) + INSERT OR IGNORE
+    // would silently swallow either way). A dispatch never awaited (or
+    // whose transcript only appeared at the very end) gets exactly ONE row
+    // here, with the resolved transcript_path when sightable now and
+    // explicit null when it is not — unlike await's own per-tick
+    // resolveAgentSessionTick, this NEVER skips the row for an unresolved
+    // transcript: close is the last chance, and endAgentSession's UPDATE
+    // below needs a row to land on.
+    let transcriptPath = entry ? entry.transcript_path : null
+    if (entry && !entry.session_started) {
+      // QA REWORK (should-fix B): forward the resolution stats into
+      // emitter.bumpStat the same way resolveAgentSessionTick (be-41-04)
+      // does — `stats: {}` thrown away silently means a missing/ambiguous
+      // resolution here is invisible to stats() forever.
+      const closeStats = {}
+      const resolved = resolveTranscript({ record, projectsDir, stats: closeStats })
+      if (closeStats.resolution_missing) emitter.bumpStat('resolution_missing', closeStats.resolution_missing)
+      if (closeStats.resolution_ambiguous) emitter.bumpStat('resolution_ambiguous', closeStats.resolution_ambiguous)
+      transcriptPath = resolved ? resolved.transcript_path : null
+      emitter.emit((handle) => {
+        handle.startAgentSession({
+          adw_id: emitter.adwId,
+          dispatch_id: record.dispatch_id,
+          role: sanitizeAgentIdentityField(record.role),
+          model: sanitizeAgentIdentityField(record.model),
+          claude_session_id: record.dispatch_id, // be-41-03: claude_session_id === dispatch_id, always
+          transcript_path: resolved ? sanitizeTranscriptPathForLedger(resolved.transcript_path) : null,
+        })
+      })
+      const sessionStartPersistedOk = emitter.updateSidecar((draft) => {
+        const e = draft.dispatches && draft.dispatches[record.dispatch_id]
+        // Compare-and-set (mirrors resolveAgentSessionTick's own guard): a
+        // concurrent caller that already pinned this session first must
+        // never be overwritten.
+        if (e && !e.session_started) {
+          e.session_started = true
+          e.transcript_path = resolved ? resolved.transcript_path : null
+          e.sighted_at = resolved ? isoMs(Date.now()) : null
+        }
+      })
+      // QA REWORK (should-fix A): mirrors resolveAgentSessionTick's own
+      // give-up log — a discarded persist result here would silently leave
+      // the sidecar's session_started flag stuck false forever.
+      if (!sessionStartPersistedOk) {
+        log(`close: session-start sidecar persist failed for dispatch ${record.dispatch_id} (lock give-up?)`)
+      }
+    } else if (!entry) {
+      // QA REWORK (should-fix A): a missing sidecar entry (never dispatched
+      // through this run's own sidecar, or a sidecar that failed to persist
+      // at dispatch time) makes the ensureAgentSession fallback above a
+      // silent no-op — log it so the skip is diagnosable instead of just
+      // "no agent_sessions row appeared".
+      log(`close: no sidecar entry for dispatch ${record.dispatch_id} — skipping the ensureAgentSession fallback and the tool_call/decision back-fill`)
+    }
+
+    // 2. ENVELOPE MIRRORED — re-read/re-validate record.return_path
+    // read-only (never trust an earlier tick's classification, matching
+    // presentReturn's own discipline). violation_names is built as
+    // `${path}:${keyword}` — NEVER `.message` (contract.mjs embeds the
+    // offending value verbatim into every message) — and additionally
+    // shape-filtered (buildEnvelopeViolationNames) since recordEnvelope has
+    // no built-in guard of its own for this field.
+    const closeReturnText = readTextOrNull(record.return_path)
+    const closeValidation = validateReturn(record, closeReturnText)
+    const envelope = closeValidation.envelope
+    emitter.emit((handle) => {
+      handle.recordEnvelope({
+        adw_id: emitter.adwId,
+        dispatch_id: record.dispatch_id,
+        slice_id: record.slice_id,
+        attempt: record.attempt,
+        role: sanitizeAgentIdentityField(record.role),
+        produced_at: resolveEnvelopeProducedAtMs(envelope),
+        schema_version: envelope && Number.isInteger(envelope.schema_version) ? envelope.schema_version : null,
+        // QA REWORK (must-fix #2b): record.return_path is worker-writable
+        // (same uid, G13) exactly like transcript_path — sanitized through
+        // the SAME helper (sanitizeTranscriptPathForLedger) before it
+        // reaches the ledger's envelope_path column, never raw.
+        envelope_path: sanitizeTranscriptPathForLedger(record.return_path),
+        body_kind: record.return ? record.return.kind : null,
+        valid: closeValidation.ok,
+        violation_names: buildEnvelopeViolationNames(closeValidation.violations),
+      })
+    })
+
+    // 3/5/6. ONE seq reservation for the whole event back-fill (ADR-027):
+    // agent_end + (on the FIRST close only, see backfillHistory below) every
+    // back-filled tool_call row and the reconcile-evidence decision row —
+    // never one reservation per row.
+    //
+    // QA REWORK (must-fix #3): the tool_call back-fill and the decision row
+    // are gated on the SAME `entry && !entry.ended` condition guarding
+    // endAgentSession (item 4, below) — a repeat close on an already-`ended`
+    // dispatch re-reads the same transcript and must never re-emit a second
+    // batch of tool_call rows or a second decision row: nothing dedupes
+    // them, so every downstream tool-usage count would silently double.
+    // agent_end is deliberately NOT gated this way — it is mirrored again on
+    // every close (see the "agent_end CARRIES THE RECORD'S TERMINAL OUTCOME"
+    // test, which pins this as intentional and unrelated to this gate).
+    const backfillHistory = Boolean(entry) && !entry.ended
+    const rawToolTuples = backfillHistory && transcriptPath && isSafeTranscriptFileForTeardownRead(transcriptPath)
+      ? readToolCalls({ transcriptPath })
+      : []
+    // QA REWORK (must-fix #1): reserveSeq refuses any n > MAX_SEQ_RESERVE_N
+    // (64, emit.mjs-private) and returns [] — without a cap, a single
+    // dispatch with 63+ tool calls (routine for a real coder dispatch) would
+    // make the `else` branch below skip EVERYTHING for that close: no
+    // agent_end, no tool_call rows, no decision row. Capping the
+    // BACK-FILLED tool_call rows at a bound comfortably under the ceiling
+    // (60, leaving room for agent_end + decision => at most 62 < 64)
+    // guarantees agent_end and the decision row always land, regardless of
+    // tool-call count. The most RECENT 60 tuples are kept (not the first
+    // 60): the decision row landing right after them reasons about how the
+    // dispatch ENDED, and the tail of the transcript is the evidence
+    // closest to that ending. The drop is made VISIBLE two ways: a stderr
+    // line here, and a `tool_calls_dropped:<n>` entry folded into the
+    // decision row's own closed-vocabulary `alternatives` list below (never
+    // a raw count anywhere else — matching that field's existing
+    // count-only convention).
+    const TOOL_CALL_BACKFILL_CAP = 60
+    const toolTuples = rawToolTuples.length > TOOL_CALL_BACKFILL_CAP
+      ? rawToolTuples.slice(-TOOL_CALL_BACKFILL_CAP)
+      : rawToolTuples
+    const droppedToolCallCount = rawToolTuples.length - toolTuples.length
+    if (droppedToolCallCount > 0) {
+      log(`close: dispatch ${record.dispatch_id} transcript had ${rawToolTuples.length} tool_call tuples — backfilling only the most recent ${TOOL_CALL_BACKFILL_CAP} (dropped ${droppedToolCallCount}) to stay under the ledger's per-close seq-reservation ceiling`)
+    }
+    const eventCount = backfillHistory ? toolTuples.length + 2 : 1 // agent_end, [+tool_calls, +decision]
+    const seqs = emitter.reserveSeq('event', eventCount)
+    if (seqs.length === eventCount) {
+      let seqIdx = 0
+
+      // 3. agent_end CARRIES THE RECORD'S TERMINAL OUTCOME — closeCmd's own
+      // resolved `outcome`, never re-derived.
+      emitter.emit((handle) => {
+        handle.recordEvent({
+          adw_id: emitter.adwId, type: 'agent_end', seq: seqs[seqIdx], phase_id: phaseId,
+          payload: { role: sanitizeAgentIdentityField(record.role), outcome, dispatch_id: record.dispatch_id },
+        })
+      })
+      seqIdx += 1
+
+      if (backfillHistory) {
+        // 5. N back-filled tool_call rows with HISTORICAL timestamps from
+        // the reducer (never now() — see toolCallTimestampMs's header
+        // comment).
+        for (const tuple of toolTuples) {
+          const seq = seqs[seqIdx]
+          seqIdx += 1
+          emitter.emit((handle) => {
+            handle.recordEvent({
+              adw_id: emitter.adwId, type: 'tool_call', seq, phase_id: phaseId,
+              started_at: toolCallTimestampMs(tuple.started_at),
+              ended_at: toolCallTimestampMs(tuple.ended_at),
+              payload: { tool: tuple.tool, ok: tuple.ok },
+            })
+          })
+        }
+
+        // 6. RECONCILE EVIDENCE AS A decision ROW — dispatcher-authored
+        // closed-vocabulary values plus counts only (see the two helpers'
+        // header comments); never classify()'s own raw warning strings.
+        const alternatives = summarizeReconcileWarnings(classification.warnings)
+        if (droppedToolCallCount > 0) alternatives.push(`tool_calls_dropped:${droppedToolCallCount}`)
+        emitter.emit((handle) => {
+          handle.recordEvent({
+            adw_id: emitter.adwId, type: 'decision', seq: seqs[seqIdx], phase_id: phaseId,
+            payload: {
+              decided: outcome,
+              why: resolveReconcileDecisionReason({ record, uncorroborated: classification.warnings.some((w) => w.includes('terminal_outcome_uncorroborated')), postconditionResult, warnings: classification.warnings }),
+              alternatives,
+            },
+          })
+        })
+      }
+    } else {
+      log(`close: dispatch ${record.dispatch_id} ledger seq reservation gave up — skipping this close's event back-fill (agent_end${backfillHistory ? '/tool_call/decision' : ''})`)
+    }
+
+    // 4. endAgentSession LANDS ALL TEN FIELDS — gated on the SAME
+    // `backfillHistory` (`entry` existing and not yet `ended`) as the
+    // tool_call/decision back-fill above (idempotent across a repeat
+    // close): explicit null for every unknown figure (never omitted —
+    // endAgentSession's requireFields rejects only `undefined`, and
+    // omission here would refuse the whole call rather than record
+    // "unknown").
+    if (backfillHistory) {
+      const rawUsage = transcriptPath && isSafeTranscriptFileForTeardownRead(transcriptPath)
+        ? readUsage({ transcriptPath })
+        : null
+      // QA-mirrors teardownCmd's own should-fix B: message_count===0 AND
+      // dropped_lines===0 together means "nothing at all could be read from
+      // this path" (transcript.mjs's own never-throw contract), not a
+      // genuine zero-usage reading — fall back to explicit null the same
+      // way a never-sighted transcript does.
+      const usage = rawUsage && (rawUsage.message_count > 0 || rawUsage.dropped_lines > 0) ? rawUsage : null
+      const endedOk = emitter.emit((handle) => {
+        handle.endAgentSession({
+          adw_id: emitter.adwId,
+          claude_session_id: record.dispatch_id,
+          context_tokens: usage ? usage.context_tokens : null,
+          context_window: null, // U-4: no verified source in #41
+          raw_read_tokens: usage ? usage.raw_read_tokens : null,
+          raw_written_tokens: usage ? usage.raw_written_tokens : null,
+          billed_input_tokens: usage ? usage.billed_input_tokens : null,
+          billed_output_tokens: usage ? usage.billed_output_tokens : null,
+          billed_cache_write_tokens: usage ? usage.billed_cache_write_tokens : null,
+          billed_cache_read_tokens: usage ? usage.billed_cache_read_tokens : null,
+        })
+      })
+      if (endedOk) {
+        // AMENDED POST-be-41-04 (orchestrator note): mark `ended` so
+        // teardownCmd's reconciliation loop (session_started && !ended)
+        // never sees this dispatch as still open and re-emits
+        // endAgentSession for the same claude_session_id — which, because
+        // endAgentSession is an unconditional UPDATE of all ten fields (not
+        // a merge), would overwrite the real figures just recorded above
+        // with the never-sighted branch's explicit nulls.
+        const endedPersistedOk = emitter.updateSidecar((draft) => {
+          if (draft.dispatches && draft.dispatches[record.dispatch_id]) {
+            draft.dispatches[record.dispatch_id].ended = true
+          }
+        })
+        // QA REWORK (should-fix A): mirrors resolveAgentSessionTick's own
+        // give-up log — a discarded persist result here means a future
+        // close/teardown could re-run endAgentSession against a real row
+        // that was already correctly ended, without anything logging why.
+        if (!endedPersistedOk) {
+          log(`close: 'ended' sidecar persist failed for dispatch ${record.dispatch_id} (lock give-up?) — a future close/teardown may re-attempt endAgentSession for this dispatch`)
+        }
+      }
+    }
+    emitter.dispose()
+  } catch (err) {
+    log(`close: ledger mirror failed — continuing (${err.message})`)
   }
 
   const uncorroborated = classification.warnings.some((w) => w.includes('terminal_outcome_uncorroborated'))
@@ -2507,6 +3373,28 @@ function deletePreviewArtifacts(stateDir) {
 export const TEARDOWN_OUTCOMES = Object.freeze(['ok', 'refused'])
 export const DEFAULT_TEARDOWN_OUTCOME = 'ok'
 
+// QA REWORK (should-fix E): resolveTranscript (transcript.mjs, out of scope
+// to edit) already statSync-checks a candidate BEFORE ever reading it — but
+// teardown's own read, here, goes through the SIDECAR's pinned
+// transcript_path at teardown time, an interval during which a worker (same
+// uid) could have replaced that path's target. Without this guard, a worker
+// pointing the pinned path at a FIFO could hang teardown indefinitely, and
+// pointing it at a huge file could spike memory — readUsage's own
+// readFileSync (transcript.mjs, out of scope) has neither check itself.
+// `{ throwIfNoEntry: false }` mirrors resolveTranscript's own TOCTOU-safe
+// stat call (transcript.mjs) rather than existsSync+statSync as two syscalls.
+const TRANSCRIPT_TEARDOWN_MAX_BYTES = 500 * 1024 * 1024 // 500 MiB — generous for a real transcript.
+function isSafeTranscriptFileForTeardownRead(transcriptPath) {
+  if (typeof transcriptPath !== 'string' || transcriptPath === '') return false
+  let st
+  try {
+    st = statSync(transcriptPath, { throwIfNoEntry: false })
+  } catch {
+    st = null
+  }
+  return Boolean(st && st.isFile() && st.size <= TRANSCRIPT_TEARDOWN_MAX_BYTES)
+}
+
 export function teardownCmd(args, ctx) {
   const { roots, paths, primaryCheckout, taskSlug } = ctx
 
@@ -2566,6 +3454,78 @@ export function teardownCmd(args, ctx) {
   // specific artifacts, and the dispatch records that carry the real
   // diagnostic value are unaffected (archiveOrDelete still archives them).
   deletePreviewArtifacts(paths.stateDir)
+
+  // #41 (SF-2): reconcile every still-open agent session, close out the run
+  // (endPhase(open) + endSession — 'ok' -> 'ok', 'refused' -> 'aborted';
+  // SESSION_STATUSES's 'fail' stays reserved for ledger.mjs's own finalizer,
+  // never mapped from here), and log the run's final drop-counter snapshot.
+  // MUST run BEFORE stateDir is archived/deleted below — <stateDir>/ledger/
+  // (the run sidecar, db and jsonl) lives under paths.stateDir, exactly like
+  // every other per-task sidecar this function sweeps; teardown never
+  // touches ~/.dev-team/factory/ (#40's written obligation) because
+  // openEmitter never resolves a db path outside paths.stateDir.
+  try {
+    const emitter = openEmitter(ctx)
+    const sidecarSnapshot = emitter.sidecar()
+    const openEntries = Object.entries(sidecarSnapshot?.dispatches || {})
+      .filter(([, entry]) => entry && entry.session_started && !entry.ended)
+    const endedIds = []
+    for (const [dispatchId, entry] of openEntries) {
+      const rawUsage = entry.transcript_path && isSafeTranscriptFileForTeardownRead(entry.transcript_path)
+        ? readUsage({ transcriptPath: entry.transcript_path })
+        : null
+      // QA should-fix B: a transcript that WAS sighted (session_started,
+      // had a transcript_path) but has since become gone/unreadable by
+      // teardown time still returns a well-formed ALL-ZERO result from
+      // readUsage (transcript.mjs's own documented never-throw contract —
+      // an ENOENT is swallowed upstream, not rethrown) rather than
+      // throwing. Passing that confident zero straight to endAgentSession
+      // would misrepresent "this session used zero tokens" as a REAL
+      // reading. message_count === 0 AND dropped_lines === 0 together is
+      // readUsage's own "nothing at all could be read from this path"
+      // signal (as opposed to a transcript that was genuinely read and
+      // genuinely has no usage-bearing lines yet, which would still show up
+      // via dropped_lines counting whatever malformed/non-assistant lines
+      // it DID see) — treat that combination as "became unreadable" and
+      // fall back to the SAME explicit-null treatment already used for a
+      // session that was never sighted at all.
+      const usage = rawUsage && (rawUsage.message_count > 0 || rawUsage.dropped_lines > 0) ? rawUsage : null
+      emitter.emit((handle) => {
+        handle.endAgentSession({
+          adw_id: emitter.adwId,
+          claude_session_id: entry.claude_session_id,
+          context_tokens: usage ? usage.context_tokens : null,
+          context_window: null, // U-4: no verified source in #41
+          raw_read_tokens: usage ? usage.raw_read_tokens : null,
+          raw_written_tokens: usage ? usage.raw_written_tokens : null,
+          billed_input_tokens: usage ? usage.billed_input_tokens : null,
+          billed_output_tokens: usage ? usage.billed_output_tokens : null,
+          billed_cache_write_tokens: usage ? usage.billed_cache_write_tokens : null,
+          billed_cache_read_tokens: usage ? usage.billed_cache_read_tokens : null,
+        })
+      })
+      endedIds.push(dispatchId)
+    }
+    if (endedIds.length > 0) {
+      emitter.updateSidecar((draft) => {
+        for (const dispatchId of endedIds) {
+          if (draft.dispatches[dispatchId]) draft.dispatches[dispatchId].ended = true
+        }
+      })
+    }
+    // endRun emits endPhase(open) + endSession with the sidecar's OWN
+    // billed_* accumulator (be-41-01's own contract) — never re-derived here.
+    emitter.endRun({ status: outcome === 'ok' ? 'ok' : 'aborted' })
+    const snapshot = emitter.statsSnapshot()
+    emitter.emit((handle, nextSeq) => {
+      handle.recordEvent({
+        adw_id: emitter.adwId, type: 'log', seq: nextSeq('event'), phase_id: null, payload: snapshot,
+      })
+    })
+    emitter.dispose()
+  } catch (err) {
+    log(`teardown: ledger mirror failed — continuing (${err.message})`)
+  }
 
   const dateStr = new Date().toISOString().slice(0, 10)
   const taskDirAction = archiveOrDelete(paths.taskDir, join(roots.tasksRoot, '.archive', `${taskSlug}-${dateStr}`), archive)
@@ -2633,6 +3593,14 @@ export function phaseCmd(args, ctx) {
       clearProgress({ workspaceId: workspaceState.workspace_id })
     } catch (err) {
       log(`phase: clearProgress failed — progress pill not cleared: ${err.message}`)
+    }
+    // #41 (SF-2): 'gate' is the only phase this verb ever sets that the
+    // ledger mirror needs to hear about — 'planning'/'building' are fired by
+    // workspaceCmd/dispatchCmd. NEVER LOAD-BEARING (see workspaceCmd's note).
+    try {
+      openEmitter(ctx).phaseTransition('gate')
+    } catch (err) {
+      log(`phase: ledger mirror failed — continuing (${err.message})`)
     }
   }
   return { code: 0, json: { phase: args.set } }

@@ -186,3 +186,9 @@ Total wall-clock budget: <= 90 000 ms (<= 90s) for the whole verb. Every field i
 **browser-verify's own gate-time enum is closed at three members**, distinct from the five dispatch-time members above: `preview_disabled` (`cmux_preview_url` is not configured — the feature is inert), `no_preview_recorded` (no sidecar exists, or it was malformed — cross-read against `preview.reason` per the rule above), `preview_surface_gone` (a sidecar exists but fails corroboration against a fresh tree: gone, wrong workspace, or not browser-typed).
 
 **Credentials:** log the preview into dev/staging accounts only, never production or admin credentials — the same rule the preview singleton's own config-key documentation states.
+
+## Mirroring a gate result into the ledger (#40, issue #41)
+
+`scripts/chain/gates.mjs`'s `check`/`baseline` verbs never write to the ledger themselves. In cmux execution mode, after a gate run produces its `--json` report, mirror it via `node scripts/factory/emit.mjs gate --report <path> --state-dir <stateDir>`. The mirror supplies the four keys the report itself doesn't carry — `adw_id`/`phase_id` from the run's sidecar, a slice-qualified `gate_name` (`<slice>/chain-check`), and a per-slice `attempt` counter — and stores the report's `checks`/`violations` verbatim, never re-shaped or summarized. This mirroring can never alter the gate's own verdict: a ledger write failure only shows up in `emit.mjs stats`'s drop counters, never in the gate's exit code or its parsed `{verdict, findings}`.
+
+**Run-level acceptance requires every one of `emit.mjs stats`'s drop counters to read zero** — `emitted`, `dropped`, `lock_giveups`, `resolution_ambiguous`, `resolution_missing`, `payload_keys_dropped`. Check it with `node scripts/factory/emit.mjs stats --state-dir <stateDir>` before declaring the run done: a nonzero drop counter means rows were silently lost even though the gate itself may have reported `pass`.

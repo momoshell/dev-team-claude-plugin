@@ -642,6 +642,14 @@ export function buildArgv(record) {
   if (record.effort !== null) {
     argv.push('--effort', record.effort)
   }
+  // record.dispatch_id is already a parent-minted, schema-validated, never-
+  // reused v4 UUID (dispatch-record.schema.json:10) — reused verbatim as the
+  // worker's Claude session id, never re-minted here. Must land before
+  // --permission-mode and every variadic flag below (--tools,
+  // --allowedTools, --disallowedTools, --add-dir): those flags are variadic
+  // and greedily consume a following positional, so a flag placed after them
+  // can be silently swallowed (conventions.md 2026-08-01).
+  argv.push('--session-id', record.dispatch_id)
   argv.push('--permission-mode', record.profile.permission_mode)
   // Hard rule 2: the role prompt is passed as a PATH, never as bytes.
   argv.push('--append-system-prompt-file', record.role_prompt_path)
@@ -669,9 +677,13 @@ export function buildArgv(record) {
   // assertion — every element (model, effort, rule strings, kickoff, …) is
   // swept for \n/\r. roster.schema.json's `model` pattern (`\S`, unanchored)
   // does not exclude an embedded newline, so this is a real gap this closes.
-  for (const el of argv) {
-    if (/[\n\r]/.test(el)) {
-      throw new Error(`buildArgv: refused — argv element contains a newline or carriage return: ${JSON.stringify(el)}`)
+  for (let i = 0; i < argv.length; i++) {
+    if (/[\n\r]/.test(argv[i])) {
+      // trust: never embed the raw offending element (may carry a nonce or
+      // other sensitive content) — this message reaches worker-readable
+      // sinks (adapter-claude.mjs logger.log + writeBlockedReturn), so only
+      // the element's index is safe to disclose.
+      throw new Error(`buildArgv: refused — argv element at index ${i} contains a newline or carriage return`)
     }
   }
 

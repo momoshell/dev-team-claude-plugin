@@ -638,9 +638,39 @@ function openRunInner({
   // ledger.mjs's per-HANDLE degraded-notice guard (per-emission handles
   // meant per-emission stderr lines).
   let cachedLedgerHandle = null
+  // VISIBILITY SEAM: ledger.mjs's own mirror() helper deliberately never
+  // rethrows a mirror-write failure (see ledger.mjs:10-13, the
+  // MIRROR-NEVER-AUTHORITY invariant) — it only increments the handle's own
+  // stats().mirror_errors. Left unchecked, that means a real sqlite write
+  // genuinely lost under contention (e.g. SQLITE_BUSY exhausting
+  // busy_timeout) returns NORMALLY from recordEvent/etc., so emit()'s own
+  // try/catch below never sees it and reports dropped: 0 even though a row
+  // is gone from the mirror. lastMirrorErrors tracks the last OBSERVED value
+  // of the handle's own counter so any INCREASE across an emit() call — a
+  // silent write loss that just happened — is folded into this facade's own
+  // `dropped` counter (never a separate field: the six-field stats() shape
+  // is part of this module's own tested contract, and "a write this facade
+  // asked for did not durably land" is squarely what `dropped` already
+  // means).
+  let lastMirrorErrors = null
   function ledgerHandle() {
     if (!cachedLedgerHandle) cachedLedgerHandle = openLedgerFn()
     return cachedLedgerHandle
+  }
+  function absorbMirrorErrors(handle) {
+    if (!handle || typeof handle.stats !== 'function') return
+    const { mirror_errors: mirrorErrors } = handle.stats()
+    if (typeof mirrorErrors !== 'number') return
+    if (lastMirrorErrors === null) {
+      lastMirrorErrors = mirrorErrors
+      return
+    }
+    const delta = mirrorErrors - lastMirrorErrors
+    if (delta > 0) {
+      localStats.dropped += delta
+      noteStderrOnce(`emit: detected ${delta} silent mirror-write failure(s) via ledger stats().mirror_errors — counted as dropped`)
+    }
+    lastMirrorErrors = mirrorErrors
   }
   function closeLedgerHandle() {
     if (cachedLedgerHandle) {
@@ -807,6 +837,7 @@ function openRunInner({
       }
       fn(handle, nextSeq)
       localStats.emitted += 1
+      absorbMirrorErrors(handle)
       return true
     } catch (err) {
       localStats.dropped += 1

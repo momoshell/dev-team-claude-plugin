@@ -12,9 +12,35 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
-import { openLedger, PAYLOAD_KEYS } from '../scripts/factory/ledger.mjs'
+import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
+
+// A handful of this file's tests query the real SQLite mirror directly (via
+// openLedger().dumpTable(...)) or otherwise assert a real, non-null
+// phase_id/mirror row count from an UNFORCED (real process.versions.node)
+// ledger handle. Below NODE_FLOOR (ledger.mjs's own node:sqlite floor,
+// currently 24.0.0), openLedger() DEGRADES by design (ADR-024, #40): no
+// mirror table exists, dumpTable/getSession answer [] / null, and
+// phaseTransition legitimately returns phase_id: null. Those specific tests
+// (and only those — every other test in this file either forces degraded
+// mode explicitly via nodeVersion, or never touches the real mirror at all,
+// and stays ungated) self-skip below the floor, mirroring
+// test/factory-ledger.test.mjs's own SKIP pattern exactly (this is the one
+// other file in the split allowed to contain a skip — see
+// test/factory-emit-floor.test.mjs for the zero-condition-excluded half).
+const require = createRequire(import.meta.url)
+function sqliteAvailable() {
+  try {
+    require('node:sqlite')
+    return true
+  } catch {
+    return false
+  }
+}
+const SQLITE_OK = sqliteAvailable()
+const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 
 const EMIT_MODULE_URL = new URL('../scripts/factory/emit.mjs', import.meta.url).href
 const LEDGER_MODULE_URL = new URL('../scripts/factory/ledger.mjs', import.meta.url).href
@@ -104,7 +130,7 @@ test('SEQ RESERVATION UNDER CONCURRENCY: two in-process emitters allocate disjoi
   assert.equal(allocated.length, new Set(allocated).size, 'a seq value was allocated more than once')
 })
 
-test('SEQ RESERVATION UNDER CONCURRENCY: two real child processes racing reserveSeq+emit produce unique seqs and every row survives in the mirror', { timeout: 30000 }, async () => {
+test('SEQ RESERVATION UNDER CONCURRENCY: two real child processes racing reserveSeq+emit produce unique seqs and every row survives in the mirror', { skip: SKIP, timeout: 30000 }, async () => {
   const dir = freshDir('seq-two-procs')
   const dbPath = join(dir, 'ledger', 'ledger.db')
   const ITER = 15
@@ -416,7 +442,7 @@ function runNeverLoadBearingScenario(makeOpenLedger) {
   }
 }
 
-test('NEVER LOAD-BEARING: a throwing ledger handle never escapes the facade and only affects ledger-derived fields', async () => {
+test('NEVER LOAD-BEARING: a throwing ledger handle never escapes the facade and only affects ledger-derived fields', { skip: SKIP }, async () => {
   // Isolates this scenario's facade-failure guard from any earlier test's
   // trip — the guard is module-scoped for the whole process (M4 residual,
   // round 3), so this test's own "exactly one line" assertion below needs a
@@ -516,7 +542,7 @@ test('READABLE COUNTERS: statsSnapshot() is info when clean and warn once any dr
 // IDEMPOTENT PHASE TRANSITION
 // ---------------------------------------------------------------------------
 
-test('IDEMPOTENT PHASE TRANSITION: two emitter instances calling phaseTransition("building") in a row produce exactly one building phase row', () => {
+test('IDEMPOTENT PHASE TRANSITION: two emitter instances calling phaseTransition("building") in a row produce exactly one building phase row', { skip: SKIP }, () => {
   const dir = freshDir('idempotent-phase')
   const dbPath = join(dir, 'ledger', 'ledger.db')
   const e1 = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', dbPath })
@@ -540,7 +566,7 @@ test('IDEMPOTENT PHASE TRANSITION: two emitter instances calling phaseTransition
 // flakiness): the first call's injected startPhase synchronously triggers
 // the second call before returning, exactly reproducing the ordering round
 // 2 observed under real concurrency.
-test('IDEMPOTENT PHASE TRANSITION: a write-back superseded by a fully-completed overlapping transition does not rewind the phase pointer', () => {
+test('IDEMPOTENT PHASE TRANSITION: a write-back superseded by a fully-completed overlapping transition does not rewind the phase pointer', { skip: SKIP }, () => {
   const dir = freshDir('idempotent-phase-cas-overlap')
   const dbPath = join(dir, 'ledger', 'ledger.db')
   let e2

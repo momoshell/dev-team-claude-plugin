@@ -125,6 +125,19 @@ test('command ship.md: refuses to guess a task slug for teardown', () => {
   assert.match(step, /never guess/i)
 })
 
+test('command team.md: documents mirroring a gate report into the ledger via emit.mjs gate/stats, gated on every drop counter reading zero', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  assert.match(md, /emit\.mjs gate --report <path> --state-dir <stateDir>/)
+  assert.match(md, /emit\.mjs stats --state-dir <stateDir>/)
+  assert.match(md, /every drop counter must read zero/)
+})
+
+test('command team.md: states the agent-tool/workflow lanes get no ledger record for gate results or phase\/dispatch events (best-effort only)', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  assert.match(md, /agent-tool or workflow-mode runs there is no code-side hook point to mirror from/)
+  assert.match(md, /land nowhere in the ledger for those lanes — best-effort only/)
+})
+
 test('command onboard.md: checks cmux as a prerequisite and sets execution_mode', () => {
   const md = readFileSync(join(ROOT, 'commands', 'onboard.md'), 'utf8')
   assert.match(md, /command -v cmux/)

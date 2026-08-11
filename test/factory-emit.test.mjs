@@ -6,15 +6,15 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, utimesSync,
+  mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, utimesSync, symlinkSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
-import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
+import { openRun, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
 // A handful of this file's tests query the real SQLite mirror directly (via
@@ -1001,6 +1001,366 @@ test('LIBRARY PURITY: openRun does not install a signal handler; installFinalize
   emitter.dispose()
   assert.equal(process.listenerCount('SIGTERM'), before.sigterm)
   assert.equal(process.listenerCount('SIGINT'), before.sigint)
+})
+
+// ---------------------------------------------------------------------------
+// CLI: `gate --report <path>` / `stats` (be-41-06, issue #41)
+// ---------------------------------------------------------------------------
+
+const EMIT_SCRIPT = join(ROOT, 'scripts', 'factory', 'emit.mjs')
+
+function runCli(args, opts = {}) {
+  return spawnSync(process.execPath, [EMIT_SCRIPT, ...args], { encoding: 'utf8', ...opts })
+}
+
+// Seeds a run sidecar in-process (mirrors the seed helpers already used
+// above) — the gate/stats CLI never mints a run itself (discovery_context
+// assumption #2), so every CLI test needs one already on disk first.
+function seedRun(dir) {
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
+  const adwId = emitter.adwId
+  emitter.dispose()
+  return adwId
+}
+
+function writeReport(dir, report) {
+  const p = join(dir, `report-${Math.random().toString(36).slice(2)}.json`)
+  writeFileSync(p, JSON.stringify(report))
+  return p
+}
+
+// Deliberately out-of-order checks, a hard_fail:true entry, and a violation
+// carrying a note — the fixture C1's VERBATIM requirement exists to catch a
+// re-shape/re-order/drop.
+function sampleReport(overrides = {}) {
+  return {
+    task: 'sample-task',
+    slice: 'be-41-06',
+    checks: [
+      { item: 'z-check', ok: true, hard_fail: false, note: 'note-z' },
+      { item: 'a-check', ok: false, hard_fail: true, note: 'note-a' },
+    ],
+    hard_fail: true,
+    violations: [{ item: 'a-check', hard_fail: true, note: 'violation note' }],
+    ...overrides,
+  }
+}
+
+test('CLI gate: the four caller-supplied keys are each correct — adw_id/phase_id from the sidecar, a slice-qualified gate_name, a 1-based attempt', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-keys')
+  const adwId = seedRun(dir)
+  const reportPath = writeReport(dir, sampleReport())
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir, '--json'])
+  assert.equal(res.status, 0, res.stderr)
+  const printed = JSON.parse(res.stdout.trim())
+  assert.equal(printed.adw_id, adwId)
+  assert.equal(printed.phase_id, null, 'phase_id must be explicit null when no phase has started — never omitted')
+  assert.equal(printed.gate_name, 'be-41-06/chain-check', 'gate_name must carry the slice')
+  assert.equal(printed.attempt, 1)
+  assert.equal(printed.ok, false, 'ok must be checks.every(c => c.ok), never report.hard_fail hoisted directly')
+})
+
+test('CLI gate: checks and violations land VERBATIM — same order, same keys, same values, nothing added or dropped', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-verbatim')
+  const adwId = seedRun(dir)
+  const report = sampleReport()
+  const reportPath = writeReport(dir, report)
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir])
+  assert.equal(res.status, 0, res.stderr)
+
+  const ledger = openLedger({ dbPath: join(dir, 'ledger', 'ledger.db') })
+  const rows = ledger.dumpTable('gate_results').filter((r) => r.adw_id === adwId)
+  ledger.close()
+  assert.equal(rows.length, 1)
+  assert.deepEqual(JSON.parse(rows[0].checks_json), report.checks, 'checks did not round-trip verbatim')
+  assert.deepEqual(JSON.parse(rows[0].violations_json), report.violations, 'violations did not round-trip verbatim')
+})
+
+test('CLI gate: a second invocation for the SAME slice increments attempt and BOTH rows survive; a different slice gets its own distinct gate_name', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-attempts')
+  const adwId = seedRun(dir)
+
+  const reportA1 = writeReport(dir, sampleReport({ slice: 'be-41-06' }))
+  const resA1 = runCli(['gate', '--report', reportA1, '--state-dir', dir])
+  assert.equal(resA1.status, 0, resA1.stderr)
+
+  const reportA2 = writeReport(dir, sampleReport({ slice: 'be-41-06' }))
+  const resA2 = runCli(['gate', '--report', reportA2, '--state-dir', dir])
+  assert.equal(resA2.status, 0, resA2.stderr)
+
+  const reportB1 = writeReport(dir, sampleReport({ slice: 'be-41-07' }))
+  const resB1 = runCli(['gate', '--report', reportB1, '--state-dir', dir])
+  assert.equal(resB1.status, 0, resB1.stderr)
+
+  const ledger = openLedger({ dbPath: join(dir, 'ledger', 'ledger.db') })
+  const rows = ledger.dumpTable('gate_results').filter((r) => r.adw_id === adwId)
+  ledger.close()
+
+  const sliceARows = rows.filter((r) => r.gate_name === 'be-41-06/chain-check')
+  const sliceBRows = rows.filter((r) => r.gate_name === 'be-41-07/chain-check')
+  // Asserting "a row exists" alone would pass on the silent
+  // UNIQUE(adw_id, gate_name, attempt) + INSERT OR IGNORE collapse this
+  // test exists to catch — assert the exact row count instead.
+  assert.equal(sliceARows.length, 2, `expected 2 surviving rows for be-41-06, got ${sliceARows.length}`)
+  assert.deepEqual(sliceARows.map((r) => r.attempt).sort(), [1, 2])
+  assert.equal(sliceBRows.length, 1, `expected 1 surviving row for be-41-07, got ${sliceBRows.length}`)
+  assert.equal(sliceBRows[0].attempt, 1)
+})
+
+test('CLI gate: NO LEDGER FAILURE BECOMES A GATE FAILURE — a throwing JSONL append still exits 0 with the normal report, and counts a drop', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-throwing-ledger')
+  seedRun(dir)
+  // Forces the ledger's OWN appendJsonl to throw (EISDIR) without touching
+  // any test seam the CLI doesn't expose — a real, load-bearing failure
+  // mode, not a mock.
+  mkdirSync(join(dir, 'ledger', 'ledger.jsonl'), { recursive: true })
+  const reportPath = writeReport(dir, sampleReport())
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir, '--json'])
+  assert.equal(res.status, 0, res.stderr, 'the gate\'s own verdict must never be altered by a mirror failure')
+  const printed = JSON.parse(res.stdout.trim())
+  assert.equal(printed.mirrored, false)
+  assert.equal(printed.ok, false, 'the parsed report verdict is unchanged by the mirror failure')
+
+  const statsRes = runCli(['stats', '--state-dir', dir, '--json'])
+  assert.equal(statsRes.status, 0, statsRes.stderr)
+  const stats = JSON.parse(statsRes.stdout.trim())
+  assert.equal(stats.dropped, 1)
+})
+
+test('CLI gate: refuses (exit 2) on a missing report path, an unparseable report, and a structurally-wrong report (checks not an array) — never a silent degrade to zero checks', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-refusals')
+  seedRun(dir)
+
+  const missing = runCli(['gate', '--report', join(dir, 'does-not-exist.json'), '--state-dir', dir])
+  assert.equal(missing.status, 2)
+  assert.match(missing.stderr, /reason: unreadable_report/)
+
+  const unparseablePath = join(dir, 'unparseable.json')
+  writeFileSync(unparseablePath, 'not json at all')
+  const unparseable = runCli(['gate', '--report', unparseablePath, '--state-dir', dir])
+  assert.equal(unparseable.status, 2)
+  assert.match(unparseable.stderr, /reason: unparseable_report/)
+
+  const wrongShapePath = writeReport(dir, { slice: 'be-x', checks: 'not-an-array', violations: [] })
+  const wrongShape = runCli(['gate', '--report', wrongShapePath, '--state-dir', dir])
+  assert.equal(wrongShape.status, 2)
+  assert.match(wrongShape.stderr, /reason: malformed_report/)
+})
+
+test('CLI gate: refuses (exit 2) when no run sidecar exists — never mints one on the gate\'s behalf', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-no-run')
+  const reportPath = writeReport(dir, sampleReport())
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir])
+  assert.equal(res.status, 2)
+  assert.match(res.stderr, /reason: no_run/)
+  assert.ok(!existsSync(join(dir, 'ledger', 'run.json')), 'the gate verb must never originate a fresh run sidecar')
+})
+
+test('CLI stats: prints the six drop counters (human + --json), and emits NOTHING to the ledger', { skip: SKIP }, () => {
+  const dir = freshDir('cli-stats-basic')
+  const adwId = seedRun(dir)
+
+  const humanRes = runCli(['stats', '--state-dir', dir])
+  assert.equal(humanRes.status, 0, humanRes.stderr)
+  for (const key of ['emitted', 'dropped', 'lock_giveups', 'resolution_ambiguous', 'resolution_missing', 'payload_keys_dropped']) {
+    assert.match(humanRes.stdout, new RegExp(key))
+  }
+
+  const jsonRes = runCli(['stats', '--state-dir', dir, '--json'])
+  assert.equal(jsonRes.status, 0, jsonRes.stderr)
+  const zeroStats = JSON.parse(jsonRes.stdout.trim())
+  assert.deepEqual(zeroStats, {
+    emitted: 0, dropped: 0, lock_giveups: 0, resolution_ambiguous: 0, resolution_missing: 0, payload_keys_dropped: 0,
+  })
+
+  // Now make a counter nonzero and confirm it is visibly distinguishable
+  // from the all-zero baseline above.
+  mkdirSync(join(dir, 'ledger', 'ledger.jsonl'), { recursive: true })
+  const reportPath = writeReport(dir, sampleReport())
+  const gateRes = runCli(['gate', '--report', reportPath, '--state-dir', dir])
+  assert.equal(gateRes.status, 0, gateRes.stderr)
+  const dirtyRes = runCli(['stats', '--state-dir', dir, '--json'])
+  const dirtyStats = JSON.parse(dirtyRes.stdout.trim())
+  assert.equal(dirtyStats.dropped, 1)
+  assert.notDeepEqual(dirtyStats, zeroStats)
+
+  const ledger = openLedger({ dbPath: join(dir, 'ledger', 'ledger.db') })
+  const gateRows = ledger.dumpTable('gate_results').filter((r) => r.adw_id === adwId)
+  ledger.close()
+  assert.equal(gateRows.length, 0, 'stats itself must never write to the ledger — the row above came from the gate call, not stats')
+})
+
+test('CLI stats: refuses (exit 2) when no run sidecar is present — never fabricates an all-zero success', { skip: SKIP }, () => {
+  const dir = freshDir('cli-stats-no-run')
+  const res = runCli(['stats', '--state-dir', dir])
+  assert.equal(res.status, 2)
+  assert.match(res.stderr, /reason: no_run/)
+})
+
+// ---------------------------------------------------------------------------
+// REWORK round: MUST/SHOULD-FIX #1-#5 (deep-review pass on the gate verb)
+// ---------------------------------------------------------------------------
+
+// MUST-FIX #1: a ledger-side degradation (openRun itself coming up
+// degraded) must never invert the gate's exit code from 0 to 2. Reproduces
+// the exact live repro: a directory sitting at the sidecar's lock path
+// forces linkSync/readFileSync to throw (EISDIR, not EEXIST/ENOENT),
+// which openRun's own try/catch turns into a fully degraded emitter — the
+// sidecar file itself was already proven to exist and be readable moments
+// earlier via readSidecarJsonOrRefuse, so the gate must still mirror
+// nothing but report its normal (non-mirror) verdict at exit 0.
+test('CLI gate: MUST-FIX #1 — an openRun-level degradation never inverts the gate exit code from 0 to 2', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-openrun-degraded')
+  seedRun(dir)
+  const lockPath = join(dir, 'ledger', 'run.lock')
+  mkdirSync(lockPath, { recursive: true })
+  const reportPath = writeReport(dir, sampleReport())
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir, '--json'])
+  assert.equal(res.status, 0, `expected exit 0 despite the ledger-side openRun degradation, got ${res.status}. stderr: ${res.stderr}`)
+  const printed = JSON.parse(res.stdout.trim())
+  assert.equal(printed.mirrored, false, 'a degraded openRun must never mirror, but must still report the gate result')
+  assert.equal(printed.ok, false, 'the parsed report verdict is unchanged by the ledger-side degradation')
+  assert.equal(printed.gate_name, 'be-41-06/chain-check', 'gate_name must still be sourced from the already-proven-readable sidecar/report, not refused')
+  assert.match(res.stderr, /openRun is running fully degraded/, 'the degraded openRun path must actually have been exercised')
+})
+
+// MUST-FIX #2: attempt:0 (bumpGateAttempt's own documented lock-give-up
+// signal) must never be recorded into the ledger unchecked — a live,
+// non-stale lock planted at the sidecar's lock path forces a bounded
+// give-up (openRun itself degrades via createOrAdoptSidecar's own lock
+// attempt, so bumpGateAttempt returns 0 too). Confirms: no gate_results row
+// is ever written for either of TWO invocations against the SAME
+// gate_name — proving the attempt:0 collision this fix exists to prevent
+// never occurs, since neither invocation ever reaches the ledger at all.
+test('CLI gate: MUST-FIX #2 — attempt:0 from a lock give-up is never written to the ledger, even across two invocations of the same gate_name', { skip: SKIP, timeout: 10000 }, () => {
+  const dir = freshDir('cli-gate-attempt-zero')
+  const adwId = seedRun(dir)
+  const lockPath = join(dir, 'ledger', 'run.lock')
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }))
+
+  const report1 = writeReport(dir, sampleReport())
+  const res1 = runCli(['gate', '--report', report1, '--state-dir', dir, '--json'])
+  assert.equal(res1.status, 0, res1.stderr)
+  assert.equal(JSON.parse(res1.stdout.trim()).mirrored, false)
+
+  const report2 = writeReport(dir, sampleReport())
+  const res2 = runCli(['gate', '--report', report2, '--state-dir', dir, '--json'])
+  assert.equal(res2.status, 0, res2.stderr)
+  assert.equal(JSON.parse(res2.stdout.trim()).mirrored, false)
+
+  mkdirSync(join(dir, 'ledger'), { recursive: true })
+  const ledger = openLedger({ dbPath: join(dir, 'ledger', 'ledger.db') })
+  const rows = ledger.dumpTable('gate_results').filter((r) => r.adw_id === adwId)
+  ledger.close()
+  assert.equal(rows.length, 0, 'a lock give-up must never write a gate_results row, and never collide on attempt:0 across repeated give-ups')
+})
+
+// MUST-FIX #3: report.slice is caller-supplied and must be sanitized before
+// it reaches gate_name — both the ledger's gate_name column and the CLI's
+// own printed summaries.
+test('CLI gate: MUST-FIX #3 — a hostile report.slice (embedded newline + ANSI) is stripped before reaching gate_name, the ledger and stdout', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-hostile-slice')
+  const adwId = seedRun(dir)
+  const hostileSlice = 'be-41-06\x1B[31m\ninjected-line'
+
+  const jsonReportPath = writeReport(dir, sampleReport({ slice: hostileSlice }))
+  const jsonRes = runCli(['gate', '--report', jsonReportPath, '--state-dir', dir, '--json'])
+  assert.equal(jsonRes.status, 0, jsonRes.stderr)
+  const printed = JSON.parse(jsonRes.stdout.trim())
+  assert.ok(!/[\x00-\x1F\x7F]/.test(printed.gate_name), 'gate_name must have no raw control/ANSI bytes')
+  assert.equal(printed.gate_name, 'be-41-06injected-line/chain-check', 'sanity: the ANSI/newline bytes are removed, the surrounding text survives')
+
+  const ledger = openLedger({ dbPath: join(dir, 'ledger', 'ledger.db') })
+  const rows = ledger.dumpTable('gate_results').filter((r) => r.adw_id === adwId)
+  ledger.close()
+  assert.equal(rows.length, 1)
+  assert.ok(!/[\x00-\x1F\x7F]/.test(rows[0].gate_name), 'the ledger gate_name column must have no raw control/ANSI bytes')
+
+  const humanReportPath = writeReport(dir, sampleReport({ slice: hostileSlice }))
+  const humanRes = runCli(['gate', '--report', humanReportPath, '--state-dir', dir])
+  assert.equal(humanRes.status, 0, humanRes.stderr)
+  assert.equal(humanRes.stdout.trim().split('\n').length, 1, 'the human-readable one-line summary must stay one line even with a hostile slice')
+  assert.ok(!/[\x00-\x1F\x7F]/.test(humanRes.stdout.trimEnd()), 'stdout must not contain raw control/ANSI bytes (excluding its own single trailing newline)')
+})
+
+// SHOULD-FIX #4(a): buildReport (scripts/chain/gates.mjs) never legitimately
+// produces an empty checks array — a truncated/malformed report must
+// refuse rather than fabricate a vacuous ok:true PASS via [].every(...).
+test('CLI gate: SHOULD-FIX #4(a) — an empty checks array refuses (exit 2) rather than fabricating a vacuous ok:true PASS', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-empty-checks')
+  seedRun(dir)
+  const reportPath = writeReport(dir, sampleReport({ checks: [] }))
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir])
+  assert.equal(res.status, 2, res.stderr)
+  assert.match(res.stderr, /reason: malformed_report/)
+})
+
+// SHOULD-FIX #4(b): a malformed check element must refuse with exit 2 (a
+// structurally-wrong report), never an unexpected exit 1 from a raw
+// TypeError deep inside report.checks.every(c => c.ok).
+test('CLI gate: SHOULD-FIX #4(b) — a malformed check element refuses with exit 2, never an unexpected exit 1', { skip: SKIP }, () => {
+  const dir = freshDir('cli-gate-malformed-check')
+  seedRun(dir)
+
+  const nullCheckPath = writeReport(dir, sampleReport({ checks: [null] }))
+  const nullCheckRes = runCli(['gate', '--report', nullCheckPath, '--state-dir', dir])
+  assert.equal(nullCheckRes.status, 2, nullCheckRes.stderr)
+  assert.match(nullCheckRes.stderr, /reason: malformed_report/)
+
+  const missingOkPath = writeReport(dir, sampleReport({ checks: [{ item: 'x', hard_fail: false }] }))
+  const missingOkRes = runCli(['gate', '--report', missingOkPath, '--state-dir', dir])
+  assert.equal(missingOkRes.status, 2, missingOkRes.stderr)
+  assert.match(missingOkRes.stderr, /reason: malformed_report/)
+})
+
+// SHOULD-FIX #5: if the post-emit stats flush itself gives up under lock
+// contention, the drop counter this invocation just recorded may never
+// reach disk — this must surface as a stderr warning, never a silent
+// discard, and must never change the gate's own exit code.
+test('CLI gate: SHOULD-FIX #5 — a stats-flush failure after emit() prints a stderr warning without changing the exit code', { skip: SKIP, timeout: 10000 }, () => {
+  const dir = freshDir('cli-gate-flush-giveup')
+  seedRun(dir)
+  const lockPath = join(dir, 'ledger', 'run.lock')
+  writeFileSync(lockPath, JSON.stringify({ pid: process.pid, started_at: new Date().toISOString() }))
+  const reportPath = writeReport(dir, sampleReport())
+  const res = runCli(['gate', '--report', reportPath, '--state-dir', dir, '--json'])
+  assert.equal(res.status, 0, res.stderr)
+  assert.match(res.stderr, /stats flush to the run sidecar failed/, 'a flush give-up must be visible on stderr, never silently discarded')
+})
+
+test('CLI: --state-dir is required for both verbs, and an unknown verb refuses', { skip: SKIP }, () => {
+  const dir = freshDir('cli-usage')
+  const noStateDir = runCli(['stats'])
+  assert.equal(noStateDir.status, 2)
+
+  const noVerb = runCli([])
+  assert.equal(noVerb.status, 2)
+
+  const badVerb = runCli(['bogus', '--state-dir', dir])
+  assert.equal(badVerb.status, 2)
+})
+
+test('symlinked invocation: emit.mjs still runs its CLI body when invoked through a symlinked path component', { skip: SKIP }, () => {
+  const dir = freshDir('cli-symlink')
+  seedRun(dir)
+  const linkDir = mkdtempSync(join(fixtureRoot, 'symlink-'))
+  symlinkSync(dirname(EMIT_SCRIPT), join(linkDir, 'linked'))
+  const linkedScript = join(linkDir, 'linked', 'emit.mjs')
+  const res = spawnSync(process.execPath, [linkedScript, 'stats', '--state-dir', dir, '--json'], { encoding: 'utf8' })
+  assert.equal(res.status, 0, res.stderr)
+  const parsed = JSON.parse(res.stdout.trim())
+  assert.equal(parsed.emitted, 0)
+})
+
+test('source-text pin: main() never calls process.exit, and the invokedDirectly guard realpathSyncs BOTH sides', () => {
+  const codeLines = EMIT_SOURCE.split('\n').filter((line) => !line.trim().startsWith('//'))
+  assert.ok(!codeLines.some((line) => /process\.exit\(/.test(line)), 'emit.mjs calls process.exit somewhere outside a comment')
+  assert.ok(codeLines.some((line) => /process\.exitCode\s*=\s*main\(/.test(line)), 'the invokedDirectly guard must set process.exitCode, not process.exit')
+  assert.match(EMIT_SOURCE, /realpathOr\(process\.argv\[1\]\)\s*===\s*realpathOr\(fileURLToPath\(import\.meta\.url\)\)/, 'the invokedDirectly guard must realpathSync BOTH process.argv[1] and import.meta.url')
+})
+
+test('in-process main(): an unknown verb returns 2 without throwing', () => {
+  assert.equal(main(['bogus']), 2)
 })
 
 // ---------------------------------------------------------------------------

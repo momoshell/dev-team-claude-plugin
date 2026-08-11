@@ -626,3 +626,30 @@ test('agents/code-reviewer.md and code-reviewer-deep.md state that a deferred ro
     assert.match(body, /A `deferred \(issue #N\)` row is NOT settled — deferral is scheduling, not dismissal — so report the defect again if you re-encounter it\./, `${name}: missing deferred-not-settled carve-out`)
   }
 })
+
+// ---------------------------------------------------------------------------
+// be-41-06 (issue #41, epic #39) — mirroring a gate result into the ledger
+// ---------------------------------------------------------------------------
+
+const GATE_LEDGER_HEADING = '## Mirroring a gate result into the ledger (#40, issue #41)'
+
+test('qa-gate.md: the gate-ledger section is found and states how emit.mjs gate mirrors a chain-check report', () => {
+  const section = extractSection(qaGateMd, GATE_LEDGER_HEADING)
+  assert.match(section, /node scripts\/factory\/emit\.mjs gate --report <path> --state-dir <stateDir>/)
+  assert.match(section, /adw_id`\/`phase_id` from the run's sidecar, a slice-qualified `gate_name`/)
+  assert.match(section, /never re-shaped or summarized/)
+})
+
+test('qa-gate.md: the gate-ledger section states a mirror failure can never alter the gate\'s own verdict', () => {
+  const section = extractSection(qaGateMd, GATE_LEDGER_HEADING)
+  assert.match(section, /can never alter the gate's own verdict/)
+  assert.match(section, /never in the gate's exit code or its parsed `\{verdict, findings\}`/)
+})
+
+test('qa-gate.md: run-level acceptance requires every emit.mjs stats drop counter to read zero', () => {
+  const section = extractSection(qaGateMd, GATE_LEDGER_HEADING)
+  assert.match(section, /\*\*Run-level acceptance requires every one of `emit\.mjs stats`'s drop counters to read zero\*\*/)
+  for (const key of ['emitted', 'dropped', 'lock_giveups', 'resolution_ambiguous', 'resolution_missing', 'payload_keys_dropped']) {
+    assert.match(section, new RegExp(key))
+  }
+})

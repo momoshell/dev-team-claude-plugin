@@ -638,39 +638,56 @@ function openRunInner({
   // ledger.mjs's per-HANDLE degraded-notice guard (per-emission handles
   // meant per-emission stderr lines).
   let cachedLedgerHandle = null
-  // VISIBILITY SEAM: ledger.mjs's own mirror() helper deliberately never
-  // rethrows a mirror-write failure (see ledger.mjs:10-13, the
-  // MIRROR-NEVER-AUTHORITY invariant) — it only increments the handle's own
-  // stats().mirror_errors. Left unchecked, that means a real sqlite write
-  // genuinely lost under contention (e.g. SQLITE_BUSY exhausting
-  // busy_timeout) returns NORMALLY from recordEvent/etc., so emit()'s own
-  // try/catch below never sees it and reports dropped: 0 even though a row
-  // is gone from the mirror. lastMirrorErrors tracks the last OBSERVED value
-  // of the handle's own counter so any INCREASE across an emit() call — a
-  // silent write loss that just happened — is folded into this facade's own
-  // `dropped` counter (never a separate field: the six-field stats() shape
-  // is part of this module's own tested contract, and "a write this facade
-  // asked for did not durably land" is squarely what `dropped` already
-  // means).
+  // VISIBILITY SEAM: two distinct ways a real ledger write can be lost
+  // WITHOUT ever throwing, so emit()'s own try/catch never sees either one
+  // on its own:
+  //  (a) ledger.mjs's mirror() helper deliberately never rethrows a
+  //      mirror-write failure (see ledger.mjs:10-13, the
+  //      MIRROR-NEVER-AUTHORITY invariant) — it only increments the
+  //      handle's own stats().mirror_errors. lastMirrorErrors tracks the
+  //      last OBSERVED value of that counter so any INCREASE across an
+  //      emit() call is folded in below.
+  //  (b) ledger.mjs's ensureDb() open-time first-open lock race (two real
+  //      processes racing to create+migrate the SAME brand-new db) can
+  //      exhaust its own bounded retry budget and permanently DEGRADE the
+  //      whole handle for a reason other than the intentional below-floor
+  //      path — ledger.mjs's own test suite documents this as an accepted,
+  //      OS-scheduling-dependent possibility (S11(c)), never treated as
+  //      flaky. Once degraded this way, mirror() short-circuits on a null
+  //      connection BEFORE ever calling fn() — mirror_errors above can
+  //      never see it, since it is only bumped from inside fn()'s own
+  //      catch. This is the ONLY place that failure mode becomes visible.
+  // Both fold into this facade's own `dropped` counter (never a separate
+  // field: the six-field stats() shape is part of this module's own tested
+  // contract, and "a write this facade asked for did not durably land" is
+  // squarely what `dropped` already means). Below-floor degradation is
+  // excluded deliberately — it is normal, intentional behavior (ADR-024),
+  // never a drop; see test/factory-emit-floor.test.mjs's own dropped===0
+  // expectations on a forced-below-floor handle.
   let lastMirrorErrors = null
   function ledgerHandle() {
     if (!cachedLedgerHandle) cachedLedgerHandle = openLedgerFn()
     return cachedLedgerHandle
   }
-  function absorbMirrorErrors(handle) {
+  function absorbLedgerHealth(handle) {
     if (!handle || typeof handle.stats !== 'function') return
-    const { mirror_errors: mirrorErrors } = handle.stats()
-    if (typeof mirrorErrors !== 'number') return
-    if (lastMirrorErrors === null) {
-      lastMirrorErrors = mirrorErrors
-      return
+    const s = handle.stats()
+    if (typeof s.mirror_errors === 'number') {
+      if (lastMirrorErrors === null) {
+        lastMirrorErrors = s.mirror_errors
+      } else {
+        const delta = s.mirror_errors - lastMirrorErrors
+        if (delta > 0) {
+          localStats.dropped += delta
+          noteStderrOnce(`emit: detected ${delta} silent mirror-write failure(s) via ledger stats().mirror_errors — counted as dropped`)
+        }
+        lastMirrorErrors = s.mirror_errors
+      }
     }
-    const delta = mirrorErrors - lastMirrorErrors
-    if (delta > 0) {
-      localStats.dropped += delta
-      noteStderrOnce(`emit: detected ${delta} silent mirror-write failure(s) via ledger stats().mirror_errors — counted as dropped`)
+    if (s.degraded && s.degraded_reason !== 'below_floor') {
+      localStats.dropped += 1
+      noteStderrOnce(`emit: ledger handle is degraded (${s.degraded_reason || 'unknown'}) for a reason other than below-floor — every emission on it is counted as dropped`)
     }
-    lastMirrorErrors = mirrorErrors
   }
   function closeLedgerHandle() {
     if (cachedLedgerHandle) {
@@ -837,7 +854,7 @@ function openRunInner({
       }
       fn(handle, nextSeq)
       localStats.emitted += 1
-      absorbMirrorErrors(handle)
+      absorbLedgerHealth(handle)
       return true
     } catch (err) {
       localStats.dropped += 1

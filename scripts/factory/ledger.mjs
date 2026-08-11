@@ -553,7 +553,18 @@ export function openLedger({
   // design (createRequire, not await import()) so every writer stays
   // synchronous and "no write transaction spans an await" is structurally
   // impossible to violate.
-  let openLockRetried = false
+  // Bounded, immediate (no-sleep) open-lock retry budget — see the
+  // CONCURRENCY SEAM comment in the catch block below for why this exists
+  // and why it can never sleep. Raised from a single retry (round 3) to a
+  // small bounded count: a live two-real-process race on a brand-new db
+  // (#41's own SEQ RESERVATION UNDER CONCURRENCY test) showed a single
+  // retry insufficient on a loaded CI runner — one side's ensureDb()
+  // permanently degraded after losing the race twice, silently dropping
+  // every subsequent mirror write for that process's whole lifetime with
+  // NO stats signal at all (mirror() never even runs fn() on a null
+  // connection, so mirror_errors is never touched either).
+  const OPEN_LOCK_RETRY_BUDGET = 5
+  let openLockRetries = 0
   function ensureDb() {
     if (db || dbOpenAttempted) return db
     if (degraded) {
@@ -568,9 +579,16 @@ export function openLedger({
       ensureDirAndPerms()
       const { DatabaseSync } = require('node:sqlite')
       const conn = new DatabaseSync(dbPath)
+      // busy_timeout is set FIRST, before journal_mode/synchronous: those
+      // two pragmas (and the migrations that follow) can themselves throw
+      // "database is locked" against a freshly-created db another process
+      // is concurrently opening, and only a statement that runs AFTER
+      // busy_timeout is applied gets SQLite's own internal wait — setting
+      // it any later left journal_mode/synchronous themselves exposed to
+      // an instant, unprotected lock failure.
+      conn.exec('PRAGMA busy_timeout = 5000')
       conn.exec('PRAGMA journal_mode = WAL')
       conn.exec('PRAGMA synchronous = 1')
-      conn.exec('PRAGMA busy_timeout = 5000')
       applyMigrations(conn)
       chmodIfExists(dbPath, 0o600)
       chmodIfExists(`${dbPath}-wal`, 0o600)
@@ -582,17 +600,19 @@ export function openLedger({
       // CONCURRENCY SEAM: two processes racing to open + migrate the SAME
       // fresh db can hit "database is locked" even with busy_timeout set
       // (the timeout covers a statement already inside a transaction, not
-      // the initial connect + first-migration race). One IMMEDIATE retry
-      // (no sleep — busy_timeout=5000 already provides the wait inside
-      // SQLite itself) avoids permanently degrading a handle purely
-      // because it lost a benign first-open race; a second failure
-      // degrades as usual. Deliberately does NOT call sleepSync: that
-      // helper stays confined to killVerb (an explicit foreground operator
-      // command) — every writer/reader, and now the finalizer's registry
-      // lookups, route through ensureDb, and none of them may block on a
-      // synchronous Atomics.wait.
-      if (!openLockRetried && isLockedError(err)) {
-        openLockRetried = true
+      // the initial connect + first-migration race — narrowed, not closed,
+      // by setting busy_timeout first above). A bounded run of IMMEDIATE
+      // retries (no sleep — busy_timeout=5000 already provides the wait
+      // inside SQLite itself for every statement after the first) avoids
+      // permanently degrading a handle purely because it lost a benign
+      // first-open race; exhausting the budget still degrades as usual.
+      // Deliberately does NOT call sleepSync: that helper stays confined to
+      // killVerb (an explicit foreground operator command) — every
+      // writer/reader, and now the finalizer's registry lookups, route
+      // through ensureDb, and none of them may block on a synchronous
+      // Atomics.wait.
+      if (openLockRetries < OPEN_LOCK_RETRY_BUDGET && isLockedError(err)) {
+        openLockRetries += 1
         return ensureDb()
       }
       dbOpenAttempted = true

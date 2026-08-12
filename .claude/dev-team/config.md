@@ -1,5 +1,7 @@
 # Dev-team config — dev-team-claude-plugin
 
+execution_mode: cmux
+
 ## task_source
 
 ```

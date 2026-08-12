@@ -304,6 +304,13 @@ test('E-P1 sequence: the full dispatch also produces rename-tab and send/send-ke
   const sendIdx = log.indexOf(sendEntry)
   const sendKeyIdx = log.indexOf(sendKeyEntry)
   assert.ok(sendIdx < sendKeyIdx)
+
+  // select-workspace BEFORE new-pane — displaying the task workspace is
+  // load-bearing (lazy shell materialization; FOCUS BAN narrowing 2026-08-12).
+  const selectIdx = log.findIndex((e) => e.argv[0] === 'select-workspace')
+  const newPaneIdx = log.findIndex((e) => e.argv[0] === 'new-pane')
+  assert.ok(selectIdx !== -1, 'expected a select-workspace invocation')
+  assert.ok(newPaneIdx !== -1 && selectIdx < newPaneIdx, 'select-workspace must precede new-pane')
 })
 
 // ---------------------------------------------------------------------------
@@ -2226,7 +2233,7 @@ test('AMBIGUOUS PANE (fix 1): statusCmd and presentReturn both skip the mount an
 // invokes none of focus-pane/focus-panel/select-workspace.
 // ---------------------------------------------------------------------------
 
-test('FOCUS BAN (log-level): a full dispatch->close of a doc-tab judgment role invokes no focus-pane/focus-panel/select-workspace', () => {
+test('FOCUS BAN (log-level, narrowed 2026-08-12): a full dispatch->close of a doc-tab judgment role invokes no focus-pane/focus-panel, and EXACTLY ONE select-workspace (the load-bearing display before new-pane; lazy shell materialization)', () => {
   const { env, ctx } = setUpWorkspace('focus-ban-log')
   const specPath = makeSpecFile(ctx, 'be-2f')
   const dispatchRes = dispatchCmd({ slice: 'be-2f', role: 'backend-lead', spec: specPath }, ctx)
@@ -2235,8 +2242,11 @@ test('FOCUS BAN (log-level): a full dispatch->close of a doc-tab judgment role i
   closeCmd({ dispatch: dispatchRes.json.dispatch_id }, ctx)
 
   const log = readLog(env.logPath)
-  const forbidden = new Set(['focus-pane', 'focus-panel', 'select-workspace'])
+  const forbidden = new Set(['focus-pane', 'focus-panel'])
   assert.equal(log.some((e) => forbidden.has(e.argv[0])), false)
+  // select-workspace fires once, at dispatch, never again (close/doc-tab
+  // paths stay display-neutral) — the pin that the narrowing stays narrow.
+  assert.equal(log.filter((e) => e.argv[0] === 'select-workspace').length, 1)
 })
 
 // MUTATION-KILLER (qa-lead gate audit): presentReturn's own header comment

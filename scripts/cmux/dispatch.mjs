@@ -47,7 +47,7 @@ import {
 } from './record.mjs'
 import {
   PreflightError, isValidPreflightCache,
-  preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab,
+  preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab, selectWorkspace,
   closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
   PHASES, setPhase, readEvents, tree,
   TIERS, setWorkspaceColor, setProgress, clearProgress,
@@ -1697,6 +1697,11 @@ export function dispatchCmd(args, ctx) {
     // (6) create the pane. The workspace's own initial surface is reserved
     // for the workspace itself (created by `workspace`, never reused by a
     // dispatch) — every dispatch gets its own dedicated pane via createPane.
+    // The workspace must be DISPLAYED first: cmux materializes a terminal's
+    // shell lazily on first display, so a pane born in a background
+    // workspace never boots and the kickoff has nowhere to land
+    // (live-observed 2026-08-12; see selectWorkspace's header comment).
+    selectWorkspace(workspaceState.workspace_id)
     const created = createPane({ workspaceId: workspaceState.workspace_id })
     paneId = created.paneId
     surfaceId = created.surfaceId

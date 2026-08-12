@@ -8,6 +8,40 @@ import { readCmuxPreviewUrl } from '../scripts/cmux/dispatch.mjs'
 const doc = readFileSync(join(ROOT, 'references/cmux-dispatch.md'), 'utf8')
 const dispatchSrc = readFileSync(join(ROOT, 'scripts/cmux/dispatch.mjs'), 'utf8')
 const qaGateDoc = readFileSync(join(ROOT, 'references/qa-gate.md'), 'utf8')
+const teamDoc = readFileSync(join(ROOT, 'commands/team.md'), 'utf8')
+
+// ---------------------------------------------------------------------------
+// doc-78-03 (issue #78, ADR-028) — the PreToolUse dispatch-guard doc pins.
+// Every NEW normative sentence added to references/cmux-dispatch.md and
+// commands/team.md for this slice gets a pinned assertion here.
+// ---------------------------------------------------------------------------
+
+test('cmux-dispatch.md §1 names the mechanical backstop (hooks/dispatch-guard.mjs) adjacent to the HARD STOP passage', () => {
+  const hardStopIdx = doc.indexOf('**Preflight failure is a HARD STOP.**')
+  assert.ok(hardStopIdx > -1, 'expected to find the HARD STOP passage')
+  const backstopIdx = doc.indexOf('**Mechanical backstop (be-78-02):**')
+  assert.ok(backstopIdx > -1, 'expected to find the mechanical-backstop paragraph')
+  assert.ok(backstopIdx > hardStopIdx, 'the backstop paragraph must come after the HARD STOP passage')
+  assert.ok(backstopIdx - hardStopIdx < 800, 'the backstop paragraph must sit adjacent to the HARD STOP passage, not elsewhere in the doc')
+  assert.match(doc, /a PreToolUse hook \(`hooks\/dispatch-guard\.mjs`\) now DENIES an Agent-tool dispatch of a `pane: true` role while `execution_mode` resolves `cmux`/)
+})
+
+test('cmux-dispatch.md names the kill switch and the fail-open posture, without restating the ADR', () => {
+  assert.match(doc, /Kill switch: `\/dev-team:team mode agent-tool`/)
+  assert.match(doc, /a broken config never blocks Agent-tool use; it degrades to unenforced with a logged reason/)
+  assert.match(doc, /~\/\.dev-team\/guard\/dispatch-guard\.jsonl/)
+  assert.doesNotMatch(doc, /six conjuncts|six-conjunct/i, 'the backstop paragraph must point at the ADR, not restate its conjunct list')
+})
+
+test("commands/team.md's mode bullet names the PreToolUse guard and the mode agent-tool kill switch", () => {
+  const modeBulletIdx = teamDoc.indexOf("- **`mode cmux|agent-tool`**")
+  assert.ok(modeBulletIdx > -1, 'expected to find the mode bullet')
+  const nextBulletIdx = teamDoc.indexOf('\n- **`', modeBulletIdx + 1)
+  const modeBullet = nextBulletIdx > -1 ? teamDoc.slice(modeBulletIdx, nextBulletIdx) : teamDoc.slice(modeBulletIdx)
+  assert.match(modeBullet, /a PreToolUse guard \(`hooks\/dispatch-guard\.mjs`\) mechanically blocks an Agent-tool dispatch of a pane role/)
+  assert.match(modeBullet, /`mode agent-tool` is the sanctioned way to turn that off/)
+  assert.match(modeBullet, /makes the session's substrate truthful rather than overriding a guard/)
+})
 
 test('cmux-dispatch.md recommends --max-block-s 570 on the await join', () => {
   assert.ok(doc.includes('--max-block-s 570'))

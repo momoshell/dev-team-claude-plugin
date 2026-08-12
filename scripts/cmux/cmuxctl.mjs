@@ -24,7 +24,7 @@ export const CMUX_BIN = process.env.CMUX_BIN || 'cmux'
 // construction anywhere: cmux() asserts membership before spawning.
 export const VERBS = Object.freeze([
   'ping', 'identify', 'capabilities', 'tree', 'new-window', 'new-workspace', 'new-pane',
-  'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab',
+  'markdown', 'move-surface', 'reorder-surface', 'send', 'send-key', 'rename-tab', 'select-workspace',
   'set-status', 'close-surface', 'close-workspace', 'top', 'events', 'config', 'wait-for',
   'new-surface', 'read-screen', 'clear-progress', 'workspace-action', 'set-progress', 'browser',
 ])
@@ -48,6 +48,7 @@ export const VERB_METHODS = Object.freeze({
   'new-workspace': 'workspace.create',
   'close-workspace': 'workspace.close',
   'new-pane': 'pane.create',
+  'select-workspace': 'workspace.select',
   send: 'surface.send_text',
   'send-key': 'surface.send_key',
   'close-surface': 'surface.close',
@@ -703,7 +704,7 @@ const SEND_SETTLE_MS = 30
 // has NO default spawn timeout — see backend-notes' no-default-spawn-timeout
 // entry), which is what makes SEND_READY_TIMEOUT_MS a real wall-clock bound
 // (worst case: readyTimeoutMs + one probe) instead of a mere retry count.
-const SEND_READY_TIMEOUT_MS = 15_000
+const SEND_READY_TIMEOUT_MS = 60_000
 const SEND_READY_POLL_MS = 250
 const SEND_VERIFY_ATTEMPTS = 3
 const SEND_PROBE_TIMEOUT_MS = 5_000
@@ -1023,6 +1024,28 @@ export function closeSurface(id) {
 export function closeWorkspace(id) {
   if (!requireTargetPresent('workspace', id, 'closeWorkspace')) return
   cmux('close-workspace', ['--workspace', id])
+}
+
+/**
+ * selectWorkspace(id) -> boolean — make the workspace the DISPLAYED one.
+ * Load-bearing for dispatch, not cosmetic: cmux materializes a terminal
+ * surface's shell lazily on first display (live-observed 2026-08-12 — a
+ * pane created in a background workspace never became readable within 60s;
+ * the identical pane in the displayed workspace was readable in ~6s). A
+ * kickoff typed into a never-displayed pane goes nowhere, so dispatch
+ * selects the task workspace immediately before creating the worker pane.
+ * Failure is loud-but-nonfatal here: sendLine's readiness gate downstream
+ * is the enforcing check and produces the attributable refusal.
+ */
+export function selectWorkspace(id) {
+  if (!requireTargetPresent('workspace', id, 'selectWorkspace')) return false
+  const res = cmux('select-workspace', ['--workspace', id])
+  if (!res.ok) {
+    // eslint-disable-next-line no-console
+    console.error(`selectWorkspace: select-workspace failed: ${res.error?.message}`)
+    return false
+  }
+  return true
 }
 
 // ---------------------------------------------------------------------------

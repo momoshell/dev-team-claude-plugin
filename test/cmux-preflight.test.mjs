@@ -22,7 +22,7 @@ const {
   CMUX_BIN, VERBS, VERB_METHODS, PREFLIGHT_MESSAGES, formatPreflightMessage, PreflightError,
   cmux, normalizeId, normalizeIds, tree, findSurface, findWorkspace, recoverNewId,
   preflight, ensureTeamWindow, ensureWorkspace, createPane, sendLine, renameTab,
-  setStatus, closeSurface, closeWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
+  setStatus, closeSurface, closeWorkspace, selectWorkspace, mountDocTab, findDocTabSurface, reorderDocTabFirst,
   PHASES, setPhase, topTsv, readEvents,
   TURN_END_EVENT_NAME, parseTurnEndEvent, TIERS, TIER_COLORS, clearProgress, setWorkspaceColor, readScreen,
 } = await import(CMUXCTL_PATH)
@@ -103,20 +103,34 @@ test('every cmux(...) call site in this module uses a verb from VERBS', () => {
   for (const verb of used) assert.ok(VERBS.includes(verb), `${verb} is invoked but not in VERBS`)
 })
 
-// FOCUS BAN (be-06-01, acceptance criteria) — source-level guard: no
-// scripts/cmux/*.mjs file may invoke focus-pane, focus-panel or
-// select-workspace as a verb/argv literal. `--focus false` is the opposite
-// of focusing and is exempt because it never matches these literals. The
-// guard matches only a QUOTED occurrence (the shape every real verb/argv
-// literal takes in this codebase, e.g. `'focus-pane'`) so a prose comment
-// merely discussing the ban (e.g. dispatch.mjs's "never focus-pane / window
-// focus") is not itself a false positive.
-test('FOCUS BAN: no scripts/cmux/*.mjs file invokes focus-pane, focus-panel or select-workspace as a quoted literal', () => {
+// FOCUS BAN (be-06-01, acceptance criteria; NARROWED 2026-08-12) —
+// source-level guard: no scripts/cmux/*.mjs file may invoke focus-pane or
+// focus-panel as a verb/argv literal, and no file except cmuxctl.mjs may
+// invoke select-workspace. `--focus false` is the opposite of focusing and
+// is exempt because it never matches these literals. The guard matches only
+// a QUOTED occurrence (the shape every real verb/argv literal takes in this
+// codebase, e.g. `'focus-pane'`) so a prose comment merely discussing the
+// ban is not itself a false positive.
+// WHY the select-workspace narrowing: the original ban assumed displaying a
+// workspace is purely cosmetic. Live-observed 2026-08-12: cmux materializes
+// a terminal surface's shell LAZILY ON FIRST DISPLAY — a pane created in a
+// background workspace never boots (unreadable after 60s), so the kickoff
+// has nowhere to land; the identical pane in the displayed workspace is
+// readable in ~6s. Displaying the task workspace is therefore load-bearing
+// for dispatch, not cosmetic. The single sanctioned caller is cmuxctl.mjs's
+// selectWorkspace(), which changes only which workspace the TEAM window
+// displays — it never focuses a pane/panel and never steals keyboard focus,
+// so the spirit of the ban (no focus theft) survives the narrowing. The
+// positive pin lives beside the sendLine tests ('selectWorkspace emits…')
+// and in cmux-dispatch.test.mjs's E-P1 ordering assertion.
+test('FOCUS BAN: no scripts/cmux/*.mjs invokes focus-pane/focus-panel; select-workspace only from cmuxctl.mjs', () => {
   const scriptsDir = join(HERE, '..', 'scripts', 'cmux')
   const scriptFiles = readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs')).map((f) => join(scriptsDir, f))
-  const forbidden = ['focus-pane', 'focus-panel', 'select-workspace']
   for (const path of scriptFiles) {
     const src = readFileSync(path, 'utf8')
+    const forbidden = path.endsWith('cmuxctl.mjs')
+      ? ['focus-pane', 'focus-panel']
+      : ['focus-pane', 'focus-panel', 'select-workspace']
     for (const token of forbidden) {
       // Backtick included alongside '/" — a template-literal verb argument
       // (e.g. `` `focus-pane` ``) must not slip past a quote class that only
@@ -217,7 +231,7 @@ test('be-11-01: VERBS gains read-screen/clear-progress/workspace-action; VERB_ME
     [
       'capabilities', 'close-surface', 'close-workspace', 'identify', 'markdown', 'move-surface',
       'new-pane', 'new-window', 'new-workspace', 'ping', 'rename-tab', 'reorder-surface',
-      'send', 'send-key', 'top', 'tree',
+      'select-workspace', 'send', 'send-key', 'top', 'tree',
     ].sort(),
   )
 })
@@ -734,6 +748,16 @@ test('closeSurface passes the containing window as --window (build-102 window-sc
   assert.equal(closeCalls.length, 1)
   assert.deepEqual(closeCalls[0].argv.slice(1, 3), ['--surface', surfaceId])
   assert.deepEqual(closeCalls[0].argv.slice(3), ['--window', ORCH_WINDOW], 'the containing window must ride --window, or a cross-window close fails live')
+})
+
+test('selectWorkspace emits select-workspace against the named workspace and returns true (load-bearing display for lazy shell materialization)', () => {
+  const { logPath } = freshEnv('select-workspace-pin')
+  assert.equal(selectWorkspace(ORCH_WORKSPACE), true)
+  const calls = readLog(logPath).filter((e) => e.argv[0] === 'select-workspace')
+  assert.equal(calls.length, 1)
+  assert.deepEqual(calls[0].argv.slice(1), ['--workspace', ORCH_WORKSPACE])
+  // gone-target short-circuit preserved (requireTargetPresent semantics)
+  assert.equal(selectWorkspace('00000000-0000-0000-0000-000000000000'), false)
 })
 
 test('sendLine refuses a whitespace-only line — echoNeedle degenerates to the empty string and the verify would be vacuous', () => {

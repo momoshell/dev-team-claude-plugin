@@ -14,7 +14,7 @@ Every non-pane role stays an Agent-tool dispatch as before.
 
 **Lifecycle order, per the CLI header block:** `preflight` (caches `preflight.json`, must run first) → `workspace` (binds a workspace to the task; without it every mutating verb refuses: `"no workspace bound for this task — run `workspace` first"`) → `dispatch` → `await` → `close --dispatch <id>` (finalizes a dispatch record and derives its outcome) → `teardown`. `status` is read-only and runs in any mode alongside `preflight`.
 
-**Join rhythm is a foreground loop, never fire-and-forget:**
+**Join rhythm is a continuously-running loop, never fire-and-forget — and never conversation-blocking:** run each `await` invocation as a BACKGROUND task and let its completion notification drive the re-invoke, so the orchestrator stays available for the user between blocks (deterministic-backbone: code owns the mechanical wait, the orchestrator keeps judgment — amended 2026-08-12; the loop must still run to resolution, backgrounding is not permission to forget it):
 
 ```
 node "${CLAUDE_PLUGIN_ROOT}/scripts/cmux/dispatch.mjs" await --task <slug> --all <dispatch_id...> [--max-block-s N]

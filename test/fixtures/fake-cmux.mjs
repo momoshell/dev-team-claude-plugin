@@ -646,6 +646,17 @@ switch (verb) {
     break
   }
 
+  case 'select-workspace': {
+    // Live build 102: flag form required ("select-workspace requires
+    // --workspace"), same family as close-workspace.
+    const id = argAfter('--workspace')
+    if (!id) fail('bad_args', 'select-workspace requires --workspace')
+    const state = loadState()
+    if (!findWorkspaceEntry(state, id)) fail('not_found', 'Workspace not found')
+    succeed('OK workspace:0')
+    break
+  }
+
   case 'close-workspace': {
     // build 102 (F5, live-pass-findings.md) REFUSES a positional id — the
     // legacy verb is now an alias for `workspace close` and requires

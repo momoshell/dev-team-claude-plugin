@@ -173,20 +173,84 @@ export const DEFAULT_EXECUTION_MODE = 'agent-tool'
 // trust C2: a config.md with MORE THAN ONE `execution_mode:` line (a fenced
 // example quoting the key is the obvious case) is ambiguous — refusing
 // beats silently matching whichever line the regex found first.
-export function readExecutionMode(configText) {
+//
+// parseExecutionMode(configText) -> { present: boolean, mode } is the ONE
+// shared matcher behind both readExecutionMode (project-file layer, kept
+// byte-identical below) and resolveExecutionMode's home-file layer (be-76).
+// Deliberately fence-blind, like readExecutionMode always was — never fork a
+// second matcher for the home file.
+function parseExecutionMode(configText) {
   const matches = [...(configText || '').matchAll(EXECUTION_MODE_LINE_RE)]
   if (matches.length > 1) {
     throw new Error(`readExecutionMode: config text contains ${matches.length} 'execution_mode:' lines — ambiguous (a fenced example?), refusing`)
   }
-  if (matches.length === 0) return DEFAULT_EXECUTION_MODE
+  if (matches.length === 0) return { present: false, mode: DEFAULT_EXECUTION_MODE }
   const raw = matches[0][1].trim()
   const value = EXECUTION_MODE_ALIASES[raw] ?? raw
   if (!EXECUTION_MODES.includes(value)) {
     // quote the RAW configured spelling, not the normalized one, so the
-    // operator sees what their file actually says.
-    throw new Error(`readExecutionMode: unknown execution_mode value: ${JSON.stringify(raw)}`)
+    // operator sees what their file actually says — capped before
+    // JSON.stringify (sanitize-and-cap, conventions.md): this message is now
+    // reachable from two files (project + home config), so a volume cap
+    // beside the existing injection-safety cap (JSON.stringify) is due.
+    const cappedRaw = raw.length > 80 ? `${raw.slice(0, 80)}...<truncated, ${raw.length} chars total>` : raw
+    throw new Error(`readExecutionMode: unknown execution_mode value: ${JSON.stringify(cappedRaw)}`)
   }
-  return value
+  return { present: true, mode: value }
+}
+
+export function readExecutionMode(configText) {
+  return parseExecutionMode(configText).mode
+}
+
+// be-76: whether configText carries a live execution_mode: line at all —
+// exported so callers/tests can distinguish "absent" from "present and
+// equal to the default value".
+export function executionModeIsSet(configText) {
+  return parseExecutionMode(configText).present
+}
+
+// MODE_SOURCES — diagnostic only, never a control-flow input. Names which
+// layer resolveExecutionMode's result came from. resolveExecutionMode below
+// builds its `source` field FROM this array (indexed by named lookup, never
+// a bare string literal) so a mutation to the emitted 'project'/'home'/
+// 'default' token trips the drift-guard test pinning this array's contents.
+export const MODE_SOURCES = Object.freeze(['project', 'home', 'default'])
+const [MODE_SOURCE_PROJECT, MODE_SOURCE_HOME, MODE_SOURCE_DEFAULT] = MODE_SOURCES
+
+// MODE_SOURCE_UNRESOLVED — deliberately OUTSIDE MODE_SOURCES:
+// resolveExecutionMode() itself never returns it (a real resolution is
+// always 'project'/'home'/'default'); it is preflightCmd's own degrade
+// value for when a parse error is swallowed rather than propagated (be-76
+// round-3 fix — see the comment at that catch site).
+const MODE_SOURCE_UNRESOLVED = 'unresolved'
+
+// resolveExecutionMode({ projectConfigText, homeConfigText }) -> { mode, source }
+// Two-layer read (be-76, issue #41-adjacent): the project checkout's
+// .claude/dev-team/config.md governs when it carries a bare execution_mode:
+// line; when it is silent, ~/.claude/dev-team/config.md supplies a
+// machine-level default; when neither does, DEFAULT_EXECUTION_MODE applies.
+// Ambiguity (>1 line) is evaluated PER FILE via parseExecutionMode — never
+// across the concatenation of both files.
+//
+// SHORT-CIRCUIT (deliberate): the home file is not parsed at all when the
+// project layer is present — a project file with a live execution_mode:
+// line short-circuits before homeConfigText is ever touched, so an
+// ambiguous (or malformed) home file cannot affect a checkout that already
+// states its own mode.
+//
+// D2 (deliberate, non-layering): cmux_env_file, env_file_keys and
+// cmux_preview_url are NOT layered here or anywhere else (ADR-018:
+// env_file_keys, the primary allowlist control, must be evaluated against
+// the same file that names the env file — splitting them across layers
+// would be a permission-surface change needing its own ADR amendment).
+// Only execution_mode is layered.
+export function resolveExecutionMode({ projectConfigText, homeConfigText }) {
+  const project = parseExecutionMode(projectConfigText)
+  if (project.present) return { mode: project.mode, source: MODE_SOURCE_PROJECT }
+  const home = parseExecutionMode(homeConfigText)
+  if (home.present) return { mode: home.mode, source: MODE_SOURCE_HOME }
+  return { mode: DEFAULT_EXECUTION_MODE, source: MODE_SOURCE_DEFAULT }
 }
 
 // ---------------------------------------------------------------------------
@@ -598,11 +662,13 @@ export function buildContext(args) {
   // exists; a dispatch that needs a genuinely valid live roster (buildRecord
   // reads ctx.roster) still gets the frozen-at-dispatch-time shape, which is
   // exactly what S12 asks for anyway.
+  const home = process.env.HOME || process.env.USERPROFILE || '/root'
+
   let roster
   try {
     ({ roster } = loadRoster({
       pluginRoot,
-      home: process.env.HOME || process.env.USERPROFILE || '/root',
+      home,
       primaryCheckout,
       session: fileConfig.session || null,
     }))
@@ -613,7 +679,7 @@ export function buildContext(args) {
     roster = snapshot
   }
 
-  return { roots, paths, roster, primaryCheckout, repoSlug, taskSlug, pluginRoot, config: fileConfig }
+  return { roots, paths, roster, primaryCheckout, repoSlug, taskSlug, pluginRoot, config: fileConfig, home }
 }
 
 // readTaskRoster(ctx, sliceIds) -> [{ role, cli }] shaped for preflight()'s
@@ -810,8 +876,11 @@ export function writeCompletionNonce(noncePath) {
 
 // ---------------------------------------------------------------------------
 // Execution-mode gate — every mutating verb refuses when execution_mode is
-// not 'cmux'. `configText` is the raw text of .claude/dev-team/config.md
-// (or '' if absent) — readExecutionMode owns the parse.
+// not 'cmux'. `resolved` is a resolveExecutionMode() result ({ mode, source
+// }), already computed by the caller from BOTH config layers (project
+// checkout's .claude/dev-team/config.md and ~/.claude/dev-team/config.md) —
+// resolveExecutionMode, not readExecutionMode alone, owns the two-layer
+// parse.
 // ---------------------------------------------------------------------------
 
 // browser-verify's membership here is NOT "mutates a record" (it mutates
@@ -822,12 +891,14 @@ export function writeCompletionNonce(noncePath) {
 // gate (issue #12/D3, ADR-019) — not a lifecycle-record concern at all.
 const MUTATING_VERBS = new Set(['workspace', 'dispatch', 'await', 'close', 'teardown', 'phase', 'browser-verify'])
 
-function assertExecutionModeCmux(verb, configText) {
+// assertExecutionModeCmux(verb, resolved) — resolved is a resolveExecutionMode()
+// result ({ mode, source }), computed once by the caller from both config
+// layers (be-76). mode_source is diagnostic only, never a control-flow input.
+function assertExecutionModeCmux(verb, resolved) {
   if (!MUTATING_VERBS.has(verb)) return
-  const mode = readExecutionMode(configText)
-  if (mode !== 'cmux') {
+  if (resolved.mode !== 'cmux') {
     throw new OperationalError(
-      `refused: execution_mode is ${JSON.stringify(mode)}, not "cmux" — set execution_mode: cmux in .claude/dev-team/config.md to use the cmux dispatcher`,
+      `refused: execution_mode is ${JSON.stringify(resolved.mode)} (source: ${resolved.source}), not "cmux" — set execution_mode: cmux in this checkout's .claude/dev-team/config.md, or in ~/.claude/dev-team/config.md for a machine-level default (the project file wins when both set it), to use the cmux dispatcher`,
     )
   }
 }
@@ -842,8 +913,13 @@ function readConfigText(primaryCheckout) {
 // preflight
 // ---------------------------------------------------------------------------
 
+// preflightCmd is NOT gated by execution_mode (preflight is not in
+// MUTATING_VERBS) — it only REPORTS the resolved mode/source as diagnostics.
+// preflight() (cmuxctl.mjs) writes and shape-checks its own cache file
+// internally from preflightJson alone, so the two extra keys added below
+// never reach preflight.json on disk.
 export function preflightCmd(args, ctx) {
-  const { paths, primaryCheckout, roster } = ctx
+  const { paths, primaryCheckout, roster, home } = ctx
   const rosterEntries = rosterForPreflight(roster)
   const worktreesIndex = readWorktreesIndex(paths.worktreesIndexPath)
   const worktreeDirs = Object.values(worktreesIndex).map((w) => w.path)
@@ -856,7 +932,26 @@ export function preflightCmd(args, ctx) {
     force: Boolean(args.force),
   })
 
-  return { code: 0, json: preflightJson }
+  // preflight is read-only and must never fail on an ambiguous or
+  // unknown-value config.md (project or home) — execution_mode/mode_source
+  // below are diagnostics only, so a parse error here is swallowed rather
+  // than propagated (be-76 round-3 fix: this call used to throw straight
+  // through preflightCmd, breaking the same read-only invariant the
+  // MUTATING_VERBS gate in main() exists to preserve). The reason is still
+  // logged (stderr, suppressed by silentMain in tests) so a misconfigured
+  // checkout doesn't look healthy here and fail opaquely one verb later.
+  let resolved
+  try {
+    resolved = resolveExecutionMode({
+      projectConfigText: readConfigText(primaryCheckout),
+      homeConfigText: readConfigText(home),
+    })
+  } catch (err) {
+    log(`preflight: execution_mode unresolved — ${err.message}`)
+    resolved = { mode: null, source: MODE_SOURCE_UNRESOLVED }
+  }
+
+  return { code: 0, json: { ...preflightJson, execution_mode: resolved.mode, mode_source: resolved.source } }
 }
 
 // lifecycle S14: preflight.json lives in stateDir (worker-reachable, G13) —
@@ -3834,12 +3929,24 @@ export function main(argv) {
     return err instanceof UsageError ? 2 : 1
   }
 
-  try {
-    assertExecutionModeCmux(verb, readConfigText(ctx.primaryCheckout))
-  } catch (err) {
-    log(err.message)
-    printResult({ code: 1, json: { error: err.message } })
-    return 1
+  // Only mutating verbs pay the two-layer config parse (and can fail on an
+  // ambiguous/unknown config.md) — status/preflight must stay read-only and
+  // run regardless of execution_mode, even when a config.md is ambiguous
+  // (be-76 round-3 fix: resolveExecutionMode used to run unconditionally
+  // here, before MUTATING_VERBS was ever checked, so a parse error in either
+  // config layer broke read-only verbs too).
+  if (MUTATING_VERBS.has(verb)) {
+    try {
+      const resolved = resolveExecutionMode({
+        projectConfigText: readConfigText(ctx.primaryCheckout),
+        homeConfigText: readConfigText(ctx.home),
+      })
+      assertExecutionModeCmux(verb, resolved)
+    } catch (err) {
+      log(err.message)
+      printResult({ code: 1, json: { error: err.message } })
+      return 1
+    }
   }
 
   let result

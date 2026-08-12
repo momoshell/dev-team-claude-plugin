@@ -18,7 +18,7 @@ import {
   rmSync,
 } from 'node:fs'
 import { execFileSync, spawnSync, spawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { dirname, join, delimiter } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { randomUUID } from 'node:crypto'
@@ -28,10 +28,51 @@ const ROOT = join(HERE, '..')
 const FIXTURE = join(HERE, 'fixtures', 'fake-cmux.mjs')
 const DISPATCH_PATH = join(ROOT, 'scripts', 'cmux', 'dispatch.mjs')
 
+// A2 (#27) fix-round item 8 — the makeTmpDir/TMP_DIRS-and-after-cleanup
+// convention test/cmux-ladder.test.mjs and test/claude-adapter.test.mjs both
+// use for THEIR fixture dirs. Declared here, ahead of the HOME pin below, so
+// the HOME pin's own tmp dir can be registered for cleanup too — this file
+// otherwise builds every fixture dir via freshCmuxEnv/buildTestCtx or raw
+// mkdtempSync calls that predate this fix round; NOTHING removes those
+// tmpdirs (nor FAKE_BIN_DIR) — this is a pre-existing leak, out of scope for
+// this change, not "already handled".
+const A2_FIX_ROUND_TMP_DIRS = []
+
+function makeTmpDir(prefix) {
+  const dir = mkdtempSync(join(tmpdir(), prefix))
+  A2_FIX_ROUND_TMP_DIRS.push(dir)
+  return dir
+}
+
+// TEST HERMETICITY (be-76, mandatory, security-adjacent): dispatch.mjs now
+// reads ~/.claude/dev-team/config.md as the home layer of execution_mode.
+// Pin HOME to a fresh, empty temp dir BEFORE the dynamic import below (and
+// delete USERPROFILE, dispatch.mjs's fallback on non-HOME platforms) so no
+// assertion anywhere in this file can be influenced by the developer's real
+// ~/.claude/dev-team/config.md or roster.json.
+//
+// REAL_HOME is captured BEFORE the pin below overwrites process.env.HOME —
+// os.homedir() reads $HOME on POSIX, so capturing it after the pin would
+// just echo the tmp dir back. This is the CANARY (test-engineer mutation
+// finding): every be-76 test helper derives its path from live
+// process.env.HOME regardless of whether it is pinned, so nothing else in
+// this file would fail if the pin below were silently deleted — this
+// assertion is the one thing that actually breaks in that case.
+const REAL_HOME = homedir()
+process.env.HOME = makeTmpDir('cmux-dispatch-home-')
+delete process.env.USERPROFILE
+
+assert.notEqual(
+  process.env.HOME, REAL_HOME,
+  'be-76 TEST HERMETICITY CANARY: process.env.HOME must be pinned to a fresh tmp dir, never the real developer home — refusing to run this suite',
+)
+
 process.env.CMUX_BIN = FIXTURE
 
 const {
-  readExecutionMode, EXECUTION_MODES, OUTCOME_MAPPING, mapOutcome, applyPostconditionOverride,
+  readExecutionMode, EXECUTION_MODES, EXECUTION_MODE_ALIASES, DEFAULT_EXECUTION_MODE,
+  resolveExecutionMode, executionModeIsSet, MODE_SOURCES,
+  OUTCOME_MAPPING, mapOutcome, applyPostconditionOverride,
   parseArgs, buildContext, ensureWorktree, isDispatcherWorktree, removeWorktreeIfCleanAndMerged,
   writeCompletionNonce, adapterLaunchLine,
   preflightCmd, workspaceCmd, dispatchCmd, awaitCmd, closeCmd, statusCmd, teardownCmd, phaseCmd,
@@ -47,7 +88,7 @@ const {
 
 const {
   PREFLIGHT_MESSAGES, formatPreflightMessage, closeSurface, tree, findDocTabSurface, createPane, mountDocTab,
-  ensureWorkspace, TIERS, TIER_COLORS, recoverNewId, cmux, findSurface,
+  ensureWorkspace, TIERS, TIER_COLORS, recoverNewId, cmux, findSurface, isValidPreflightCache,
   BROWSER_LOAD_STATE, browserVerb, browserOpen, browserGoto, browserWaitReady,
   browserErrorsClear, browserErrorsList, browserScreenshot,
   BROWSER_OPEN_SPAWN_TIMEOUT_MS, BROWSER_OPEN_AFTER_TREE_TIMEOUT_MS,
@@ -87,23 +128,11 @@ const SQLITE_SKIP_REASON = `node:sqlite is unavailable on Node ${process.version
 // Fixture plumbing.
 // ---------------------------------------------------------------------------
 
-// A2 (#27) fix-round item 8 — the makeTmpDir/TMP_DIRS-and-after-cleanup
-// convention test/cmux-ladder.test.mjs and test/claude-adapter.test.mjs both
-// use for THEIR fixture dirs. This file otherwise builds every fixture dir
-// via freshCmuxEnv/buildTestCtx or raw mkdtempSync calls that predate this
-// fix round; NOTHING removes those tmpdirs (nor FAKE_BIN_DIR) — this is a
-// pre-existing leak, out of scope for this change, not "already handled".
-// Only the two NEW tmpdirs added by this fix round (the symlink-invocation
-// regression test and the cross-file check-name-agreement test) are
-// registered below.
-const A2_FIX_ROUND_TMP_DIRS = []
-
-function makeTmpDir(prefix) {
-  const dir = mkdtempSync(join(tmpdir(), prefix))
-  A2_FIX_ROUND_TMP_DIRS.push(dir)
-  return dir
-}
-
+// A2_FIX_ROUND_TMP_DIRS/makeTmpDir are declared above, ahead of the HOME pin
+// (moved there so the HOME pin's own tmp dir can be registered too). Only
+// the HOME pin plus the two NEW tmpdirs added by the original A2 fix round
+// (the symlink-invocation regression test and the cross-file
+// check-name-agreement test) are registered here.
 after(() => {
   for (const dir of A2_FIX_ROUND_TMP_DIRS) {
     rmSync(dir, { recursive: true, force: true })
@@ -317,7 +346,7 @@ test('EXECUTION_MODES drift guard: widening the accepted set requires a delibera
 test('doc-drift regression: the REAL .claude/dev-team/config.md never live-parses a documentation example as a value', () => {
   const realConfigPath = join(ROOT, '.claude', 'dev-team', 'config.md')
   const realConfigText = readFileSync(realConfigPath, 'utf8')
-  assert.equal(readExecutionMode(realConfigText), 'agent-tool', 'the real config.md carries no live execution_mode: line today')
+  assert.equal(executionModeIsSet(realConfigText), false, "this repo keeps its checkout neutral: the machine-level ~/.claude/dev-team/config.md owns execution_mode, never a tracked file")
   assert.equal(readCmuxEnvFile(realConfigText), null, 'the real config.md documents cmux_env_file but must never live-parse it as a value')
   assert.deepEqual(readEnvFileKeys(realConfigText), [], 'the real config.md documents env_file_keys but must never live-parse it as a value')
 })
@@ -2592,6 +2621,46 @@ test('execution mode: preflight and status are NOT gated by execution_mode', () 
   assert.equal(silentMain(['status', ...commonArgs]), 0)
 })
 
+// be-76 round-3 regression: main() briefly resolved execution_mode from both
+// config layers unconditionally, before ever checking MUTATING_VERBS — so an
+// ambiguous config.md (project or home) made preflight/status fail even
+// though neither verb is gated by execution_mode. These pin the ambiguous
+// case specifically (the earlier read-only test above only covers the
+// absent-config case, which the regression didn't touch).
+test('execution mode: preflight and status are NOT gated by execution_mode, even when the PROJECT config.md is ambiguous (two execution_mode: lines)', () => {
+  const env = freshCmuxEnv('exec-mode-readonly-project-ambiguous')
+  const checkout = makeGitCheckout(env.dir)
+  writeConfigMd(checkout, 'execution_mode: cmux\nexecution_mode: agent-tool\n')
+  const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+  assert.equal(silentMain(['preflight', ...commonArgs]), 0)
+  assert.equal(silentMain(['status', ...commonArgs]), 0)
+
+  // Pin the degrade shape too, not just the exit code: preflightCmd's own
+  // diagnostic resolve independently swallows the same ambiguity error, and
+  // must report it as the named MODE_SOURCE_UNRESOLVED value, never a bare
+  // 'unresolved' string a future refactor could silently drift from.
+  const ctx = buildContext({ task: 'sample-task', checkout, repo: 'sample-repo', root: join(env.dir, 'dev-team'), 'plugin-root': ROOT })
+  const preflightRes = preflightCmd({}, ctx)
+  assert.equal(preflightRes.json.execution_mode, null)
+  assert.equal(preflightRes.json.mode_source, 'unresolved')
+})
+
+test('execution mode: preflight and status are NOT gated by execution_mode, even when the HOME config.md is ambiguous (two execution_mode: lines)', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: cmux\nexecution_mode: agent-tool\n')
+    const env = freshCmuxEnv('exec-mode-readonly-home-ambiguous')
+    const checkout = makeGitCheckout(env.dir)
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+    assert.equal(silentMain(['preflight', ...commonArgs]), 0)
+    assert.equal(silentMain(['status', ...commonArgs]), 0)
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
 test('execution mode: `dispatch` proceeds once execution_mode: cmux is set', () => {
   const env = freshCmuxEnv('exec-mode-allow')
   const checkout = makeGitCheckout(env.dir)
@@ -2627,6 +2696,284 @@ test('execution mode: `phase` (a mutating verb) refuses when execution_mode is n
   assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 0)
   const log = readLog(env.logPath)
   assert.ok(log.some((e) => e.argv[0] === 'set-status' && e.argv[1] === 'devteam-phase' && e.argv[2] === 'gate'))
+})
+
+// ---------------------------------------------------------------------------
+// be-76: two-layer execution_mode read (project config.md governs when it
+// carries a bare execution_mode: line; ~/.claude/dev-team/config.md supplies
+// a machine-level default when the project file is silent). HOME is pinned
+// to a fresh empty tmp dir at the top of this file (before dispatch.mjs's
+// dynamic import), so every home-layer test below writes/clears its own
+// config.md under that pinned HOME and cannot see the real developer HOME.
+// ---------------------------------------------------------------------------
+
+function homeConfigPath() {
+  return join(process.env.HOME, '.claude', 'dev-team', 'config.md')
+}
+
+function writeHomeConfigMd(text) {
+  const configPath = homeConfigPath()
+  mkdirSync(dirname(configPath), { recursive: true })
+  writeFileSync(configPath, text)
+}
+
+function clearHomeConfigMd() {
+  rmSync(homeConfigPath(), { force: true })
+}
+
+// ANTI-VACUITY (per the issue's core case): no execution_mode: line in the
+// project file, but the HOME file sets execution_mode: cmux -> a mutating
+// verb proceeds. Placed first among the be-76 tests — this is the proof the
+// home seam is actually wired, not merely present in the exports.
+test('be-76 POSITIVE: no project execution_mode line + home execution_mode: cmux -> mutating verb proceeds', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: cmux\n')
+    const env = freshCmuxEnv('exec-mode-home-positive')
+    const checkout = makeGitCheckout(env.dir)
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+    const ctx = buildContext({ task: 'sample-task', checkout, repo: 'sample-repo', root: join(env.dir, 'dev-team'), 'plugin-root': ROOT })
+
+    assert.equal(silentMain(['preflight', ...commonArgs]), 0)
+    assert.equal(silentMain(['workspace', ...commonArgs]), 0)
+    assert.equal(silentMain(['dispatch', ...commonArgs, '--slice', 'be-1a', '--role', 'coder', '--spec', makeSpecFile(ctx)]), 0)
+
+    const log = readLog(env.logPath)
+    assert.ok(log.find((e) => e.argv[0] === 'new-pane'))
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76 PRECEDENCE: project execution_mode: agent-tool + home execution_mode: cmux -> refuses (project wins)', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: cmux\n')
+    const env = freshCmuxEnv('exec-mode-precedence-a')
+    const checkout = makeGitCheckout(env.dir)
+    writeConfigMd(checkout, 'execution_mode: agent-tool\n')
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+    assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 1)
+    assert.deepEqual(readLog(env.logPath), [])
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76 PRECEDENCE (reverse): project execution_mode: cmux + home execution_mode: agent-tool -> proceeds', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: agent-tool\n')
+    const env = freshCmuxEnv('exec-mode-precedence-b')
+    const checkout = makeGitCheckout(env.dir)
+    writeConfigMd(checkout, 'execution_mode: cmux\n')
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+    assert.equal(silentMain(['preflight', ...commonArgs]), 0)
+    assert.equal(silentMain(['workspace', ...commonArgs]), 0)
+    assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 0)
+    const log = readLog(env.logPath)
+    assert.ok(log.some((e) => e.argv[0] === 'set-status' && e.argv[1] === 'devteam-phase' && e.argv[2] === 'gate'))
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+// SHORT-CIRCUIT (deliberate, see the comment at resolveExecutionMode's
+// definition site in dispatch.mjs): when the project layer is present, the
+// home file is never parsed at all — so a home file with two bare
+// execution_mode: lines (which would throw "ambiguous" if it were ever
+// parsed) does not throw, because it is never reached.
+test('be-76 SHORT-CIRCUIT: project execution_mode: cmux + an ambiguous (two-line) home file -> proceeds, does not throw', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: cmux\nexecution_mode: agent-tool\n')
+    const env = freshCmuxEnv('exec-mode-shortcircuit')
+    const checkout = makeGitCheckout(env.dir)
+    writeConfigMd(checkout, 'execution_mode: cmux\n')
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+    assert.equal(silentMain(['preflight', ...commonArgs]), 0)
+    assert.equal(silentMain(['workspace', ...commonArgs]), 0)
+    assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 0)
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76 PER-FILE AMBIGUITY: no project line + a two-line home file refuses with the same /ambiguous/ message as the project file today', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: cmux\nexecution_mode: agent-tool\n')
+    const env = freshCmuxEnv('exec-mode-home-ambiguous')
+    const checkout = makeGitCheckout(env.dir)
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+
+    assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 1)
+    assert.deepEqual(readLog(env.logPath), [])
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76 PER-FILE AMBIGUITY: a project file with two execution_mode: lines still refuses exactly as today', () => {
+  assert.throws(
+    () => readExecutionMode('execution_mode: cmux\nexecution_mode: agent-tool\n'),
+    /ambiguous/,
+  )
+})
+
+test('be-76 FENCE-BLINDNESS INHERITED: a home file whose only execution_mode: line sits inside a fenced block is still read as a live value', () => {
+  const fencedOnly = ['```', 'execution_mode: cmux', '```', ''].join('\n')
+  const resolved = resolveExecutionMode({ projectConfigText: '', homeConfigText: fencedOnly })
+  assert.deepEqual(resolved, { mode: 'cmux', source: 'home' })
+})
+
+test('be-76 FENCE-BLINDNESS INHERITED: two execution_mode: lines across fenced+unfenced in the same home file refuse as ambiguous', () => {
+  const fencedAndBare = ['execution_mode: agent-tool', '```', 'execution_mode: cmux', '```', ''].join('\n')
+  assert.throws(
+    () => resolveExecutionMode({ projectConfigText: '', homeConfigText: fencedAndBare }),
+    /ambiguous/,
+  )
+})
+
+test('be-76 DEFAULT UNCHANGED: neither file present -> mode agent-tool, source default, mutating verbs refuse exactly as today', () => {
+  clearHomeConfigMd()
+  const resolved = resolveExecutionMode({ projectConfigText: '', homeConfigText: '' })
+  assert.deepEqual(resolved, { mode: 'agent-tool', source: 'default' })
+
+  const env = freshCmuxEnv('exec-mode-default-unchanged')
+  const checkout = makeGitCheckout(env.dir)
+  const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+  assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 1)
+  assert.deepEqual(readLog(env.logPath), [])
+})
+
+test('be-76 DEFAULT UNCHANGED: both files present with no execution_mode: line -> mode agent-tool, source default', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('# home config, no execution_mode line\nother: stuff\n')
+    const env = freshCmuxEnv('exec-mode-default-both-silent')
+    const checkout = makeGitCheckout(env.dir)
+    writeConfigMd(checkout, '# project config, no execution_mode line\nother: stuff\n')
+    const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+    assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 1)
+    assert.deepEqual(readLog(env.logPath), [])
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76 refusal message names the resolved mode and mode_source', () => {
+  const res = spawnSync(process.execPath, [
+    DISPATCH_PATH, 'phase',
+    '--task', 'sample-task', '--checkout', makeGitCheckout(freshCmuxEnv('exec-mode-refusal-msg').dir),
+    '--repo', 'sample-repo', '--set', 'gate',
+  ], { encoding: 'utf8', env: process.env })
+  assert.equal(res.status, 1)
+  assert.match(res.stderr, /execution_mode is "agent-tool" \(source: default\), not "cmux"/)
+})
+
+// be-76 NON-LAYERING (D2), corroborated fix — the original version of this
+// test called readCmuxEnvFile/readEnvFileKeys/readCmuxPreviewUrl DIRECTLY
+// against a hardcoded project-only string; it never read the home file it
+// wrote two lines earlier, so it could only ever pass, whether or not any
+// real call site was ever changed to layer these keys. This version drives
+// the SAME home-only config.md through workspaceCmd + dispatchCmd (real
+// call sites, mirroring the QA fix #8 / A-B preview fixture patterns
+// elsewhere in this file) and asserts the home file's env-file/preview-url
+// values have NO effect — i.e. behavior identical to the home file being
+// absent. This fails if a call site regressed to reading merged/home config
+// for these three keys.
+test('be-76 NON-LAYERING (D2): a home config.md with cmux_env_file/env_file_keys/cmux_preview_url has zero effect through real call sites — identical to the home file being absent', () => {
+  clearHomeConfigMd()
+  try {
+    const env = freshCmuxEnv('exec-mode-d2-real-callsite')
+    const checkout = makeGitCheckout(env.dir)
+    // Project file present but silent on all three keys.
+    writeConfigMd(checkout, '# project config, no env-file/preview keys\n')
+    const ctx = buildContext({ task: 'sample-task', checkout, repo: 'sample-repo', root: join(env.dir, 'dev-team'), 'plugin-root': ROOT })
+    assert.equal(preflightCmd({}, ctx).code, 0)
+
+    // Home file DOES set all three keys — a bogus, otherwise-valid env file
+    // (would inject FOO=1 if ever layered) and a preview URL.
+    const bogusEnvFilePath = join(env.dir, 'should-not-be-read.env')
+    writeFileSync(bogusEnvFilePath, 'FOO=1\n')
+    writeHomeConfigMd([
+      `cmux_env_file: ${bogusEnvFilePath}`,
+      'env_file_keys: [FOO]',
+      'cmux_preview_url: http://localhost:9999/should-not-be-seen',
+      '',
+    ].join('\n'))
+
+    const workspaceRes = workspaceCmd({}, ctx)
+    assert.equal(workspaceRes.code, 0)
+    const workspaceState = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'workspace.json'), 'utf8'))
+    assert.equal('env_file' in workspaceState, false, 'a home-only cmux_env_file must have zero effect — env_file key must be OMITTED entirely, identical to the home file being absent (be-11-05: no env_file key at all when null)')
+
+    const specPath = makeSpecFile(ctx, 'be-76-d2', { domain: 'frontend' })
+    const dispatchRes = dispatchCmd({ slice: 'be-76-d2', role: 'coder', spec: specPath }, ctx)
+    assert.equal(dispatchRes.code, 0)
+    assert.equal('preview' in dispatchRes.json, false, 'a home-only cmux_preview_url must have zero effect — no preview key, identical to the home file being absent')
+    assert.equal(readLog(env.logPath).filter((e) => e.argv[0] === 'browser' && e.argv[1] === 'open').length, 0)
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76: DEFAULT_EXECUTION_MODE / EXECUTION_MODE_ALIASES drift guard — the default stays agent-tool, and subagent still normalizes to it', () => {
+  assert.equal(DEFAULT_EXECUTION_MODE, 'agent-tool')
+  assert.deepEqual(EXECUTION_MODE_ALIASES, { subagent: 'agent-tool' })
+  assert.equal(readExecutionMode('execution_mode: subagent\n'), EXECUTION_MODE_ALIASES.subagent)
+})
+
+test('be-76: MODE_SOURCES drift guard — frozen and exactly the three-value closed set', () => {
+  assert.deepEqual(MODE_SOURCES, ['project', 'home', 'default'])
+  assert.ok(Object.isFrozen(MODE_SOURCES))
+})
+
+// be-76 PROJECT SOURCE (corroborated fix): only 'home' and 'default' had a
+// direct resolveExecutionMode(...) assertion pinning the full {mode, source}
+// shape below — a mutation of the project-present branch's emitted source
+// (e.g. to 'home') left every existing test green. Mirrors the DEFAULT
+// UNCHANGED / FENCE-BLINDNESS tests' direct-call style above, but for the
+// project-present branch specifically.
+test('be-76 PROJECT SOURCE: project execution_mode: cmux present -> resolveExecutionMode returns { mode: "cmux", source: "project" } exactly', () => {
+  const resolved = resolveExecutionMode({ projectConfigText: 'execution_mode: cmux\n', homeConfigText: '' })
+  assert.deepEqual(resolved, { mode: 'cmux', source: 'project' })
+})
+
+test('be-76 PROJECT SOURCE: project execution_mode present even when the home file ALSO sets a (different) mode -> source is still "project", never "home"', () => {
+  const resolved = resolveExecutionMode({ projectConfigText: 'execution_mode: agent-tool\n', homeConfigText: 'execution_mode: cmux\n' })
+  assert.deepEqual(resolved, { mode: 'agent-tool', source: 'project' })
+})
+
+test('be-76: preflightCmd reports execution_mode + mode_source as diagnostics only, never written to preflight.json on disk', () => {
+  clearHomeConfigMd()
+  try {
+    writeHomeConfigMd('execution_mode: cmux\n')
+    const { ctx } = setUpWorkspace('be-76-preflight-diagnostics')
+    const res = preflightCmd({}, ctx)
+    assert.equal(res.json.execution_mode, 'cmux')
+    assert.equal(res.json.mode_source, 'home')
+
+    const onDisk = JSON.parse(readFileSync(join(ctx.paths.stateDir, 'preflight.json'), 'utf8'))
+    assert.equal('execution_mode' in onDisk, false, 'execution_mode must never be written to the on-disk cache')
+    assert.equal('mode_source' in onDisk, false, 'mode_source must never be written to the on-disk cache')
+    assert.ok(isValidPreflightCache(onDisk), 'the on-disk cache must still pass the frozen shape check untouched')
+  } finally {
+    clearHomeConfigMd()
+  }
+})
+
+test('be-76 TEST HERMETICITY: with HOME pinned to an empty tmp dir, a no-config checkout still refuses (no accidental read of the real developer HOME)', () => {
+  clearHomeConfigMd()
+  const env = freshCmuxEnv('exec-mode-hermeticity')
+  const checkout = makeGitCheckout(env.dir)
+  const commonArgs = ['--task', 'sample-task', '--checkout', checkout, '--repo', 'sample-repo', '--root', join(env.dir, 'dev-team'), '--plugin-root', ROOT]
+  assert.equal(silentMain(['phase', ...commonArgs, '--set', 'gate']), 1)
+  assert.deepEqual(readLog(env.logPath), [])
 })
 
 // ---------------------------------------------------------------------------
@@ -5940,7 +6287,7 @@ test('browser-verify REFUSES under execution_mode: agent-tool — exit != 0, zer
   assert.notEqual(res.code, 0)
   // S11 (panel-1 S2): pin the refusal REASON, not just a nonzero exit — a
   // mutation that refused for some other cause would otherwise pass.
-  assert.match(res.stderr, /execution_mode is "agent-tool", not "cmux"/)
+  assert.match(res.stderr, /execution_mode is "agent-tool" \(source: default\), not "cmux"/)
   const log = readLog(env.logPath)
   assert.equal(log.filter((e) => e.argv[0] === 'browser').length, 0)
 })

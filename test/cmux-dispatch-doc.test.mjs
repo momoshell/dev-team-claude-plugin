@@ -138,6 +138,20 @@ test('the live-falsified sub-verb-first grammar (`browser goto|wait|errors|scree
 
 // fix-round-2 re-confirmation Consider (F2): the close-surface row must warn
 // that browser surfaces refuse it and name the working command.
+// be-76-02: Ambiguity trap becomes per-file (project vs home config.md),
+// not a single-file rule. Pin the new wording and assert the old
+// single-file phrasing survives nowhere in the doc.
+test('cmux-dispatch.md\'s Ambiguity trap is per-file: each layer (project/home) evaluated separately, one line in each is not ambiguous', () => {
+  assert.match(doc, /\*\*Ambiguity trap \(per file, be-76\):\*\*/)
+  assert.match(doc, /evaluated SEPARATELY, never across the pair/)
+  assert.match(doc, /is NOT ambiguous: the project line governs and the home file is not even read/)
+  assert.match(doc, /makes THAT file ambiguous/)
+})
+
+test('the old single-file Ambiguity trap phrasing ("must contain exactly one execution_mode: line") survives nowhere in cmux-dispatch.md', () => {
+  assert.doesNotMatch(doc, /must contain exactly one `execution_mode:` line/)
+})
+
 test('cmux-dispatch.md close-surface row carries the browser-surface caveat naming `browser <id> tab close`', () => {
   const row = doc.slice(doc.indexOf('| `close-surface <id>`'))
   const rowText = row.slice(0, row.indexOf('\n'))

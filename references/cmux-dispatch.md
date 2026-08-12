@@ -66,7 +66,7 @@ Every verb prints one JSON object to stdout and human lines to stderr; exit 0 = 
 
 **Fidelity notes:** pane workers inherit `CLAUDE.md`, project skills, and MCP servers (Agent-tool subagents do not). The runaway/hang bound is `timeout_s` (parent-side, measured from `record.created_at`); `max_turns` remains schema-present but is refused — not silently accepted — if ever set non-null, by design (see ADR-017 in architecture-notes.md).
 
-**Ambiguity trap:** `.claude/dev-team/config.md` must contain exactly one `execution_mode:` line. A second one — a fenced example quoting the key is the classic case — makes the config ambiguous, and every mutating dispatch verb then refuses. Never add a second `execution_mode:` line anywhere in that file, fenced or not.
+**Ambiguity trap (per file, be-76):** `execution_mode` is now a two-layer read — this checkout's `.claude/dev-team/config.md` (project) and `~/.claude/dev-team/config.md` (home) — and each file must contain at most one bare `execution_mode:` line, evaluated SEPARATELY, never across the pair. One bare line in the project file and one in the home file is NOT ambiguous: the project line governs and the home file is not even read. A second `execution_mode:` line in EITHER file — a fenced example quoting the key is the classic case — makes THAT file ambiguous, and every mutating dispatch verb then refuses. Never add a second `execution_mode:` line anywhere in either file, fenced or not.
 
 ## 2. Verb reference (distilled)
 

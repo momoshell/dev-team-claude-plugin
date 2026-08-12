@@ -61,6 +61,24 @@ test('command team.md: roster bullet no longer claims a bogus <model> throws, an
   assert.match(m[0], /no persisted session layer/)
 })
 
+// be-76-02: mode bullet no longer claims an unqualified "absent key =
+// agent-tool" — it names the two-layer precedence (project > home >
+// default), that the verb writes only the project file, and that a
+// machine-level default is a hand-edit of ~/.claude/dev-team/config.md.
+test('command team.md: mode bullet names ~/.claude/dev-team/config.md, states project always wins over home, and that the verb writes only the project file', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  const m = md.match(/mode cmux\|agent-tool[\s\S]*?(?=\n- \*\*|$)/)
+  assert.ok(m, 'has a mode bullet')
+  assert.match(m[0], /~\/\.claude\/dev-team\/config\.md/)
+  assert.match(m[0], /a project line always wins over a home one when both are set/)
+  assert.match(m[0], /This verb writes only the project file/)
+})
+
+test('command team.md: mode bullet no longer claims an unqualified "absent key = agent-tool"', () => {
+  const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
+  assert.doesNotMatch(md, /absent key = `agent-tool`/)
+})
+
 test('command team.md: workflow carve-out states cmux panes are conversational-only', () => {
   const md = readFileSync(join(ROOT, 'commands', 'team.md'), 'utf8')
   const m = md.match(/workflow <goal>[\s\S]*?(?=\n- \*\*|$)/)

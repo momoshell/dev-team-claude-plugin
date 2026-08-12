@@ -44,6 +44,7 @@ function freshEnv(prefix) {
   delete process.env.FAKE_CMUX_MISSING_METHODS
   delete process.env.FAKE_CMUX_NO_CALLER
   delete process.env.FAKE_CMUX_EVENTS
+  delete process.env.FAKE_CMUX_SCREEN
   delete process.env.FAKE_CMUX_TOP
   delete process.env.FAKE_CMUX_EXIT_CODE
   return { dir, logPath, statePath }
@@ -613,8 +614,8 @@ test('regression: ids minted within one invocation are pairwise distinct, so a f
   renameTab(surfaceId, 'coder')
   sendLine(surfaceId, 'echo hi')
   const invocations = readLog(logPath)
-  assert.ok(invocations.some((e) => e.argv[0] === 'rename-tab' && e.argv[1] === surfaceId), 'renameTab must not silently no-op against the fresh surface')
-  assert.ok(invocations.some((e) => e.argv[0] === 'send' && e.argv[1] === surfaceId), 'sendLine must not silently no-op against the fresh surface')
+  assert.ok(invocations.some((e) => e.argv[0] === 'rename-tab' && e.argv[2] === surfaceId), 'renameTab must not silently no-op against the fresh surface')
+  assert.ok(invocations.some((e) => e.argv[0] === 'send' && e.argv[2] === surfaceId), 'sendLine must not silently no-op against the fresh surface')
 })
 
 // ---------------------------------------------------------------------------
@@ -628,7 +629,8 @@ test('sendLine performs send then send-key enter, in that order', () => {
   assert.equal(invocations.length, 2)
   assert.equal(invocations[0].argv[0], 'send')
   assert.equal(invocations[1].argv[0], 'send-key')
-  assert.equal(invocations[1].argv[2], 'enter')
+  assert.deepEqual(invocations[1].argv.slice(1, 3), ['--surface', ORCH_SURFACE])
+  assert.deepEqual(invocations[1].argv.slice(3), ['--', 'enter'])
 })
 
 test('sendLine allowlist refuses backtick, $, backslash, double-quote, and newline — refusal throws, never escapes-and-continues', () => {
@@ -661,6 +663,83 @@ test('sendLine accepts an ordinary line containing a lone apostrophe (allowliste
   sendLine(ORCH_SURFACE, "echo it's fine")
   const invocations = readLog(logPath).filter((e) => e.argv[0] === 'send')
   assert.equal(invocations.length, 1)
+})
+
+// ---------------------------------------------------------------------------
+// Verified-send failure modes (build-102 grammar fix, deep-review round 1) —
+// every branch pinned so a deleted guard flips a test, not a live dispatch.
+// ---------------------------------------------------------------------------
+
+test('sendLine readiness timeout: an unreadable frame throws before ANY send — never types into the void, never presses enter', () => {
+  const { logPath } = freshEnv('sendline-ready-timeout')
+  process.env.FAKE_CMUX_FAIL = 'read-screen'
+  assert.throws(
+    () => sendLine(ORCH_SURFACE, 'echo hi', { readyTimeoutMs: 200, readyPollMs: 20 }),
+    /never became readable/,
+  )
+  delete process.env.FAKE_CMUX_FAIL
+  const invocations = readLog(logPath)
+  assert.equal(invocations.filter((e) => e.argv[0] === 'send').length, 0, 'no text may be typed into an unreadable frame')
+  assert.equal(invocations.filter((e) => e.argv[0] === 'send-key').length, 0, 'enter must never fire on the readiness-timeout path')
+})
+
+test('sendLine verify exhaustion: an echo that never lands throws, clears the line before every retype, and NEVER presses enter', () => {
+  const { dir, logPath } = freshEnv('sendline-verify-exhaustion')
+  // A readable frame that never contains the needle — readiness passes,
+  // every verify attempt counts 0.
+  const screenPath = join(dir, 'screen.txt')
+  writeFileSync(screenPath, 'just a prompt, nothing typed\n')
+  process.env.FAKE_CMUX_SCREEN = screenPath
+  assert.throws(
+    () => sendLine(ORCH_SURFACE, 'echo hello there', { readyPollMs: 10, verifyAttempts: 3 }),
+    /not verified exactly once .* after 3 attempts/,
+  )
+  delete process.env.FAKE_CMUX_SCREEN
+  const invocations = readLog(logPath)
+  assert.equal(invocations.filter((e) => e.argv[0] === 'send').length, 3, 'expected exactly verifyAttempts sends')
+  const sendKeys = invocations.filter((e) => e.argv[0] === 'send-key')
+  const dd = (e) => e.argv[e.argv.indexOf('--') + 1]
+  assert.deepEqual(sendKeys.map(dd), ['ctrl+u', 'ctrl+u'], 'expected a ctrl+u line-clear before each retype (attempts 2 and 3) and NO enter')
+})
+
+test('sendLine doubled-line recovery: a landed-but-unread first copy makes the retype produce count 2 — refused, cleared with ctrl+u, retyped clean, and enter fires on exactly one verified copy', () => {
+  const { logPath, statePath } = freshEnv('sendline-doubled-recovery')
+  const line = 'echo doubled recovery probe'
+  // Simulate the race: a first copy ALREADY sits unsubmitted on the input
+  // line (typed, but its echo read lagged so the caller never saw it).
+  // Seeding via a raw fixture send both creates the state file and models
+  // the landed text exactly the way sendLine's own send would.
+  const seed = cmux('send', ['--surface', ORCH_SURFACE, '--', line])
+  assert.equal(seed.ok, true)
+  // sendLine's attempt 1 now APPENDS (fixture concatenates, like a real
+  // PTY input line) -> count 2 -> refused -> ctrl+u clears -> attempt 2
+  // types a single clean copy -> count 1 -> enter.
+  sendLine(ORCH_SURFACE, line, { readyPollMs: 10 })
+  const invocations = readLog(logPath)
+  const dd = (e) => e.argv[e.argv.indexOf('--') + 1]
+  const sendKeys = invocations.filter((e) => e.argv[0] === 'send-key').map(dd)
+  assert.deepEqual(sendKeys, ['ctrl+u', 'enter'], 'expected the doubled line to be cleared once, then exactly one enter on the clean retype')
+  assert.equal(invocations.filter((e) => e.argv[0] === 'send').length, 3, 'seed + attempt 1 (doubled, refused) + attempt 2 (clean)')
+  // The fixture's echo state holds exactly one copy at the end — what enter
+  // actually submitted.
+  const typed = JSON.parse(readFileSync(statePath, 'utf8'))._typed[ORCH_SURFACE.toLowerCase()]
+  assert.equal(typed, line, 'exactly one clean copy on the input line at submit time')
+})
+
+test('closeSurface passes the containing window as --window (build-102 window-scoped UUID resolution) — resolved from a fresh tree, not the caller context', () => {
+  const { logPath } = freshEnv('close-surface-window-context')
+  const { surfaceId } = createPane({ workspaceId: ORCH_WORKSPACE })
+  closeSurface(surfaceId)
+  const closeCalls = readLog(logPath).filter((e) => e.argv[0] === 'close-surface')
+  assert.equal(closeCalls.length, 1)
+  assert.deepEqual(closeCalls[0].argv.slice(1, 3), ['--surface', surfaceId])
+  assert.deepEqual(closeCalls[0].argv.slice(3), ['--window', ORCH_WINDOW], 'the containing window must ride --window, or a cross-window close fails live')
+})
+
+test('sendLine refuses a whitespace-only line — echoNeedle degenerates to the empty string and the verify would be vacuous', () => {
+  const { logPath } = freshEnv('sendline-refuse-whitespace-only')
+  assert.throws(() => sendLine(ORCH_SURFACE, '   '), /no whitespace-free token/)
+  assert.equal(readLog(logPath).filter((e) => e.argv[0] === 'send').length, 0)
 })
 
 test('sendLine refuses an interpolated path that does not match ^/[A-Za-z0-9._/-]+$', () => {
@@ -839,7 +918,7 @@ test('mountDocTab mounts a doc tab, recovers its id via diff (never from stdout 
   assert.deepEqual(markdownCall.argv, ['markdown', 'open', '/tmp/render.md', '--surface', ORCH_SURFACE])
   const reorderCall = invocations.find((e) => e.argv[0] === 'reorder-surface')
   assert.ok(reorderCall, 'reorder-surface must be invoked')
-  assert.deepEqual(reorderCall.argv, ['reorder-surface', surfaceId, '--before', ORCH_SURFACE])
+  assert.deepEqual(reorderCall.argv, ['reorder-surface', '--surface', surfaceId, '--before', ORCH_SURFACE])
 })
 
 // qa should-fix: the move-surface branch (the one place --focus false
@@ -857,9 +936,9 @@ test('mountDocTab: the created surface landing in a FOREIGN pane triggers move-s
   const invocations = readLog(logPath)
   const moveCall = invocations.find((e) => e.argv[0] === 'move-surface')
   assert.ok(moveCall, 'expected move-surface — the new surface landed in ORCH_PANE, not the requested foreign pane')
-  assert.deepEqual(moveCall.argv, ['move-surface', surfaceId, '--pane', foreignPaneId, '--focus', 'false'])
+  assert.deepEqual(moveCall.argv, ['move-surface', '--surface', surfaceId, '--pane', foreignPaneId, '--focus', 'false'])
   const reorderCall = invocations.find((e) => e.argv[0] === 'reorder-surface')
-  assert.deepEqual(reorderCall.argv, ['reorder-surface', surfaceId, '--before', ORCH_SURFACE])
+  assert.deepEqual(reorderCall.argv, ['reorder-surface', '--surface', surfaceId, '--before', ORCH_SURFACE])
   // move-surface strictly precedes reorder-surface.
   assert.ok(invocations.indexOf(moveCall) < invocations.indexOf(reorderCall))
 })
@@ -1096,7 +1175,7 @@ test('reorderDocTabFirst: issues reorder-surface --before and never focuses; ret
   assert.equal(ok, true)
   const invocations = readLog(logPath)
   const reorderCalls = invocations.filter((e) => e.argv[0] === 'reorder-surface')
-  assert.ok(reorderCalls.some((c) => c.argv[1] === surfaceId && c.argv[2] === '--before' && c.argv[3] === ORCH_SURFACE))
+  assert.ok(reorderCalls.some((c) => c.argv[1] === '--surface' && c.argv[2] === surfaceId && c.argv[3] === '--before' && c.argv[4] === ORCH_SURFACE))
   assert.equal(invocations.some((e) => e.argv[0] === 'focus-pane'), false)
 })
 

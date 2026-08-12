@@ -137,6 +137,58 @@ test('garbage stdin exits 0 with no output', () => {
   assert.equal(r.stdout, '')
 })
 
+test('DEDUP: a message split across three streamed lines is counted once, at its final usage', () => {
+  const transcript = writeTranscript([
+    assistantEntry({ message: { id: 'msg-1', model: 'claude-sonnet-5', usage: { input_tokens: 0, output_tokens: 100_000 } } }),
+    assistantEntry({ message: { id: 'msg-1', model: 'claude-sonnet-5', usage: { input_tokens: 0, output_tokens: 100_000 } } }),
+    assistantEntry({ message: { id: 'msg-1', model: 'claude-sonnet-5', usage: { input_tokens: 0, output_tokens: 1_000_000 } } }),
+  ])
+  const r = run({ session_id: `sess-${n}`, transcript_path: transcript })
+  assert.equal(r.status, 0, r.stderr)
+  // final line's output_tokens (1M) at the $10/MTok intro rate -> $10.00
+  assert.equal(r.stdout, '$10.00')
+  // $12.00 would be the #56 over-count from summing all three lines' output_tokens (100k+100k+1M = 1.2M -> $12.00)
+  assert.notEqual(r.stdout, '$12.00')
+})
+
+test('DEDUP is LAST-WINS, not a per-field max', () => {
+  const transcript = writeTranscript([
+    assistantEntry({ message: { id: 'msg-2', model: 'claude-sonnet-5', usage: { input_tokens: 1_000_000, output_tokens: 1_000_000 } } }),
+    assistantEntry({ message: { id: 'msg-2', model: 'claude-sonnet-5', usage: { input_tokens: 0, output_tokens: 200_000 } } }),
+  ])
+  const r = run({ session_id: `sess-${n}`, transcript_path: transcript })
+  assert.equal(r.status, 0, r.stderr)
+  // last line only: 200k output at $10/MTok intro rate -> $2.00
+  assert.equal(r.stdout, '$2.00')
+  // a per-field max or first-wins implementation would yield $12.00 (1M in @$2 + 1M out @$10)
+  assert.notEqual(r.stdout, '$12.00')
+})
+
+test('distinct message ids never collapse', () => {
+  const transcript = writeTranscript([
+    assistantEntry({ message: { id: 'msg-a', model: 'claude-sonnet-5', usage: { input_tokens: 1_000_000, output_tokens: 0 } } }),
+    assistantEntry({ message: { id: 'msg-b', model: 'claude-sonnet-5', usage: { input_tokens: 1_000_000, output_tokens: 0 } } }),
+  ])
+  const r = run({ session_id: `sess-${n}`, transcript_path: transcript })
+  assert.equal(r.status, 0, r.stderr)
+  assert.equal(r.stdout, '$4.00') // two distinct $2/MTok(intro) input-only entries
+})
+
+test('DEDUP: a filtered-out line sharing an id must not shadow a valid entry', () => {
+  const transcript = writeTranscript([
+    assistantEntry({ message: { id: 'msg-shadow', model: 'claude-sonnet-5', usage: { input_tokens: 1_000_000, output_tokens: 0 } } }),
+    // same id, but fails the type filter — must be dropped BEFORE the Map write, not overwrite the valid entry above
+    { type: 'user', isSidechain: false, timestamp: '2026-07-11T12:00:00Z', message: { id: 'msg-shadow' } },
+  ])
+  const r = run({ session_id: `sess-${n}`, transcript_path: transcript })
+  assert.equal(r.status, 0, r.stderr)
+  // valid entry survives: 1M input at $2/MTok intro rate -> $2.00
+  assert.equal(r.stdout, '$2.00')
+  // if the Map write happened before filtering, the trailing user-type line (same id) would
+  // shadow the valid assistant entry and the survivor would fail the pricing filters -> $0.00
+  assert.notEqual(r.stdout, '$0.00')
+})
+
 test('post-intro-window Sonnet 5 pricing uses the standard rate', () => {
   const transcript = writeTranscript([
     assistantEntry({ timestamp: '2026-09-02T00:00:00Z', message: { model: 'claude-sonnet-5', usage: { input_tokens: 1_000_000, output_tokens: 0 } } }),

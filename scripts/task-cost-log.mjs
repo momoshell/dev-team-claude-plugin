@@ -6,15 +6,13 @@
 // WHY THIS DIFFERS FROM scripts/task-cost.mjs's STATUSLINE FIGURE (do not
 // conflate the two — see README § Per-task cost):
 //   - the statusline mirrors Claude Code's own built-in `$` figure: main
-//     window only, no subagent cost, no de-duplication across the multiple
-//     JSONL lines a single streamed message is written as (a pre-existing,
-//     user-visible, and already-flagged divergence — see task-cost.mjs's
-//     costSince header comment and GitHub issue #56). It reads a live
-//     statusLine JSON payload from stdin.
+//     window only, no subagent cost. It reads a live statusLine JSON
+//     payload from stdin, invoked on every prompt render.
 //   - this ledger sums the orchestrator's own transcript AND every
-//     subagent's sidecar transcript, de-duplicating by message id (see THE
-//     CORRECTNESS TRAP below) before pricing. It is invoked explicitly as
-//     a step in commands/ship.md — never wired to any statusLine.
+//     subagent's sidecar transcript before pricing (both de-duplicate by
+//     message id — see THE CORRECTNESS TRAP below — that part is shared).
+//     It is invoked explicitly as a step in commands/ship.md — never wired
+//     to any statusLine — and rounds with round4 rather than toFixed(2).
 //
 // PLATFORM FACTS — undocumented, CLI-version-dependent, verified against
 // the installed Claude Code CLI (v2.1.220-2.1.224) by direct file

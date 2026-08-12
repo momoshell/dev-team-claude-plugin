@@ -693,6 +693,20 @@ const SAFE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/
 // outside this set is.
 const SAFE_LINE_RE = /^[A-Za-z0-9 _.,:;=/@'+-]+$/
 const SEND_SETTLE_MS = 30
+// Verified-send bounds (build-102 grammar fix): the pane's shell spawns
+// asynchronously after new-pane returns — on a slow shell (starship warming
+// a node toolchain) the surface exists long before it can accept input, and
+// text typed into that gap is silently dropped. read-screen doubles as the
+// readiness probe (it fails with internal_error until the terminal buffer
+// exists) and as the echo check that the typed line actually landed.
+// SEND_PROBE_TIMEOUT_MS bounds each individual read-screen spawn (cmux()
+// has NO default spawn timeout — see backend-notes' no-default-spawn-timeout
+// entry), which is what makes SEND_READY_TIMEOUT_MS a real wall-clock bound
+// (worst case: readyTimeoutMs + one probe) instead of a mere retry count.
+const SEND_READY_TIMEOUT_MS = 15_000
+const SEND_READY_POLL_MS = 250
+const SEND_VERIFY_ATTEMPTS = 3
+const SEND_PROBE_TIMEOUT_MS = 5_000
 
 function assertSafeLine(line) {
   if (typeof line !== 'string' || line.length === 0) {
@@ -720,31 +734,126 @@ function settle(ms) {
   Atomics.wait(new Int32Array(sab), 0, 0, ms)
 }
 
+// The longest whitespace-free token of the line, used as the echo needle.
+// Wrapping breaks visual lines at arbitrary columns, so the frame is joined
+// with all whitespace stripped before searching — a space-free needle
+// survives any wrap; the longest one (in practice the record path) is the
+// least likely to collide with prompt decoration.
+function echoNeedle(line) {
+  return line.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), '')
+}
+
+// -> null when the frame is unreadable (distinct from "needle absent"),
+// otherwise the number of times the needle occurs in the whitespace-stripped
+// frame. Counting, not membership: a doubled input line (a retype appended
+// to an already-landed copy) contains the needle TWICE, and pressing enter
+// on it would submit a corrupted command — the verify below requires
+// exactly one.
+function frameNeedleCount(surfaceId, needle) {
+  const res = cmux('read-screen', ['--surface', surfaceId, '--lines', '40'], { timeoutMs: SEND_PROBE_TIMEOUT_MS })
+  if (!res.ok) return null
+  const stripped = res.stdout.replace(/\s+/g, '')
+  return stripped.split(needle).length - 1
+}
+
 /**
- * sendLine(surfaceId, line) -> void
+ * sendLine(surfaceId, line, opts?) -> void
  * `send` does NOT auto-submit even with a trailing newline (spike S7) — a
- * `send-key <surface> enter` after a settle delay is required to submit.
+ * `send-key --surface <id> -- enter` after the echo verifies is required to
+ * submit. Build 102 grammar (live-verified 2026-08-12 on a scratch pane):
+ * BOTH verbs take the surface as a `--surface` flag, never positionally —
+ * `send-key <uuid> enter` parses the uuid as the key name ("Unknown key"),
+ * and `send <uuid> <line>` mistargets the text at the CALLER's own surface
+ * (live-reproduced 2026-08-12, issue-78 attempt 1). The `--` separator
+ * before free text is also live-verified (typed text lands clean, no
+ * literal `--`), and it closes the `-`-leading-line flag-consumption gap
+ * the positional form had.
+ * Verified-send: wait for the pane's frame to be readable, type, then
+ * require the echo needle to appear EXACTLY ONCE before submitting. On any
+ * other count the line is cleared with `send-key ctrl+u` (the kill char in
+ * both canonical tty mode and readline/zle raw mode — live-verified to
+ * clear an unsubmitted line) and retyped, up to opts.verifyAttempts times.
+ * The exactly-once rule is what makes the retry safe: a retype that lands
+ * on top of a first copy whose echo read lagged produces count 2, which is
+ * REFUSED and cleared — never submitted (deep-review Must-fix, 2026-08-12).
+ * Every failure past the target-presence gate THROWS — the caller
+ * (dispatchCmd) owns the abort path, and a silently-dropped kickoff must
+ * never look like a successful dispatch again.
+ * opts: { readyTimeoutMs, readyPollMs, verifyAttempts } — test injection
+ * points; production callers pass nothing and get the module constants.
  */
-export function sendLine(surfaceId, line) {
+export function sendLine(surfaceId, line, opts = {}) {
+  const {
+    readyTimeoutMs = SEND_READY_TIMEOUT_MS,
+    readyPollMs = SEND_READY_POLL_MS,
+    verifyAttempts = SEND_VERIFY_ATTEMPTS,
+  } = opts
   if (!requireTargetPresent('surface', surfaceId, 'sendLine')) return
   assertSafeLine(line)
-  const sendRes = cmux('send', [surfaceId, line])
-  if (!sendRes.ok) {
-    // eslint-disable-next-line no-console
-    console.error(`sendLine: send failed: ${sendRes.error?.message}`)
-    return
+  const needle = echoNeedle(line)
+  if (!needle) {
+    throw new Error('sendLine: refused — line has no whitespace-free token to verify the echo against (whitespace-only line)')
   }
-  settle(SEND_SETTLE_MS)
-  const enterRes = cmux('send-key', [surfaceId, 'enter'])
+
+  // Readiness: poll until the terminal frame is readable at all (a null
+  // count means read-screen itself failed — the buffer does not exist yet).
+  const deadline = Date.now() + readyTimeoutMs
+  while (frameNeedleCount(surfaceId, needle) === null) {
+    if (Date.now() >= deadline) {
+      throw new Error(`sendLine: surface ${surfaceId} never became readable within ${readyTimeoutMs}ms — shell not up, refusing to type into the void`)
+    }
+    settle(readyPollMs)
+  }
+
+  let landed = false
+  let lastCount = null
+  for (let attempt = 1; attempt <= verifyAttempts; attempt += 1) {
+    if (attempt > 1) {
+      // Clear whatever the prior attempt left — a lagging echo read means
+      // the first copy may HAVE landed, and a bare retype would append to
+      // it on the same unsubmitted input line. ctrl+u kills the line in
+      // both canonical mode (drains input the shell has not read yet) and
+      // readline/zle raw mode. A failed clear throws: retyping over
+      // unknown residue is exactly the corruption this loop exists to
+      // prevent.
+      const clearRes = cmux('send-key', ['--surface', surfaceId, '--', 'ctrl+u'], { timeoutMs: SEND_PROBE_TIMEOUT_MS })
+      if (!clearRes.ok) {
+        throw new Error(`sendLine: ctrl+u line-clear failed before retype: ${clearRes.error?.message}`)
+      }
+      settle(readyPollMs)
+    }
+    const sendRes = cmux('send', ['--surface', surfaceId, '--', line], { timeoutMs: SEND_PROBE_TIMEOUT_MS })
+    if (!sendRes.ok) {
+      throw new Error(`sendLine: send failed: ${sendRes.error?.message}`)
+    }
+    settle(SEND_SETTLE_MS)
+    lastCount = frameNeedleCount(surfaceId, needle)
+    // ABSOLUTE exactly-once, deliberately not a baseline-delta (round-2
+    // review W2, rejected): a delta cannot distinguish a scrollback
+    // baseline (safe to keep) from an unsubmitted-input baseline (appending
+    // to it is the exact corruption this loop prevents) — under a delta,
+    // the seeded-unread-copy race would VERIFY a doubled line. Absolute
+    // counting is fail-closed instead: a pane whose frame already carries
+    // the needle aborts loudly. Acceptable because the only production
+    // call site targets a freshly created pane whose frame is clean.
+    if (lastCount === 1) { landed = true; break }
+    // 0: dropped (shell still initializing). >1: doubled (echo lag + this
+    // attempt). null: frame went unreadable mid-flight. All three clear
+    // and retype on the next attempt; none may reach enter.
+  }
+  if (!landed) {
+    throw new Error(`sendLine: typed line not verified exactly once on surface ${surfaceId} after ${verifyAttempts} attempts (last count: ${lastCount}) — refusing to press enter on unverified input`)
+  }
+
+  const enterRes = cmux('send-key', ['--surface', surfaceId, '--', 'enter'], { timeoutMs: SEND_PROBE_TIMEOUT_MS })
   if (!enterRes.ok) {
-    // eslint-disable-next-line no-console
-    console.error(`sendLine: send-key enter failed: ${enterRes.error?.message}`)
+    throw new Error(`sendLine: send-key enter failed: ${enterRes.error?.message}`)
   }
 }
 
 export function renameTab(surfaceId, title) {
   if (!requireTargetPresent('surface', surfaceId, 'renameTab')) return
-  cmux('rename-tab', [surfaceId, title])
+  cmux('rename-tab', ['--surface', surfaceId, '--', title])
 }
 
 export function setStatus(key, value, opts = {}) {
@@ -893,8 +1002,22 @@ export function readScreen(surfaceId, { lines = 40 } = {}) {
 }
 
 export function closeSurface(id) {
-  if (!requireTargetPresent('surface', id, 'closeSurface')) return
-  cmux('close-surface', [id])
+  // Build 102, two quirks (both live-observed 2026-08-12): (1) close-surface
+  // is flags-only — a positional id is IGNORED and the verb falls back to
+  // the caller's own $CMUX_SURFACE_ID; (2) unlike send/send-key/read-screen,
+  // which resolve a surface UUID globally, close-surface resolves it inside
+  // a WINDOW context (default: the caller's window) — a cross-window close
+  // without --window fails `Surface not found`. The team window is not the
+  // orchestrator's window, so resolve the containing window from the same
+  // fresh tree the presence check reads and pass it explicitly.
+  const t = tree({ all: true })
+  const found = locate(t, id)
+  if (!found?.surface) {
+    // eslint-disable-next-line no-console
+    console.error(`closeSurface: target surface ${id} is gone from the fresh tree — no-op`)
+    return
+  }
+  cmux('close-surface', ['--surface', id, '--window', found.window.id])
 }
 
 export function closeWorkspace(id) {
@@ -1162,7 +1285,7 @@ export function reorderDocTabFirst({ paneId, terminalSurfaceId } = {}) {
       return false
     }
     if (!found.id) return false
-    const res = cmux('reorder-surface', [found.id, '--before', terminalSurfaceId])
+    const res = cmux('reorder-surface', ['--surface', found.id, '--before', terminalSurfaceId])
     if (!res.ok) {
       // eslint-disable-next-line no-console
       console.error(`reorderDocTabFirst: reorder-surface failed: ${res.error?.message}`)
@@ -1232,13 +1355,13 @@ function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel 
   const loc = locate(after, surfaceId)
   const landedPaneId = loc?.pane?.id ?? null
   if (landedPaneId !== paneId) {
-    const moveRes = cmux('move-surface', [surfaceId, '--pane', paneId, '--focus', 'false'])
+    const moveRes = cmux('move-surface', ['--surface', surfaceId, '--pane', paneId, '--focus', 'false'])
     if (!moveRes.ok) {
       abandonOrphan(surfaceId, landedPaneId ?? paneId, rungLabel, `move-surface failed: ${moveRes.error?.message}`)
       return null
     }
   }
-  const reorderRes = cmux('reorder-surface', [surfaceId, '--before', terminalSurfaceId])
+  const reorderRes = cmux('reorder-surface', ['--surface', surfaceId, '--before', terminalSurfaceId])
   if (!reorderRes.ok) {
     abandonOrphan(surfaceId, paneId, rungLabel, `reorder-surface failed: ${reorderRes.error?.message}`)
     return null

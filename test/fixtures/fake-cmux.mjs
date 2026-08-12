@@ -487,7 +487,8 @@ switch (verb) {
   }
 
   case 'move-surface': {
-    const surfaceId = argv[1]
+    // Build 102: `[--surface <id> | <id>]` — both forms accepted, like live.
+    const surfaceId = argAfter('--surface') || argv[1]
     const targetPaneId = argAfter('--pane')
     const state = loadState()
     const found = findSurfaceEntry(state, surfaceId)
@@ -517,7 +518,7 @@ switch (verb) {
     // rung 1 "succeeding" with a silently-relocated surface.
     const stateForVerificationFailCheck = loadState()
     if (stateForVerificationFailCheck._simulateBrowserSurfaceRelocateOnReorder) {
-      const surfaceId = argv[1]
+      const surfaceId = argAfter('--surface') || argv[1]
       const found = findSurfaceEntry(stateForVerificationFailCheck, surfaceId)
       if (found && found.surface.type === 'browser') {
         found.pane.surfaces.splice(found.idx, 1)
@@ -537,12 +538,59 @@ switch (verb) {
   }
 
   case 'send': {
+    // Build 102 grammar (live-verified 2026-08-12): `send [flags] [--] <text>`
+    // — the surface rides a --surface FLAG. A positional surface id is NOT an
+    // error on the real CLI: it silently becomes the text and the send
+    // targets $CMUX_SURFACE_ID (the caller's own pane). The fixture is
+    // stricter than live here on purpose — a regression to the legacy
+    // positional form must FAIL tests loudly, not silently mistarget.
+    const surfaceId = argAfter('--surface')
+    if (!surfaceId) fail('bad_args', 'fake-cmux: send requires --surface (build-102 grammar; positional target is the legacy form)')
+    const dd = argv.indexOf('--')
+    const text = dd >= 0 ? argv.slice(dd + 1).join(' ') : undefined
+    if (!text) fail('bad_args', 'fake-cmux: send requires -- <text>')
+    const state = loadState()
+    if (!findSurfaceEntry(state, surfaceId)) fail('not_found', 'Surface not found')
+    // Echo state: read-screen renders the typed line so cmuxctl's
+    // verified-send can confirm the echo, exactly like a live terminal.
+    // APPEND, never overwrite — a real PTY concatenates a second unsubmitted
+    // send onto the same input line, which is precisely the doubled-line
+    // corruption the verify's exactly-once rule exists to catch; an
+    // overwriting fixture would make that path structurally unmodelable
+    // (deep-review Should-fix 4, 2026-08-12).
+    state._typed = state._typed || {}
+    const k = surfaceId.toLowerCase()
+    state._typed[k] = (state._typed[k] || '') + text
+    saveState(state)
     succeed('')
     break
   }
 
   case 'send-key': {
-    succeed('')
+    // Build 102 grammar: `send-key [flags] [--] <key>` — one positional, the
+    // KEY. The legacy `send-key <uuid> enter` form therefore parses the uuid
+    // as the key name and fails exactly like live cmux did on 2026-08-12.
+    const surfaceId = argAfter('--surface')
+    if (!surfaceId) fail('bad_args', 'fake-cmux: send-key requires --surface (build-102 grammar)')
+    const dd = argv.indexOf('--')
+    const key = dd >= 0
+      ? argv[dd + 1]
+      : argv.filter((a, i) => i > 0 && a !== '--surface' && argv[i - 1] !== '--surface')[0]
+    if (!key || !/^[a-z0-9+]+$/.test(key) || /^[0-9a-f-]{36}$/i.test(key)) {
+      fail('bad_args', 'Unknown key')
+    }
+    // ctrl+u kills the current unsubmitted input line (live-verified
+    // 2026-08-12) — clear the echo state so a verified-send retype starts
+    // from an empty line. `enter` deliberately does NOT clear _typed: on a
+    // real terminal the submitted command line stays visible in scrollback.
+    if (key === 'ctrl+u') {
+      const state = loadState()
+      if (state._typed) {
+        delete state._typed[(argAfter('--surface') || '').toLowerCase()]
+        saveState(state)
+      }
+    }
+    succeed(`OK surface:0 workspace:0`)
     break
   }
 
@@ -551,7 +599,10 @@ switch (verb) {
     // is TERMINAL-surfaces-only — a browser (or any non-terminal) surface
     // fails not_found. No production caller is affected: every existing
     // caller in this repo only ever renames a terminal surface.
-    const surfaceId = argv[1]
+    // Build 102 grammar: target is a --surface flag; the title is positional
+    // (after `--`).
+    const surfaceId = argAfter('--surface')
+    if (!surfaceId) fail('bad_args', 'fake-cmux: rename-tab requires --surface (build-102 grammar)')
     const state = loadState()
     const found = findSurfaceEntry(state, surfaceId)
     if (found && found.surface.type !== 'terminal') {
@@ -567,8 +618,25 @@ switch (verb) {
   }
 
   case 'close-surface': {
-    const id = argv[1]
+    // Build 102 grammar: flags-only. A positional id on the live CLI is
+    // ignored in favor of $CMUX_SURFACE_ID (the caller's own surface) —
+    // live-observed closing the wrong surface on 2026-08-12. The fixture
+    // hard-fails the legacy form instead of modeling the mistarget.
+    // ALSO window-scoped (second live-observed quirk, same day): a UUID is
+    // resolved only inside the named --window context — the fixture
+    // REQUIRES the flag and validates containment, stricter than live's
+    // caller-window default, so dropping --window (or passing the wrong
+    // window) fails tests loudly instead of re-breaking cross-window
+    // closes live (round-2 review W3).
+    const id = argAfter('--surface')
+    if (!id) fail('bad_args', 'fake-cmux: close-surface requires --surface (build-102 grammar; a positional id is ignored by live cmux)')
+    const windowId = argAfter('--window')
+    if (!windowId) fail('bad_args', 'fake-cmux: close-surface requires --window (build-102 resolves surface UUIDs window-scoped; cmuxctl must pass the containing window)')
     const state = loadState()
+    const win = findWindow(state, windowId)
+    if (!win) fail('not_found', 'Window not found')
+    const inWindow = (win.workspaces || []).some((ws) => (ws.panes || []).some((pn) => (pn.surfaces || []).some((sf) => sf.id.toLowerCase() === id.toLowerCase())))
+    if (!inWindow) fail('not_found', 'Surface not found')
     const found = findSurfaceEntry(state, id)
     if (!found) fail('not_found', 'Surface not found')
     found.pane.surfaces.splice(found.idx, 1)
@@ -605,9 +673,18 @@ switch (verb) {
   }
 
   case 'read-screen': {
+    // FAKE_CMUX_SCREEN (triage tests) takes precedence; otherwise the frame
+    // echoes whatever `send` last typed into this surface (like a real
+    // terminal), so cmuxctl's verified-send finds its needle without any
+    // per-test setup. Falls back to the canned frame for untouched surfaces.
     const screenPath = process.env.FAKE_CMUX_SCREEN
-    const stdout = screenPath && existsSync(screenPath) ? readFileSync(screenPath, 'utf8') : '$ cmux fake screen frame\n'
-    succeed(stdout)
+    if (screenPath && existsSync(screenPath)) {
+      succeed(readFileSync(screenPath, 'utf8'))
+    }
+    const surfaceId = (argAfter('--surface') || '').toLowerCase()
+    const state = loadState()
+    const typed = state._typed && state._typed[surfaceId]
+    succeed(typed ? `$ ${typed}\n` : '$ cmux fake screen frame\n')
     break
   }
 

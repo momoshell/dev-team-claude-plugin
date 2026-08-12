@@ -1759,15 +1759,26 @@ export function dispatchCmd(args, ctx) {
   // return_path/signals_path via frozen path charsets, attn_parent/
   // attn_upstream via the frozen devteam-<uuid>-attn pattern) is
   // independently charset-constrained upstream, and pluginRoot/recordPath are
-  // both resolvePath-derived, so this throw path has no known reachable
-  // trigger through the public CLI today — it exists for defense-in-depth
-  // against a future kickoff/launch-composition change, and must not itself
-  // crash uninformatively if a secondary failure (e.g. the record having
-  // become otherwise unreadable) hits terminateRecord.
+  // both resolvePath-derived. Since the build-102 verified-send rework this
+  // throw path is ROUTINELY reachable (a shell that never becomes readable
+  // within the readiness bound, or an echo that never verifies exactly
+  // once), not just a charset defense-in-depth — so the abort must clean up
+  // the pane it dispatched into: closeSurface mirrors the worktree_prep
+  // abort above, or every slow-shell abort leaks a live pane holding
+  // unsubmitted typed text.
   try {
     sendLine(surfaceId, adapterLaunchLine({ execPath: process.execPath, pluginRoot, recordPath }))
   } catch (err) {
     unlinkIfExists(sidecars.nonce)
+    // closeSurface CAN throw (its own fresh tree() read) — and the likeliest
+    // way to reach this catch is a wedged substrate where tree() fails too.
+    // A cleanup failure must never displace terminateRecord below or the
+    // OperationalError naming the real cause (round-2 review W1).
+    try {
+      closeSurface(surfaceId)
+    } catch (closeErr) {
+      log(`dispatch: sendLine abort could not close the pane surface: ${closeErr.message}`)
+    }
     try {
       terminateRecord(recordPath, 'aborted')
     } catch (terminateErr) {

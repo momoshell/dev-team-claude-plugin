@@ -153,7 +153,7 @@ test('the old single-file Ambiguity trap phrasing ("must contain exactly one exe
 })
 
 test('cmux-dispatch.md close-surface row carries the browser-surface caveat naming `browser <id> tab close`', () => {
-  const row = doc.slice(doc.indexOf('| `close-surface <id>`'))
+  const row = doc.slice(doc.indexOf('| `close-surface --surface <id> --window <id>`'))
   const rowText = row.slice(0, row.indexOf('\n'))
   assert.match(rowText, /refuses a BROWSER surface/)
   assert.match(rowText, /`browser <id> tab close`/)
@@ -208,7 +208,7 @@ test('cmux-dispatch.md §2 footer states why the browser family is not capabilit
 })
 
 test('cmux-dispatch.md documents rename-tab as terminal-surfaces-only', () => {
-  assert.match(doc, /rename-tab <surface> <title>` \| sets the `\{agent type\} \(\{model\}\)` tab title; terminal surfaces only/)
+  assert.match(doc, /rename-tab --surface <surface> -- <title>` \| sets the `\{agent type\} \(\{model\}\)` tab title; terminal surfaces only/)
 })
 
 test('cmux-dispatch.md never adds browser-verify to the lifecycle-order line', () => {

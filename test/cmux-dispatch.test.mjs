@@ -294,10 +294,11 @@ test('E-P1 sequence: the full dispatch also produces rename-tab and send/send-ke
   assert.ok(renameEntry, 'expected a rename-tab invocation')
   assert.ok(sendEntry, 'expected a send invocation')
   assert.ok(sendKeyEntry, 'expected a send-key invocation')
-  assert.equal(renameEntry.argv[1], res.json.surface_id)
-  assert.equal(sendEntry.argv[1], res.json.surface_id)
-  assert.equal(sendKeyEntry.argv[1], res.json.surface_id)
-  assert.equal(sendKeyEntry.argv[2], 'enter')
+  // Build-102 grammar: every target rides a --surface flag, never positional.
+  assert.deepEqual(renameEntry.argv.slice(1, 3), ['--surface', res.json.surface_id])
+  assert.deepEqual(sendEntry.argv.slice(1, 3), ['--surface', res.json.surface_id])
+  assert.deepEqual(sendKeyEntry.argv.slice(1, 3), ['--surface', res.json.surface_id])
+  assert.deepEqual(sendKeyEntry.argv.slice(3), ['--', 'enter'])
 
   // send THEN send-key (spike S7: send never auto-submits).
   const sendIdx = log.indexOf(sendEntry)
@@ -533,13 +534,17 @@ test('adapter launch PAIRED POSITIVE: a successful dispatch sends the composed l
   const sendKeyEntries = log.filter((e) => e.argv[0] === 'send-key')
   assert.equal(sendEntries.length, 1, `expected exactly one send, got ${JSON.stringify(sendEntries)}`)
   assert.equal(sendKeyEntries.length, 1, `expected exactly one send-key, got ${JSON.stringify(sendKeyEntries)}`)
-  assert.equal(sendKeyEntries[0].argv[2], 'enter')
-  assert.equal(sendEntries[0].argv[2], expectedLine)
+  // Build-102 grammar: send is `--surface <id> -- <text>`, send-key is
+  // `--surface <id> -- enter`; the launch line is the sole post-`--` text.
+  assert.deepEqual(sendKeyEntries[0].argv.slice(3), ['--', 'enter'])
+  const sendDd = sendEntries[0].argv.indexOf('--')
+  assert.ok(sendDd > 0, 'send must separate text with --')
+  assert.equal(sendEntries[0].argv.slice(sendDd + 1).join(' '), expectedLine)
 
   // record.kickoff is unchanged (still the model's prompt, delivered via
   // buildArgv's positional) and is NOT what was typed into the pane.
   assert.equal(typeof record.kickoff, 'string')
-  assert.notEqual(sendEntries[0].argv[2], record.kickoff)
+  assert.notEqual(sendEntries[0].argv.slice(sendDd + 1).join(' '), record.kickoff)
 
   const sidecars = sidecarPaths(ctx.paths, res.json.dispatch_id)
   assert.ok(existsSync(sidecars.nonce), 'the nonce must still be on disk right after a successful dispatch')
@@ -786,9 +791,9 @@ test('E-P3 normalization: record read back from disk has lowercase surface ids, 
   const renameEntry = log.find((e) => e.argv[0] === 'rename-tab')
   const sendEntry = log.find((e) => e.argv[0] === 'send')
   const sendKeyEntry = log.find((e) => e.argv[0] === 'send-key')
-  assert.equal(renameEntry.argv[1], record.surface.surface_id)
-  assert.equal(sendEntry.argv[1], record.surface.surface_id)
-  assert.equal(sendKeyEntry.argv[1], record.surface.surface_id)
+  assert.equal(renameEntry.argv[2], record.surface.surface_id)
+  assert.equal(sendEntry.argv[2], record.surface.surface_id)
+  assert.equal(sendKeyEntry.argv[2], record.surface.surface_id)
 })
 
 test('ONLY UUIDS ARE PERSISTED: no short ref (surface:1234) and every id field is lowercase, even though the fake emits mixed-case', () => {
@@ -1163,7 +1168,8 @@ test('INVOCATION BOUND UNDER ATTENTION (amended, #3): a chunked join where the d
   const amendedBound = baselineBound + READ_SCREEN_CALLS_PER_ATTENTION_TRANSITION * chunks
   assert.ok(totalInvocations <= amendedBound, `expected <= ${amendedBound} invocations (baseline ${baselineBound} + ${READ_SCREEN_CALLS_PER_ATTENTION_TRANSITION} per chunk for read-screen), got ${totalInvocations}`)
 
-  const readScreenCalls = readLog(env.logPath).filter((e) => e.argv[0] === 'read-screen')
+  // slice past the dispatch-time verified-send reads (readiness + echo check)
+  const readScreenCalls = readLog(env.logPath).slice(dispatchInvocationsSoFar).filter((e) => e.argv[0] === 'read-screen')
   assert.equal(readScreenCalls.length, chunks, 'expected exactly one read-screen fire per await() invocation while the dispatch stays in attention')
 })
 
@@ -1448,6 +1454,7 @@ test('READ-SCREEN TRANSITION: fires exactly once across two consecutive internal
   const { dir, ctx } = setUpWorkspace('read-screen-transition')
   const specA = makeSpecFile(ctx, 'be-3j')
   const dispatchA = dispatchCmd({ slice: 'be-3j', role: 'coder', spec: specA }, ctx)
+  const invocationsAfterDispatch = readLog(process.env.FAKE_CMUX_LOG).length
 
   const eventsPath = join(dir, 'events.jsonl')
   const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
@@ -1467,7 +1474,7 @@ test('READ-SCREEN TRANSITION: fires exactly once across two consecutive internal
   assert.equal(res.json.status, 'still-running')
   assert.equal(res.json.attention.length, 1)
 
-  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen')
+  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).slice(invocationsAfterDispatch).filter((e) => e.argv[0] === 'read-screen')
   assert.equal(readScreenCalls.length, 1, 'expected exactly one read-screen invocation across every internal tick of this single await() call')
 })
 
@@ -1512,6 +1519,7 @@ test('RAW FRAME NEVER REACHES JSON OR DISK: the produced await JSON payload and 
   const { dir, ctx } = setUpWorkspace('raw-frame-never-json')
   const specA = makeSpecFile(ctx, 'be-3k')
   const dispatchA = dispatchCmd({ slice: 'be-3k', role: 'coder', spec: specA }, ctx)
+  const invocationsAfterDispatch = readLog(process.env.FAKE_CMUX_LOG).length
 
   const screenPath = join(dir, 'screen.txt')
   const distinctiveFrameText = 'DISTINCTIVE_SCREEN_MARKER_zzq9'
@@ -1539,7 +1547,7 @@ test('RAW FRAME NEVER REACHES JSON OR DISK: the produced await JSON payload and 
 
   // The real read-screen call happened (proving the assertion above is not
   // vacuous) and the reduced tuple reached a log line, never the frame text.
-  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen')
+  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).slice(invocationsAfterDispatch).filter((e) => e.argv[0] === 'read-screen')
   assert.equal(readScreenCalls.length, 1)
   assert.match(stderr, /screen signature scan/)
   assert.doesNotMatch(stderr, new RegExp(distinctiveFrameText), 'the raw frame must never reach a log line either')
@@ -1563,6 +1571,7 @@ test('VACUITY GUARD (mandatory, end-to-end): running the full await() pipeline w
   const { dir, ctx } = setUpWorkspace('vacuity-guard-e2e')
   const specA = makeSpecFile(ctx, 'be-3m')
   const dispatchA = dispatchCmd({ slice: 'be-3m', role: 'coder', spec: specA }, ctx)
+  const invocationsAfterDispatch = readLog(process.env.FAKE_CMUX_LOG).length
 
   const eventsPath = join(dir, 'events.jsonl')
   const staleOccurredAt = new Date(Date.now() - 100_000).toISOString()
@@ -1592,7 +1601,7 @@ test('VACUITY GUARD (mandatory, end-to-end): running the full await() pipeline w
   // Prove this isn't vacuous: read-screen genuinely fired both times (the
   // diagnostic plane DID see two different frames) and the two frames
   // really do differ in what they'd match.
-  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).filter((e) => e.argv[0] === 'read-screen')
+  const readScreenCalls = readLog(process.env.FAKE_CMUX_LOG).slice(invocationsAfterDispatch).filter((e) => e.argv[0] === 'read-screen')
   assert.equal(readScreenCalls.length, 2, 'expected read-screen to fire once per await() invocation (fresh transition each call)')
 
   // The actual proof: status/attention/remaining are byte-identical
@@ -1709,7 +1718,7 @@ test('close on a valid return: closes the executor pane, re-resolves its id from
   const log = readLog(env.logPath)
   const closeEntry = log.find((e) => e.argv[0] === 'close-surface')
   assert.ok(closeEntry)
-  assert.equal(closeEntry.argv[1], dispatchRes.json.surface_id)
+  assert.deepEqual(closeEntry.argv.slice(1, 3), ['--surface', dispatchRes.json.surface_id])
 
   const terminated = readRecord(join(ctx.paths.dispatchDir, 'be-1a.1.json'))
   assert.equal(terminated.outcome, 'ok')
@@ -1924,7 +1933,7 @@ test('IDEMPOTENCY: awaitCmd THEN closeCmd on a resolved judgment-role dispatch p
   const markdownOpens = log.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open')
   assert.equal(markdownOpens.length, 1, 'expected exactly one markdown-open TOTAL — awaitCmd\'s presentReturn call performs the only mount; closeCmd\'s presentReturn finds the doc tab already present and only reorders')
   assert.equal(log.filter((e) => e.argv[0] === 'new-surface').length, 0)
-  const reorders = log.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[2] === '--before' && e.argv[3] === record.surface.surface_id)
+  const reorders = log.filter((e) => e.argv[0] === 'reorder-surface' && e.argv[3] === '--before' && e.argv[4] === record.surface.surface_id)
   assert.equal(reorders.length, 2, 'expected exactly two reorder-surface --before <terminal>: one from the awaitCmd mount, one from closeCmd\'s presentReturn')
 })
 
@@ -1947,8 +1956,8 @@ test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -
   assert.ok(markdownIdx !== -1 && reorderIdx !== -1, 'expected markdown/reorder-surface in the dispatch-time log')
   assert.ok(markdownIdx < reorderIdx, 'expected markdown open -> reorder-surface, in order')
   assert.equal(logAfterDispatch.some((e) => e.argv[0] === 'move-surface'), false)
-  assert.equal(logAfterDispatch[reorderIdx].argv[2], '--before')
-  assert.equal(logAfterDispatch[reorderIdx].argv[3], dispatchRes.json.surface_id)
+  assert.equal(logAfterDispatch[reorderIdx].argv[3], '--before')
+  assert.equal(logAfterDispatch[reorderIdx].argv[4], dispatchRes.json.surface_id)
 
   const tBeforeClose = tree({ all: true })
   const docTabBeforeClose = findDocTabSurface(tBeforeClose, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
@@ -1971,9 +1980,9 @@ test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -
   assert.equal(rendered, expectedBody)
 
   const logAfterClose = readLog(env.logPath)
-  const closeSurfaceEntriesForTerminal = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id)
+  const closeSurfaceEntriesForTerminal = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[2] === dispatchRes.json.surface_id)
   assert.equal(closeSurfaceEntriesForTerminal.length, 1, 'expected exactly ONE close-surface for the terminal surface id (collapse-on-close)')
-  const closeSurfaceEntriesForDocTab = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === docTabBeforeClose.id)
+  const closeSurfaceEntriesForDocTab = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[2] === docTabBeforeClose.id)
   assert.equal(closeSurfaceEntriesForDocTab.length, 0, 'expected ZERO close-surface for the doc-tab surface id')
 
   const tAfterClose = tree({ all: true })
@@ -2147,7 +2156,7 @@ test('STALE TERMINAL SURFACE: after collapse-on-close, a repeat close and two st
   assert.ok(existsSync(collapsedSidecarPath), 'expected the .collapsed sidecar to be written on a successful collapse')
 
   const logAfterClose = readLog(env.logPath)
-  const closeSurfaceEntries = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id)
+  const closeSurfaceEntries = logAfterClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[2] === dispatchRes.json.surface_id)
   assert.equal(closeSurfaceEntries.length, 1, 'expected exactly one close-surface for the terminal surface, from the collapse itself')
   const markdownOpensAfterClose = logAfterClose.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length
   const reordersAfterClose = logAfterClose.filter((e) => e.argv[0] === 'reorder-surface').length
@@ -2160,7 +2169,7 @@ test('STALE TERMINAL SURFACE: after collapse-on-close, a repeat close and two st
   })
   assert.match(capturedRepeatClose, /already collapsed/)
   const logAfterRepeatClose = readLog(env.logPath)
-  assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[1] === dispatchRes.json.surface_id).length, 1, 'a repeat close must not attempt to close the already-dead terminal surface again')
+  assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'close-surface' && e.argv[2] === dispatchRes.json.surface_id).length, 1, 'a repeat close must not attempt to close the already-dead terminal surface again')
   assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'markdown' && e.argv[1] === 'open').length, markdownOpensAfterClose, 'a repeat close must attempt no further mount against the dead terminal surface')
   assert.equal(logAfterRepeatClose.filter((e) => e.argv[0] === 'reorder-surface').length, reordersAfterClose, 'a repeat close must attempt no further reorder against the dead terminal surface')
 
@@ -5096,12 +5105,12 @@ test('rename-tab fails not_found on a non-terminal (browser) surface (fixture fi
   const treeBefore = tree({ all: true })
   const opened = browserOpen('http://localhost:3000/', { workspaceId, treeBefore })
 
-  const browserRenameRes = cmux('rename-tab', [opened.surfaceId, 'preview'])
+  const browserRenameRes = cmux('rename-tab', ['--surface', opened.surfaceId, '--', 'preview'])
   assert.equal(browserRenameRes.ok, false)
   assert.equal(browserRenameRes.error.code, 'not_found')
 
   const terminalSurfaceId = workspaceRes.json.initial_surface_id
-  const terminalRenameRes = cmux('rename-tab', [terminalSurfaceId, 'my terminal'])
+  const terminalRenameRes = cmux('rename-tab', ['--surface', terminalSurfaceId, '--', 'my terminal'])
   assert.equal(terminalRenameRes.ok, true)
 })
 
@@ -6139,7 +6148,7 @@ test('teardown: a REAL preview surface created via ensurePreviewBrowser has its 
   assert.equal(res.code, 0)
   const closeSurfaceIds = readLog(env.logPath)
     .filter((e) => e.argv[0] === 'close-surface')
-    .map((e) => e.argv[1].toLowerCase())
+    .map((e) => e.argv[2].toLowerCase())
   assert.ok(closeSurfaceIds.includes(sidecar.surface_id), `expected ${sidecar.surface_id} in close-surface log, got: ${JSON.stringify(closeSurfaceIds)}`)
 })
 

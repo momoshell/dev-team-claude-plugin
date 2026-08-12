@@ -1944,8 +1944,8 @@ test('IDEMPOTENCY: awaitCmd THEN closeCmd on a resolved judgment-role dispatch p
   assert.equal(reorders.length, 2, 'expected exactly two reorder-surface --before <terminal>: one from the awaitCmd mount, one from closeCmd\'s presentReturn')
 })
 
-test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -> reorder-surface --before <terminal>; move-surface is skipped since the new surface already lands in the target pane), the render path content equals the envelope body once resolved, and close COLLAPSES to the doc tab (be-11-03)', () => {
-  const { env, ctx } = setUpWorkspace('doctab-return')
+test('S8 CROSS-WINDOW: doc tab on return — dispatch mounts the placeholder (markdown open -> reorder-surface --before <terminal>, both naming the team workspace/window; move-surface is skipped since the new surface already lands in the target pane), the render path content equals the envelope body once resolved, and close COLLAPSES to the doc tab (be-11-03)', () => {
+  const { env, ctx, preflightRes, workspaceRes } = setUpWorkspace('doctab-return')
   const specPath = makeSpecFile(ctx, 'be-2a')
   const dispatchRes = dispatchCmd({ slice: 'be-2a', role: 'backend-lead', spec: specPath }, ctx)
   const record = readRecord(join(ctx.paths.dispatchDir, 'be-2a.1.json'))
@@ -1956,7 +1956,12 @@ test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -
   // the SAME pane as the terminal surface (which IS paneId, since
   // createPane minted both together) — mountDocTab's rungs only move when
   // the new surface actually lands in a DIFFERENT pane (interface_contract
-  // item 5: "if pane differs move-surface").
+  // item 5: "if pane differs move-surface"). The fixture models rung 1 as an
+  // APPEND into the source's pane; live `markdown open` *splits from* the
+  // source (`--direction` default `right`), so live `move-surface` may be
+  // load-bearing on every rung-1 mount — a path no test here exercises
+  // (n1, pre-existing fixture-fidelity gap, rides on the live-acceptance
+  // checklist).
   const logAfterDispatch = readLog(env.logPath)
   const markdownIdx = logAfterDispatch.findIndex((e) => e.argv[0] === 'markdown')
   const reorderIdx = logAfterDispatch.findIndex((e) => e.argv[0] === 'reorder-surface')
@@ -1966,8 +1971,21 @@ test('S8: doc tab on return — dispatch mounts the placeholder (markdown open -
   assert.equal(logAfterDispatch[reorderIdx].argv[3], '--before')
   assert.equal(logAfterDispatch[reorderIdx].argv[4], dispatchRes.json.surface_id)
 
+  // Prove the run is genuinely CROSS-WINDOW — otherwise the rest of this
+  // test is vacuous. That is the whole of issue #88.
+  const tAtDispatch = tree({ all: true })
+  const teamWindow = tAtDispatch.windows.find((w) => (w.workspaces || [])
+    .some((ws) => ws.id.toLowerCase() === workspaceRes.json.workspace_id.toLowerCase()))
+  assert.ok(teamWindow, 'expected the task workspace to live in some window')
+  assert.notEqual(teamWindow.id, preflightRes.json.orchestrator.window_id,
+    'the mount under test must be genuinely CROSS-WINDOW — that is the whole of issue #88')
+  assert.deepEqual(logAfterDispatch[markdownIdx].argv.slice(-4), ['--workspace', workspaceRes.json.workspace_id, '--window', teamWindow.id])
+
   const tBeforeClose = tree({ all: true })
   const docTabBeforeClose = findDocTabSurface(tBeforeClose, { paneId: dispatchRes.json.pane_id, terminalSurfaceId: dispatchRes.json.surface_id })
+  // This is issue #88's headline consequence: a sibling doc tab in the
+  // worker's own pane is the precondition collapse-on-close needs, and it
+  // only exists when a context-carrying rung 1/2 succeeds cross-window.
   assert.ok(docTabBeforeClose.id, 'expected a positively-verified sibling doc-tab surface before close')
 
   // (2) resolve with a valid markdown return, then close — presentReturn

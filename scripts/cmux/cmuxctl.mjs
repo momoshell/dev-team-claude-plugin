@@ -1293,10 +1293,12 @@ export function findDocTabSurface(t, { paneId, terminalSurfaceId } = {}) {
 /**
  * reorderDocTabFirst({ paneId, terminalSurfaceId }) -> boolean
  * Fetches a FRESH tree, resolves the doc tab via findDocTabSurface, and on a
- * hit issues `reorder-surface <docId> --before <terminalSurfaceId>` and
- * nothing else. An AMBIGUOUS pane (>=2 markdown candidates) is refused
- * loudly — there is no way to know which surface to reorder, so this never
- * guesses. NEVER throws, NEVER focuses.
+ * hit issues `reorder-surface <docId> --before <terminalSurfaceId> --workspace
+ * <ws> --window <win>` (both documented CONTEXT flags on build 102, the
+ * close-surface family — naming the pane's own workspace/window rather than
+ * inheriting the caller's) and nothing else. An AMBIGUOUS pane (>=2 markdown
+ * candidates) is refused loudly — there is no way to know which surface to
+ * reorder, so this never guesses. NEVER throws, NEVER focuses.
  */
 export function reorderDocTabFirst({ paneId, terminalSurfaceId } = {}) {
   try {
@@ -1308,7 +1310,13 @@ export function reorderDocTabFirst({ paneId, terminalSurfaceId } = {}) {
       return false
     }
     if (!found.id) return false
-    const res = cmux('reorder-surface', ['--surface', found.id, '--before', terminalSurfaceId])
+    const paneLoc = locate(t, paneId)
+    if (!paneLoc?.workspace || !paneLoc?.window) {
+      // eslint-disable-next-line no-console
+      console.error(`reorderDocTabFirst: pane ${paneId} has no resolvable workspace/window context — refusing`)
+      return false
+    }
+    const res = cmux('reorder-surface', ['--surface', found.id, '--before', terminalSurfaceId, '--workspace', paneLoc.workspace.id, '--window', paneLoc.window.id])
     if (!res.ok) {
       // eslint-disable-next-line no-console
       console.error(`reorderDocTabFirst: reorder-surface failed: ${res.error?.message}`)
@@ -1359,7 +1367,7 @@ function abandonOrphan(surfaceId, paneId, rungLabel, reason) {
 // rung, after this function has already abandoned any surface it created).
 // Throws RungAbortError on an id-recovery ambiguity — see that class's own
 // comment for why that case must not simply return null.
-function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel }) {
+function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel, workspaceId, windowId }) {
   const openRes = openFn()
   if (!openRes.ok) {
     // eslint-disable-next-line no-console
@@ -1378,13 +1386,20 @@ function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel 
   const loc = locate(after, surfaceId)
   const landedPaneId = loc?.pane?.id ?? null
   if (landedPaneId !== paneId) {
+    // move-surface's --workspace/--window are documented TARGETS (confirmed
+    // live twice), and --pane already names the destination — adding them
+    // would specify two potentially conflicting destinations, changing what
+    // this call MEANS rather than how its id resolves. Stays byte-identical.
     const moveRes = cmux('move-surface', ['--surface', surfaceId, '--pane', paneId, '--focus', 'false'])
     if (!moveRes.ok) {
       abandonOrphan(surfaceId, landedPaneId ?? paneId, rungLabel, `move-surface failed: ${moveRes.error?.message}`)
       return null
     }
   }
-  const reorderRes = cmux('reorder-surface', ['--surface', surfaceId, '--before', terminalSurfaceId])
+  // --workspace/--window here are documented CONTEXT on build 102 (the
+  // close-surface family) — the load-bearing reason this reorder can target
+  // a surface in a foreign window at all.
+  const reorderRes = cmux('reorder-surface', ['--surface', surfaceId, '--before', terminalSurfaceId, '--workspace', workspaceId, '--window', windowId])
   if (!reorderRes.ok) {
     abandonOrphan(surfaceId, paneId, rungLabel, `reorder-surface failed: ${reorderRes.error?.message}`)
     return null
@@ -1394,14 +1409,28 @@ function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel 
 
 /**
  * mountDocTab({ renderPath, paneId, terminalSurfaceId }) -> surfaceId | null
- * NEVER throws, NEVER focuses. Three-rung fallback chain, each rung
- * attempted only if the previous failed:
- *   r1 `markdown open <renderPath> --surface <terminalSurfaceId>`
- *   r2 `new-surface --type browser --url <pathToFileURL(renderPath).href> --pane <paneId> --focus false`,
+ * NEVER throws, NEVER focuses. Resolves the anchor's workspace/window once,
+ * up front, from a fresh tree, and names them explicitly on every rung
+ * instead of inheriting the caller's own focus. Three-rung fallback chain,
+ * each rung attempted only if the previous failed:
+ *   r1 `markdown open <renderPath> --surface <terminalSurfaceId> --workspace <ws> --window <win>`
+ *   r2 `new-surface --type browser --url <pathToFileURL(renderPath).href> --pane <paneId> --workspace <ws> --window <win> --focus false`,
  *      then a post-mount tree re-read verifies the surface actually landed
  *      in <paneId> before trusting success (file:// acceptance is
  *      live-unverified) — a verification failure falls through to rung 3.
- *   r3 `markdown open <renderPath>` (no --surface, left in its own pane)
+ *   r3 `markdown open <renderPath> --workspace <ws> --window <win>` (no
+ *      --surface, left in its own pane)
+ * Build 102, live help re-read 2026-08-12 (issue #88): the two flags do NOT
+ * mean the same thing on every verb. Rung 2's --window and both
+ * reorder-surface flags are documented CONTEXT (the close-surface family,
+ * PR #87) — the reason those two rungs resolve a foreign-window target at
+ * all. Rung 1/3's markdown-open flags are documented TARGETS: they place
+ * the viewer in the anchor's workspace/window, which on rung 3 IS the fix
+ * for the focused-surface default this issue was filed over — they must
+ * NOT be described as scoping --surface resolution. On build 102 markdown
+ * open has no documented context flag for its source surface, so rung 1
+ * remains the cross-window-unverified rung; rung 2 is the fix that is
+ * grammatically guaranteed.
  * An id-recovery ambiguity inside ANY rung (RungAbortError) aborts the
  * whole chain immediately rather than advancing — see that class's comment.
  * Failure of all three returns null and logs one loud line — a doc-tab
@@ -1410,18 +1439,21 @@ function attemptOpenRung(before, openFn, { paneId, terminalSurfaceId, rungLabel 
 export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
   try {
     const before = tree({ all: true })
-    if (!findSurface(before, terminalSurfaceId)) {
+    const anchor = locate(before, terminalSurfaceId)
+    if (!anchor?.surface) {
       // eslint-disable-next-line no-console
       console.error(`mountDocTab: terminal surface ${terminalSurfaceId} is gone from the fresh tree — no-op`)
       return null
     }
+    const workspaceId = anchor.workspace.id
+    const windowId = anchor.window.id
 
     let rung1
     try {
       rung1 = attemptOpenRung(
         before,
-        () => cmux('markdown', ['open', renderPath, '--surface', terminalSurfaceId]),
-        { paneId, terminalSurfaceId, rungLabel: 'rung 1 (markdown open --surface)' },
+        () => cmux('markdown', ['open', renderPath, '--surface', terminalSurfaceId, '--workspace', workspaceId, '--window', windowId]),
+        { paneId, terminalSurfaceId, rungLabel: 'rung 1 (markdown open --surface; build-102 source-surface resolution has no context flag — suspect cross-window)', workspaceId, windowId },
       )
     } catch (err) {
       if (err instanceof RungAbortError) return null
@@ -1431,7 +1463,9 @@ export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
 
     // Rung 2 (browser file://) is the one live-unverified rung — logged
     // loudly on every use so a live acceptance run surfaces it regardless
-    // of eventual success.
+    // of eventual success. --window is the load-bearing context flag here;
+    // --workspace is the belt — redundant with --pane, but it displaces the
+    // $CMUX_WORKSPACE_ID default, which is the orchestrator's workspace.
     // eslint-disable-next-line no-console
     console.error('mountDocTab: attempting rung 2 (new-surface browser file://) — file:// acceptance is live-unverified')
     const beforeR2 = tree({ all: true })
@@ -1440,8 +1474,8 @@ export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
     try {
       rung2 = attemptOpenRung(
         beforeR2,
-        () => cmux('new-surface', ['--type', 'browser', '--url', fileUrl, '--pane', paneId, '--focus', 'false']),
-        { paneId, terminalSurfaceId, rungLabel: 'rung 2 (new-surface browser)' },
+        () => cmux('new-surface', ['--type', 'browser', '--url', fileUrl, '--pane', paneId, '--workspace', workspaceId, '--window', windowId, '--focus', 'false']),
+        { paneId, terminalSurfaceId, rungLabel: 'rung 2 (new-surface browser)', workspaceId, windowId },
       )
     } catch (err) {
       if (err instanceof RungAbortError) return null
@@ -1460,7 +1494,7 @@ export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
     }
 
     const beforeR3 = tree({ all: true })
-    const openRes = cmux('markdown', ['open', renderPath])
+    const openRes = cmux('markdown', ['open', renderPath, '--workspace', workspaceId, '--window', windowId])
     if (!openRes.ok) {
       // eslint-disable-next-line no-console
       console.error(`mountDocTab: rung 3 (markdown open, no --surface) failed — all three rungs exhausted: ${openRes.error?.message}`)
@@ -1476,7 +1510,7 @@ export function mountDocTab({ renderPath, paneId, terminalSurfaceId } = {}) {
       return null
     }
     // eslint-disable-next-line no-console
-    console.error('mountDocTab: rung 3 (markdown open, no --surface) succeeded — doc tab left in its own pane, not moved or reordered')
+    console.error('mountDocTab: rung 3 (markdown open, no --surface) succeeded — doc tab left in its own pane in the task workspace, not moved or reordered')
     return surfaceId
   } catch (err) {
     // eslint-disable-next-line no-console

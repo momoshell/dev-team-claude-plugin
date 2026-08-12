@@ -1,5 +1,17 @@
 {
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Agent",
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 10,
+            "command": "if [ -n \"${DEVTEAM_WORKER:-}\" ]; then exit 0; fi; command -v node >/dev/null 2>&1 || { d=\"$HOME/.dev-team/guard\"; mkdir -p \"$d\" 2>/dev/null; printf '{\"ts\":\"%s\",\"decision\":\"allow\",\"reason_code\":\"node_unresolved\"}\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\" >> \"$d/dispatch-guard.jsonl\" 2>/dev/null; printf '%s\\n' '{\"systemMessage\":\"dev-team: node was not found on PATH — the dispatch guard did not run, so substrate discipline is unenforced for this call.\"}'; exit 0; }; exec node \"${CLAUDE_PLUGIN_ROOT}/hooks/dispatch-guard.mjs\""
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [

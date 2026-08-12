@@ -91,6 +91,37 @@ export function assertSafeLine(line) {
   }
 }
 
+// --- assignment composition ----------------------------------------------------
+// The assignment LINE is typed into a live shell, so it must stay inside
+// SAFE_LINE_RE; rich content travels in a brief FILE and the line only points at
+// it. Each field is checked as a WHOLE value here because assertSafeLine walks
+// space-split tokens and skips any token without a '/': a relative brief path
+// ('brief.md') or a path split in half by an embedded space would pass it unseen.
+const SAFE_TOKEN_RE = /^[A-Za-z0-9._-]+$/
+
+function assertToken(name, value) {
+  if (typeof value !== 'string' || !SAFE_TOKEN_RE.test(value)) {
+    throw new Error(`assignmentLine: ${name} must be a single safe token: ${value}`)
+  }
+}
+
+function assertPathValue(name, value) {
+  if (typeof value !== 'string' || !SAFE_PATH_RE.test(value)) {
+    throw new Error(`assignmentLine: ${name} must be an absolute charset-clean path: ${value}`)
+  }
+}
+
+export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
+  assertToken('id', id)
+  assertToken('role', role)
+  assertPathValue('briefFile', briefFile)
+  assertPathValue('taskDir', taskDir)
+  assertPathValue('returnPath', returnPath)
+  const line = `ASSIGNMENT ${id}: read your brief at ${briefFile}. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}`
+  assertSafeLine(line)
+  return line
+}
+
 function frameNeedleCount(surfaceId, needle) {
   const res = cmux('read-screen', ['--surface', surfaceId, '--lines', '40'])
   if (!res.ok) return null

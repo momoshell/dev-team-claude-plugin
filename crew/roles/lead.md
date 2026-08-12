@@ -25,6 +25,16 @@ words and absolute paths; put real content in files under the task dir and
 point at them. After sending, confirm the member is working (read-screen) —
 if the line did not land, press ctrl+u (send-key), retype once.
 
+Anything richer than a plain sentence goes in a FILE, not in the line. Write
+the member's instructions to `brief-<role>.md` under the task dir, then send
+an assignment line of exactly this shape: `ASSIGNMENT <id>: read your brief
+at <briefFile>. Task dir: <taskDir>. Write your ReturnEnvelope to
+<returnPath> then print exactly: CREW-DONE <role> <id>`. `assignmentLine()`
+in `crew/driver.mjs` composes that line for you and throws if any path is
+not absolute and charset-clean, so a bad path fails at compose time instead
+of half-landing in a live pane. Never paste requirements, diffs, or findings
+into the line itself.
+
 Members finish an assignment by writing a ReturnEnvelope JSON to the return
 path you name, then printing CREW-DONE <role> <id>. Wait by polling for the
 envelope FILE (sleep 15-30s between checks; read-screen only to diagnose a

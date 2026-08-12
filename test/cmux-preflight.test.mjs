@@ -939,10 +939,10 @@ test('mountDocTab mounts a doc tab, recovers its id via diff (never from stdout 
   const invocations = readLog(logPath)
   assert.equal(invocations.some((e) => e.argv[0] === 'focus-pane'), false)
   const markdownCall = invocations.find((e) => e.argv[0] === 'markdown')
-  assert.deepEqual(markdownCall.argv, ['markdown', 'open', '/tmp/render.md', '--surface', ORCH_SURFACE])
+  assert.deepEqual(markdownCall.argv, ['markdown', 'open', '/tmp/render.md', '--surface', ORCH_SURFACE, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW])
   const reorderCall = invocations.find((e) => e.argv[0] === 'reorder-surface')
   assert.ok(reorderCall, 'reorder-surface must be invoked')
-  assert.deepEqual(reorderCall.argv, ['reorder-surface', '--surface', surfaceId, '--before', ORCH_SURFACE])
+  assert.deepEqual(reorderCall.argv, ['reorder-surface', '--surface', surfaceId, '--before', ORCH_SURFACE, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW])
 })
 
 // qa should-fix: the move-surface branch (the one place --focus false
@@ -960,9 +960,13 @@ test('mountDocTab: the created surface landing in a FOREIGN pane triggers move-s
   const invocations = readLog(logPath)
   const moveCall = invocations.find((e) => e.argv[0] === 'move-surface')
   assert.ok(moveCall, 'expected move-surface — the new surface landed in ORCH_PANE, not the requested foreign pane')
+  // move-surface stays byte-identical — its --workspace/--window are
+  // documented TARGETS (build 102, confirmed live twice), and --pane already
+  // names the destination; naming them too would specify two potentially
+  // conflicting destinations. Do not "complete the sweep" by adding them.
   assert.deepEqual(moveCall.argv, ['move-surface', '--surface', surfaceId, '--pane', foreignPaneId, '--focus', 'false'])
   const reorderCall = invocations.find((e) => e.argv[0] === 'reorder-surface')
-  assert.deepEqual(reorderCall.argv, ['reorder-surface', '--surface', surfaceId, '--before', ORCH_SURFACE])
+  assert.deepEqual(reorderCall.argv, ['reorder-surface', '--surface', surfaceId, '--before', ORCH_SURFACE, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW])
   // move-surface strictly precedes reorder-surface.
   assert.ok(invocations.indexOf(moveCall) < invocations.indexOf(reorderCall))
 })
@@ -983,7 +987,7 @@ test('mountDocTab falls through to rung 2 (new-surface) when rung 1 (markdown op
   const invocations = readLog(logPath)
   const newSurfaceCall = invocations.find((e) => e.argv[0] === 'new-surface')
   assert.ok(newSurfaceCall, 'new-surface must be invoked as rung 2')
-  assert.deepEqual(newSurfaceCall.argv, ['new-surface', '--type', 'browser', '--url', 'file:///tmp/x.md', '--pane', ORCH_PANE, '--focus', 'false'])
+  assert.deepEqual(newSurfaceCall.argv, ['new-surface', '--type', 'browser', '--url', 'file:///tmp/x.md', '--pane', ORCH_PANE, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW, '--focus', 'false'])
   assert.equal(invocations.some((e) => e.argv[0] === 'focus-pane'), false)
 })
 
@@ -1000,6 +1004,97 @@ test('mountDocTab returns null loudly when the terminal surface is already gone,
   freshEnv('mount-doc-tab-gone')
   const result = mountDocTab({ renderPath: '/tmp/x.md', paneId: 'irrelevant', terminalSurfaceId: 'ffffffff-ffff-ffff-ffff-ffffffffffff' })
   assert.equal(result, null)
+})
+
+// issue #88 (C.2): the dispatch suite already runs cross-window
+// (setUpWorkspace -> ensureTeamWindow mints a fresh window per
+// cmux-dispatch.test.mjs), so mountDocTab must resolve its anchor's OWN
+// workspace/window rather than inheriting the caller's (orchestrator's) —
+// build the team seat the same way test 'createPane recovers...' above does.
+test('mountDocTab CROSS-WINDOW: rung 1 + reorder carry the team workspace/window, never ORCH_WORKSPACE/ORCH_WINDOW', () => {
+  const { dir, logPath } = freshEnv('mount-doc-tab-cross-window')
+  const pf = runPreflight(dir)
+  const windowId = ensureTeamWindow(pf)
+  const { workspaceId } = ensureWorkspace({ windowId, taskSlug: 'be-2a', cwd: '/tmp/repo' })
+  const { paneId, surfaceId: terminalSurfaceId } = createPane({ workspaceId })
+
+  const surfaceId = mountDocTab({ renderPath: '/tmp/cross.md', paneId, terminalSurfaceId })
+  assert.match(surfaceId, /^[0-9a-f-]+$/)
+
+  const invocations = readLog(logPath)
+  const markdownCall = invocations.find((e) => e.argv[0] === 'markdown')
+  const reorderCall = invocations.find((e) => e.argv[0] === 'reorder-surface')
+  assert.deepEqual(markdownCall.argv.slice(-4), ['--workspace', workspaceId, '--window', windowId])
+  assert.deepEqual(reorderCall.argv.slice(-4), ['--workspace', workspaceId, '--window', windowId])
+  assert.notEqual(workspaceId, ORCH_WORKSPACE)
+  assert.notEqual(windowId, ORCH_WINDOW)
+  assert.equal(markdownCall.argv.includes(ORCH_WORKSPACE), false)
+  assert.equal(markdownCall.argv.includes(ORCH_WINDOW), false)
+
+  const t = tree({ all: true })
+  const teamPane = t.windows.flatMap((w) => w.workspaces || []).flatMap((ws) => ws.panes || []).find((p) => p.id.toLowerCase() === paneId.toLowerCase())
+  assert.ok(teamPane, 'expected the team pane to still exist in a fresh tree')
+  assert.ok(teamPane.surfaces.some((s) => s.id.toLowerCase() === surfaceId.toLowerCase()), 'expected the new surface inside the team pane')
+})
+
+// issue #88 (C.3): rung 3 must target the intended (team) workspace, not
+// whichever surface happens to be focused. FAKE_CMUX_FAIL=reorder-surface is
+// the established way (see 'FAKE_CMUX_FAIL=reorder-surface' below) to drive
+// rungs 1+2 to create-then-fail-to-place while rung 3 still succeeds — this
+// is the behavioural proof that replaces the deleted AC-#5 grep (B2).
+test('mountDocTab CROSS-WINDOW rung 3: targets the intended team workspace, not the focused one', () => {
+  const { dir, logPath } = freshEnv('mount-doc-tab-cross-window-rung3')
+  const pf = runPreflight(dir)
+  const windowId = ensureTeamWindow(pf)
+  const { workspaceId } = ensureWorkspace({ windowId, taskSlug: 'be-2b', cwd: '/tmp/repo' })
+  const { paneId, surfaceId: terminalSurfaceId } = createPane({ workspaceId })
+
+  process.env.FAKE_CMUX_FAIL = 'reorder-surface'
+  const surfaceId = mountDocTab({ renderPath: '/tmp/cross-rung3.md', paneId, terminalSurfaceId })
+  assert.match(surfaceId, /^[0-9a-f-]+$/)
+
+  const invocations = readLog(logPath)
+  const rung3Entry = invocations.find((e) => e.argv[0] === 'markdown' && !e.argv.includes('--surface'))
+  assert.ok(rung3Entry, 'expected rung 3 (markdown open, no --surface) to fire')
+  assert.deepEqual(rung3Entry.argv.slice(-4), ['--workspace', workspaceId, '--window', windowId])
+
+  const t = tree({ all: true })
+  const containingWorkspace = findWorkspace(t, surfaceId)
+  assert.ok(containingWorkspace, 'expected the recovered rung-3 surface to resolve to a workspace in a fresh tree')
+  assert.equal(containingWorkspace.id.toLowerCase(), workspaceId.toLowerCase())
+  assert.notEqual(containingWorkspace.id.toLowerCase(), ORCH_WORKSPACE.toLowerCase())
+})
+
+// issue #88 (C.4): fixture-strictness mutation-killer — without this, §B's
+// requireContext strictness is unproven. Every context-less legacy form must
+// be rejected.
+test('fake-cmux fixture: markdown open / new-surface / reorder-surface all reject the context-less legacy form', () => {
+  freshEnv('fixture-strictness-mutation-killer')
+  assert.equal(cmux('markdown', ['open', '/tmp/x.md', '--surface', ORCH_SURFACE]).ok, false)
+  assert.equal(cmux('new-surface', ['--type', 'browser', '--url', 'file:///tmp/x.md', '--pane', ORCH_PANE, '--focus', 'false']).ok, false)
+  assert.equal(cmux('reorder-surface', ['--surface', ORCH_SURFACE, '--before', ORCH_SURFACE]).ok, false)
+})
+
+// review.md S1 (should-fix): the PRESENCE half of §B's strictness is proven
+// above (C.4) — a MISSING --workspace/--window is rejected. This is the
+// CONTAINMENT half: a well-formed, mutually-consistent --workspace/--window
+// pair that simply does NOT contain the target surface/pane must also be
+// rejected. Deleting any one of the three inWorkspace(...) guards in
+// fake-cmux.mjs left the whole 507-test lane green (reviewer's mutation D) —
+// this test fails if any one of them is removed.
+test('fake-cmux fixture: markdown open / new-surface / reorder-surface all reject a well-formed-but-WRONG context (real --workspace/--window that does not contain the target)', () => {
+  const { dir } = freshEnv('fixture-containment-mutation-killer')
+  const pf = runPreflight(dir)
+  const windowId = ensureTeamWindow(pf)
+  const { workspaceId } = ensureWorkspace({ windowId, taskSlug: 'be-2d', cwd: '/tmp/repo' })
+  const { paneId: teamPaneId, surfaceId: teamSurfaceId } = createPane({ workspaceId })
+
+  // ORCH_WORKSPACE/ORCH_WINDOW are a real, mutually-consistent pair — just
+  // not the one that actually contains the team pane/surface used as the
+  // target, which is precisely build 102's captured #88 symptom.
+  assert.equal(cmux('markdown', ['open', '/tmp/x.md', '--surface', teamSurfaceId, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW]).ok, false)
+  assert.equal(cmux('new-surface', ['--type', 'browser', '--url', 'file:///tmp/x.md', '--pane', teamPaneId, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW, '--focus', 'false']).ok, false)
+  assert.equal(cmux('reorder-surface', ['--surface', teamSurfaceId, '--before', teamSurfaceId, '--workspace', ORCH_WORKSPACE, '--window', ORCH_WINDOW]).ok, false)
 })
 
 // MUTATION-KILLER (qa-lead gate audit): mountDocTab's own header comment
@@ -1199,8 +1294,28 @@ test('reorderDocTabFirst: issues reorder-surface --before and never focuses; ret
   assert.equal(ok, true)
   const invocations = readLog(logPath)
   const reorderCalls = invocations.filter((e) => e.argv[0] === 'reorder-surface')
-  assert.ok(reorderCalls.some((c) => c.argv[1] === '--surface' && c.argv[2] === surfaceId && c.argv[3] === '--before' && c.argv[4] === ORCH_SURFACE))
+  assert.ok(reorderCalls.some((c) => c.argv[1] === '--surface' && c.argv[2] === surfaceId && c.argv[3] === '--before' && c.argv[4] === ORCH_SURFACE
+    && c.argv[5] === '--workspace' && c.argv[6] === ORCH_WORKSPACE && c.argv[7] === '--window' && c.argv[8] === ORCH_WINDOW))
   assert.equal(invocations.some((e) => e.argv[0] === 'focus-pane'), false)
+})
+
+// issue #88 (C.5): reorderDocTabFirst must carry the PANE's own workspace/
+// window context (resolved via locate on the pane id, cross-window), never
+// the caller's.
+test('reorderDocTabFirst CROSS-WINDOW: carries the pane\'s own team workspace/window, never ORCH_WORKSPACE/ORCH_WINDOW', () => {
+  const { dir, logPath } = freshEnv('reorder-doc-tab-first-cross-window')
+  const pf = runPreflight(dir)
+  const windowId = ensureTeamWindow(pf)
+  const { workspaceId } = ensureWorkspace({ windowId, taskSlug: 'be-2c', cwd: '/tmp/repo' })
+  const { paneId, surfaceId: terminalSurfaceId } = createPane({ workspaceId })
+  mountDocTab({ renderPath: '/tmp/cross-reorder.md', paneId, terminalSurfaceId })
+
+  const ok = reorderDocTabFirst({ paneId, terminalSurfaceId })
+  assert.equal(ok, true)
+  const invocations = readLog(logPath)
+  const reorderCalls = invocations.filter((e) => e.argv[0] === 'reorder-surface')
+  const last = reorderCalls[reorderCalls.length - 1]
+  assert.deepEqual(last.argv.slice(-4), ['--workspace', workspaceId, '--window', windowId])
 })
 
 // ---------------------------------------------------------------------------

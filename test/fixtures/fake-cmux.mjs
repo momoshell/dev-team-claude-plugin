@@ -194,6 +194,35 @@ function findWindow(state, id) {
   return (state.windows || []).find((w) => w.id.toLowerCase() === needle) || null
 }
 
+// Build 102, live help re-read 2026-08-12 (issue #88). The two flags do NOT
+// mean the same thing on every verb, and this fixture is stricter than live on
+// both counts, for two DIFFERENT reasons:
+//   - new-surface (--window) and reorder-surface (both flags) are documented
+//     CONTEXT — the close-surface family (PR #87). Requiring them models
+//     build-102's caller-scoped resolution, so dropping one fails tests instead
+//     of resolving against the operator's own window.
+//   - markdown open's flags are documented TARGETS. Requiring them asserts the
+//     caller NAMES its target workspace/window rather than inheriting the
+//     focused surface — the rung-3 stray this issue is about. It is NOT
+//     evidence that they scope --surface resolution; nothing on build 102 does.
+function requireContext(state, label) {
+  const workspaceId = argAfter('--workspace')
+  if (!workspaceId) fail('bad_args', `fake-cmux: ${label} requires --workspace (build-102: cmuxctl must name its target/context workspace, never inherit focus)`)
+  const windowId = argAfter('--window')
+  if (!windowId) fail('bad_args', `fake-cmux: ${label} requires --window (build-102: cmuxctl must name the containing window)`)
+  const win = findWindow(state, windowId)
+  if (!win) fail('not_found', 'Window not found')
+  const entry = findWorkspaceEntry(state, workspaceId)
+  if (!entry || entry.window.id.toLowerCase() !== win.id.toLowerCase()) fail('not_found', 'Workspace not found')
+  return { win, workspace: entry.workspace }
+}
+
+function inWorkspace(workspace, id) {           // pane OR surface containment
+  const needle = (id || '').toLowerCase()
+  return (workspace.panes || []).some((p) => p.id.toLowerCase() === needle
+    || (p.surfaces || []).some((s) => s.id.toLowerCase() === needle))
+}
+
 // The FROZEN live `capabilities --json` method list (cmux 0.64.20, captured
 // 2026-08-02 — see live-capabilities.json in the 1b fix-plan package), NOT a
 // copy of cmuxctl.mjs's VERBS. Live methods are RPC-style dotted names
@@ -409,7 +438,9 @@ switch (verb) {
     const renderPath = argv[2]
     const fromSurface = argAfter('--surface')
     const state = loadState()
+    const { workspace } = requireContext(state, 'markdown open')
     if (fromSurface) {
+      if (!inWorkspace(workspace, fromSurface)) fail('not_found', 'Source surface not found')
       const found = findSurfaceEntry(state, fromSurface)
       if (!found) fail('not_found', 'Surface not found')
       const newSurf = nextId(state)
@@ -432,14 +463,15 @@ switch (verb) {
       // be-06-01 S7(b): `markdown open` WITHOUT --surface matches live cmux
       // (tasks/cmux-mode/spike-findings.md:228) — it creates its own new
       // pane + markdown surface rather than failing not_found. This is what
-      // mountDocTab's rung 3 depends on.
-      const win = state.windows[0]
-      const ws = win.workspaces[0]
+      // mountDocTab's rung 3 depends on. The target workspace is now
+      // EXPLICIT (requireContext above) — this used to hardcode the first
+      // window's first workspace, which was the fixture's own model of the
+      // bug this issue is about.
       const paneId = nextId(state)
       const surfId = nextId(state)
-      ws.panes.push({
+      workspace.panes.push({
         id: paneId,
-        workspace_id: ws.id,
+        workspace_id: workspace.id,
         surface_ids: [surfId],
         selected_surface_id: surfId,
         surfaces: [{ id: surfId, pane_id: paneId, type: 'markdown', tty: null, title: renderPath }],
@@ -462,20 +494,21 @@ switch (verb) {
     const type = argAfter('--type') || 'browser'
     const targetPaneId = argAfter('--pane')
     const state = loadState()
+    const { workspace } = requireContext(state, 'new-surface')
     const newSurf = nextId(state)
     if (targetPaneId) {
+      if (!inWorkspace(workspace, targetPaneId)) fail('not_found', 'Pane not found')
       const targetPane = findPane(state, targetPaneId)
       if (!targetPane) fail('not_found', 'Target pane not found')
       targetPane.surfaces.push({ id: newSurf, pane_id: targetPane.id, type, tty: null, title: argAfter('--url') || '' })
       targetPane.surface_ids.push(newSurf)
     } else {
-      const wsId = argAfter('--workspace')
-      const entry = findWorkspaceEntry(state, wsId)
-      if (!entry) fail('not_found', 'Workspace not found')
+      // Production never takes this branch — every mountDocTab rung-2 call
+      // passes --pane. Create the pane in the resolved workspace.
       const paneId = nextId(state)
-      entry.workspace.panes.push({
+      workspace.panes.push({
         id: paneId,
-        workspace_id: entry.workspace.id,
+        workspace_id: workspace.id,
         surface_ids: [newSurf],
         selected_surface_id: newSurf,
         surfaces: [{ id: newSurf, pane_id: paneId, type, tty: null, title: argAfter('--url') || '' }],
@@ -517,6 +550,8 @@ switch (verb) {
     // relocated by this hook, or a future test could accidentally observe
     // rung 1 "succeeding" with a silently-relocated surface.
     const stateForVerificationFailCheck = loadState()
+    const { workspace } = requireContext(stateForVerificationFailCheck, 'reorder-surface')
+    if (!inWorkspace(workspace, argAfter('--surface') || argv[1])) fail('not_found', 'Surface not found')
     if (stateForVerificationFailCheck._simulateBrowserSurfaceRelocateOnReorder) {
       const surfaceId = argAfter('--surface') || argv[1]
       const found = findSurfaceEntry(stateForVerificationFailCheck, surfaceId)

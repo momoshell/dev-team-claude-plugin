@@ -15,7 +15,7 @@ export const EXECUTION_MODES = Object.freeze(['agent-tool', 'cmux'])
 export const EXECUTION_MODE_ALIASES = Object.freeze({ subagent: 'agent-tool' })
 export const DEFAULT_EXECUTION_MODE = 'agent-tool'
 
-// note for assertExecutionModeCmux (below): because 'subagent' normalizes to
+// note for assertExecutionModeCmux (scripts/cmux/dispatch.mjs): because 'subagent' normalizes to
 // 'agent-tool' here, a config saying `execution_mode: subagent` now produces
 // a gate refusal naming "agent-tool" — intended, since the mode IS
 // agent-tool and subagent is only a spelling of it.

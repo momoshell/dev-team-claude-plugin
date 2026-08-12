@@ -86,38 +86,49 @@ export function costOfUsage(usage, price) {
   )
 }
 
-// costSince intentionally does NOT de-duplicate by message.id, even though
-// a single assistant message is written as multiple JSONL lines (one per
-// content block, each with an evolving `usage.output_tokens`) — see
-// scripts/task-cost-log.mjs's header for the confirmed shape. That means
-// this statusline figure over-counts relative to the true billed cost.
-// This is a pre-existing, user-visible, and already-flagged divergence
-// (see GitHub issue #56) — NOT something to silently "fix" here; doing so
-// would change a user-visible number outside this task's scope. The
-// `entry.isSidechain !== false` filter below is similarly left exactly as
-// shipped: it scopes this readout to Claude Code's own built-in `$` figure
-// (main window only) and is a no-op in practice today, since nothing in a
-// main transcript is ever isSidechain:true.
+// costSince de-duplicates by message.id before pricing: Claude Code writes
+// one assistant message as multiple JSONL lines (one per content block,
+// each repeating the same message.id, with `usage.output_tokens` EVOLVING
+// across the lines as the stream progresses) — see
+// scripts/task-cost-log.mjs's header for the confirmed shape, and its
+// collectEntries for the shape this mirrors (not imported — that file
+// imports FROM this one). A single Map keyed by message.id, LAST occurrence
+// in file order wins (the final, complete usage), is built in one pass;
+// entries lacking a message.id key on `${transcriptPath}#${lineIndex}` so
+// they stay distinct rather than collapsing. Pricing happens once per
+// surviving message, after dedup. This closes #56: the un-deduped sum used
+// to over-count relative to the true billed cost. The
+// `entry.isSidechain !== false` filter below is left exactly as shipped: it
+// scopes this readout to Claude Code's own built-in `$` figure (main window
+// only) and is a no-op in practice today, since nothing in a main
+// transcript is ever isSidechain:true.
 export function costSince(transcriptPath, sinceISO) {
   if (!existsSync(transcriptPath)) return null
-  let total = 0
+  const messages = new Map()
   const lines = readFileSync(transcriptPath, 'utf8').split('\n')
-  for (const line of lines) {
-    if (!line) continue
+  lines.forEach((line, i) => {
+    if (!line) return
     let entry
     try {
       entry = JSON.parse(line)
     } catch {
-      continue
+      return
     }
-    if (entry.type !== 'assistant' || entry.isSidechain !== false) continue
-    if (sinceISO && (typeof entry.timestamp !== 'string' || entry.timestamp < sinceISO)) continue
+    if (entry.type !== 'assistant' || entry.isSidechain !== false) return
+    if (sinceISO && (typeof entry.timestamp !== 'string' || entry.timestamp < sinceISO)) return
     const usage = entry.message?.usage
     const model = entry.message?.model
-    if (!usage || !model) continue
-    const price = priceFor(model, entry.timestamp || '')
+    if (!usage || !model) return
+    const id = entry.message?.id
+    const key = typeof id === 'string' && id ? id : `${transcriptPath}#${i}`
+    messages.set(key, { model, usage, timestamp: entry.timestamp || '' })
+  })
+
+  let total = 0
+  for (const entry of messages.values()) {
+    const price = priceFor(entry.model, entry.timestamp)
     if (!price) continue
-    total += costOfUsage(usage, price) / 1_000_000
+    total += costOfUsage(entry.usage, price) / 1_000_000
   }
   return total
 }

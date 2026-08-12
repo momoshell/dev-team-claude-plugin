@@ -600,15 +600,29 @@ test('contract.mjs exports exactly the 3 functions + 17 constants of the frozen 
 // `mode cmux|agent-tool` and `roster <role>=<agent>:<model>` verbs plus
 // ship.md's teardown step and onboard.md's cmux check / config keys / roster
 // seeding.
-// What survives is the part of A9 that still means something after #7:
+// Narrowed again by be-78-02: hooks/hooks.json REGISTERS a PreToolUse hook
+// (matcher "Agent") that invokes hooks/dispatch-guard.mjs — that guard reads
+// cmux mode and the merged roster to enforce substrate discipline. The
+// invariant below is now narrower than its original wording: hooks.json's
+// OWN text stays substrate-neutral (no "cmux"/"roster" word, no scripts/
+// path segment — see the two structural pins below), while the SCRIPT it
+// invokes is governed separately (dispatch-guard.mjs is exempted from the
+// word scan here; its own behavior is pinned by test/dispatch-guard.test.mjs).
+// What survives is the part of A9 that still means something after #7/be-78-02:
 //   - team-build.workflow.mjs never learns about cmux — workflow mode stays on
 //     the Workflow tool's agent() primitive (1d carve-out).
-//   - hooks/hooks.json never learns about cmux — the worker guard keys on a
-//     neutral env var (DEVTEAM_WORKER), never on cmux/roster knowledge.
+//   - hooks/hooks.json's own text never learns about cmux — the SessionStart
+//     worker guard keys on a neutral env var (DEVTEAM_WORKER); the new
+//     PreToolUse entry names only "Agent", "node" and a plugin-relative
+//     hooks/ path, never the words cmux/roster and never a scripts/ path.
 //   - every command other than team.md/ship.md/onboard.md stays
 //     substrate-agnostic. A NEW command is substrate-agnostic by default: it
 //     must be added to GUARDED_COMMANDS deliberately, which is what the
 //     closed-manifest assertion below forces.
+//   - every hooks/*.mjs script other than dispatch-guard.mjs stays
+//     substrate-agnostic by default: a NEW hook script must be added to
+//     HOOK_SCRIPT_EXEMPTIONS deliberately, which is what the closed-manifest
+//     assertion below forces (mirrors the commands/ pattern one-for-one).
 // ---------------------------------------------------------------------------
 
 const CMUX_WIRED_SURFACES = new Set([
@@ -618,6 +632,8 @@ const CMUX_WIRED_SURFACES = new Set([
   join('commands', 'onboard.md'),
 ])
 const GUARDED_COMMANDS = ['next.md', 'pr-review.md']
+const HOOK_SCRIPT_EXEMPTIONS = ['dispatch-guard.mjs']
+const GUARDED_HOOK_SCRIPTS = []
 
 test('cmux/roster stay absent from the substrate-agnostic surfaces', () => {
   // The exemptions must still exist under those exact names — a rename must
@@ -633,14 +649,34 @@ test('cmux/roster stay absent from the substrate-agnostic surfaces', () => {
   // empty or mis-globbed list would satisfy every assertion below.
   assert.deepEqual(guardedCommands, GUARDED_COMMANDS)
 
+  // Same closed-manifest shape, extended to hooks/: every hooks/*.mjs file
+  // not deliberately exempted must stay free of the two forbidden words. An
+  // empty-today manifest (nothing but the exempted dispatch-guard.mjs lives
+  // under hooks/ yet) is the point — the NEXT hook script is
+  // substrate-agnostic by default and must be exempted on purpose.
+  const guardedHookScripts = readdirSync(join(ROOT, 'hooks'))
+    .filter((f) => f.endsWith('.mjs') && !HOOK_SCRIPT_EXEMPTIONS.includes(f))
+    .sort()
+  assert.deepEqual(guardedHookScripts, GUARDED_HOOK_SCRIPTS)
+
   const files = [
     join(ROOT, 'team-build.workflow.mjs'),
     join(ROOT, 'hooks', 'hooks.json'),
     ...guardedCommands.map((f) => join(ROOT, 'commands', f)),
+    ...guardedHookScripts.map((f) => join(ROOT, 'hooks', f)),
   ]
   for (const f of files) {
     const src = readFileSync(f, 'utf8')
     assert.equal(/cmux/i.test(src), false, `${f} contains "cmux"`)
     assert.equal(/roster/i.test(src), false, `${f} contains "roster"`)
   }
+
+  // Structural pin (AC15.iv): hooks.json must never carry a scripts/ path
+  // segment — a future simplification that inlined a scripts/cmux/... path
+  // there would silently re-couple the substrate-neutral registration file
+  // to the substrate, defeating the word scan above (a path segment is not
+  // a "word").
+  const hooksJsonSrc = readFileSync(join(ROOT, 'hooks', 'hooks.json'), 'utf8')
+  const scriptsPathNeedle = ['scripts', '/'].join('')
+  assert.equal(hooksJsonSrc.includes(scriptsPathNeedle), false, 'hooks.json must not contain a scripts/ path segment')
 })

@@ -33,10 +33,20 @@ Write `plan.md` in the task dir with EXACTLY these sections:
 - **Risks/consults** — anything you are <90% sure of. If a tech-lead pane
   exists, questions you want it to answer; else flag for the orchestrator.
 
-## Envelope details fields
+## Envelope details fields (the driver BRANCHES on these — all required)
 
-"details": { "plan_path": "<abs>", "consult_wanted": true|false,
+"details": { "plan_path": "<abs>",
+             "files_in_scope": ["<repo-relative path of every file the builder
+                                 may touch, tests and the version-bump file
+                                 included>", ...],
+             "validation_lane": "<the exact command the builder must run green>",
+             "consult_wanted": true|false,
              "consult_questions": ["..."] }
+
+files_in_scope is the scope GATE: the driver diffs the builder's changes
+against it with git and bounces anything outside. A missing or empty list
+escalates the whole task — the gate cannot be skipped. Paths repo-relative,
+exactly as `git status --porcelain` prints them.
 
 Keep the plan grounded in what IS (read first, plan second), match the repo's
 existing conventions, and prefer boring designs that a sonnet builder can

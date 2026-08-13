@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-// crew/crew.mjs — crew v2: a self-contained team runtime (zero legacy
-// dev-team imports). One cmux workspace per task, booted in a single
+// crew/crew.mjs — crew v3: a self-contained team runtime (zero legacy
+// dev-team imports). v3 inverts control: crew/drive.mjs (CODE) runs the
+// task loop; the LEAD pane is a judge consulted only at decision points. One cmux workspace per task, booted in a single
 // declarative call. A LEAD pane runs the task from inside the workspace —
 // it drives the planner/builder/reviewer/tech-lead members, runs the
 // validation lanes and the full suite, does the git scope check, and commits.
@@ -23,7 +24,10 @@ import { join, dirname, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { cmux, tree, locate, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
+import { execSync, spawnSync } from 'node:child_process'
+
+import { cmux, tree, locate, sendLine, renameTab, closeSurface, closeWorkspace, logLine, assignmentLine } from './driver.mjs'
+import { driveTask } from './drive.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROLES_DIR = join(HERE, 'roles')
@@ -153,7 +157,52 @@ function bootCmd(args) {
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
 
-// Hand the whole task to the LEAD (the only assignment the orchestrator makes).
+// v3: the deterministic driver runs the task loop (code disposes); the lead
+// pane is consulted only at decision points. This IS `run` now; the v2
+// agent-driven handoff survives as `handoff` for comparison runs.
+function realIo(crew, paths, checkout) {
+  let seq = 0
+  return {
+    assign({ role, briefFile }) {
+      const m = crew.members[role]
+      if (!m) throw new Error(`role ${role} not seated in this crew`)
+      seq += 1
+      const id = `d${seq}`
+      const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
+      sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
+      return { id, returnPath }
+    },
+    wait(returnPath, timeoutS) {
+      const deadline = Date.now() + timeoutS * 1000
+      while (Date.now() < deadline) {
+        if (existsSync(returnPath)) {
+          try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { /* partial write; retry */ }
+        }
+        const sab = new SharedArrayBuffer(4)
+        Atomics.wait(new Int32Array(sab), 0, 0, 5000)
+      }
+      return null
+    },
+    writeFile(path, content) { writeFileSync(path, content) },
+    readFile(path) { return existsSync(path) ? readFileSync(path, 'utf8') : null },
+    run(cmd) {
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000 })
+      return { ok: res.status === 0, output: `${res.stdout || ''}${res.stderr || ''}` }
+    },
+    changedFiles() {
+      const out = execSync('git status --porcelain', { cwd: checkout, encoding: 'utf8' })
+      return out.split('\n').filter(Boolean).map((l) => l.slice(3).trim()).filter(Boolean)
+    },
+    commit(files, message) {
+      execSync(`git add -- ${files.map((f) => `'${f}'`).join(' ')}`, { cwd: checkout })
+      execSync('git commit -q -F -', { cwd: checkout, input: message })
+      return execSync('git rev-parse --short HEAD', { cwd: checkout, encoding: 'utf8' }).trim()
+    },
+    log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },
+    now() { return Date.now() },
+  }
+}
+
 function runCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -162,10 +211,33 @@ function runCmd(args) {
   if (!args['brief-file']) throw new Error('run requires --brief-file <path to the task brief>')
   const briefFile = resolvePath(args['brief-file'])
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
+  if (!crew.members.lead) throw new Error('v3 run requires a lead seat (the decision judge)')
+
+  const ctx = {
+    task: taskSlug, briefFile, taskDir: paths.taskDir, checkout,
+    roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test',
+  }
+  const io = realIo(crew, paths, checkout)
+  const result = driveTask(ctx, io)
+  // The task envelope is written by CODE — same path `wait` watches.
+  writeFileSync(crew.lead_return, JSON.stringify(result, null, 2))
+  process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: crew.lead_return })}\n`)
+  if (result.status !== 'done') process.exitCode = 1
+}
+
+// v2 legacy: hand the whole task to the LEAD as the driver (agent-driven).
+function handoffCmd(args) {
+  const taskSlug = slug(args.task)
+  const checkout = resolvePath(args.checkout || process.cwd())
+  const paths = pathsFor(taskSlug, checkout)
+  const crew = loadCrew(paths)
+  if (!args['brief-file']) throw new Error('handoff requires --brief-file <path to the task brief>')
+  const briefFile = resolvePath(args['brief-file'])
+  if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
 
   const line = `TASK: run this task end to end. Read the brief at ${briefFile} and the crew map at ${join(paths.dir, 'crew.json')}. Drive the crew, verify, commit on green, then write your ReturnEnvelope to ${crew.lead_return} and print CREW-DONE lead task`
   sendLine(crew.members.lead.surface_id, line)
-  logLine(join(paths.dir, 'crew.log'), { at: new Date().toISOString(), event: 'run', brief: briefFile })
+  logLine(join(paths.dir, 'crew.log'), { at: new Date().toISOString(), event: 'handoff', brief: briefFile })
   process.stdout.write(`${JSON.stringify({ handed_to: 'lead', lead_return: crew.lead_return })}\n`)
 }
 
@@ -224,7 +296,7 @@ function parseArgs(argv) {
   return out
 }
 
-const COMMANDS = { boot: bootCmd, run: runCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }
+const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }
 const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)

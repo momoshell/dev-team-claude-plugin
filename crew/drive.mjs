@@ -211,6 +211,11 @@ export function driveTask(ctx, io) {
     }
   }
 
+  // Fired at most once per run: the plan viewer is a singleton. Today plan
+  // acceptance happens exactly once, so this is defensive — a future re-entry
+  // into acceptance must never mount a second pane.
+  let docShown = false
+
   // ---- 1. PLAN ----------------------------------------------------------------
   let planEnv = null
   let planBrief = ctx.briefFile
@@ -259,6 +264,14 @@ export function driveTask(ctx, io) {
   }
   if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds} rounds`)
 
+  const planPath = planEnv.details?.plan_path || art('plan.md')
+  // Put the plan of record on screen, once (io.showDoc is OPTIONAL — an io
+  // without it behaves exactly as before, stage sequence included). cmux's
+  // markdown viewer live-watches the file and the plan path is stable for the
+  // whole task, so ONE mount covers every later revision: there is deliberately
+  // no close-and-remount cycle here.
+  if (!docShown) { docShown = true; io.showDoc?.(planPath) }
+
   const scopeFiles = planEnv.details?.files_in_scope
   if (!Array.isArray(scopeFiles) || scopeFiles.length === 0) {
     return escalate('plan', 'planner envelope carries no files_in_scope — the scope gate cannot run without it', planEnv.artifacts || [])
@@ -299,7 +312,6 @@ export function driveTask(ctx, io) {
   }
 
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
-  const planPath = planEnv.details?.plan_path || art('plan.md')
   let buildBrief = planPath
   let buildNote = 'build'
   let builderEnv = null

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, assertCapabilities, resolveAdapters } from './crew.mjs'
+import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, assertCapabilities, resolveAdapters, docOpenArgs } from './crew.mjs'
 import { seatCommand, capabilities } from './adapters/adapter-claude.mjs'
 
 // cmux build-102 rejects layouts whose split nodes are not strictly binary
@@ -110,4 +110,9 @@ test('resolveAdapters rejects an unknown --agent-<role> naming the missing file,
   )
   const r = await resolveAdapters(['builder'], {})
   assert.equal(r.builder.name, 'claude')
+})
+
+test('the plan viewer mounts window-scoped and never steals focus', () => {
+  const args = docOpenArgs({ path: '/tmp/t/plan.md', workspaceId: 'ws-1', windowId: 'win-1' })
+  assert.deepEqual(args, ['open', '/tmp/t/plan.md', '--workspace', 'ws-1', '--window', 'win-1', '--direction', 'down', '--focus', 'false'])
 })

@@ -56,3 +56,28 @@ test('round-trip: composed line always passes assertSafeLine', () => {
 test('missing field throws', () => {
   assert.throws(() => assignmentLine({}), /assignmentLine: id/)
 })
+
+test('dot-only id and role throw', () => {
+  for (const bad of ['.', '..', '...']) {
+    assert.throws(() => assignmentLine({ ...GOOD, id: bad }), /assignmentLine: id/)
+    assert.throws(() => assignmentLine({ ...GOOD, role: bad }), /assignmentLine: role/)
+  }
+})
+
+test('the thrown message names the offending token', () => {
+  assert.throws(() => assignmentLine({ ...GOOD, id: '..' }), /assignmentLine: id .*: \.\.$/)
+  assert.throws(() => assignmentLine({ ...GOOD, role: '...' }), /assignmentLine: role .*: \.\.\.$/)
+})
+
+test('path separators in id and role throw', () => {
+  assert.throws(() => assignmentLine({ ...GOOD, id: '../x' }), /assignmentLine: id/)
+  assert.throws(() => assignmentLine({ ...GOOD, role: 'a/b' }), /assignmentLine: role/)
+  assert.throws(() => assignmentLine({ ...GOOD, id: 'a\\b' }), /assignmentLine: id/)
+})
+
+test('legitimate tokens still compose', () => {
+  for (const id of ['a1', 'd12', 'p1', 'v0.1.97']) {
+    assert.doesNotThrow(() => assignmentLine({ ...GOOD, id }))
+  }
+  assert.doesNotThrow(() => assignmentLine({ ...GOOD, id: 'tech-lead', role: 'tech-lead' }))
+})

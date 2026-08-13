@@ -98,9 +98,13 @@ export function assertSafeLine(line) {
 // space-split tokens and skips any token without a '/': a relative brief path
 // ('brief.md') or a path split in half by an embedded space would pass it unseen.
 const SAFE_TOKEN_RE = /^[A-Za-z0-9._-]+$/
+// Path separators are already outside SAFE_TOKEN_RE; dot-only tokens ('.', '..')
+// are not, and they are the ones that turn into traversal when a caller joins an
+// id or role into a filesystem path.
+const DOTS_ONLY_RE = /^\.+$/
 
 function assertToken(name, value) {
-  if (typeof value !== 'string' || !SAFE_TOKEN_RE.test(value)) {
+  if (typeof value !== 'string' || !SAFE_TOKEN_RE.test(value) || DOTS_ONLY_RE.test(value)) {
     throw new Error(`assignmentLine: ${name} must be a single safe token: ${value}`)
   }
 }

@@ -1,0 +1,52 @@
+>>> {"id":"prompt-1","type":"prompt","message":"Use bash to run sleep 25, then reply B10-SLOW-DONE."}
+STDERR Warning: No project session found with id '116b1000-0000-4000-8000-000000000010'; creating a new session with that id.
+
+{"id":"prompt-1","type":"response","command":"prompt","success":true}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Use bash to run sleep 25, then reply B10-SLOW-DONE."}],"timestamp":1786644679686}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Use bash to run sleep 25, then reply B10-SLOW-DONE."}],"timestamp":1786644679686}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1786644679690}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"{\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"command"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"\":\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"sleep"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":" "}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"25"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"\",\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"timeout"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"\":"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"30"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"}"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","contentIndex":0,"toolCall":{"type":"toolCall","id":"call_m1KqO2ci1KDeA0ZifNdjEeGx|fc_048039d44a750819016a7e08c9d15481919c5219b395ba52b8","name":"bash","arguments":{"command":"sleep 25","timeout":30}}}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_m1KqO2ci1KDeA0ZifNdjEeGx|fc_048039d44a750819016a7e08c9d15481919c5219b395ba52b8","name":"bash","arguments":{"command":"sleep 25","timeout":30}}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":760,"output":24,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":784,"cost":{"input":0.000152,"output":0.0000288,"cacheRead":0,"cacheWrite":0,"total":0.0001808}},"stopReason":"toolUse","timestamp":1786644679690,"responseId":"resp_048039d44a750819016a7e08c8ad408191ade7c78e6545aaed","rawStopReason":"completed"}}
+{"type":"tool_execution_start","toolCallId":"call_m1KqO2ci1KDeA0ZifNdjEeGx|fc_048039d44a750819016a7e08c9d15481919c5219b395ba52b8","toolName":"bash","args":{"command":"sleep 25","timeout":30}}
+{"type":"tool_execution_update","toolCallId":"call_m1KqO2ci1KDeA0ZifNdjEeGx|fc_048039d44a750819016a7e08c9d15481919c5219b395ba52b8","toolName":"bash","args":{"command":"sleep 25","timeout":30},"partialResult":{"content":[]}}
+### sending SIGKILL mid-turn
+<<< first_exit code=null signal=SIGKILL
+### session_file=/private/tmp/pi116-scratch-OW2sEF/sessions/2026-08-13T18-11-19-662Z_116b1000-0000-4000-8000-000000000010.jsonl
+### session_wc=5
+### session_last={"type":"message","id":"3d39e8f8","parentId":"63539e06","timestamp":"2026-08-13T18:11:22.180Z","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_m1KqO2ci1KDeA0ZifNdjEeGx|fc_048039d44a750819016a7e08c9d15481919c5219b395ba52b8","name":"bash","arguments":{"command":"sleep 25","timeout":30}}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":760,"output":24,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":784,"cost":{"input":0.000152,"output":0.0000288,"cacheRead":0,"cacheWrite":0,"total":0.0001808}},"stopReason":"toolUse","timestamp":1786644679690,"responseId":"resp_048039d44a750819016a7e08c8ad408191ade7c78e6545aaed","rawStopReason":"completed"}}
+>>> {"id":"resume-1","type":"prompt","message":"The previous process was killed. Reply B10-RESUMED-DONE."}
+{"id":"resume-1","type":"response","command":"prompt","success":true}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"The previous process was killed. Reply B10-RESUMED-DONE."}],"timestamp":1786644684402}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"The previous process was killed. Reply B10-RESUMED-DONE."}],"timestamp":1786644684402}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1786644684410}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"B"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"10"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"RES"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"UM"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ED"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-D"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ONE"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"B10-RESUMED-DONE"}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"B10-RESUMED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_048039d44a750819016a7e08ce022c8191b3616038297cc605\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":818,"output":12,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":830,"cost":{"input":0.00016360000000000002,"output":0.0000144,"cacheRead":0,"cacheWrite":0,"total":0.00017800000000000002}},"stopReason":"stop","timestamp":1786644684410,"responseId":"resp_048039d44a750819016a7e08cd6f248191b96df6a27ffddb00","rawStopReason":"completed"}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"B10-RESUMED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_048039d44a750819016a7e08ce022c8191b3616038297cc605\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":818,"output":12,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":830,"cost":{"input":0.00016360000000000002,"output":0.0000144,"cacheRead":0,"cacheWrite":0,"total":0.00017800000000000002}},"stopReason":"stop","timestamp":1786644684410,"responseId":"resp_048039d44a750819016a7e08cd6f248191b96df6a27ffddb00","rawStopReason":"completed"},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"The previous process was killed. Reply B10-RESUMED-DONE."}],"timestamp":1786644684402},{"role":"assistant","content":[{"type":"text","text":"B10-RESUMED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_048039d44a750819016a7e08ce022c8191b3616038297cc605\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":818,"output":12,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":830,"cost":{"input":0.00016360000000000002,"output":0.0000144,"cacheRead":0,"cacheWrite":0,"total":0.00017800000000000002}},"stopReason":"stop","timestamp":1786644684410,"responseId":"resp_048039d44a750819016a7e08cd6f248191b96df6a27ffddb00","rawStopReason":"completed"}],"willRetry":false}
+{"type":"agent_settled"}
+<<< second_exit code=0 signal=none

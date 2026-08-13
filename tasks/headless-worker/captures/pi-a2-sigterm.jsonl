@@ -1,0 +1,22 @@
+{"type":"session","version":3,"id":"019ffc4e-34db-73ad-a21c-1222cdea6d60","timestamp":"2026-08-13T18:06:51.611Z","cwd":"/private/tmp/pi116-scratch-OW2sEF/work"}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Use bash to run sleep 25, then reply A2-TERM-DONE."}],"timestamp":1786644411635}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Use bash to run sleep 25, then reply A2-TERM-DONE."}],"timestamp":1786644411635}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1786644411639}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"{\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"command"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"\":\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"sleep"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":" "}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"25"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"\",\""}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"timeout"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"\":"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"30"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_delta","contentIndex":0,"delta":"}"}}
+{"type":"message_update","assistantMessageEvent":{"type":"toolcall_end","contentIndex":0,"toolCall":{"type":"toolCall","id":"call_QPyQaLlN9QJXfXOpoytZNlNh|fc_0b89c1b9e3d6ec4a016a7e07bd233c8191b64ad5d874a3f5dc","name":"bash","arguments":{"command":"sleep 25","timeout":30}}}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"toolCall","id":"call_QPyQaLlN9QJXfXOpoytZNlNh|fc_0b89c1b9e3d6ec4a016a7e07bd233c8191b64ad5d874a3f5dc","name":"bash","arguments":{"command":"sleep 25","timeout":30}}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":763,"output":24,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":787,"cost":{"input":0.00015260000000000002,"output":0.0000288,"cacheRead":0,"cacheWrite":0,"total":0.00018140000000000002}},"stopReason":"toolUse","timestamp":1786644411639,"responseId":"resp_0b89c1b9e3d6ec4a016a7e07bc7a148191b85489930dceb2ef","rawStopReason":"completed"}}
+{"type":"tool_execution_start","toolCallId":"call_QPyQaLlN9QJXfXOpoytZNlNh|fc_0b89c1b9e3d6ec4a016a7e07bd233c8191b64ad5d874a3f5dc","toolName":"bash","args":{"command":"sleep 25","timeout":30}}
+{"type":"tool_execution_update","toolCallId":"call_QPyQaLlN9QJXfXOpoytZNlNh|fc_0b89c1b9e3d6ec4a016a7e07bd233c8191b64ad5d874a3f5dc","toolName":"bash","args":{"command":"sleep 25","timeout":30},"partialResult":{"content":[]}}

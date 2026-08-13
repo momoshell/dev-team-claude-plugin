@@ -12,9 +12,12 @@
 // behavior change, not a refactor.
 export const capabilities = Object.freeze({
   prompt_file: true, tool_deny: true, unattended: true, session_resume: true,
+  // claude --effort <low|medium|high|xhigh|max> (verified against the
+  // installed CLI 2026-08-13) — the roster's effort dimension is enforceable.
+  effort: true,
 })
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief }) {
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
   // quiet inside the pane (defensive; a no-op when the plugin is absent).
@@ -23,9 +26,12 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // under bypass; --allowedTools is only an auto-approve list and is inert
   // here) — beyond that, containment is the git scope gate, the feature-
   // branch blast radius, and the operator's global deny rules.
+  // effort is OPTIONAL: absent, the command stays byte-identical to the
+  // pre-effort adapter (the compatibility pin in crew.test.mjs holds).
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
+    ...(effort ? ['--effort', `"${effort}"`] : []),
     '--allowedTools', `"${tools}"`,
     '--disallowedTools', `"${deny}"`,
     '--append-system-prompt-file', `"${promptFile}"`,

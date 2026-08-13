@@ -122,7 +122,23 @@ const PI_SAMPLE = {
 // assertCapabilities gates seat boot on these exact keys — a lie here silently unlocks seats the adapter cannot actually enforce.
 test('the pi adapter declares honest, frozen capabilities', () => {
   assert.ok(Object.isFrozen(piCapabilities))
-  assert.deepEqual({ ...piCapabilities }, { prompt_file: true, tool_deny: true, unattended: true, session_resume: true })
+  assert.deepEqual({ ...piCapabilities }, { prompt_file: true, tool_deny: true, unattended: true, session_resume: true, effort: true })
+})
+
+// Effort is an OPTIONAL, separate dimension on both adapters: absent it must
+// change NOTHING (the claude byte-identity pin above already proves that
+// side), and present it maps to each agent's own flag — never the pi
+// ':<level>' model-string shorthand, which would entangle model id and
+// effort in one unauditable string.
+test('effort maps to claude --effort and pi --thinking; absent effort leaves both commands untouched', () => {
+  const withEffort = seatCommand({ ...PI_SAMPLE, effort: 'xhigh' })
+  assert.match(withEffort, /--effort "xhigh"/)
+  assert.doesNotMatch(seatCommand(PI_SAMPLE), /--effort/)
+
+  const piWith = piSeatCommand({ ...PI_SAMPLE, effort: 'high' })
+  assert.match(piWith, /--thinking high/)
+  assert.match(piWith, /--model google\/gemini-3-pro(\s|$)/, 'model id must stay untouched by effort')
+  assert.doesNotMatch(piSeatCommand(PI_SAMPLE), /--thinking/)
 })
 
 // A crew seat is a persistent pane: --print exits after the boot brief and --no-session drops the session, so their absence is load-bearing.

@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
-  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, BOOT_TRANSPORT, assertCapabilities, resolveAdapters, docOpenArgs,
+  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, assertCapabilities, resolveAdapters, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
 } from './crew.mjs'
@@ -134,8 +134,10 @@ test('unshipped capability pairs and absent transports throw naming adapter and 
   }
 })
 
-test('BOOT_TRANSPORT keeps boot on pane until #83 lands', () => {
-  assert.equal(BOOT_TRANSPORT, 'pane')
+test('transportFor selects headless-json only for explicitly named roles', () => {
+  assert.equal(transportFor('builder', { headless: 'builder' }), 'headless-json')
+  assert.equal(transportFor('lead', { headless: 'builder' }), 'pane')
+  assert.equal(transportFor('builder', {}), 'pane')
 })
 
 test('assertCapabilities rejects an adapter that cannot enforce tool denial, naming seat + adapter + capability', () => {
@@ -153,6 +155,22 @@ test('resolveAdapters rejects an unknown --agent-<role> naming the missing file,
   )
   const r = await resolveAdapters(['builder'], {})
   assert.equal(r.builder.name, 'claude')
+})
+
+test('resolveAdapters boots headless claude and refuses the unshipped pi pair', async () => {
+  const r = await resolveAdapters(['builder'], { headless: 'builder' })
+  assert.equal(r.builder.transport, 'headless-json')
+  await assert.rejects(() => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }), /adapter-pi.*headless-json/)
+})
+
+test('resolveWorkerBin prefers an explicit existing path over the environment', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-bin-'))
+  const explicit = join(dir, 'explicit'); const env = join(dir, 'env')
+  writeFileSync(explicit, ''); writeFileSync(env, '')
+  const old = process.env.CREW_CLAUDE_BIN
+  process.env.CREW_CLAUDE_BIN = env
+  try { assert.equal(resolveWorkerBin({ 'claude-bin': explicit }), explicit) }
+  finally { if (old === undefined) delete process.env.CREW_CLAUDE_BIN; else process.env.CREW_CLAUDE_BIN = old; rmSync(dir, { recursive: true, force: true }) }
 })
 
 const PI_SAMPLE = {

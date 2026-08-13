@@ -54,6 +54,33 @@ export function capabilitiesFor({ transport } = {}) {
 // needs no namespace prefix — the id IS the CLI's namespace.
 export function modelString({ provider, id }) { return id }
 
+// The headless-json invocation shape. Returns ARGV (never a shell string):
+// crew never assembles agent flags, and argv sidesteps quoting entirely.
+// --verbose accompanies --output-format stream-json in every HW-1 capture.
+// resume=false CREATES the session (--session-id); resume=true CONTINUES it
+// (--resume).
+export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
+                                  prompt, sessionId, resume = false, bin, effort }) {
+  if (!bin || !bin.startsWith('/')) throw new Error(`adapter-claude.headlessCommand: bin must be an ABSOLUTE frozen worker binary path, got ${JSON.stringify(bin)} — refusing to inherit whatever PATH resolves`)
+  if (!sessionId) throw new Error('adapter-claude.headlessCommand: sessionId is required (one session per seat)')
+  return {
+    bin,
+    args: [
+      '-p', prompt,
+      '--output-format', 'stream-json',
+      '--verbose',
+      '--model', model,
+      '--permission-mode', 'bypassPermissions',
+      ...(effort ? ['--effort', effort] : []),
+      '--allowedTools', tools,
+      '--disallowedTools', deny,
+      '--append-system-prompt-file', promptFile,
+      ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
+    ],
+    env: { DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir },
+  }
+}
+
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks

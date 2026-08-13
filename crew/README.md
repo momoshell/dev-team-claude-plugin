@@ -130,6 +130,28 @@ needs tool denial (every seat today) will not boot on an adapter declaring
 today; `prompt_file`, `unattended`, and `session_resume` are declared for the
 adapters still to come.
 
+## io contract
+
+The driver consumes one synchronous io object: `assign({role, briefFile,
+note}) -> {id, returnPath}`, `wait(returnPath, timeoutS) -> envelope|null`,
+`writeFile`, `readFile`, `run`, optional `runClean`, `changedFiles`, `commit`,
+optional `status`/`showDoc`, `log`, `now`, and optional `emit`. `assign` and
+`wait` are per-seat; the remaining methods are checkout-global and shared by
+all seats. The shipped transports are `pane` (cmux terminal) and
+`headless-json` (one-shot `claude -p --output-format stream-json` per
+assignment). Pass `--headless builder,reviewer` at boot to select it per role;
+mixed pane/headless crews are supported.
+
+Headless workers use a frozen binary, resolved in this order:
+`--claude-bin <absolute path>`, `$CREW_CLAUDE_BIN`, then
+`${HOME}/.local/bin/claude` when it exists; there is no bare-PATH fallback.
+`headlessIo` treats the ReturnEnvelope as the record and classifies worker
+runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`, or
+`timeout`; a perfect stream without an envelope is still `no-envelope`.
+`headless-rpc` is declared by `adapter-pi.capabilitiesFor` but is not
+implemented: a long-lived RPC worker held open across assignments is a
+different transport shape and its own slice.
+
 ## Readiness
 
 Before `run` drives a seat, it waits for that seat to render as ready:

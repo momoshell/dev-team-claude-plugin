@@ -73,6 +73,11 @@ const reviewEnv = (verdict) => ({
   status: 'done', role: 'reviewer', summary: 'reviewed',
   details: { verdict, review_path: `${TD}/review.md`, must_fix: verdict === 'pass' ? 0 : 1 },
 })
+const checkEnv = (verdict) => ({
+  status: 'done', role: 'tech-lead', summary: 'checked',
+  details: { verdict, check_path: `${TD}/plan-check.md` },
+})
+const CTX_TL = Object.freeze({ ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] })
 const leadEnv = (decision, guidance = 'do X then Y in a.mjs') => ({
   status: 'done', role: 'lead', details: { decision, reason: 'because', guidance },
 })
@@ -437,14 +442,14 @@ test('compounding policy: lead bounce over advisor escalate -> lead prevails (sa
   assert.equal(io.calls.commits.length, 1)
 })
 
-test('compounding policy: an off-menu advisor recommendation is discarded (null), no dissent, no binding', () => {
+test('compounding policy: a now-on-menu advisor recommendation records dissent without binding', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv(),
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
       'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
-      'reviewer:3': { status: 'done', role: 'reviewer', details: { perspective: 'one more round would do it', recommendation: 'bounce', confidence: 'medium' } }, // bounce is OFF-MENU here (accept|escalate)
+      'reviewer:3': { status: 'done', role: 'reviewer', details: { perspective: 'one more round would do it', recommendation: 'bounce', confidence: 'medium' } },
       'lead:2': leadEnv('accept'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -452,7 +457,7 @@ test('compounding policy: an off-menu advisor recommendation is discarded (null)
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.dissents, []) // off-menu rec never becomes dissent
+  assert.deepEqual(res.details.dissents[0], { from: 'reviewer', recommendation: 'bounce', lead_decision: 'accept', consult: 1 })
   assert.equal(io.calls.commits.length, 1)
 })
 
@@ -988,4 +993,120 @@ test('a throwing io.emit changes nothing', () => {
   const plain = driveTask(CTX, fakeIo(input))
   const noisy = driveTask(CTX, fakeIo({ ...input, emit: () => { throw new Error('ledger unavailable') } }))
   assert.deepEqual(noisy, plain)
+})
+
+test('review exhaustion at a non-final build round grants a real round and review', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'), 'reviewer:3': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 4 } }, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 4)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 3)
+  assert.deepEqual(res.details.extra_rounds_granted, [{ where: 'review', round: 3 }])
+})
+
+test('review grant bounce brief is code-composed from the review path', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'), 'reviewer:3': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce', 'misleading guidance that must not become the brief'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const brief = Object.entries(io.calls.writes).find(([path]) => /build-bounce-r3\.md$/.test(path))?.[1]
+  assert.match(brief, new RegExp(`${TD}/review\\.md`))
+  assert.doesNotMatch(brief, /misleading guidance/)
+})
+
+test('final build-round review revise can buy one round and its review decides', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce'),
+    },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'red' }, 'lane-cmd:2': { ok: false, output: 'red' },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 4)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 2)
+  assert.equal(res.details.accepted_via, 'review pass')
+})
+
+test('review grant cap refuses a second bounce and escalates without commit', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'), 'reviewer:3': reviewEnv('changes-needed'),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(io.calls.commits.length, 0)
+  const decisions = Object.entries(io.calls.writes).filter(([path]) => /decision-\d+b?\.md$/.test(path)).map(([, body]) => body)
+  assert.equal(decisions.filter((body) => /^- bounce$/m.test(body)).length, 1)
+  assert.deepEqual(res.details.extra_rounds_granted, [{ where: 'review', round: 3 }])
+})
+
+test('plan-check exhaustion can buy one plan round and re-check it', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 3)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'tech-lead').length, 3)
+  assert.deepEqual(res.details.extra_rounds_granted, [{ where: 'plan-check', round: 2 }])
+})
+
+test('plan-check grant cap refuses a second bounce and escalates', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('revise'),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'),
+    },
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'escalation')
+  assert.deepEqual(res.details.extra_rounds_granted, [{ where: 'plan-check', round: 2 }])
+  const decisions = Object.entries(io.calls.writes).filter(([path]) => /decision-\d+b?\.md$/.test(path)).map(([, body]) => body)
+  assert.equal(decisions.filter((body) => /^- bounce$/m.test(body)).length, 1)
+})
+
+test('done and escalation envelopes always record the grant list, including empty happy paths', () => {
+  const done = driveTask(CTX, fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'],
+  }))
+  assert.deepEqual(done.details.extra_rounds_granted, [])
+  const escalated = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv({ status: 'blocked' }), 'lead:1': leadEnv('escalate') } }))
+  assert.deepEqual(escalated.details.extra_rounds_granted, [])
 })

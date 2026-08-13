@@ -80,7 +80,11 @@ export function driveTask(ctx, io) {
   const S = { consults: 0, stages: [], commit: null, dissents: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
 
-  const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }) }
+  // Every stage transition goes to the journal AND (when io provides it) to
+  // a live status surface — the workspace pill — so a quiet team is never
+  // illegible: the pill says which CODE stage is running (suite, gate,
+  // commit...). On escalation it freezes at the failing stage.
+  const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label) }
 
   function assignAndWait(role, briefFile, note) {
     const { id, returnPath } = io.assign({ role, briefFile, note })

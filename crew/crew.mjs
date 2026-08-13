@@ -198,6 +198,11 @@ function realIo(crew, paths, checkout) {
       execSync('git commit -q -F -', { cwd: checkout, input: message })
       return execSync('git rev-parse --short HEAD', { cwd: checkout, encoding: 'utf8' }).trim()
     },
+    status(label) {
+      // Workspace pill: glanceable "which code stage is running" for the
+      // humans watching. Best-effort — a pill failure never touches the loop.
+      cmux('set-status', ['crew-stage', label, '--workspace', crew.workspace_id])
+    },
     log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },
     now() { return Date.now() },
   }

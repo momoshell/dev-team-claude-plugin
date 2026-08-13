@@ -40,6 +40,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [] } = {}) {
     },
     changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
     commit(files, message) { calls.commits.push({ files, message }); return 'abc1234' },
+    status(label) { (calls.status ||= []).push(label) },
     log(obj) { calls.logs.push(obj) },
     now() { return 0 },
   }
@@ -479,6 +480,17 @@ test('no gate_cmd in the plan -> the loop runs exactly as before (gate stage nev
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate, null)
   assert.ok(!res.details.stages.some((s) => /^gate/.test(s)))
+})
+
+test('every stage transition reaches io.status in order (the live pill feed)', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(io.calls.status, res.details.stages)
 })
 
 test('DECISIONS and LIMITS are the frozen public contract', () => {

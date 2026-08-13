@@ -54,6 +54,27 @@ where judgment lives.
 - Escalation ladder: **code → lead → orchestrator/human**, each hop only
   when an enum says so.
 
+## Adapters (hot seats)
+
+A seat is a *hot seat*: any CLI agent can hold it, not just claude. The whole
+contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
+
+- `capabilities` — a frozen object declaring what the agent can enforce:
+  `prompt_file`, `tool_deny`, `unattended`, `session_resume`.
+- `seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief })
+  → string` — the pane's command line. crew composes the merged prompt file
+  and hands it in; the adapter owns the invocation shape.
+
+`--agent-<role> <name>` at boot picks the adapter, mirroring
+`--model-<role>`; default is `claude`. An unknown name fails the boot loudly,
+naming the missing adapter file — never a silent fallback.
+
+Capability declarations are enforced, not decorative: a seat whose charter
+needs tool denial (every seat today) will not boot on an adapter declaring
+`tool_deny: false` — no silent weaker seats. Only `tool_deny` is checked
+today; `prompt_file`, `unattended`, and `session_resume` are declared for the
+adapters still to come.
+
 ## The acceptance gate (gate-first)
 
 The planner may author an executable gate in the TASK DIR (immutable to the
@@ -88,6 +109,8 @@ Everything durable is a FILE; pane chat is never the record.
   unit-tested without cmux).
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
+- `adapters/adapter-*.mjs` — the per-agent seam: capabilities + seatCommand
+  (see "Adapters" above).
 - `roles/*.md` — seat charters, appended as system prompts at boot.
 - Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition).
 

@@ -12,7 +12,7 @@
 //
 // Verbs:
 //   crew.mjs boot  --task <slug> [--roles lead,planner,builder,reviewer[,tech-lead]]
-//                  [--checkout <dir>] [--model-<role> <id>]...
+//                  [--checkout <dir>] [--model-<role> <id>] [--agent-<role> <name>]...
 //   crew.mjs run   --task <slug> --brief-file <path>   # hand the task to the lead
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
@@ -22,7 +22,7 @@ import {
 } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { execSync, execFileSync, spawnSync } from 'node:child_process'
 
@@ -45,12 +45,14 @@ const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 // stays available everywhere — every seat writes envelopes and task-dir
 // artifacts — so the REPO boundary for non-builder seats is the git scope
 // gate + commit-in-scope, not tool denial.
+// `agent` names the adapter (crew/adapters/adapter-<name>.mjs) that fills
+// the seat; overridable per task via --agent-<role>, default 'claude'.
 export const SEAT_DEFAULTS = Object.freeze({
-  lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'lead.md' },
-  planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', prompt: 'planner.md' },
-  builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', prompt: 'builder.md' },
-  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', prompt: 'reviewer.md' },
-  'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'tech-lead.md' },
+  lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'lead.md', agent: 'claude' },
+  planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', prompt: 'planner.md', agent: 'claude' },
+  builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', prompt: 'builder.md', agent: 'claude' },
+  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', prompt: 'reviewer.md', agent: 'claude' },
+  'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'tech-lead.md', agent: 'claude' },
 })
 export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer'])
 
@@ -83,7 +85,39 @@ function seatModel(role, args) {
   return args[`model-${role}`] || SEAT_DEFAULTS[role].model
 }
 
-function paneCommand(role, args, { checkout, taskDir, bootBrief }) {
+function seatAgent(role, args) {
+  return args[`agent-${role}`] || SEAT_DEFAULTS[role].agent
+}
+
+// Enforce that the resolved adapter can actually deliver what the seat's
+// charter needs. Only tool_deny has a real consequence today: every seat has
+// a non-empty deny list, so an adapter that can't enforce it would boot a
+// silently weaker seat. Returns undefined on success.
+export function assertCapabilities(role, agentName, capabilities) {
+  if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
+    throw new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
+  }
+}
+
+// Resolve each role's agent name to its adapter module, by filename — this
+// IS the seam: adding an agent means dropping a file in crew/adapters/, not
+// editing crew.mjs. Dynamic import() is inherently async.
+export async function resolveAdapters(roles, args) {
+  const out = {}
+  for (const role of roles) {
+    const name = String(seatAgent(role, args))
+    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
+    const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
+    if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
+    const adapter = await import(pathToFileURL(file).href)
+    if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
+    assertCapabilities(role, name, adapter.capabilities)
+    out[role] = { name, adapter }
+  }
+  return out
+}
+
+function paneCommand(role, args, { taskDir, bootBrief, adapter }) {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
   // claude 2.1.229): passing shared + role as two flags silently drops shared.
@@ -91,22 +125,10 @@ function paneCommand(role, args, { checkout, taskDir, bootBrief }) {
   // per seat, generated in the task dir at boot.
   const merged = join(taskDir, `role-${role}.md`)
   writeFileSync(merged, `${readFileSync(SHARED_PROMPT, 'utf8')}\n\n${readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')}`)
-  // `env` (a real binary) sets the vars regardless of how cmux runs the
-  // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
-  // quiet inside the pane (defensive; a no-op when the plugin is absent).
-  // bypassPermissions: crew seats run unattended (no human at their pane to
-  // approve). The ENFORCED tool boundary is --disallowedTools (it holds even
-  // under bypass; --allowedTools is only an auto-approve list and is inert
-  // here) — beyond that, containment is the git scope gate, the feature-
-  // branch blast radius, and the operator's global deny rules.
-  return [
-    'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
-    'claude', '--model', seatModel(role, args), '--permission-mode', 'bypassPermissions',
-    '--allowedTools', `"${seat.tools}"`,
-    '--disallowedTools', `"${seat.deny}"`,
-    '--append-system-prompt-file', `"${merged}"`,
-    `"${bootBrief}"`,
-  ].join(' ')
+  return adapter.seatCommand({
+    role, model: seatModel(role, args), promptFile: merged,
+    tools: seat.tools, deny: seat.deny, taskDir, bootBrief,
+  })
 }
 
 function stackVertical(nodes) {
@@ -123,12 +145,15 @@ export function composeLayout(roles, mk) {
   return { direction: 'horizontal', split: 0.42, children: [head, stackVertical(rest)] }
 }
 
-function bootCmd(args) {
+async function bootCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   let roles = (args.roles ? args.roles.split(',') : [...DEFAULT_ROLES]).map((r) => r.trim())
   if (!roles.includes('lead')) roles = ['lead', ...roles]
   for (const r of roles) if (!SEAT_DEFAULTS[r]) throw new Error(`unknown crew role: ${r}`)
+  // Resolve adapters before touching cmux — a bad --agent-<role> or a
+  // capability shortfall must fail before a workspace gets created.
+  const adapters = await resolveAdapters(roles, args)
 
   const paths = pathsFor(taskSlug, checkout)
   // The state dir keys on the checkout's BASENAME — two different checkouts
@@ -143,7 +168,7 @@ function bootCmd(args) {
   mkdirSync(paths.returnsDir, { recursive: true })
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
-  const mk = (role) => paneCommand(role, args, { checkout, taskDir: paths.taskDir, bootBrief })
+  const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter })
   const layout = composeLayout(roles, mk)
 
   const before = tree()
@@ -179,12 +204,12 @@ function bootCmd(args) {
     for (const role of roles) {
       const hit = byName.get(role)
       if (!hit) throw new Error(`boot: no surface named ${role} in the new workspace (tree names: ${[...byName.keys()].join(', ')})`)
-      members[role] = { pane_id: hit.pane.id, surface_id: hit.surface.id, model: seatModel(role, args) }
+      members[role] = { pane_id: hit.pane.id, surface_id: hit.surface.id, model: seatModel(role, args), agent: adapters[role].name }
     }
   } else {
     roles.forEach((role, i) => {
       const surface = (panes[i].surfaces || [])[0]
-      members[role] = { pane_id: panes[i].id, surface_id: surface.id, model: seatModel(role, args) }
+      members[role] = { pane_id: panes[i].id, surface_id: surface.id, model: seatModel(role, args), agent: adapters[role].name }
     })
   }
   for (const role of roles) renameTab(members[role].surface_id, role)
@@ -464,9 +489,16 @@ if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)
   const fn = COMMANDS[verb]
   if (!fn) { process.stderr.write(`usage: crew.mjs <${Object.keys(COMMANDS).join('|')}> --task <slug> ...\n`); process.exit(2) }
-  try { fn(parseArgs(rest)) } catch (err) {
+  // fn may be async (boot resolves adapters via dynamic import) — a sync
+  // try/catch cannot see an async rejection, so a promise result is also
+  // routed to `fail` explicitly.
+  const fail = (err) => {
     process.stderr.write(`error: ${err.message}\n`)
     process.stdout.write(`${JSON.stringify({ error: err.message })}\n`)
     process.exit(1)
   }
+  try {
+    const r = fn(parseArgs(rest))
+    if (r && typeof r.then === 'function') r.catch(fail)
+  } catch (err) { fail(err) }
 }

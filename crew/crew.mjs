@@ -225,6 +225,26 @@ async function bootCmd(args) {
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
 
+// The mount grammar, isolated so a test can pin it. On cmux build 102
+// `markdown open`'s --workspace/--window are TARGETS: naming them plants the
+// viewer in the CREW's workspace instead of whatever the human happens to be
+// focused on (the PR #92 regression). --focus false: a viewer never steals
+// focus. No --surface: build 102 has no context flag for the source surface,
+// so that rung was never cross-window-verified.
+export function docOpenArgs({ path, workspaceId, windowId }) {
+  return ['open', path, '--workspace', workspaceId, '--window', windowId, '--direction', 'down', '--focus', 'false']
+}
+
+// Surface ids present in `after` but not in `before` — the only recovery path
+// for a cmux verb that creates a surface without printing its id.
+function newSurfaceIds(before, after) {
+  const seen = new Set()
+  for (const w of before.windows || []) for (const ws of w.workspaces || []) for (const p of ws.panes || []) for (const s of p.surfaces || []) seen.add(s.id)
+  const fresh = []
+  for (const w of after.windows || []) for (const ws of w.workspaces || []) for (const p of ws.panes || []) for (const s of p.surfaces || []) if (!seen.has(s.id)) fresh.push(s.id)
+  return fresh
+}
+
 // v3: the deterministic driver runs the task loop (code disposes); the lead
 // pane is consulted only at decision points. This IS `run` now; the v2
 // agent-driven handoff survives as `handoff` for comparison runs.
@@ -313,6 +333,30 @@ function realIo(crew, paths, checkout) {
       // Workspace pill: glanceable "which code stage is running" for the
       // humans watching. Best-effort — a pill failure never touches the loop.
       cmux('set-status', ['crew-stage', label, '--workspace', crew.workspace_id])
+    },
+    // Mount the plan of record in cmux's live-watching markdown viewer, ONCE.
+    // The viewer follows the file, and the plan path is stable for the whole
+    // task, so a revision needs no remount — this is a no-op after the first
+    // call. Idempotency is persisted on crew.doc_viewer so a re-run against a
+    // still-standing (escalated) workspace does not mount a second pane.
+    // Best-effort like status(): a mount failure warns and returns.
+    showDoc(path) {
+      try {
+        if (crew.doc_viewer?.path === path) return
+        if (crew.doc_viewer?.surface_id) closeSurface(crew.doc_viewer.surface_id)
+        const before = tree()
+        const res = cmux('markdown', docOpenArgs({ path, workspaceId: crew.workspace_id, windowId: crew.window_id }))
+        if (!res.ok) throw new Error(res.error.message)
+        // markdown open prints no id — recover it by tree diff. An ambiguous
+        // diff still records the mount (surface_id null) so the singleton
+        // guard holds; only the teardown close is lost.
+        const surfaceId = newSurfaceIds(before, tree())
+        crew.doc_viewer = { path, surface_id: surfaceId.length === 1 ? surfaceId[0] : null }
+        saveCrew(paths, crew)
+        logLine(join(paths.dir, 'journal.jsonl'), { at: new Date().toISOString(), event: 'doc-viewer', path, surface_id: crew.doc_viewer.surface_id })
+      } catch (err) {
+        process.stderr.write(`warning: plan viewer mount failed (${err.message}) — continuing\n`)
+      }
     },
     log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },
     now() { return Date.now() },
@@ -496,6 +540,10 @@ function statusCmd(args) {
 // pane scrollback.
 function teardownCore(paths, crew) {
   for (const m of Object.values(crew.members)) closeSurface(m.surface_id)
+  // The viewer is not in crew.members, so the loop above never sees it, and
+  // close-workspace is documented to no-op while a live pane occupies the
+  // workspace — close it by id rather than trusting the workspace close.
+  if (crew.doc_viewer?.surface_id) closeSurface(crew.doc_viewer.surface_id)
   closeWorkspace(crew.workspace_id)
   // Full timestamp, not date-only: a second same-day run of the same slug
   // must never ENOTEMPTY onto the first run's archive.

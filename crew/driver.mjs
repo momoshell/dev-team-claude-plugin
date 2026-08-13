@@ -68,7 +68,8 @@ export function locate(t, id) {
 // allowlist charset; content travels in files, never in the line.
 const SAFE_LINE_RE = /^[A-Za-z0-9 _.,:;=/@'+-]+$/
 const SAFE_PATH_RE = /^\/[A-Za-z0-9._/-]+$/
-const SEND_SETTLE_MS = 30
+const SEND_SETTLE_MS = 250
+const SEND_VERIFY_WINDOW_MS = 3000
 const SEND_READY_TIMEOUT_MS = 60_000
 const SEND_READY_POLL_MS = 250
 const SEND_VERIFY_ATTEMPTS = 3
@@ -132,9 +133,20 @@ function frameNeedleCount(surfaceId, needle) {
   return res.stdout.replace(/\s+/g, '').split(needle).length - 1
 }
 
+// The verification needle must come from the line's TAIL: a long line wraps
+// in the seat's input box, and the box viewport scrolls to keep the cursor
+// (at the END) visible — the head is genuinely absent from read-screen even
+// though the buffer content is intact (live-hit 2026-08-13: two clean boots
+// showed the identical "truncation", which was viewport scroll, not loss).
+// Longest of the last 8 tokens = the return path on assignment lines.
+export function pickNeedle(line) {
+  const tokens = line.split(/\s+/).filter(Boolean)
+  return tokens.slice(-8).reduce((a, b) => (b.length > a.length ? b : a), '')
+}
+
 export function sendLine(surfaceId, line) {
   assertSafeLine(line)
-  const needle = line.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), '')
+  const needle = pickNeedle(line)
   if (!needle) throw new Error('sendLine: no verifiable token in line')
 
   // Verify against a BASELINE, not an absolute count of 1: the needle may
@@ -152,15 +164,36 @@ export function sendLine(surfaceId, line) {
   let last = null
   for (let attempt = 1; attempt <= SEND_VERIFY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) {
-      const clear = cmux('send-key', ['--surface', surfaceId, '--', 'ctrl+u'])
-      if (!clear.ok) throw new Error(`sendLine: ctrl+u failed: ${clear.error.message}`)
+      // Clearing a TUI input box is NOT one ctrl+u (live-hit 2026-08-13):
+      // in the claude TUI ctrl+u deletes to the start of the VISUAL line and
+      // then no-ops, leaving a truncated tail of any wrapped line. ctrl+u
+      // first (harmless everywhere), then ONE ctrl+c (claude's full input
+      // clear; on an already-empty box it only arms an exit warning, which
+      // the retype immediately disarms — never send it twice in a row).
+      // Refuse to retype into a box that still shows the needle.
+      cmux('send-key', ['--surface', surfaceId, '--', 'ctrl+u'])
       settle(SEND_READY_POLL_MS)
+      if (frameNeedleCount(surfaceId, needle) !== before) {
+        cmux('send-key', ['--surface', surfaceId, '--', 'ctrl+c'])
+        settle(SEND_READY_POLL_MS)
+      }
+      if (frameNeedleCount(surfaceId, needle) !== before) {
+        throw new Error('sendLine: could not clear the pane input back to baseline before retype')
+      }
     }
     const send = cmux('send', ['--surface', surfaceId, '--', line])
     if (!send.ok) throw new Error(`sendLine: send failed: ${send.error.message}`)
-    settle(SEND_SETTLE_MS)
-    last = frameNeedleCount(surfaceId, needle)
-    if (last === before + 1) { landed = true; break }
+    // POLL for the echo rather than reading once: a TUI seat right after
+    // boot can take a second-plus to render typed input, and a single fast
+    // read here mistakes slow rendering for a lost send (live-hit 2026-08-13:
+    // both crews' first assignment landed but verified 0, killing the run).
+    const verifyDeadline = Date.now() + SEND_VERIFY_WINDOW_MS
+    do {
+      settle(SEND_SETTLE_MS)
+      last = frameNeedleCount(surfaceId, needle)
+      if (last === before + 1) { landed = true; break }
+    } while (Date.now() < verifyDeadline)
+    if (landed) break
   }
   if (!landed) throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before}, last ${last})`)
 

@@ -301,6 +301,13 @@ function runCmd(args) {
     task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal,
     roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test',
   }
+  // Seats are TUI processes and the first assignment must not race their
+  // boot: characters typed into a pty before the TUI grabs it are silently
+  // swallowed (live-hit 2026-08-13 — the leading chunk of the first
+  // assignment vanished on both crews). Gate on each seat actually RENDERING
+  // its TUI chrome before driving.
+  awaitSeatsReady(crew)
+
   const io = realIo(crew, paths, checkout)
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
@@ -337,6 +344,26 @@ function runCmd(args) {
   const taskReturn = archived ? crew.task_return.replace(paths.dir, archived) : crew.task_return
   process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
   if (result.status !== 'done') process.exitCode = 1
+}
+
+// A seat is ready when its claude TUI is rendering chrome (the input prompt
+// or the permission-mode status line) — not merely when the pty is readable,
+// which is true while the binary is still starting and swallowing input.
+function awaitSeatsReady(crew, timeoutS = 120) {
+  const deadline = Date.now() + timeoutS * 1000
+  const pending = new Set(Object.keys(crew.members))
+  while (pending.size > 0) {
+    for (const role of [...pending]) {
+      const res = cmux('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
+      if (res.ok && /bypass permissions|shift\+tab to cycle|❯/.test(res.stdout)) pending.delete(role)
+    }
+    if (pending.size === 0) break
+    if (Date.now() > deadline) {
+      throw new Error(`seats never became ready within ${timeoutS}s: ${[...pending].join(', ')}`)
+    }
+    const sab = new SharedArrayBuffer(4)
+    Atomics.wait(new Int32Array(sab), 0, 0, 2000)
+  }
 }
 
 // pathsFor keys on the checkout BASENAME — assert the crew on disk actually

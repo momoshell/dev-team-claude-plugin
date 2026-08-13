@@ -400,6 +400,62 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
 
+test('emitAdapter carries the phase cursor onto events and fails malformed cursors closed', () => {
+  let seq = 0
+  const events = []
+  const emitter = {
+    adwId: 'adw-phase-test',
+    phaseTransition: () => ({ phase_id: 7 }),
+    emit: (fn) => fn({ recordEvent: (event) => events.push(event) }, () => ++seq),
+  }
+  const adapter = emitAdapter(emitter)
+  adapter({ kind: 'assign', id: 'before', role: 'planner' })
+  adapter({ kind: 'stage', label: 'plan:r1' })
+  adapter({ kind: 'assign', id: 'after', role: 'planner' })
+  assert.equal(events[0].phase_id, null)
+  assert.equal(events[1].phase_id, 7)
+
+  const malformed = {
+    adwId: 'adw-malformed-phase',
+    phaseTransition: () => 42,
+    emit: (fn) => fn({ recordEvent: (event) => events.push(event) }, () => ++seq),
+  }
+  assert.doesNotThrow(() => emitAdapter(malformed)({ kind: 'stage', label: 'build:r1' }))
+  assert.equal(events.at(-1).phase_id, null)
+})
+
+test('real ledger agent events reference their distinct planning and build phases', { skip: !nodeMeetsLedgerFloor }, () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'crew-phase-state-'))
+  const dbPath = join(stateDir, 'ledger.db')
+  try {
+    const emitter = openRun({ stateDir, repoSlug: 'repo', taskSlug: 'phase-task', dbPath })
+    emitter.startRun()
+    const adapter = emitAdapter(emitter)
+    for (const event of [
+      { kind: 'stage', label: 'plan:r1' },
+      { kind: 'assign', id: 'p1', role: 'planner' },
+      { kind: 'envelope', id: 'p1', role: 'planner', status: 'done' },
+      { kind: 'stage', label: 'build:r1' },
+      { kind: 'assign', id: 'b1', role: 'builder' },
+      { kind: 'envelope', id: 'b1', role: 'builder', status: 'done' },
+    ]) adapter(event)
+    emitter.endRun({ status: 'ok' })
+    const ledger = openLedger({ dbPath })
+    const rows = ledger.listEvents({ adw_id: emitter.adwId, limit: 100 })
+    const phaseIds = new Set(ledger.dumpTable('phases').filter((row) => row.adw_id === emitter.adwId).map((row) => row.id))
+    const agents = rows.filter((row) => row.type === 'agent_start' || row.type === 'agent_end')
+    assert.equal(agents.length, 4)
+    assert.ok(agents.every((row) => row.phase_id !== null && phaseIds.has(row.phase_id)))
+    const planner = agents.find((row) => JSON.parse(row.payload_json).role === 'planner')
+    const builder = agents.find((row) => JSON.parse(row.payload_json).role === 'builder')
+    assert.notEqual(planner.phase_id, builder.phase_id)
+    assert.equal(emitter.stats().dropped, 0)
+    ledger.close()
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
 test('a real ledger round trip mirrors the complete drive event set', { skip: !nodeMeetsLedgerFloor }, () => {
   const stateDir = mkdtempSync(join(tmpdir(), 'crew-emit-state-'))
   const dbPath = join(stateDir, 'ledger.db')

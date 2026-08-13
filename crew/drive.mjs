@@ -18,6 +18,7 @@ export const LIMITS = Object.freeze({
   plan_rounds: 2, // planner attempts (initial + bounces)
   build_rounds: 3, // builder attempts across lane/scope/review bounces
   review_rounds: 2, // reviewer verdicts
+  extra_rounds: 1, // lead-granted rounds at REVIEW / PLAN-CHECK exhaustion
   lead_consults: 4, // total decision consults per task
   gate_fails_to_triage: 2, // gate failures before build-vs-gate-defect triage
   gate_repairs: 1, // the gate's author may repair it at most once per task
@@ -132,7 +133,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [] }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
@@ -267,13 +268,23 @@ export function driveTask(ctx, io) {
     return { decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from }
   }
 
+  // A lead-granted extra round at an exhaustion point that could not grant
+  // before. `limits.extra_rounds` is the bound, and it is enforced by NOT
+  // OFFERING 'bounce' once spent — an out-of-set answer already escalates
+  // (askLead), so a lead that asks anyway fails toward the human.
+  const canGrant = () => S.grants.length < limits.extra_rounds
+  const grant = (where, round) => {
+    S.grants.push({ where, round })
+    io.log({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } })
+  }
+
   function escalate(where, why, extraArtifacts = []) {
     stage(`escalate:${where}`)
     return {
       status: 'escalation',
       summary: `Task ${ctx.task} needs a human: ${why}`,
       artifacts: [journal, ...extraArtifacts],
-      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents },
+      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants },
     }
   }
 
@@ -285,7 +296,8 @@ export function driveTask(ctx, io) {
   // ---- 1. PLAN ----------------------------------------------------------------
   let planEnv = null
   let planBrief = ctx.briefFile
-  for (let round = 1; round <= limits.plan_rounds; round += 1) {
+  let extraPlanRounds = 0
+  for (let round = 1; round <= limits.plan_rounds + extraPlanRounds; round += 1) {
     stage(`plan:r${round}`)
     const env = assignAndWait('planner', planBrief, round === 1 ? 'plan' : 'plan-revision')
     if (env.status !== 'done') {
@@ -315,12 +327,22 @@ export function driveTask(ctx, io) {
     const check = assignAndWait('tech-lead', checkBrief, 'plan-check')
     const v = verdictOf(check)
     if (v === 'pass') break
-    if (round === limits.plan_rounds) {
+    if (round >= limits.plan_rounds + extraPlanRounds) {
+      const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
       const c = consultLead(
-        `The plan check still says revise after ${round} round(s). Accept the latest plan anyway, or escalate?`,
-        ['accept', 'escalate'], [planPath, check.details?.check_path || art('plan-check.md')],
+        `The plan check still says revise after ${round} round(s). Grant one more plan round, accept the latest plan anyway, or escalate?`,
+        options, [planPath, check.details?.check_path || art('plan-check.md')],
       )
       if (c.decision === 'escalate') return escalate('plan-check', c.reason)
+      if (c.decision === 'bounce') {
+        grant('plan-check', round)
+        extraPlanRounds += 1
+        const b = art(`plan-bounce-r${round}.md`)
+        io.writeFile(b, `# Plan revision (round ${round})\n\nRevise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`)
+        planBrief = b
+        planEnv = null
+        continue
+      }
       break // accept: proceed on the latest plan
     }
     const b = art(`plan-bounce-r${round}.md`)
@@ -328,7 +350,7 @@ export function driveTask(ctx, io) {
     planBrief = b
     planEnv = null
   }
-  if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds} rounds`)
+  if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds + extraPlanRounds} rounds`)
 
   const planPath = planEnv.details?.plan_path || art('plan.md')
   // Put the plan of record on screen, once (io.showDoc is OPTIONAL — an io
@@ -396,6 +418,8 @@ export function driveTask(ctx, io) {
   // consult limit, so a looping judge still cannot loop the driver).
   let accepted = null
   let extraRounds = 0
+  let extraReviews = 0
+  let lastReviewPath = art('review.md')
   let gateTriaged = false
   build:
   for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
@@ -510,12 +534,22 @@ export function driveTask(ctx, io) {
     // verdict re-asks the REVIEWER in place — the builder is never re-run
     // for a reviewer's malformed envelope.
     while (true) {
-      if (reviews >= limits.review_rounds) {
+      if (reviews >= limits.review_rounds + extraReviews) {
+        const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
         const c = consultLead(
-          `Review rounds are exhausted (${reviews}) and the last verdict was revise. Accept with residuals, or escalate?`,
-          ['accept', 'escalate'], [planPath, art('review.md')],
+          `Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`,
+          options, [planPath, lastReviewPath],
         )
         if (c.decision === 'escalate') return escalate('review', c.reason)
+        if (c.decision === 'bounce') {
+          grant('review', round)
+          extraReviews += 1
+          if (finalRound()) extraRounds += 1
+          const b = art(`build-bounce-r${round}.md`)
+          io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
+          buildBrief = b; buildNote = 'review-fix'
+          continue build
+        }
         accepted = 'lead accepted with residuals (review rounds exhausted)'
         break build
       }
@@ -529,15 +563,26 @@ export function driveTask(ctx, io) {
       ].join('\n'))
       const review = assignAndWait('reviewer', revBrief, 'review')
       reviews += 1
+      lastReviewPath = review.details?.review_path || art('review.md')
       const v = verdictOf(review)
       if (v === 'pass') { stage('review:pass'); accepted = 'review pass'; break build }
       if (v === 'revise') {
         if (finalRound()) {
+          const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
           const c = consultLead(
-            `Build rounds are exhausted but the review says changes-needed. Accept with residuals, or escalate?`,
-            ['accept', 'escalate'], [planPath, review.details?.review_path || art('review.md')],
+            `Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`,
+            options, [planPath, lastReviewPath],
           )
           if (c.decision === 'escalate') return escalate('review', c.reason)
+          if (c.decision === 'bounce') {
+            grant('review', round)
+            extraRounds += 1
+            extraReviews += 1
+            const b = art(`build-bounce-r${round}.md`)
+            io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
+            buildBrief = b; buildNote = 'review-fix'
+            continue build
+          }
           accepted = 'lead accepted with residuals (build rounds exhausted)'
           break build
         }
@@ -580,6 +625,7 @@ export function driveTask(ctx, io) {
     details: {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
+      extra_rounds_granted: S.grants,
       gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
     },
   }

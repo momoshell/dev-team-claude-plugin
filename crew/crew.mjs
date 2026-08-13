@@ -360,13 +360,20 @@ export function phaseForStage(label) {
 }
 
 export function emitAdapter(emitter) {
+  // The emitter owns the phase cursor and hands it back from every
+  // phaseTransition; carry it onto every event so agent rows can be
+  // associated with the phase they ran in (#123). A null cursor (degraded
+  // emitter, or events before the first stage) is what recordEvent already
+  // stores today, so this can never change a run.
+  let phaseId = null
   const record = (type, payload) => emitter.emit((handle, nextSeq) => handle.recordEvent({
-    adw_id: emitter.adwId, type, seq: nextSeq('event'), payload,
+    adw_id: emitter.adwId, type, seq: nextSeq('event'), phase_id: phaseId, payload,
   }))
   return (event) => {
     if (!event || typeof event !== 'object') return
     if (event.kind === 'stage') {
-      emitter.phaseTransition(phaseForStage(event.label))
+      const t = emitter.phaseTransition(phaseForStage(event.label))
+      phaseId = typeof t?.phase_id === 'number' ? t.phase_id : null
       record('log', { level: 'info', message: event.label })
     } else if (event.kind === 'assign') {
       record('agent_start', { role: event.role, dispatch_id: event.id })

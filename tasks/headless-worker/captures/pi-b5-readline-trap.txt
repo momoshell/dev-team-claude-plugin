@@ -1,0 +1,6 @@
+payload contains literal U+2028: true
+payload JSON: {"type":"prompt","message":"literal separator-inside-json-string"}
+readline record count: 3
+readline records parseable: 1:yes | 2:yes | 3:yes
+byte-level LF splitter record count: 2
+byte-level records parseable: 1:yes | 2:yes

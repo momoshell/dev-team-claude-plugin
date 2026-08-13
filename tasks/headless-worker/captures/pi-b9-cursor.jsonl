@@ -1,0 +1,32 @@
+>>> {"id":"prompt-1","type":"prompt","message":"Reply B9-SEEDED-DONE."}
+STDERR Warning: No project session found with id '116b9000-0000-4000-8000-000000000009'; creating a new session with that id.
+{"id":"prompt-1","type":"response","command":"prompt","success":true}
+{"type":"agent_start"}
+{"type":"turn_start"}
+{"type":"message_start","message":{"role":"user","content":[{"type":"text","text":"Reply B9-SEEDED-DONE."}],"timestamp":1786644626337}}
+{"type":"message_end","message":{"role":"user","content":[{"type":"text","text":"Reply B9-SEEDED-DONE."}],"timestamp":1786644626337}}
+{"type":"message_start","message":{"role":"assistant","content":[],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"totalTokens":0,"cost":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"total":0}},"stopReason":"pending","timestamp":1786644626342}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_start","contentIndex":0}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"B"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"9"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"SEE"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"DED"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"-D"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_delta","contentIndex":0,"delta":"ONE"}}
+{"type":"message_update","assistantMessageEvent":{"type":"text_end","contentIndex":0,"content":"B9-SEEDED-DONE"}}
+{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"B9-SEEDED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_0fb285446df4f27b016a7e0893dc888191a863d66bb2dd49ee\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":752,"output":11,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":763,"cost":{"input":0.00015040000000000002,"output":0.000013199999999999999,"cacheRead":0,"cacheWrite":0,"total":0.00016360000000000002}},"stopReason":"stop","timestamp":1786644626342,"responseId":"resp_0fb285446df4f27b016a7e08931b7481919a91bcbbf000c90b","rawStopReason":"completed"}}
+{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"B9-SEEDED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_0fb285446df4f27b016a7e0893dc888191a863d66bb2dd49ee\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":752,"output":11,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":763,"cost":{"input":0.00015040000000000002,"output":0.000013199999999999999,"cacheRead":0,"cacheWrite":0,"total":0.00016360000000000002}},"stopReason":"stop","timestamp":1786644626342,"responseId":"resp_0fb285446df4f27b016a7e08931b7481919a91bcbbf000c90b","rawStopReason":"completed"},"toolResults":[]}
+{"type":"agent_end","messages":[{"role":"user","content":[{"type":"text","text":"Reply B9-SEEDED-DONE."}],"timestamp":1786644626337},{"role":"assistant","content":[{"type":"text","text":"B9-SEEDED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_0fb285446df4f27b016a7e0893dc888191a863d66bb2dd49ee\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":752,"output":11,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":763,"cost":{"input":0.00015040000000000002,"output":0.000013199999999999999,"cacheRead":0,"cacheWrite":0,"total":0.00016360000000000002}},"stopReason":"stop","timestamp":1786644626342,"responseId":"resp_0fb285446df4f27b016a7e08931b7481919a91bcbbf000c90b","rawStopReason":"completed"}],"willRetry":false}
+{"type":"agent_settled"}
+>>> {"id":"entries-1","type":"get_entries"}
+{"id":"entries-1","type":"response","command":"get_entries","success":true,"data":{"entries":[{"type":"model_change","id":"1b4b2fb5","parentId":null,"timestamp":"2026-08-13T18:10:26.334Z","provider":"openai-codex","modelId":"gpt-5.6-luna"},{"type":"thinking_level_change","id":"b72f2d18","parentId":"1b4b2fb5","timestamp":"2026-08-13T18:10:26.334Z","thinkingLevel":"low"},{"type":"message","id":"c07b535e","parentId":"b72f2d18","timestamp":"2026-08-13T18:10:26.338Z","message":{"role":"user","content":[{"type":"text","text":"Reply B9-SEEDED-DONE."}],"timestamp":1786644626337}},{"type":"message","id":"d5c69d5a","parentId":"c07b535e","timestamp":"2026-08-13T18:10:28.227Z","message":{"role":"assistant","content":[{"type":"text","text":"B9-SEEDED-DONE","textSignature":"{\"v\":1,\"id\":\"msg_0fb285446df4f27b016a7e0893dc888191a863d66bb2dd49ee\",\"phase\":\"final_answer\"}"}],"api":"openai-codex-responses","provider":"openai-codex","model":"gpt-5.6-luna","usage":{"input":752,"output":11,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":763,"cost":{"input":0.00015040000000000002,"output":0.000013199999999999999,"cacheRead":0,"cacheWrite":0,"total":0.00016360000000000002}},"stopReason":"stop","timestamp":1786644626342,"responseId":"resp_0fb285446df4f27b016a7e08931b7481919a91bcbbf000c90b","rawStopReason":"completed"}}],"leafId":"d5c69d5a"}}
+### cursor=d5c69d5a
+>>> {"id":"bad-since-1","type":"get_entries","since":"does-not-exist-116"}
+{"id":"bad-since-1","type":"response","command":"get_entries","success":false,"error":"Entry not found: does-not-exist-116"}
+<<< child_exit code=0 signal=none
+>>> {"id":"entries-since-1","type":"get_entries","since":"d5c69d5a"}
+>>> {"id":"bad-since-2","type":"get_entries","since":"does-not-exist-116"}
+{"id":"entries-since-1","type":"response","command":"get_entries","success":true,"data":{"entries":[],"leafId":"d5c69d5a"}}
+{"id":"bad-since-2","type":"response","command":"get_entries","success":false,"error":"Entry not found: does-not-exist-116"}
+<<< child_exit code=0 signal=none

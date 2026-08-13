@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES } from './crew.mjs'
+import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, assertCapabilities, resolveAdapters } from './crew.mjs'
+import { seatCommand, capabilities } from './adapters/adapter-claude.mjs'
 
 // cmux build-102 rejects layouts whose split nodes are not strictly binary
 // and whose single-pane trees are anything but a bare leaf ("Invalid
@@ -74,4 +75,39 @@ test('seat deny lists are the ENFORCED boundary: only the builder may Edit, the 
       assert.match(seat.deny, /NotebookEdit/)
     }
   }
+})
+
+test('adapter-claude.seatCommand is byte-identical to the pre-refactor paneCommand output', () => {
+  const SAMPLE = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/crew-task/role-builder.md',
+    tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', taskDir: '/tmp/crew-task',
+    bootBrief: 'Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait.',
+  }
+  // Captured from main BEFORE the adapter refactor — do not regenerate this
+  // from the new code; it is the compatibility bar.
+  const EXPECTED = 'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" claude --model sonnet --permission-mode bypassPermissions --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."'
+  assert.equal(seatCommand(SAMPLE), EXPECTED)
+})
+
+test('every seat declares an agent; the claude adapter declares full, frozen capabilities', () => {
+  for (const [role, seat] of Object.entries(SEAT_DEFAULTS)) assert.equal(seat.agent, 'claude', `${role} has no agent`)
+  assert.ok(Object.isFrozen(capabilities))
+  assert.equal(capabilities.tool_deny, true)
+})
+
+test('assertCapabilities rejects an adapter that cannot enforce tool denial, naming seat + adapter + capability', () => {
+  assert.throws(
+    () => assertCapabilities('builder', 'weakling', { tool_deny: false }),
+    (err) => /builder/.test(err.message) && /weakling/.test(err.message) && /tool_deny/.test(err.message),
+  )
+  assert.doesNotThrow(() => assertCapabilities('builder', 'claude', { tool_deny: true }))
+})
+
+test('resolveAdapters rejects an unknown --agent-<role> naming the missing file, resolves the default claude adapter otherwise', async () => {
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }),
+    /adapter-nope\.mjs/,
+  )
+  const r = await resolveAdapters(['builder'], {})
+  assert.equal(r.builder.name, 'claude')
 })

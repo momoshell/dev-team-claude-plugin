@@ -78,9 +78,12 @@ function paneCommand(role, args, { checkout, taskDir, bootBrief }) {
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
   // quiet inside the pane (defensive; a no-op when the plugin is absent).
+  // bypassPermissions: crew seats run unattended (no human at their pane to
+  // approve), sandboxed by their --allowedTools list; the workspace/checkout is
+  // the blast radius. Same posture as the reference team-boot implementations.
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR=${taskDir}`,
-    'claude', '--model', seatModel(role, args), '--permission-mode', 'acceptEdits',
+    'claude', '--model', seatModel(role, args), '--permission-mode', 'bypassPermissions',
     '--allowedTools', `"${seat.tools}"`,
     '--append-system-prompt-file', `"${SHARED_PROMPT}"`,
     '--append-system-prompt-file', `"${rolePrompt}"`,

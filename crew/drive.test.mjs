@@ -5,7 +5,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { driveTask, LIMITS, DECISIONS } from './drive.mjs'
+import { driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
 const CTX = Object.freeze({
@@ -247,7 +247,146 @@ test('consult limit exhausts to escalation (a looping lead cannot loop the drive
   assert.match(res.details.escalation.why, /consult limit/)
 })
 
+test('second-opinion valve: lead requests reviewer perspective, code gathers it unseeded, lead decides on re-ask', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'ambiguous brief' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { perspective: 'the brief means X; plan for X', recommendation: 'bounce', confidence: 'high' } },
+      'lead:2': leadEnv('bounce', 'plan for X per the reviewer perspective'),
+      'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.consults, 1) // the compounded exchange is ONE consult
+  // the perspective brief went to the reviewer and does NOT leak the lead's leaning
+  const pBrief = Object.entries(io.calls.writes).find(([k]) => /perspective-1\.md/.test(k))[1]
+  assert.match(pBrief, /advising a decision/)
+  // Unseeded means the lead's LEANING is structurally absent (it never
+  // exists in any artifact); the decision vocabulary IS shared so the
+  // recommendation comes back machine-comparable.
+  assert.match(pBrief, /own view is deliberately not shared/)
+  assert.match(pBrief, /recommendation/)
+  // the second decision brief carries the perspective, and no valve
+  const b2 = Object.entries(io.calls.writes).find(([k]) => /decision-1b\.md/.test(k))[1]
+  assert.match(b2, /Independent perspective from reviewer/)
+  assert.match(b2, /plan for X/)
+  assert.doesNotMatch(b2, /second-opinion \(set details\.from/)
+})
+
+test('a second second-opinion answer escalates — one hop is the bound', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'blocked' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { perspective: 'unclear', confidence: 'low' } },
+      'lead:2': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'planner' } },
+    },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /one hop is the bound/)
+})
+
+test('second-opinion naming an unseated member escalates', () => {
+  const ctx = { ...CTX, roles: ['lead', 'planner', 'builder', 'reviewer'] } // no tech-lead seated
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'blocked' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'tech-lead' } },
+    },
+  })
+  const res = driveTask(ctx, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /not a seated judgment member/)
+})
+
+test('compounding policy: lead accept over advisor escalate -> binding escalation naming the dissent', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:3': { status: 'done', role: 'reviewer', details: { perspective: 'these residuals are load-bearing', recommendation: 'escalate', confidence: 'high' } },
+      'lead:2': leadEnv('accept'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /independently recommended escalate/)
+  assert.equal(res.details.dissents.length, 1)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('compounding policy: lead bounce over advisor escalate -> lead prevails (safe direction), dissent recorded, task completes', () => {
+  // planner-insufficient consult: options are bounce|escalate. Advisor says
+  // escalate, lead says bounce — the split is recorded but a SAFE-direction
+  // lead decision is never overridden.
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'ambiguous' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { perspective: 'seems unresolvable to me', recommendation: 'escalate', confidence: 'low' } },
+      'lead:2': leadEnv('bounce', 'the brief means X; plan for X'),
+      'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.dissents[0], { from: 'reviewer', recommendation: 'escalate', lead_decision: 'bounce', consult: 1 })
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('compounding policy: an off-menu advisor recommendation is discarded (null), no dissent, no binding', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:3': { status: 'done', role: 'reviewer', details: { perspective: 'one more round would do it', recommendation: 'bounce', confidence: 'medium' } }, // bounce is OFF-MENU here (accept|escalate)
+      'lead:2': leadEnv('accept'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.dissents, []) // off-menu rec never becomes dissent
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('compounding policy: agreement leaves no dissent recorded', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { perspective: 'bounce with X', recommendation: 'bounce', confidence: 'high' } },
+      'lead:2': leadEnv('bounce', 'do X'),
+      'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.dissents, [])
+})
+
 test('DECISIONS and LIMITS are the frozen public contract', () => {
   assert.ok(Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS))
   assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+  assert.equal(SECOND_OPINION, 'second-opinion')
+  assert.ok(Object.isFrozen(PERSPECTIVE_TARGETS))
 })

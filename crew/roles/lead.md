@@ -27,6 +27,14 @@ artifacts before answering; a warm judge beats a cold one.
 An answer outside the offered options is treated as escalate — so never
 invent a fourth option; if none fits, choose escalate and say why.
 
+One extra valve exists on the FIRST round of a consult only, when the brief
+offers it: `second-opinion`. Use it when your confidence is genuinely low
+and another seat holds knowledge you lack — the reviewer knows the diff, the
+tech-lead knows the plan's weak points. Answer decision="second-opinion"
+with details.from=<one of the offered roles>; CODE gathers their view
+independently (your leaning is never shared with them) and re-asks you once
+with it attached — and then you must decide. Requesting it twice escalates.
+
 ## How to judge
 
 - **bounce** when the failure is fixable and you can say HOW in one brief.

@@ -30,6 +30,16 @@ export const WAITS_S = Object.freeze({
 // escalate (fail toward the human, never toward silent progress).
 export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 
+// The compounding valve: on the FIRST round of a consult the lead may answer
+// decision='second-opinion' with details.from=<a seated judgment member>.
+// CODE then gathers that member's perspective — same question and context,
+// deliberately WITHOUT the lead's leaning (unseeded, so it is genuinely
+// independent) — and re-asks the lead once, with the perspective attached
+// and the valve removed. One hop, then the judge must judge. The whole
+// exchange counts as ONE consult against the limit.
+export const SECOND_OPINION = 'second-opinion'
+export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead', 'planner'])
+
 function fail(stage, msg) {
   const err = new Error(`${stage}: ${msg}`)
   err.stage = stage
@@ -65,7 +75,7 @@ function verdictOf(env) {
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null }
+  const S = { consults: 0, stages: [], commit: null, dissents: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
 
   const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }) }
@@ -80,30 +90,96 @@ export function driveTask(ctx, io) {
   }
 
   // Consult the lead: offer a closed option set, get a decision back.
-  // Anything invalid, out-of-set, or timed out escalates.
+  // Anything invalid, out-of-set, or timed out escalates. A first-round
+  // 'second-opinion' answer triggers the code-mediated compounding hop.
   function consultLead(question, options, contextPaths) {
     S.consults += 1
     if (S.consults > limits.lead_consults) {
       return { decision: 'escalate', reason: `lead consult limit (${limits.lead_consults}) exhausted` }
     }
-    const briefPath = art(`decision-${S.consults}.md`)
+    const targets = PERSPECTIVE_TARGETS.filter((r) => ctx.roles.includes(r))
+    const first = askLead(question, options, contextPaths, { round: 1, targets })
+    if (first.decision !== SECOND_OPINION) return first
+
+    // Compounding hop (code-executed, one only). Invalid target -> escalate.
+    const from = first.from
+    if (!targets.includes(from)) {
+      return { decision: 'escalate', reason: `second-opinion target ${JSON.stringify(from)} is not a seated judgment member` }
+    }
+    const pBrief = art(`perspective-${S.consults}.md`)
+    io.writeFile(pBrief, [
+      `# Perspective requested (consult ${S.consults})`, '',
+      `You are advising a decision, not re-doing your role's work. The lead's`,
+      `own view is deliberately not shared with you — answer independently`,
+      `from your seat's knowledge; be direct about confidence.`, '',
+      `## Question`, question, '',
+      `## Possible outcomes (recommend exactly one)`,
+      ...options.map((o) => `- ${o}`), '',
+      `## Context files (read before answering)`,
+      ...contextPaths.map((x) => `- ${x}`), '',
+      `Reply with a ReturnEnvelope whose details are {"perspective": "<3-8 sentences>", "recommendation": "<one outcome>", "confidence": "high|medium|low"}.`,
+    ].join('\n'))
+    const pEnv = assignAndWait(from, pBrief, 'perspective')
+    const recommendation = pEnv.status === 'done' && options.includes(pEnv.details?.recommendation)
+      ? pEnv.details.recommendation : null
+    const perspective = pEnv.status === 'done'
+      ? `${pEnv.details?.perspective || pEnv.summary || '(empty perspective)'} [recommends: ${recommendation || 'unstated'}; confidence: ${pEnv.details?.confidence || 'unstated'}]`
+      : `(${from} returned ${pEnv.status}: ${pEnv.summary || 'no detail'})`
+    io.log({ at: io.now(), perspective_from: from, recommendation, consult: S.consults })
+
+    const second = askLead(
+      `${question}\n\n## Independent perspective from ${from} (gathered unseeded)\n${perspective}`,
+      options, contextPaths, { round: 2, targets: [] },
+    )
+    if (second.decision === SECOND_OPINION) {
+      return { decision: 'escalate', reason: 'lead requested a second second-opinion — one hop is the bound' }
+    }
+    // Compounding policy (code-owned): synthesis by the lead, but divergence
+    // is never silent, and it binds in exactly one direction —
+    //   lead=accept vs advisor=escalate  -> ESCALATE (one judge asking for a
+    //     human is enough on the lenient path; compounding may only ever
+    //     strengthen an outcome toward safety, never weaken it);
+    //   any other split -> lead prevails, dissent recorded for the human.
+    if (recommendation && recommendation !== second.decision) {
+      const dissent = { from, recommendation, lead_decision: second.decision, consult: S.consults }
+      S.dissents.push(dissent)
+      io.log({ at: io.now(), dissent })
+      if (second.decision === 'accept' && recommendation === 'escalate') {
+        return { decision: 'escalate', reason: `lead accepted but ${from} independently recommended escalate — on the lenient path a single judge asking for a human is binding` }
+      }
+    }
+    return second
+  }
+
+  function askLead(question, options, contextPaths, { round, targets }) {
+    const briefPath = art(`decision-${S.consults}${round === 2 ? 'b' : ''}.md`)
+    const valve = round === 1 && targets.length > 0
+      ? [`- ${SECOND_OPINION} (set details.from to one of: ${targets.join(', ')} — code will gather their independent view and re-ask you once)`]
+      : []
     io.writeFile(briefPath, [
-      `# Decision needed (consult ${S.consults})`, '',
+      `# Decision needed (consult ${S.consults}${round === 2 ? ', final round' : ''})`, '',
       `## Question`, question, '',
       `## Your options (answer with exactly one in details.decision)`,
-      ...options.map((o) => `- ${o}`), '',
+      ...options.map((o) => `- ${o}`),
+      ...valve, '',
       `## Context files (read before deciding)`,
-      ...contextPaths.map((p) => `- ${p}`), '',
-      `Reply with a ReturnEnvelope whose details are {"decision": <option>, "reason": "...", "guidance": "..."}.`,
+      ...contextPaths.map((x) => `- ${x}`), '',
+      `Reply with a ReturnEnvelope whose details are {"decision": <option>, "reason": "...", "guidance": "..."${round === 1 ? ', "from": "<role>" when requesting a second opinion' : ''}}.`,
       `guidance is REQUIRED when decision is bounce — it becomes the bounce brief's steer.`,
     ].join('\n'))
-    const env = assignAndWait('lead', briefPath, 'decision')
+    const env = assignAndWait('lead', briefPath, round === 2 ? 'decision-final' : 'decision')
     const d = env.details || {}
-    if (env.status !== 'done' || !options.includes(d.decision)) {
+    // Round 2: a repeat second-opinion passes through raw so consultLead can
+    // name the one-hop bound precisely in its escalation reason.
+    if (round === 2 && env.status === 'done' && d.decision === SECOND_OPINION) {
+      return { decision: SECOND_OPINION }
+    }
+    const allowed = round === 1 && targets.length > 0 ? [...options, SECOND_OPINION] : options
+    if (env.status !== 'done' || !allowed.includes(d.decision)) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
     }
-    io.log({ at: io.now(), decision: d.decision, consult: S.consults, reason: d.reason })
-    return { decision: d.decision, reason: d.reason || '', guidance: d.guidance || '' }
+    io.log({ at: io.now(), decision: d.decision, consult: S.consults, round, reason: d.reason })
+    return { decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from }
   }
 
   function escalate(where, why, extraArtifacts = []) {
@@ -112,7 +188,7 @@ export function driveTask(ctx, io) {
       status: 'escalation',
       summary: `Task ${ctx.task} needs a human: ${why}`,
       artifacts: [art('journal.jsonl'), ...extraArtifacts],
-      details: { stages: S.stages, escalation: { where, why }, commit: null },
+      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents },
     }
   }
 
@@ -282,6 +358,6 @@ export function driveTask(ctx, io) {
     status: 'done',
     summary: `Task ${ctx.task} complete: committed ${S.commit} (${scopeFiles.length} files), suite green, review pass. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), art('journal.jsonl')],
-    details: { commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults, escalation: null },
+    details: { commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults, dissents: S.dissents, escalation: null },
   }
 }

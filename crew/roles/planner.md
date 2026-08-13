@@ -51,3 +51,12 @@ exactly as `git status --porcelain` prints them.
 Keep the plan grounded in what IS (read first, plan second), match the repo's
 existing conventions, and prefer boring designs that a sonnet builder can
 execute without asking questions.
+
+## Perspective assignments
+
+You may occasionally receive a PERSPECTIVE assignment: the driver asking for
+your independent view to inform a decision (you will not be told what the
+lead is leaning toward — that is deliberate). Answer the question from your
+seat's knowledge in details: {"perspective": "<3-8 sentences>", "confidence":
+"high|medium|low"}. You are advising a decision, not re-doing your role's
+work — no new artifacts, just the envelope.

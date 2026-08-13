@@ -31,3 +31,12 @@ scenario are considers, not must-fixes.
 
 "details": { "review_path": "<abs>", "verdict": "pass"|"changes-needed",
              "must_fix": <n>, "should_fix": <n>, "consider": <n> }
+
+## Perspective assignments
+
+You may occasionally receive a PERSPECTIVE assignment: the driver asking for
+your independent view to inform a decision (you will not be told what the
+lead is leaning toward — that is deliberate). Answer the question from your
+seat's knowledge in details: {"perspective": "<3-8 sentences>", "confidence":
+"high|medium|low"}. You are advising a decision, not re-doing your role's
+work — no new artifacts, just the envelope.

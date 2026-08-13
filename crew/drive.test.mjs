@@ -493,6 +493,155 @@ test('every stage transition reaches io.status in order (the live pill feed)', (
   assert.deepEqual(io.calls.status, res.details.stages)
 })
 
+// --- loop-boundary regressions (the "final-round bounce commits" class) ------
+// A granted bounce must always land in a REAL round; the finish block runs
+// only via review:pass or an explicit lead accept. These pin the fix for the
+// class where lane-red/gate-red/builder-insufficient work reached commit.
+
+test('final-round lane red + lead grants bounce -> a REAL extra round runs; commit only after review pass', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'lead:1': leadEnv('bounce', 'the lane fails on X; fix X'),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'red' }, 'lane-cmd:2': { ok: false, output: 'red' },
+      'lane-cmd:3': { ok: false, output: 'red' }, 'lane-cmd:4': { ok: true, output: '' },
+      'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 4) // the granted bounce GOT its round
+  assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 1) // and review still happened
+  assert.equal(res.details.accepted_via, 'review pass')
+})
+
+test('final-round lane red, granted bounce STILL red, lead then escalates -> escalation, NO commit', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('escalate'),
+    },
+    runs: { 'lane-cmd': { ok: false, output: 'red forever' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('builder insufficient on the FINAL round + granted bounce -> re-assigned, never a stale-envelope commit', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), // good round 1
+      'builder:2': buildEnv({ status: 'insufficient' }), 'builder:3': buildEnv({ status: 'insufficient' }),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'), 'lead:3': leadEnv('bounce'),
+      'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  // round 1 built+reviewed(changes-needed) -> r2/r3 insufficient (r3 is final: bounce extends) -> r4 builds -> review pass
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 4)
+  assert.equal(res.details.accepted_via, 'review pass')
+})
+
+test('unreadable reviewer verdict + granted bounce re-asks the REVIEWER in place — the builder is NOT re-run', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { verdict: 'maybe?' } },
+      'lead:1': leadEnv('bounce'),
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 2)
+})
+
+test('an envelope with a MISMATCHED assignment_id is rejected (stale-file replay guard)', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ assignment_id: 'd9-from-a-previous-run' }) },
+  })
+  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope/)
+})
+
+test('an envelope carrying its OWN assignment_id is accepted', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ assignment_id: 'planner1' }), // fakeIo ids are `${role}${n}`
+      'builder:1': buildEnv({ assignment_id: 'builder1' }),
+      'reviewer:1': { ...reviewEnv('pass'), assignment_id: 'reviewer1' },
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  assert.equal(driveTask(CTX, io).status, 'done')
+})
+
+test('accepted_via records a lead accept-with-residuals distinctly from a review pass', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
+      'lead:1': leadEnv('accept'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.match(res.details.accepted_via, /residuals/)
+  assert.match(res.summary, /residuals/)
+  assert.doesNotMatch(res.summary, /review pass/) // the envelope never asserts a review that did not happen
+})
+
+test('escalation artifacts and exhaustion briefs cite the REAL journal path from ctx', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ status: 'blocked' }), 'lead:1': leadEnv('escalate') },
+  })
+  const res = driveTask({ ...CTX, journal: '/real/crew/journal.jsonl' }, io)
+  assert.equal(res.status, 'escalation')
+  assert.ok(res.artifacts.includes('/real/crew/journal.jsonl'))
+  assert.ok(!res.artifacts.some((a) => a === `${TD}/journal.jsonl`))
+})
+
+test('a gate repair records the replaced command in the gate audit trail', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'wrong target' } },
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:2': { ok: false, output: 'fail A' }, 'gate-bad:3': { ok: false, output: 'fail B' },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.gate.replaced, ['gate-bad'])
+})
+
 test('DECISIONS and LIMITS are the frozen public contract', () => {
   assert.ok(Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS))
   assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])

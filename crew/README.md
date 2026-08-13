@@ -32,7 +32,7 @@ boot layout — nothing is ever typed into a spawning shell):
 |---|---|---|
 | `lead` | the judge: consulted by code only at genuine judgment points, answers with a closed-enum decision envelope | none |
 | `planner` | domain lead + architect + scout-commander; envelope carries `files_in_scope`, `validation_lane`, optional `gate_cmd` | none (task dir only) |
-| `builder` | the only repo-writing seat; tests are part of building | in-scope files only (git-gated) |
+| `builder` | the only repo-writing seat; tests are part of building | in-scope files only (git-gated); the only seat allowed `Edit` (tool-denied elsewhere) |
 | `reviewer` | conformance to plan, then correctness; also gate-defect triage and perspective duty | none |
 | `tech-lead` | optional plan adversary — deliberately a different model/effort | none |
 
@@ -97,6 +97,12 @@ journal); archives keep the durable record after teardown.
 ## Posture
 
 Seats run `--permission-mode bypassPermissions` (nobody is at their panes to
-approve), contained by per-seat `--allowedTools`, the feature-branch blast
-radius, `DEVTEAM_WORKER=1` anti-recursion, and the operator's global deny
-rules. The driver never pushes; PR/push stays with the human's orchestrator.
+approve). The ENFORCED tool boundary is per-seat `--disallowedTools` — it
+holds even under bypass, and it is what makes builder-only `Edit` and
+builder-never-`Task` real (`--allowedTools` is only an auto-approve list;
+under bypass it restricts nothing). `Write` stays available to every seat
+(envelopes, task-dir artifacts), so the REPO boundary for non-builder seats
+is the git scope gate + in-scope-only commit, not tool denial. Beyond that:
+the feature-branch blast radius, `DEVTEAM_WORKER=1` anti-recursion, and the
+operator's global deny rules. The driver never pushes; PR/push stays with
+the human's orchestrator.

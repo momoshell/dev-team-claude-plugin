@@ -49,10 +49,14 @@ function fail(stage, msg) {
 }
 
 // --- envelope shape checks (never trust a member's file blindly) -------------
-function validEnvelope(env, role) {
+// The assignment_id check is anti-replay: a stale file from an earlier run
+// (crash, escalation) must never satisfy a fresh assignment. Missing is
+// tolerated (the shape contract is prompt-borne); a MISMATCH never is.
+function validEnvelope(env, role, id) {
   return env && typeof env === 'object'
     && typeof env.status === 'string'
     && (env.role === undefined || env.role === role)
+    && (env.assignment_id === undefined || env.assignment_id === id)
 }
 
 function verdictOf(env) {
@@ -65,6 +69,7 @@ function verdictOf(env) {
 // --- the driver ----------------------------------------------------------------
 // ctx: { task, briefFile, taskDir, checkout, roles: [..seated roles..],
 //        lane: <fallback validation command|null>, suite: <full-suite command>,
+//        journal: <real journal.jsonl path (lives in the CREW dir)>,
 //        limits?, waits? }
 // io:  { assign({role, briefFile, note}) -> {id, returnPath},
 //        wait(returnPath, timeoutS) -> envelope|null,
@@ -79,6 +84,9 @@ export function driveTask(ctx, io) {
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const S = { consults: 0, stages: [], commit: null, dissents: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
+  // The journal lives in the CREW dir, not the task dir — take its real path
+  // from ctx so decision briefs and escalation artifacts never cite a 404.
+  const journal = ctx.journal || art('journal.jsonl')
 
   // Every stage transition goes to the journal AND (when io provides it) to
   // a live status surface — the workspace pill — so a quiet team is never
@@ -90,7 +98,7 @@ export function driveTask(ctx, io) {
     const { id, returnPath } = io.assign({ role, briefFile, note })
     io.log({ at: io.now(), assign: id, role, brief: briefFile })
     const env = io.wait(returnPath, waits[role] || 1200)
-    if (!validEnvelope(env, role)) throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
+    if (!validEnvelope(env, role, id)) throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
     io.log({ at: io.now(), envelope: id, role, status: env.status })
     return env
   }
@@ -98,12 +106,14 @@ export function driveTask(ctx, io) {
   // Consult the lead: offer a closed option set, get a decision back.
   // Anything invalid, out-of-set, or timed out escalates. A first-round
   // 'second-opinion' answer triggers the code-mediated compounding hop.
-  function consultLead(question, options, contextPaths) {
+  function consultLead(question, options, contextPaths, { exclude } = {}) {
     S.consults += 1
     if (S.consults > limits.lead_consults) {
       return { decision: 'escalate', reason: `lead consult limit (${limits.lead_consults}) exhausted` }
     }
-    const targets = PERSPECTIVE_TARGETS.filter((r) => ctx.roles.includes(r))
+    // exclude: a seat whose own output is the thing under judgment cannot be
+    // offered as the independent advisor on it.
+    const targets = PERSPECTIVE_TARGETS.filter((r) => ctx.roles.includes(r) && r !== exclude)
     const first = askLead(question, options, contextPaths, { round: 1, targets })
     if (first.decision !== SECOND_OPINION) return first
 
@@ -193,7 +203,7 @@ export function driveTask(ctx, io) {
     return {
       status: 'escalation',
       summary: `Task ${ctx.task} needs a human: ${why}`,
-      artifacts: [art('journal.jsonl'), ...extraArtifacts],
+      artifacts: [journal, ...extraArtifacts],
       details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents },
     }
   }
@@ -263,6 +273,7 @@ export function driveTask(ctx, io) {
   // exact defect class the v2 plan review caught by hand, mechanized).
   let gateCmd = planEnv.details?.gate_cmd || null
   let gateRepairs = 0
+  const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
   if (gateCmd) {
     stage('gate-baseline')
     const baseline = io.run(gateCmd)
@@ -272,8 +283,9 @@ export function driveTask(ctx, io) {
       io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYour acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
       const env2 = assignAndWait('planner', b, 'gate-fix')
       if (env2.status !== 'done' || !env2.details?.gate_cmd) {
-        return escalate('gate', `baseline-green gate could not be repaired (planner returned ${env2.status})`)
+        return escalate('gate', `baseline-green gate could not be repaired (planner returned ${env2.status}: ${env2.summary || 'no detail'})`)
       }
+      gateHistory.push(gateCmd)
       gateCmd = env2.details.gate_cmd
       const re = io.run(gateCmd)
       if (re.ok) return escalate('gate', 'repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
@@ -286,7 +298,17 @@ export function driveTask(ctx, io) {
   let buildNote = 'build'
   let builderEnv = null
   let reviews = 0
-  for (let round = 1; round <= limits.build_rounds; round += 1) {
+  // The finish block runs ONLY when `accepted` is set — at review:pass or at
+  // an explicit lead accept. No bounce, however granted, can fall out of the
+  // loop into a commit: a final-round consult that grants "bounce once more"
+  // EXTENDS the bound by one real round instead (bounded in turn by the
+  // consult limit, so a looping judge still cannot loop the driver).
+  let accepted = null
+  let extraRounds = 0
+  let gateTriaged = false
+  build:
+  for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
+    const finalRound = () => round >= limits.build_rounds + extraRounds
     stage(`build:r${round}`)
     const env = assignAndWait('builder', buildBrief, buildNote)
     if (env.status !== 'done') {
@@ -295,6 +317,7 @@ export function driveTask(ctx, io) {
         ['bounce', 'escalate'], [buildBrief, ...(env.artifacts || [])],
       )
       if (c.decision === 'escalate') return escalate('build', c.reason, env.artifacts || [])
+      if (finalRound()) extraRounds += 1 // the granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
       io.writeFile(b, `# Build bounce (round ${round})\n\n${c.guidance}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'build-fix'
@@ -307,7 +330,7 @@ export function driveTask(ctx, io) {
     const changed = io.changedFiles()
     const outOfScope = changed.filter((f) => !scopeFiles.includes(f))
     if (outOfScope.length > 0) {
-      if (round === limits.build_rounds) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
+      if (finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
       const b = art(`build-bounce-r${round}.md`)
       io.writeFile(b, `# Scope bounce (round ${round})\n\nThese files are OUTSIDE the plan's scope — revert them or stop touching them:\n${outOfScope.map((f) => `- ${f}`).join('\n')}\n\nIn-scope set:\n${scopeFiles.map((f) => `- ${f}`).join('\n')}\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'scope-fix'
@@ -318,12 +341,13 @@ export function driveTask(ctx, io) {
     stage(`lane:r${round}`)
     const laneRes = io.run(lane)
     if (!laneRes.ok) {
-      if (round === limits.build_rounds) {
+      if (finalRound()) {
         const c = consultLead(
           `The validation lane is still red after ${round} rounds. Bounce once more with guidance, or escalate?`,
-          ['bounce', 'escalate'], [planPath, art('journal.jsonl')],
+          ['bounce', 'escalate'], [planPath, journal],
         )
         if (c.decision !== 'bounce') return escalate('lane', c.reason)
+        extraRounds += 1
       }
       const b = art(`build-bounce-r${round}.md`)
       io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
@@ -332,15 +356,16 @@ export function driveTask(ctx, io) {
     }
 
     // Gate B2 (mechanical): the acceptance gate, when the plan authored one.
-    // Failures feed back VERBATIM; repeated failures trigger a build-vs-gate
+    // Failures feed back VERBATIM; repeated failures trigger ONE build-vs-gate
     // defect triage by the reviewer (closed enum); a gate defect lets the
-    // planner repair its own gate ONCE (old gate preserved by the planner),
+    // planner repair its own gate ONCE (old gate preserved in gateHistory),
     // and the repaired gate re-runs immediately WITHOUT consuming a builder
     // round. The repair contract forbids weakening any legitimate check.
     if (gateCmd) {
       stage(`gate:r${round}`)
       let gateRes = io.run(gateCmd)
-      if (!gateRes.ok && round >= limits.gate_fails_to_triage && gateRepairs < limits.gate_repairs) {
+      if (!gateRes.ok && round >= limits.gate_fails_to_triage && !gateTriaged && gateRepairs < limits.gate_repairs) {
+        gateTriaged = true
         const tBrief = art(`gate-triage-r${round}.md`)
         io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.`)
         const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
@@ -351,18 +376,20 @@ export function driveTask(ctx, io) {
           io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve your old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
           const rep = assignAndWait('planner', rBrief, 'gate-repair')
           if (rep.status === 'done' && rep.details?.gate_cmd) {
+            gateHistory.push(gateCmd)
             gateCmd = rep.details.gate_cmd
             gateRes = io.run(gateCmd) // re-run immediately; no builder round consumed
           }
         }
       }
       if (!gateRes.ok) {
-        if (round === limits.build_rounds) {
+        if (finalRound()) {
           const c = consultLead(
             `The acceptance gate is still red after ${round} build rounds. Bounce once more with guidance, or escalate?`,
-            ['bounce', 'escalate'], [planPath, art('journal.jsonl')],
+            ['bounce', 'escalate'], [planPath, journal],
           )
           if (c.decision !== 'bounce') return escalate('gate', c.reason)
+          extraRounds += 1
         }
         const b = art(`build-bounce-r${round}.md`)
         io.writeFile(b, `# Gate bounce (round ${round})\n\nThe ACCEPTANCE GATE is red — the build does not yet do what was asked. The gate is immutable to you; make the build satisfy it:\n\n    ${gateCmd}\n\nFailures (verbatim):\n${gateRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
@@ -371,55 +398,64 @@ export function driveTask(ctx, io) {
       }
     }
 
-    // Gate C (judgment, but enum-consumed): the reviewer.
-    if (reviews >= limits.review_rounds) {
-      const c = consultLead(
-        `Review rounds are exhausted (${reviews}) and the last verdict was revise. Accept with residuals, or escalate?`,
-        ['accept', 'escalate'], [planPath, art('review.md')],
-      )
-      if (c.decision === 'escalate') return escalate('review', c.reason)
-      break
-    }
-    stage(`review:r${reviews + 1}`)
-    const revBrief = art(`review-brief-${reviews + 1}.md`)
-    io.writeFile(revBrief, [
-      `# Review (round ${reviews + 1})`, '',
-      `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
-      `Re-run the validation lane yourself: ${lane}`,
-      `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
-    ].join('\n'))
-    const review = assignAndWait('reviewer', revBrief, 'review')
-    reviews += 1
-    const v = verdictOf(review)
-    if (v === 'pass') { stage('review:pass'); break }
-    if (v !== 'revise') {
+    // Gate C (judgment, but enum-consumed): the reviewer. An unreadable
+    // verdict re-asks the REVIEWER in place — the builder is never re-run
+    // for a reviewer's malformed envelope.
+    while (true) {
+      if (reviews >= limits.review_rounds) {
+        const c = consultLead(
+          `Review rounds are exhausted (${reviews}) and the last verdict was revise. Accept with residuals, or escalate?`,
+          ['accept', 'escalate'], [planPath, art('review.md')],
+        )
+        if (c.decision === 'escalate') return escalate('review', c.reason)
+        accepted = 'lead accepted with residuals (review rounds exhausted)'
+        break build
+      }
+      stage(`review:r${reviews + 1}`)
+      const revBrief = art(`review-brief-${reviews + 1}.md`)
+      io.writeFile(revBrief, [
+        `# Review (round ${reviews + 1})`, '',
+        `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
+        `Re-run the validation lane yourself: ${lane}`,
+        `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
+      ].join('\n'))
+      const review = assignAndWait('reviewer', revBrief, 'review')
+      reviews += 1
+      const v = verdictOf(review)
+      if (v === 'pass') { stage('review:pass'); accepted = 'review pass'; break build }
+      if (v === 'revise') {
+        if (finalRound()) {
+          const c = consultLead(
+            `Build rounds are exhausted but the review says changes-needed. Accept with residuals, or escalate?`,
+            ['accept', 'escalate'], [planPath, review.details?.review_path || art('review.md')],
+          )
+          if (c.decision === 'escalate') return escalate('review', c.reason)
+          accepted = 'lead accepted with residuals (build rounds exhausted)'
+          break build
+        }
+        const b = art(`build-bounce-r${round}.md`)
+        io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${review.details?.review_path || art('review.md')}. Plan: ${planPath}`)
+        buildBrief = b; buildNote = 'review-fix'
+        continue build
+      }
       const c = consultLead(
         `The reviewer returned an unreadable verdict (status=${review.status}, verdict=${review.details?.verdict}). Bounce the reviewer, or escalate?`,
         ['bounce', 'escalate'], [revBrief, ...(review.artifacts || [])],
+        { exclude: 'reviewer' },
       )
       if (c.decision === 'escalate') return escalate('review', c.reason)
-      reviews -= 1 // the re-ask replaces the unreadable round
-      continue
+      reviews -= 1 // the re-ask replaces the unreadable round; loop re-asks in place
     }
-    if (round === limits.build_rounds) {
-      const c = consultLead(
-        `Build rounds are exhausted but the review says changes-needed. Accept with residuals, or escalate?`,
-        ['accept', 'escalate'], [planPath, review.details?.review_path || art('review.md')],
-      )
-      if (c.decision === 'escalate') return escalate('review', c.reason)
-      break
-    }
-    const b = art(`build-bounce-r${round}.md`)
-    io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${review.details?.review_path || art('review.md')}. Plan: ${planPath}`)
-    buildBrief = b; buildNote = 'review-fix'
   }
-  if (!builderEnv) return escalate('build', `no accepted build within ${limits.build_rounds} rounds`)
+  if (!builderEnv || !accepted) {
+    return escalate('build', `no accepted build within ${limits.build_rounds + extraRounds} rounds`)
+  }
 
   // ---- 3. FINISH: full suite (code) + commit-on-green (code) --------------------
   stage('suite')
   const suiteRes = io.run(ctx.suite)
   if (!suiteRes.ok) {
-    return escalate('suite', `full suite red after review pass — this needs eyes:\n${suiteRes.output.slice(-2000)}`)
+    return escalate('suite', `full suite red after acceptance — this needs eyes:\n${suiteRes.output.slice(-2000)}`)
   }
   stage('commit')
   const message = builderEnv.details?.commit_message
@@ -429,8 +465,12 @@ export function driveTask(ctx, io) {
 
   return {
     status: 'done',
-    summary: `Task ${ctx.task} complete: committed ${S.commit} (${scopeFiles.length} files), suite green, review pass. Stages: ${S.stages.join(' | ')}`,
-    artifacts: [planPath, art('review.md'), art('journal.jsonl')],
-    details: { commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults, dissents: S.dissents, gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs } : null, escalation: null },
+    summary: `Task ${ctx.task} complete: committed ${S.commit} (${scopeFiles.length} files), suite green, ${accepted}. Stages: ${S.stages.join(' | ')}`,
+    artifacts: [planPath, art('review.md'), journal],
+    details: {
+      commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults,
+      dissents: S.dissents, accepted_via: accepted, escalation: null,
+      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, ...(gateHistory.length ? { replaced: gateHistory } : {}) } : null,
+    },
   }
 }

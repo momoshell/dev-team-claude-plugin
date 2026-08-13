@@ -137,10 +137,15 @@ export function sendLine(surfaceId, line) {
   const needle = line.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), '')
   if (!needle) throw new Error('sendLine: no verifiable token in line')
 
+  // Verify against a BASELINE, not an absolute count of 1: the needle may
+  // already be on screen (the same brief path assigned twice, the seat's own
+  // transcript quoting a path it read) and a correct send must still verify.
   const deadline = Date.now() + SEND_READY_TIMEOUT_MS
-  while (frameNeedleCount(surfaceId, needle) === null) {
+  let before = frameNeedleCount(surfaceId, needle)
+  while (before === null) {
     if (Date.now() >= deadline) throw new Error(`sendLine: surface ${surfaceId} never became readable`)
     settle(SEND_READY_POLL_MS)
+    before = frameNeedleCount(surfaceId, needle)
   }
 
   let landed = false
@@ -155,9 +160,9 @@ export function sendLine(surfaceId, line) {
     if (!send.ok) throw new Error(`sendLine: send failed: ${send.error.message}`)
     settle(SEND_SETTLE_MS)
     last = frameNeedleCount(surfaceId, needle)
-    if (last === 1) { landed = true; break }
+    if (last === before + 1) { landed = true; break }
   }
-  if (!landed) throw new Error(`sendLine: echo not verified exactly once (last count ${last})`)
+  if (!landed) throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before}, last ${last})`)
 
   const enter = cmux('send-key', ['--surface', surfaceId, '--', 'enter'])
   if (!enter.ok) throw new Error(`sendLine: enter failed: ${enter.error.message}`)

@@ -59,3 +59,19 @@ test('every default role has a seat definition; builder is the only Edit seat an
     }
   }
 })
+
+test('seat deny lists are the ENFORCED boundary: only the builder may Edit, the builder never gets subagents', () => {
+  // --allowedTools is inert under bypassPermissions (verified live); the
+  // --disallowedTools deny list is what actually holds. These pins keep the
+  // charter real: drop a deny entry and the posture in README becomes a lie.
+  for (const [role, seat] of Object.entries(SEAT_DEFAULTS)) {
+    assert.ok(seat.deny, `${role} has no deny list — under bypassPermissions it would be unconstrained`)
+    if (role === 'builder') {
+      assert.match(seat.deny, /Task/), assert.match(seat.deny, /Agent/)
+      assert.doesNotMatch(seat.deny, /Edit/, 'the builder is the one seat that MUST keep Edit')
+    } else {
+      assert.match(seat.deny, /Edit/, `${role} must be tool-denied Edit, not just un-allowed`)
+      assert.match(seat.deny, /NotebookEdit/)
+    }
+  }
+})

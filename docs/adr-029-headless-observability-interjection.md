@@ -1,12 +1,12 @@
 # ADR-029: Headless observability and interjection — the pane-parity matrix for piped seats
 
-**Status:** DRAFT — proposed 2026-08-13, awaiting user ratification · **Source:** issue #85 (epic #80) · **Evidence:** `tasks/headless-worker/spike-findings.md` (HW-1, claude), `tasks/headless-worker/pi-spike-findings.md` (HW-1b, pi)
+**Status:** RATIFIED 2026-08-13 (all seven §8 questions answered; see §9) · **Source:** issue #85 (epic #80) · **Evidence:** `tasks/headless-worker/spike-findings.md` (HW-1, claude), `tasks/headless-worker/pi-spike-findings.md` (HW-1b, pi)
 
 ---
 
 ## 0. Status, scope, and the numbering choice
 
-This is a DRAFT decision record. Ratification belongs to the user. It continues the ADR sequence as ADR-029, puts the full record in `docs/`, and adds a one-line proposed-number pointer to the existing register at the legacy path `.claude/dev-team/memory/architecture-notes.md`. That tree is described as retired but is git-tracked and remains the active register: it contains ADR-024 through ADR-028, and shipped code still cites ADR numbers. The orchestrator is filing register cleanup separately; this ADR records the finding and does not fix the path.
+This record was ratified by the user on 2026-08-13; §9 carries the seven answers and what each one commissions. It continues the ADR sequence as ADR-029, puts the full record in `docs/`, and adds a one-line proposed-number pointer to the existing register at the legacy path `.claude/dev-team/memory/architecture-notes.md`. That tree is described as retired but is git-tracked and remains the active register: it contains ADR-024 through ADR-028, and shipped code still cites ADR numbers. The orchestrator is filing register cleanup separately; this ADR records the finding and does not fix the path.
 
 The scope is headless, piped crew seats: observability, interjection, attention signals, and the constraints on escalation recovery. #80's daemon architecture and its invariant **`idle ≠ success`** are ratified input: liveness is a give-up signal, while the envelope and authoritative task records determine outcome. Nothing in this ADR makes screen state or process state authoritative. This ADR amends issue #85's own body on escalation recovery. It fixes constraints, not the transition mechanism: #125 owns the park/lease transition protocol, alongside #83, and its prior protocol analysis is preserved there.
 
@@ -154,3 +154,17 @@ The exact capability assertions are a consequence, not a suggestion: #83 must na
 5. Yes/no/amend: upgrade gate-result observability by emitting and mirroring per-gate results via `recordGateResult`, with attention firing only on gate exhaustion/triage escalation? This requires a `drive.mjs` change and an owner other than #83-the-transport.
 6. Yes/no/amend: should driver checkpoint/resume be commissioned? §5 rejects it and issue #85 is amended accordingly.
 7. Yes/no/amend: should “send another assignment to a still-live pane seat” be minted as its own capability? §3 declines to overload `session_resume`; if pane transport should advertise it, it needs a name and definition.
+
+## 9. Ratification — 2026-08-13
+
+All seven §8 questions answered by the user. The answers below are the decision; where one commissions work, the owner is named.
+
+1. **Numbering — ratified as posed.** ADR-029 in `docs/`, with the pointer in the legacy register. The register's *location* is not settled here: issue #128 owns whether `.claude/dev-team/` remains the ADR home. Ratifying the number does not ratify the path.
+2. **pi `--mode rpc`, one process per worker session — ratified**, and pi ships **no** `headless-json` profile. Declaring a profile the adapter does not run is the same species of fiction as the flat adapter-wide object this ADR removed (§3).
+3. **`moment` stays a one-member enum (`escalation`) — ratified.** Pre-declaring members nothing emits is how this document's own first draft produced a false claim: a reader saw `gate_pass` in the ledger's `EVENT_TYPES` and inferred a write path that has no caller. A closed enum is cheap to extend when a second moment exists and is emitted.
+4. **A human answer to a parked run is a structured record — ratified.** It carries a stable `decision_id`; it does not ride free text. #125's first crash window is precisely that *idempotent input is not idempotent execution*, and a retry can only be recognised as a retry if the answer is identifiable. #125 owns the record's shape; this ADR fixes that it is structured and park-identifying.
+5. **Gate-result observability — COMMISSIONED.** Today no per-gate verdict reaches a human at all: the gate result is journalled and pilled, never mirrored, so it does not survive the workspace. The driver emits per-gate results, `emitAdapter` maps them through `recordGateResult`, and an attention moment fires only on gate exhaustion or triage escalation — not on ordinary red-then-green. This requires a `drive.mjs` change and therefore an owner **other than #83-the-transport**; filed as **#130**. Rationale of record: on 2026-08-13 a task's gate was green while review found three must-fixes, and the crew cannot currently measure how often that happens.
+6. **Driver checkpoint/resume — NOT commissioned; §5's rejection ratified.** Persisting every `driveTask` local plus a program counter would turn the driver into a checkpointed state machine and contradicts #83's scope of leaving `drive.mjs` unchanged. Linked runs deliver the outcome a human cares about.
+7. **`reassign` is minted as its own capability — ratified.** The runtime already sends a still-live pane seat repeated assignments — every bounce brief is one — while the pane profile declares `interjection: none`, `session_resume: false`, `abort: none`. Nothing in the matrix names that ability, so the table implies something false about the transport the crew uses daily. The distinction is closed: **`interjection` acts on a seat mid-turn; `reassign` gives a new assignment to a seat that has settled.** Per-transport values are NOT set here: pane is established by the driver's own bounce path (`crew/drive.mjs` build/review bounces, exercised continuously), and the headless values require capture like every other cell in §3 — the implementing slice pins them with evidence, and an uncaptured cell stays `false`. Owner: **#131**, paired with the slice that lands `capabilitiesFor({transport})`.
+
+Nothing else in this record changes. Questions 5 and 7 create work; 1–4 and 6 are confirmations of what is written above.

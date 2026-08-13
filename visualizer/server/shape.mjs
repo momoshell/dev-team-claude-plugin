@@ -42,7 +42,7 @@ export function foldAgents(events = []) {
 
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
-  if (field === 'phase_lanes') return 'phase association absent from the record — crew agent events carry no phase_id'
+  if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   const missing = probe?.missing || []
   if (missing.includes(field)) return 'predates this measurement'
   if (field === 'read_tokens' || field === 'written_tokens') return 'awaiting the metering daemon (#83)'
@@ -86,7 +86,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   const phaseCards = phases.map((phase) => {
     const ps = dateValue(phase.started_at)
     const pe = dateValue(phase.ended_at)
-    return { seq: phase.seq, name: phase.name, status: phase.status, lane: phaseLanes.get(phase.id) ?? null,
+    return { id: phase.id ?? null, seq: phase.seq, name: phase.name, status: phase.status, lane: phaseLanes.get(phase.id) ?? null,
       started_at: phase.started_at ?? null, ended_at: phase.ended_at ?? null,
       duration_ms: ps == null ? null : (pe ?? now) - ps }
   })

@@ -13,6 +13,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
   let degradedReason = null
   let closed = false
   const probe = { missing: [...OPTIONAL_COLUMNS.sessions], latched: false, probes: 0 }
+  let json1 = null
   const triage = createTriage({ ledgerDb, triageDb })
 
   function open() {
@@ -62,11 +63,23 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     const runs = sessions.map((session) => shapeRun(session, phaseMap.get(session.adw_id), eventMap.get(session.adw_id), triageRows.get(session.adw_id), probe, now)).filter((run) => matchesFilters(run, filters))
     return { runs, degraded: degraded || triage.health().degraded, probe: { ...probe } }
   }
-  function listEvents({ adw_id, after = 0, limit = 200 } = {}) {
+  function listEvents({ adw_id, after = 0, limit = 200, type, role, phase_id } = {}) {
     const handle = open()
     if (!handle) return { events: [], cursor: after }
-    const events = handle.prepare('SELECT * FROM events WHERE adw_id = ? AND id > ? ORDER BY id LIMIT ?').all(adw_id, after, limit)
-    return { events, cursor: events.length ? events[events.length - 1].id : after }
+    const filters = type != null || role != null || phase_id != null
+    const where = ['adw_id = ?', 'id > ?'], args = [adw_id, after], unsupported_filters = []
+    if (type != null) { where.push('type = ?'); args.push(type) }
+    if (phase_id != null) { where.push('phase_id = ?'); args.push(phase_id) }
+    if (role != null) {
+      if (json1 === null) {
+        try { handle.prepare(`SELECT json_extract('{"a":1}','$.a') AS value`).get(); json1 = true } catch { json1 = false }
+      }
+      if (json1) { where.push("json_extract(payload_json,'$.role') = ?"); args.push(role) } else unsupported_filters.push('role')
+    }
+    const events = handle.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY id LIMIT ?`).all(...args, limit)
+    if (!filters) return { events, cursor: events.length ? events[events.length - 1].id : after }
+    const max = handle.prepare('SELECT max(id) AS max_id FROM events WHERE adw_id = ?').get(adw_id)?.max_id
+    return { events, cursor: events.length === limit ? events.at(-1).id : (max ?? after), ...(unsupported_filters.length ? { unsupported_filters } : {}) }
   }
   function health() {
     probeColumns()

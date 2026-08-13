@@ -5,5 +5,11 @@ async function request(path, options) {
   return data
 }
 export const getSessions = (filters = {}) => request(`/api/sessions?${new URLSearchParams(filters)}`)
-export const getEvents = (adwId, after = 0, limit) => request(`/api/events?adw_id=${encodeURIComponent(adwId)}&after=${after}${limit == null ? '' : `&limit=${limit}`}`)
+export const getEvents = (adwId, after = 0, limit, filters = {}) => {
+  const params = new URLSearchParams({ adw_id: adwId, after })
+  if (limit != null) params.set('limit', limit)
+  for (const key of ['type', 'role', 'phase_id']) if (filters[key] !== undefined && filters[key] !== '' && filters[key] !== null) params.set(key, filters[key])
+  return request(`/api/events?${params}`)
+}
+export const getReturns = (repoSlug, taskSlug, adwId) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
 export const postTriage = (adwId, reviewed) => request('/api/triage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adw_id: adwId, reviewed }) })

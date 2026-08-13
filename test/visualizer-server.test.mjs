@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawn as spawnProcess } from 'node:child_process'
@@ -15,6 +15,19 @@ const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
 
 function digest(path) { return createHash('sha256').update(readFileSync(path)).digest('hex') }
+function treeDigest(root) {
+  const hash = createHash('sha256')
+  function walk(dir) {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name), stat = statSync(path)
+      hash.update(name)
+      if (stat.isDirectory()) walk(path)
+      else hash.update(readFileSync(path))
+    }
+  }
+  walk(root)
+  return hash.digest('hex')
+}
 async function json(base, path, options) {
   const response = await fetch(`${base}${path}`, options)
   const text = await response.text()
@@ -34,8 +47,10 @@ function announce(child) {
     child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
   })
 }
-function startServer(ledgerDb, triageDb) {
-  const child = spawnProcess(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb], { stdio: ['ignore', 'pipe', 'pipe'] })
+function startServer(ledgerDb, triageDb, crewRoot) {
+  const args = ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
+  if (crewRoot) args.push('--crew-root', crewRoot)
+  const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
 }
@@ -43,16 +58,25 @@ async function stopServer(child) {
   child.kill('SIGTERM')
   await new Promise((resolve) => child.once('exit', resolve))
 }
+function returnsFixture(root, adwId) {
+  const dir = join(root, 'repo', 'finished'), returns = join(dir, 'returns'), ledger = join(dir, 'ledger')
+  mkdirSync(returns, { recursive: true }); mkdirSync(ledger, { recursive: true })
+  writeFileSync(join(ledger, 'run.json'), JSON.stringify({ adw_id: adwId, repo_slug: 'repo', task_slug: 'finished' }))
+  const envelope = (id, role) => JSON.stringify({ assignment_id: id, role, status: 'done', summary: `${role} ${id}`, artifacts: [], details: {} })
+  writeFileSync(join(returns, 'd1.planner.json'), envelope('d1', 'planner'))
+  writeFileSync(join(returns, 'd2.builder.json'), envelope('d2', 'builder'))
+  writeFileSync(join(returns, 'task.json'), JSON.stringify({ status: 'done' }))
+}
 function fixture(path, { filler = 0 } = {}) {
   const ledger = openLedger({ dbPath: path })
   const done = 'test-done-0000-0000-000000000001'
   const live = 'test-live-0000-0000-000000000002'
   ledger.startSession({ adw_id: done, repo_slug: 'repo', task_slug: 'finished' })
   for (const [seq, name] of ['plan', 'build', 'review'].entries()) { ledger.startPhase({ adw_id: done, seq: seq + 1, name }); ledger.endPhase({ adw_id: done, seq: seq + 1, status: 'ok' }) }
-  ledger.recordEvent({ adw_id: done, type: 'agent_start', payload: { role: 'planner', dispatch_id: 'd1' } })
-  ledger.recordEvent({ adw_id: done, type: 'agent_end', payload: { role: 'planner', dispatch_id: 'd1', outcome: 'done' } })
-  ledger.recordEvent({ adw_id: done, type: 'agent_start', payload: { role: 'builder', dispatch_id: 'd2' } })
-  ledger.recordEvent({ adw_id: done, type: 'agent_end', payload: { role: 'builder', dispatch_id: 'd2', outcome: 'done' } })
+  ledger.recordEvent({ adw_id: done, type: 'agent_start', phase_id: 1, payload: { role: 'planner', dispatch_id: 'd1' } })
+  ledger.recordEvent({ adw_id: done, type: 'agent_end', phase_id: 1, payload: { role: 'planner', dispatch_id: 'd1', outcome: 'done' } })
+  ledger.recordEvent({ adw_id: done, type: 'agent_start', phase_id: 2, payload: { role: 'builder', dispatch_id: 'd2' } })
+  ledger.recordEvent({ adw_id: done, type: 'agent_end', phase_id: 2, payload: { role: 'builder', dispatch_id: 'd2', outcome: 'done' } })
   for (let i = 0; i < filler; i += 1) ledger.recordEvent({ adw_id: done, type: 'log', payload: { level: 'info', message: `filler ${i}` } })
   ledger.endSession({ adw_id: done, status: 'ok' })
   ledger.startSession({ adw_id: live, repo_slug: 'repo', task_slug: 'live' })
@@ -64,13 +88,15 @@ function fixture(path, { filler = 0 } = {}) {
 
 test('visualizer server never writes to the ledger', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-server-'))
-  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db'), crewRoot = join(dir, 'crew')
   const { done, live } = fixture(ledgerDb, { filler: 201 })
+  returnsFixture(crewRoot, done)
   // Baseline must precede spawn and every endpoint, otherwise a ledger write can be included in it.
   const before = digest(ledgerDb)
+  const crewBefore = treeDigest(crewRoot)
   let child, base
   try {
-    child = spawn(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb], { stdio: ['ignore', 'pipe', 'pipe'] })
+    child = spawn(process.execPath, ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb, '--crew-root', crewRoot], { stdio: ['ignore', 'pipe', 'pipe'] })
     children.add(child)
     base = await announce(child)
     const sessions = await json(base, '/api/sessions')
@@ -88,6 +114,18 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
     assert.equal(second.json.events.length, 100)
     assert.equal(third.json.events.length, 5)
     assert.ok(third.json.events.every((event) => event.id > second.json.cursor))
+    assert.equal(first.json.cursor, first.json.events.at(-1).id)
+    const returns = await json(base, `/api/returns?repo_slug=repo&task_slug=finished&adw_id=${done}`)
+    assert.equal(returns.status, 200); assert.equal(returns.json.envelopes.length, 2); assert.equal(returns.json.task.status, 'done')
+    assert.equal((await json(base, '/api/returns')).status, 400)
+    const escapedReturns = await json(base, '/api/returns?repo_slug=../&task_slug=finished')
+    assert.equal(escapedReturns.status, 200); assert.ok(escapedReturns.json.error); assert.equal(escapedReturns.json.envelopes.length, 0)
+    const logs = await json(base, `/api/events?adw_id=${done}&type=log&limit=10`)
+    assert.ok(logs.json.events.every((event) => event.type === 'log')); assert.ok(Number.isFinite(logs.json.cursor))
+    const builders = await json(base, `/api/events?adw_id=${done}&role=builder`)
+    assert.ok(builders.json.events.every((event) => JSON.parse(event.payload_json).role === 'builder')); assert.ok(Number.isFinite(builders.json.cursor))
+    const byPhase = await json(base, `/api/events?adw_id=${done}&phase_id=1`)
+    assert.ok(byPhase.json.events.length > 0); assert.ok(byPhase.json.events.every((event) => event.phase_id === 1)); assert.ok(Number.isFinite(byPhase.json.cursor))
     assert.equal((await json(base, `/api/events?adw_id=${live}&limit=50`)).json.events.length, 1)
     await json(base, '/api/health'); await json(base, '/api/health')
     assert.equal((await json(base, '/api/events?adw_id=x&after=bad')).status, 400)
@@ -104,6 +142,7 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
     await stopServer(child); child = null
     // Compare to the pre-spawn baseline after triage: this is the acceptance line.
     assert.equal(digest(ledgerDb), before)
+    assert.equal(treeDigest(crewRoot), crewBefore)
     const readonly = new (require('node:sqlite').DatabaseSync)(ledgerDb, { readOnly: true })
     assert.throws(() => readonly.exec('CREATE TABLE visualizer_write_probe (x)'))
     readonly.close()

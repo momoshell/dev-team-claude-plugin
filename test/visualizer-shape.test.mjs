@@ -4,6 +4,8 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
+import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
+import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
 
 const start = '2024-01-01T00:00:00.000Z'
 const end = '2024-01-01T00:00:02.000Z'
@@ -119,12 +121,55 @@ test('final drain is queued behind an in-flight periodic drain', async () => {
   assert.equal(calls, 2)
 })
 
-test('crew emitter tripwire documents absent phase linkage', () => {
-  // If crew starts sending phase_id, this fails and PhaseDots can return to lane colouring.
-  const source = readFileSync(join(process.cwd(), 'crew/crew.mjs'), 'utf8')
-  const agentCalls = source.match(/record\('(agent_start|agent_end)'\s*,\s*\{[^}]*\}\)/g) || []
-  assert.equal(agentCalls.length, 2)
-  for (const call of agentCalls) assert.doesNotMatch(call, /phase_id/)
+test('crew emitter tripwire confirms phase linkage and honest unavailable wording', () => {
+  const crew = readFileSync(join(process.cwd(), 'crew/crew.mjs'), 'utf8')
+  const shape = readFileSync(join(process.cwd(), 'visualizer/server/shape.mjs'), 'utf8')
+  assert.match(crew, /const record = \(type, payload\).*phase_id: phaseId/s)
+  assert.doesNotMatch(shape, /crew agent events carry no phase_id/)
+})
+
+test('timeline reserves request space and parks queued phases', () => {
+  const run = { started_at: start, ended_at: end, phase_lanes: 'agent', phases: [
+    { id: 1, seq: 1, name: 'plan', status: 'ok', lane: 0, started_at: start, ended_at: end },
+    { id: 2, seq: 2, name: 'finish', status: 'running', lane: null, started_at: null, ended_at: null },
+  ] }
+  const out = layoutTimeline(run, [], { now: Date.parse(end) })
+  assert.equal(out.origin_at, start)
+  assert.equal(out.queued[0].queued, true)
+  assert.equal(out.queued[0].width, QUEUED_WIDTH)
+  assert.equal(out.request, null)
+})
+
+test('timeline excludes point events and keeps span marks', () => {
+  const run = { phases: [{ id: 1, seq: 1, name: 'plan', status: 'ok', started_at: start, ended_at: end }] }
+  const out = layoutTimeline(run, [{ id: 1, started_at: null, ended_at: null, payload_json: '{"duration_ms":99}' }, { id: 2, started_at: start, ended_at: end }], { now: Date.parse(end) })
+  assert.deepEqual(out.marks.map((event) => event.id), [2])
+})
+
+test('timeline floors and separates consecutive blocks', () => {
+  const run = { phases: [{ id: 1, seq: 1, name: 'a', started_at: start, ended_at: start }, { id: 2, seq: 2, name: 'b', started_at: end, ended_at: end }] }
+  const out = layoutTimeline(run, [], { now: Date.parse(end) })
+  assert.ok(out.blocks.every((block) => block.width >= MIN_WIDTH - 1e-9))
+  assert.ok(out.blocks[0].x + out.blocks[0].width <= out.blocks[1].x + 1e-9)
+})
+
+test('envelope diff reports recursive changes in stable order', () => {
+  const before = { status: 'done', summary: 'old', artifacts: ['a'], details: { remove: true } }
+  const after = { status: 'done', summary: 'new', artifacts: ['a', 'b'], details: { add: true } }
+  const rows = diffEnvelopes(before, after)
+  assert.deepEqual(rows.map((row) => row.path), ['artifacts[1]', 'details.add', 'details.remove', 'summary'])
+})
+
+test('attemptPairs finds consecutive attempts per role', () => {
+  const pairs = attemptPairs([{ role: 'builder', dispatch_seq: 1 }, { role: 'planner', dispatch_seq: 2 }, { role: 'builder', dispatch_seq: 3 }])
+  assert.equal(pairs.length, 1)
+  assert.equal(pairs[0].role, 'builder')
+})
+
+test('timeline empty run is safe', () => {
+  const out = layoutTimeline({ phases: [] }, [])
+  assert.deepEqual(out.blocks, [])
+  assert.deepEqual(out.marks, [])
 })
 
 test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the boundaries', () => {

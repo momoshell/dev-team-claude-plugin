@@ -1,6 +1,26 @@
 # Conventions — dev-team-claude-plugin
 
-Cross-cutting conventions and decisions. The orchestrator is the sole writer — leads only propose deltas. Mark superseded entries `deprecated` (`supersedes: <entry>`) rather than deleting them.
+Cross-cutting conventions and decisions. Mark superseded entries `deprecated` (`supersedes: <entry>`) rather than deleting them.
+
+> **Read this before citing an entry.** Moved here from `.claude/dev-team/memory/` (#128).
+> Most entries below predate v0.2.0 and were written for the **retired**
+> first-generation runtime — they talk about `scripts/cmux/dispatch.mjs`,
+> `agents/<role>.md`, worker plugins, the QA-gate ladder, and roster profiles,
+> none of which exist on `main`. They are kept verbatim as reasoning that is
+> still quoted, not as instructions to follow.
+>
+> The entries still binding for the crew are the substrate-independent ones —
+> notably **2026-08-02 (concurrency: `linkSync` exclusive creates, `wx` locks,
+> a corrupt lock is stale and never a wedge)**, **2026-08-02 (guards are
+> vacuous unless proven by mutation)**, **2026-08-01 (structural impossibility
+> over test assertion; whitelist over blacklist)**, **2026-08-03 (a literal NUL
+> makes a source file unsearchable to grep)**, and **2026-08-08 (verify a
+> coder's commit actually landed — a return describes intent, not disk)**.
+> Design work cites the concurrency entry directly; #125's park/lease lock
+> inherits it.
+>
+> The former "orchestrator is the sole writer, leads propose deltas" rule was
+> the retired runtime's memory protocol and no longer applies.
 
 ## Format
 
@@ -8,7 +28,7 @@ Cross-cutting conventions and decisions. The orchestrator is the sole writer —
 
 ## Entries
 
-- **2026-08-01** — Every functional commit bumps the `version` field in `.claude-plugin/plugin.json` and the commit message ends with `; bump 0.<major>.<minor>`. *Why:* a directory-marketplace install caches the plugin at a version-pinned path (`~/.claude/plugins/cache/dev-team/dev-team/<version>/`) and `plugin update` no-ops while the version is unchanged — an unbumped version means the fix never reaches installed copies. Source: `.claude-plugin/plugin.json` + observed git history (e.g. commit `f7b6cef`).
+- **2026-08-01** — [deprecated 2026-08-14 — superseded by #137: bump on **release**, not per commit; the enforced rule is that `plugin.json` and `marketplace.json` never disagree (`test/version-agreement.test.mjs`). The cache reasoning below still explains why a release bump matters.] Every functional commit bumps the `version` field in `.claude-plugin/plugin.json` and the commit message ends with `; bump 0.<major>.<minor>`. *Why:* a directory-marketplace install caches the plugin at a version-pinned path (`~/.claude/plugins/cache/dev-team/dev-team/<version>/`) and `plugin update` no-ops while the version is unchanged — an unbumped version means the fix never reaches installed copies. Source: `.claude-plugin/plugin.json` + observed git history (e.g. commit `f7b6cef`).
 - **2026-08-01** — No lint or typecheck tooling exists (no `tsconfig.json`, no eslint config) — the repo is plain JS (Node `--test`) + Markdown. *Why:* the plugin ships agent/command definitions as Markdown and a handful of `.mjs` scripts; there's no compiled/typed surface to check. Source: repo root listing.
 - **2026-08-01** — Test suite (`node --test`) runs the full 87-test suite in under 1 second. *Why:* means `validate.fast` and `validate.full` are identical here — no separate slow/fast split is needed. Source: timed run at onboarding.
 - **2026-08-01** — This repo is the dev-team plugin's own source; `/dev-team:onboard`/`next`/`ship` run here manage the plugin's own development. *Why:* affects how leads should read structural references — `agents/`, `commands/`, `references/` etc. are the plugin's *product*, not consumer app code.

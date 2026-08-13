@@ -69,6 +69,11 @@ contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
 `--model-<role>`; default is `claude`. An unknown name fails the boot loudly,
 naming the missing adapter file — never a silent fallback.
 
+Shipped adapters: `claude` (default) and `pi` — `--agent-reviewer pi
+--model-reviewer google/gemini-3-pro` seats a reviewer on pi. Note pi's deny
+list (`--exclude-tools`) matches pi-namespaced tool names, so a claude-shaped
+seat deny list does not translate 1:1 yet.
+
 Capability declarations are enforced, not decorative: a seat whose charter
 needs tool denial (every seat today) will not boot on an adapter declaring
 `tool_deny: false` — no silent weaker seats. Only `tool_deny` is checked

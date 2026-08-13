@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = join(fileURLToPath(import.meta.url), '..')
 const ROOT = join(HERE, '..')
-const SCRIPTS_DIR = join(ROOT, 'scripts', 'cmux')
+const CREW_DIR = join(ROOT, 'crew')
 const FACTORY_DIR = join(ROOT, 'scripts', 'factory')
 const MODULE_PATH = join(FACTORY_DIR, 'transcript.mjs')
 
@@ -189,7 +189,7 @@ test('C2 CLAMP: numOr0 never lets a negative or fractional usage field survive i
 // RESOLUTION REFUSES BOTH WAYS AND COUNTS THEM DISTINCTLY.
 // ---------------------------------------------------------------------------
 
-// Real-shaped dispatch_ids (scripts/cmux/dispatch-record.schema.json's
+// Real-shaped dispatch_ids (the retired dispatch-record schema's
 // `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`) — S4
 // requires resolveTranscript to shape-guard the id to this pattern before
 // ever using it in a filename scan, so fixtures below use valid UUIDs
@@ -309,14 +309,13 @@ test('RESOLUTION: the dash-encoding is never derived (source-text needle: no cod
 // NO-SUBAGENTS ASSUMPTION SHIPS AS A DRIFT-GUARD TEST.
 // ---------------------------------------------------------------------------
 
-test('DRIFT GUARD: contract.mjs\'s frozen DISALLOWED_TOOLS still excludes Task, Agent and mcp__* (source text, never imported)', () => {
-  const contractSrc = readFileSync(join(SCRIPTS_DIR, 'contract.mjs'), 'utf8')
-  const m = contractSrc.match(/export const DISALLOWED_TOOLS\s*=\s*\[([^\]]*)\]/)
-  assert.ok(m, 'DISALLOWED_TOOLS literal not found in contract.mjs — this reducer\'s no-subagents assumption cannot be verified')
-  const literal = m[1]
-  assert.match(literal, /'Task'/, 'DISALLOWED_TOOLS must still exclude Task — if a role gains Task, this reducer silently under-counts usage')
-  assert.match(literal, /'Agent'/, 'DISALLOWED_TOOLS must still exclude Agent')
-  assert.match(literal, /'mcp__\*'/, 'DISALLOWED_TOOLS must still exclude mcp__*')
+test('DRIFT GUARD (crew era): the builder seat — whose transcripts this reducer counts — never carries the subagent tool', () => {
+  // The legacy contract.mjs is retired; the no-subagents assumption now
+  // guards against the crew's own seat table.
+  const crewSrc = readFileSync(join(CREW_DIR, 'crew.mjs'), 'utf8')
+  const m = crewSrc.match(/builder:\s*\{[^}]*tools:\s*'([^']*)'/)
+  assert.ok(m, 'builder seat tools literal not found in crew/crew.mjs')
+  assert.doesNotMatch(m[1], /Task|Agent/, 'the builder seat must never carry the subagent tool — this reducer would silently under-count usage')
 })
 
 // ---------------------------------------------------------------------------
@@ -339,11 +338,12 @@ test('IMPORT FIREWALL (direction 1): transcript.mjs contains no repo import at a
   assert.doesNotMatch(transcriptSrc, /^export \* from /m, 'no re-export either')
 })
 
-test('IMPORT FIREWALL (direction 2): no decision module (ladder.mjs, triage.mjs, contract.mjs) references transcript.mjs', () => {
-  for (const f of ['ladder.mjs', 'triage.mjs', 'contract.mjs']) {
-    const src = readFileSync(join(SCRIPTS_DIR, f), 'utf8')
-    assert.doesNotMatch(src, /factory\/transcript/, `${f} must never reference scripts/factory/transcript.mjs`)
-    assert.doesNotMatch(src, /transcript\.mjs/, `${f} must never reference transcript.mjs`)
+test('IMPORT FIREWALL (direction 2): no crew decision module (drive.mjs, crew.mjs) imports transcript.mjs', () => {
+  // The legacy decision modules (ladder/triage/contract) are retired; the
+  // firewall now guards the crew's decision plane instead.
+  for (const f of ['drive.mjs', 'crew.mjs']) {
+    const src = readFileSync(join(CREW_DIR, f), 'utf8')
+    assert.doesNotMatch(src, /factory\/transcript/, `crew/${f} must never import scripts/factory/transcript.mjs`)
   }
 })
 

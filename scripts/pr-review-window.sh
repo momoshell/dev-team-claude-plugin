@@ -168,4 +168,4 @@ trap 'exit 143' TERM
 trap cleanup EXIT
 
 cd "$wt_dir"
-claude "/dev-team:pr-review https://github.com/$repo/pull/$pr"
+claude "Work GitHub PR https://github.com/$repo/pull/$pr like a teammate: read the PR description and the full diff, run the test suite, then review for correctness first and conformance second. If it is someone else's PR, leave inline comments via gh; if it is mine, triage existing feedback, apply agreed fixes, and respond to each comment. Never force-push."

@@ -1,15 +1,15 @@
 // scripts/factory/transcript.mjs — the import-firewalled transcript reducer
 // for issue #41 (SF-2, epic #39). THIS IS THE THIRD INSTANCE of the
-// import-firewalled-reducer pattern in this repo, after scripts/cmux/
-// triage.mjs and scripts/cmux/browser-evidence.mjs (conventions.md
+// import-firewalled-reducer pattern in this repo, established by the
+// retired legacy runtime's triage/browser-evidence reducers (conventions.md
 // 2026-08-07): this module imports NOTHING from this repo (node builtins
-// only) and is imported by NO decision module (scripts/cmux/ladder.mjs,
-// scripts/cmux/triage.mjs, scripts/cmux/contract.mjs) — asserted in BOTH
+// only) and is imported by NO decision module (crew/drive.mjs,
+// crew/crew.mjs in the crew era) — asserted in BOTH
 // directions by test/factory-transcript.test.mjs's source-text tests. No
 // caller is wired up yet: be-41-03/04/05 do that wiring in later slices.
 //
 // WHY THIS EXISTS. Panes run `claude` INTERACTIVELY with stdio:'inherit'
-// (scripts/cmux/adapter-claude.mjs:614) and `--output-format stream-json` is
+// (the retired adapter, see git history) and `--output-format stream-json` is
 // print-mode-only — so the worker's own Claude transcript JSONL is the ONLY
 // usage surface available in cmux mode. This module reduces that transcript
 // to three closed shapes: a resolution result, a token-usage split, and a
@@ -45,12 +45,12 @@
 //
 // NO-SUBAGENTS ASSUMPTION (why no <session-id>/subagents/*.jsonl walk is
 // needed for completeness): a worker session cannot spawn subagents because
-// `DISALLOWED_TOOLS` is frozen at scripts/cmux/contract.mjs:12 as
-// `['mcp__*', 'Task', 'Agent']` and is always applied (scripts/cmux/
+// In the retired legacy runtime, `DISALLOWED_TOOLS` was frozen as
+// `['mcp__*', 'Task', 'Agent']` and was always applied (retired runtime,
 // record.mjs:572, :651 -> --disallowedTools). If any role ever gains
 // `Task`, this reducer would silently under-count usage — that re-entry
 // condition ships as a drift-guard TEST (test/factory-transcript.test.mjs,
-// reading contract.mjs's SOURCE TEXT via readFileSync + regex, never
+// reading the crew seat table's SOURCE TEXT via readFileSync + regex, never
 // importing it), not as this comment alone.
 //
 // Zero repo dependencies. ESM, Node 20 floor (this module uses no
@@ -63,10 +63,13 @@ import { join } from 'node:path'
 // not an exact member (including an ANSI-escape-laden, newline-laden, or
 // 5000-char string) reduces to the literal 'other' — the raw name is never
 // forwarded unguarded. Duplicated here rather than imported from
-// scripts/cmux/contract.mjs's TOOLS list on purpose: importing it would
+// any runtime tool list on purpose: importing it would
 // breach the firewall (this module imports nothing from the repo).
 // 'Task' and 'Agent' are included even though DISALLOWED_TOOLS
-// (scripts/cmux/contract.mjs) forbids a worker from ever calling them: if
+// forbade a legacy worker from ever calling them; in the crew era only
+// the BUILDER seat (whose transcripts this reducer counts) is guaranteed
+// subagent-free — planner/reviewer seats DO carry Task, so the no-subagents
+// assumption is builder-scoped, exactly what the drift guard pins: if
 // that drift guard ever failed (a role gained Task/Agent), the resulting
 // subagent calls must be visible in this mirrored data as their own name,
 // not laundered into the generic 'other' bucket alongside every other
@@ -101,7 +104,7 @@ function shapeTimestamp(value) {
   return typeof value === 'string' && ISO_MS_PATTERN.test(value) ? value : null
 }
 
-// dispatch_id's own schema shape (scripts/cmux/dispatch-record.schema.json),
+// dispatch_id's own schema shape (retired dispatch-record schema, git history),
 // duplicated here on purpose for the same firewall reason as ISO_MS_PATTERN
 // above. An id that doesn't match this shape is never used to build a
 // filename or to appear in a log line.

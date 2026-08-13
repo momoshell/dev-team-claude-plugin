@@ -2,19 +2,26 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "dev-team",
   "description": "Local marketplace for the dev-team Claude Code plugin",
-  "owner": { "name": "Momcilo" },
-  "metadata": { "description": "Local marketplace for the dev-team plugin", "version": "0.1.40" },
+  "owner": {
+    "name": "Momcilo"
+  },
+  "metadata": {
+    "description": "Local marketplace for the dev-team plugin",
+    "version": "0.2.0"
+  },
   "plugins": [
     {
       "name": "dev-team",
-      "author": { "name": "Momcilo" },
+      "author": {
+        "name": "Momcilo"
+      },
       "category": "development",
       "source": {
         "source": "url",
         "url": "https://github.com/momoshell/dev-team-claude-plugin.git",
         "ref": "main"
       },
-      "description": "Hierarchical multi-agent dev team: orchestrator → on-demand domain leads → execute-only coders, with spec contracts, single-writer memory, a 3-tier review ladder, and a deterministic team-build workflow.",
+      "description": "Crew: a team runtime for cmux — whole team booted per task in one workspace, a deterministic driver runs the loop (plan, gate-first acceptance, build, review, suite, commit-on-green), agents kept for judgment via closed-enum decision envelopes.",
       "homepage": "https://github.com/momoshell/dev-team-claude-plugin"
     }
   ]

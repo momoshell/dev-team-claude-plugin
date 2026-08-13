@@ -16,7 +16,9 @@ import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
-import { NONCE_PREFIX } from '../scripts/cmux/contract.mjs'
+// Inlined from the retired legacy runtime's contract (scripts/cmux/contract.mjs):
+// the completion-nonce prefix the ledger's sweep guard checks against.
+const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   TERM_TO_KILL_MS, WRITERS, LedgerUsageError,

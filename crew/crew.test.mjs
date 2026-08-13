@@ -6,13 +6,13 @@ import { join } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
-  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, assertCapabilities, resolveAdapters, docOpenArgs,
+  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, BOOT_TRANSPORT, assertCapabilities, resolveAdapters, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
 } from './crew.mjs'
 import { driveTask } from './drive.mjs'
-import { seatCommand, capabilities, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, capabilities as piCapabilities, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
+import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
+import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 
@@ -102,10 +102,40 @@ test('adapter-claude.seatCommand is byte-identical to the pre-refactor paneComma
   assert.equal(seatCommand(SAMPLE), EXPECTED)
 })
 
-test('every seat declares an agent; the claude adapter declares full, frozen capabilities', () => {
+test('every shipped capability profile is exact, complete, and frozen', async () => {
   for (const [role, seat] of Object.entries(SEAT_DEFAULTS)) assert.equal(seat.agent, 'claude', `${role} has no agent`)
-  assert.ok(Object.isFrozen(capabilities))
-  assert.equal(capabilities.tool_deny, true)
+  const claudeMod = await import('./adapters/adapter-claude.mjs')
+  const piMod = await import('./adapters/adapter-pi.mjs')
+  assert.equal(claudeMod.capabilities, undefined)
+  assert.equal(piMod.capabilities, undefined)
+
+  const claudePane = capabilitiesFor({ transport: 'pane' })
+  // #131: drive.mjs bounce paths reassign a settled pane seat.
+  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.ok(Object.isFrozen(claudePane))
+  const claudeHeadless = capabilitiesFor({ transport: 'headless-json' })
+  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
+  assert.ok(Object.isFrozen(claudeHeadless))
+  const piPane = piCapabilitiesFor({ transport: 'pane' })
+  // #131: drive.mjs bounce paths reassign a settled pane seat.
+  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.ok(Object.isFrozen(piPane))
+  const piHeadless = piCapabilitiesFor({ transport: 'headless-rpc' })
+  // #131: no follow_up/reassign capture exists for headless-rpc.
+  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: false })
+  assert.ok(Object.isFrozen(piHeadless))
+})
+
+test('unshipped capability pairs and absent transports throw naming adapter and transport', () => {
+  for (const [adapter, name, transport] of [[capabilitiesFor, 'claude', 'headless-rpc'], [piCapabilitiesFor, 'pi', 'headless-json']]) {
+    assert.throws(() => adapter({ transport }), (err) => err.message.includes(name) && err.message.includes(transport))
+    assert.throws(() => adapter({ transport: 'unknown' }), (err) => err.message.includes(name) && err.message.includes('unknown'))
+    assert.throws(() => adapter({}), (err) => err.message.includes(name) && err.message.includes('undefined'))
+  }
+})
+
+test('BOOT_TRANSPORT keeps boot on pane until #83 lands', () => {
+  assert.equal(BOOT_TRANSPORT, 'pane')
 })
 
 test('assertCapabilities rejects an adapter that cannot enforce tool denial, naming seat + adapter + capability', () => {
@@ -132,9 +162,13 @@ const PI_SAMPLE = {
 }
 
 // assertCapabilities gates seat boot on these exact keys — a lie here silently unlocks seats the adapter cannot actually enforce.
-test('the pi adapter declares honest, frozen capabilities', () => {
-  assert.ok(Object.isFrozen(piCapabilities))
-  assert.deepEqual({ ...piCapabilities }, { prompt_file: true, tool_deny: true, unattended: true, session_resume: true, effort: true })
+test('the pane profiles satisfy boot capability checks while missing tool denial is refused', () => {
+  assert.doesNotThrow(() => assertCapabilities('builder', 'claude', capabilitiesFor({ transport: 'pane' })))
+  assert.doesNotThrow(() => assertCapabilities('builder', 'pi', piCapabilitiesFor({ transport: 'pane' })))
+  assert.throws(
+    () => assertCapabilities('builder', 'x', { prompt_file: true, unattended: true, effort: true, tool_deny: undefined }),
+    (err) => /builder/.test(err.message) && /x/.test(err.message) && /tool_deny/.test(err.message),
+  )
 })
 
 // Effort is an OPTIONAL, separate dimension on both adapters: absent it must

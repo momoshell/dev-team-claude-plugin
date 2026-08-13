@@ -1,14 +1,14 @@
 // crew/adapters/adapter-pi.mjs — the pi agent adapter.
 //
 // An adapter is the seam between a crew seat and the CLI agent that fills it:
-// `capabilities` (frozen) declares what the agent can enforce, and
-// `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
+// `capabilitiesFor(...)` resolves one frozen profile per (adapter, transport)
+// pair, and `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
 // adapter by seat.agent (default 'claude', overridable via --agent-<role>),
 // by filename — nothing in crew.mjs knows pi exists. pi's flag grammar
 // differs from claude's (see below), so there is no byte-identity bar here
 // the way there is for adapter-claude.mjs; this adapter is judged on
 // honesty of its capability claims, not on matching another agent's shape.
-export const capabilities = Object.freeze({
+const INVARIANT = Object.freeze({
   // --append-system-prompt treats an existing path as file contents
   // (verified in pi's resource-loader), so the merged role file lands intact.
   prompt_file: true,
@@ -21,14 +21,44 @@ export const capabilities = Object.freeze({
   // (--approve/-a only governs trusting project-local config files, not
   // tool calls — deliberately not passed here.)
   unattended: true,
-  // --session-id can create/resume an exact session; crew does not pass one
-  // today, but the mechanism exists.
-  session_resume: true,
   // --thinking <off|minimal|low|medium|high|xhigh|max> (also the
   // ':<level>' model-string shorthand) — live-verified 2026-08-13: a
   // luna:high seat showed "gpt-5.6-luna • high" in its status bar.
   effort: true,
 })
+
+const PROFILES = Object.freeze({
+  pane: Object.freeze({
+    // ADR-029 §3:52 — pane interjection is not established by a capture.
+    interjection: 'none',
+    // ADR-029 §3:53 — pane owns no process handle for an abort.
+    abort: 'none',
+    // ADR-029 §3:54 — pane command passes no --session-id.
+    session_resume: false,
+    // ADR-029 §3:54 — pane has no client-resumable observation cursor.
+    durable_cursor: 'none',
+    // #131 — drive.mjs bounce paths reassign a settled pane seat.
+    reassign: true,
+  }),
+  'headless-rpc': Object.freeze({
+    // ADR-029 §3:52 — pi RPC steer delivers at a tool boundary.
+    interjection: 'boundary',
+    // ADR-029 §3:53 — pi RPC exposes an in-protocol abort command.
+    abort: 'command',
+    // ADR-029 §3:54 — RPC resumes the persisted pi session.
+    session_resume: true,
+    // ADR-029 §3:54 — pi RPC's session entry id is a durable cursor.
+    durable_cursor: 'entry_id',
+    // #131 — no follow_up/reassign capture exists for headless-rpc.
+    reassign: false,
+  }),
+})
+
+export function capabilitiesFor({ transport } = {}) {
+  const p = PROFILES[transport]
+  if (!p) throw new Error(`adapter-pi: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
+  return Object.freeze({ ...INVARIANT, ...p })
+}
 
 // pi namespaces models as <pi-provider>/<id>. openai -> openai-codex is
 // DELIBERATE: that provider routes through the ChatGPT subscription OAuth

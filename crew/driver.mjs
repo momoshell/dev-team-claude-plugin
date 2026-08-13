@@ -165,10 +165,6 @@ export function sendLine(surfaceId, line) {
 
 // --- context-aware surface ops ------------------------------------------------
 
-export function readScreen(surfaceId, lines = 40) {
-  const res = cmux('read-screen', ['--surface', surfaceId, '--lines', String(lines)])
-  return res.ok ? res.stdout : null
-}
 
 export function renameTab(surfaceId, title) {
   cmux('rename-tab', ['--surface', surfaceId, '--', title])
@@ -185,13 +181,6 @@ export function closeWorkspace(id) {
   return cmux('close-workspace', ['--workspace', id]).ok
 }
 
-// Mount a markdown artifact under a member's pane (PR #92 grammar: markdown
-// open's --workspace/--window are TARGETS; naming them pins the mount to the
-// crew workspace instead of inheriting the caller's focus).
-export function mountArtifact(path, { workspaceId, windowId }) {
-  const res = cmux('markdown', ['open', path, '--workspace', workspaceId, '--window', windowId, '--direction', 'down', '--focus', 'false'])
-  return res.ok
-}
 
 // --- crew log ------------------------------------------------------------------
 export function logLine(file, obj) {

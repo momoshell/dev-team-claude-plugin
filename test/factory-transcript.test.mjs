@@ -309,14 +309,13 @@ test('RESOLUTION: the dash-encoding is never derived (source-text needle: no cod
 // NO-SUBAGENTS ASSUMPTION SHIPS AS A DRIFT-GUARD TEST.
 // ---------------------------------------------------------------------------
 
-test('DRIFT GUARD: contract.mjs\'s frozen DISALLOWED_TOOLS still excludes Task, Agent and mcp__* (source text, never imported)', () => {
-  const contractSrc = readFileSync(join(SCRIPTS_DIR, 'contract.mjs'), 'utf8')
-  const m = contractSrc.match(/export const DISALLOWED_TOOLS\s*=\s*\[([^\]]*)\]/)
-  assert.ok(m, 'DISALLOWED_TOOLS literal not found in contract.mjs — this reducer\'s no-subagents assumption cannot be verified')
-  const literal = m[1]
-  assert.match(literal, /'Task'/, 'DISALLOWED_TOOLS must still exclude Task — if a role gains Task, this reducer silently under-counts usage')
-  assert.match(literal, /'Agent'/, 'DISALLOWED_TOOLS must still exclude Agent')
-  assert.match(literal, /'mcp__\*'/, 'DISALLOWED_TOOLS must still exclude mcp__*')
+test('DRIFT GUARD (crew era): the builder seat — whose transcripts this reducer counts — never carries the subagent tool', () => {
+  // The legacy contract.mjs is retired; the no-subagents assumption now
+  // guards against the crew's own seat table.
+  const crewSrc = readFileSync(join(SCRIPTS_DIR, '..', '..', 'crew', 'crew.mjs'), 'utf8')
+  const m = crewSrc.match(/builder:\s*\{[^}]*tools:\s*'([^']*)'/)
+  assert.ok(m, 'builder seat tools literal not found in crew/crew.mjs')
+  assert.doesNotMatch(m[1], /Task|Agent/, 'the builder seat must never carry the subagent tool — this reducer would silently under-count usage')
 })
 
 // ---------------------------------------------------------------------------
@@ -339,11 +338,12 @@ test('IMPORT FIREWALL (direction 1): transcript.mjs contains no repo import at a
   assert.doesNotMatch(transcriptSrc, /^export \* from /m, 'no re-export either')
 })
 
-test('IMPORT FIREWALL (direction 2): no decision module (ladder.mjs, triage.mjs, contract.mjs) references transcript.mjs', () => {
-  for (const f of ['ladder.mjs', 'triage.mjs', 'contract.mjs']) {
-    const src = readFileSync(join(SCRIPTS_DIR, f), 'utf8')
-    assert.doesNotMatch(src, /factory\/transcript/, `${f} must never reference scripts/factory/transcript.mjs`)
-    assert.doesNotMatch(src, /transcript\.mjs/, `${f} must never reference transcript.mjs`)
+test('IMPORT FIREWALL (direction 2): no crew decision module (drive.mjs, crew.mjs) imports transcript.mjs', () => {
+  // The legacy decision modules (ladder/triage/contract) are retired; the
+  // firewall now guards the crew's decision plane instead.
+  for (const f of ['drive.mjs', 'crew.mjs']) {
+    const src = readFileSync(join(SCRIPTS_DIR, '..', '..', 'crew', f), 'utf8')
+    assert.doesNotMatch(src, /factory\/transcript/, `crew/${f} must never import scripts/factory/transcript.mjs`)
   }
 })
 

@@ -1,5 +1,0 @@
-{
-  "name": "dev-team-worker",
-  "version": "1.0.0",
-  "description": "Per-dispatch worker plugin: enforces the return-gate and mode-gate hooks inside a dispatched cmux pane."
-}

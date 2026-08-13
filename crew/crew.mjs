@@ -149,11 +149,11 @@ function bootCmd(args) {
   const crew = {
     schema_version: 2, task: taskSlug, checkout,
     workspace_id: workspace.id, window_id: windowId,
-    roles, members, lead_return: join(paths.returnsDir, 'lead.json'),
+    roles, members, task_return: join(paths.returnsDir, 'task.json'),
     created_at: new Date().toISOString(),
   }
   saveCrew(paths, crew)
-  logLine(join(paths.dir, 'crew.log'), { at: new Date().toISOString(), event: 'boot', roles, models: Object.fromEntries(roles.map((r) => [r, members[r].model])) })
+  logLine(join(paths.dir, 'journal.jsonl'), { at: new Date().toISOString(), event: 'boot', roles, models: Object.fromEntries(roles.map((r) => [r, members[r].model])) })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
 
@@ -225,7 +225,7 @@ function runCmd(args) {
   const io = realIo(crew, paths, checkout)
   const result = driveTask(ctx, io)
   // The task envelope is written by CODE — same path `wait` watches.
-  writeFileSync(crew.lead_return, JSON.stringify(result, null, 2))
+  writeFileSync(crew.task_return, JSON.stringify(result, null, 2))
 
   // Outcome-gated lifecycle, in code as policy:
   //   done       -> auto-teardown (archive the record, close the view),
@@ -237,7 +237,7 @@ function runCmd(args) {
     archived = teardownCore(paths, crew)
   }
   // After archive the envelope moves with the dir — report where it lives now.
-  const taskReturn = archived ? crew.lead_return.replace(paths.dir, archived) : crew.lead_return
+  const taskReturn = archived ? crew.task_return.replace(paths.dir, archived) : crew.task_return
   process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
   if (result.status !== 'done') process.exitCode = 1
 }
@@ -252,10 +252,10 @@ function handoffCmd(args) {
   const briefFile = resolvePath(args['brief-file'])
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
 
-  const line = `TASK: run this task end to end. Read the brief at ${briefFile} and the crew map at ${join(paths.dir, 'crew.json')}. Drive the crew, verify, commit on green, then write your ReturnEnvelope to ${crew.lead_return} and print CREW-DONE lead task`
+  const line = `TASK: run this task end to end. Read the brief at ${briefFile} and the crew map at ${join(paths.dir, 'crew.json')}. Drive the crew, verify, commit on green, then write your ReturnEnvelope to ${crew.task_return} and print CREW-DONE lead task`
   sendLine(crew.members.lead.surface_id, line)
-  logLine(join(paths.dir, 'crew.log'), { at: new Date().toISOString(), event: 'handoff', brief: briefFile })
-  process.stdout.write(`${JSON.stringify({ handed_to: 'lead', lead_return: crew.lead_return })}\n`)
+  logLine(join(paths.dir, 'journal.jsonl'), { at: new Date().toISOString(), event: 'handoff', brief: briefFile })
+  process.stdout.write(`${JSON.stringify({ handed_to: 'lead', task_return: crew.task_return })}\n`)
 }
 
 function waitCmd(args) {
@@ -266,9 +266,9 @@ function waitCmd(args) {
   const timeoutMs = Number(args['timeout-s'] || 3600) * 1000
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
-    if (existsSync(crew.lead_return)) {
+    if (existsSync(crew.task_return)) {
       let env = null
-      try { env = JSON.parse(readFileSync(crew.lead_return, 'utf8')) } catch { env = null }
+      try { env = JSON.parse(readFileSync(crew.task_return, 'utf8')) } catch { env = null }
       if (env && typeof env.status === 'string') {
         process.stdout.write(`${JSON.stringify({ status: env.status, summary: env.summary, artifacts: env.artifacts || [], details: env.details || {} })}\n`)
         return

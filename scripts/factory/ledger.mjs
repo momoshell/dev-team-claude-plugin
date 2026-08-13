@@ -61,7 +61,11 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
-import { NONCE_PREFIX } from '../cmux/contract.mjs'
+// NONCE_PREFIX was imported from the legacy runtime's contract
+// (scripts/cmux/contract.mjs, retired with that runtime). The ledger's
+// sweep guard still honors nonce-prefixed sidecars, so the constant's
+// authority now lives here.
+const NONCE_PREFIX = 'devteam-done-'
 
 const require = createRequire(import.meta.url)
 

@@ -15,11 +15,11 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [] } = {}) {
-  const calls = { assign: [], run: [], commits: [], writes: {}, logs: [] }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null } = {}) {
+  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [] }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
-  return {
+  const io = {
     calls,
     assign({ role, briefFile }) {
       counts[role] = (counts[role] || 0) + 1
@@ -44,6 +44,14 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [] } = {}) {
     log(obj) { calls.logs.push(obj) },
     now() { return 0 },
   }
+  if (cleanRuns) {
+    io.runClean = (cmd) => {
+      counts[`clean:${cmd}`] = (counts[`clean:${cmd}`] || 0) + 1
+      calls.runClean.push({ cmd, n: counts[`clean:${cmd}`] })
+      return cleanRuns[`${cmd}:${counts[`clean:${cmd}`]}`] ?? cleanRuns[cmd] ?? { ok: false, output: '' }
+    }
+  }
+  return io
 }
 
 const planEnv = (over = {}) => ({
@@ -468,6 +476,108 @@ test('repeated gate failures trigger reviewer triage; gate-defect diagnosis lets
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
   const repair = Object.values(io.calls.writes).find((w) => /GATE DEFECT/.test(w))
   assert.match(repair, /may NOT weaken any legitimate check/)
+})
+
+test('a repaired gate proven red on the pristine tree proceeds — and the proof costs no builder round', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:2': { ok: false, output: 'bogus fail A' },
+      'gate-bad:3': { ok: false, output: 'bogus fail B' },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-fixed': { ok: false, output: 'red on pristine' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.cmd, 'gate-fixed')
+  assert.equal(res.details.gate.reverified, true)
+  assert.deepEqual(io.calls.runClean, [{ cmd: 'gate-fixed', n: 1 }])
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('a repaired gate GREEN on the pristine tree is vacuous — escalate, never commit', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:2': { ok: false, output: 'bogus fail A' },
+      'gate-bad:3': { ok: false, output: 'bogus fail B' },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-fixed': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'gate')
+  assert.match(res.details.escalation.why, /gate-fixed/)
+  assert.match(res.details.escalation.why, /STILL green/)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('an io without runClean keeps the repair path exactly as it was', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:2': { ok: false, output: 'bogus fail A' },
+      'gate-bad:3': { ok: false, output: 'bogus fail B' },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(res.details.gate.reverified, false)
+  assert.equal(io.calls.commits.length, 1)
+  assert.deepEqual(io.calls.run.map((r) => r.cmd), ['gate-bad', 'lane-cmd', 'gate-bad', 'lane-cmd', 'gate-bad', 'gate-fixed', 'suite-cmd'])
+})
+
+test('no repair -> the gate record carries no reverified field and runClean is never called', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: 'baseline red' },
+      'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.reverified, undefined)
+  assert.equal(io.calls.runClean.length, 0)
 })
 
 test('no gate_cmd in the plan -> the loop runs exactly as before (gate stage never appears)', () => {

@@ -265,6 +265,23 @@ function realIo(crew, paths, checkout) {
       if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
       return { ok: res.status === 0, output }
     },
+    // Prove a command red on the PRE-BUILD tree: set the working changes
+    // aside, run, restore. The pop lives in a finally so a throwing command
+    // can never leave the builder's work stashed, and a failed round-trip
+    // throws loudly rather than silently reporting a result from the wrong
+    // tree (runCmd turns the throw into an escalation envelope).
+    runClean(cmd) {
+      const dirty = execSync('git status --porcelain -uall', { cwd: checkout, encoding: 'utf8' }).trim()
+      if (!dirty) return this.run(cmd) // nothing to set aside — the tree IS pristine
+      const push = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', 'crew:runClean'], { cwd: checkout, encoding: 'utf8' })
+      if (push.status !== 0) throw new Error(`runClean: git stash push failed, refusing to judge a gate against the wrong tree:\n${push.stderr || push.stdout || ''}`)
+      try {
+        return this.run(cmd)
+      } finally {
+        const pop = spawnSync('git', ['stash', 'pop'], { cwd: checkout, encoding: 'utf8' })
+        if (pop.status !== 0) throw new Error(`runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash (git stash list):\n${pop.stderr || pop.stdout || ''}`)
+      }
+    },
     changedFiles() {
       // -z: NUL-delimited, no quoting of paths with spaces; -uall: untracked
       // files individually, never a collapsed '?? dir/'. Rename/copy entries

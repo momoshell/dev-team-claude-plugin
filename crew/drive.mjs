@@ -75,6 +75,9 @@ function verdictOf(env) {
 //        wait(returnPath, timeoutS) -> envelope|null,
 //        writeFile(path, content) -> void, readFile(path) -> string|null,
 //        run(cmd) -> {ok, output},            // shell, cwd=checkout
+//        runClean(cmd) -> {ok, output},      // OPTIONAL: run cmd against the
+//                                            // checkout with the uncommitted
+//                                            // changes temporarily set aside
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
 //        commit(files, message) -> hash,
 //        log(obj) -> void,                    // journal line (code-owned)
@@ -273,6 +276,9 @@ export function driveTask(ctx, io) {
   // exact defect class the v2 plan review caught by hand, mechanized).
   let gateCmd = planEnv.details?.gate_cmd || null
   let gateRepairs = 0
+  let gateReverified = null // set only when a MID-RUN repair is accepted:
+                            // true = proven red on the pristine tree,
+                            // false = io has no runClean, the proof could not run
   const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
   if (gateCmd) {
     stage('gate-baseline')
@@ -360,7 +366,9 @@ export function driveTask(ctx, io) {
     // defect triage by the reviewer (closed enum); a gate defect lets the
     // planner repair its own gate ONCE (old gate preserved in gateHistory),
     // and the repaired gate re-runs immediately WITHOUT consuming a builder
-    // round. The repair contract forbids weakening any legitimate check.
+    // round. The repair contract forbids weakening any legitimate check. When
+    // the io supports it, the repaired gate is re-proved red on the pristine
+    // (pre-build) tree before it is trusted against the already-built tree.
     if (gateCmd) {
       stage(`gate:r${round}`)
       let gateRes = io.run(gateCmd)
@@ -378,6 +386,21 @@ export function driveTask(ctx, io) {
           if (rep.status === 'done' && rep.details?.gate_cmd) {
             gateHistory.push(gateCmd)
             gateCmd = rep.details.gate_cmd
+            // The mid-run twin of the baseline red-proof. A repaired gate is
+            // handed to a tree that is already built, where a WEAKENED gate
+            // goes green in one step and walks the run to commit. So prove it
+            // still fails on the pre-build tree first. io.runClean is optional:
+            // an io without it keeps today's behavior exactly (additive, never
+            // breaking a DI user).
+            gateReverified = false
+            if (typeof io.runClean === 'function') {
+              stage(`gate-reverify:${gateRepairs}`)
+              const pristine = io.runClean(gateCmd)
+              if (pristine.ok) {
+                return escalate('gate', `repaired gate is STILL green at baseline (pristine tree, builder's changes set aside): ${gateCmd} — vacuous acceptance cannot be built against`)
+              }
+              gateReverified = true
+            }
             gateRes = io.run(gateCmd) // re-run immediately; no builder round consumed
           }
         }
@@ -470,7 +493,7 @@ export function driveTask(ctx, io) {
     details: {
       commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
-      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, ...(gateHistory.length ? { replaced: gateHistory } : {}) } : null,
+      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
     },
   }
 }

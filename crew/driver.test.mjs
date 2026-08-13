@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentLine, assertSafeLine } from './driver.mjs'
+import { assignmentLine, assertSafeLine, pickNeedle } from './driver.mjs'
 
 const GOOD = {
   id: 'p1',
@@ -80,4 +80,17 @@ test('legitimate tokens still compose', () => {
     assert.doesNotThrow(() => assignmentLine({ ...GOOD, id }))
   }
   assert.doesNotThrow(() => assignmentLine({ ...GOOD, id: 'tech-lead', role: 'tech-lead' }))
+})
+
+test('pickNeedle chooses from the line TAIL — the input-box viewport scrolls to the end, hiding the head', () => {
+  const line = assignmentLine({
+    id: 'd1', role: 'planner',
+    briefFile: '/private/tmp/some-very-long-scratchpad-path-that-wraps-many-columns/brief-95-adapter-seam.md',
+    returnPath: '/Users/x/.crew/repo/task/returns/d1.planner.json',
+    taskDir: '/Users/x/.crew/repo/task/task',
+  })
+  const needle = pickNeedle(line)
+  assert.equal(needle, '/Users/x/.crew/repo/task/returns/d1.planner.json')
+  // the head-positioned brief path must NEVER be the needle, however long
+  assert.notEqual(needle, line.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), ''))
 })

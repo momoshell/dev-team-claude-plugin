@@ -8,6 +8,7 @@ import { openRun } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, assertCapabilities, resolveAdapters, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
 } from './crew.mjs'
 import { driveTask } from './drive.mjs'
 import { seatCommand, capabilities, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
@@ -290,6 +291,52 @@ test('seatReadySignal: ready-reply beats chrome, chrome is a real fallback, and 
   assert.equal(seatReadySignal('x@host ~/repo %\n', 'lead'), null)
   const brief = 'Crew for task demo. Task dir /tmp. Read your role in the system prompt, reply exactly ready: your-role, then wait.'
   assert.equal(seatReadySignal(brief, 'builder'), null)
+})
+
+test('waitForEnvelope returns an envelope after polling and times out for a live seat', () => {
+  let t = 0
+  const now = () => t
+  const sleep = (ms) => { t += ms }
+  let polls = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 60, role: 'builder',
+    readEnvelope: () => (++polls >= 3 ? { status: 'done' } : null),
+    probeSeat: () => true, now, sleep,
+  })
+  assert.deepEqual(env, { status: 'done' })
+  t = 0
+  assert.equal(waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 15, role: 'builder',
+    readEnvelope: () => null, probeSeat: () => true, now, sleep,
+  }), null)
+})
+
+test('waitForEnvelope fast-fails after consecutive gone probes, but indeterminate probes time out', () => {
+  let t = 0
+  const now = () => t
+  const sleep = (ms) => { t += ms }
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => null, probeSeat: () => false, now, sleep,
+  }), (err) => err.stage === 'seat-died' && /seat died: builder/.test(err.message) && t < 1200 * 1000)
+  t = 0
+  assert.equal(waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 60, role: 'builder',
+    readEnvelope: () => null, probeSeat: () => null, now, sleep,
+  }), null)
+})
+
+test('waitForEnvelope envelope wins at death time and liveness constants are integer exports', () => {
+  let t = 0
+  let probes = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => (probes >= LIVENESS_MISSES_TO_DIE ? { status: 'done' } : null),
+    probeSeat: () => { probes += 1; return false }, now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+  assert.equal(probes, LIVENESS_MISSES_TO_DIE)
+  for (const value of [WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE]) assert.equal(Number.isInteger(value), true)
 })
 
 test('assertSeats: a lead-less crew passes; a seated-but-missing lead or missing reviewer throws', () => {

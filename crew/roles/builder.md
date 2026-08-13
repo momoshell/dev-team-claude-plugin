@@ -26,4 +26,4 @@ not someone else's job.
              "commit_message": "<one line, your own words for THIS diff>" }
 
 The commit_message is yours: describe the code you actually wrote (the
-orchestrator uses it verbatim for the code commit).
+orchestrator uses it as the commit body; the subject comes from the plan).

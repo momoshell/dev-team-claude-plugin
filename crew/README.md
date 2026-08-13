@@ -8,7 +8,7 @@ node crew/crew.mjs boot --task my-task --roles lead,planner,builder,reviewer
 node crew/crew.mjs boot --task my-task --tier <mechanical|build|judge>
 node crew/crew.mjs run  --task my-task --brief-file /abs/path/brief.md
 # ... code drives the loop; watch the workspace, read the pill ...
-node crew/crew.mjs status --task my-task          # liveness
+node crew/crew.mjs status --task my-task          # liveness (true|false|null per seat)
 node crew/crew.mjs teardown --task my-task        # manual close (run auto-tears-down on done)
 ```
 
@@ -135,6 +135,13 @@ that have scrolled past that reply (a re-run against a long-lived workspace)
 — agent TUI chrome as a documented, looser fallback (`seatReadySignal` in
 `crew.mjs`). Agent-agnostic by construction: it recognizes claude's and pi's
 chrome without either adapter knowing readiness detection exists.
+
+**Liveness is three-state, deliberately.** `paneAlive()` returns `true`,
+`false`, or `null` — `null` meaning *indeterminate* (the cmux tree could not
+be read), never *dead*. `status` reports that value per seat, and the wait
+loop counts only `false` toward its dead-seat verdict, so a cmux hiccup can
+never kill a live run. Liveness is a give-up signal only: a quiet seat is not
+a failed one, and outcome comes from the envelope file, always.
 
 ## The acceptance gate (gate-first)
 

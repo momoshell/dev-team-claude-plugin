@@ -33,7 +33,12 @@ Write `plan.md` in the task dir with EXACTLY these sections:
 - **Risks/consults** — anything you are <90% sure of. If a tech-lead pane
   exists, questions you want it to answer; else flag for the orchestrator.
 
-## Envelope details fields (the driver BRANCHES on these — all required)
+## Envelope details fields (the driver BRANCHES on these)
+
+Required: `plan_path`, `files_in_scope`, `validation_lane`. The rest are
+optional but change what the driver does: omitting `commit_subject` falls back
+to a subject derived from your summary, and omitting `issues` drops the Refs
+trailer — both are worse than filling them in.
 
 "details": { "plan_path": "<abs>",
              "files_in_scope": ["<repo-relative literal path, or a trailing-slash

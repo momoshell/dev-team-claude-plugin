@@ -58,7 +58,7 @@
       },
       "planner": {
         "provider": "anthropic",
-        "id": "claude-opus-5",
+        "id": "claude-fable-5",
         "agent": "claude",
         "effort": "high"
       },
@@ -152,6 +152,19 @@
         "tool-call",
         "cheap",
         "coding"
+      ],
+      "source": "models.dev",
+      "last_verified": "2026-08-13"
+    },
+    "anthropic/claude-fable-5": {
+      "cost_in_per_mtok": 10,
+      "cost_out_per_mtok": 50,
+      "context": 1000000,
+      "tags": [
+        "reasoning",
+        "tool-call",
+        "frontier",
+        "architecture"
       ],
       "source": "models.dev",
       "last_verified": "2026-08-13"

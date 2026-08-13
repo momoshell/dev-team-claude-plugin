@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/crew/roster.schema.json",
+  "title": "crew roster",
+  "type": "object",
+  "required": ["schema_version", "updated_at", "tiers", "models"],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "const": 1 },
+    "updated_at": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" },
+    "tiers": {
+      "type": "object",
+      "required": ["mechanical", "build", "judge"],
+      "additionalProperties": false,
+      "properties": {
+        "mechanical": { "$ref": "#/$defs/tier" },
+        "build": { "$ref": "#/$defs/tier" },
+        "judge": { "$ref": "#/$defs/tier" }
+      }
+    },
+    "models": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9-]+/[A-Za-z0-9._-]+$": { "$ref": "#/$defs/model" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "tier": {
+      "type": "object",
+      "required": ["lead", "planner", "builder", "reviewer"],
+      "additionalProperties": false,
+      "properties": {
+        "lead": { "$ref": "#/$defs/seat" },
+        "planner": { "$ref": "#/$defs/seat" },
+        "builder": { "$ref": "#/$defs/seat" },
+        "reviewer": { "$ref": "#/$defs/seat" },
+        "tech-lead": { "$ref": "#/$defs/seat" }
+      }
+    },
+    "seat": {
+      "type": ["object", "null"],
+      "required": ["provider", "id", "agent", "effort"],
+      "additionalProperties": false,
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "agent": { "enum": ["claude", "pi"] },
+        "effort": { "enum": ["low", "medium", "high", "max"] }
+      }
+    },
+    "model": {
+      "type": "object",
+      "required": ["cost_in_per_mtok", "cost_out_per_mtok", "context", "tags", "source", "last_verified"],
+      "additionalProperties": false,
+      "properties": {
+        "cost_in_per_mtok": { "type": "number", "minimum": 0 },
+        "cost_out_per_mtok": { "type": "number", "minimum": 0 },
+        "context": { "type": "integer", "minimum": 1 },
+        "tags": { "type": "array", "items": { "type": "string" } },
+        "source": { "type": "string" },
+        "last_verified": { "type": "string", "pattern": "^\\d{4}-\\d{2}-\\d{2}$" }
+      }
+    }
+  }
+}

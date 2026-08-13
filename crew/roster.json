@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-13",
+  "tiers": {
+    "mechanical": {
+      "lead": null,
+      "planner":  { "provider": "anthropic", "id": "claude-sonnet-5",  "agent": "claude", "effort": "low" },
+      "builder":  { "provider": "anthropic", "id": "claude-haiku-4-5", "agent": "claude", "effort": "low" },
+      "reviewer": { "provider": "anthropic", "id": "claude-haiku-4-5", "agent": "claude", "effort": "low" }
+    },
+    "build": {
+      "lead":     { "provider": "anthropic", "id": "claude-opus-5",   "agent": "claude", "effort": "medium" },
+      "planner":  { "provider": "anthropic", "id": "claude-opus-5",   "agent": "claude", "effort": "medium" },
+      "builder":  { "provider": "anthropic", "id": "claude-sonnet-5", "agent": "claude", "effort": "medium" },
+      "reviewer": { "provider": "anthropic", "id": "claude-opus-5",   "agent": "claude", "effort": "medium" }
+    },
+    "judge": {
+      "lead":      { "provider": "anthropic", "id": "claude-opus-5",   "agent": "claude", "effort": "high" },
+      "planner":   { "provider": "anthropic", "id": "claude-opus-5",   "agent": "claude", "effort": "high" },
+      "builder":   { "provider": "anthropic", "id": "claude-sonnet-5", "agent": "claude", "effort": "medium" },
+      "reviewer":  { "provider": "anthropic", "id": "claude-opus-5",   "agent": "claude", "effort": "high" },
+      "tech-lead": { "provider": "openai",    "id": "gpt-5.6-sol",     "agent": "pi",     "effort": "high" }
+    }
+  },
+  "models": {
+    "anthropic/claude-opus-5":   { "cost_in_per_mtok": 5, "cost_out_per_mtok": 25, "context": 1000000, "tags": ["reasoning", "tool-call", "judge"],    "source": "models.dev", "last_verified": "2026-08-13" },
+    "anthropic/claude-sonnet-5": { "cost_in_per_mtok": 2, "cost_out_per_mtok": 10, "context": 1000000, "tags": ["reasoning", "tool-call", "workhorse"], "source": "models.dev", "last_verified": "2026-08-13" },
+    "anthropic/claude-haiku-4-5":{ "cost_in_per_mtok": 1, "cost_out_per_mtok": 5,  "context": 200000,  "tags": ["reasoning", "tool-call", "cheap"],    "source": "models.dev", "last_verified": "2026-08-13" },
+    "openai/gpt-5.6-sol":        { "cost_in_per_mtok": 5, "cost_out_per_mtok": 30, "context": 1050000, "tags": ["reasoning", "tool-call", "vendor-diverse"], "source": "models.dev", "last_verified": "2026-08-13" }
+  }
+}

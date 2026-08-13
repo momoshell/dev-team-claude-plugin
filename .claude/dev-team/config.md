@@ -37,16 +37,14 @@ Single command, two usage modes — the full suite (~771 tests as of v0.1.48) ru
 
 ## review_defaults
 
+_(Crew-era note, 2026-08-13: the legacy runtime this section configured was
+retired in v0.2.0; the skills that consumed review_defaults no longer exist.
+Kept for the two surviving subsystems as a record of their blast-radius
+class.)_
+
 Deep review by default for:
-- `handover-spec.schema.json`, `coder-return.schema.json` — the spec contract; a breaking change here silently breaks every lead/coder handoff.
-- `orchestration.md`, `references/*.md` — the core behavior rules injected into every session via the `SessionStart` hook.
-- `hooks/hooks.json` — session-start injection wiring.
-- `scripts/trello.sh` — handles credentials (must never leak them to stdout/stderr/transcript).
-- `scripts/cmux/*.schema.json`, `scripts/cmux/roster.default.json`, `scripts/cmux/contract.mjs` — the cmux execution-mode contract freeze (slice 1a); same blast-radius class as the root schemas, plus it encodes a permission/security boundary.
-- `scripts/cmux/*.mjs` (`resolve.mjs`, `record.mjs`, `cmuxctl.mjs`, `ladder.mjs`, `dispatch.mjs`) — the 1b dispatcher runtime; every one encodes a permission, path, or completion-evidence boundary (adversarial 3-reviewer panel was required at 1b, not just deep review).
+- `scripts/factory/*.mjs` — the run-trace mirror (#40): trace-fact-bearing; a defect here silently corrupts the record of what actually happened.
 - `scripts/pr-review-window.sh` — spawns windows/processes and does worktree teardown.
-- `scripts/factory/*.mjs` — the run-trace mirror (#40): trace-fact-bearing, and #59 will retire hand-written run prose in favour of these rows, so a defect here silently corrupts the record of what actually happened.
-- `scripts/chain/*.mjs` (#28: `gates.mjs`, `evidence.mjs`) — the gates CLI: agent-controlled command execution (`tests_pass`'s spawn of a spec's `validation_commands`) plus the ADR-016 memory-single-writer mechanical backstop (`scope_compliance`'s protected-path `hard_fail`), same blast-radius class as the cmux dispatcher.
 
 ## current_task
 

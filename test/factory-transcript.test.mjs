@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 const HERE = join(fileURLToPath(import.meta.url), '..')
 const ROOT = join(HERE, '..')
-const SCRIPTS_DIR = join(ROOT, 'scripts', 'cmux')
+const CREW_DIR = join(ROOT, 'crew')
 const FACTORY_DIR = join(ROOT, 'scripts', 'factory')
 const MODULE_PATH = join(FACTORY_DIR, 'transcript.mjs')
 
@@ -189,7 +189,7 @@ test('C2 CLAMP: numOr0 never lets a negative or fractional usage field survive i
 // RESOLUTION REFUSES BOTH WAYS AND COUNTS THEM DISTINCTLY.
 // ---------------------------------------------------------------------------
 
-// Real-shaped dispatch_ids (scripts/cmux/dispatch-record.schema.json's
+// Real-shaped dispatch_ids (the retired dispatch-record schema's
 // `^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`) — S4
 // requires resolveTranscript to shape-guard the id to this pattern before
 // ever using it in a filename scan, so fixtures below use valid UUIDs
@@ -312,7 +312,7 @@ test('RESOLUTION: the dash-encoding is never derived (source-text needle: no cod
 test('DRIFT GUARD (crew era): the builder seat — whose transcripts this reducer counts — never carries the subagent tool', () => {
   // The legacy contract.mjs is retired; the no-subagents assumption now
   // guards against the crew's own seat table.
-  const crewSrc = readFileSync(join(SCRIPTS_DIR, '..', '..', 'crew', 'crew.mjs'), 'utf8')
+  const crewSrc = readFileSync(join(CREW_DIR, 'crew.mjs'), 'utf8')
   const m = crewSrc.match(/builder:\s*\{[^}]*tools:\s*'([^']*)'/)
   assert.ok(m, 'builder seat tools literal not found in crew/crew.mjs')
   assert.doesNotMatch(m[1], /Task|Agent/, 'the builder seat must never carry the subagent tool — this reducer would silently under-count usage')
@@ -342,7 +342,7 @@ test('IMPORT FIREWALL (direction 2): no crew decision module (drive.mjs, crew.mj
   // The legacy decision modules (ladder/triage/contract) are retired; the
   // firewall now guards the crew's decision plane instead.
   for (const f of ['drive.mjs', 'crew.mjs']) {
-    const src = readFileSync(join(SCRIPTS_DIR, '..', '..', 'crew', f), 'utf8')
+    const src = readFileSync(join(CREW_DIR, f), 'utf8')
     assert.doesNotMatch(src, /factory\/transcript/, `crew/${f} must never import scripts/factory/transcript.mjs`)
   }
 })

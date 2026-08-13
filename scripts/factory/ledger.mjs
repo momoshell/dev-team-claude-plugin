@@ -105,7 +105,7 @@ export const PAYLOAD_KEYS = Object.freeze({
 })
 
 // The closed set of source-error `reason` values; anything else is coerced
-// to 'Error'. RecordInvalidError is scripts/cmux/record.mjs's exported error
+// to 'Error'. RecordInvalidError was the retired record.mjs's exported error
 // class name, referenced here BY NAME ONLY — record.mjs itself must never be
 // imported (one-way subsystem direction, cmux -> factory).
 const SOURCE_ERROR_REASONS = Object.freeze(['RecordInvalidError', 'SyntaxError', 'Error'])
@@ -424,8 +424,8 @@ export function isLockedError(err) {
 // Redacts args recursively (plain objects and arrays) BEFORE either the
 // JSONL line or the db bind sees them: drops any key matching /^DEVTEAM_/i,
 // and drops any string value containing a secret marker. The marker set is
-// [NONCE_PREFIX], imported from scripts/cmux/contract.mjs rather than
-// hardcoded, so this stays in sync with the one place that owns the value.
+// [NONCE_PREFIX] — inlined above (the legacy contract that owned it was
+// retired with that runtime; this file is the value's authority now).
 function redact(value, stats) {
   if (Array.isArray(value)) {
     // Array elements carry no key context, so the marker-value check runs
@@ -1055,7 +1055,7 @@ export function openLedger({
   // offending source itself. Two hard rules for the caller (documented
   // here, at the boundary, because this is the value-leak channel):
   //  - violation_names must be built as `${v.path}:${v.keyword}` — NEVER
-  //    `v.message`. scripts/cmux/contract.mjs builds every violation
+  //    `v.message`. The retired contract.mjs built every violation
   //    `message` by embedding the offending value verbatim (e.g. `expected
   //    type X, got ${JSON.stringify(value)}`), so a message string is an
   //    uncontrolled copy of task-controlled bytes. Any element that fails

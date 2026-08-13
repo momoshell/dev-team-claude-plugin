@@ -397,7 +397,7 @@ function acquireLock(lockPath, nowFn) {
 
 // Release only if the on-disk lock still carries THIS holder's exact
 // pid + started_at — a late-waking, already-superseded holder must never
-// delete a successor's lock (mirrors dispatch.mjs:2017-2025).
+// delete a successor's lock (pattern inherited from the retired dispatch.mjs).
 function releaseLock(lockPath, holder) {
   const current = readJsonOrNull(lockPath)
   if (current && current.pid === holder.pid && current.started_at === holder.started_at) {
@@ -1423,7 +1423,7 @@ export function main(argv) {
 // realpath both sides: the ESM loader realpaths import.meta.url while
 // argv[1] stays literal, so under a symlinked path component a literal
 // compare is silently false and the CLI would no-op (mirrors
-// dispatch.mjs's own realpathOr / invokedDirectly shape exactly).
+// the retired dispatch.mjs's realpathOr / invokedDirectly shape exactly).
 function realpathOr(path) {
   try {
     return realpathSync(path)

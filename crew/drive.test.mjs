@@ -15,8 +15,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null } = {}) {
-  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [] }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, showDoc = false } = {}) {
+  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [] }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
@@ -51,6 +51,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null } = 
       return cleanRuns[`${cmd}:${counts[`clean:${cmd}`]}`] ?? cleanRuns[cmd] ?? { ok: false, output: '' }
     }
   }
+  if (showDoc) io.showDoc = (p) => { calls.showDoc.push(p) }
   return io
 }
 
@@ -601,6 +602,67 @@ test('every stage transition reaches io.status in order (the live pill feed)', (
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.deepEqual(io.calls.status, res.details.stages)
+})
+
+// --- plan viewer (io.showDoc) -------------------------------------------------
+
+test('the accepted plan is mounted once in the live viewer, on the plan path', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    showDoc: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(io.calls.showDoc, [`${TD}/plan.md`])
+})
+
+test("the viewer mounts on the planner's plan_path, not a hardcoded default", () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, plan_path: `${TD}/custom-plan.md` } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    showDoc: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(io.calls.showDoc, [`${TD}/custom-plan.md`])
+})
+
+test('a bounced plan mounts the viewer once — after acceptance, never twice', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'brief ambiguous' }),
+      'lead:1': leadEnv('bounce', 'the brief means X not Y; plan for X'),
+      'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    showDoc: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.showDoc.length, 1)
+  assert.deepEqual(io.calls.showDoc, [`${TD}/plan.md`])
+})
+
+test('an io without showDoc drives an identical loop (the additive pin)', () => {
+  const mk = (showDoc) => fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    showDoc,
+  })
+  const withoutDoc = driveTask(CTX, mk(false))
+  const withDoc = driveTask(CTX, mk(true))
+  assert.equal(withoutDoc.status, 'done')
+  assert.equal(withDoc.status, 'done')
+  assert.deepEqual(withoutDoc.details.stages, withDoc.details.stages)
 })
 
 // --- loop-boundary regressions (the "final-round bounce commits" class) ------

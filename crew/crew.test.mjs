@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, assertCapabilities, resolveAdapters } from './crew.mjs'
+import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, assertCapabilities, resolveAdapters, docOpenArgs } from './crew.mjs'
 import { seatCommand, capabilities } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilities as piCapabilities } from './adapters/adapter-pi.mjs'
 
@@ -153,4 +153,9 @@ test('a provider-qualified model is passed through whole; a bare id is never nar
   const bare = piSeatCommand({ ...PI_SAMPLE, model: 'sonnet' })
   assert.doesNotMatch(bare, /(^|\s)--provider(\s|$)/)
   assert.match(bare, /--model sonnet(\s|$)/)
+})
+
+test('the plan viewer mounts window-scoped and never steals focus', () => {
+  const args = docOpenArgs({ path: '/tmp/t/plan.md', workspaceId: 'ws-1', windowId: 'win-1' })
+  assert.deepEqual(args, ['open', '/tmp/t/plan.md', '--workspace', 'ws-1', '--window', 'win-1', '--direction', 'down', '--focus', 'false'])
 })

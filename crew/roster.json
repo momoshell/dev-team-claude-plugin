@@ -6,9 +6,9 @@
       "lead": null,
       "planner": {
         "provider": "anthropic",
-        "id": "claude-sonnet-5",
+        "id": "claude-opus-5",
         "agent": "claude",
-        "effort": "low"
+        "effort": "medium"
       },
       "builder": {
         "provider": "openai",
@@ -37,16 +37,16 @@
         "effort": "medium"
       },
       "builder": {
-        "provider": "anthropic",
-        "id": "claude-sonnet-5",
-        "agent": "claude",
-        "effort": "medium"
+        "provider": "openai",
+        "id": "gpt-5.6-luna",
+        "agent": "pi",
+        "effort": "high"
       },
       "reviewer": {
-        "provider": "anthropic",
-        "id": "claude-opus-5",
-        "agent": "claude",
-        "effort": "medium"
+        "provider": "openai",
+        "id": "gpt-5.6-terra",
+        "agent": "pi",
+        "effort": "high"
       }
     },
     "judge": {
@@ -63,10 +63,10 @@
         "effort": "high"
       },
       "builder": {
-        "provider": "anthropic",
-        "id": "claude-sonnet-5",
-        "agent": "claude",
-        "effort": "medium"
+        "provider": "openai",
+        "id": "gpt-5.6-luna",
+        "agent": "pi",
+        "effort": "high"
       },
       "reviewer": {
         "provider": "anthropic",

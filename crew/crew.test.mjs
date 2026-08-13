@@ -265,7 +265,9 @@ test('resolveSeatModels end to end through the REAL adapters, on the real roster
   const out = resolveSeatModels(seats, adapters)
   assert.equal(out.builder.model, 'openai-codex/gpt-5.6-luna')
   assert.equal(out.reviewer.model, 'openai-codex/gpt-5.6-terra')
-  assert.equal(out.planner.model, 'claude-sonnet-5')
+  // Tracks the LIVE roster cell (planning floor, ratified 2026-08-13: the
+  // planner seat is opus-grade at EVERY tier — never sonnet/haiku/luna).
+  assert.equal(out.planner.model, 'claude-opus-5')
 })
 
 test('translateDeny covers every SEAT_DEFAULTS deny value, dedupes, and drops unknown names', () => {

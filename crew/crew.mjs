@@ -28,6 +28,7 @@ import { execSync, execFileSync, spawnSync } from 'node:child_process'
 
 import { cmux, tree, locate, sendLine, renameTab, closeSurface, closeWorkspace, logLine, assignmentLine } from './driver.mjs'
 import { driveTask } from './drive.mjs'
+import { headlessIo } from './headless.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -97,8 +98,14 @@ function seatAgent(role, args) {
 // charter needs. Only tool_deny has a real consequence today: every seat has
 // a non-empty deny list, so an adapter that can't enforce it would boot a
 // silently weaker seat. Returns undefined on success.
-// Until #83 lands a headless transport, every seat boots into a cmux pane.
-export const BOOT_TRANSPORT = 'pane'
+export const DEFAULT_TRANSPORT = 'pane'
+export const HEADLESS_TRANSPORT = 'headless-json'
+
+export function transportFor(role, args = {}) {
+  const list = String(args.headless === true ? '' : (args.headless || ''))
+    .split(',').map((s) => s.trim()).filter(Boolean)
+  return list.includes(role) ? HEADLESS_TRANSPORT : DEFAULT_TRANSPORT
+}
 
 export function assertCapabilities(role, agentName, capabilities) {
   if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
@@ -187,13 +194,17 @@ export async function resolveAdapters(roles, args, seats = null) {
     const adapter = await import(pathToFileURL(file).href)
     if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
     if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
-    assertCapabilities(role, name, adapter.capabilitiesFor({ transport: BOOT_TRANSPORT }))
-    out[role] = { name, adapter }
+    const transport = transportFor(role, args)
+    assertCapabilities(role, name, adapter.capabilitiesFor({ transport }))
+    if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
+      throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
+    }
+    out[role] = { name, adapter, transport }
   }
   return out
 }
 
-function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
+function writeRolePrompt(role, taskDir) {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
   // claude 2.1.229): passing shared + role as two flags silently drops shared.
@@ -201,6 +212,12 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
   // per seat, generated in the task dir at boot.
   const merged = join(taskDir, `role-${role}.md`)
   writeFileSync(merged, `${readFileSync(SHARED_PROMPT, 'utf8')}\n\n${readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')}`)
+  return merged
+}
+
+function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
+  const seat = SEAT_DEFAULTS[role]
+  const merged = join(taskDir, `role-${role}.md`)
   // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — or, when a
   // --tier was used, the roster's resolved seat (tierSeat), which flags still
   // override. Both shipped adapters declare transport-invariant effort in
@@ -227,6 +244,26 @@ export function composeLayout(roles, mk) {
   return { direction: 'horizontal', split: 0.42, children: [head, stackVertical(rest)] }
 }
 
+export function resolveWorkerBin(args = {}) {
+  const explicit = args['claude-bin']
+  const env = process.env.CREW_CLAUDE_BIN
+  const home = join(homedir(), '.local', 'bin', 'claude')
+  const candidates = [
+    ['--claude-bin', explicit],
+    ['$CREW_CLAUDE_BIN', env],
+    ['${HOME}/.local/bin/claude', home],
+  ]
+  for (const [label, candidate] of candidates) {
+    if (!candidate) continue
+    if (!String(candidate).startsWith('/')) {
+      if (label === '--claude-bin' || label === '$CREW_CLAUDE_BIN') throw new Error(`headless worker binary ${label} must be an absolute path, got ${JSON.stringify(candidate)}`)
+      continue
+    }
+    if (existsSync(candidate)) return candidate
+  }
+  throw new Error(`no frozen headless worker binary found: checked --claude-bin, $CREW_CLAUDE_BIN, and ${home} (spike-findings.md:39-48)`)
+}
+
 async function bootCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -248,10 +285,18 @@ async function bootCmd(args) {
     if (!roles.includes('lead')) roles = ['lead', ...roles]
   }
   for (const r of roles) if (!SEAT_DEFAULTS[r]) throw new Error(`unknown crew role: ${r}`)
+  const headlessNames = String(args.headless === true ? '' : (args.headless || ''))
+    .split(',').map((r) => r.trim()).filter(Boolean)
+  for (const role of headlessNames) if (!roles.includes(role)) {
+    throw new Error(`--headless ${role} given but crew seats no ${role}`)
+  }
   // Resolve adapters before touching cmux — a bad --agent-<role> or a
   // capability shortfall must fail before a workspace gets created.
   const adapters = await resolveAdapters(roles, args, tierSeats)
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters) : null
+  const paneRoles = roles.filter((role) => transportFor(role, args) === DEFAULT_TRANSPORT)
+  if (paneRoles.length === 0) throw new Error('boot requires at least one pane seat (the lead is a pane seat in this slice)')
+  const workerBin = headlessNames.length ? resolveWorkerBin(args) : null
 
   const paths = pathsFor(taskSlug, checkout)
   // The state dir keys on the checkout's BASENAME — two different checkouts
@@ -266,8 +311,9 @@ async function bootCmd(args) {
   mkdirSync(paths.returnsDir, { recursive: true })
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
+  for (const role of roles) writeRolePrompt(role, paths.taskDir)
   const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role] })
-  const layout = composeLayout(roles, mk)
+  const layout = composeLayout(paneRoles, mk)
 
   const before = tree()
   const res = cmux('new-workspace', ['--name', `crew-${taskSlug}`, '--cwd', checkout, '--layout', JSON.stringify(layout), '--focus', 'true'])
@@ -286,7 +332,7 @@ async function bootCmd(args) {
   if (candidates.length !== 1) throw new Error(`boot: expected exactly one new crew-${taskSlug} workspace, found ${candidates.length}`)
   const { ws: workspace, windowId } = candidates[0]
   const panes = workspace.panes || []
-  if (panes.length !== roles.length) throw new Error(`boot: expected ${roles.length} panes, found ${panes.length}`)
+  if (panes.length !== paneRoles.length) throw new Error(`boot: expected ${paneRoles.length} panes, found ${panes.length}`)
 
   // Seat every role by its SURFACE NAME (set in the layout) — positional
   // mapping mis-seats every role silently if the tree's pane order ever
@@ -298,36 +344,41 @@ async function bootCmd(args) {
     const s = (p.surfaces || [])[0]
     if (s?.name) byName.set(String(s.name).toLowerCase(), { pane: p, surface: s })
   }
+  const memberFor = (role, pane = null, surface = null) => ({
+    pane_id: pane?.id || null, surface_id: surface?.id || null,
+    transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
+    tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
+    ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
+  })
   if (byName.size > 0) {
-    for (const role of roles) {
+    for (const role of paneRoles) {
       const hit = byName.get(role)
       if (!hit) throw new Error(`boot: no surface named ${role} in the new workspace (tree names: ${[...byName.keys()].join(', ')})`)
-      members[role] = {
-        pane_id: hit.pane.id, surface_id: hit.surface.id, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
-        ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
-      }
+      members[role] = memberFor(role, hit.pane, hit.surface)
     }
   } else {
-    roles.forEach((role, i) => {
+    paneRoles.forEach((role, i) => {
       const surface = (panes[i].surfaces || [])[0]
-      members[role] = {
-        pane_id: panes[i].id, surface_id: surface.id, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
-        ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
-      }
+      members[role] = memberFor(role, panes[i], surface)
     })
   }
-  for (const role of roles) renameTab(members[role].surface_id, role)
+  for (const role of roles.filter((r) => transportFor(r, args) === HEADLESS_TRANSPORT)) members[role] = memberFor(role)
+  for (const role of paneRoles) renameTab(members[role].surface_id, role)
 
   const crew = {
-    schema_version: 2, task: taskSlug, checkout,
+    schema_version: 3, task: taskSlug, checkout,
     workspace_id: workspace.id, window_id: windowId,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
     created_at: new Date().toISOString(),
+    ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
   }
   saveCrew(paths, crew)
   logLine(join(paths.dir, 'journal.jsonl'), {
-    at: new Date().toISOString(), event: 'boot', roles, models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
+    at: new Date().toISOString(), event: 'boot', roles,
+    models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
+    transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
+    ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats, allocation: sources } : {}),
   })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
@@ -442,13 +493,24 @@ function paneAlive(surfaceId) {          // true | false | null (indeterminate)
   catch { return null }
 }
 
-function realIo(crew, paths, checkout, emitter) {
+function realIo(crew, paths, checkout, emitter, adapters, args = {}) {
   let seq = 0
   const seatFor = new Map()
+  const headlessPaths = new Set()
+  const headlessRoles = Object.values(crew.members).some((m) => m.transport === HEADLESS_TRANSPORT)
+  const headless = headlessRoles
+    ? headlessIo({ crew, paths, taskDir: paths.taskDir, checkout, adapters, bin: crew.claude_bin || resolveWorkerBin(args), deps: { log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj) } })
+    : null
   const io = {
-    assign({ role, briefFile }) {
+    assign(spec) {
+      const { role } = spec
       const m = crew.members[role]
       if (!m) throw new Error(`role ${role} not seated in this crew`)
+      if (m.transport === HEADLESS_TRANSPORT) {
+        const result = headless.assign(spec)
+        headlessPaths.add(result.returnPath)
+        return result
+      }
       seq += 1
       const id = `d${seq}`
       const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
@@ -460,6 +522,7 @@ function realIo(crew, paths, checkout, emitter) {
       return { id, returnPath }
     },
     wait(returnPath, timeoutS) {
+      if (headlessPaths.has(returnPath)) return headless.wait(returnPath, timeoutS)
       const seat = seatFor.get(returnPath)
       try {
         return waitForEnvelope({
@@ -612,7 +675,7 @@ function runCmd(args) {
     emitter.startRun()
   } catch { emitter = null }
 
-  const io = realIo(crew, paths, checkout, emitter)
+  const io = realIo(crew, paths, checkout, emitter, null, args)
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.
@@ -672,7 +735,7 @@ export function seatReadySignal(screen, role) {
 
 function awaitSeatsReady(crew, timeoutS = 120, journal = null) {
   const deadline = Date.now() + timeoutS * 1000
-  const pending = new Set(Object.keys(crew.members))
+  const pending = new Set(Object.keys(crew.members).filter((role) => crew.members[role].surface_id))
   while (pending.size > 0) {
     for (const role of [...pending]) {
       const res = cmux('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
@@ -781,7 +844,7 @@ function statusCmd(args) {
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
   const alive = {}
-  for (const [role, m] of Object.entries(crew.members)) alive[role] = paneAlive(m.surface_id)
+  for (const [role, m] of Object.entries(crew.members)) alive[role] = m.surface_id ? paneAlive(m.surface_id) : 'headless'
   process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive })}\n`)
 }
 
@@ -790,7 +853,7 @@ function statusCmd(args) {
 // on disk by contract before this runs — deliverables live in files, never
 // pane scrollback.
 function teardownCore(paths, crew) {
-  for (const m of Object.values(crew.members)) closeSurface(m.surface_id)
+  for (const m of Object.values(crew.members)) if (m.surface_id) closeSurface(m.surface_id)
   // The viewer is not in crew.members, so the loop above never sees it, and
   // close-workspace is documented to no-op while a live pane occupies the
   // workspace — close it by id rather than trusting the workspace close.

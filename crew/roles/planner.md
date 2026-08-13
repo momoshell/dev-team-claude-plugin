@@ -48,6 +48,23 @@ against it with git and bounces anything outside. A missing or empty list
 escalates the whole task — the gate cannot be skipped. Paths repo-relative,
 exactly as `git status --porcelain` prints them.
 
+## The acceptance gate (gate-first, strongly encouraged)
+
+When the task's outcome is mechanically checkable, ALSO author an executable
+acceptance gate and return it as details.gate_cmd: a single command (e.g.
+`node <taskDir>/gate.mjs`) that exits 0 iff what the brief asked for is what
+got built. Write the script in the TASK DIR, never the repo — it must stay
+outside the builder's reach. Rules the driver enforces mechanically:
+- The gate runs at BASELINE before any build and MUST fail red there. A
+  green baseline means your gate is vacuous or the work already exists —
+  you will be bounced to fix it, and a second green baseline escalates.
+- Map every explicit requirement in the brief to a concrete check; print
+  failures as `expected X, found Y, at PATH` (they feed back verbatim to
+  the builder).
+- If the gate later proves defective, you get exactly ONE repair (preserve
+  the old gate under a .r1 suffix); the repair may never weaken a
+  legitimate check.
+
 Keep the plan grounded in what IS (read first, plan second), match the repo's
 existing conventions, and prefer boring designs that a sonnet builder can
 execute without asking questions.

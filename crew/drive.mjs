@@ -19,6 +19,8 @@ export const LIMITS = Object.freeze({
   build_rounds: 3, // builder attempts across lane/scope/review bounces
   review_rounds: 2, // reviewer verdicts
   lead_consults: 4, // total decision consults per task
+  gate_fails_to_triage: 2, // gate failures before build-vs-gate-defect triage
+  gate_repairs: 1, // the gate's author may repair it at most once per task
 })
 
 export const WAITS_S = Object.freeze({
@@ -247,6 +249,33 @@ export function driveTask(ctx, io) {
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
 
+  // ---- 1c. ACCEPTANCE GATE, gate-first (fusion-harness pattern) ---------------
+  // The planner may author an executable acceptance gate in the TASK DIR
+  // (outside the repo — immutable to the builder by construction): a command
+  // that exits 0 iff what-was-asked is what-got-built. Two rules, enforced
+  // mechanically: the gate is written BEFORE any build, and the BASELINE run
+  // must fail RED — a green baseline means the gate is vacuous or the work
+  // already exists, and either way the planner hears about it loudly (the
+  // exact defect class the v2 plan review caught by hand, mechanized).
+  let gateCmd = planEnv.details?.gate_cmd || null
+  let gateRepairs = 0
+  if (gateCmd) {
+    stage('gate-baseline')
+    const baseline = io.run(gateCmd)
+    if (baseline.ok) {
+      stage('gate-baseline:green-bounce')
+      const b = art('gate-vacuous-bounce.md')
+      io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYour acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
+      const env2 = assignAndWait('planner', b, 'gate-fix')
+      if (env2.status !== 'done' || !env2.details?.gate_cmd) {
+        return escalate('gate', `baseline-green gate could not be repaired (planner returned ${env2.status})`)
+      }
+      gateCmd = env2.details.gate_cmd
+      const re = io.run(gateCmd)
+      if (re.ok) return escalate('gate', 'repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
+    }
+  }
+
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
   const planPath = planEnv.details?.plan_path || art('plan.md')
   let buildBrief = planPath
@@ -296,6 +325,46 @@ export function driveTask(ctx, io) {
       io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'lane-fix'
       continue
+    }
+
+    // Gate B2 (mechanical): the acceptance gate, when the plan authored one.
+    // Failures feed back VERBATIM; repeated failures trigger a build-vs-gate
+    // defect triage by the reviewer (closed enum); a gate defect lets the
+    // planner repair its own gate ONCE (old gate preserved by the planner),
+    // and the repaired gate re-runs immediately WITHOUT consuming a builder
+    // round. The repair contract forbids weakening any legitimate check.
+    if (gateCmd) {
+      stage(`gate:r${round}`)
+      let gateRes = io.run(gateCmd)
+      if (!gateRes.ok && round >= limits.gate_fails_to_triage && gateRepairs < limits.gate_repairs) {
+        const tBrief = art(`gate-triage-r${round}.md`)
+        io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.`)
+        const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
+        if (triage.status === 'done' && triage.details?.defect === 'gate') {
+          gateRepairs += 1
+          stage(`gate-repair:${gateRepairs}`)
+          const rBrief = art('gate-repair-bounce.md')
+          io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve your old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
+          const rep = assignAndWait('planner', rBrief, 'gate-repair')
+          if (rep.status === 'done' && rep.details?.gate_cmd) {
+            gateCmd = rep.details.gate_cmd
+            gateRes = io.run(gateCmd) // re-run immediately; no builder round consumed
+          }
+        }
+      }
+      if (!gateRes.ok) {
+        if (round === limits.build_rounds) {
+          const c = consultLead(
+            `The acceptance gate is still red after ${round} build rounds. Bounce once more with guidance, or escalate?`,
+            ['bounce', 'escalate'], [planPath, art('journal.jsonl')],
+          )
+          if (c.decision !== 'bounce') return escalate('gate', c.reason)
+        }
+        const b = art(`build-bounce-r${round}.md`)
+        io.writeFile(b, `# Gate bounce (round ${round})\n\nThe ACCEPTANCE GATE is red — the build does not yet do what was asked. The gate is immutable to you; make the build satisfy it:\n\n    ${gateCmd}\n\nFailures (verbatim):\n${gateRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
+        buildBrief = b; buildNote = 'gate-fix'
+        continue
+      }
     }
 
     // Gate C (judgment, but enum-consumed): the reviewer.
@@ -358,6 +427,6 @@ export function driveTask(ctx, io) {
     status: 'done',
     summary: `Task ${ctx.task} complete: committed ${S.commit} (${scopeFiles.length} files), suite green, review pass. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), art('journal.jsonl')],
-    details: { commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults, dissents: S.dissents, escalation: null },
+    details: { commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults, dissents: S.dissents, gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs } : null, escalation: null },
   }
 }

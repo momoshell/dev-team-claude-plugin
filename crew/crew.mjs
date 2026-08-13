@@ -125,9 +125,14 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter }) {
   // per seat, generated in the task dir at boot.
   const merged = join(taskDir, `role-${role}.md`)
   writeFileSync(merged, `${readFileSync(SHARED_PROMPT, 'utf8')}\n\n${readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')}`)
+  // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — until the
+  // roster integration resolves it per tier, this is the manual dial. Both
+  // shipped adapters declare capabilities.effort and map it to their own
+  // flag (claude --effort, pi --thinking).
   return adapter.seatCommand({
     role, model: seatModel(role, args), promptFile: merged,
     tools: seat.tools, deny: seat.deny, taskDir, bootBrief,
+    effort: args[`effort-${role}`] || undefined,
   })
 }
 

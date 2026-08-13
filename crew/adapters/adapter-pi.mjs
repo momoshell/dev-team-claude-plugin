@@ -23,9 +23,13 @@ export const capabilities = Object.freeze({
   // --session-id can create/resume an exact session; crew does not pass one
   // today, but the mechanism exists.
   session_resume: true,
+  // --thinking <off|minimal|low|medium|high|xhigh|max> (also the
+  // ':<level>' model-string shorthand) — live-verified 2026-08-13: a
+  // luna:high seat showed "gpt-5.6-luna • high" in its status bar.
+  effort: true,
 })
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief }) {
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
   // Same env-var contract as the claude adapter (`env`, DEVTEAM_WORKER=1,
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
   // work regardless of which binary fills the seat.
@@ -59,10 +63,15 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // (:398-422) then synthesizes a google model whose id is the literal
   // pattern, returning it with only a warning — a phantom seat that dies on
   // its first message instead of failing to boot.
+  // effort is OPTIONAL and additive: absent, the command is unchanged. It
+  // maps to --thinking (NOT the ':<level>' model-string shorthand, so a
+  // roster model id passes through untouched and effort stays a separate,
+  // auditable dimension).
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     'pi',
     '--model', model,
+    ...(effort ? ['--thinking', effort] : []),
     '--exclude-tools', `"${deny}"`,
     '--append-system-prompt', `"${promptFile}"`,
     `"${bootBrief}"`,

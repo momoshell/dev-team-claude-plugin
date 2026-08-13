@@ -1,10 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
+import { openRun } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, assertCapabilities, resolveAdapters, docOpenArgs,
-  resolveTier, resolveSeatModels, seatReadySignal, assertSeats,
+  resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
 } from './crew.mjs'
+import { driveTask } from './drive.mjs'
 import { seatCommand, capabilities, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilities as piCapabilities, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 
@@ -301,4 +306,114 @@ test('a lead-less layout is still strictly binary, with the first seated role on
 
 test('ROLE_ORDER is key-identical to SEAT_DEFAULTS — one truth for seating order and layout order', () => {
   assert.deepEqual([...ROLE_ORDER], Object.keys(SEAT_DEFAULTS))
+})
+
+test('phaseForStage maps every driver stage and defaults unknown labels to build', () => {
+  const table = {
+    'plan:r1': 'planning', 'check:r1': 'planning', 'gate-baseline': 'build', 'gate-repair:1': 'build',
+    'gate-reverify:1': 'build', 'scope-gate:r1': 'build', 'lane:r1': 'build', 'gate:r1': 'build',
+    'review:pass': 'review', suite: 'finish', commit: 'finish', done: 'done', 'escalate:lane': 'escalation',
+    'future:stage': 'build',
+  }
+  for (const [label, phase] of Object.entries(table)) assert.equal(phaseForStage(label), phase, label)
+})
+
+function adapterEvents() {
+  return [
+    { kind: 'stage', label: 'plan:r1' },
+    { kind: 'assign', id: 'd1', role: 'planner', brief: '/tmp/brief' },
+    { kind: 'envelope', id: 'd1', role: 'planner', status: 'done' },
+    { kind: 'decision', decided: 'accept', why: 'green' },
+    { kind: 'dissent', from: 'reviewer', recommendation: 'escalate', lead_decision: 'accept' },
+  ]
+}
+
+test('emitAdapter maps drive events to closed ledger vocabulary with explicit sequence', () => {
+  let seq = 100
+  const calls = { phases: [], events: [] }
+  const emitter = {
+    adwId: 'adw-test',
+    phaseTransition: (phase) => calls.phases.push(phase),
+    emit: (fn) => fn({ recordEvent: (event) => calls.events.push(event) }, () => ++seq),
+  }
+  const adapter = emitAdapter(emitter)
+  for (const event of adapterEvents()) adapter(event)
+  adapter(null)
+  adapter({ kind: 'unknown' })
+  assert.ok(calls.phases.length >= 1)
+  assert.ok(calls.events.length >= 4)
+  for (const event of calls.events) {
+    assert.ok(EVENT_TYPES.includes(event.type))
+    assert.ok(Object.keys(event.payload).every((key) => PAYLOAD_KEYS[event.type].includes(key)))
+    assert.equal(event.adw_id, 'adw-test')
+    assert.equal(typeof event.seq, 'number')
+  }
+})
+
+const floorMajor = Number.parseInt(NODE_FLOOR, 10)
+const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
+
+test('a real ledger round trip mirrors the complete drive event set', { skip: !nodeMeetsLedgerFloor }, () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'crew-emit-state-'))
+  const dbPath = join(stateDir, 'ledger.db')
+  try {
+    const emitter = openRun({ stateDir, repoSlug: 'repo', taskSlug: 'task', dbPath })
+    emitter.startRun()
+    const adapter = emitAdapter(emitter)
+    for (const event of adapterEvents()) adapter(event)
+    emitter.endRun({ status: 'ok' })
+    const ledger = openLedger({ dbPath })
+    const rows = ledger.listEvents({ adw_id: emitter.adwId, limit: 100 })
+    assert.ok(rows.length >= 4)
+    assert.ok(ledger.dumpTable('phases').length >= 1)
+    assert.equal(ledger.getSession(emitter.adwId).status, 'ok')
+    assert.equal(emitter.stats().dropped, 0)
+    ledger.close()
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('a degraded emitter is inert for the adapter and drive', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-emit-degraded-'))
+  const stateFile = join(parent, 'not-a-dir')
+  writeFileSync(stateFile, 'file')
+  try {
+    const emitter = openRun({ stateDir: stateFile, repoSlug: 'repo', taskSlug: 'task', dbPath: join(stateFile, 'ledger.db') })
+    const adapter = emitAdapter(emitter)
+    assert.doesNotThrow(() => adapterEvents().forEach((event) => adapter(event)))
+    assert.ok(emitter.stats().dropped >= 0)
+
+    const ctx = {
+      task: 'degraded', briefFile: '/tmp/brief.md', taskDir: '/tmp/degraded-task', checkout: '/tmp/repo',
+      roles: ['lead', 'planner', 'builder', 'reviewer'], lane: null, suite: 'suite-cmd',
+    }
+    const envelopes = {
+      'planner:1': { status: 'done', role: 'planner', details: { plan_path: '/tmp/degraded-task/plan.md', files_in_scope: ['a.mjs', 'a.test.mjs'] } },
+      'builder:1': { status: 'done', role: 'builder', details: { files_changed: ['a.mjs', 'a.test.mjs'], commit_message: 'feat: degraded' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { verdict: 'pass' } },
+    }
+    const makeIo = (emit) => {
+      const counts = {}
+      const io = {
+        assign({ role }) {
+          counts[role] = (counts[role] || 0) + 1
+          return { id: `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
+        },
+        wait(path) { return envelopes[path] || null },
+        writeFile() {}, readFile() { return null },
+        run() { return { ok: true, output: '' } },
+        changedFiles() { return ['a.mjs', 'a.test.mjs'] },
+        commit() { return 'abc1234' },
+        log() {}, now() { return 0 },
+      }
+      if (emit) io.emit = emit
+      return io
+    }
+    const plain = driveTask(ctx, makeIo())
+    const degraded = driveTask(ctx, makeIo(adapter))
+    assert.deepEqual(degraded, plain)
+  } finally {
+    rmSync(parent, { recursive: true, force: true })
+  }
 })

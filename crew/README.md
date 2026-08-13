@@ -158,7 +158,11 @@ Everything durable is a FILE; pane chat is never the record.
 - `crew.mjs` — CLI: boot / run / handoff (legacy agent-driven mode) / wait /
   status / teardown, plus `realIo` wiring the driver to cmux + git.
 - `drive.mjs` — the deterministic task loop (dependency-injected io; fully
-  unit-tested without cmux).
+  unit-tested without cmux). `io.emit(event)` is OPTIONAL: when `run` can open
+  a factory ledger run, stage/assign/envelope/decision/dissent events are
+  mirrored through `emitAdapter` in `crew.mjs`. Instrumentation is never
+  load-bearing — a missing, broken or unwritable ledger changes nothing about
+  a run's outcome.
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
 - `adapters/adapter-*.mjs` — the per-agent seam: capabilities + seatCommand

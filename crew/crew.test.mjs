@@ -2,6 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, assertCapabilities, resolveAdapters } from './crew.mjs'
 import { seatCommand, capabilities } from './adapters/adapter-claude.mjs'
+import { seatCommand as piSeatCommand, capabilities as piCapabilities } from './adapters/adapter-pi.mjs'
 
 // cmux build-102 rejects layouts whose split nodes are not strictly binary
 // and whose single-pane trees are anything but a bare leaf ("Invalid
@@ -110,4 +111,46 @@ test('resolveAdapters rejects an unknown --agent-<role> naming the missing file,
   )
   const r = await resolveAdapters(['builder'], {})
   assert.equal(r.builder.name, 'claude')
+})
+
+const PI_SAMPLE = {
+  role: 'builder', model: 'google/gemini-3-pro', promptFile: '/tmp/crew-task/role-builder.md',
+  tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', taskDir: '/tmp/crew-task',
+  bootBrief: 'Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait.',
+}
+
+// assertCapabilities gates seat boot on these exact keys — a lie here silently unlocks seats the adapter cannot actually enforce.
+test('the pi adapter declares honest, frozen capabilities', () => {
+  assert.ok(Object.isFrozen(piCapabilities))
+  assert.deepEqual({ ...piCapabilities }, { prompt_file: true, tool_deny: true, unattended: true, session_resume: true })
+})
+
+// A crew seat is a persistent pane: --print exits after the boot brief and --no-session drops the session, so their absence is load-bearing.
+test('adapter-pi.seatCommand carries every crew-supplied field and neither interactive-killing flag', () => {
+  const cmd = piSeatCommand(PI_SAMPLE)
+  assert.match(cmd, /DEVTEAM_WORKER=1/)
+  assert.match(cmd, /CREW_ROLE=builder/)
+  assert.match(cmd, /CREW_TASK_DIR="\/tmp\/crew-task"/)
+  assert.match(cmd, /--exclude-tools "Task,Agent"/)
+  assert.match(cmd, /--append-system-prompt "\/tmp\/crew-task\/role-builder\.md"/)
+  // Pins the binary itself — nothing else in this suite fails if a copy-paste swaps 'pi' for another executable.
+  assert.match(cmd, /(^|\s)pi(\s|$)/)
+  // Anchored to the end and requires the closing quote: an unquoted or repositioned brief still needs to fail this.
+  assert.match(cmd, /"Crew for task demo\..*wait\."$/)
+  // Word-boundary regexes are mandatory here — a naive includes('-p ') matches --append-system-prompt and would fail a correct adapter.
+  assert.doesNotMatch(cmd, /(^|\s)--print(\s|$)/)
+  assert.doesNotMatch(cmd, /(^|\s)-p(\s|$)/)
+  assert.doesNotMatch(cmd, /(^|\s)--no-session(\s|$)/)
+})
+
+// --provider is never passed, qualified or bare: a real "Model not found" error on a bare miss beats a --provider google
+// fallback silently narrowing the search and synthesizing a phantom google model that only warns, then dies on first message.
+test('a provider-qualified model is passed through whole; a bare id is never narrowed to a provider', () => {
+  const qualified = piSeatCommand({ ...PI_SAMPLE, model: 'google/gemini-3-pro' })
+  assert.match(qualified, /--model google\/gemini-3-pro(\s|$)/)
+  assert.doesNotMatch(qualified, /(^|\s)--provider(\s|$)/)
+
+  const bare = piSeatCommand({ ...PI_SAMPLE, model: 'sonnet' })
+  assert.doesNotMatch(bare, /(^|\s)--provider(\s|$)/)
+  assert.match(bare, /--model sonnet(\s|$)/)
 })

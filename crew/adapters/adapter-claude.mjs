@@ -17,6 +17,10 @@ export const capabilities = Object.freeze({
   effort: true,
 })
 
+// The claude CLI accepts full model ids, so the roster's {provider,id} pair
+// needs no namespace prefix — the id IS the CLI's namespace.
+export function modelString({ provider, id }) { return id }
+
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks

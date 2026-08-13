@@ -110,6 +110,16 @@ export function driveTask(ctx, io) {
   // Anything invalid, out-of-set, or timed out escalates. A first-round
   // 'second-opinion' answer triggers the code-mediated compounding hop.
   function consultLead(question, options, contextPaths, { exclude } = {}) {
+    // Lead-optional (mechanical tier): with no judge seated there is nobody
+    // to consult, so the consult short-circuits UP the ladder (code ->
+    // orchestrator) without an assign — the ratified ladder, minus a rung
+    // that does not exist. A seated lead reaches none of this: behavior
+    // below is unchanged.
+    if (!ctx.roles.includes('lead')) {
+      const reason = `no lead seated (mechanical tier): ${question}`
+      io.log({ at: io.now(), no_lead_escalation: reason })
+      return { decision: 'escalate', reason }
+    }
     S.consults += 1
     if (S.consults > limits.lead_consults) {
       return { decision: 'escalate', reason: `lead consult limit (${limits.lead_consults}) exhausted` }

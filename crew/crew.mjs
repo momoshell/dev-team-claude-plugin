@@ -55,6 +55,9 @@ export const SEAT_DEFAULTS = Object.freeze({
   'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'tech-lead.md', agent: 'claude' },
 })
 export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer'])
+// Canonical seating order — also layout order (index 0 takes the left half).
+// Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
+export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
 function slug(s) {
   const out = String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
@@ -99,13 +102,81 @@ export function assertCapabilities(role, agentName, capabilities) {
   }
 }
 
+// Resolve a roster tier into seated roles, per-seat cells, and a per-field
+// provenance map. PURE: sync, no imports, no adapter knowledge — the
+// per-adapter model-string translation is a separate step (resolveSeatModels)
+// so this function stays testable with a bare roster object.
+export function resolveTier(roster, tier, args = {}) {
+  const cells = roster?.tiers?.[tier]
+  if (!cells) throw new Error(`unknown tier "${tier}" — valid tiers: ${Object.keys(roster?.tiers || {}).join(', ')}`)
+  // Canonical order first, then any roster-typo keys ROLE_ORDER doesn't know
+  // about — a typo must surface at boot's SEAT_DEFAULTS check, never be
+  // silently dropped.
+  const order = [...ROLE_ORDER.filter((r) => r in cells), ...Object.keys(cells).filter((r) => !ROLE_ORDER.includes(r))]
+  const roles = []
+  const seats = {}
+  const sources = {}
+  for (const role of order) {
+    const cell = cells[role]
+    if (!cell) continue // null/absent -> not seated
+    roles.push(role)
+    const agentOverride = args[`agent-${role}`]
+    const effortOverride = args[`effort-${role}`]
+    const modelOverride = args[`model-${role}`]
+    seats[role] = {
+      agent: agentOverride || cell.agent,
+      effort: effortOverride || cell.effort,
+      provider: cell.provider,
+      id: cell.id,
+      // null = "translate from provider/id"; a flag value is a RAW
+      // passthrough, never translated (the operator is speaking their own
+      // CLI's namespace).
+      model: modelOverride || null,
+    }
+    sources[role] = {
+      agent: agentOverride ? 'override' : 'roster',
+      model: modelOverride ? 'override' : 'roster',
+      effort: effortOverride ? 'override' : 'roster',
+    }
+  }
+  // A flag naming a role the tier does not seat is a loud throw — silently
+  // dropping operator intent is the worse failure.
+  for (const key of Object.keys(args)) {
+    const m = /^(model|agent|effort)-(.+)$/.exec(key)
+    if (m && !roles.includes(m[2])) {
+      throw new Error(`--${m[1]}-${m[2]} given but tier ${tier} seats no ${m[2]}`)
+    }
+  }
+  return { roles, seats, sources }
+}
+
+// The per-adapter translation step, kept out of the pure resolver: a roster
+// cell is translated by the adapter that will run it; a --model-<role>
+// override is already the operator's own CLI namespace and passes through
+// raw. `adapters` is the {role: {name, adapter}} map resolveAdapters returns.
+export function resolveSeatModels(seats, adapters) {
+  const out = {}
+  for (const [role, seat] of Object.entries(seats)) {
+    const adapter = adapters[role]?.adapter
+    // The typeof fallback keeps a third-party adapter without modelString
+    // bootable.
+    const model = seat.model || (typeof adapter?.modelString === 'function'
+      ? adapter.modelString({ provider: seat.provider, id: seat.id })
+      : seat.id)
+    out[role] = { ...seat, model }
+  }
+  return out
+}
+
 // Resolve each role's agent name to its adapter module, by filename — this
 // IS the seam: adding an agent means dropping a file in crew/adapters/, not
-// editing crew.mjs. Dynamic import() is inherently async.
-export async function resolveAdapters(roles, args) {
+// editing crew.mjs. Dynamic import() is inherently async. `seats` (optional)
+// is a tier's resolved seat map — when present, its agent choice wins over
+// the --agent-<role>/SEAT_DEFAULTS flags-or-default path.
+export async function resolveAdapters(roles, args, seats = null) {
   const out = {}
   for (const role of roles) {
-    const name = String(seatAgent(role, args))
+    const name = String(seats?.[role]?.agent || seatAgent(role, args))
     if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
     const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
     if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
@@ -117,7 +188,7 @@ export async function resolveAdapters(roles, args) {
   return out
 }
 
-function paneCommand(role, args, { taskDir, bootBrief, adapter }) {
+function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
   // claude 2.1.229): passing shared + role as two flags silently drops shared.
@@ -125,14 +196,14 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter }) {
   // per seat, generated in the task dir at boot.
   const merged = join(taskDir, `role-${role}.md`)
   writeFileSync(merged, `${readFileSync(SHARED_PROMPT, 'utf8')}\n\n${readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')}`)
-  // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — until the
-  // roster integration resolves it per tier, this is the manual dial. Both
-  // shipped adapters declare capabilities.effort and map it to their own
-  // flag (claude --effort, pi --thinking).
+  // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — or, when a
+  // --tier was used, the roster's resolved seat (tierSeat), which flags still
+  // override. Both shipped adapters declare capabilities.effort and map it
+  // to their own flag (claude --effort, pi --thinking).
   return adapter.seatCommand({
-    role, model: seatModel(role, args), promptFile: merged,
+    role, model: tierSeat?.model || seatModel(role, args), promptFile: merged,
     tools: seat.tools, deny: seat.deny, taskDir, bootBrief,
-    effort: args[`effort-${role}`] || undefined,
+    effort: tierSeat?.effort || args[`effort-${role}`] || undefined,
   })
 }
 
@@ -142,7 +213,7 @@ function stackVertical(nodes) {
   return { direction: 'vertical', split: 1 / nodes.length, children: [head, stackVertical(rest)] }
 }
 
-// lead takes the left half; members stack on the right.
+// the first seated role takes the left half; the rest stack on the right.
 export function composeLayout(roles, mk) {
   const panes = roles.map((r) => ({ pane: { surfaces: [{ type: 'terminal', name: r, command: mk(r) }] } }))
   if (panes.length === 1) return panes[0]
@@ -153,12 +224,28 @@ export function composeLayout(roles, mk) {
 async function bootCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
-  let roles = (args.roles ? args.roles.split(',') : [...DEFAULT_ROLES]).map((r) => r.trim())
-  if (!roles.includes('lead')) roles = ['lead', ...roles]
+  let roles, tierName = null, tierSeats = null, sources = null
+  if (args.tier) {
+    if (args.roles) throw new Error('--tier and --roles are mutually exclusive: the tier defines the seating')
+    // The roster is the RUNTIME's policy, not the target checkout's. A
+    // corrupt/missing roster must name the file and that rule, not throw a
+    // bare "Unexpected token".
+    const rosterPath = join(HERE, 'roster.json')
+    let roster
+    try { roster = JSON.parse(readFileSync(rosterPath, 'utf8')) } catch (err) {
+      throw new Error(`--tier needs the crew runtime's own roster at ${rosterPath} (not the target checkout's): ${err.message}`)
+    }
+    ;({ roles, seats: tierSeats, sources } = resolveTier(roster, String(args.tier), args))
+    tierName = String(args.tier)
+  } else {
+    roles = (args.roles ? args.roles.split(',') : [...DEFAULT_ROLES]).map((r) => r.trim())
+    if (!roles.includes('lead')) roles = ['lead', ...roles]
+  }
   for (const r of roles) if (!SEAT_DEFAULTS[r]) throw new Error(`unknown crew role: ${r}`)
   // Resolve adapters before touching cmux — a bad --agent-<role> or a
   // capability shortfall must fail before a workspace gets created.
-  const adapters = await resolveAdapters(roles, args)
+  const adapters = await resolveAdapters(roles, args, tierSeats)
+  const seats = tierSeats ? resolveSeatModels(tierSeats, adapters) : null
 
   const paths = pathsFor(taskSlug, checkout)
   // The state dir keys on the checkout's BASENAME — two different checkouts
@@ -173,7 +260,7 @@ async function bootCmd(args) {
   mkdirSync(paths.returnsDir, { recursive: true })
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
-  const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter })
+  const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role] })
   const layout = composeLayout(roles, mk)
 
   const before = tree()
@@ -209,12 +296,18 @@ async function bootCmd(args) {
     for (const role of roles) {
       const hit = byName.get(role)
       if (!hit) throw new Error(`boot: no surface named ${role} in the new workspace (tree names: ${[...byName.keys()].join(', ')})`)
-      members[role] = { pane_id: hit.pane.id, surface_id: hit.surface.id, model: seatModel(role, args), agent: adapters[role].name }
+      members[role] = {
+        pane_id: hit.pane.id, surface_id: hit.surface.id, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
+        ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
+      }
     }
   } else {
     roles.forEach((role, i) => {
       const surface = (panes[i].surfaces || [])[0]
-      members[role] = { pane_id: panes[i].id, surface_id: surface.id, model: seatModel(role, args), agent: adapters[role].name }
+      members[role] = {
+        pane_id: panes[i].id, surface_id: surface.id, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
+        ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
+      }
     })
   }
   for (const role of roles) renameTab(members[role].surface_id, role)
@@ -224,9 +317,13 @@ async function bootCmd(args) {
     workspace_id: workspace.id, window_id: windowId,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
     created_at: new Date().toISOString(),
+    ...(tierName ? { tier: tierName, seats } : {}),
   }
   saveCrew(paths, crew)
-  logLine(join(paths.dir, 'journal.jsonl'), { at: new Date().toISOString(), event: 'boot', roles, models: Object.fromEntries(roles.map((r) => [r, members[r].model])) })
+  logLine(join(paths.dir, 'journal.jsonl'), {
+    at: new Date().toISOString(), event: 'boot', roles, models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
+    ...(tierName ? { tier: tierName, seats, allocation: sources } : {}),
+  })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
 
@@ -377,11 +474,9 @@ function runCmd(args) {
   if (!args['brief-file']) throw new Error('run requires --brief-file <path to the task brief>')
   const briefFile = resolvePath(args['brief-file'])
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
-  // The driver assigns all four core seats unconditionally — discover a
+  // The driver assigns planner/builder/reviewer unconditionally — discover a
   // missing seat NOW, not mid-loop after a plan and a build are spent.
-  for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
-    if (!crew.members[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${crew.roles.join(', ')})`)
-  }
+  assertSeats(crew)
   // The scope gate reads `git status` as ground truth — a dirty checkout at
   // start would be attributed to the builder and poison every scope verdict.
   const dirty = execSync('git status --porcelain', { cwd: checkout, encoding: 'utf8' }).trim()
@@ -395,9 +490,9 @@ function runCmd(args) {
   // Seats are TUI processes and the first assignment must not race their
   // boot: characters typed into a pty before the TUI grabs it are silently
   // swallowed (live-hit 2026-08-13 — the leading chunk of the first
-  // assignment vanished on both crews). Gate on each seat actually RENDERING
-  // its TUI chrome before driving.
-  awaitSeatsReady(crew)
+  // assignment vanished on both crews). Gate on each seat actually replying
+  // ready (or, as a fallback, rendering agent chrome) before driving.
+  awaitSeatsReady(crew, 120, journal)
 
   const io = realIo(crew, paths, checkout)
   // A throw out of the driver (member timeout, dead pane, git failure) is an
@@ -437,16 +532,36 @@ function runCmd(args) {
   if (result.status !== 'done') process.exitCode = 1
 }
 
-// A seat is ready when its claude TUI is rendering chrome (the input prompt
-// or the permission-mode status line) — not merely when the pty is readable,
-// which is true while the binary is still starting and swallowing input.
-function awaitSeatsReady(crew, timeoutS = 120) {
+// A seat's readiness, layered so it stays agent-agnostic:
+// 1. PRIMARY: the seat's own ready reply. Every boot brief instructs exactly
+//    `ready: <role>`, and the brief's own text says the literal "your-role",
+//    so the echoed brief can never satisfy a real role's pattern.
+// 2. FALLBACK: agent TUI chrome, for panes that have scrolled past the reply
+//    (re-runs against a long-lived workspace). Loose by design and documented
+//    as second-rate evidence: chrome proves the TUI is up, not that the seat
+//    read its brief. A false positive costs one assignment typed a beat early;
+//    a false negative costs a 120s hang and a killed boot.
+export const READY_CHROME = Object.freeze([
+  /bypass permissions|shift\+tab to cycle|❯/, // claude
+  /\(sub\)|\s•\s/, // pi status line: "$0.000 (sub) … gpt-5.6-luna • high"
+])
+export function seatReadySignal(screen, role) {
+  const s = String(screen || '')
+  if (new RegExp(`ready:\\s*${role}\\b`, 'i').test(s)) return 'ready-reply'
+  return READY_CHROME.some((re) => re.test(s)) ? 'chrome' : null
+}
+
+function awaitSeatsReady(crew, timeoutS = 120, journal = null) {
   const deadline = Date.now() + timeoutS * 1000
   const pending = new Set(Object.keys(crew.members))
   while (pending.size > 0) {
     for (const role of [...pending]) {
       const res = cmux('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
-      if (res.ok && /bypass permissions|shift\+tab to cycle|❯/.test(res.stdout)) pending.delete(role)
+      const sig = res.ok && seatReadySignal(res.stdout, role)
+      if (sig) {
+        pending.delete(role)
+        if (journal) logLine(journal, { at: new Date().toISOString(), event: 'seat-ready', role, signal: sig })
+      }
     }
     if (pending.size === 0) break
     if (Date.now() > deadline) {
@@ -454,6 +569,18 @@ function awaitSeatsReady(crew, timeoutS = 120) {
     }
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, 2000)
+  }
+}
+
+// planner/builder/reviewer are assigned unconditionally by the driver. The
+// lead is required ONLY if the crew was booted with one: a lead-less crew
+// (mechanical tier) is valid, and drive.mjs escalates where it would consult.
+export function assertSeats(crew) {
+  for (const role of ['planner', 'builder', 'reviewer']) {
+    if (!crew.members[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${crew.roles.join(', ')})`)
+  }
+  if (crew.roles.includes('lead') && !crew.members.lead) {
+    throw new Error(`v3 run requires a lead seat (booted roles: ${crew.roles.join(', ')})`)
   }
 }
 
@@ -475,6 +602,7 @@ function handoffCmd(args) {
   if (!args['brief-file']) throw new Error('handoff requires --brief-file <path to the task brief>')
   const briefFile = resolvePath(args['brief-file'])
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
+  if (!crew.members.lead) throw new Error(`handoff needs a lead seat; this crew was booted lead-less (roles: ${crew.roles.join(', ')})`)
 
   const line = `TASK: run this task end to end. Read the brief at ${briefFile} and the crew map at ${join(paths.dir, 'crew.json')}. Drive the crew, verify, commit on green, then write your ReturnEnvelope to ${crew.task_return} and print CREW-DONE lead task`
   sendLine(crew.members.lead.surface_id, line)

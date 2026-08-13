@@ -13,8 +13,9 @@ export const capabilities = Object.freeze({
   // (verified in pi's resource-loader), so the merged role file lands intact.
   prompt_file: true,
   // --exclude-tools is pi's enforced denylist (filters the active tool set
-  // by exact name match). MECHANISM is honest — see the namespace-gap note
-  // on `tools`/`deny` below for what it does NOT yet translate.
+  // by exact name match). translateDeny() maps the seat's claude-named deny
+  // list into pi's own tool namespace before it reaches this flag — see the
+  // translation table below.
   tool_deny: true,
   // pi has no per-tool approval gate at all, so there is nothing to bypass.
   // (--approve/-a only governs trusting project-local config files, not
@@ -29,6 +30,39 @@ export const capabilities = Object.freeze({
   effort: true,
 })
 
+// pi namespaces models as <pi-provider>/<id>. openai -> openai-codex is
+// DELIBERATE: that provider routes through the ChatGPT subscription OAuth
+// (verified `pi auth check --provider openai-codex`).
+export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic' })
+
+export function modelString({ provider, id }) {
+  const p = PI_PROVIDERS[provider]
+  if (!p) throw new Error(`adapter-pi: no pi provider for roster provider "${provider}" (known: ${Object.keys(PI_PROVIDERS).join(', ')}) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`)
+  return `${p}/${id}`
+}
+
+// claude tool name -> pi tool name. null = the tool has no pi equivalent, so
+// denying it is vacuously satisfied: pi has NO subagent tool at all, which is
+// why Task/Agent drop. That drop is honest, not a hole.
+const PI_TOOL_NAMES = Object.freeze({
+  Read: 'read', Write: 'write', Edit: 'edit', Bash: 'bash',
+  NotebookEdit: null, Task: null, Agent: null,
+})
+
+// Unknown claude names DROP rather than pass through: passing an unmatched
+// name would be inert inside pi anyway, and a typo must not look enforced.
+export function translateDeny(deny) {
+  const out = []
+  for (const raw of String(deny || '').split(',')) {
+    const name = raw.trim()
+    if (!name) continue
+    const mapped = PI_TOOL_NAMES[name]
+    if (!mapped) continue
+    if (!out.includes(mapped)) out.push(mapped)
+  }
+  return out
+}
+
 export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
   // Same env-var contract as the claude adapter (`env`, DEVTEAM_WORKER=1,
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
@@ -41,14 +75,12 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // signature for contract symmetry with the adapter interface.
   //
   // `deny` (the claude-named disallowedTools list, e.g. "Edit,NotebookEdit")
-  // is passed through to --exclude-tools UNCHANGED. pi filters tools by an
-  // exact, case-sensitive name match against its own namespace
-  // (read/bash/edit/write/...), so a claude-shaped deny list currently
-  // excludes nothing inside pi. tool_deny: true stays honest at the
-  // mechanism level (pi can deny tools, and the flag is wired) — but the
-  // namespace translation is deliberately out of scope for this build; see
-  // issue #44's live-dogfood acceptance and the recommendation to restrict
-  // pi seats to judgment roles until a claude->pi tool-name map exists.
+  // is translated via translateDeny() into pi's own tool namespace before it
+  // reaches --exclude-tools. A seat whose translated list comes back empty
+  // (e.g. the builder: "Task,Agent" has no pi equivalent) omits the flag
+  // entirely rather than passing pi an empty/quoted no-op — pi has no
+  // subagent tool at all, so that boundary is vacuously satisfied, not
+  // silently dropped.
   //
   // --print/-p and --no-session are deliberately never passed: --print exits
   // after the boot brief and --no-session drops the seat's session — either
@@ -67,12 +99,13 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // maps to --thinking (NOT the ':<level>' model-string shorthand, so a
   // roster model id passes through untouched and effort stays a separate,
   // auditable dimension).
+  const piDeny = translateDeny(deny)
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     'pi',
     '--model', model,
     ...(effort ? ['--thinking', effort] : []),
-    '--exclude-tools', `"${deny}"`,
+    ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),
     '--append-system-prompt', `"${promptFile}"`,
     `"${bootBrief}"`,
   ].join(' ')

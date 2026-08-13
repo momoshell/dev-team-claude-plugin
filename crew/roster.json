@@ -6,9 +6,9 @@
       "lead": null,
       "planner": {
         "provider": "anthropic",
-        "id": "claude-sonnet-5",
+        "id": "claude-opus-5",
         "agent": "claude",
-        "effort": "low"
+        "effort": "medium"
       },
       "builder": {
         "provider": "openai",

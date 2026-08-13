@@ -66,6 +66,52 @@ function verdictOf(env) {
     : null
 }
 
+// An entry ending in '/' is a DIRECTORY PREFIX; anything else is a literal
+// path matched exactly. Nothing else is supported — and unsupported shapes
+// are rejected loudly (validateScopeEntries), never silently ignored.
+export const SCOPE_DIR_MIN_SEGMENTS = 2
+export function validateScopeEntries(entries) {
+  const errors = []
+  for (const entry of entries) {
+    let why = null
+    if (typeof entry !== 'string' || entry.length === 0) {
+      why = 'empty or non-string entry'
+    } else if (/[*?\[\]{}]/.test(entry)) {
+      why = 'glob patterns are not supported — list literal paths or a trailing-slash directory'
+    } else if (entry.startsWith('/')) {
+      why = 'absolute path — paths must be repo-relative, as git status prints them'
+    } else if (entry.split('/').some((segment) => segment === '.' || segment === '..')) {
+      why = 'must be a plain repo-relative path (no . or .. segments)'
+    } else if (entry.endsWith('/') && entry.split('/').filter(Boolean).length < SCOPE_DIR_MIN_SEGMENTS) {
+      why = 'directory prefix is too broad — a top-level directory would authorize most of the tree; name a subdirectory (at least two segments) or list files'
+    }
+    if (why) errors.push({ entry, why })
+  }
+  return errors
+}
+
+export function scopeMatcher(entries) {
+  return (repoRelativePath) => entries.some((entry) => entry.endsWith('/')
+    ? repoRelativePath.startsWith(entry)
+    : repoRelativePath === entry)
+}
+
+export function composeCommitMessage({ task, planEnv, builderEnv }) {
+  const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
+  const subjectLine = firstNonEmptyLine(planEnv?.details?.commit_subject)
+  const planLine = firstNonEmptyLine(planEnv?.summary)
+  const subject = subjectLine || `crew(${task}): ${planLine || 'task change'}`
+  const body = String(builderEnv?.details?.commit_message || builderEnv?.summary || '').trim()
+  const bodyPart = body && body.split('\n')[0] === subject ? '' : body
+  const issues = []
+  for (const issue of Array.isArray(planEnv?.details?.issues) ? planEnv.details.issues : []) {
+    const digits = String(issue).trim().replace(/^#/, '')
+    if (/^\d+$/.test(digits) && !issues.includes(`#${digits}`)) issues.push(`#${digits}`)
+  }
+  const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''
+  return [subject, bodyPart, refs].filter(Boolean).join('\n\n')
+}
+
 // --- the driver ----------------------------------------------------------------
 // ctx: { task, briefFile, taskDir, checkout, roles: [..seated roles..],
 //        lane: <fallback validation command|null>, suite: <full-suite command>,
@@ -296,6 +342,13 @@ export function driveTask(ctx, io) {
   if (!Array.isArray(scopeFiles) || scopeFiles.length === 0) {
     return escalate('plan', 'planner envelope carries no files_in_scope — the scope gate cannot run without it', planEnv.artifacts || [])
   }
+  const scopeErrors = validateScopeEntries(scopeFiles)
+  if (scopeErrors.length > 0) {
+    return escalate('plan',
+      `files_in_scope carries entries the scope gate cannot honor — fix the plan, not the build: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`,
+      planEnv.artifacts || [])
+  }
+  const inScope = scopeMatcher(scopeFiles)
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
 
@@ -366,7 +419,7 @@ export function driveTask(ctx, io) {
     // Gate A (mechanical): scope by git, never by self-report.
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
-    const outOfScope = changed.filter((f) => !scopeFiles.includes(f))
+    const outOfScope = changed.filter((f) => !inScope(f))
     if (outOfScope.length > 0) {
       if (finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
       const b = art(`build-bounce-r${round}.md`)
@@ -513,17 +566,19 @@ export function driveTask(ctx, io) {
     return escalate('suite', `full suite red after acceptance — this needs eyes:\n${suiteRes.output.slice(-2000)}`)
   }
   stage('commit')
-  const message = builderEnv.details?.commit_message
-    || `crew(${ctx.task}): ${builderEnv.summary?.split('\n')[0] || 'task change'}`
-  S.commit = io.commit(scopeFiles, message)
+  const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
+  const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
+  if (!hasCommitSubject) io.log({ at: io.now(), commit_subject: 'fallback-from-plan-summary' })
+  const committing = io.changedFiles().filter(inScope)
+  S.commit = io.commit(committing, message)
   stage('done')
 
   return {
     status: 'done',
-    summary: `Task ${ctx.task} complete: committed ${S.commit} (${scopeFiles.length} files), suite green, ${accepted}. Stages: ${S.stages.join(' | ')}`,
+    summary: `Task ${ctx.task} complete: committed ${S.commit} (${committing.length} files), suite green, ${accepted}. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), journal],
     details: {
-      commit: S.commit, stages: S.stages, files_committed: scopeFiles, consults: S.consults,
+      commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
     },

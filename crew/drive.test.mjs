@@ -5,7 +5,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS } from './drive.mjs'
+import {
+  driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
+  validateScopeEntries, scopeMatcher, composeCommitMessage,
+} from './drive.mjs'
 
 const TD = '/tmp/fake-task'
 const CTX = Object.freeze({
@@ -85,9 +88,61 @@ test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero
   assert.equal(res.details.commit, 'abc1234')
   assert.equal(res.details.consults, 0)
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
-  assert.equal(io.calls.commits[0].message, 'feat: the change')
+  assert.equal(io.calls.commits[0].message, 'crew(t1): planned\n\nfeat: the change')
   // suite ran exactly once, AFTER the lane
   assert.deepEqual(io.calls.run.map((r) => r.cmd), ['lane-cmd', 'suite-cmd'])
+})
+
+test('scope helpers match directory prefixes and validate only supported entries', () => {
+  const match = scopeMatcher(['tasks/x/captures/', 'crew/drive.mjs'])
+  assert.equal(match('tasks/x/captures/1.md'), true)
+  assert.equal(match('tasks/x/captures/deep/2.md'), true)
+  assert.equal(match('crew/drive.mjs'), true)
+  assert.equal(match('crew/crew.mjs'), false)
+  assert.equal(match('tasks/x/other.md'), false)
+  assert.deepEqual(validateScopeEntries(['tasks/x/captures/', 'crew/drive.mjs']), [])
+  for (const entry of ['crew/', 'tasks/', '.', './', '/', '', 'crew/*.mjs', '*', '../x.mjs', '/abs/x.mjs']) {
+    const [error] = validateScopeEntries([entry])
+    assert.equal(error.entry, entry)
+    assert.ok(error.why)
+  }
+})
+
+test('directory-prefix scope commits concrete changed paths without a scope bounce', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: ['tasks/x/captures/', 'a.mjs'] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'tasks/x/captures/1.md', 'tasks/x/captures/2.md'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
+  assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'tasks/x/captures/1.md', 'tasks/x/captures/2.md'])
+  assert.deepEqual(res.details.files_committed, io.calls.commits[0].files)
+})
+
+test('unsupported scope entries escalate before assigning a builder', () => {
+  for (const entry of ['crew/', 'crew/*.mjs']) {
+    const io = fakeIo({ envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [entry, 'a.mjs'] } }) } })
+    const res = driveTask(CTX, io)
+    assert.equal(res.status, 'escalation')
+    assert.ok(res.details.escalation.why.includes(entry))
+    assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 0)
+  }
+})
+
+test('composeCommitMessage uses the plan subject, builder body, and ordered issue refs', () => {
+  const msg = composeCommitMessage({
+    task: 'hygiene',
+    planEnv: { summary: 'whole change', details: { commit_subject: 'fix(crew): runtime', issues: [112, '114', '#117', 'bad', '#112'] } },
+    builderEnv: { summary: 'ignored', details: { commit_message: 'test: repair the lane assertion' } },
+  })
+  assert.equal(msg, 'fix(crew): runtime\n\ntest: repair the lane assertion\n\nRefs: #112, #114, #117')
+  assert.equal(composeCommitMessage({ task: 'x', planEnv: { summary: 'plan', details: {} }, builderEnv: { details: { commit_message: 'crew(x): plan' } } }), 'crew(x): plan')
+  assert.doesNotMatch(composeCommitMessage({ task: 'x', planEnv: { summary: 'plan', details: {} }, builderEnv: { details: { commit_message: 'body' } } }), /Refs:/)
 })
 
 test('red lane bounces the builder with the failure output, then green -> done', () => {
@@ -107,6 +162,30 @@ test('red lane bounces the builder with the failure output, then green -> done',
   assert.match(bounceBrief, /RED/)
   assert.match(bounceBrief, /FAIL x/)
   assert.equal(res.details.consults, 0) // mechanical bounce, no lead needed
+})
+
+test('bounced lane run commits the planner subject, round-2 builder body, and issue refs', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, commit_subject: 'fix(crew): three crew-runtime defects', issues: [112, 114, 117] } }),
+      'builder:1': buildEnv({ details: { ...buildEnv().details, commit_message: 'wip: initial attempt' } }),
+      'builder:2': buildEnv({ details: { ...buildEnv().details, commit_message: 'test: repair the lane assertion' } }),
+      'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'RED' }, 'lane-cmd:2': { ok: true, output: '' },
+      'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
+  const message = io.calls.commits[0].message
+  assert.equal(message.split('\n')[0], 'fix(crew): three crew-runtime defects')
+  assert.match(message, /test: repair the lane assertion/)
+  assert.match(message, /#112/)
+  assert.doesNotMatch(message, /wip: initial attempt/)
 })
 
 test('out-of-scope edits bounce mechanically naming the offending files', () => {

@@ -392,8 +392,47 @@ function ledgerDbPath() {
 // v3: the deterministic driver runs the task loop (code disposes); the lead
 // pane is consulted only at decision points. This IS `run` now; the v2
 // agent-driven handoff survives as `handoff` for comparison runs.
+export const WAIT_POLL_MS = 5000
+export const LIVENESS_PROBE_MS = 30_000
+export const LIVENESS_MISSES_TO_DIE = 2
+
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, now, sleep }) {
+  const started = now()
+  const deadline = started + timeoutS * 1000
+  let lastProbeAt = started
+  let misses = 0
+  while (now() < deadline) {
+    const env = readEnvelope()
+    if (env != null) return env
+
+    const current = now()
+    if (probeSeat && current - lastProbeAt >= LIVENESS_PROBE_MS) {
+      lastProbeAt = current
+      const alive = probeSeat()
+      if (alive === true) misses = 0
+      else if (alive === false) misses += 1
+      if (misses >= LIVENESS_MISSES_TO_DIE) {
+        const arrived = readEnvelope()
+        if (arrived != null) return arrived
+        const err = new Error(`seat died: ${role} — its pane is gone (${LIVENESS_MISSES_TO_DIE} consecutive liveness probes) and no envelope arrived at ${returnPath}`)
+        err.stage = 'seat-died'
+        err.role = role
+        throw err
+      }
+    }
+    sleep(WAIT_POLL_MS)
+  }
+  return null
+}
+
+function paneAlive(surfaceId) {          // true | false | null (indeterminate)
+  try { const t = tree(); return Array.isArray(t?.windows) ? !!locate(t, surfaceId) : null }
+  catch { return null }
+}
+
 function realIo(crew, paths, checkout, emitter) {
   let seq = 0
+  const seatFor = new Map()
   const io = {
     assign({ role, briefFile }) {
       const m = crew.members[role]
@@ -404,19 +443,30 @@ function realIo(crew, paths, checkout, emitter) {
       // Anti-replay: seq restarts every process, so a crashed/escalated run
       // leaves files a re-run's wait() would instantly (and wrongly) accept.
       if (existsSync(returnPath)) unlinkSync(returnPath)
+      seatFor.set(returnPath, { role, surface_id: m.surface_id })
       sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
       return { id, returnPath }
     },
     wait(returnPath, timeoutS) {
-      const deadline = Date.now() + timeoutS * 1000
-      while (Date.now() < deadline) {
-        if (existsSync(returnPath)) {
-          try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { /* partial write; retry */ }
-        }
-        const sab = new SharedArrayBuffer(4)
-        Atomics.wait(new Int32Array(sab), 0, 0, 5000)
+      const seat = seatFor.get(returnPath)
+      try {
+        return waitForEnvelope({
+          returnPath, timeoutS, role: seat?.role || 'unknown',
+          readEnvelope: () => {
+            if (!existsSync(returnPath)) return null
+            try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { return null }
+          },
+          probeSeat: seat ? () => paneAlive(seat.surface_id) : null,
+          now: Date.now,
+          sleep: (ms) => {
+            const sab = new SharedArrayBuffer(4)
+            Atomics.wait(new Int32Array(sab), 0, 0, ms)
+          },
+        })
+      } catch (err) {
+        if (err.stage === 'seat-died') io.log({ at: Date.now(), seat_died: seat?.role || 'unknown', returnPath })
+        throw err
       }
-      return null
     },
     writeFile(path, content) { writeFileSync(path, content) },
     readFile(path) { return existsSync(path) ? readFileSync(path, 'utf8') : null },
@@ -718,9 +768,8 @@ function statusCmd(args) {
   }
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
-  const t = tree()
   const alive = {}
-  for (const [role, m] of Object.entries(crew.members)) alive[role] = !!locate(t, m.surface_id)
+  for (const [role, m] of Object.entries(crew.members)) alive[role] = paneAlive(m.surface_id)
   process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive })}\n`)
 }
 

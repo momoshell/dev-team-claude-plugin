@@ -36,9 +36,12 @@ Write `plan.md` in the task dir with EXACTLY these sections:
 ## Envelope details fields (the driver BRANCHES on these — all required)
 
 "details": { "plan_path": "<abs>",
-             "files_in_scope": ["<repo-relative path of every file the builder
-                                 may touch, tests and the version-bump file
-                                 included>", ...],
+             "files_in_scope": ["<repo-relative literal path, or a trailing-slash
+                                 directory prefix of at least two segments; globs,
+                                 . / .. / absolute paths / top-level directories
+                                 are rejected loudly>", ...],
+             "commit_subject": "<one conventional-commit subject line for the WHOLE change>",
+             "issues": [112, 114], // emits a Refs: trailer
              "validation_lane": "<the exact command the builder must run green>",
              "consult_wanted": true|false,
              "consult_questions": ["..."] }

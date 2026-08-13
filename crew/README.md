@@ -46,7 +46,7 @@ recorded: `sources.<role>.model === 'override'` in the boot journal's
 ```
 plan -> (tech-lead check when seated) -> gate-baseline(RED required)
      -> build -> scope-gate(git) -> validation lane -> acceptance gate
-     -> review -> full suite -> commit-on-green(builder's message)
+     -> review -> full suite -> commit-on-green(plan subject + builder body)
 ```
 
 Every loop is bounded (`LIMITS`), every verdict is a closed enum, every bounce

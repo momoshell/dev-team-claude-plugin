@@ -1,6 +1,6 @@
 {
   "name": "dev-team",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Crew: a team runtime for cmux — whole team booted per task in one workspace, a deterministic driver runs the loop (plan, gate-first acceptance, build, review, suite, commit-on-green), agents kept for judgment via closed-enum decision envelopes.",
   "author": {
     "name": "Momcilo"

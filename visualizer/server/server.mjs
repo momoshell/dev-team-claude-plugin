@@ -5,6 +5,7 @@ import { resolve, join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
+import { createReturnsSource } from './returns-source.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -12,7 +13,7 @@ const schema = 1
 
 function defaults() {
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined }
+  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew') }
 }
 function args(argv) {
   const out = defaults()
@@ -22,6 +23,7 @@ function args(argv) {
     else if (arg === '--host') out.host = argv[++i]
     else if (arg === '--ledger-db') out.ledgerDb = argv[++i]
     else if (arg === '--triage-db') out.triageDb = argv[++i]
+    else if (arg === '--crew-root') out.crewRoot = argv[++i]
   }
   return out
 }
@@ -66,6 +68,7 @@ function staticResponse(req, res) {
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
+  const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
     try {
@@ -77,13 +80,24 @@ export function startServer(options = {}) {
       if (url.pathname === '/api/events') {
         if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
         const after = integer(url.searchParams.get('after'), 0), limit = integer(url.searchParams.get('limit'), 200)
-        if (after === null || limit === null || limit < 1) return json(res, 400, { schema, error: 'after and limit must be integers' })
-        const result = feed.listEvents({ adw_id: url.searchParams.get('adw_id') || '', after, limit })
+        const phase_id = url.searchParams.has('phase_id') ? integer(url.searchParams.get('phase_id'), null) : undefined
+        if (after === null || limit === null || limit < 1 || phase_id === null) return json(res, 400, { schema, error: 'after, limit and phase_id must be integers' })
+        const filters = {}
+        for (const key of ['type', 'role']) if (url.searchParams.get(key)) filters[key] = url.searchParams.get(key)
+        if (phase_id !== undefined) filters.phase_id = phase_id
+        const result = feed.listEvents({ adw_id: url.searchParams.get('adw_id') || '', after, limit, ...filters })
+        return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/returns') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        const repo_slug = url.searchParams.get('repo_slug'), task_slug = url.searchParams.get('task_slug')
+        if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
+        const result = returns.listEnvelopes({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/health') {
         if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
-        return json(res, 200, { schema, ...feed.health() })
+        return json(res, 200, { schema, ...feed.health(), ...returns.health(), returns_readonly: true })
       }
       if (url.pathname === '/api/triage') {
         if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
@@ -102,7 +116,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), readonly: true })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: true })}\n`)
   })
   return { server, feed }
 }

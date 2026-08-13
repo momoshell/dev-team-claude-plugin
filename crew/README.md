@@ -5,11 +5,30 @@ driven by deterministic code, with agents kept for judgment.
 
 ```
 node crew/crew.mjs boot --task my-task --roles lead,planner,builder,reviewer
+node crew/crew.mjs boot --task my-task --tier <mechanical|build|judge>
 node crew/crew.mjs run  --task my-task --brief-file /abs/path/brief.md
 # ... code drives the loop; watch the workspace, read the pill ...
 node crew/crew.mjs status --task my-task          # liveness
 node crew/crew.mjs teardown --task my-task        # manual close (run auto-tears-down on done)
 ```
+
+`--tier` seats the crew from `crew/roster.json` — the crew RUNTIME's own
+roster, not the target checkout's — instead of `--roles`; the two flags are
+mutually exclusive (the tier defines the seating). Per-seat `--model-<role>`
+/ `--agent-<role>` / `--effort-<role>` flags still override individual cells.
+
+| tier | lead | planner | builder | reviewer | tech-lead |
+|---|---|---|---|---|---|
+| `mechanical` | — | claude, low | pi, high | pi, medium | — |
+| `build` | claude, medium | claude, medium | claude, medium | claude, medium | — |
+| `judge` | claude, high | claude, high | claude, medium | claude, high | pi, xhigh |
+
+A `--model-<role>` flag on a `--tier` boot is a **raw passthrough that is
+never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat
+stays a bare-id lookup, not `openai-codex/gpt-5.6-luna`, because an operator
+typing a model id is speaking their own CLI's namespace. Where it is
+recorded: `sources.<role>.model === 'override'` in the boot journal's
+`allocation` map.
 
 ## The model
 
@@ -52,7 +71,9 @@ where judgment lives.
   `accept` over an advisor's independent `escalate` recommendation escalates
   — compounding may only strengthen outcomes toward safety.
 - Escalation ladder: **code → lead → orchestrator/human**, each hop only
-  when an enum says so.
+  when an enum says so. A lead-less crew (`mechanical` tier) has nobody at
+  the middle rung: every consult that would have asked the lead escalates
+  straight to the orchestrator instead.
 
 ## Adapters (hot seats)
 
@@ -60,25 +81,51 @@ A seat is a *hot seat*: any CLI agent can hold it, not just claude. The whole
 contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
 
 - `capabilities` — a frozen object declaring what the agent can enforce:
-  `prompt_file`, `tool_deny`, `unattended`, `session_resume`.
-- `seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief })
-  → string` — the pane's command line. crew composes the merged prompt file
-  and hands it in; the adapter owns the invocation shape.
+  `prompt_file`, `tool_deny`, `unattended`, `session_resume`, `effort`.
+- `seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief,
+  effort }) → string` — the pane's command line. crew composes the merged
+  prompt file and hands it in; the adapter owns the invocation shape.
+- `modelString({ provider, id }) → string` — translates a roster cell's
+  `{provider, id}` into the agent's own model-string namespace. claude's ids
+  need no prefix (the id IS the CLI's namespace); pi namespaces as
+  `<pi-provider>/<id>`, with `openai → openai-codex` (that provider routes
+  through the ChatGPT subscription OAuth) and an unmapped provider a loud
+  throw rather than a guessed passthrough.
 
 `--agent-<role> <name>` at boot picks the adapter, mirroring
 `--model-<role>`; default is `claude`. An unknown name fails the boot loudly,
 naming the missing adapter file — never a silent fallback.
 
 Shipped adapters: `claude` (default) and `pi` — `--agent-reviewer pi
---model-reviewer google/gemini-3-pro` seats a reviewer on pi. Note pi's deny
-list (`--exclude-tools`) matches pi-namespaced tool names, so a claude-shaped
-seat deny list does not translate 1:1 yet.
+--model-reviewer google/gemini-3-pro` seats a reviewer on pi. pi's deny list
+(`--exclude-tools`) matches pi-namespaced tool names, so a claude-shaped seat
+deny list is translated before it reaches pi:
+
+| seat | claude deny | pi `--exclude-tools` |
+|---|---|---|
+| lead / tech-lead | `Edit,NotebookEdit,Task,Agent` | `"edit"` |
+| planner / reviewer | `Edit,NotebookEdit` | `"edit"` |
+| builder | `Task,Agent` | *(flag omitted — empty translation)* |
+
+A pi builder ends up with no `--exclude-tools` at all, because pi has no
+subagent tool for `Task`/`Agent` to translate to — that seat's real boundary
+is the git scope gate + commit-in-scope, the same posture `Write` already has
+everywhere.
 
 Capability declarations are enforced, not decorative: a seat whose charter
 needs tool denial (every seat today) will not boot on an adapter declaring
 `tool_deny: false` — no silent weaker seats. Only `tool_deny` is checked
 today; `prompt_file`, `unattended`, and `session_resume` are declared for the
 adapters still to come.
+
+## Readiness
+
+Before `run` drives a seat, it waits for that seat to render as ready:
+primarily its own `ready: <role>` reply to the boot brief, and — for panes
+that have scrolled past that reply (a re-run against a long-lived workspace)
+— agent TUI chrome as a documented, looser fallback (`seatReadySignal` in
+`crew.mjs`). Agent-agnostic by construction: it recognizes claude's and pi's
+chrome without either adapter knowing readiness detection exists.
 
 ## The acceptance gate (gate-first)
 

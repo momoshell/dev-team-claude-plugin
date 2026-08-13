@@ -814,6 +814,36 @@ test('a gate repair records the replaced command in the gate audit trail', () =>
   assert.deepEqual(res.details.gate.replaced, ['gate-bad'])
 })
 
+// --- lead-optional driver (mechanical tier) -----------------------------------
+
+test('lead-less: a planner insufficient escalates naming "no lead seated" and the original question, with zero lead assigns', () => {
+  const ctx = { ...CTX, roles: ['planner', 'builder', 'reviewer'] }
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ status: 'insufficient', summary: 'brief ambiguous' }) },
+  })
+  const res = driveTask(ctx, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /no lead seated/)
+  assert.match(res.details.escalation.why, /brief ambiguous/)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 0)
+  // an escalation envelope carries no consult count by design (drive.mjs:204-212)
+  assert.equal(res.details.consults, undefined)
+})
+
+test('lead-less happy path: plan -> build -> gates -> review pass -> suite -> commit, zero lead assigns, consults === 0', () => {
+  const ctx = { ...CTX, roles: ['planner', 'builder', 'reviewer'] }
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(ctx, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 0)
+  assert.equal(res.details.consults, 0)
+  assert.equal(io.calls.commits.length, 1)
+})
+
 test('DECISIONS and LIMITS are the frozen public contract', () => {
   assert.ok(Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS))
   assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])

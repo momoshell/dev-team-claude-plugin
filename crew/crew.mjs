@@ -97,6 +97,9 @@ function seatAgent(role, args) {
 // charter needs. Only tool_deny has a real consequence today: every seat has
 // a non-empty deny list, so an adapter that can't enforce it would boot a
 // silently weaker seat. Returns undefined on success.
+// Until #83 lands a headless transport, every seat boots into a cmux pane.
+export const BOOT_TRANSPORT = 'pane'
+
 export function assertCapabilities(role, agentName, capabilities) {
   if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
     throw new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
@@ -183,7 +186,8 @@ export async function resolveAdapters(roles, args, seats = null) {
     if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
     const adapter = await import(pathToFileURL(file).href)
     if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
-    assertCapabilities(role, name, adapter.capabilities)
+    if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
+    assertCapabilities(role, name, adapter.capabilitiesFor({ transport: BOOT_TRANSPORT }))
     out[role] = { name, adapter }
   }
   return out
@@ -199,8 +203,9 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
   writeFileSync(merged, `${readFileSync(SHARED_PROMPT, 'utf8')}\n\n${readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')}`)
   // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — or, when a
   // --tier was used, the roster's resolved seat (tierSeat), which flags still
-  // override. Both shipped adapters declare capabilities.effort and map it
-  // to their own flag (claude --effort, pi --thinking).
+  // override. Both shipped adapters declare transport-invariant effort in
+  // the resolved profile and map it to their own flag (claude --effort, pi
+  // --thinking).
   return adapter.seatCommand({
     role, model: tierSeat?.model || seatModel(role, args), promptFile: merged,
     tools: seat.tools, deny: seat.deny, taskDir, bootBrief,

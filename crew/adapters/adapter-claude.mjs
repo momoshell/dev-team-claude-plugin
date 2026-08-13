@@ -1,8 +1,8 @@
 // crew/adapters/adapter-claude.mjs — the claude agent adapter.
 //
 // An adapter is the seam between a crew seat and the CLI agent that fills it:
-// `capabilities` (frozen) declares what the agent can enforce, and
-// `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
+// `capabilitiesFor(...)` resolves one frozen profile per (adapter, transport)
+// pair, and `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
 // adapter by seat.agent (default 'claude', overridable via --agent-<role>)
 // and never builds the invocation itself — that composition lives here.
 //
@@ -10,12 +10,45 @@
 // byte-identical to the pre-refactor paneCommand() in crew.mjs (see
 // crew.test.mjs's byte-identity pin). Any change to the string below is a
 // behavior change, not a refactor.
-export const capabilities = Object.freeze({
-  prompt_file: true, tool_deny: true, unattended: true, session_resume: true,
+const INVARIANT = Object.freeze({
+  prompt_file: true, tool_deny: true, unattended: true,
   // claude --effort <low|medium|high|xhigh|max> (verified against the
   // installed CLI 2026-08-13) — the roster's effort dimension is enforceable.
   effort: true,
 })
+
+const PROFILES = Object.freeze({
+  pane: Object.freeze({
+    // ADR-029 §3:52 — pane stdin is not a supported mid-turn channel.
+    interjection: 'none',
+    // ADR-029 §3:54 — pane owns no process handle for an abort.
+    abort: 'none',
+    // ADR-029 §3:54 — pane command passes no --session-id.
+    session_resume: false,
+    // ADR-029 §3:54 — pane has no client-resumable observation cursor.
+    durable_cursor: 'none',
+    // #131 — drive.mjs bounce paths reassign a settled pane seat.
+    reassign: true,
+  }),
+  'headless-json': Object.freeze({
+    // ADR-029 §3:52 — text stdin is read to EOF before the turn.
+    interjection: 'turn',
+    // ADR-029 §3:53 — supervisor signal is the supported abort mechanism.
+    abort: 'signal',
+    // ADR-029 §3:54 — the headless session persists for a later invocation.
+    session_resume: true,
+    // ADR-029 §3:54 — claude's session file is not a durable cursor.
+    durable_cursor: 'none',
+    // #131 — no capture establishes reassign for headless-json.
+    reassign: false,
+  }),
+})
+
+export function capabilitiesFor({ transport } = {}) {
+  const p = PROFILES[transport]
+  if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
+  return Object.freeze({ ...INVARIANT, ...p })
+}
 
 // The claude CLI accepts full model ids, so the roster's {provider,id} pair
 // needs no namespace prefix — the id IS the CLI's namespace.

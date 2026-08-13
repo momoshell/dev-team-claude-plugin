@@ -89,8 +89,11 @@ where judgment lives.
 A seat is a *hot seat*: any CLI agent can hold it, not just claude. The whole
 contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
 
-- `capabilities` — a frozen object declaring what the agent can enforce:
-  `prompt_file`, `tool_deny`, `unattended`, `session_resume`, `effort`.
+- `capabilitiesFor({ transport })` — returns one frozen resolved profile with
+  the four invariant keys plus transport-scoped capabilities. The closed
+  transports are `pane`, `headless-json`, and `headless-rpc`; shipped pairs are
+  claude × (`pane`, `headless-json`) and pi × (`pane`, `headless-rpc`). Pi has
+  no `headless-json`; every unshipped pair throws rather than guessing.
 - `seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief,
   effort }) → string` — the pane's command line. crew composes the merged
   prompt file and hands it in; the adapter owns the invocation shape.
@@ -181,7 +184,7 @@ Everything durable is a FILE; pane chat is never the record.
   a run's outcome.
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
-- `adapters/adapter-*.mjs` — the per-agent seam: capabilities + seatCommand
+- `adapters/adapter-*.mjs` — the per-agent seam: capabilitiesFor + seatCommand
   (see "Adapters" above).
 - `roles/*.md` — seat charters, appended as system prompts at boot.
 - Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition).

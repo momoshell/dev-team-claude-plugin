@@ -31,6 +31,19 @@ node crew/crew.mjs run  --task my-task --brief-file /abs/path/brief.md
   review ladder). That system was retired in v0.2.0 after the crew proved
   itself on live tasks; its full source lives in git history.
 
+## Versioning
+
+**Bump on release, not per commit.** Earlier history bumped
+`.claude-plugin/plugin.json` on essentially every feature commit; with several
+crews landing multi-file features in a day, that convention stopped paying for
+itself and was missed five times in two days (#137). Feature commits no longer
+carry a `; bump x.y.z` subject suffix.
+
+What is enforced instead is the thing that actually shipped wrong metadata:
+`plugin.json` and `.claude-plugin/marketplace.json` must always agree.
+`test/version-agreement.test.mjs` asserts it, so it fails in the same
+`node --test` run that gates every crew commit — bump both files or neither.
+
 ## Lineage
 
 The crew synthesizes the strongest idea from three reference patterns —

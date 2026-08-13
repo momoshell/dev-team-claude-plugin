@@ -221,7 +221,19 @@ function runCmd(args) {
   const result = driveTask(ctx, io)
   // The task envelope is written by CODE — same path `wait` watches.
   writeFileSync(crew.lead_return, JSON.stringify(result, null, 2))
-  process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: crew.lead_return })}\n`)
+
+  // Outcome-gated lifecycle, in code as policy:
+  //   done       -> auto-teardown (archive the record, close the view),
+  //                 unless --keep was passed for pane inspection.
+  //   escalation -> NEVER teardown: the workspace IS the escalation context
+  //                 (warm members, readable panes) the human needs.
+  let archived = null
+  if (result.status === 'done' && args.keep === undefined) {
+    archived = teardownCore(paths, crew)
+  }
+  // After archive the envelope moves with the dir — report where it lives now.
+  const taskReturn = archived ? crew.lead_return.replace(paths.dir, archived) : crew.lead_return
+  process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
   if (result.status !== 'done') process.exitCode = 1
 }
 
@@ -275,15 +287,24 @@ function statusCmd(args) {
   process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive })}\n`)
 }
 
+// Archive the crew dir (the durable record: envelopes, journal, artifacts)
+// and close the ephemeral view (panes, workspace). Everything evidentiary is
+// on disk by contract before this runs — deliverables live in files, never
+// pane scrollback.
+function teardownCore(paths, crew) {
+  for (const m of Object.values(crew.members)) closeSurface(m.surface_id)
+  closeWorkspace(crew.workspace_id)
+  const archived = `${paths.dir}.archive-${new Date().toISOString().slice(0, 10)}`
+  renameSync(paths.dir, archived)
+  return archived
+}
+
 function teardownCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
-  for (const m of Object.values(crew.members)) closeSurface(m.surface_id)
-  closeWorkspace(crew.workspace_id)
-  const archived = `${paths.dir}.archive-${new Date().toISOString().slice(0, 10)}`
-  renameSync(paths.dir, archived)
+  const archived = teardownCore(paths, crew)
   process.stdout.write(`${JSON.stringify({ archived })}\n`)
 }
 

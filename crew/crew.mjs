@@ -28,6 +28,7 @@ import { execSync, execFileSync, spawnSync } from 'node:child_process'
 
 import { cmux, tree, locate, sendLine, renameTab, closeSurface, closeWorkspace, logLine, assignmentLine } from './driver.mjs'
 import { driveTask } from './drive.mjs'
+import { openRun } from '../scripts/factory/emit.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROLES_DIR = join(HERE, 'roles')
@@ -347,12 +348,53 @@ function newSurfaceIds(before, after) {
   return fresh
 }
 
+export function phaseForStage(label) {
+  const head = String(label ?? '').split(':')[0]
+  if (head === 'plan' || head === 'check') return 'planning'
+  if (['build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify'].includes(head)) return 'build'
+  if (head === 'review') return 'review'
+  if (head === 'suite' || head === 'commit') return 'finish'
+  if (head === 'done') return 'done'
+  if (head === 'escalate') return 'escalation'
+  return 'build'
+}
+
+export function emitAdapter(emitter) {
+  const record = (type, payload) => emitter.emit((handle, nextSeq) => handle.recordEvent({
+    adw_id: emitter.adwId, type, seq: nextSeq('event'), payload,
+  }))
+  return (event) => {
+    if (!event || typeof event !== 'object') return
+    if (event.kind === 'stage') {
+      emitter.phaseTransition(phaseForStage(event.label))
+      record('log', { level: 'info', message: event.label })
+    } else if (event.kind === 'assign') {
+      record('agent_start', { role: event.role, dispatch_id: event.id })
+    } else if (event.kind === 'envelope') {
+      record('agent_end', { role: event.role, outcome: event.status, dispatch_id: event.id })
+    } else if (event.kind === 'decision') {
+      record('decision', { decided: event.decided, why: event.why })
+    } else if (event.kind === 'dissent') {
+      record('decision', {
+        decided: event.lead_decision,
+        why: `dissent from ${event.from}`,
+        alternatives: [event.recommendation],
+      })
+    }
+  }
+}
+
+function ledgerDbPath() {
+  return process.env.DEVTEAM_LEDGER_DB
+    || join(process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory'), 'ledger.db')
+}
+
 // v3: the deterministic driver runs the task loop (code disposes); the lead
 // pane is consulted only at decision points. This IS `run` now; the v2
 // agent-driven handoff survives as `handoff` for comparison runs.
-function realIo(crew, paths, checkout) {
+function realIo(crew, paths, checkout, emitter) {
   let seq = 0
-  return {
+  const io = {
     assign({ role, briefFile }) {
       const m = crew.members[role]
       if (!m) throw new Error(`role ${role} not seated in this crew`)
@@ -463,6 +505,8 @@ function realIo(crew, paths, checkout) {
     log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },
     now() { return Date.now() },
   }
+  if (emitter) io.emit = emitAdapter(emitter)
+  return io
 }
 
 function runCmd(args) {
@@ -494,7 +538,19 @@ function runCmd(args) {
   // ready (or, as a fallback, rendering agent chrome) before driving.
   awaitSeatsReady(crew, 120, journal)
 
-  const io = realIo(crew, paths, checkout)
+  // The factory ledger mirror (#94). openRun() never throws and degrades
+  // to an inert emitter; the extra try/catch covers a caller-side surprise
+  // (a bad path, an unwritable home) so instrumentation can never take a
+  // crew run down. nodeVersion is deliberately NOT passed: openLedger's own
+  // default is process.versions.node, and passing process.version silently
+  // fails the ledger floor parse and drops every mirror row.
+  let emitter = null
+  try {
+    emitter = openRun({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
+    emitter.startRun()
+  } catch { emitter = null }
+
+  const io = realIo(crew, paths, checkout, emitter)
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.
@@ -510,6 +566,7 @@ function runCmd(args) {
       details: { stages: null, commit: null, dissents: [], escalation: { where: err.stage || 'driver', why: err.message } },
     }
   }
+  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
   // The task envelope is written by CODE — same path `wait` watches.
   writeFileSync(crew.task_return, JSON.stringify(result, null, 2))
 

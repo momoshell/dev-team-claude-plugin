@@ -81,6 +81,7 @@ function verdictOf(env) {
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
 //        commit(files, message) -> hash,
 //        log(obj) -> void,                    // journal line (code-owned)
+//        emit(event) -> void,                 // OPTIONAL: mirror a drive event to the factory ledger; instrumentation is NEVER load-bearing
 //        now() -> ms }
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
@@ -91,16 +92,23 @@ export function driveTask(ctx, io) {
   // from ctx so decision briefs and escalation artifacts never cite a 404.
   const journal = ctx.journal || art('journal.jsonl')
 
+  // Instrumentation is never load-bearing (ADR-024/026 clause 1): the
+  // emitter itself never throws, and this try/catch means an io that does
+  // still cannot change a run's outcome, exit code, or timing.
+  const emit = (event) => { try { io.emit?.(event) } catch { /* never load-bearing */ } }
+
   // Every stage transition goes to the journal AND (when io provides it) to
   // a live status surface — the workspace pill — so a quiet team is never
   // illegible: the pill says which CODE stage is running (suite, gate,
   // commit...). On escalation it freezes at the failing stage.
-  const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label) }
+  const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label); emit({ kind: 'stage', label }) }
 
   function assignAndWait(role, briefFile, note) {
     const { id, returnPath } = io.assign({ role, briefFile, note })
     io.log({ at: io.now(), assign: id, role, brief: briefFile })
+    emit({ kind: 'assign', id, role, brief: briefFile })
     const env = io.wait(returnPath, waits[role] || 1200)
+    emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope' })
     if (!validEnvelope(env, role, id)) throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
     io.log({ at: io.now(), envelope: id, role, status: env.status })
     return env
@@ -173,6 +181,7 @@ export function driveTask(ctx, io) {
       const dissent = { from, recommendation, lead_decision: second.decision, consult: S.consults }
       S.dissents.push(dissent)
       io.log({ at: io.now(), dissent })
+      emit({ kind: 'dissent', ...dissent })
       if (second.decision === 'accept' && recommendation === 'escalate') {
         return { decision: 'escalate', reason: `lead accepted but ${from} independently recommended escalate — on the lenient path a single judge asking for a human is binding` }
       }
@@ -208,6 +217,7 @@ export function driveTask(ctx, io) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
     }
     io.log({ at: io.now(), decision: d.decision, consult: S.consults, round, reason: d.reason })
+    emit({ kind: 'decision', decided: d.decision, why: d.reason || '', consult: S.consults, round })
     return { decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from }
   }
 

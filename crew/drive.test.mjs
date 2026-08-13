@@ -15,8 +15,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, showDoc = false } = {}) {
-  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [] }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, showDoc = false, emit = false } = {}) {
+  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [] }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
@@ -52,6 +52,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, sho
     }
   }
   if (showDoc) io.showDoc = (p) => { calls.showDoc.push(p) }
+  if (emit) io.emit = emit === true ? (event) => { calls.emits.push(event) } : emit
   return io
 }
 
@@ -849,4 +850,63 @@ test('DECISIONS and LIMITS are the frozen public contract', () => {
   assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
   assert.equal(SECOND_OPINION, 'second-opinion')
   assert.ok(Object.isFrozen(PERSPECTIVE_TARGETS))
+})
+
+test('emit mirrors every stage transition in order', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.deepEqual(io.calls.emits.filter((e) => e.kind === 'stage').map((e) => e.label), res.details.stages)
+})
+
+test('emit mirrors assignments and envelope returns, including insufficient returns', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient' }), 'lead:1': leadEnv('bounce'), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const assigns = io.calls.emits.filter((e) => e.kind === 'assign')
+  const envelopes = io.calls.emits.filter((e) => e.kind === 'envelope')
+  assert.equal(assigns.length, envelopes.length)
+  assert.ok(assigns.some((e) => e.role === 'planner' && e.id === 'planner1'))
+  assert.ok(envelopes.some((e) => e.role === 'planner' && e.status === 'insufficient'))
+  for (const e of [...assigns, ...envelopes]) assert.ok(e.id && e.role)
+})
+
+test('emit mirrors lead decisions and dissents', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient' }),
+      'lead:1': { status: 'done', role: 'lead', details: { decision: SECOND_OPINION, from: 'reviewer' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { perspective: 'residuals matter', recommendation: 'escalate', confidence: 'high' } },
+      'lead:2': leadEnv('bounce'), 'planner:2': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  assert.ok(io.calls.emits.some((e) => e.kind === 'decision' && e.decided === 'bounce'))
+  assert.ok(io.calls.emits.some((e) => e.kind === 'dissent' && e.from === 'reviewer' && e.recommendation === 'escalate' && e.lead_decision === 'bounce'))
+})
+
+test('a throwing io.emit changes nothing', () => {
+  const input = {
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  }
+  const plain = driveTask(CTX, fakeIo(input))
+  const noisy = driveTask(CTX, fakeIo({ ...input, emit: () => { throw new Error('ledger unavailable') } }))
+  assert.deepEqual(noisy, plain)
 })

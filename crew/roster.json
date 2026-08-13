@@ -58,7 +58,7 @@
       },
       "planner": {
         "provider": "anthropic",
-        "id": "claude-fable-5",
+        "id": "claude-opus-5",
         "agent": "claude",
         "effort": "high"
       },
@@ -164,7 +164,7 @@
         "reasoning",
         "tool-call",
         "frontier",
-        "architecture"
+        "override-only"
       ],
       "source": "models.dev",
       "last_verified": "2026-08-13"

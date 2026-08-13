@@ -19,9 +19,18 @@ mutually exclusive (the tier defines the seating). Per-seat `--model-<role>`
 
 | tier | lead | planner | builder | reviewer | tech-lead |
 |---|---|---|---|---|---|
-| `mechanical` | — | claude, low | pi, high | pi, medium | — |
-| `build` | claude, medium | claude, medium | claude, medium | claude, medium | — |
-| `judge` | claude, high | claude, high | claude, medium | claude, high | pi, xhigh |
+| `mechanical` | — | claude/opus-5, medium | pi/luna, high | pi/terra, medium | — |
+| `build` | claude/opus-5, medium | claude/opus-5, medium | pi/luna, high | pi/terra, high | — |
+| `judge` | claude/opus-5, high | claude/opus-5, high | pi/luna, high | claude/opus-5, high | pi/sol, xhigh |
+
+Cells are `<agent>/<model>, <effort>`; `roster.json` is the source of truth
+and this table is a convenience copy of it. Two ratified invariants the tiers
+encode: the **planning floor** — the planner seat is opus-grade at *every*
+tier, because the plan is the artifact every downstream stage inherits, so it
+is never the place to save — and the **review-vendor rule** — luna builds at
+every tier, and `judge` keeps opus on review so cross-vendor checking holds
+where the stakes are highest, while `build`/`mechanical` accept the
+same-vendor luna→terra pair with the opus lead as the backstop.
 
 A `--model-<role>` flag on a `--tier` boot is a **raw passthrough that is
 never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat

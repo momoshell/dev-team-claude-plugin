@@ -43,10 +43,10 @@
         "effort": "medium"
       },
       "reviewer": {
-        "provider": "anthropic",
-        "id": "claude-opus-5",
-        "agent": "claude",
-        "effort": "medium"
+        "provider": "openai",
+        "id": "gpt-5.6-terra",
+        "agent": "pi",
+        "effort": "high"
       }
     },
     "judge": {

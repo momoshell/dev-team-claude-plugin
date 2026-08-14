@@ -105,6 +105,18 @@ function verdictOf(env) {
     : null
 }
 
+export function reviewOutcome(role, env) {
+  if (role !== 'reviewer') return null
+  const v = verdictOf(env)
+  if (!v) return null
+  const count = (n) => (Number.isInteger(n) && n >= 0 ? n : null)
+  const d = env.details || {}
+  return {
+    verdict: v === 'pass' ? 'pass' : 'changes-needed',
+    must_fix: count(d.must_fix), should_fix: count(d.should_fix), consider: count(d.consider),
+  }
+}
+
 // An entry ending in '/' is a DIRECTORY PREFIX; anything else is a literal
 // path matched exactly. Nothing else is supported — and unsupported shapes
 // are rejected loudly (validateScopeEntries), never silently ignored.
@@ -203,10 +215,10 @@ export function driveTask(ctx, io) {
   // shipped implementation had. Bind here rather than forbid `this` in io
   // implementations: every other io call site in this file is a method call,
   // and this keeps that true for runners too.
-  const runGate = (name, cmd, runner = io.run) => {
+  const runGate = (name, cmd, runner = io.run, pristine = false) => {
     const res = runner.call(io, cmd)
     gateAttempt += 1
-    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output) })
+    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine })
     return res
   }
   // Attention fires ONLY where the gate loop stops being self-correcting:
@@ -222,7 +234,9 @@ export function driveTask(ctx, io) {
     io.log({ at: io.now(), assign: id, role, brief: briefFile })
     emit({ kind: 'assign', id, role, brief: briefFile })
     const env = io.wait(returnPath, waits[role] || 1200)
-    emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope' })
+    const review = reviewOutcome(role, env)
+    emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
+    if (review) io.log({ at: io.now(), review_outcome: { dispatch: id, ...review } })
     if (!validEnvelope(env, role, id)) throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
     io.log({ at: io.now(), envelope: id, role, status: env.status })
     return env
@@ -480,15 +494,24 @@ export function driveTask(ctx, io) {
   // details.gate and journalled, never swallowed.
   const recordGateProof = (label) => {
     gateProvenGeneration = gateGeneration
-    if (typeof io.runClean !== 'function') { gateDiscrimination = 'unproven'; return null }
+    const settleProof = (summary) => {
+      io.log({ at: io.now(), gate_discrimination: gateDiscrimination, gate_generation: gateGeneration, gate_summary: summary, gate_proof_note: gateProofNote })
+      emit({ kind: 'discrimination', generation: gateGeneration, verdict: gateDiscrimination, summary, note: gateProofNote })
+    }
+    if (typeof io.runClean !== 'function') {
+      gateDiscrimination = 'unproven'
+      settleProof(null)
+      return null
+    }
     let pristine
     try {
       stage(label)
-      pristine = runGate(label, gateCmd, io.runClean)
+      pristine = runGate(label, gateCmd, io.runClean, true)
     } catch (err) {
       gateDiscrimination = 'unproven'
       gateProofNote = err.message
       io.log({ at: io.now(), gate_proof_unproven: err.message, gate_generation: gateGeneration })
+      settleProof(null)
       return null
     }
     // The FULL predicate (:76-82), not bare non-zero exit: a crash, a missing
@@ -500,6 +523,7 @@ export function driveTask(ctx, io) {
       : baselineGateDefect(pristine.output)
     gateDiscrimination = defect ? 'failed' : 'proven'
     gateProofNote = defect // null when proven; the throw path sets it above
+    settleProof(parseGateSummary(pristine.output))
     return pristine
   }
 

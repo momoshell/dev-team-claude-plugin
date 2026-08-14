@@ -38,8 +38,8 @@ test('.gitignore contains all four run-trace mirror db artifact patterns', () =>
   }
 })
 
-test('package.json exposes the four read-only ledger recipes pointing at the ledger entry point', () => {
-  const names = ['ledger:sessions', 'ledger:phases', 'ledger:tail', 'ledger:procs']
+test('package.json exposes the six read-only ledger recipes pointing at the ledger entry point', () => {
+  const names = ['ledger:sessions', 'ledger:phases', 'ledger:tail', 'ledger:procs', 'ledger:gate-review-gap', 'ledger:eligible-tasks']
   for (const name of names) {
     assert.ok(name in pkg.scripts, `missing script ${name}`)
     assert.match(pkg.scripts[name], /scripts\/factory\/ledger\.mjs/, `${name} does not invoke the ledger entry point`)

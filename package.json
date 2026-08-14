@@ -9,6 +9,8 @@
     "ledger:phases": "node scripts/factory/ledger.mjs phases",
     "ledger:tail": "node scripts/factory/ledger.mjs tail",
     "ledger:procs": "node scripts/factory/ledger.mjs procs",
+    "ledger:gate-review-gap": "node scripts/factory/ledger.mjs gate-review-gap",
+    "ledger:eligible-tasks": "node scripts/factory/ledger.mjs eligible-tasks",
     "viz:serve": "node visualizer/server/server.mjs",
     "viz:build": "vite build --config visualizer/web/vite.config.mjs",
     "viz:dev": "vite --config visualizer/web/vite.config.mjs"

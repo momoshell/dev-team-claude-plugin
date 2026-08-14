@@ -8,7 +8,7 @@ import assert from 'node:assert/strict'
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   validateScopeEntries, scopeMatcher, composeCommitMessage,
-  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
+  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, reviewOutcome,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -82,6 +82,17 @@ const checkEnv = (verdict) => ({
 const CTX_TL = Object.freeze({ ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] })
 const leadEnv = (decision, guidance = 'do X then Y in a.mjs') => ({
   status: 'done', role: 'lead', details: { decision, reason: 'because', guidance },
+})
+
+test('reviewOutcome normalizes reviewer verdicts and count fields', () => {
+  assert.deepEqual(reviewOutcome('reviewer', {
+    status: 'done', details: { verdict: 'revise', must_fix: 3, should_fix: 2, consider: 1 },
+  }), { verdict: 'changes-needed', must_fix: 3, should_fix: 2, consider: 1 })
+  assert.deepEqual(reviewOutcome('reviewer', {
+    status: 'done', details: { verdict: 'approve', must_fix: -1, should_fix: 1.5, consider: '0' },
+  }), { verdict: 'pass', must_fix: null, should_fix: null, consider: null })
+  assert.equal(reviewOutcome('planner', { status: 'done', details: { verdict: 'pass' } }), null)
+  assert.equal(reviewOutcome('reviewer', { status: 'done', details: { defect: 'gate' } }), null)
 })
 
 test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero consults', () => {
@@ -744,6 +755,7 @@ test('an io without runClean keeps the repair path exactly as it was', () => {
 
 test('first green records discrimination without adding a reverified field', () => {
   const io = fakeIo({
+    emit: true,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
       'builder:1': buildEnv(),
@@ -762,6 +774,12 @@ test('first green records discrimination without adding a reverified field', () 
   assert.equal(res.details.gate.reverified, undefined)
   assert.equal(res.details.gate.discrimination, 'proven')
   assert.equal(io.calls.runClean.length, 1)
+  const gates = io.calls.emits.filter((event) => event.kind === 'gate')
+  assert.ok(gates.every((event) => event.generation === 1 && typeof event.pristine === 'boolean'))
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'discrimination'), [{
+    kind: 'discrimination', generation: 1, verdict: 'proven',
+    summary: { total: 3, failed: 3, errored: 0 }, note: null,
+  }])
 })
 
 test("a failed first-green proof bounces the PLANNER for a gate repair, never the builder", () => {
@@ -977,6 +995,7 @@ test('a failed proof whose planner repair omits gate_cmd escalates without a com
 
 test('missing runClean records unproven without adding a proof stage or changing the run', () => {
   const io = fakeIo({
+    emit: true,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
@@ -994,10 +1013,14 @@ test('missing runClean records unproven without adding a proof stage or changing
   assert.equal(io.calls.commits.length, 1)
   assert.equal(res.details.stages.includes('gate-proof:1'), false)
   assert.equal(res.details.stages.filter((stage) => /bounce|escalate:/.test(stage)).length, 0)
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'discrimination'), [{
+    kind: 'discrimination', generation: 1, verdict: 'unproven', summary: null, note: null,
+  }])
 })
 
 test('a throwing runClean records unproven and preserves its stash message in the journal', () => {
   const io = fakeIo({
+    emit: true,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
@@ -1018,6 +1041,11 @@ test('a throwing runClean records unproven and preserves its stash message in th
   const journal = io.calls.logs.find((line) => line.gate_proof_unproven)
   assert.ok(journal)
   assert.equal(journal.gate_proof_unproven, res.details.gate.discrimination_note)
+  const discrimination = io.calls.emits.find((event) => event.kind === 'discrimination')
+  assert.deepEqual(discrimination, {
+    kind: 'discrimination', generation: 1, verdict: 'unproven', summary: null,
+    note: res.details.gate.discrimination_note,
+  })
 })
 
 test('a review bounce does not repeat the first-green proof for one generation', () => {
@@ -1513,6 +1541,26 @@ test('emit mirrors assignments and envelope returns, including insufficient retu
   for (const e of [...assigns, ...envelopes]) assert.ok(e.id && e.role)
 })
 
+test('reviewer envelope events carry normalized outcomes while planner and builder events do not', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const envelopes = io.calls.emits.filter((event) => event.kind === 'envelope')
+  const reviewer = envelopes.find((event) => event.role === 'reviewer')
+  assert.deepEqual(reviewer.review, { verdict: 'changes-needed', must_fix: 1, should_fix: null, consider: null })
+  assert.ok(envelopes.filter((event) => event.role !== 'reviewer').every((event) => !('review' in event)))
+  assert.deepEqual(io.calls.logs.find((line) => line.review_outcome).review_outcome, {
+    dispatch: 'reviewer1', verdict: 'changes-needed', must_fix: 1, should_fix: null, consider: null,
+  })
+})
+
 test('emit mirrors lead decisions and dissents', () => {
   const io = fakeIo({
     emit: true,
@@ -1541,6 +1589,7 @@ test('a throwing io.emit changes nothing', () => {
       'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
     changed: ['a.mjs', 'a.test.mjs'],
   }
   const plainIo = fakeIo(input)
@@ -1549,6 +1598,29 @@ test('a throwing io.emit changes nothing', () => {
   const noisy = driveTask(CTX, noisyIo)
   assert.deepEqual(noisy, plain)
   assert.deepEqual(noisyIo.calls.run, plainIo.calls.run)
+  assert.deepEqual(noisyIo.calls.runClean, plainIo.calls.runClean)
+})
+
+test('an absent emitter leaves the envelope and gate proof calls unchanged', () => {
+  const input = {
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  }
+  const absentIo = fakeIo(input)
+  const throwingIo = fakeIo({ ...input, emit: () => { throw new Error('ledger unavailable') } })
+  const absent = driveTask(CTX, absentIo)
+  const throwing = driveTask(CTX, throwingIo)
+  assert.deepEqual(absent, throwing)
+  assert.deepEqual(absentIo.calls.run, throwingIo.calls.run)
+  assert.deepEqual(absentIo.calls.runClean, throwingIo.calls.runClean)
 })
 
 test('review exhaustion at a non-final build round grants a real round and review', () => {

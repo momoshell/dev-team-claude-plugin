@@ -92,6 +92,11 @@ export function emitAdapter(emitter) {
       record('agent_start', { role: event.role, dispatch_id: event.id })
     } else if (event.kind === 'envelope') {
       record('agent_end', { role: event.role, outcome: event.status, dispatch_id: event.id })
+      if (event.review) emitter.emit((handle) => handle.recordReviewOutcome({
+        adw_id: emitter.adwId, phase_id: phaseId, dispatch_id: event.id, role: event.role,
+        verdict: event.review.verdict, must_fix: event.review.must_fix ?? null,
+        should_fix: event.review.should_fix ?? null, consider: event.review.consider ?? null,
+      }))
     } else if (event.kind === 'decision') {
       record('decision', { decided: event.decided, why: event.why })
     } else if (event.kind === 'dissent') {
@@ -106,6 +111,14 @@ export function emitAdapter(emitter) {
         adw_id: emitter.adwId, phase_id: phaseId,
         gate_name: String(event.name ?? 'gate'), attempt: event.attempt, ok: !!event.ok,
         checks: event.summary ? [event.summary] : [], violations: [],
+        gate_generation: event.generation ?? null, pristine: !!event.pristine,
+      }))
+    } else if (event.kind === 'discrimination') {
+      emitter.emit((handle) => handle.recordGateDiscrimination({
+        adw_id: emitter.adwId, phase_id: phaseId, gate_generation: event.generation,
+        verdict: event.verdict, checks_total: event.summary?.total ?? null,
+        checks_failed: event.summary?.failed ?? null, checks_errored: event.summary?.errored ?? null,
+        note: event.note ?? null,
       }))
     } else if (event.kind === 'attention') {
       // ADR-029 §4: attention rides the existing closed log vocabulary.

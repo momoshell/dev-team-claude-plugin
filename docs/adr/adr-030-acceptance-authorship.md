@@ -1,6 +1,15 @@
 # ADR-030: Acceptance authorship — the seat that plans may draft the gate, but only a proof may accept it
 
-**Status:** PROPOSED 2026-08-14 (five questions answered; awaiting ratification) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
+**Status:** RATIFIED 2026-08-14 · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
+
+Ratified with three amendments to the proposal, each recorded inline at the
+decision it changes and summarised in §9: Decision 2 adopts in **two stages**
+(the stash-isolation test lands before a failed proof can block); Decision 3's
+trigger measures **cumulative growth from round 1** with absolute sizes and the
+`files_in_scope` count as the evidence, rather than 1.25× round-over-round; and
+Decision 5 **splits into two phases**, of which only phase 1 — structured
+findings with stable IDs and severity — is commissioned now. Decisions 1, 4 and
+the numbering choice are ratified as proposed.
 
 ## 0. Scope and what this ADR does not reopen
 
@@ -16,7 +25,7 @@ They add no new unbounded loop: proof runs are bounded by the existing
 The implementation must degrade sanely when no lead or no tech-lead is seated.
 In particular, a missing lead must continue to escalate rather than invent an
 answer, and a missing tech-lead must not make the driver manufacture a
-plan-check verdict. This is a proposed decision record, not a code change.
+plan-check verdict. This is a decision record, not a code change.
 
 ## 1. Context — the acceptance signal is graded by the seat it grades
 
@@ -138,6 +147,23 @@ and uses one predicate everywhere.
   recorded on `details.gate` beside `reverified`, and the named journal,
   emitter, and ledger representations use the generation key. The gate is not
   rerun merely because a build round occurred.
+- **Staged adoption — the proof does not block until its own machinery is
+  tested** *(amended at ratification, 2026-08-14)*. This decision promotes
+  `runClean` from a rare repair-path operation to a normal-path one on every
+  task, and `runClean` is `git stash push --include-untracked` followed by
+  `git stash pop`. `crew/realio.mjs` already carries an error string for the
+  case where the pop fails and leaves the checkout half-restored **with the
+  builder's work in the stash** — a failure mode that is survivable when it can
+  only occur after a gate repair, and unacceptable as a per-task risk. The
+  stash-isolation coverage this decision commissions in #168 (ignored paths,
+  `node_modules`, and the outer-`realIo` pin) therefore lands FIRST. Until it is
+  green, a failed or unavailable pristine proof records
+  `discrimination: 'unproven'` and does not bounce; once it is green, a failed
+  proof is a gate defect on the routing above. A stash or pop failure always
+  records `unproven` and never fails the run, in either stage — the proof is
+  evidence about the gate, and it may not become a new way to lose a build.
+  This preserves the decision's own asymmetry: absence of evidence is not
+  evidence of absence, and only the latter blocks.
 - **Interaction with #153:** `errored: 0` makes a red pristine run mean that
   every check ran and adjudicated, rather than that the gate crashed. #153
   enforced this at baseline and deliberately left post-build runs unchanged;
@@ -202,10 +228,25 @@ a verdict in its own right.
 
 **Decision:** **yes, as evidence with a named trigger, never as an automatic
 verdict.** For each plan-check round, the driver records
-`{round, plan_bytes, gate_bytes, plan_delta, gate_delta}` and embeds the result
-in the next plan-bounce brief and the tech-lead check brief. A round is labeled
-`divergent` when it is round 2 or later and combined plan-plus-gate bytes are at
-least **1.25×** the preceding round's combined bytes.
+`{round, plan_bytes, gate_bytes, plan_delta, gate_delta, files_in_scope_count}`
+and embeds the result in the next plan-bounce brief and the tech-lead check
+brief. A round is labeled `divergent` when it is round 2 or later and combined
+plan-plus-gate bytes are at least **2× the ROUND-1 combined bytes** — cumulative
+growth from the plan's own starting point, not growth against the immediately
+preceding round.
+
+*Amended at ratification (2026-08-14).* The proposal measured round-over-round
+growth at 1.25×. That fires on a plan legitimately deepening — a round 2 that
+adds the section its own check demanded trips it — and a label that fires on
+healthy rounds is one the seats learn to ignore, which is worse than no label.
+What failed in #142 was not any single round's delta: it was **175KB of plan
+plus gate describing a ~500-line build**. The signal is artifact size relative
+to the work, so the trigger measures cumulative divergence from where the plan
+started, and the evidence carries the **absolute** plan and gate bytes beside
+the plan's declared `files_in_scope` count — a reader comparing 175KB against
+four in-scope files needs no ratio at all. This amends the threshold's
+denominator, not the evidence-only character of the signal; the rejected
+alternatives below stand unchanged.
 
 Plan bytes come from `details.plan_path` (`crew/drive.mjs:422`). Gate bytes
 come from a new explicit `details.gate_path`, which is task-directory-contained
@@ -293,14 +334,36 @@ reviewer returns counts rather than finding identities. The question is whether
 acceptance with residuals can be refused mechanically without pretending that
 free text is a finding ledger.
 
-**Decision:** **yes.** Acceptance with residuals is a closed, code-validated
-claim, but the canonical finding set must exist first. The reviewer contract
-returns a findings array with a stable per-review ID and severity alongside the
-existing counts. This is a runtime-wide contract migration: `SEAT_DEFAULTS`
-gives every crew the shared `reviewer.md` (`crew/crew.mjs:69-74`), every crew
-requires a reviewer because the driver assigns one unconditionally
-(`crew/crew.mjs:427-429`), and the shared role contract, envelope validation,
-fixtures, contract tests, and exhaustion path must move together in #170.
+**Decision:** **yes — in two phases, and only phase 1 is commissioned now**
+*(amended at ratification, 2026-08-14)*. Acceptance with residuals is a closed,
+code-validated claim, but the canonical finding set must exist first, and the
+enforcement half rests on a single incident.
+
+- **Phase 1 — commissioned (#170).** The reviewer contract returns a findings
+  array with a stable per-review ID and severity alongside the existing counts.
+  This is a runtime-wide contract migration: `SEAT_DEFAULTS` gives every crew
+  the shared `reviewer.md` (`crew/crew.mjs:69-74`), every crew requires a
+  reviewer because the driver assigns one unconditionally
+  (`crew/crew.mjs:427-429`), and the shared role contract, envelope validation,
+  fixtures and contract tests move together. Phase 1 is **pure addition**: no
+  acceptance path changes, nothing fails closed, and #169's "was the gate green
+  while review found a must-fix" query needs exactly this data regardless of
+  what phase 2 concludes.
+- **Phase 2 — specified here, NOT commissioned.** Typed residuals, the
+  severity constraint, and the fail-closed invalid accept described below.
+  Start condition: phase 1 shipped **and** at least 20 tasks of finding data
+  exist, **or** a second residual-accepted correctness incident occurs —
+  whichever comes first. The trigger is recordable from the phase-1 data; it is
+  not a matter of anyone's recollection.
+
+Rationale for the split: the mechanism is sound and lifted from a reference
+implementation where it is proven, but the *evidence* is one incident (#144),
+which §7 already concedes. The migration is the largest change this ADR
+commissions, and building the enforcement before its own shape can be observed
+is the mistake this document exists to name. Sequencing also unblocks #169,
+which would otherwise wait behind a contract migration it does not need.
+Everything below specifies phase 2 and is ratified as the design to build when
+its start condition is met — not as work to start now.
 
 At exhaustion (`crew/drive.mjs:628-646,661-679`), every unresolved finding from
 the last review must appear exactly once across one of these two arrays:
@@ -359,8 +422,11 @@ while type is the lead's claim about the risk of not fixing it; and removing
 
 ## 8. Consequences and owner slices
 
-This ADR changes no code. #168, #169, and #170 were filed against this ADR and
-must not be built ahead of ratification. Per-check discrimination is deliberately
+This ADR changes no code. #168, #169 and #170 were filed against it and are now
+unblocked, in the staged order the amendments set: #168's stash-isolation
+coverage before its proof can block, #170 phase 1 (structured findings) before
+any typed-residual enforcement, and #169 free to proceed as soon as phase 1
+lands. Per-check discrimination is deliberately
 absent from this table: its start condition, denominator, and trigger live in
 Decision 2 and the evidence-gap table, but it is not commissioned now.
 
@@ -378,22 +444,45 @@ ratification. #142 remains the owner of its growth and carve directions; #168,
 #169, and #170 own the new proof, measurement, and residual contracts
 respectively.
 
-## 9. Open questions for ratification
+## 9. Ratification record — 2026-08-14
 
-1. **Yes/no/amend:** ratify Decision 1's answer that the planner may author
-   `gate.mjs`, but authorship alone never accepts the gate.
-2. **Yes/no/amend:** ratify Decision 2's driver-owned `gate_generation`, first
-   green proof per generation, full `baselineGateDefect` predicate, planner-bounce
-   routing, and the 20-task re-entry condition beginning only after #168 and
-   #169 land.
-3. **Yes/no/amend:** ratify Decision 3's 1.25× growth trigger as evidence only,
-   including explicit `details.gate_path` and no automatic bounce or carve.
-4. **Yes/no/amend:** ratify Decision 4's required `proceed|carve` planner enum,
-   validated before `check:r{n}`, with a buildable first slice carried on
-   escalation.
-5. **Yes/no/amend:** ratify Decision 5's runtime-wide reviewer contract
-   migration and severity-constrained residual/refuted validation owned by
-   #170, including fail-closed invalid accepts.
-6. **Yes/no/amend:** ratify the numbering choice that burns ADR-030 as this
-   proposed standalone document and advances the register's next-free number
-   to 031.
+All six questions were answered by the user. Three were ratified as proposed;
+three were amended, and each amendment is written into the decision it changes
+rather than left as a note here.
+
+1. **Decision 1 — ratified as proposed.** The planner may author `gate.mjs`;
+   authorship alone never accepts it. The reasoning that carried it: a biased
+   author and a careless author produce the same artifact, so the missing
+   property was a test of the artifact, not a change of author.
+2. **Decision 2 — ratified, AMENDED to adopt in two stages.** The proof is
+   correct and is the answer to the day's vacuous gates, but it promotes
+   `runClean` — `git stash push`/`pop` — from a rare repair-path operation to a
+   per-task one, and a failed pop leaves the checkout half-restored with the
+   builder's work in the stash. The stash-isolation coverage commissioned in
+   #168 lands first; until it is green a failed or unavailable proof records
+   `discrimination: 'unproven'` and does not bounce. A stash or pop failure
+   records `unproven` in either stage and never fails a run.
+3. **Decision 3 — ratified, AMENDED trigger.** Evidence-only stands. The
+   threshold moves from 1.25× round-over-round to **2× the round-1 combined
+   bytes**, and the evidence carries absolute plan and gate sizes beside the
+   declared `files_in_scope` count. Round-over-round growth fires on a plan
+   legitimately deepening, and a label that fires on healthy rounds is one the
+   seats learn to ignore; what failed in #142 was 175KB describing a ~500-line
+   build, which is a cumulative ratio, not a per-round one.
+4. **Decision 4 — ratified as proposed.** The `proceed|carve` enum is required,
+   not offered. The prose escape hatch was offered twice and taken zero times —
+   once declined in writing by a planner's own D1.
+5. **Decision 5 — ratified, AMENDED into two phases.** Only **phase 1** is
+   commissioned: structured findings with stable IDs and severity, which is
+   pure addition and which #169 needs regardless. Phase 2 — typed residuals,
+   the severity constraint, fail-closed invalid accepts — is ratified as the
+   design to build when its start condition is met: phase 1 shipped and 20
+   tasks of finding data, or a second residual-accepted correctness incident,
+   whichever comes first. The mechanism is proven elsewhere; the evidence here
+   is one incident, as §7 concedes, and building enforcement before its shape
+   can be observed is the mistake this document exists to name.
+6. **Numbering — ratified as proposed.** This document is ADR-030; the
+   register's next free number is 031.
+
+The amendments changed thresholds and sequencing, not a single decision's
+direction. Nothing in §§2–6 was reversed.

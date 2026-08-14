@@ -58,7 +58,7 @@ not free.
 | 027 | Multi-process seq allocation is parent-owned, persisted-before-emission | ratified 2026-08-11 | below |
 | 028 | Substrate discipline is a PreToolUse guard that denies only on positive evidence | ratified 2026-08-12 | below |
 | 029 | Headless observability and interjection: the pane-parity matrix for piped seats | ratified 2026-08-13 | [full document](adr-029-headless-observability-interjection.md) |
-| 030 | Acceptance authorship: the planner may draft the gate, but only a proof accepts it | proposed 2026-08-14 | [full document](adr-030-acceptance-authorship.md) |
+| 030 | Acceptance authorship: the planner may draft the gate, but only a proof accepts it | ratified 2026-08-14 | [full document](adr-030-acceptance-authorship.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

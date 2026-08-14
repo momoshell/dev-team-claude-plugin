@@ -135,10 +135,12 @@ test('unshipped capability pairs and absent transports throw naming adapter and 
   }
 })
 
-test('transportFor selects headless-json only for explicitly named roles', () => {
+test('transportFor selects each named transport and rejects an ambiguous seat', () => {
   assert.equal(transportFor('builder', { headless: 'builder' }), 'headless-json')
-  assert.equal(transportFor('lead', { headless: 'builder' }), 'pane')
+  assert.equal(transportFor('builder', { 'headless-rpc': 'builder' }), 'headless-rpc')
+  assert.equal(transportFor('lead', { 'headless-rpc': 'builder' }), 'pane')
   assert.equal(transportFor('builder', {}), 'pane')
+  assert.throws(() => transportFor('builder', { headless: 'builder', 'headless-rpc': 'builder' }), /builder.*headless.*headless-rpc/)
 })
 
 test('assertCapabilities rejects an adapter that cannot enforce tool denial, naming seat + adapter + capability', () => {
@@ -162,6 +164,12 @@ test('resolveAdapters boots headless claude and refuses the unshipped pi pair', 
   const r = await resolveAdapters(['builder'], { headless: 'builder' })
   assert.equal(r.builder.transport, 'headless-json')
   await assert.rejects(() => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }), /adapter-pi.*headless-json/)
+})
+
+test('resolveAdapters boots pi headless-rpc and refuses claude on that transport', async () => {
+  const r = await resolveAdapters(['builder'], { 'headless-rpc': 'builder', 'agent-builder': 'pi' })
+  assert.equal(r.builder.transport, 'headless-rpc')
+  await assert.rejects(() => resolveAdapters(['builder'], { 'headless-rpc': 'builder' }), /claude.*headless-rpc/)
 })
 
 test('resolveWorkerBin prefers an explicit existing path over the environment', () => {

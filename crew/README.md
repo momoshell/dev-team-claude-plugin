@@ -137,10 +137,14 @@ note}) -> {id, returnPath}`, `wait(returnPath, timeoutS) -> envelope|null`,
 `writeFile`, `readFile`, `run`, optional `runClean`, `changedFiles`, `commit`,
 optional `status`/`showDoc`, `log`, `now`, and optional `emit`. `assign` and
 `wait` are per-seat; the remaining methods are checkout-global and shared by
-all seats. The shipped transports are `pane` (cmux terminal) and
+all seats. The shipped transports are `pane` (cmux terminal),
 `headless-json` (one-shot `claude -p --output-format stream-json` per
-assignment). Pass `--headless builder,reviewer` at boot to select it per role;
-mixed pane/headless crews are supported.
+assignment), and `headless-rpc` (a long-lived `pi --mode rpc` process held open
+across assignments). Pass `--headless builder,reviewer` or `--headless-rpc
+builder` at boot to select it per role; mixed crews are supported. The RPC
+capability surface is `steer`, `abort`, and `entries`; the envelope remains the
+record and the stream remains transport only. No live attention is emitted
+here; that belongs to #125.
 
 Headless workers use a frozen binary, resolved in this order:
 `--claude-bin <absolute path>`, `$CREW_CLAUDE_BIN`, then
@@ -148,9 +152,6 @@ Headless workers use a frozen binary, resolved in this order:
 `headlessIo` treats the ReturnEnvelope as the record and classifies worker
 runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`, or
 `timeout`; a perfect stream without an envelope is still `no-envelope`.
-`headless-rpc` is declared by `adapter-pi.capabilitiesFor` but is not
-implemented: a long-lived RPC worker held open across assignments is a
-different transport shape and its own slice.
 
 ## Readiness
 
@@ -234,7 +235,7 @@ Everything durable is a FILE; pane chat is never the record.
 - `roles/*.md` — seat charters, appended as system prompts at boot.
 - Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition),
   `reclaim.test.mjs` (reservation and transition-lock contracts),
-  `io-contract.test.mjs` (the shared io contract, run against realIo and headlessIo).
+  `io-contract.test.mjs` (the shared io contract, run against realIo, headlessIo, and headlessRpcIo).
 
 State lives under `~/.crew/<repo>/<task>/` (crew.json, task dir, returns,
 journal); archives keep the durable record after teardown.

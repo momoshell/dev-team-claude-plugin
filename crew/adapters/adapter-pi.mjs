@@ -21,6 +21,10 @@ const INVARIANT = Object.freeze({
   // (--approve/-a only governs trusting project-local config files, not
   // tool calls — deliberately not passed here.)
   unattended: true,
+  // pi ships NO subagent tool at all (see PI_TOOL_NAMES: Task/Agent -> null),
+  // on every transport. Declared false, not worked around: this is the honest
+  // claim that makes a charter-side `requires: ['subagents']` meaningful.
+  subagents: false,
   // --thinking <off|minimal|low|medium|high|xhigh|max> (also the
   // ':<level>' model-string shorthand) — live-verified 2026-08-13: a
   // luna:high seat showed "gpt-5.6-luna • high" in its status bar.

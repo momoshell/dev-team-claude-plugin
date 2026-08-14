@@ -42,7 +42,7 @@ never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat
 stays a bare-id lookup, not `openai-codex/gpt-5.6-luna`, because an operator
 typing a model id is speaking their own CLI's namespace. Where it is
 recorded: `sources.<role>.model === 'override'` in the boot journal's
-`allocation` map.
+`allocation` map (including any declared capability shortfalls).
 
 ## The model
 
@@ -95,7 +95,8 @@ A seat is a *hot seat*: any CLI agent can hold it, not just claude. The whole
 contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
 
 - `capabilitiesFor({ transport })` — returns one frozen resolved profile with
-  the four invariant keys plus transport-scoped capabilities. The closed
+  the five invariant keys, including `subagents`, plus transport-scoped
+  capabilities. The closed
   transports are `pane`, `headless-json`, and `headless-rpc`; shipped pairs are
   claude × (`pane`, `headless-json`) and pi × (`pane`, `headless-rpc`). Pi has
   no `headless-json`; every unshipped pair throws rather than guessing.
@@ -114,7 +115,8 @@ contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
 naming the missing adapter file — never a silent fallback.
 
 Shipped adapters: `claude` (default) and `pi` — `--agent-reviewer pi
---model-reviewer google/gemini-3-pro` seats a reviewer on pi. pi's deny list
+--model-reviewer google/gemini-3-pro --allow-shortfall-reviewer subagents`
+seats a reviewer on pi with an explicit degraded-capability override. pi's deny list
 (`--exclude-tools`) matches pi-namespaced tool names, so a claude-shaped seat
 deny list is translated before it reaches pi:
 
@@ -129,11 +131,14 @@ subagent tool for `Task`/`Agent` to translate to — that seat's real boundary
 is the git scope gate + commit-in-scope, the same posture `Write` already has
 everywhere.
 
-Capability declarations are enforced, not decorative: a seat whose charter
-needs tool denial (every seat today) will not boot on an adapter declaring
-`tool_deny: false` — no silent weaker seats. Only `tool_deny` is checked
-today; `prompt_file`, `unattended`, and `session_resume` are declared for the
-adapters still to come.
+Capability declarations are enforced, not decorative: charters declare
+`requires` when they depend on a capability. Planner and reviewer require
+`subagents`, so either seat refuses to boot on pi before a workspace exists;
+a deliberate shortfall override (`--allow-shortfall-<role> <cap>`) boots it
+degraded and records the waived capability in the boot journal's `allocation`
+map as `shortfall`. Tool denial remains enforced for every seat, while
+`prompt_file`, `unattended`, and `session_resume` are declared for the adapters
+still to come.
 
 ## io contract
 

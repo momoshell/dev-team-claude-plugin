@@ -56,12 +56,14 @@ const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 // gate + commit-in-scope, not tool denial.
 // `agent` names the adapter (crew/adapters/adapter-<name>.mjs) that fills
 // the seat; overridable per task via --agent-<role>, default 'claude'.
+// `requires` names the capability keys the charter depends on; a seat whose
+// adapter cannot deliver one refuses to boot.
 export const SEAT_DEFAULTS = Object.freeze({
-  lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'lead.md', agent: 'claude' },
-  planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', prompt: 'planner.md', agent: 'claude' },
-  builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', prompt: 'builder.md', agent: 'claude' },
-  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', prompt: 'reviewer.md', agent: 'claude' },
-  'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', prompt: 'tech-lead.md', agent: 'claude' },
+  lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'lead.md', agent: 'claude' },
+  planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'planner.md', agent: 'claude' },
+  builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', requires: [], prompt: 'builder.md', agent: 'claude' },
+  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'reviewer.md', agent: 'claude' },
+  'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'tech-lead.md', agent: 'claude' },
 })
 export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer'])
 // Canonical seating order — also layout order (index 0 takes the left half).
@@ -95,9 +97,9 @@ function seatAgent(role, args) {
 }
 
 // Enforce that the resolved adapter can actually deliver what the seat's
-// charter needs. Only tool_deny has a real consequence today: every seat has
-// a non-empty deny list, so an adapter that can't enforce it would boot a
-// silently weaker seat. Returns undefined on success.
+// charter needs. Every seat has a non-empty deny list, so an adapter that
+// can't enforce it would boot a silently weaker seat. Returns undefined on
+// success.
 
 export function transportFor(role, args = {}) {
   const headless = String(args.headless === true ? '' : (args.headless || ''))
@@ -112,10 +114,31 @@ export function transportFor(role, args = {}) {
   return DEFAULT_TRANSPORT
 }
 
-export function assertCapabilities(role, agentName, capabilities) {
+export function assertCapabilities(role, agentName, capabilities, allowed = []) {
   if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
     throw new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
   }
+  for (const cap of SEAT_DEFAULTS[role].requires || []) {
+    if (capabilities?.[cap] === true) continue
+    if (allowed.includes(cap)) continue
+    throw new Error(`seat ${role} requires capability "${cap}" but agent adapter "${agentName}" declares ${cap}: ${JSON.stringify(capabilities?.[cap])} — refusing to boot a weaker seat (pass --allow-shortfall-${role} ${cap} to boot it degraded on purpose)`)
+  }
+}
+
+export function seatShortfalls(role, args = {}) {
+  const raw = args[`allow-shortfall-${role}`]
+  if (raw === true) throw new Error(`--allow-shortfall-${role} needs a capability name (e.g. --allow-shortfall-${role} subagents) — a bare flag would waive every capability`)
+  return String(raw || '').split(',').map((s) => s.trim()).filter(Boolean)
+}
+
+export function bootAllocation(roles, args = {}, sources = null) {
+  const out = {}
+  for (const role of roles) {
+    const shortfall = seatShortfalls(role, args)
+    const cell = { ...(sources?.[role] || {}), ...(shortfall.length ? { shortfall } : {}) }
+    if (Object.keys(cell).length) out[role] = cell
+  }
+  return Object.keys(out).length ? out : null
 }
 
 // Resolve a roster tier into seated roles, per-seat cells, and a per-field
@@ -191,6 +214,10 @@ export function resolveSeatModels(seats, adapters) {
 // the --agent-<role>/SEAT_DEFAULTS flags-or-default path.
 export async function resolveAdapters(roles, args, seats = null) {
   const out = {}
+  for (const key of Object.keys(args)) {
+    const m = /^allow-shortfall-(.+)$/.exec(key)
+    if (m && !roles.includes(m[1])) throw new Error(`--allow-shortfall-${m[1]} given but crew seats no ${m[1]}`)
+  }
   for (const role of roles) {
     const name = String(seats?.[role]?.agent || seatAgent(role, args))
     if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
@@ -200,7 +227,7 @@ export async function resolveAdapters(roles, args, seats = null) {
     if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
     if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
     const transport = transportFor(role, args)
-    assertCapabilities(role, name, adapter.capabilitiesFor({ transport }))
+    assertCapabilities(role, name, adapter.capabilitiesFor({ transport }), seatShortfalls(role, args))
     if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
       throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
     }
@@ -362,12 +389,14 @@ async function bootCmd(args) {
     ...(tierName ? { tier: tierName, seats } : {}),
   }
   saveCrew(paths, crew)
+  const allocation = bootAllocation(roles, args, sources)
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles,
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
     ...(workerBin ? { claude_bin: workerBin } : {}),
-    ...(tierName ? { tier: tierName, seats, allocation: sources } : {}),
+    ...(tierName ? { tier: tierName, seats } : {}),
+    ...(allocation ? { allocation } : {}),
   })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }

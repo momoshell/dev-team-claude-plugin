@@ -122,9 +122,9 @@ test('final drain is queued behind an in-flight periodic drain', async () => {
 })
 
 test('crew emitter tripwire confirms phase linkage and honest unavailable wording', () => {
-  const crew = readFileSync(join(process.cwd(), 'crew/crew.mjs'), 'utf8')
+  const realio = readFileSync(join(process.cwd(), 'crew/realio.mjs'), 'utf8')
   const shape = readFileSync(join(process.cwd(), 'visualizer/server/shape.mjs'), 'utf8')
-  assert.match(crew, /const record = \(type, payload\).*phase_id: phaseId/s)
+  assert.match(realio, /const record = \(type, payload\).*phase_id: phaseId/s)
   assert.doesNotMatch(shape, /crew agent events carry no phase_id/)
 })
 

@@ -211,11 +211,13 @@ Everything durable is a FILE; pane chat is never the record.
 ## Files
 
 - `crew.mjs` — CLI: boot / run / handoff (legacy agent-driven mode) / wait /
-  status / teardown, plus `realIo` wiring the driver to cmux + git.
+  status / teardown.
+- `realio.mjs` — the io implementation: the injected-`deps` seam,
+  `waitForEnvelope`, `emitAdapter`, and the cmux + git wiring.
 - `drive.mjs` — the deterministic task loop (dependency-injected io; fully
   unit-tested without cmux). `io.emit(event)` is OPTIONAL: when `run` can open
   a factory ledger run, stage/assign/envelope/decision/dissent events are
-  mirrored through `emitAdapter` in `crew.mjs`; `gate` events go to
+  mirrored through `emitAdapter` in `realio.mjs`; `gate` events go to
   `gate_results`, and `attention` events go to warn-level `log` rows. Attention
   fires only on gate exhaustion or triage escalation and carries `park_id:
   null` pending #125. Instrumentation is never load-bearing — a missing,
@@ -231,7 +233,8 @@ Everything durable is a FILE; pane chat is never the record.
   (see "Adapters" above).
 - `roles/*.md` — seat charters, appended as system prompts at boot.
 - Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition),
-  `reclaim.test.mjs` (reservation and transition-lock contracts).
+  `reclaim.test.mjs` (reservation and transition-lock contracts),
+  `io-contract.test.mjs` (the shared io contract, run against realIo and headlessIo).
 
 State lives under `~/.crew/<repo>/<task>/` (crew.json, task dir, returns,
 journal); archives keep the durable record after teardown.

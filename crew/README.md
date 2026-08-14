@@ -231,10 +231,11 @@ Everything durable is a FILE; pane chat is never the record.
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
 - `reclaim.mjs` — append-only token-fenced transition locks, the serialized
-  reservation engine, and the pluggable evidence-authority seam. Park and lease
-  surfaces remain #125's to add on this engine. Serialization is guaranteed for
-  normal operation and automatic ESRCH displacement; `overrideLock` is break
-  glass and requires operator attestation of supervisor quiescence.
+  reservation engine, the lease surface, and the park forward path. The park /
+  lease protocol is documented in `docs/park-lease-protocol.md`; park
+  reconciliation is slice 2b. Serialization is guaranteed for normal operation
+  and automatic ESRCH displacement; `overrideLock` is break glass and requires
+  operator attestation of supervisor quiescence.
 - `adapters/adapter-*.mjs` — the per-agent seam: capabilitiesFor + seatCommand
   (see "Adapters" above).
 - `roles/*.md` — seat charters, appended as system prompts at boot.

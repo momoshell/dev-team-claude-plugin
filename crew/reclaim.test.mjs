@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { reclaimStore, reservationEngine, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS, markerLockName, LOCK_ATTEMPTS, LOCK_INTERVAL_MS } from './reclaim.mjs'
+import { reclaimStore, reservationEngine, PHASES, VERDICTS, EVIDENCE_KINDS, LEASE_PHASES, SUCCESSOR_STATES, PARK_STATES, LAUNCH_STATES, CONFLICT_REASONS, LIVENESS, markerLockName, leaseKey, parkLockName, LOCK_ATTEMPTS, LOCK_INTERVAL_MS } from './reclaim.mjs'
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'reclaim-'))
@@ -29,7 +29,7 @@ function marker(f, over = {}) {
 }
 
 test('exports closed enums', () => { assert.deepEqual(PHASES, { RESERVED: 'reserved', SPAWNING: 'spawning', RUNNING: 'running' }); assert.deepEqual(VERDICTS, { FREE: 'free', RECLAIMABLE: 'reclaimable', BUSY: 'busy', UNRESOLVABLE: 'unresolvable' }) })
-test('evidence enum is pgid only', () => assert.deepEqual(EVIDENCE_KINDS, { PGID: 'pgid' }))
+test('evidence enum includes successor authority', () => assert.deepEqual(EVIDENCE_KINDS, { PGID: 'pgid', SUCCESSOR: 'successor' }))
 test('liveness enum is tri-state', () => assert.deepEqual(LIVENESS, { ALIVE: 'alive', DEAD: 'dead', UNKNOWN: 'unknown' }))
 test('lock constants are bounded', () => { assert.equal(LOCK_ATTEMPTS, 20); assert.equal(LOCK_INTERVAL_MS, 50) })
 test('marker lock names are stable and safe', () => { assert.equal(markerLockName('x'), markerLockName('x')); assert.notEqual(markerLockName('x'), markerLockName('y')); assert.match(markerLockName('x'), /^[0-9a-f]+$/) })
@@ -99,3 +99,157 @@ test('an unattested lock override record is inert', () => {
     })
   }
 })
+
+test('slice enums and identities are exact and frozen', () => {
+  assert.deepEqual(LEASE_PHASES, { HELD: 'held', TRANSFERRED: 'transferred' })
+  assert.deepEqual(SUCCESSOR_STATES, { ABSENT: 'absent', ACTIVE: 'active', RESUMED: 'resumed', ABANDONED: 'abandoned', MISMATCH: 'mismatch', UNKNOWN: 'unknown' })
+  assert.deepEqual(PARK_STATES, ['parked', 'claimed', 'resumed', 'abandoned'])
+  assert.deepEqual(LAUNCH_STATES, [null, 'pending', 'enqueued'])
+  assert.deepEqual(CONFLICT_REASONS, ['answer-conflict', 'successor-conflict', 'decision-mismatch', 'no-answer', 'park-settled', 'seat-busy', 'enqueue-unresolved', 'unresolvable'])
+  assert.equal(Object.isFrozen(PARK_STATES), true)
+  assert.equal(Object.isFrozen(LAUNCH_STATES), true)
+  assert.equal(Object.isFrozen(CONFLICT_REASONS), true)
+  assert.match(leaseKey('role', 'session'), /^[0-9a-f]{32}$/)
+  assert.match(parkLockName('park'), /^[0-9a-f]{32}$/)
+  assert.notEqual(leaseKey('role', 'session'), markerLockName('role'))
+  assert.notEqual(parkLockName('park'), markerLockName('park'))
+})
+
+test('finding 2 validates every lease boundary before locking', () => each(({ s, dir }) => {
+  const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  const cases = [
+    [[], { spec, successorState: () => 'absent' }],
+    [{ role: 'a' }, { spec, successorState: () => 'absent' }],
+    [[{ role: ' ', sessionId: 's' }], { spec, successorState: () => 'absent' }],
+    [[{ role: 'a', sessionId: '' }], { spec, successorState: () => 'absent' }],
+    [[{ role: 'a', sessionId: 's' }, { role: 'a', sessionId: 's' }], { spec, successorState: () => 'absent' }],
+    [[{ role: 'a', sessionId: 's' }], { spec: { ...spec, extra: true }, successorState: () => 'absent' }],
+    [[{ role: 'a', sessionId: 's' }], { spec: { ...spec, decision: { ...spec.decision, answer: ' ' } }, successorState: () => 'absent' }],
+    [[{ role: 'a', sessionId: 's' }], { spec, order: 'a', successorState: () => 'absent' }],
+    [[{ role: 'a', sessionId: 's' }], { spec, successorState: null }],
+  ]
+  for (const [seats, opts] of cases) {
+    assert.deepEqual(s.acquireLeases(seats, opts), { ok: false, reason: 'unresolvable' })
+    assert.equal(s.activeLeases().length, 0)
+    assert.equal(readdirSync(join(dir, 'leases')).filter((name) => name.endsWith('.json')).length, 0)
+  }
+}))
+
+test('successor liveness is terminal-only', () => {
+  const f = deadFixture()
+  try {
+    const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+    assert.equal(f.s.acquireLeases([{ role: 'a', sessionId: 's' }], { spec, successorState: () => 'absent' }).ok, true)
+    assert.equal(f.s.reconcileLease('a', 's', { successorState: () => 'absent' }).verdict, VERDICTS.UNRESOLVABLE)
+    assert.equal(f.s.reconcileLease('a', 's', { successorState: () => 'resumed' }).verdict, VERDICTS.RECLAIMABLE)
+  } finally { f.done() }
+})
+
+test('finite lease clock refuses before writing', () => each(({ dir, deps }) => {
+  const s = reclaimStore({ dir, actor: 'clock', deps: { ...deps, now: () => NaN } })
+  const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  assert.deepEqual(s.acquireLeases([{ role: 'a', sessionId: 's' }], { spec, successorState: () => 'absent' }), { ok: false, reason: 'unresolvable' })
+  assert.equal(s.activeLeases().length, 0)
+}))
+
+test('malformed normalized specs refuse before writing', () => each(({ s }) => {
+  const base = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  for (const spec of [{}, { ...base, extra: 1 }, { ...base, run_id: ' ' }, { ...base, decision: { ...base.decision, answer: ' ' } }]) {
+    assert.deepEqual(s.acquireLeases([{ role: 'a', sessionId: 's' }], { spec, successorState: () => 'absent' }), { ok: false, reason: 'unresolvable' })
+    assert.equal(s.activeLeases().length, 0)
+  }
+}))
+
+test('set equality is a strict verifier guard', () => each(({ s }) => {
+  const park = { park_id: 'p', seats: [{ role: 'a', sessionId: 's', warm: false }], leases: [], spec: { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }, decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  assert.deepEqual(s.verifyLeaseSet(park), { ok: false, reason: 'lease-set-mismatch' })
+}))
+
+test('lease record has the canonical eight keys', () => each(({ s, dir }) => {
+  const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  const result = s.acquireLeases([{ role: 'a', sessionId: 's' }], { spec, successorState: () => 'absent' })
+  assert.equal(result.ok, true)
+  const record = JSON.parse(readFileSync(join(dir, 'leases', `${leaseKey('a', 's')}.json`), 'utf8'))
+  assert.deepEqual(Object.keys(record).sort(), ['at', 'key', 'owner', 'phase', 'reservation_id', 'role', 'sessionId', 'spec'])
+  assert.equal(record.phase, LEASE_PHASES.HELD)
+  assert.deepEqual(Object.keys(record.owner).sort(), ['pid', 'startedAt'])
+  assert.equal(Number.isFinite(record.owner.startedAt), true)
+  assert.equal(Number.isFinite(record.at), true)
+  assert.equal('evidence' in record, false)
+}))
+
+test('lease release reports a foreign remaining member and continues', () => each(({ s, dir }) => {
+  const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  const got = s.acquireLeases([{ role: 'a', sessionId: 's' }, { role: 'b', sessionId: 's' }], { spec, successorState: () => 'absent' })
+  const path = join(dir, 'leases', `${leaseKey('b', 's')}.json`)
+  const foreign = JSON.parse(readFileSync(path, 'utf8'))
+  foreign.reservation_id = 'foreign'
+  writeFileSync(path, JSON.stringify(foreign))
+  const released = s.releaseLeases(got.handles)
+  assert.equal(released.ok, false)
+  assert.deepEqual(released.released.map((seat) => seat.role), ['a'])
+  assert.deepEqual(released.remaining.map((seat) => seat.role), ['b'])
+}))
+
+test('recordAnswer is byte-stable and conflict-safe', () => each(({ s, dir }) => {
+  const id = s.mintPark({ run_id: 'r', seats: [{ role: 'a', sessionId: 's' }] }).park.park_id
+  const answer = { decision_id: 'd', actor: 'a', answer: 'yes' }
+  assert.equal(s.recordAnswer(id, answer).ok, true)
+  const path = join(dir, 'parks', `${id}.json`)
+  const before = readFileSync(path, 'utf8')
+  assert.equal(s.recordAnswer(id, answer).existing, true)
+  assert.equal(readFileSync(path, 'utf8'), before)
+  assert.equal(s.recordAnswer(id, { ...answer, actor: 'b' }).reason, 'answer-conflict')
+  assert.equal(s.recordAnswer(id, { decision_id: 'd2', actor: 'a', answer: 'yes' }).reason, 'answer-conflict')
+  assert.equal(readFileSync(path, 'utf8'), before)
+}))
+
+test('claim freezes one persisted decision and replay is pure', () => each(({ s, dir }) => {
+  const id = s.mintPark({ run_id: 'r', seats: [{ role: 'a', sessionId: 's' }] }).park.park_id
+  s.recordAnswer(id, { decision_id: 'd', actor: 'a', answer: 'yes' })
+  let calls = 0
+  let seen
+  const enqueue = (spec) => { calls += 1; seen = spec; return true }
+  const args = { decision_id: 'd', successor_run_id: 'next', enqueue, successorState: () => 'absent' }
+  assert.equal(s.claim(id, args).ok, true)
+  assert.equal(Object.isFrozen(seen), true)
+  assert.equal(Object.isFrozen(seen.decision), true)
+  const before = readFileSync(join(dir, 'parks', `${id}.json`), 'utf8')
+  assert.equal(s.claim(id, args).replayed, true)
+  assert.equal(calls, 1)
+  assert.equal(readFileSync(join(dir, 'parks', `${id}.json`), 'utf8'), before)
+  assert.equal(s.claim(id, { ...args, successor_run_id: 'different' }).reason, 'successor-conflict')
+}))
+
+test('claim and settlement preserve authority outcomes', () => {
+  const f = deadFixture()
+  try {
+    const id = f.s.mintPark({ run_id: 'r', seats: [{ role: 'a', sessionId: 's' }] }).park.park_id
+    f.s.recordAnswer(id, { decision_id: 'd', actor: 'a', answer: 'yes' })
+    assert.equal(f.s.claim(id, { decision_id: 'd', successor_run_id: 'next', enqueue: () => true, successorState: () => 'absent' }).park.launch_state, 'pending')
+    assert.equal(f.s.settlePark(id, { successorState: () => 'absent' }).reason, 'no-terminal-evidence')
+    assert.equal(f.s.settlePark(id, { successorState: () => 'resumed', outcome: 'abandoned' }).park.state, 'resumed')
+    assert.equal(f.s.settlePark(id, { successorState: () => 'resumed' }).already, true)
+  } finally { f.done() }
+})
+
+test('active successor links and transfers leases', () => each(({ s, dir }) => {
+  const id = s.mintPark({ run_id: 'r', seats: [{ role: 'a', sessionId: 's' }] }).park.park_id
+  s.recordAnswer(id, { decision_id: 'd', actor: 'a', answer: 'yes' })
+  const result = s.claim(id, { decision_id: 'd', successor_run_id: 'next', enqueue: () => true, successorState: () => 'active' })
+  assert.equal(result.park.launch_state, 'enqueued')
+  assert.equal(Number.isFinite(result.park.linked_at), true)
+  const lease = JSON.parse(readFileSync(join(dir, 'leases', `${leaseKey('a', 's')}.json`), 'utf8'))
+  assert.equal(lease.phase, LEASE_PHASES.TRANSFERRED)
+}))
+
+test('unsafe ids and generated traversal never touch parks', () => each(({ s, dir, deps }) => {
+  for (const id of ['../x', 'a/b', '.', '..', ' ']) {
+    assert.equal(s.readPark(id), null)
+    assert.equal(s.recordAnswer(id, { decision_id: 'd', actor: 'a', answer: 'y' }).reason, 'unresolvable')
+    assert.equal(s.claim(id, { decision_id: 'd', successor_run_id: 'x', enqueue: () => true, successorState: () => 'absent' }).reason, 'unresolvable')
+    assert.equal(s.settlePark(id, { successorState: () => 'resumed' }).reason, 'unresolvable')
+  }
+  const generated = reclaimStore({ dir, actor: 'generated', deps: { ...deps, uuid: () => 'park-0-id' } })
+  assert.equal(generated.mintPark({ run_id: 'r', seats: [{ role: 'a', sessionId: 's' }] }).ok, true)
+}))

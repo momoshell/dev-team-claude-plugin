@@ -30,7 +30,19 @@ scenario are considers, not must-fixes.
 ## Envelope details fields
 
 "details": { "review_path": "<abs>", "verdict": "pass"|"changes-needed",
-             "must_fix": <n>, "should_fix": <n>, "consider": <n> }
+             "must_fix": <n>, "should_fix": <n>, "consider": <n>,
+             "findings": [ { "id": "<stable within THIS review>",
+                             "severity": "must-fix"|"should-fix"|"consider",
+                             "location": "<file:line>",
+                             "summary": "<the concrete failure scenario, one line>" } ] }
+
+`findings` mirrors review.md's findings — one entry per finding you wrote, with
+that finding's same severity; the counts stay the counts you already report.
+Each `id` is yours to mint (for example, `RV1-1`), must be unique within this
+review, and must not be reused for a different finding in the same review.
+Reuse the same id across rounds only if it is literally the same finding.
+`findings` is optional: omit it and the run behaves exactly as before. The
+driver never invents an id you did not write.
 
 ## Gate triage
 

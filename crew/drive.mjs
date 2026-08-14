@@ -464,6 +464,7 @@ export function driveTask(ctx, io) {
   let gateProvenGeneration = null // the generation whose proof is already recorded
   let gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
   let gateProofNote = null        // operator-facing detail, set only on a contained throw
+  let gateProofOutput = null
 
   // The proof, recorded ONCE per generation at that generation's first pristine
   // run — the repair re-proof when there is one, otherwise the gate's first
@@ -493,8 +494,76 @@ export function driveTask(ctx, io) {
     // The FULL predicate (:76-82), not bare non-zero exit: a crash, a missing
     // summary, or an errored check is not discrimination. A green pristine run
     // is 'failed' whatever it printed.
-    gateDiscrimination = !pristine.ok && !baselineGateDefect(pristine.output) ? 'proven' : 'failed'
+    gateProofOutput = pristine.output
+    const defect = pristine.ok
+      ? "the gate is STILL green at baseline (pristine tree, the builder's changes set aside), so its verdict does not depend on the work"
+      : baselineGateDefect(pristine.output)
+    gateDiscrimination = defect ? 'failed' : 'proven'
+    gateProofNote = defect // null when proven; the throw path sets it above
     return pristine
+  }
+
+  // Accept a planner-returned replacement gate: a NEW generation (identity is
+  // the driver's, not the command string) that must prove itself on the
+  // pristine tree before it is trusted against the already-built tree.
+  const acceptRepairedGate = (cmd, label) => {
+    gateHistory.push(gateCmd)
+    gateCmd = cmd
+    gateGeneration += 1
+    recordGateProof(label)
+    gateReverified = gateDiscrimination === 'proven'
+  }
+
+  // ADR-030 §3: a failed proof is a GATE defect. The planner repairs it once,
+  // against the SAME single gate_repairs budget the reviewer-triage path uses,
+  // and the builder is NEVER bounced for evidence about the gate (#153 burned
+  // nine stages on exactly that misroute). The repair consumes no builder
+  // round. `unproven` is not `failed` and never reaches here: absence of
+  // evidence may not become a new way to lose a build.
+  //
+  // The loop runs at most twice: each pass spends budget, so the second failed
+  // proof falls into the escalation above it. That is what bounds a task at
+  // `1 + gate_repairs` pristine runs — reaching a third is a bug, not a budget
+  // question.
+  // Returns { escalation } | { repaired: bool }.
+  const settleFailedProof = () => {
+    let repaired = false
+    while (gateDiscrimination === 'failed') {
+      if (gateRepairs >= limits.gate_repairs) {
+        return { escalation: gateEscalate(`the acceptance gate did not prove it discriminates and the single gate repair is spent — ${gateProofNote}. Gate: ${gateCmd}`) }
+      }
+      gateRepairs += 1
+      stage(`gate-repair:${gateRepairs}`)
+      const b = art('gate-discrimination-bounce.md')
+      io.writeFile(b, [
+        '# Gate repair: your gate does not DISCRIMINATE (one repair allowed per task)',
+        '',
+        'The build is GREEN against your acceptance gate — but the driver ran the SAME',
+        "gate on the PRISTINE (pre-build) tree, with the builder's changes stashed away,",
+        `and the result is not proof that the gate measures the work: ${gateProofNote}.`,
+        '',
+        'A gate whose verdict does not depend on the work cannot accept it.',
+        '',
+        'Pristine run (verbatim, last 2000 chars):',
+        gateProofOutput.slice(-2000),
+        '',
+        'Preserve your old gate under a .r1 suffix, then fix it so it checks exactly what',
+        'the brief asked — you may NOT weaken or delete a legitimate check, and it must',
+        'print a final GATE-SUMMARY {"total":<n>,"failed":<n>,"errored":0} line.',
+        'Return the (possibly identical) gate_cmd in details.',
+        '',
+        `Gate: ${gateCmd}`,
+        `Plan: ${planPath}`,
+        `Brief: ${ctx.briefFile}`,
+      ].join('\n'))
+      const rep = assignAndWait('planner', b, 'gate-repair')
+      if (!(rep.status === 'done' && rep.details?.gate_cmd)) {
+        return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (planner returned ${rep.status}: ${rep.summary || 'no detail'}) — ${gateProofNote}. Gate: ${gateCmd}`) }
+      }
+      acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
+      repaired = true
+    }
+    return { repaired }
   }
 
   if (gateCmd) {
@@ -626,20 +695,27 @@ export function driveTask(ctx, io) {
           io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve your old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
           const rep = assignAndWait('planner', rBrief, 'gate-repair')
           if (rep.status === 'done' && rep.details?.gate_cmd) {
-            gateHistory.push(gateCmd)
-            gateCmd = rep.details.gate_cmd
-            gateGeneration += 1
-            gateReverified = false
-            const pristine = recordGateProof(`gate-reverify:${gateRepairs}`)
-            if (pristine) {
-              if (pristine.ok) {
-                return gateEscalate(`repaired gate is STILL green at baseline (pristine tree, builder's changes set aside): ${gateCmd} — vacuous acceptance cannot be built against`)
-              }
-              gateReverified = true
-            }
+            acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
+            // The re-proof no longer trusts bare `pristine.ok`: a repaired gate
+            // that crashes or prints no summary on the pristine tree is not red
+            // for the right reason either (#153, ADR-030 §3). The budget is
+            // already spent here, so a failed re-proof escalates — with the
+            // diagnosis that actually applies.
+            const settled = settleFailedProof()
+            if (settled.escalation) return settled.escalation
             gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd) // re-run immediately; no builder round consumed
           }
         }
+      }
+      // First green of this generation: measure, once. A generation repaired
+      // above was already proven by its re-proof, so this is a no-op there —
+      // which is what keeps the whole run within ADR-030's `1 + gate_repairs`
+      // bound on pristine runs.
+      if (gateRes.ok && gateProvenGeneration !== gateGeneration) {
+        recordGateProof(`gate-proof:${gateGeneration}`)
+        const settled = settleFailedProof()
+        if (settled.escalation) return settled.escalation
+        if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
       if (!gateRes.ok) {
         if (finalRound()) {
@@ -655,11 +731,6 @@ export function driveTask(ctx, io) {
         buildBrief = b; buildNote = 'gate-fix'
         continue
       }
-      // First green of this generation: measure, once. A generation repaired
-      // above was already proven by its re-proof, so this is a no-op there —
-      // which is what keeps the whole run within ADR-030's `1 + gate_repairs`
-      // bound on pristine runs.
-      if (gateProvenGeneration !== gateGeneration) recordGateProof(`gate-proof:${gateGeneration}`)
     }
 
     // Gate C (judgment, but enum-consumed): the reviewer. An unreadable

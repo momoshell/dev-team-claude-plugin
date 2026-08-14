@@ -195,6 +195,51 @@ Choose a **long-lived `--mode rpc` process** held open by the daemon. The captur
 
 Today's adapter contract in `crew/adapters/adapter-pi.mjs:11-31` declares none of these flags; #85 is where the interjection column lands. This spike changes no adapter code.
 
+## B11 (#148, 2026-08-14) — reassigning a SETTLED session
+
+Added after #148 asked whether a pi RPC seat can take a bounce. Capture:
+`captures/pi-b11-reassign.jsonl`; harness: `captures/pi-rpc-reassign.mjs`, kept
+separate from `pi-rpc-driver.mjs` so this spike's checked-in evidence is not
+altered.
+
+The question is `drive.mjs`-shaped, not protocol-shaped. Every bounce path in
+the loop — plan bounce, lane bounce, review bounce, gate repair — reassigns a
+seat that has **already returned an envelope**. So "reassign" means: after
+`agent_settled`, does a further assignment land and complete?
+
+Three arms, one session (`b11-recall-148`), luna at `--thinking low`:
+
+| Arm | What was sent | Result |
+|---|---|---|
+| A | after turn 1 settled, a second `prompt` on the **same process** | settled normally, replied `B11-SECOND-SAME-PROCESS-DONE` |
+| B | first process `stdin.end()`, exit 0; **new process** with `--session`, then a `prompt` | settled normally, replied `B11-THIRD-NEW-PROCESS-DONE` |
+| C | on that resumed process, "what marker did you reply with in your FIRST reply of this session?" | answered **`B11-FIRST-DONE`** — turn 1's marker, produced by a *different process* |
+
+**Finding: a settled pi RPC session is reassignable, same-process and
+cross-process, and history survives the process boundary.** Arm C is the
+load-bearing one: delivery is not memory, and a bounce brief saying "revise
+YOUR plan per this check" is worthless to a seat that cannot see the turn it is
+being bounced on.
+
+**Reporting caveat, recorded because it nearly misled this spike:** every
+`agent_end` carries `messages` of length 2 (one user, one assistant) on all four
+turns, including the recall turn. `agent_end.messages` is the **turn's**
+messages, not the session context — reading it as context would have produced
+the exact opposite conclusion. Arm C is what distinguishes them, and it is why
+the arm exists: an observed success is not evidence about the mechanism behind
+it (2026-08-07 conventions entry — capture the introspection surface separately
+from the behaviour surface).
+
+`adapter-pi.mjs`'s `headless-rpc` profile moves `reassign: false -> true` on
+this capture. #131's `false` recorded the absence of a capture, not an observed
+limitation.
+
+**Not measured:** reassignment after an *aborted* rather than settled turn (b7
+showed a fresh prompt works post-abort on the same process, but not
+cross-process); reassignment after a crash mid-turn (b10 covers resume, not a
+second assignment); concurrent clients on one session, which stays unmeasured
+and is still why ADR-029 §5 constraint 3 is ours to enforce.
+
 ## #85 input — what interjection pi can promise
 
 Pi can promise a **boundary steer**, not an interruption: send `steer` while a tool is running, the tool finishes undisturbed, then pi delivers the steer before the next LLM call. B6 shows the model actually saw the exact message. That is stronger than HW-1's claude result (`spike-findings.md` H5.2), where text stdin was read to EOF before the turn and kill+resume was the only correction path.

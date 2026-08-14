@@ -121,8 +121,9 @@ test('every shipped capability profile is exact, complete, and frozen', async ()
   assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(piPane))
   const piHeadless = piCapabilitiesFor({ transport: 'headless-rpc' })
-  // #131: no follow_up/reassign capture exists for headless-rpc.
-  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: false })
+  // #148: reassign captured live (captures/pi-b11-reassign.jsonl) — a settled
+  // session takes a further assignment same-process and cross-process.
+  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
   assert.ok(Object.isFrozen(piHeadless))
 })
 

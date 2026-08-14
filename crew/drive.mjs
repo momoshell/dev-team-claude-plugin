@@ -43,6 +43,44 @@ export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 export const SECOND_OPINION = 'second-opinion'
 export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead', 'planner'])
 
+// The gate's machine-readable summary line (#153). A gate must print it, and
+// the driver reads it to tell "every check RAN and failed" from "the command
+// exited non-zero" — which a wholly broken gate also does. `errored` counts
+// checks that threw before they could adjudicate anything.
+export const GATE_SUMMARY_PREFIX = 'GATE-SUMMARY'
+
+// Parse the LAST summary line in the gate's output, or null if there is none.
+// Last wins: a gate that re-runs a suite internally may legitimately print
+// more than one, and the final line is the one describing the whole run.
+// Anything malformed reads as ABSENT, never as a zero-errored pass — a
+// summary we cannot parse is not evidence that the gate ran.
+export function parseGateSummary(output) {
+  let found = null
+  for (const raw of String(output || '').split('\n')) {
+    const line = raw.trim()
+    if (!line.startsWith(GATE_SUMMARY_PREFIX)) continue
+    let obj
+    try { obj = JSON.parse(line.slice(GATE_SUMMARY_PREFIX.length).trim()) } catch { continue }
+    if (!obj || typeof obj !== 'object') continue
+    const { total, failed, errored } = obj
+    if (![total, failed, errored].every((n) => Number.isSafeInteger(n) && n >= 0)) continue
+    found = { total, failed, errored }
+  }
+  return found
+}
+
+// Why a baseline is not acceptable as red. null = it is acceptable.
+// A gate that did not RUN cannot have failed for the right reason, and at
+// baseline every check is red anyway, so a broken check hides in the crowd —
+// which is exactly how #153's ReferenceError survived to build round 3.
+export function baselineGateDefect(output) {
+  const summary = parseGateSummary(output)
+  if (!summary) return `the gate printed no ${GATE_SUMMARY_PREFIX} line, so the driver cannot tell a red gate from a broken one`
+  if (summary.errored > 0) return `${summary.errored} of ${summary.total} checks THREW instead of adjudicating — a gate that cannot run cannot be red for the right reason`
+  if (summary.failed === 0) return `the summary reports 0 failed checks, which contradicts the non-zero exit`
+  return null
+}
+
 function fail(stage, msg) {
   const err = new Error(`${stage}: ${msg}`)
   err.stage = stage
@@ -403,6 +441,29 @@ export function driveTask(ctx, io) {
       gateCmd = env2.details.gate_cmd
       const re = io.run(gateCmd)
       if (re.ok) return escalate('gate', 'repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
+    } else {
+      // Red — but red HOW? (#153) Non-zero exit is also what a gate whose
+      // every check throws produces, and at baseline everything is red, so a
+      // broken check is invisible until the implementation makes it
+      // reachable — nine stages later, with the one gate repair already spent.
+      // This bounce is pre-build hygiene and deliberately does NOT consume
+      // gateRepairs, exactly like the vacuous-green bounce above.
+      let defect = baselineGateDefect(baseline.output)
+      if (defect) {
+        stage('gate-baseline:defect-bounce')
+        const b = art('gate-defect-bounce.md')
+        io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYour gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
+        const env3 = assignAndWait('planner', b, 'gate-fix')
+        if (env3.status !== 'done' || !env3.details?.gate_cmd) {
+          return escalate('gate', `defective gate could not be repaired (planner returned ${env3.status}: ${env3.summary || 'no detail'})`)
+        }
+        gateHistory.push(gateCmd)
+        gateCmd = env3.details.gate_cmd
+        const re = io.run(gateCmd)
+        if (re.ok) return escalate('gate', 'repaired gate is GREEN at baseline — vacuous acceptance cannot be built against')
+        defect = baselineGateDefect(re.output)
+        if (defect) return escalate('gate', `repaired gate STILL does not run at baseline: ${defect}`)
+      }
     }
   }
 

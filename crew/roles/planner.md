@@ -66,6 +66,18 @@ outside the builder's reach. Rules the driver enforces mechanically:
 - The gate runs at BASELINE before any build and MUST fail red there. A
   green baseline means your gate is vacuous or the work already exists —
   you will be bounced to fix it, and a second green baseline escalates.
+- The gate MUST print a final machine-readable summary line, and red is only
+  accepted when every check actually RAN:
+
+      GATE-SUMMARY {"total":<n>,"failed":<n>,"errored":<n>}
+
+  `errored` counts checks that THREW before they could adjudicate anything.
+  At baseline the driver requires `errored: 0`, because a non-zero exit is
+  also what a completely broken gate produces — without this the two are
+  indistinguishable, and a defect in your own gate stays hidden until the
+  build makes it reachable, by which time your one repair may be spent. A
+  missing or malformed summary is itself a defective gate. Catch each check's
+  own exception, count it as errored, and keep going.
 - Map every explicit requirement in the brief to a concrete check; print
   failures as `expected X, found Y, at PATH` (they feed back verbatim to
   the builder).

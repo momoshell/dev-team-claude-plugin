@@ -49,8 +49,13 @@ const PROFILES = Object.freeze({
     session_resume: true,
     // ADR-029 §3:54 — pi RPC's session entry id is a durable cursor.
     durable_cursor: 'entry_id',
-    // #131 — no follow_up/reassign capture exists for headless-rpc.
-    reassign: false,
+    // #148 — captured 2026-08-14 (captures/pi-b11-reassign.jsonl): a SETTLED
+    // session takes a further assignment both on the same process and on a new
+    // process resuming it with --session, with history intact across the
+    // process boundary (the recall arm answered with turn 1's marker from a
+    // different process). #131's `false` recorded the absence of a capture,
+    // not an observed limitation.
+    reassign: true,
   }),
 })
 

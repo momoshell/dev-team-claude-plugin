@@ -665,3 +665,86 @@ test('a lock-only store creates no record directories', () => each(({ dir, deps 
   assert.equal(existsSync(join(sub, 'leases')), false)
   assert.equal(existsSync(join(sub, 'parks')), false)
 }))
+
+// --- review round-2 residuals, 2026-08-14 (each test dies without its guard) --
+
+// should-fix 1: the sweep's per-row catch. Another supervisor holding ONE
+// park's lock makes withLock throw reclaim-lock-unavailable for that row;
+// without the catch the throw aborts the whole sweep and every later park —
+// including healthy waiting rows — is silently skipped.
+test('a row whose lock is held elsewhere buckets unresolvable without aborting the sweep', () => { const f = deadFixture(); try {
+  const locked = parkFixture(f, 'r1', [{ role: 'a', sessionId: 'lk-a' }])
+  const waiting = parkFixture(f, 'r2', [{ role: 'b', sessionId: 'wt-b' }])
+  // The holder must look ALIVE to the sweeping store — under deadFixture's
+  // all-pids-dead kill, the engine's automatic ESRCH displacement would just
+  // take the lock over (correct behaviour, wrong scenario).
+  const liveKill = (pid, signal) => { if (pid === 701 || pid === -701) return true; const e = Error('gone'); e.code = 'ESRCH'; throw e }
+  const other = reclaimStore({ dir: f.dir, actor: 'other', deps: { ...f.deps, pid: 701, kill: liveKill } })
+  assert.equal(other.acquire(parkLockName(locked.id)).ok, true)
+  const sweeper = reclaimStore({ dir: f.dir, actor: 'sweeper', deps: { ...f.deps, kill: liveKill } })
+  const out = sweeper.reconcileParks({ enqueue: () => true, successorState: () => SUCCESSOR_STATES.ABSENT })
+  assert.equal(out.unresolvable.includes(locked.id), true, 'the contended row buckets unresolvable')
+  assert.equal(out.waiting.includes(waiting.id), true, 'rows after the contended one are still swept')
+} finally { f.done() } })
+
+// should-fix 2: the settlement vocabulary. An incomplete release must answer
+// lease-release-incomplete (retryable), never the terminal unresolvable —
+// collapsing the two is exactly what the r2 rework existed to prevent.
+test('settlePark reports lease-release-incomplete when a lease unlink fails', () => { const f = deadFixture(); try {
+  const { id, answer } = parkFixture(f)
+  const claimed = f.s.claim(id, { decision_id: answer.decision_id, successor_run_id: 'next', enqueue: () => true, successorState: () => SUCCESSOR_STATES.ABSENT })
+  assert.equal(claimed.ok, true)
+  const target = claimed.park.leases[0]
+  const targetPath = join(f.dir, 'leases', `${leaseKey(target.role, target.sessionId)}.json`)
+  const broken = reclaimStore({ dir: f.dir, actor: 'broken', deps: { ...f.deps, unlinkSync(path) { if (String(path) === targetPath) { const e = Error('io'); e.code = 'EIO'; throw e } return fsUnlink(path) } } })
+  const out = broken.settlePark(id, { successorState: () => SUCCESSOR_STATES.RESUMED })
+  assert.deepEqual({ ok: out.ok, reason: out.reason }, { ok: false, reason: 'lease-release-incomplete' })
+  assert.equal(broken.readPark(id).state, 'claimed', 'an incomplete release never persists the terminal state')
+} finally { f.done() } })
+
+// consider C2: the settle residue scan. All owned handles release cleanly, but
+// a stray same-spec lease under another key remains on disk — settlement must
+// refuse with the retryable reason rather than declare the seat set free.
+test('settlePark refuses on same-spec lease residue outside the released set', () => { const f = deadFixture(); try {
+  const { id, answer } = parkFixture(f)
+  const claimed = f.s.claim(id, { decision_id: answer.decision_id, successor_run_id: 'next', enqueue: () => true, successorState: () => SUCCESSOR_STATES.ABSENT })
+  assert.equal(claimed.ok, true)
+  const strayKey = leaseKey('c', 'sx')
+  writeFileSync(join(f.dir, 'leases', `${strayKey}.json`), JSON.stringify({ reservation_id: 'stray', key: strayKey, phase: LEASE_PHASES.HELD, role: 'c', sessionId: 'sx', spec: claimed.park.spec, owner: { pid: 999999999, startedAt: 1 }, at: 1 }))
+  const out = f.s.settlePark(id, { successorState: () => SUCCESSOR_STATES.RESUMED })
+  assert.deepEqual({ ok: out.ok, reason: out.reason }, { ok: false, reason: 'lease-release-incomplete' })
+} finally { f.done() } })
+
+// consider C5: bucket ordering, with ids whose FILENAME order differs from
+// their stem order ('a-b.json' < 'a.json' as filenames, 'a' < 'a-b' as stems)
+// so the promised ascending order is only true if the sweep actually sorts.
+test('sweep buckets are sorted by id, not by readdir filename order', () => { const f = deadFixture(); try {
+  writeFileSync(join(f.dir, 'parks', 'a.json'), '{nope')
+  writeFileSync(join(f.dir, 'parks', 'a-b.json'), '{nope')
+  const out = f.s.reconcileParks({ enqueue: () => true, successorState: () => SUCCESSOR_STATES.ABSENT })
+  assert.deepEqual(out.unresolvable, ['a', 'a-b'])
+} finally { f.done() } })
+
+// consider C6: the under-lock re-validation. The park file is valid when
+// listParks scans it and is tampered before the row's lock is taken — the
+// TOCTOU window the re-read exists for. A raw re-read would act on the
+// tampered record (here: link it under its forged park_id).
+test('a park tampered between the scan and its lock is re-validated, not acted on', () => { const f = deadFixture(); try {
+  const { id, answer } = parkFixture(f)
+  assert.equal(f.s.claim(id, { decision_id: answer.decision_id, successor_run_id: 'next', enqueue: () => true, successorState: () => SUCCESSOR_STATES.ABSENT }).ok, true)
+  const parkPath = join(f.dir, 'parks', `${id}.json`)
+  // Tamper AFTER listParks validated the row and exactly when its lock is
+  // being taken: flip claimed/pending to parked/null while leaving the spec
+  // and lease handles in place. That is malformed residue per the row
+  // invariant — a raw re-read would trust the phase and bucket it 'waiting',
+  // silently parking a row that still owns seats.
+  let tampered = false
+  const broken = reclaimStore({ dir: f.dir, actor: 'broken', deps: { ...f.deps, linkSync(from, to) {
+    if (!tampered && String(to).includes(parkLockName(id))) { tampered = true; writeFileSync(parkPath, JSON.stringify({ ...JSON.parse(readFileSync(parkPath, 'utf8')), state: 'parked', launch_state: null })) }
+    return fsLink(from, to)
+  } } })
+  const out = broken.reconcileParks({ enqueue: () => true, successorState: () => SUCCESSOR_STATES.ACTIVE })
+  assert.equal(out.unresolvable.includes(id), true, 'the tampered row is unresolvable')
+  assert.equal(out.waiting.length, 0, 'residue-carrying parked/null is never read as a healthy waiting row')
+  assert.equal(JSON.parse(readFileSync(parkPath, 'utf8')).state, 'parked', 'the row is left untouched for a human')
+} finally { f.done() } })

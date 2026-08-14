@@ -11,9 +11,11 @@ import {
   closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,
 } from './driver.mjs'
 import { headlessIo as defaultHeadlessIo } from './headless.mjs'
+import { headlessRpcIo as defaultHeadlessRpcIo } from './headless-rpc.mjs'
 
 export const DEFAULT_TRANSPORT = 'pane'
 export const HEADLESS_TRANSPORT = 'headless-json'
+export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
@@ -169,15 +171,29 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
   })
-  const headlessIo = deps.headlessIo || defaultHeadlessIo
   const resolveBin = deps.resolveWorkerBin || resolveWorkerBin
   let seq = 0
   const seatFor = new Map()
-  const headlessPaths = new Set()
-  const headlessRoles = Object.values(crew.members).some((m) => m.transport === HEADLESS_TRANSPORT)
-  const headless = headlessRoles
-    ? headlessIo({ crew, paths, taskDir: paths.taskDir, checkout, adapters, bin: crew.claude_bin || resolveBin(args), deps: { log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj) } })
-    : null
+  const transportForPath = new Map()
+  const transportFactories = {
+    [HEADLESS_TRANSPORT]: deps.headlessIo || defaultHeadlessIo,
+    [HEADLESS_RPC_TRANSPORT]: deps.headlessRpcIo || defaultHeadlessRpcIo,
+  }
+  const transportInstances = new Map()
+  const transportArgs = { crew, paths, taskDir: paths.taskDir, checkout, adapters, bin: null, deps: { log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj) } }
+  function transportIo(name, role) {
+    if (!transportFactories[name]) throw new Error(`unknown transport "${name}" for seat ${role}`)
+    if (!transportInstances.has(name)) {
+      // Claude's frozen worker binary is for headless-json only; RPC is
+      // explicitly pi --mode rpc and must never inherit crew.claude_bin.
+      const factoryArgs = {
+        ...transportArgs,
+        bin: name === HEADLESS_RPC_TRANSPORT ? 'pi' : (crew.claude_bin || resolveBin(args)),
+      }
+      transportInstances.set(name, transportFactories[name](factoryArgs))
+    }
+    return transportInstances.get(name)
+  }
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
@@ -187,9 +203,10 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       const { role, briefFile } = spec
       const m = crew.members[role]
       if (!m) throw new Error(`role ${role} not seated in this crew`)
-      if (m.transport === HEADLESS_TRANSPORT) {
-        const result = headless.assign(spec)
-        headlessPaths.add(result.returnPath)
+      if (m.transport !== DEFAULT_TRANSPORT) {
+        const transport = transportIo(m.transport, role)
+        const result = transport.assign(spec)
+        transportForPath.set(result.returnPath, transport)
         return result
       }
       seq += 1
@@ -203,7 +220,8 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       return { id, returnPath }
     },
     wait(returnPath, timeoutS) {
-      if (headlessPaths.has(returnPath)) return headless.wait(returnPath, timeoutS)
+      const transport = transportForPath.get(returnPath)
+      if (transport) return transport.wait(returnPath, timeoutS)
       const seat = seatFor.get(returnPath)
       try {
         return waitForEnvelope({

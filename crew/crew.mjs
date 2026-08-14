@@ -29,11 +29,11 @@ import { execSync } from 'node:child_process'
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { driveTask } from './drive.mjs'
 import {
-  realIo, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT,
+  realIo, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
 } from './realio.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
-  DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, WAIT_POLL_MS, LIVENESS_PROBE_MS,
+  DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, WAIT_POLL_MS, LIVENESS_PROBE_MS,
   LIVENESS_MISSES_TO_DIE,
 } from './realio.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
@@ -100,9 +100,16 @@ function seatAgent(role, args) {
 // silently weaker seat. Returns undefined on success.
 
 export function transportFor(role, args = {}) {
-  const list = String(args.headless === true ? '' : (args.headless || ''))
+  const headless = String(args.headless === true ? '' : (args.headless || ''))
     .split(',').map((s) => s.trim()).filter(Boolean)
-  return list.includes(role) ? HEADLESS_TRANSPORT : DEFAULT_TRANSPORT
+  const rpc = String(args['headless-rpc'] === true ? '' : (args['headless-rpc'] || ''))
+    .split(',').map((s) => s.trim()).filter(Boolean)
+  if (headless.includes(role) && rpc.includes(role)) {
+    throw new Error(`role ${role} is named by both --headless and --headless-rpc`)
+  }
+  if (rpc.includes(role)) return HEADLESS_RPC_TRANSPORT
+  if (headless.includes(role)) return HEADLESS_TRANSPORT
+  return DEFAULT_TRANSPORT
 }
 
 export function assertCapabilities(role, agentName, capabilities) {
@@ -265,9 +272,12 @@ async function bootCmd(args) {
   for (const r of roles) if (!SEAT_DEFAULTS[r]) throw new Error(`unknown crew role: ${r}`)
   const headlessNames = String(args.headless === true ? '' : (args.headless || ''))
     .split(',').map((r) => r.trim()).filter(Boolean)
-  for (const role of headlessNames) if (!roles.includes(role)) {
-    throw new Error(`--headless ${role} given but crew seats no ${role}`)
+  const rpcNames = String(args['headless-rpc'] === true ? '' : (args['headless-rpc'] || ''))
+    .split(',').map((r) => r.trim()).filter(Boolean)
+  for (const role of [...headlessNames, ...rpcNames]) if (!roles.includes(role)) {
+    throw new Error(`transport role ${role} given but crew seats no ${role}`)
   }
+  for (const role of roles) transportFor(role, args) // detects ambiguous lists before cmux boot
   // Resolve adapters before touching cmux — a bad --agent-<role> or a
   // capability shortfall must fail before a workspace gets created.
   const adapters = await resolveAdapters(roles, args, tierSeats)
@@ -340,7 +350,7 @@ async function bootCmd(args) {
       members[role] = memberFor(role, panes[i], surface)
     })
   }
-  for (const role of roles.filter((r) => transportFor(r, args) === HEADLESS_TRANSPORT)) members[role] = memberFor(role)
+  for (const role of roles.filter((r) => transportFor(r, args) !== DEFAULT_TRANSPORT)) members[role] = memberFor(role)
   for (const role of paneRoles) renameTab(members[role].surface_id, role)
 
   const crew = {

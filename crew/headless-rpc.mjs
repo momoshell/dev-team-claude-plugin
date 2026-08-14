@@ -1,0 +1,419 @@
+// The stream is transport and observability, never the record; the envelope is
+// the record; idle ≠ success. This synchronous supervisor keeps one pi RPC
+// process per seat alive across assignments.
+import {
+  existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
+  unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync,
+  openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
+} from 'node:fs'
+import { join } from 'node:path'
+import { spawn as cpSpawn } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
+
+import { assignmentLine } from './driver.mjs'
+import { shq, classifyRun } from './headless.mjs'
+import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
+import { translateDeny } from './adapters/adapter-pi.mjs'
+
+export const WAIT_POLL_MS = 5000
+const ABORT_SETTLE_MS = 2000
+const FIFO_RETRIES = 20
+const FIFO_RETRY_MS = 100
+
+// Do not use node:readline here. captures/pi-b5-readline-trap.txt has two
+// LF-delimited records, while readline incorrectly exposes three around U+2028.
+export function splitFrames(buffer) {
+  const input = Buffer.isBuffer(buffer) ? buffer : Buffer.from(String(buffer ?? ''), 'utf8')
+  const lines = []
+  let start = 0
+  for (;;) {
+    const nl = input.indexOf(0x0a, start)
+    if (nl < 0) break
+    let line = input.subarray(start, nl).toString('utf8')
+    if (line.endsWith('\r')) line = line.slice(0, -1)
+    lines.push(line)
+    start = nl + 1
+  }
+  return { lines, rest: input.subarray(start) }
+}
+
+export function rpcCommand(spec = {}) {
+  const {
+    bin = 'pi', model, effort, sessionDir, sessionId, resume, promptFile,
+    deny, env = {},
+  } = spec
+  return {
+    bin,
+    args: [
+      '--mode', 'rpc', '--model', model,
+      ...(effort ? ['--thinking', effort] : []),
+      '--session-dir', sessionDir,
+      ...(resume ? ['--session', sessionId] : ['--session-id', sessionId]),
+      '--append-system-prompt', promptFile,
+      ...(translateDeny(deny).length ? ['--exclude-tools', translateDeny(deny).join(',')] : []),
+      '--no-context-files', '--no-extensions', '--no-skills',
+    ],
+    env,
+  }
+}
+
+const byteLength = (value) => Buffer.isBuffer(value) ? value.length : Buffer.byteLength(String(value ?? ''), 'utf8')
+
+function parseExit(path, read, exists) {
+  if (!path || !exists(path)) return null
+  try {
+    const n = Number(String(read(path, 'utf8')).trim())
+    return Number.isFinite(n) ? n : null
+  } catch { return null }
+}
+
+function envelopeAt(path, read, exists) {
+  if (!path || !exists(path)) return null
+  try {
+    const value = JSON.parse(String(read(path, 'utf8')))
+    return value && typeof value === 'object' ? value : null
+  } catch { return null }
+}
+
+function adapterFor(adapters, role) {
+  const entry = adapters?.[role]
+  return entry?.adapter || entry || null
+}
+
+function persistCrew(crew, paths, write) {
+  if (!paths?.dir) return
+  const file = join(paths.dir, 'crew.json')
+  try { if (fsExistsSync(file)) write(file, JSON.stringify(crew, null, 2)) } catch { /* diagnostics only */ }
+}
+
+function staged(stage, message, role) {
+  const err = new Error(message || stage)
+  err.stage = stage
+  if (role) err.role = role
+  return err
+}
+
+export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, deps = {} }) {
+  const spawn = deps.spawn || cpSpawn
+  const open = deps.openSync || fsOpenSync
+  const writeFd = deps.writeSync || fsWriteSync
+  const closeFd = deps.closeSync || fsCloseSync
+  const exists = deps.existsSync || fsExistsSync
+  const read = deps.readFileSync || fsReadFileSync
+  const write = deps.writeFileSync || fsWriteFileSync
+  const unlink = deps.unlinkSync || fsUnlinkSync
+  const mkdir = deps.mkdirSync || fsMkdirSync
+  const readdir = deps.readdirSync || fsReaddirSync
+  const kill = deps.kill || ((p, signal) => process.kill(p, signal))
+  const uuid = deps.uuid || randomUUID
+  const now = deps.now || (() => Date.now())
+  const sleep = deps.sleep || ((ms) => {
+    const sab = new SharedArrayBuffer(4)
+    Atomics.wait(new Int32Array(sab), 0, 0, ms)
+  })
+  const pid = deps.pid ?? process.pid
+  const injectedLog = deps.log
+  const root = join(taskDir || paths.taskDir, 'headless-rpc')
+  const store = reclaimStore({
+    dir: root, actor: `headless-rpc:${pid}`, deps,
+    // The seat layout intentionally differs from headless-json's d<n> run
+    // directories; register its role-local pgid as the same evidence kind.
+    evidencePolicies: { [EVIDENCE_KINDS.PGID]: (_role, marker) => marker?.evidence || null },
+  })
+  const seats = new Map()
+  const pending = new Map()
+  let commandSeq = 0
+
+  function log(value) {
+    if (injectedLog) return injectedLog(value)
+    try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(value)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
+  }
+  function seatDir(role) { return join(root, role) }
+  function seatFile(role, name) { return join(seatDir(role), name) }
+  function sessionPath(role) { return seatFile(role, 'session.json') }
+  function readJson(path) {
+    try { return exists(path) ? JSON.parse(String(read(path, 'utf8'))) : null } catch { return null }
+  }
+  function saveJson(path, value) { write(path, JSON.stringify(value, null, 2)) }
+  function session(role) { return readJson(sessionPath(role)) || {} }
+  function saveSession(role, value) { saveJson(sessionPath(role), { ...session(role), ...value }) }
+  function commandId(turn, command) {
+    commandSeq += 1
+    return `${turn?.id || 'rpc'}-${command}-${commandSeq}`
+  }
+  function fileSize(path) {
+    if (!exists(path)) return 0
+    try { return byteLength(read(path)) } catch { return 0 }
+  }
+  function nextAssignmentId() {
+    let max = 0
+    const inspect = (name) => { const m = /^d(\d+)(?:\.|$)/.exec(name); if (m) max = Math.max(max, Number(m[1])) }
+    try { for (const name of readdir(root)) inspect(name) } catch {}
+    try { for (const name of readdir(paths.returnsDir)) inspect(name) } catch {}
+    try {
+      for (const name of readdir(root)) {
+        const saved = readJson(join(root, name, 'session.json'))
+        max = Math.max(max, Number(String(saved?.lastAssignmentId || '').slice(1)) || 0)
+      }
+    } catch {}
+    for (const seat of seats.values()) max = Math.max(max, Number(String(session(seat.role).lastAssignmentId || '').slice(1)) || 0)
+    return `d${max + 1}`
+  }
+  function readFrames(seat) {
+    const path = seat.stream
+    if (!exists(path)) return []
+    let current
+    try {
+      const raw = read(path)
+      current = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), 'utf8')
+    } catch { return [] }
+    if (current.length < seat.readOffset) { seat.readOffset = 0; seat.rest = Buffer.alloc(0) }
+    const chunk = current.subarray(seat.readOffset)
+    seat.readOffset = current.length
+    const split = splitFrames(Buffer.concat([seat.rest || Buffer.alloc(0), chunk]))
+    seat.rest = split.rest
+    const out = []
+    for (const line of split.lines) {
+      if (!line.trim()) continue
+      try { out.push(JSON.parse(line)) } catch { /* truncated or diagnostic lines are inert */ }
+    }
+    return out
+  }
+  function fold(seat, frames) {
+    for (const frame of frames) {
+      if (!frame || typeof frame !== 'object') continue
+      if (seat.turn) {
+        seat.turn.state.sawJson = true
+        if (frame.type === 'agent_settled') seat.turn.state.settled = true
+        // agent_end is only the conversation boundary; it is not completion.
+        if (frame.type === 'agent_end') seat.turn.state.ended = true
+      }
+      if (frame.type === 'response') {
+        if (frame.id != null) {
+          seat.responses.set(frame.id, frame)
+          pending.delete(frame.id)
+        }
+      }
+    }
+    return frames
+  }
+  function pollSeat(seat) { return fold(seat, readFrames(seat)) }
+  function responseError(role, frame) {
+    const command = frame.command || 'unknown'
+    return staged('rpc-command-error', `rpc command ${JSON.stringify(command)} failed: ${frame.error || 'unknown error'}`, role)
+  }
+  function send(seat, obj, command = obj.type || obj.command || 'command') {
+    const id = obj.id || commandId(seat.turn, command)
+    const value = { ...obj, id }
+    pending.set(id, { command, at: now() })
+    writeFd(seat.fd, `${JSON.stringify(value)}\n`)
+    return id
+  }
+  function ensureProcess(role, assignmentId = 'd0') {
+    const member = crew.members?.[role]
+    if (!member) throw new Error(`role ${role} not seated in this crew`)
+    let seat = seats.get(role)
+    if (seat && (!seat.exit || !exists(seat.exit))) return seat
+    if (seat?.fd != null) { try { closeFd(seat.fd) } catch {} }
+    if (seat?.handle) { try { store.clear(seat.handle) } catch {} }
+    seat = null
+    const dir = seatDir(role)
+    mkdir(dir, { recursive: true })
+    const stream = seatFile(role, 'stream.jsonl'), stderr = seatFile(role, 'stderr.log')
+    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), fifo = seatFile(role, 'cmd.fifo'), cmdPath = seatFile(role, 'cmd.json')
+    const old = session(role)
+    const sessionId = member.session_id || old.sessionId || uuid()
+    const resume = !!(member.started || old.sessionId)
+    // A prior process may have exited while this supervisor was away. Observe
+    // its completion proof before removing the reusable seat's exit marker.
+    const prior = store.reconcile(role)
+    if (prior.marker?.exit && exists(prior.marker.exit)) {
+      try { store.clear(prior.handle) } catch {}
+    }
+    if (exists(exit)) { try { unlink(exit) } catch {} }
+    let marker = store.reconcile(role)
+    let fd = null
+    let child = null
+    if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
+      // Adopt a still-running seat rather than opening a second pi session.
+      fd = open(fifo, 'r+')
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null }
+      seats.set(role, seat)
+      return seat
+    }
+    if (marker.verdict === VERDICTS.UNRESOLVABLE) throw staged('rpc-unresolvable-reservation', `rpc seat ${role} has an unresolvable reservation`, role)
+    if (marker.verdict === VERDICTS.RECLAIMABLE) { try { store.clear(marker.handle) } catch {} }
+    const adapter = adapterFor(adapters, role)
+    const commandFactory = adapter?.rpcCommand || rpcCommand
+    const command = commandFactory.call(adapter, {
+      role, model: member.model, effort: member.effort, sessionDir: dir,
+      sessionId, resume, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`),
+      deny: member.deny, bin: bin || 'pi', taskDir: taskDir || paths.taskDir,
+      env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
+    })
+    const args = command.args || []
+    const shell = `rm -f ${shq(exit)}; mkfifo ${shq(fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin || bin || 'pi')} ${args.map(shq).join(' ')} <${shq(fifo)} >>${shq(stream)} 2>>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
+    const reservation = store.reserve(role, {
+      phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid },
+      role, id: assignmentId, dir, returnPath: '', exit, startedAt: now(),
+    })
+    if (!reservation.ok) throw staged(reservation.reason === 'unresolvable' ? 'rpc-unresolvable-reservation' : 'rpc-session-busy', `rpc seat ${role} is busy`, role)
+    const handle = reservation.handle
+    try {
+      saveJson(cmdPath, command)
+      store.advance(handle, PHASES.SPAWNING)
+      child = spawn('/bin/sh', ['-c', shell], { detached: true, stdio: 'ignore', cwd: checkout || crew.checkout, env: { ...process.env, ...(command.env || {}) } })
+      child.unref?.()
+      store.advance(handle, PHASES.RUNNING, { pid: child.pid })
+      // Opening is the probe: injected supervisors may model the FIFO without
+      // materializing a filesystem node, while the real O_RDWR open fails until
+      // mkfifo has completed. Keep the retry bounded in either case.
+      for (let i = 0; i < FIFO_RETRIES && fd == null; i += 1) {
+        try { fd = open(fifo, 'r+') } catch { sleep(FIFO_RETRY_MS) }
+      }
+      if (fd == null) throw staged('rpc-spawn-failed', `rpc fifo did not appear for seat ${role}`, role)
+      member.session_id = sessionId; member.started = true
+      persistCrew(crew, paths, write)
+      saveSession(role, { sessionId, pid: child.pid, startedAt: now(), lastAssignmentId: assignmentId })
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, handle }
+      seats.set(role, seat)
+      return seat
+    } catch (err) {
+      // A SPAWNING marker is deliberately retained when the child may have
+      // started; reclaimStore is the authority used to resolve that case.
+      if (!child) { try { store.clear(handle) } catch {} }
+      throw err
+    }
+  }
+  function commandResponse(seat, id, timeoutMs = ABORT_SETTLE_MS) {
+    const deadline = now() + timeoutMs
+    while (now() <= deadline) {
+      pollSeat(seat)
+      const frame = seat.responses.get(id)
+      if (frame) return frame
+      sleep(WAIT_POLL_MS)
+    }
+    return null
+  }
+  function assign({ role, briefFile, note }) {
+    const member = crew.members?.[role]
+    if (!member) throw new Error(`role ${role} not seated in this crew`)
+    let existing = seats.get(role)
+    if (existing?.turn && !existing.turn.state.settled) throw staged('rpc-session-busy', `rpc seat ${role} already has an in-flight turn`, role)
+    const id = nextAssignmentId()
+    const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
+    if (exists(returnPath)) unlink(returnPath)
+    const seat = ensureProcess(role, id)
+    const offset = fileSize(seat.stream)
+    seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
+    const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
+    const turn = { id, role, returnPath, offset, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
+    seat.turn = turn
+    const promptId = send(seat, { type: 'prompt', message: prompt, id }, 'prompt')
+    turn.promptId = promptId
+    saveSession(role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(role).startedAt || now(), lastAssignmentId: id })
+    return { id, returnPath }
+  }
+  function finishTurn(seat) { seat.turn = null; seat.responses.clear() }
+  function killAfterTimeout(seat) {
+    try { kill(-seat.pid, 'SIGTERM') } catch {}
+    const deadline = now() + ABORT_SETTLE_MS
+    while (now() < deadline && parseExit(seat.exit, read, exists) === null) sleep(WAIT_POLL_MS)
+    if (parseExit(seat.exit, read, exists) === null) {
+      let proven = false
+      try { kill(-seat.pid, 'SIGKILL'); proven = true } catch (err) { proven = err?.code === 'ESRCH' }
+      if (!proven) {
+        const current = store.reconcile(seat.role)
+        if (current.marker?.reservation_id === seat.handle?.reservation_id) proven = store.probeEvidence(current.marker.evidence) === LIVENESS.DEAD
+      }
+      if (proven && seat.handle) store.clear(seat.handle)
+    }
+  }
+  function abort(role, options = {}) {
+    const seat = seats.get(role)
+    if (!seat?.turn) throw staged('rpc-session-not-in-flight', `rpc seat ${role} has no in-flight turn`, role)
+    const id = send(seat, { type: 'abort' }, 'abort')
+    const deadline = now() + (options.settleMs ?? ABORT_SETTLE_MS)
+    let response = null
+    while (now() <= deadline) {
+      pollSeat(seat)
+      response ||= seat.responses.get(id)
+      if (seat.turn.state.settled) return response
+      sleep(WAIT_POLL_MS)
+    }
+    return response
+  }
+  // Boundary delivery, not interruption: an in-flight tool completes
+  // undisturbed, and the guidance never changes wait()'s outcome.
+  function steer(role, message) {
+    const seat = seats.get(role)
+    if (!seat?.turn || seat.turn.state.settled) throw staged('rpc-session-not-in-flight', `rpc seat ${role} has no in-flight turn`, role)
+    const id = send(seat, { type: 'steer', message }, 'steer')
+    const response = commandResponse(seat, id)
+    if (!response) throw staged('rpc-timeout', `timed out waiting for steer response for seat ${role}`, role)
+    if (response.success === false) throw responseError(role, response)
+    return response
+  }
+  function wait(returnPath, timeoutS) {
+    const seat = [...seats.values()].find((s) => s.turn?.returnPath === returnPath)
+    if (!seat) throw staged('rpc-no-envelope', `no rpc turn for ${returnPath}`)
+    const turn = seat.turn
+    const deadline = now() + Number(timeoutS) * 1000
+    while (now() < deadline) {
+      const frames = pollSeat(seat)
+      for (const frame of frames) {
+        if (frame?.type === 'response' && frame.command === 'parse' && frame.success === false) {
+          finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
+        }
+        if (frame?.type === 'response' && frame.id === turn.id && frame.success === false) {
+          finishTurn(seat); throw responseError(turn.role, frame)
+        }
+      }
+      const env = envelopeAt(returnPath, read, exists)
+      const exitCode = parseExit(seat.exit, read, exists)
+      if (env) {
+        const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: env, timedOut: false })
+        log({ at: now(), rpc_outcome: outcome, role: turn.role, id: turn.id, exit_code: exitCode })
+        finishTurn(seat)
+        return env
+      }
+      if (exitCode !== null) {
+        const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: null, timedOut: false })
+        finishTurn(seat)
+        throw staged(`rpc-${outcome}`, `rpc ${outcome}: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
+      }
+      if (turn.state.settled) {
+        finishTurn(seat)
+        throw staged('rpc-no-envelope', `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
+      }
+      sleep(WAIT_POLL_MS)
+    }
+    abort(turn.role, { settleMs: ABORT_SETTLE_MS })
+    if (!turn.state.settled) killAfterTimeout(seat)
+    finishTurn(seat)
+    throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath}`, turn.role)
+  }
+  function entries(role, { since } = {}) {
+    const seat = ensureProcess(role, 'd0')
+    seat.responses.clear()
+    const priorCursor = since ?? session(role).cursor ?? session(role).entries
+    const id = send(seat, { type: 'get_entries', ...(priorCursor ? { since: priorCursor } : {}) }, 'get_entries')
+    const response = commandResponse(seat, id)
+    if (!response) throw staged('rpc-timeout', `timed out waiting for entries for seat ${role}`, role)
+    if (response.success === false) throw responseError(role, response)
+    const data = response.data || {}
+    const list = Array.isArray(data.entries) ? data.entries : []
+    const cursor = list.at(-1)?.id ?? data.leafId
+    saveSession(role, { cursor, entries: cursor })
+    return response
+  }
+  function close(role) {
+    const targets = role ? [seats.get(role)].filter(Boolean) : [...seats.values()]
+    for (const seat of targets) {
+      try { closeFd(seat.fd) } catch {}
+      if (seat.handle) { try { store.clear(seat.handle) } catch {} }
+      seats.delete(seat.role)
+    }
+  }
+  return { assign, wait, steer, abort, entries, close }
+}

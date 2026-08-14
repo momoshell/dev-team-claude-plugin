@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { realIo } from './realio.mjs'
 import { headlessIo } from './headless.mjs'
+import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './realio.mjs'
 import { assignmentLine } from './driver.mjs'
 
@@ -119,9 +120,47 @@ function makeHeadlessIo() {
   return { io, paths, commands, clock: () => clock, setResult: (p) => { resultPath = p }, assignmentPolls: () => polls }
 }
 
+function makeHeadlessRpcIo() {
+  const paths = dirs()
+  let clock = 0
+  let resultPath = null
+  let polls = 0
+  const commands = []
+  const baseExists = fsExistsSync
+  const baseRead = fsReadFileSync
+  const deps = {
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    pid: 777,
+    uuid: () => 'session-rpc-1',
+    spawn: (_bin, argv) => { commands.push({ kind: 'spawn', argv }); return { pid: 889, unref() {} } },
+    openSync: () => 19,
+    writeSync: (_fd, line) => { commands.push({ kind: 'write', line }) },
+    closeSync: () => {},
+    existsSync: (path) => {
+      if (path === resultPath) { polls += 1; return FAULT === 'wait-poll' ? polls >= 8 : true }
+      if (String(path).endsWith('/cmd.fifo')) return true
+      return baseExists(path)
+    },
+    readFileSync: (path, ...args) => {
+      if (path === resultPath && (FAULT !== 'wait-poll' || polls >= 8)) return JSON.stringify({ status: 'done', subject: 'headlessRpcIo' })
+      return baseRead(path, ...args)
+    },
+    writeFileSync: fsWriteFileSync,
+    unlinkSync: fsUnlinkSync,
+    mkdirSync,
+    readdirSync,
+    log: () => {},
+  }
+  const crew = { members: { builder: { model: 'model', transport: 'headless-rpc' } } }
+  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: paths.dir, adapters: { builder: {} }, bin: '/bin/pi', deps })
+  return { io, paths, commands, clock: () => clock, setResult: (p) => { resultPath = p }, assignmentPolls: () => polls }
+}
+
 const SUBJECTS = [
   { name: 'realIo', methods: [...REQUIRED, ...OPTIONAL], make: makeRealIo },
   { name: 'headlessIo', methods: ['assign', 'wait'], make: makeHeadlessIo },
+  { name: 'headlessRpcIo', methods: ['assign', 'wait'], make: makeHeadlessRpcIo },
 ]
 
 for (const subject of SUBJECTS) {
@@ -142,9 +181,13 @@ for (const subject of SUBJECTS) {
       assert.equal(fixture.sent[0].surface, 'surface-builder')
       for (const value of [briefFile, out.id, 'builder', out.returnPath]) assert.ok(fixture.sent[0].line.includes(value))
       fixture.setResult(out.returnPath)
-    } else {
+    } else if (subject.name === 'headlessIo') {
       const command = fixture.commands.find((x) => x.kind === 'command').spec
       for (const value of [briefFile, out.id, 'builder', out.returnPath]) assert.ok(command.prompt.includes(value))
+      fixture.setResult(out.returnPath)
+    } else {
+      const command = fixture.commands.find((x) => x.kind === 'write' && JSON.parse(x.line).type === 'prompt')
+      for (const value of [briefFile, out.id, 'builder', out.returnPath]) assert.ok(JSON.parse(command.line).message.includes(value))
       fixture.setResult(out.returnPath)
     }
   })
@@ -230,4 +273,16 @@ test('realIo delegates headless transport through the injected headless factory'
   const io = realIo(crew, f.paths, f.paths.dir, null, null, {}, { headlessIo: () => delegated, resolveWorkerBin: () => '/bin/worker' })
   assert.deepEqual(io.assign({ role: 'builder' }), { id: 'h1', returnPath: '/tmp/h1' })
   assert.deepEqual(io.wait('/tmp/h1', 1), { status: 'done' })
+})
+
+test('realIo gives headless-rpc pi rather than the claude worker binary', () => {
+  const f = makeRealIo(); let args = null
+  const delegated = { assign: () => ({ id: 'r1', returnPath: '/tmp/r1' }), wait: () => ({ status: 'done' }) }
+  const crew = { members: { builder: { transport: 'headless-rpc' } } }
+  const io = realIo(crew, f.paths, f.paths.dir, null, null, {}, {
+    headlessRpcIo: (received) => { args = received; return delegated },
+    resolveWorkerBin: () => { throw new Error('RPC must not resolve claude-bin') },
+  })
+  assert.deepEqual(io.assign({ role: 'builder' }), { id: 'r1', returnPath: '/tmp/r1' })
+  assert.equal(args.bin, 'pi')
 })

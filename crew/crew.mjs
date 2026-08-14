@@ -28,6 +28,7 @@ import { execSync } from 'node:child_process'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { driveTask } from './drive.mjs'
+import { reclaimStore } from './reclaim.mjs'
 import {
   realIo, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
 } from './realio.mjs'
@@ -290,6 +291,42 @@ export function composeLayout(roles, mk) {
   return { direction: 'horizontal', split: 0.42, children: [head, stackVertical(rest)] }
 }
 
+// The park's seats are the crew's seated members. sessionId prefers the pane
+// surface (what a human would reattach to) and falls back so a headless seat
+// still yields a non-blank, unique key; `warm` records whether a live pane
+// survived the escalation.
+export function parkSeats(crew) {
+  return (crew?.roles || [])
+    .filter((role) => crew.members?.[role])
+    .map((role) => {
+      const m = crew.members[role]
+      return { role, sessionId: m.surface_id || m.pane_id || `${m.transport}:${role}`, warm: !!m.surface_id }
+    })
+}
+
+// ADR-029 §4's canonical attention shape, escalation moment. park_id is
+// PRESENT on every event, minted or null.
+export function escalationAttention({ task, park_id, why, artifacts = [] }) {
+  return { kind: 'attention', moment: 'escalation', park_id: park_id ?? null, task, why, artifacts }
+}
+
+// Outcome-gated in the function itself, so `done mints nothing` is a property
+// of the seam and not of its one call site. Returns {park_id, error}; NEVER
+// throws (D2) — a store that cannot be opened or a mint that cannot complete
+// is reported, not raised.
+export function parkOnOutcome(result, { crew, runId, dir, reason, actor = 'crew', openStore } = {}) {
+  if (result?.status !== 'escalation') return { park_id: null, error: null }
+  const open = openStore || ((d) => reclaimStore({ dir: d, actor }))
+  let res
+  try {
+    const seats = parkSeats(crew)
+    if (!seats.length) return { park_id: null, error: 'no seated members to park' }
+    res = open(dir).mintPark({ run_id: runId, seats, reason: reason || '' })
+  } catch (err) { return { park_id: null, error: err?.message || String(err) } }
+  if (!res?.ok || !res.park?.park_id) return { park_id: null, error: res?.reason || 'mint failed' }
+  return { park_id: res.park.park_id, error: null }
+}
+
 async function bootCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -477,6 +514,29 @@ function runCmd(args) {
       artifacts: [journal],
       details: { stages: null, commit: null, dissents: [], escalation: { where: err.stage || 'driver', why: err.message } },
     }
+  }
+  // Outcome-gated recovery state (#165): an escalation leaves a parked/null
+  // park whose seats are this crew's, and the attention event carries its id.
+  // A mint failure is loud but non-fatal (ADR-029 §4 amendment): the run still
+  // escalates, and the workspace it never tears down stays the fallback
+  // context.
+  const { park_id, error: parkError } = parkOnOutcome(result, {
+    crew, runId: emitter?.adwId || `${taskSlug}-${new Date().toISOString()}`,
+    dir: join(paths.dir, 'reclaim'), actor: `crew:${taskSlug}`,
+    reason: result.details?.escalation?.why || result.summary || '',
+  })
+  if (parkError) {
+    logLine(journal, { at: new Date().toISOString(), event: 'park-mint-failed', error: parkError })
+    process.stderr.write(`warning: could not mint an escalation park (${parkError}) — the workspace at ${paths.dir} is the recovery context\n`)
+  }
+  if (result.status === 'escalation') {
+    const attention = escalationAttention({
+      task: taskSlug, park_id,
+      why: result.details?.escalation?.why || result.summary || '',
+      artifacts: result.artifacts || [],
+    })
+    logLine(journal, { at: new Date().toISOString(), ...attention })
+    try { io.emit?.(attention) } catch { /* instrumentation is never load-bearing */ }
   }
   try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
   // The task envelope is written by CODE — same path `wait` watches.

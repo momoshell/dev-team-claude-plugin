@@ -41,10 +41,11 @@
 // unexpected internal throw (mapped to 1).
 //
 // CLI verbs: `sessions` | `phases <adw_id>` | `tail <adw_id> [--after n]
-// [--limit n]` | `procs <adw_id>` — the four read-only verbs the npm
-// `ledger:*` recipes invoke (spellings are a contract with package.json;
-// see do-40-02) — plus `doctor` (capability + state readout) and `kill`
-// (operator-invoked process termination, its own refusal-gated helper).
+// [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
+// `eligible-tasks` — the read-only verbs the npm `ledger:*` recipes invoke
+// (spellings are a contract with package.json; see do-40-02) — plus `doctor`
+// (capability + state readout) and `kill` (operator-invoked process
+// termination, its own refusal-gated helper).
 //
 // SQL identifiers: all values are bound with `?` placeholders, never
 // string-interpolated. The only identifiers ever interpolated into SQL text
@@ -85,6 +86,8 @@ export const EVENT_TYPES = Object.freeze([
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
+export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
+export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 
 // Per-event-type closed payload key allowlist. gate_pass/gate_fail, decision
 // and error are ratified (ADR-024); the remaining seven are backend-lead
@@ -195,8 +198,42 @@ export const TABLES = Object.freeze({
       { name: 'checks_json', decl: 'TEXT' },
       { name: 'violations_json', decl: 'TEXT' },
       { name: 'created_at', decl: 'TEXT' },
+      { name: 'gate_generation', decl: 'INTEGER' },
+      { name: 'pristine', decl: 'INTEGER' },
     ],
     unique: [['adw_id', 'gate_name', 'attempt']],
+    indexes: [],
+  },
+  gate_discriminations: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'gate_generation', decl: 'INTEGER' },
+      { name: 'verdict', decl: 'TEXT' },
+      { name: 'checks_total', decl: 'INTEGER' },
+      { name: 'checks_failed', decl: 'INTEGER' },
+      { name: 'checks_errored', decl: 'INTEGER' },
+      { name: 'note', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'gate_generation']],
+    indexes: [],
+  },
+  review_outcomes: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'verdict', decl: 'TEXT' },
+      { name: 'must_fix', decl: 'INTEGER' },
+      { name: 'should_fix', decl: 'INTEGER' },
+      { name: 'consider', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'dispatch_id']],
     indexes: [],
   },
   processes: {
@@ -246,8 +283,9 @@ export const TABLES = Object.freeze({
 // JSONL line `kind` values. replayJsonl refuses any `kind` outside this set.
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordGateResult', 'startProcess', 'endProcess',
-  'heartbeat', 'startAgentSession', 'endAgentSession', 'recordSourceError',
+  'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
+  'recordReviewOutcome', 'startProcess', 'endProcess', 'heartbeat',
+  'startAgentSession', 'endAgentSession', 'recordSourceError',
 ])
 
 // ---------------------------------------------------------------------------
@@ -888,6 +926,8 @@ export function openLedger({
       checks: redact(input.checks ?? [], stats),
       violations: redact(input.violations ?? [], stats),
       created_at: isoMs(input.created_at ?? now()),
+      gate_generation: input.gate_generation ?? null,
+      pristine: input.pristine == null ? null : !!input.pristine,
     }, stats)
     appendJsonl('recordGateResult', args)
     mirror((conn) => {
@@ -899,6 +939,56 @@ export function openLedger({
       const cols = tableColumnNames('gate_results').filter((c) => c !== 'id')
       conn.prepare(`INSERT OR IGNORE INTO gate_results (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((c) => toBindable(row[c])))
+    })
+    return args
+  }
+
+  function recordGateDiscrimination(input = {}) {
+    requireFields(input, ['adw_id', 'gate_generation', 'verdict'], 'recordGateDiscrimination')
+    requireEnum(input.verdict, GATE_DISCRIMINATION_VERDICTS, 'recordGateDiscrimination', 'verdict')
+    const args = redact({
+      adw_id: input.adw_id,
+      phase_id: input.phase_id ?? null,
+      gate_generation: input.gate_generation,
+      verdict: input.verdict,
+      checks_total: input.checks_total ?? null,
+      checks_failed: input.checks_failed ?? null,
+      checks_errored: input.checks_errored ?? null,
+      note: input.note == null ? null : String(input.note),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    // `note` is the one free-text field on these outcome tables: it is
+    // redacted above, then bounded so operator detail cannot grow without
+    // limit in the durable record.
+    if (args.note != null) args.note = args.note.slice(0, 500)
+    appendJsonl('recordGateDiscrimination', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('gate_discriminations').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO gate_discriminations (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordReviewOutcome(input = {}) {
+    requireFields(input, ['adw_id', 'dispatch_id', 'verdict'], 'recordReviewOutcome')
+    requireEnum(input.verdict, REVIEW_VERDICTS, 'recordReviewOutcome', 'verdict')
+    const args = redact({
+      adw_id: input.adw_id,
+      phase_id: input.phase_id ?? null,
+      dispatch_id: input.dispatch_id,
+      role: input.role ?? null,
+      verdict: input.verdict,
+      must_fix: input.must_fix ?? null,
+      should_fix: input.should_fix ?? null,
+      consider: input.consider ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordReviewOutcome', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('review_outcomes').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO review_outcomes (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
     })
     return args
   }
@@ -1183,6 +1273,43 @@ export function openLedger({
     }
   }
 
+  function queryRows(sql) {
+    const conn = ensureDb()
+    if (!conn) return []
+    try {
+      return conn.prepare(sql).all()
+    } catch (err) {
+      stats.mirror_errors += 1
+      if (!stats.mirror_first_code) {
+        stats.mirror_first_code = err.code ?? err.name ?? 'UnknownMirrorError'
+      }
+      return []
+    }
+  }
+
+  function gateReviewGap() {
+    return queryRows(`
+      SELECT s.adw_id, s.task_slug,
+        (SELECT COUNT(*) FROM gate_results g
+           WHERE g.adw_id = s.adw_id AND g.ok = 1 AND COALESCE(g.pristine, 0) = 0) AS green_gate_runs,
+        (SELECT COUNT(*) FROM review_outcomes r WHERE r.adw_id = s.adw_id) AS reviews,
+        (SELECT MAX(r.must_fix) FROM review_outcomes r WHERE r.adw_id = s.adw_id) AS max_must_fix
+      FROM sessions s ORDER BY s.adw_id
+    `)
+  }
+
+  function eligibleTasks() {
+    return queryRows(`
+      SELECT s.adw_id, s.task_slug,
+        (SELECT MAX(g.gate_generation) FROM gate_results g WHERE g.adw_id = s.adw_id) AS active_generation,
+        (SELECT COUNT(*) FROM review_outcomes r WHERE r.adw_id = s.adw_id) AS reviews,
+        (SELECT COUNT(*) FROM gate_discriminations d
+           WHERE d.adw_id = s.adw_id AND d.verdict = 'proven'
+             AND d.gate_generation = (SELECT MAX(g2.gate_generation) FROM gate_results g2 WHERE g2.adw_id = s.adw_id)) AS proven_active
+      FROM sessions s ORDER BY s.adw_id
+    `)
+  }
+
   // ---- lifecycle / meta -----------------------------------------------------
 
   function statsFn() {
@@ -1218,9 +1345,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, startProcess, endProcess, heartbeat, startAgentSession,
-    endAgentSession, recordSourceError,
-    listSessions, listEvents, getSession, dumpTable,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome,
+    startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
+    recordSourceError,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -1513,7 +1641,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -1550,6 +1678,32 @@ export function main(argv) {
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
       stderr.write(`ledger: ${sessions.length} session(s)\n`)
+      return 0
+    }
+
+    if (verb === 'gate-review-gap') {
+      if (positional.length > 0) refuse('gate-review-gap: takes no positional arguments')
+      const rows = ledger.gateReviewGap()
+      const denominator = rows.filter((row) => row.green_gate_runs > 0 && row.reviews > 0).length
+      const numerator = rows.filter((row) => row.green_gate_runs > 0 && row.reviews > 0 && row.max_must_fix > 0).length
+      const payload = {
+        schema: 1,
+        question: 'How often does a non-pristine green gate run precede a review with must-fix findings?',
+        definition: 'gate green means a non-pristine gate_results row with ok = 1',
+        denominator,
+        numerator,
+        rate: denominator === 0 ? null : numerator / denominator,
+        rows,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
+      return 0
+    }
+
+    if (verb === 'eligible-tasks') {
+      if (positional.length > 0) refuse('eligible-tasks: takes no positional arguments')
+      const rows = ledger.eligibleTasks()
+      const eligible = rows.filter((row) => row.proven_active > 0 && row.reviews > 0).length
+      stdout.write(`${JSON.stringify({ schema: 1, horizon: 20, eligible, rows })}\n`)
       return 0
     }
 

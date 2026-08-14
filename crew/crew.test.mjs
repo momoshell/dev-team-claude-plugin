@@ -657,7 +657,7 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
   assert.equal(calls.gates.length, 1)
   assert.deepEqual(calls.gates[0], {
     adw_id: 'adw-test', phase_id: null, gate_name: 'gate:r1', attempt: 1, ok: false,
-    checks: [{ total: 3, failed: 3, errored: 0 }], violations: [],
+    checks: [{ total: 3, failed: 3, errored: 0 }], violations: [], gate_generation: null, pristine: false,
   })
   assert.equal(calls.events.filter((event) => event.type === 'log').length, 2)
   assert.ok(calls.events.some((event) => event.type === 'log' && event.payload.level === 'warn'))
@@ -665,6 +665,39 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
 
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
+
+test('emitAdapter routes discrimination triples and only review-carrying envelopes to outcome tables', () => {
+  const calls = { gates: [], discriminations: [], reviews: [], events: [] }
+  const emitter = {
+    adwId: 'adw-outcomes',
+    phaseTransition: () => ({ phase_id: 9 }),
+    emit: (fn) => fn({
+      recordEvent: (event) => calls.events.push(event),
+      recordGateResult: (event) => calls.gates.push(event),
+      recordGateDiscrimination: (event) => calls.discriminations.push(event),
+      recordReviewOutcome: (event) => calls.reviews.push(event),
+    }, () => 1),
+  }
+  const adapter = emitAdapter(emitter)
+  adapter({ kind: 'stage', label: 'build:r1' })
+  adapter({ kind: 'gate', name: 'gate:r1', attempt: 1, ok: true, generation: 2, pristine: true, summary: { total: 5, failed: 0, errored: 0 } })
+  adapter({ kind: 'discrimination', generation: 2, verdict: 'proven', summary: { total: 5, failed: 5, errored: 0 }, note: 'proof' })
+  adapter({ kind: 'envelope', id: 'reviewer1', role: 'reviewer', status: 'done', review: { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0 } })
+  adapter({ kind: 'envelope', id: 'builder1', role: 'builder', status: 'done' })
+
+  assert.deepEqual(calls.gates[0], {
+    adw_id: 'adw-outcomes', phase_id: 9, gate_name: 'gate:r1', attempt: 1, ok: true,
+    checks: [{ total: 5, failed: 0, errored: 0 }], violations: [], gate_generation: 2, pristine: true,
+  })
+  assert.deepEqual(calls.discriminations[0], {
+    adw_id: 'adw-outcomes', phase_id: 9, gate_generation: 2, verdict: 'proven',
+    checks_total: 5, checks_failed: 5, checks_errored: 0, note: 'proof',
+  })
+  assert.deepEqual(calls.reviews, [{
+    adw_id: 'adw-outcomes', phase_id: 9, dispatch_id: 'reviewer1', role: 'reviewer',
+    verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0,
+  }])
+})
 
 test('emitAdapter carries the phase cursor onto events and fails malformed cursors closed', () => {
   let seq = 0

@@ -253,7 +253,10 @@ Everything durable is a FILE; pane chat is never the record.
   unit-tested without cmux). `io.emit(event)` is OPTIONAL: when `run` can open
   a factory ledger run, stage/assign/envelope/decision/dissent events are
   mirrored through `emitAdapter` in `realio.mjs`; `gate` events go to
-  `gate_results`, and `attention` events go to warn-level `log` rows. Attention
+  `gate_results`; `discrimination` events land in `gate_discriminations`, and
+  review-carrying `envelope` events land in `review_outcomes`. The
+  `ledger:gate-review-gap` and `ledger:eligible-tasks` recipes expose the two
+  durable queries. `attention` events go to warn-level `log` rows. Attention
   fires only on gate exhaustion or triage escalation. Gate-moment attention
   carries `park_id: null`; the escalation moment is emitted by `crew.mjs`'s run
   lifecycle and carries a real minted `park_id`. Instrumentation is never

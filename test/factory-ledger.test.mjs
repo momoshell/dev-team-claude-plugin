@@ -202,7 +202,15 @@ function exerciseEveryWriter(ledger, adwId) {
   })
   ledger.recordGateResult({
     adw_id: adwId, phase_id: phaseId, gate_name: 'g1', attempt: 1, ok: true,
-    checks: [{ item: 'a', ok: true, note: '' }], violations: [],
+    checks: [{ item: 'a', ok: true, note: '' }], violations: [], gate_generation: 1, pristine: false,
+  })
+  ledger.recordGateDiscrimination({
+    adw_id: adwId, phase_id: phaseId, gate_generation: 1, verdict: 'proven',
+    checks_total: 1, checks_failed: 0, checks_errored: 0, note: 'proof',
+  })
+  ledger.recordReviewOutcome({
+    adw_id: adwId, phase_id: phaseId, dispatch_id: 'review-1', role: 'reviewer',
+    verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0,
   })
   ledger.startProcess({ adw_id: adwId, dispatch_id: 'd1', pid: 4242, command: 'node x.mjs' })
   ledger.heartbeat({ adw_id: adwId, target: 'process', pid: 4242, started_at: ledger.dumpTable('processes')[0].started_at })
@@ -257,6 +265,53 @@ test('AC-5: replaying the JSONL through the public write API into a fresh db rep
     replayedAgain[table] = ledger2.dumpTable(table)
   }
   assert.deepEqual(replayedAgain, replayed)
+})
+
+test('new outcome writers refuse out-of-enum verdicts without echoing the offending value', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const badGate = 'gate-verdict-secret'
+  const badReview = 'review-verdict-secret'
+  assert.throws(
+    () => ledger.recordGateDiscrimination({ adw_id: 'enum-1', gate_generation: 1, verdict: badGate }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes(badGate),
+  )
+  assert.throws(
+    () => ledger.recordReviewOutcome({ adw_id: 'enum-1', dispatch_id: 'd1', verdict: badReview }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes(badReview),
+  )
+})
+
+test('gateReviewGap counts only non-pristine green gate rows and must-fix reviews', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'gap-good', repo_slug: 'r', task_slug: 'good' })
+  ledger.recordGateResult({ adw_id: 'gap-good', phase_id: null, gate_name: 'g', attempt: 1, ok: true, gate_generation: 1, pristine: false })
+  ledger.recordReviewOutcome({ adw_id: 'gap-good', dispatch_id: 'review-1', verdict: 'changes-needed', must_fix: 2 })
+
+  ledger.startSession({ adw_id: 'gap-pristine', repo_slug: 'r', task_slug: 'pristine' })
+  ledger.recordGateResult({ adw_id: 'gap-pristine', phase_id: null, gate_name: 'g', attempt: 1, ok: true, gate_generation: 1, pristine: true })
+  ledger.recordReviewOutcome({ adw_id: 'gap-pristine', dispatch_id: 'review-1', verdict: 'pass', must_fix: 0 })
+
+  const rows = ledger.gateReviewGap()
+  const good = rows.find((row) => row.adw_id === 'gap-good')
+  const pristine = rows.find((row) => row.adw_id === 'gap-pristine')
+  assert.deepEqual({ ...good }, { adw_id: 'gap-good', task_slug: 'good', green_gate_runs: 1, reviews: 1, max_must_fix: 2 })
+  assert.deepEqual({ ...pristine }, { adw_id: 'gap-pristine', task_slug: 'pristine', green_gate_runs: 0, reviews: 1, max_must_fix: 0 })
+})
+
+test('eligibleTasks matches proof rows to the active gate generation', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'eligible-1', repo_slug: 'r', task_slug: 'eligible' })
+  ledger.recordGateResult({ adw_id: 'eligible-1', phase_id: null, gate_name: 'g', attempt: 1, ok: true, gate_generation: 1, pristine: false })
+  ledger.recordGateDiscrimination({ adw_id: 'eligible-1', gate_generation: 1, verdict: 'proven' })
+  ledger.recordReviewOutcome({ adw_id: 'eligible-1', dispatch_id: 'review-1', verdict: 'pass', must_fix: 0 })
+  ledger.recordGateResult({ adw_id: 'eligible-1', phase_id: null, gate_name: 'g', attempt: 2, ok: true, gate_generation: 2, pristine: false })
+
+  let row = ledger.eligibleTasks().find((candidate) => candidate.adw_id === 'eligible-1')
+  assert.deepEqual({ ...row }, { adw_id: 'eligible-1', task_slug: 'eligible', active_generation: 2, reviews: 1, proven_active: 0 })
+
+  ledger.recordGateDiscrimination({ adw_id: 'eligible-1', gate_generation: 2, verdict: 'proven' })
+  row = ledger.eligibleTasks().find((candidate) => candidate.adw_id === 'eligible-1')
+  assert.deepEqual({ ...row }, { adw_id: 'eligible-1', task_slug: 'eligible', active_generation: 2, reviews: 1, proven_active: 1 })
 })
 
 // ---------------------------------------------------------------------------

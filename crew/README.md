@@ -162,8 +162,9 @@ assignment), and `headless-rpc` (a long-lived `pi --mode rpc` process held open
 across assignments). Pass `--headless builder,reviewer` or `--headless-rpc
 builder` at boot to select it per role; mixed crews are supported. The RPC
 capability surface is `steer`, `abort`, and `entries`; the envelope remains the
-record and the stream remains transport only. No live attention is emitted
-here; that belongs to #125.
+record and the stream remains transport only. No attention is emitted from the
+transport layer: attention is a run-lifecycle event, minted and emitted where
+the outcome is known (see Lifecycle below).
 
 Headless workers use a frozen binary, resolved in this order:
 `--claude-bin <absolute path>`, `$CREW_CLAUDE_BIN`, then

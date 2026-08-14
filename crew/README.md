@@ -206,10 +206,16 @@ Everything durable is a FILE; pane chat is never the record.
   a run's outcome.
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
+- `reclaim.mjs` — append-only token-fenced transition locks, the serialized
+  reservation engine, and the pluggable evidence-authority seam. Park and lease
+  surfaces remain #125's to add on this engine. Serialization is guaranteed for
+  normal operation and automatic ESRCH displacement; `overrideLock` is break
+  glass and requires operator attestation of supervisor quiescence.
 - `adapters/adapter-*.mjs` — the per-agent seam: capabilitiesFor + seatCommand
   (see "Adapters" above).
 - `roles/*.md` — seat charters, appended as system prompts at boot.
-- Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition).
+- Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition),
+  `reclaim.test.mjs` (reservation and transition-lock contracts).
 
 State lives under `~/.crew/<repo>/<task>/` (crew.json, task dir, returns,
 journal); archives keep the durable record after teardown.

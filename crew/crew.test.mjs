@@ -262,7 +262,7 @@ test('resolveTier(mechanical) seats no lead and carries the builder cell verbati
   const r = resolveTier(roster, 'mechanical', {})
   assert.deepEqual(r.roles, ['planner', 'builder', 'reviewer'])
   assert.equal(r.seats.lead, undefined)
-  assert.deepEqual(r.seats.builder, { agent: 'pi', effort: 'high', provider: 'openai', id: 'gpt-5.6-luna', model: null })
+  assert.deepEqual(r.seats.builder, { agent: 'pi', effort: 'max', provider: 'openai', id: 'gpt-5.6-luna', model: null })
 })
 
 test('resolveTier(judge) seats every role in canonical order, tech-lead last', () => {

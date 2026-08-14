@@ -761,8 +761,16 @@ export function runChild(argv, injected = {}) {
   const existsChild = injected.existsSync || fsExistsSync
   const mkdir = injected.mkdirSync || fsMkdirSync
   const exec = injected.execSync || cpExecSync
+  // `harness` decides how a preflight failure is REPORTED — rethrown for a
+  // test driving runChild directly, or written as an escalation envelope in
+  // production. It deliberately no longer decides WHETHER preflight runs.
   const harness = !!(injected.driveTask || injected.realIo)
-  const strictPreflight = injected.preflight === true || !harness
+  // Preflight runs UNLESS a caller opts out explicitly. Deriving this from
+  // `harness` meant "I supplied a fake io" silently also meant "skip the seat,
+  // brief, checkout-identity and dirty-tree guards" — and DI is the crew's
+  // universal seam. Only tests inject today, so nothing shipped weaker; the
+  // switch was wrong-way-round for the first caller who injects in production.
+  const strictPreflight = injected.preflight !== false
   const crewDir = resolvePath(spec.crew_dir)
   const crewPath = join(crewDir, 'crew.json')
   let crew
@@ -795,7 +803,7 @@ export function runChild(argv, injected = {}) {
       if (!existsChild(ctx.briefFile)) throw new Error(`brief file not found: ${ctx.briefFile}`)
       if (crew.checkout && resolvePath(crew.checkout) !== checkout) throw new Error(`this crew was booted for ${resolvePath(crew.checkout)}, not ${checkout} — same directory name, different checkout`)
       const dirty = String(exec('git status --porcelain', { cwd: checkout, encoding: 'utf8' }) || '').trim()
-      if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\\n').slice(0, 10).join('\\n')}`)
+      if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
     }
     mkdir(taskDir, { recursive: true }); mkdir(returnsDir, { recursive: true })
     const realIo = injected.realIo || defaultRealIo

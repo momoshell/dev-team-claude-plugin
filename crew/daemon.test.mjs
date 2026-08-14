@@ -298,7 +298,7 @@ test('runChild refuses pane seats and omits lead from the mechanical ctx', () =>
   const lead = fixture({ roles: ['lead', 'planner', 'builder', 'reviewer'] })
   try {
     let seen
-    runChild({ crew_dir: lead.crewDir, task: 'x' }, { driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, realIo: () => ({}) })
+    runChild({ crew_dir: lead.crewDir, task: 'x' }, { driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, realIo: () => ({}), preflight: false })
     assert.ok(seen); assert.equal(seen.roles.includes('lead'), false)
   } finally { lead.cleanup() }
 })
@@ -330,7 +330,7 @@ test('a fork with no pid is orphaned rather than adopted forever', async () => {
 test('runChild gives a task_return override precedence over crew.json', () => {
   const f = fixture(); const override = join(f.returnsDir, 'override.json')
   try {
-    runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}) })
+    runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
     assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done'); assert.equal(existsSync(f.taskReturn), false)
   } finally { f.cleanup() }
 })
@@ -379,4 +379,71 @@ test('real unix socket answers ping and unknown command', async () => {
     const unknown = jsonFrame((await request(d.socketPath, '{"id":"u","cmd":"nope"}\n'))[0])
     assert.equal(unknown.ok, false); assert.equal(unknown.error.command, 'nope')
   })
+})
+
+// --- review round-2 residuals, 2026-08-14 -----------------------------------
+
+// R2-S2: the preflight block had ZERO coverage — every test that reached
+// runChild injected driveTask/realIo, which under the old polarity disabled
+// the block entirely. Deleting all seven guards left the suite and the gate
+// green. These pin each branch, and would have caught R2-S1 below.
+test('child preflight refuses a missing seat, a missing brief, and a foreign checkout', () => {
+  const noReviewer = fixture({ roles: ['planner', 'builder'] })
+  try {
+    runChild({ crew_dir: noReviewer.crewDir, task: 'x', brief_file: join(noReviewer.crewDir, 'b.md') }, { execSync: () => '' })
+    const env = JSON.parse(readFileSync(noReviewer.taskReturn, 'utf8'))
+    assert.equal(env.status, 'escalation')
+    assert.match(env.details.escalation.why, /requires a reviewer seat/)
+  } finally { noReviewer.cleanup() }
+
+  const noBrief = fixture()
+  try {
+    runChild({ crew_dir: noBrief.crewDir, task: 'x' }, { execSync: () => '' })
+    assert.match(JSON.parse(readFileSync(noBrief.taskReturn, 'utf8')).details.escalation.why, /--brief-file/)
+  } finally { noBrief.cleanup() }
+
+  const foreign = fixture()
+  try {
+    const brief = join(foreign.crewDir, 'b.md'); writeFileSync(brief, '# brief')
+    runChild({ crew_dir: foreign.crewDir, task: 'x', brief_file: brief, checkout: tmpdir() }, { execSync: () => '' })
+    assert.match(JSON.parse(readFileSync(foreign.taskReturn, 'utf8')).details.escalation.why, /same directory name, different checkout/)
+  } finally { foreign.cleanup() }
+})
+
+// R2-S1: the dirty listing was capped with split('\\n') inside a template
+// literal — a literal backslash-n, so the array had one element and the cap
+// never applied. A checkout with an untracked node_modules would embed
+// thousands of lines in an envelope that is re-read on every result() call.
+test('a dirty checkout refuses and its listing is capped at ten lines', () => {
+  const f = fixture()
+  try {
+    const brief = join(f.crewDir, 'b.md'); writeFileSync(brief, '# brief')
+    const dirty = Array.from({ length: 25 }, (_, i) => `?? file-${i}.txt`).join('\n')
+    runChild({ crew_dir: f.crewDir, task: 'x', brief_file: brief }, { execSync: () => dirty })
+    const why = JSON.parse(readFileSync(f.taskReturn, 'utf8')).details.escalation.why
+    assert.match(why, /checkout is dirty/)
+    assert.equal(why.split('\n').length - 1, 10, 'exactly ten listing lines survive the cap')
+  } finally { f.cleanup() }
+})
+
+// The opt-out must be explicit, and must be the ONLY way to skip the block.
+// Both arms are needed: the first distinguishes the fixed polarity from the
+// original (`harness`-derived) one, under which injecting a driver silently
+// disabled every guard. The second proves the opt-out still works.
+test('injecting a driver does not skip preflight; only an explicit opt-out does', () => {
+  const strict = fixture()
+  try {
+    // Driver injected, NO opt-out: preflight must still refuse the missing brief.
+    assert.throws(
+      () => runChild({ crew_dir: strict.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), execSync: () => '' }),
+      /--brief-file/,
+      'a caller that injects a driver must still be preflighted',
+    )
+  } finally { strict.cleanup() }
+
+  const opted = fixture()
+  try {
+    runChild({ crew_dir: opted.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
+    assert.equal(JSON.parse(readFileSync(opted.taskReturn, 'utf8')).status, 'done', 'the explicit opt-out still runs the task')
+  } finally { opted.cleanup() }
 })

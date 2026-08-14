@@ -25,11 +25,14 @@ node crew/crew.mjs run  --task my-task --brief-file /abs/path/brief.md
   via dependency injection), the CLI, and the seat charters.
 - **`scripts/factory/`** — the run-trace mirror: a never-throwing emitter
   facade over a SQLite WAL ledger (instrumentation is never load-bearing).
-- **`tasks/`, `docs/`, `.claude/dev-team/memory/`** — design records from
-  this repo's history, including the retired first-generation runtime (a
-  14-agent orchestrator/lead/coder hierarchy with spec contracts and a
-  review ladder). That system was retired in v0.2.0 after the crew proved
-  itself on live tasks; its full source lives in git history.
+- **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
+  architecture decision register (**grep it before minting an ADR number**),
+  [`docs/conventions.md`](docs/conventions.md) the cross-cutting conventions.
+- **`tasks/`, `.claude/dev-team/`** — historical design records, including the
+  retired first-generation runtime (a 14-agent orchestrator/lead/coder
+  hierarchy with spec contracts and a review ladder). That system was retired
+  in v0.2.0 after the crew proved itself on live tasks; its full source lives
+  in git history.
 
 ## Versioning
 

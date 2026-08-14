@@ -2,6 +2,12 @@
 
 **Status:** As-designed record, decided 2026-08-01 · **Source:** epic #15 comments 3, 6, 8, 9 · **Note:** Superseded in parts — see the Superseded table at the end.
 
+> **Path note (#128, 2026-08-14):** the body below cites the ADR register at
+> `.claude/dev-team/memory/architecture-notes.md`. The register now lives at
+> [`docs/adr/README.md`](adr/README.md); the old path is left unedited in the
+> body, per this repo's own rule that an as-designed record is banner-annotated
+> rather than retro-edited.
+
 ---
 
 ## 0. Resolution index (for the re-review audit)

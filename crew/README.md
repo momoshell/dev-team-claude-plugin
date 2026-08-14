@@ -42,7 +42,7 @@ never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat
 stays a bare-id lookup, not `openai-codex/gpt-5.6-luna`, because an operator
 typing a model id is speaking their own CLI's namespace. Where it is
 recorded: `sources.<role>.model === 'override'` in the boot journal's
-`allocation` map.
+`allocation` map (including any declared capability shortfalls).
 
 ## The model
 
@@ -95,7 +95,8 @@ A seat is a *hot seat*: any CLI agent can hold it, not just claude. The whole
 contract is one file, `crew/adapters/adapter-<name>.mjs`, exporting:
 
 - `capabilitiesFor({ transport })` — returns one frozen resolved profile with
-  the four invariant keys plus transport-scoped capabilities. The closed
+  the five invariant keys, including `subagents`, plus transport-scoped
+  capabilities. The closed
   transports are `pane`, `headless-json`, and `headless-rpc`; shipped pairs are
   claude × (`pane`, `headless-json`) and pi × (`pane`, `headless-rpc`). Pi has
   no `headless-json`; every unshipped pair throws rather than guessing.
@@ -129,11 +130,21 @@ subagent tool for `Task`/`Agent` to translate to — that seat's real boundary
 is the git scope gate + commit-in-scope, the same posture `Write` already has
 everywhere.
 
-Capability declarations are enforced, not decorative: a seat whose charter
-needs tool denial (every seat today) will not boot on an adapter declaring
-`tool_deny: false` — no silent weaker seats. Only `tool_deny` is checked
-today; `prompt_file`, `unattended`, and `session_resume` are declared for the
-adapters still to come.
+Capability declarations are enforced, not decorative: charters declare
+`requires` when they depend on a capability. **The planner alone requires
+`subagents`** — its charter is "domain lead + architect + scout-commander", and
+fan-out discovery IS the third of those, so `--agent-planner pi` refuses before
+a workspace exists rather than booting a planner that silently discovers
+serially. The reviewer does **not** require it: its charter names no fan-out,
+and the roster deliberately seats pi/terra on review at `build`/`mechanical`
+under the review-vendor rule above — the same missing capability is correctly
+fatal for one charter and irrelevant for another, which is why the requirement
+lives on the charter and not on the adapter. A deliberate shortfall override
+(`--allow-shortfall-<role> <cap>`) boots a refusing seat degraded and records
+the waived capability in the boot journal's `allocation` map as `shortfall`.
+Tool denial remains enforced for every seat, while
+`prompt_file`, `unattended`, and `session_resume` are declared for the adapters
+still to come.
 
 ## io contract
 

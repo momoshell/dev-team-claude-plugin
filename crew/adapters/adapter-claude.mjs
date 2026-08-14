@@ -12,6 +12,9 @@
 // behavior change, not a refactor.
 const INVARIANT = Object.freeze({
   prompt_file: true, tool_deny: true, unattended: true,
+  // The Task tool is available in every claude transport; the seats that need
+  // fan-out discovery carry it in their allowlist (crew.mjs SEAT_DEFAULTS).
+  subagents: true,
   // claude --effort <low|medium|high|xhigh|max> (verified against the
   // installed CLI 2026-08-13) — the roster's effort dimension is enforceable.
   effort: true,

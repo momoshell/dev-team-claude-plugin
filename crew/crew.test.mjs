@@ -6,7 +6,7 @@ import { join } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
-  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, assertCapabilities, resolveAdapters, resolveWorkerBin, docOpenArgs,
+  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
 } from './crew.mjs'
@@ -111,19 +111,19 @@ test('every shipped capability profile is exact, complete, and frozen', async ()
 
   const claudePane = capabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(claudePane))
   const claudeHeadless = capabilitiesFor({ transport: 'headless-json' })
-  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
+  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
   assert.ok(Object.isFrozen(claudeHeadless))
   const piPane = piCapabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(piPane))
   const piHeadless = piCapabilitiesFor({ transport: 'headless-rpc' })
   // #148: reassign captured live (captures/pi-b11-reassign.jsonl) — a settled
   // session takes a further assignment same-process and cross-process.
-  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
+  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
   assert.ok(Object.isFrozen(piHeadless))
 })
 
@@ -164,6 +164,66 @@ test('resolveAdapters boots headless claude and refuses the unshipped pi pair', 
   const r = await resolveAdapters(['builder'], { headless: 'builder' })
   assert.equal(r.builder.transport, 'headless-json')
   await assert.rejects(() => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }), /adapter-pi.*headless-json/)
+})
+
+test('seat requirements refuse pi scouts, allow a named shortfall, and reject malformed overrides', async () => {
+  await assert.rejects(
+    () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }),
+    (err) => /planner/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
+  )
+  // The reviewer is deliberately NOT subject to this: the roster seats
+  // pi/terra on review at build/mechanical under the ratified review-vendor
+  // rule, so requiring subagents there would make two of three tiers
+  // unbootable. Pinned so a later "symmetry" tidy-up cannot reintroduce it.
+  const reviewer = await resolveAdapters(['reviewer'], { 'agent-reviewer': 'pi' })
+  assert.equal(reviewer.reviewer.name, 'pi')
+  const builder = await resolveAdapters(['builder'], { 'agent-builder': 'pi' })
+  assert.equal(builder.builder.name, 'pi')
+  const planner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents' })
+  assert.equal(planner.planner.name, 'pi')
+  await assert.rejects(
+    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': 'tool_deny' }),
+    (err) => /planner/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
+  )
+  await assert.rejects(
+    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': true }),
+    /--allow-shortfall-planner needs a capability name/,
+  )
+  await assert.rejects(
+    () => resolveAdapters(['planner'], { 'allow-shortfall-nosuchrole': 'subagents' }),
+    /--allow-shortfall-nosuchrole given but crew seats no nosuchrole/,
+  )
+})
+
+test('bootAllocation records only declared shortfalls and preserves tier provenance', () => {
+  assert.deepEqual(
+    bootAllocation(['planner'], { 'allow-shortfall-planner': 'subagents' }),
+    { planner: { shortfall: ['subagents'] } },
+  )
+  assert.deepEqual(
+    bootAllocation(['planner', 'builder'], {}, { planner: { agent: 'roster' }, builder: { model: 'roster' } }),
+    { planner: { agent: 'roster' }, builder: { model: 'roster' } },
+  )
+  assert.equal(bootAllocation(['planner', 'builder'], {}), null)
+})
+
+test('SEAT_DEFAULTS requires subagents for the planner ALONE — the scout-commander seat', () => {
+  assert.deepEqual(SEAT_DEFAULTS.planner.requires, ['subagents'])
+  // Not the reviewer: its charter names no fan-out, and the roster seats
+  // pi/terra on review at build/mechanical by ratified policy. A requirement
+  // here makes two of three tiers unbootable — measured, not theorised.
+  for (const role of ['lead', 'builder', 'reviewer', 'tech-lead']) assert.deepEqual(SEAT_DEFAULTS[role].requires, [])
+})
+
+test('every roster tier still boots its seats — the requirement cannot strand a shipped tier', async () => {
+  const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  for (const tier of Object.keys(roster.tiers)) {
+    const { roles, seats } = resolveTier(roster, tier, {})
+    await assert.doesNotReject(
+      () => resolveAdapters(roles, {}, seats),
+      `tier "${tier}" must boot with no shortfall override`,
+    )
+  }
 })
 
 test('resolveAdapters boots pi headless-rpc and refuses claude on that transport', async () => {

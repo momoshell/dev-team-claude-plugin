@@ -226,7 +226,10 @@ Everything durable is a FILE; pane chat is never the record.
   stages, consults, dissents, gate record, escalation.
 - **Lifecycle** (code as policy): `done` → archive the crew dir + close the
   workspace (`--keep` to inspect); `escalation` → the workspace always
-  survives (it IS the context the human needs).
+  survives (it IS the context the human needs), and mints a `parked/null` park
+  under `~/.crew/<repo>/<task>/reclaim/parks/` whose seats are the crew's;
+  `done` mints nothing, and a mint failure is warned about without changing
+  the outcome.
 
 ## Files
 
@@ -239,9 +242,11 @@ Everything durable is a FILE; pane chat is never the record.
   a factory ledger run, stage/assign/envelope/decision/dissent events are
   mirrored through `emitAdapter` in `realio.mjs`; `gate` events go to
   `gate_results`, and `attention` events go to warn-level `log` rows. Attention
-  fires only on gate exhaustion or triage escalation and carries `park_id:
-  null` pending #125. Instrumentation is never load-bearing — a missing,
-  broken or unwritable ledger changes nothing about a run's outcome.
+  fires only on gate exhaustion or triage escalation. Gate-moment attention
+  carries `park_id: null`; the escalation moment is emitted by `crew.mjs`'s run
+  lifecycle and carries a real minted `park_id`. Instrumentation is never
+  load-bearing — a missing, broken or unwritable ledger changes nothing about
+  a run's outcome.
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
 - `reclaim.mjs` — append-only token-fenced transition locks, the serialized

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
@@ -9,12 +9,106 @@ import {
   composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
+  parkSeats, parkOnOutcome, escalationAttention,
 } from './crew.mjs'
 import { driveTask } from './drive.mjs'
+import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+
+const PARK_CREW = {
+  roles: ['lead', 'planner', 'builder', 'reviewer'],
+  members: {
+    lead: { surface_id: 'surface-lead', pane_id: 'pane-lead', transport: 'pane' },
+    planner: { surface_id: null, pane_id: 'pane-planner', transport: 'pane' },
+    builder: { surface_id: null, pane_id: null, transport: 'headless' },
+    reviewer: { surface_id: 'surface-reviewer', pane_id: 'pane-reviewer', transport: 'pane' },
+  },
+}
+
+test('parkSeats maps seated members, prefers surfaces, falls back for headless seats, and marks warm panes', () => {
+  const seats = parkSeats(PARK_CREW)
+  assert.deepEqual(seats, [
+    { role: 'lead', sessionId: 'surface-lead', warm: true },
+    { role: 'planner', sessionId: 'pane-planner', warm: false },
+    { role: 'builder', sessionId: 'headless:builder', warm: false },
+    { role: 'reviewer', sessionId: 'surface-reviewer', warm: true },
+  ])
+  assert.equal(new Set(seats.map((seat) => seat.sessionId)).size, seats.length)
+})
+
+test('parkOnOutcome escalation mints a parked/null park with the crew seats', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-park-mint-'))
+  try {
+    const result = parkOnOutcome({ status: 'escalation' }, { crew: PARK_CREW, runId: 'run-park', dir, reason: 'lane red' })
+    assert.equal(typeof result.park_id, 'string')
+    assert.ok(result.park_id.trim())
+    assert.equal(result.error, null)
+    const path = join(dir, 'parks', `${result.park_id}.json`)
+    assert.equal(existsSync(path), true)
+    const park = JSON.parse(readFileSync(path, 'utf8'))
+    assert.equal(park.state, 'parked')
+    assert.equal(park.launch_state, null)
+    assert.equal(park.run_id, 'run-park')
+    assert.deepEqual(park.seats, parkSeats(PARK_CREW))
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('parkOnOutcome done mints nothing and does not create a store directory', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-park-done-'))
+  const dir = join(parent, 'reclaim')
+  try {
+    assert.deepEqual(parkOnOutcome({ status: 'done' }, { crew: PARK_CREW, runId: 'run-done', dir, reason: 'green' }), { park_id: null, error: null })
+    assert.equal(existsSync(dir), false)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('park recordAnswer and claim round trip succeeds against the minted park', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-park-roundtrip-'))
+  try {
+    const minted = parkOnOutcome({ status: 'escalation' }, { crew: PARK_CREW, runId: 'run-roundtrip', dir, reason: 'suite red' })
+    assert.ok(minted.park_id)
+    const store = reclaimStore({ dir, actor: 'test' })
+    assert.equal(store.recordAnswer(minted.park_id, { decision_id: 'decision-1', actor: 'human', answer: 'resume' }).ok, true)
+    const claimed = store.claim(minted.park_id, {
+      decision_id: 'decision-1', successor_run_id: 'run-successor', enqueue: () => true, successorState: () => 'absent',
+    })
+    assert.equal(claimed.ok, true)
+    assert.equal(claimed.park.state, 'claimed')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('parkOnOutcome reports mint failures without throwing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-park-failure-'))
+  try {
+    const failed = parkOnOutcome({ status: 'escalation' }, {
+      crew: PARK_CREW, runId: 'run-failed', dir, reason: 'x',
+      openStore: () => ({ mintPark: () => ({ ok: false, reason: 'unresolvable' }) }),
+    })
+    assert.equal(failed.park_id, null)
+    assert.equal(typeof failed.error, 'string')
+    assert.ok(failed.error.trim())
+    const thrown = parkOnOutcome({ status: 'escalation' }, {
+      crew: PARK_CREW, runId: 'run-thrown', dir, reason: 'x', openStore: () => { throw new Error('store is gone') },
+    })
+    assert.equal(thrown.park_id, null)
+    assert.equal(typeof thrown.error, 'string')
+    assert.ok(thrown.error.trim())
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('escalationAttention returns the canonical keys and preserves a null park_id', () => {
+  const event = escalationAttention({ task: 'task', park_id: 'park-1', why: 'lane red', artifacts: ['/journal'] })
+  assert.deepEqual(Object.keys(event).sort(), ['artifacts', 'kind', 'moment', 'park_id', 'task', 'why'])
+  assert.equal(event.kind, 'attention')
+  assert.equal(event.moment, 'escalation')
+  assert.equal(event.park_id, 'park-1')
+  const unminted = escalationAttention({ task: 'task', park_id: null, why: 'mint failed' })
+  assert.equal(Object.hasOwn(unminted, 'park_id'), true)
+  assert.equal(unminted.park_id, null)
+})
 
 // cmux build-102 rejects layouts whose split nodes are not strictly binary
 // and whose single-pane trees are anything but a bare leaf ("Invalid

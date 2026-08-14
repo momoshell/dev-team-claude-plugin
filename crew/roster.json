@@ -46,7 +46,7 @@
         "provider": "openai",
         "id": "gpt-5.6-terra",
         "agent": "pi",
-        "effort": "high"
+        "effort": "max"
       }
     },
     "judge": {

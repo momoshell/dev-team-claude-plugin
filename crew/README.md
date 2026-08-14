@@ -179,6 +179,20 @@ repeated failures trigger reviewer triage (`build` vs `gate` defect), and a
 gate defect grants the planner exactly one non-weakening repair whose re-run
 consumes no builder round.
 
+**Red must mean the gate RAN** (#153). A non-zero exit is also what a wholly
+broken gate produces, so the gate prints a final
+`GATE-SUMMARY {"total":n,"failed":n,"errored":n}` line and the driver requires
+`errored: 0` at baseline — `errored` counting checks that threw before they
+could adjudicate. A missing or malformed summary is itself a defective gate.
+That bounce is pre-build hygiene and deliberately does **not** consume the
+single gate repair; a second baseline that still cannot run escalates.
+Measured on a live run: a gate with one un-runnable check printed 36 failures
+across 22 checks at baseline and exited non-zero exactly like a healthy red
+gate, so the defect stayed invisible for nine stages — surfacing only once the
+implementation made the check reachable, with the one repair already spent
+elsewhere. Post-build gate runs are unchanged: reviewer triage already
+separates a build defect from a gate defect there.
+
 ## Contracts
 
 Everything durable is a FILE; pane chat is never the record.

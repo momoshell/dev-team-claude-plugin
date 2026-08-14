@@ -8,6 +8,7 @@ import assert from 'node:assert/strict'
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   validateScopeEntries, scopeMatcher, composeCommitMessage,
+  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -488,7 +489,7 @@ test('gate-first: green baseline bounces the planner; repaired gate red at basel
     },
     runs: {
       'gate-v1': { ok: true, output: 'vacuously green' },        // baseline GREEN -> bounce
-      'gate-v2:1': { ok: false, output: 'red at baseline' },     // repaired gate properly red
+      'gate-v2:1': { ok: false, output: 'red at baseline\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },     // repaired gate properly red
       'gate-v2:2': { ok: true, output: '' },                     // green after build
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
@@ -521,7 +522,7 @@ test('gate red after build feeds back verbatim and bounces without a lead consul
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
-      'gate-cmd:1': { ok: false, output: 'baseline red' },
+      'gate-cmd:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
       'gate-cmd:2': { ok: false, output: 'expected exportX, found nothing, at a.mjs:12' },
       'gate-cmd:3': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
@@ -546,7 +547,7 @@ test('repeated gate failures trigger reviewer triage; gate-defect diagnosis lets
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
-      'gate-bad:1': { ok: false, output: 'baseline red' },   // baseline
+      'gate-bad:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },   // baseline
       'gate-bad:2': { ok: false, output: 'bogus fail A' },   // build r1 -> bounce
       'gate-bad:3': { ok: false, output: 'bogus fail B' },   // build r2 -> triage fires (round >= 2)
       'gate-fixed': { ok: true, output: '' },                // repaired gate green immediately
@@ -574,13 +575,13 @@ test('a repaired gate proven red on the pristine tree proceeds — and the proof
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
-      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
       'gate-bad:2': { ok: false, output: 'bogus fail A' },
       'gate-bad:3': { ok: false, output: 'bogus fail B' },
       'gate-fixed': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
-    cleanRuns: { 'gate-fixed': { ok: false, output: 'red on pristine' } },
+    cleanRuns: { 'gate-fixed': { ok: false, output: 'red on pristine\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
   const res = driveTask(CTX, io)
@@ -602,7 +603,7 @@ test('a repaired gate GREEN on the pristine tree is vacuous — escalate, never 
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
-      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
       'gate-bad:2': { ok: false, output: 'bogus fail A' },
       'gate-bad:3': { ok: false, output: 'bogus fail B' },
       'gate-fixed': { ok: true, output: '' },
@@ -629,7 +630,7 @@ test('an io without runClean keeps the repair path exactly as it was', () => {
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
-      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
       'gate-bad:2': { ok: false, output: 'bogus fail A' },
       'gate-bad:3': { ok: false, output: 'bogus fail B' },
       'gate-fixed': { ok: true, output: '' },
@@ -653,7 +654,7 @@ test('no repair -> the gate record carries no reverified field and runClean is n
       'reviewer:1': reviewEnv('pass'),
     },
     runs: {
-      'gate-cmd:1': { ok: false, output: 'baseline red' },
+      'gate-cmd:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
       'gate-cmd:2': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
@@ -664,6 +665,120 @@ test('no repair -> the gate record carries no reverified field and runClean is n
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.reverified, undefined)
   assert.equal(io.calls.runClean.length, 0)
+})
+
+// --- #153: baseline-red must mean the gate RAN, not merely that it exited ----
+const RED = (n = 3) => `some failure\n${GATE_SUMMARY_PREFIX} {"total":${n},"failed":${n},"errored":0}`
+const THREW = `FAIL x: expected the check to run, found it threw: linkSync is not defined\n${GATE_SUMMARY_PREFIX} {"total":47,"failed":1,"errored":1}`
+
+test('parseGateSummary: last line wins, and anything malformed reads as ABSENT', () => {
+  assert.deepEqual(parseGateSummary(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":3,"errored":0}`), { total: 3, failed: 3, errored: 0 })
+  // A gate that prints twice (an internal re-run): the final line describes the run.
+  assert.deepEqual(
+    parseGateSummary(`${GATE_SUMMARY_PREFIX} {"total":1,"failed":1,"errored":0}\n${GATE_SUMMARY_PREFIX} {"total":9,"failed":2,"errored":1}`),
+    { total: 9, failed: 2, errored: 1 },
+  )
+  assert.equal(parseGateSummary('nothing here'), null)
+  assert.equal(parseGateSummary(`${GATE_SUMMARY_PREFIX} not-json`), null)
+  // Absent, NEVER a zero-errored pass: an unparseable summary is not evidence.
+  assert.equal(parseGateSummary(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":3}`), null)
+  assert.equal(parseGateSummary(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":3,"errored":-1}`), null)
+  assert.equal(parseGateSummary(`${GATE_SUMMARY_PREFIX} {"total":1.5,"failed":1,"errored":0}`), null)
+})
+
+test('baselineGateDefect: names the three ways a non-zero exit is not proof of red', () => {
+  assert.equal(baselineGateDefect(RED()), null)
+  assert.match(baselineGateDefect('red, no summary'), /printed no GATE-SUMMARY/)
+  assert.match(baselineGateDefect(THREW), /1 of 47 checks THREW/)
+  assert.match(baselineGateDefect(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`), /contradicts the non-zero exit/)
+})
+
+test('#153: a baseline whose checks THREW bounces the planner and does NOT spend the gate repair', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-broken' } }),
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-broken': { ok: false, output: THREW },        // red, but it never RAN
+      'gate-fixed:1': { ok: false, output: RED(47) },     // repaired: honestly red
+      'gate-fixed:2': { ok: true, output: '' },           // green after the build
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const bounce = Object.values(io.calls.writes).find((w) => /the gate did not RUN/.test(w))
+  assert.ok(bounce, 'expected the defective-gate bounce brief')
+  assert.match(bounce, /THREW instead of adjudicating/)
+  assert.match(bounce, /must be FIXED, not deleted/)
+  assert.equal(res.details.gate.cmd, 'gate-fixed')
+  assert.deepEqual(res.details.gate.replaced, ['gate-broken'])
+  // Pre-build hygiene, not a mid-run gate change: the ONE repair is still unspent.
+  assert.equal(res.details.gate.repairs, 0)
+})
+
+test('#153: a baseline with no summary line at all is treated as a defective gate', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-silent' } }),
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-silent': { ok: false, output: 'red at baseline' },
+      'gate-fixed:1': { ok: false, output: RED() }, 'gate-fixed:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.ok(Object.values(io.calls.writes).find((w) => /cannot tell a red gate from a broken one/.test(w)))
+})
+
+test('#153: a repaired gate that STILL does not run escalates rather than building against it', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-broken' } }),
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-still-broken' } },
+    },
+    runs: { 'gate-broken': { ok: false, output: THREW }, 'gate-still-broken': { ok: false, output: THREW } },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /STILL does not run at baseline/)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 0, 'never build against a gate that cannot run')
+})
+
+test('#153: a repaired gate that comes back GREEN at baseline escalates as vacuous', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-broken' } }),
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-vacuous' } },
+    },
+    runs: { 'gate-broken': { ok: false, output: THREW }, 'gate-vacuous': { ok: true, output: '' } },
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /GREEN at baseline/)
+})
+
+test('#153: an honestly-red baseline is untouched — no bounce, no extra planner round', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-ok' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-ok:1': { ok: false, output: RED() }, 'gate-ok:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 1, 'exactly one planner round')
+  assert.equal(Object.values(io.calls.writes).filter((w) => /did not RUN|ran GREEN/.test(w)).length, 0)
 })
 
 test('no gate_cmd in the plan -> the loop runs exactly as before (gate stage never appears)', () => {
@@ -887,7 +1002,7 @@ test('a gate repair records the replaced command in the gate audit trail', () =>
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
-      'gate-bad:1': { ok: false, output: 'baseline red' },
+      'gate-bad:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
       'gate-bad:2': { ok: false, output: 'fail A' }, 'gate-bad:3': { ok: false, output: 'fail B' },
       'gate-fixed': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },

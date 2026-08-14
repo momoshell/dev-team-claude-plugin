@@ -77,6 +77,18 @@ function validAttestation(a) {
 
 function ownerState(owner, d) {
   if (!owner || !Number.isSafeInteger(owner.pid) || owner.pid <= 0) return LIVENESS.UNKNOWN
+  // This function USED to short-circuit `owner.pid === d.pid` to ALIVE. That
+  // was dropped when the lease surface landed, and the drop is deliberate —
+  // acknowledged here rather than left silent, because this is shared
+  // lock/marker code the lease work did not otherwise touch.
+  //
+  // Production behaviour is unchanged: `process.kill(self, 0)` always
+  // succeeds, so the probe returns ALIVE for our own pid with or without the
+  // shortcut (verified, not assumed). It differs only under an injected
+  // `kill` that reports our own process dead — which is exactly how the
+  // crash-recovery fixtures simulate a supervisor that died holding a lease.
+  // Restoring the shortcut makes that simulation impossible and breaks the
+  // D14 terminal-only lease test, so the probe stays authoritative.
   try { d.kill(owner.pid, 0); return LIVENESS.ALIVE } catch (err) {
     return err?.code === 'ESRCH' ? LIVENESS.DEAD : LIVENESS.ALIVE
   }
@@ -149,8 +161,18 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
   d.mkdirSync(lockDir, { recursive: true })
   const leasesDir = join(dir, 'leases')
   const parksDir = join(dir, 'parks')
-  d.mkdirSync(leasesDir, { recursive: true })
-  d.mkdirSync(parksDir, { recursive: true })
+
+  // A record file is `<key>.json`. Everything else in these directories is
+  // scratch: writeReplace/advance stage `<key>.json.tmp.<uuid>` beside the
+  // record, and a crashed writer leaves one behind. Scratch is SKIPPED, never
+  // reported — reporting it as corrupt wedges settlement forever, because the
+  // post-release scan keeps seeing a lease that is not a lease. A `.json`
+  // whose contents will not parse is still reported corrupt: a real record
+  // that cannot be read must never be silently omitted.
+  const isRecordName = (name) => name.endsWith('.json') && !name.includes('.json.tmp.')
+  const recordNames = (path) => {
+    try { return d.readdirSync(path).sort().filter(isRecordName) } catch { return [] }
+  }
 
   function lockPath(name, fence) { return join(lockDir, `${name}.lock.${fence}`) }
   function epochs(name) {
@@ -283,7 +305,16 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     appendLine(overridePath, { at: d.now(), actor: input.actor, reason: input.reason, kind: 'lock', name, fence: cur.fence, identity, attestation: input.attestation }, d)
   }
 
+  // AFTER the _lockOnly return, deliberately: reservationEngine builds an
+  // internal lock-only store for every reclaim root, and creating leases/ and
+  // parks/ there would plant two directories inside headless/ and
+  // headless-rpc/, whose allocateRun and nextAssignmentId enumerate the root.
+  // Harmless today, but a lock-only store has no records and must not shape
+  // another consumer's on-disk layout.
   if (_lockOnly) return { acquire, release, checkFence, withLock, overrideLock }
+
+  d.mkdirSync(leasesDir, { recursive: true })
+  d.mkdirSync(parksDir, { recursive: true })
 
   const clock = () => finiteNow(d.now)
   const stamp = () => clock()
@@ -419,7 +450,14 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       }
       if (!result?.ok) {
         const released = releaseLeases(held)
-        const reason = released.ok ? result.reason : 'unresolvable'
+        // reserve() loses a race with its own vocabulary — 'busy' (EEXIST) or
+        // 'contended' (lock attempts exhausted). Both mean another holder took
+        // the seat, which is exactly 'seat-busy' and is RETRYABLE; leaking
+        // them through would report a retryable race as the terminal
+        // 'unresolvable', and neither is a member of the closed
+        // CONFLICT_REASONS this surface promises callers is exhaustive.
+        const raced = result.reason === 'busy' || result.reason === 'contended'
+        const reason = released.ok ? (raced ? 'seat-busy' : result.reason) : 'unresolvable'
         const out = { ok: false, failedAt: { role: seat.role, sessionId: seat.sessionId }, reason }
         if (released.remaining.length) out.remaining = released.remaining
         return out
@@ -430,8 +468,7 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
   }
 
   const activeLeases = () => {
-    let names
-    try { names = d.readdirSync(leasesDir).sort() } catch { return [] }
+    const names = recordNames(leasesDir)
     return names.map((name) => {
       const path = join(leasesDir, name)
       try {
@@ -470,11 +507,9 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
   }
 
   const listParks = () => {
-    let names
-    try { names = d.readdirSync(parksDir).sort() } catch { return [] }
+    const names = recordNames(parksDir)
     return names.map((name) => {
       const path = join(parksDir, name)
-      if (!name.endsWith('.json')) return { path, corrupt: true }
       const id = name.slice(0, -5)
       try {
         const value = readJson(path)
@@ -668,7 +703,14 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
           decision: Object.freeze({ decision_id: park.decision.decision_id, actor: park.decision.actor, answer: park.decision.answer }),
         })
         const acquired = acquireLeases(park.seats, { order: args.order, spec, successorState: args.successorState })
-        if (!acquired.ok) return { ok: false, reason: acquired.reason === 'seat-busy' ? 'seat-busy' : 'unresolvable' }
+        if (!acquired.ok) {
+          // Carry `remaining` through: acquireLeases reports leases its
+          // rollback could NOT release, and dropping them here made a leaked
+          // seat invisible to the caller — while claim's own writePark-failure
+          // path below already propagates it.
+          const reason = acquired.reason === 'seat-busy' ? 'seat-busy' : 'unresolvable'
+          return { ok: false, reason, ...(acquired.remaining?.length ? { remaining: acquired.remaining } : {}) }
+        }
         let next
         try {
           next = { ...park, state: 'claimed', launch_state: 'pending', leases: acquired.handles, spec, updated_at: stamp() }
@@ -684,11 +726,19 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
         try { enqueued = args.enqueue(spec) } catch { return { ok: false, reason: 'enqueue-unresolved' } }
         if (!enqueued) return { ok: false, reason: 'enqueue-unresolved' }
         park = readPark(id) || next
+        // `linked` is REPORTED, not swallowed. linkActive writes
+        // launch_state:'enqueued' before transferLeases, so a lease lock lost
+        // mid-transfer leaves the park enqueued with only some members
+        // transferred, and it returns false. That is not a failed claim — the
+        // successor really is enqueued and the frozen spec is durable — so ok
+        // stays true; but a caller that is told nothing cannot know the set is
+        // half-transferred. Completing it is the reconciler's job (slice 2b).
+        let linked = null
         if (probeSuccessor(args.successorState, spec) === SUCCESSOR_STATES.ACTIVE) {
-          linkActive(park, lockHandle)
+          linked = linkActive(park, lockHandle)
           park = readPark(id) || park
         }
-        return { ok: true, park }
+        return { ok: true, park, ...(linked === null ? {} : { linked }) }
       })
     } catch { return { ok: false, reason: 'unresolvable' } }
   }

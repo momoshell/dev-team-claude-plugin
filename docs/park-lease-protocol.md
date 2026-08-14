@@ -51,7 +51,7 @@ The inherited reservation engine evaluates a lease in this order:
 | Order | Evidence or condition | Verdict |
 | --- | --- | --- |
 | 1 | no record and the path is readable | `free` |
-| 2 | present but unparseable | `unresolvable` (unless an override applies) |
+| 2 | present but unparseable | `unresolvable` — **no override can reach it in this slice** (see Overrides) |
 | 3 | successor evidence is **ALIVE** | `busy` |
 | 4 | owner PID is **ALIVE** | `busy` |
 | 5 | only now, bad `reservation_id` or phase | `unresolvable` |
@@ -102,6 +102,18 @@ settlement.
 override records the lock name and fence, an identity (token or digest), the
 actor and reason, and the attestation `{ quiesced: true, method }`. The
 attestation is required; this is not an identity-keyed sidecar file.
+
+**There is no lease break-glass in this slice, and rows 2 and 7 above have no
+escape hatch.** `verdictOf` consults `overrideMatches` for lease records, but
+the only public way to write a reservation override is `store.override`, which
+is bound to the *marker* engine — its `pathFor` is `<dir>/.<key>.active.json`,
+so for a lease key it finds no marker and throws `reservation override identity
+mismatch`. The consequence is stated plainly because it is operationally real:
+a lease whose owner is dead and whose successor is `absent`/`mismatch`/`unknown`
+— the fail-closed case this design deliberately creates — stays `unresolvable`
+with no operator recourse, and the seat is wedged. The same holds for a lease
+file that will not parse. Slice 2b owns the fix, alongside the reconciler that
+is the other half of the recovery story.
 
 ## What this slice does not do
 

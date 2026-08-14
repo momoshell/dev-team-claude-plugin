@@ -253,3 +253,65 @@ test('unsafe ids and generated traversal never touch parks', () => each(({ s, di
   const generated = reclaimStore({ dir, actor: 'generated', deps: { ...deps, uuid: () => 'park-0-id' } })
   assert.equal(generated.mintPark({ run_id: 'r', seats: [{ role: 'a', sessionId: 's' }] }).ok, true)
 }))
+
+// --- review findings, 2026-08-14 (each test dies without its fix) -----------
+
+// #1 HIGH: writeReplace/advance stage `<key>.json.tmp.<uuid>` beside the
+// record. Parsing every directory entry turned a crashed writer's orphan into
+// a permanent phantom lease, so the post-release scan saw a lease that is not
+// a lease and settlement could never complete.
+test('scratch files are skipped, not reported as corrupt leases or parks', () => each(({ s, dir }) => {
+  const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  assert.equal(s.acquireLeases([{ role: 'a', sessionId: 's' }], { spec, successorState: () => 'active' }).ok, true)
+  writeFileSync(join(dir, 'leases', `${leaseKey('a', 's')}.json.tmp.orphan`), '{"half":')
+  const leases = s.activeLeases()
+  assert.equal(leases.length, 1, 'the orphan must not appear as a second lease')
+  assert.equal(leases.filter((l) => l.corrupt).length, 0, 'a scratch file is not a corrupt record')
+
+  assert.equal(s.mintPark({ run_id: 'r2', seats: [{ role: 'a', sessionId: 's' }] }).ok, true)
+  writeFileSync(join(dir, 'parks', 'whatever.json.tmp.orphan'), '{"half":')
+  const parks = s.listParks()
+  assert.equal(parks.filter((p) => p.corrupt).length, 0, 'a park scratch file is not a corrupt row')
+}))
+
+// A real record that will not parse must STILL surface — the scratch filter
+// must not become a way to hide corruption.
+test('a .json lease that will not parse is still reported corrupt', () => each(({ s, dir }) => {
+  writeFileSync(join(dir, 'leases', 'a__s.json'), '{not json')
+  const corrupt = s.activeLeases().filter((l) => l.corrupt)
+  assert.equal(corrupt.length, 1)
+}))
+
+// #3: reserve() loses a race with its own vocabulary ('busy' | 'contended').
+// Leaking those through reported a RETRYABLE contention as the terminal
+// 'unresolvable', and neither is a member of the closed CONFLICT_REASONS.
+test('a lease lock lost to contention reports seat-busy, not the terminal unresolvable', () => each(({ s, dir, deps }) => {
+  const spec = { run_id: 'r', resumes_park_id: 'p', decision: { decision_id: 'd', actor: 'a', answer: 'y' } }
+  const key = leaseKey('a', 's')
+  // leaseLockName is module-private but deterministic; recomputed here so the
+  // test can hold the exact lock reserve() will need.
+  const lockName = createHash('sha256').update(JSON.stringify(['lease-lock', key])).digest('hex').slice(0, 32)
+  // Another supervisor holds the lease LOCK while no lease RECORD exists, so
+  // reconcile answers FREE and acquire proceeds to reserve(), whose withLock
+  // exhausts LOCK_ATTEMPTS and answers 'contended'. Mapping that to
+  // 'unresolvable' would report a retryable race as terminal. The earlier
+  // two-store version of this test was vacuous: it hit the BUSY pre-check
+  // branch, which already mapped correctly, and survived the mutation.
+  const other = reclaimStore({ dir, actor: 'other', deps: { ...deps, pid: 701 } })
+  assert.equal(other.acquire(lockName).ok, true)
+  const out = s.acquireLeases([{ role: 'a', sessionId: 's' }], { spec, successorState: () => 'active' })
+  assert.equal(out.ok, false)
+  assert.equal(out.reason, 'seat-busy')
+  assert.ok(CONFLICT_REASONS.includes(out.reason), 'the reason must be a member of the closed set')
+}))
+
+// #7: reservationEngine builds an internal lock-only store for every reclaim
+// root. Creating leases/ and parks/ there planted two directories inside
+// headless/ and headless-rpc/, whose run-allocation enumerates the root.
+test('a lock-only store creates no record directories', () => each(({ dir, deps }) => {
+  const sub = join(dir, 'lockonly')
+  mkdirSync(sub, { recursive: true })
+  reclaimStore({ dir: sub, actor: 'test', deps, _lockOnly: true })
+  assert.equal(existsSync(join(sub, 'leases')), false)
+  assert.equal(existsSync(join(sub, 'parks')), false)
+}))

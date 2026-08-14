@@ -1,8 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
-import readline from 'node:readline'
-import { Readable } from 'node:stream'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync,
 } from 'node:fs'
@@ -72,17 +70,20 @@ function jsonFrame(frame) { return JSON.parse(frame) }
 function appendJournal(f, row) { writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`, { flag: 'a' }) }
 
 // 1. The byte splitter, rather than readline, owns LF framing.
+// Asserts OUR framing only. An earlier version also pinned readline's own
+// record count at 2, which is Node-version-dependent \u2014 node 24 splits on
+// U+2028, node 20 does not \u2014 and failed CI on the node 20 leg while passing
+// on 24. The contract is that a U+2028 inside a JSON string never breaks a
+// frame regardless of what readline would have done; `crew/headless-rpc.test.mjs`
+// pins the same property the same way.
 test('splitStream keeps U+2028 inside one JSON record', async () => {
   await each(async ({ d }) => {
     await d.start()
     const payload = `${JSON.stringify({ id: 'u', cmd: 'ping', params: { note: 'a\u2028b' } })}\n`
-    const rl = readline.createInterface({ input: Readable.from([Buffer.from(payload)]) })
-    let readlineCount = 0
-    for await (const _line of rl) readlineCount += 1
-    assert.equal(readlineCount, 2)
     const frames = await request(d.socketPath, payload)
     assert.equal(frames.length, 1)
     assert.equal(jsonFrame(frames[0]).ok, true)
+    assert.equal(jsonFrame(frames[0]).id, 'u')
   })
 })
 

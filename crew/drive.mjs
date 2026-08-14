@@ -455,6 +455,48 @@ export function driveTask(ctx, io) {
                             // true = proven red on the pristine tree,
                             // false = io has no runClean, the proof could not run
   const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
+  // #168 / ADR-030 §3: the driver MEASURES whether the gate discriminates —
+  // whether its verdict differs between the built tree and the pristine one.
+  // Identity is DRIVER-OWNED and is not the command string: the repair brief
+  // expressly permits returning an identical command, and editing gate.mjs in
+  // place leaves `node …/gate.mjs` byte-identical (:583-588).
+  let gateGeneration = 1
+  let gateProvenGeneration = null // the generation whose proof is already recorded
+  let gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
+  let gateProofNote = null        // operator-facing detail, set only on a contained throw
+
+  // The proof, recorded ONCE per generation at that generation's first pristine
+  // run — the repair re-proof when there is one, otherwise the gate's first
+  // green. It is never rerun per build round: the property cannot change unless
+  // the generation does. Returns the pristine result when one was obtained, so
+  // the repair path can keep its own (unchanged) escalate-on-green behavior.
+  //
+  // This is evidence ABOUT the gate and may NEVER become a new way to lose a
+  // build (ADR-030, ratification amendment). io.runClean is optional, and
+  // realIo.runClean THROWS on a failed stash push/pop (crew/realio.mjs:261,266);
+  // both cases record 'unproven' and the run continues untouched. The throw's
+  // message — which names the builder's work sitting in the stash — is kept on
+  // details.gate and journalled, never swallowed.
+  const recordGateProof = (label) => {
+    gateProvenGeneration = gateGeneration
+    if (typeof io.runClean !== 'function') { gateDiscrimination = 'unproven'; return null }
+    let pristine
+    try {
+      stage(label)
+      pristine = runGate(label, gateCmd, io.runClean)
+    } catch (err) {
+      gateDiscrimination = 'unproven'
+      gateProofNote = err.message
+      io.log({ at: io.now(), gate_proof_unproven: err.message, gate_generation: gateGeneration })
+      return null
+    }
+    // The FULL predicate (:76-82), not bare non-zero exit: a crash, a missing
+    // summary, or an errored check is not discrimination. A green pristine run
+    // is 'failed' whatever it printed.
+    gateDiscrimination = !pristine.ok && !baselineGateDefect(pristine.output) ? 'proven' : 'failed'
+    return pristine
+  }
+
   if (gateCmd) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
@@ -586,16 +628,10 @@ export function driveTask(ctx, io) {
           if (rep.status === 'done' && rep.details?.gate_cmd) {
             gateHistory.push(gateCmd)
             gateCmd = rep.details.gate_cmd
-            // The mid-run twin of the baseline red-proof. A repaired gate is
-            // handed to a tree that is already built, where a WEAKENED gate
-            // goes green in one step and walks the run to commit. So prove it
-            // still fails on the pre-build tree first. io.runClean is optional:
-            // an io without it keeps today's behavior exactly (additive, never
-            // breaking a DI user).
+            gateGeneration += 1
             gateReverified = false
-            if (typeof io.runClean === 'function') {
-              stage(`gate-reverify:${gateRepairs}`)
-              const pristine = runGate(`gate-reverify:${gateRepairs}`, gateCmd, io.runClean)
+            const pristine = recordGateProof(`gate-reverify:${gateRepairs}`)
+            if (pristine) {
               if (pristine.ok) {
                 return gateEscalate(`repaired gate is STILL green at baseline (pristine tree, builder's changes set aside): ${gateCmd} — vacuous acceptance cannot be built against`)
               }
@@ -619,6 +655,11 @@ export function driveTask(ctx, io) {
         buildBrief = b; buildNote = 'gate-fix'
         continue
       }
+      // First green of this generation: measure, once. A generation repaired
+      // above was already proven by its re-proof, so this is a no-op there —
+      // which is what keeps the whole run within ADR-030's `1 + gate_repairs`
+      // bound on pristine runs.
+      if (gateProvenGeneration !== gateGeneration) recordGateProof(`gate-proof:${gateGeneration}`)
     }
 
     // Gate C (judgment, but enum-consumed): the reviewer. An unreadable
@@ -717,7 +758,7 @@ export function driveTask(ctx, io) {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       extra_rounds_granted: S.grants,
-      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
+      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
     },
   }
 }

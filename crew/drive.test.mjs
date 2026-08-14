@@ -19,7 +19,7 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, showDoc = false, emit = false } = {}) {
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false } = {}) {
   const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [] }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
@@ -48,10 +48,11 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, sho
     log(obj) { calls.logs.push(obj) },
     now() { return 0 },
   }
-  if (cleanRuns) {
+  if (cleanRuns || cleanThrows) {
     io.runClean = (cmd) => {
       counts[`clean:${cmd}`] = (counts[`clean:${cmd}`] || 0) + 1
       calls.runClean.push({ cmd, n: counts[`clean:${cmd}`] })
+      if (cleanThrows) throw new Error("runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash")
       return cleanRuns[`${cmd}:${counts[`clean:${cmd}`]}`] ?? cleanRuns[cmd] ?? { ok: false, output: '' }
     }
   }
@@ -741,7 +742,7 @@ test('an io without runClean keeps the repair path exactly as it was', () => {
   assert.deepEqual(io.calls.run.map((r) => r.cmd), ['gate-bad', 'lane-cmd', 'gate-bad', 'lane-cmd', 'gate-bad', 'gate-fixed', 'suite-cmd'])
 })
 
-test('no repair -> the gate record carries no reverified field and runClean is never called', () => {
+test('first green records discrimination without adding a reverified field', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
@@ -753,12 +754,214 @@ test('no repair -> the gate record carries no reverified field and runClean is n
       'gate-cmd:2': { ok: true, output: '' },
       'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
     },
-    cleanRuns: { 'gate-cmd': { ok: false, output: '' } },
+    cleanRuns: { 'gate-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.reverified, undefined)
+  assert.equal(res.details.gate.discrimination, 'failed')
+  assert.equal(io.calls.runClean.length, 1)
+})
+
+test('first-green pristine measurement is failed only, with no bounce or escalation', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
+      'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.discrimination, 'failed')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
+  assert.equal(res.details.stages.some((stage) => stage.startsWith('escalate:')), false)
+  assert.equal(Object.keys(io.calls.writes).some((path) => /bounce/.test(path)), false)
+})
+
+test('pristine red with every check failed records proven discrimination', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.discrimination, 'proven')
+})
+
+test('pristine red without a summary records failed discrimination', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: 'red but no summary' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.discrimination, 'failed')
+})
+
+test('pristine red with an errored check records failed discrimination', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: 'check threw\nGATE-SUMMARY {"total":3,"failed":1,"errored":1}' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.discrimination, 'failed')
+})
+
+test('missing runClean records unproven without adding a proof stage or changing the run', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.discrimination, 'unproven')
+  assert.equal(io.calls.runClean.length, 0)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(res.details.stages.includes('gate-proof:1'), false)
+  assert.equal(res.details.stages.filter((stage) => /bounce|escalate:/.test(stage)).length, 0)
+})
+
+test('a throwing runClean records unproven and preserves its stash message in the journal', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanThrows: true,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(io.calls.runClean.length, 1)
+  assert.equal(res.details.gate.discrimination, 'unproven')
+  assert.match(res.details.gate.discrimination_note, /stash/)
+  const journal = io.calls.logs.find((line) => line.gate_proof_unproven)
+  assert.ok(journal)
+  assert.equal(journal.gate_proof_unproven, res.details.gate.discrimination_note)
+})
+
+test('a review bounce does not repeat the first-green proof for one generation', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'gate-cmd:3': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.runClean.length, 1)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
+})
+
+test('a byte-identical repair starts generation two and records its own proof', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'wrong target' } },
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: false, output: 'first build fail' },
+      'gate-cmd:3': { ok: false, output: 'second build fail' }, 'gate-cmd:4': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.generation, 2)
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(res.details.gate.discrimination, 'proven')
+  assert.equal(io.calls.runClean.length, 1)
+})
+
+test('a baseline defect replacement stays generation one and keeps its audit trail', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad': { ok: false, output: 'no summary' },
+      'gate-fixed:1': { ok: false, output: RED(3) }, 'gate-fixed:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-fixed': { ok: false, output: RED(3) } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.generation, 1)
+  assert.equal(res.details.gate.repairs, 0)
+  assert.deepEqual(res.details.gate.replaced, ['gate-bad'])
+})
+
+test('a happy path without a gate does not measure runClean', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate, null)
   assert.equal(io.calls.runClean.length, 0)
 })
 

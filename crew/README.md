@@ -222,6 +222,8 @@ implementation made the check reachable, with the one repair already spent
 elsewhere. Post-build gate runs are unchanged: reviewer triage already
 separates a build defect from a gate defect there.
 
+The driver owns `gate_generation` (identity is the driver's, never the command string, which a repair may legitimately return unchanged). At the first green of each generation it runs the gate once on the pristine tree via the optional `io.runClean` and records `details.gate.discrimination` as `proven` / `failed` / `unproven` under the full `baselineGateDefect` predicate; this is measurement only in this slice — nothing bounces on it, and a stash or pop failure records `unproven` and never fails a run.
+
 ## Contracts
 
 Everything durable is a FILE; pane chat is never the record.

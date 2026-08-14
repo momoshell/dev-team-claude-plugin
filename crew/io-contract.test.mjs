@@ -286,3 +286,24 @@ test('realIo gives headless-rpc pi rather than the claude worker binary', () => 
   assert.deepEqual(io.assign({ role: 'builder' }), { id: 'r1', returnPath: '/tmp/r1' })
   assert.equal(args.bin, 'pi')
 })
+
+test('outer realIo keeps runClean available for headless-json and headless-rpc seats', () => {
+  const f = makeRealIo()
+  const executed = []
+  for (const [transport, factory] of [
+    ['headless-json', 'headlessIo'],
+    ['headless-rpc', 'headlessRpcIo'],
+  ]) {
+    const io = realIo(
+      { members: { builder: { transport } } }, f.paths, f.paths.dir, null, null, {},
+      {
+        [factory]: () => ({ assign() {}, wait() {} }),
+        execSync: () => '',
+        spawnSync: (_bin, argv) => { executed.push(argv); return { status: 0, stdout: '', stderr: '' } },
+      },
+    )
+    assert.equal(typeof io.runClean, 'function')
+    assert.deepEqual(io.runClean.call(io, 'outer-realio-run'), { ok: true, output: '' })
+  }
+  assert.deepEqual(executed, [['-c', 'outer-realio-run'], ['-c', 'outer-realio-run']])
+})

@@ -40,10 +40,56 @@ function defaultSleep(ms) {
   Atomics.wait(new Int32Array(sab), 0, 0, ms)
 }
 
+function usageInt(n) {
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0
+}
+
+function usageObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+}
+
+function mapClaudeUsage(usage) {
+  return {
+    billed_input_tokens: usageInt(usage.input_tokens),
+    billed_output_tokens: usageInt(usage.output_tokens),
+    billed_cache_write_tokens: usageInt(usage.cache_creation_input_tokens),
+    billed_cache_read_tokens: usageInt(usage.cache_read_input_tokens),
+  }
+}
+
+// Inline prior art from readUsage: result.usage is the run aggregate, while
+// assistant usage is a repeated per-message delta; summing both double-counts.
+// Without a result, dedupe assistant message ids last-occurrence-wins, then sum.
+export function foldUsage(text) {
+  const messages = new Map()
+  let resultUsage = null
+  for (const line of String(text ?? '').split('\n')) {
+    if (!line.trim()) continue
+    let event
+    try { event = JSON.parse(line) } catch { continue }
+    const result = usageObject(event?.type === 'result' ? event.usage : null)
+    if (result) resultUsage = result
+    const message = event?.type === 'assistant' ? event.message : null
+    const usage = usageObject(message?.usage)
+    if (message?.id != null && usage) messages.set(message.id, usage)
+  }
+  if (resultUsage) return mapClaudeUsage(resultUsage)
+  if (!messages.size) return null
+  const total = { billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }
+  for (const usage of messages.values()) {
+    const mapped = mapClaudeUsage(usage)
+    total.billed_input_tokens += mapped.billed_input_tokens
+    total.billed_output_tokens += mapped.billed_output_tokens
+    total.billed_cache_write_tokens += mapped.billed_cache_write_tokens
+    total.billed_cache_read_tokens += mapped.billed_cache_read_tokens
+  }
+  return total
+}
+
 function parseStream(path, readFileSync, existsSync) {
-  if (!existsSync(path)) return { sawJson: false, terminal: false, terminalReason: null, lines: 0 }
+  if (!existsSync(path)) return { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null }
   let text
-  try { text = readFileSync(path, 'utf8') } catch { return { sawJson: false, terminal: false, terminalReason: null, lines: 0 } }
+  try { text = readFileSync(path, 'utf8') } catch { return { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null } }
   let sawJson = false
   let terminal = false
   let terminalReason = null
@@ -60,7 +106,7 @@ function parseStream(path, readFileSync, existsSync) {
       }
     } catch { /* truncated trailing JSONL is not itself a malformed run */ }
   }
-  return { sawJson, terminal, terminalReason, lines }
+  return { sawJson, terminal, terminalReason, lines, usage: foldUsage(text) }
 }
 
 function parseExit(path, readFileSync, existsSync) {
@@ -140,6 +186,12 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     }
   }
   const injectedLog = deps.log
+  const emit = deps.emit
+  function emitUsage(run, usage) {
+    try {
+      emit?.({ kind: 'usage', id: run.id, role: run.role, model: run.model ?? null, session_id: run.sessionId ?? null, transcript_path: run.stream || null, usage })
+    } catch { /* ADR-026: instrumentation is never load-bearing */ }
+  }
   function log(obj) {
     if (injectedLog) return injectedLog(obj)
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(obj)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
@@ -212,7 +264,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     member.started = true
     persistCrew(crew, paths, write)
-    const run = { role, id, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
+    const run = { role, id, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
     runs.set(returnPath, run)
     log({ at: now(), event: 'headless-spawn', role, id, pid: child.pid, dir, returnPath })
     return { id, returnPath }
@@ -222,9 +274,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const deadline = now() + Number(timeoutS) * 1000
     while (now() < deadline) {
       const env = readEnvelope(returnPath)
-      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); return env }
+      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); throw outcomeError(run, outcome) }
+      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); throw outcomeError(run, outcome) }
       sleep(WAIT_POLL_MS)
     }
     if (run.pid != null) { try { kill(-run.pid, 'SIGTERM') } catch {} }
@@ -241,9 +293,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id })
     }
     const raced = readEnvelope(returnPath)
-    if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); return raced }
+    if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true })
-    recordOutcome(run, outcome, stream, exitCode); throw outcomeError(run, outcome)
+    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); throw outcomeError(run, outcome)
   }
   return { assign, wait }
 }

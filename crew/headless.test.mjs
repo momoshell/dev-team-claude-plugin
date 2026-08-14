@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyRun, headlessIo, shq } from './headless.mjs'
+import { classifyRun, foldUsage, headlessIo, shq } from './headless.mjs'
 
 function makeFixture(overrides = {}, roles = ['builder']) {
   const dir = mkdtempSync(join(tmpdir(), 'headless-extra-'))
@@ -180,4 +180,74 @@ test('allocation never re-adopts an existing run directory', () => {
     assert.notEqual(second.id, first.id)
     assert.equal(existsSync(join(f.taskDir, 'headless', second.id, 'exit')), false)
   } finally { f.cleanup() }
+})
+
+test('foldUsage prefers the claude result aggregate over assistant snapshots', () => {
+  const capture = readFileSync(new URL('../tasks/headless-worker/captures/a-baseline.jsonl', import.meta.url), 'utf8')
+  assert.deepEqual(foldUsage(capture), {
+    billed_input_tokens: 18, billed_output_tokens: 287,
+    billed_cache_write_tokens: 7709, billed_cache_read_tokens: 43575,
+  })
+})
+
+test('foldUsage dedupes repeated assistant message ids with last occurrence wins', () => {
+  const line = (id, output) => JSON.stringify({
+    type: 'assistant', message: { id, usage: {
+      input_tokens: 10, output_tokens: output, cache_creation_input_tokens: 100, cache_read_input_tokens: 1000,
+    } },
+  })
+  const text = [line('m1', 5), line('m1', 5), line('m1', 400), JSON.stringify({
+    type: 'assistant', message: { id: 'm2', usage: {
+      input_tokens: 8, output_tokens: 1, cache_creation_input_tokens: 36, cache_read_input_tokens: 74,
+    } },
+  })].join('\n')
+  assert.deepEqual(foldUsage(text), {
+    billed_input_tokens: 18, billed_output_tokens: 401,
+    billed_cache_write_tokens: 136, billed_cache_read_tokens: 1074,
+  })
+})
+
+test('headless usage stays null when a stream reports no usage', () => {
+  const seen = []; const f = makeFixture({ emit: (event) => seen.push(event) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(f.taskDir, 'headless', run.id, 'stream.jsonl'), '{"type":"result","terminal_reason":"done"}\n')
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, status: 'done' }))
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
+    assert.deepEqual(seen.map((event) => ({ kind: event.kind, usage: event.usage })), [{ kind: 'usage', usage: null }])
+  } finally { f.cleanup() }
+})
+
+test('aborted headless runs emit deduped partial usage without changing classification', () => {
+  const seen = []; const f = makeFixture({ emit: (event) => seen.push(event) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const assistant = (output) => JSON.stringify({ type: 'assistant', message: { id: 'm1', usage: {
+      input_tokens: 4, output_tokens: output, cache_creation_input_tokens: 2, cache_read_input_tokens: 3,
+    } } })
+    writeFileSync(join(f.taskDir, 'headless', run.id, 'stream.jsonl'), `${assistant(1)}\n${assistant(9)}\n`)
+    writeFileSync(join(f.taskDir, 'headless', run.id, 'exit'), '137')
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => err.stage === 'headless-aborted')
+    assert.deepEqual(seen.at(-1).usage, {
+      billed_input_tokens: 4, billed_output_tokens: 9,
+      billed_cache_write_tokens: 2, billed_cache_read_tokens: 3,
+    })
+  } finally { f.cleanup() }
+})
+
+test('headless usage emission is never load-bearing on happy or aborted paths', () => {
+  const happy = makeFixture({ emit: () => { throw new Error('emitter down') } })
+  try {
+    const run = happy.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(happy.taskDir, 'headless', run.id, 'stream.jsonl'), '{"type":"result"}\n')
+    writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, status: 'done' }))
+    assert.deepEqual(happy.io.wait(run.returnPath, 1), { assignment_id: run.id, status: 'done' })
+  } finally { happy.cleanup() }
+  const aborted = makeFixture({ emit: () => { throw new Error('emitter down') } })
+  try {
+    const run = aborted.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(join(aborted.taskDir, 'headless', run.id, 'stream.jsonl'), '{"type":"assistant","message":{"id":"m","usage":{"output_tokens":1}}}\n')
+    writeFileSync(join(aborted.taskDir, 'headless', run.id, 'exit'), '137')
+    assert.throws(() => aborted.io.wait(run.returnPath, 1), (err) => err.stage === 'headless-aborted')
+  } finally { aborted.cleanup() }
 })

@@ -59,6 +59,43 @@ export function rpcCommand(spec = {}) {
 
 const byteLength = (value) => Buffer.isBuffer(value) ? value.length : Buffer.byteLength(String(value ?? ''), 'utf8')
 
+function usageInt(n) {
+  return Number.isFinite(n) ? Math.max(0, Math.trunc(n)) : 0
+}
+
+function usageObject(value) {
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+}
+
+// pi has no aggregate event: message_end carries a per-message delta, while
+// turn_end and agent_end.messages[] replay that same usage. Counting either
+// replay would double- or triple-count the billed tokens.
+export function foldRpcUsage(frames) {
+  const total = { billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }
+  let measured = false
+  for (const frame of Array.isArray(frames) ? frames : []) {
+    const usage = usageObject(frame?.type === 'message_end' ? frame.message?.usage : null)
+    if (!usage) continue
+    measured = true
+    total.billed_input_tokens += usageInt(usage.input)
+    total.billed_output_tokens += usageInt(usage.output)
+    total.billed_cache_write_tokens += usageInt(usage.cacheWrite)
+    total.billed_cache_read_tokens += usageInt(usage.cacheRead)
+  }
+  return measured ? total : null
+}
+
+function addUsage(a, b) {
+  if (b == null) return a
+  if (a == null) return b
+  return {
+    billed_input_tokens: a.billed_input_tokens + b.billed_input_tokens,
+    billed_output_tokens: a.billed_output_tokens + b.billed_output_tokens,
+    billed_cache_write_tokens: a.billed_cache_write_tokens + b.billed_cache_write_tokens,
+    billed_cache_read_tokens: a.billed_cache_read_tokens + b.billed_cache_read_tokens,
+  }
+}
+
 function parseExit(path, read, exists) {
   if (!path || !exists(path)) return null
   try {
@@ -113,6 +150,12 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   })
   const pid = deps.pid ?? process.pid
   const injectedLog = deps.log
+  const emit = deps.emit
+  function emitUsage(turn, seat, usage) {
+    try {
+      emit?.({ kind: 'usage', id: turn.id, role: turn.role, model: crew.members?.[turn.role]?.model ?? null, session_id: seat.sessionId ?? null, transcript_path: seat.stream, usage })
+    } catch { /* ADR-026: instrumentation is never load-bearing */ }
+  }
   const root = join(taskDir || paths.taskDir, 'headless-rpc')
   const store = reclaimStore({
     dir: root, actor: `headless-rpc:${pid}`, deps,
@@ -195,6 +238,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
         }
       }
     }
+    if (seat.turn) seat.turn.usage = addUsage(seat.turn.usage, foldRpcUsage(frames))
     return frames
   }
   function pollSeat(seat) { return fold(seat, readFrames(seat)) }
@@ -307,7 +351,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
-    const turn = { id, role, returnPath, offset, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
+    const turn = { id, role, returnPath, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id }, 'prompt')
     turn.promptId = promptId
@@ -363,10 +407,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       const frames = pollSeat(seat)
       for (const frame of frames) {
         if (frame?.type === 'response' && frame.command === 'parse' && frame.success === false) {
-          finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
+          emitUsage(turn, seat, turn.usage); finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
         }
         if (frame?.type === 'response' && frame.id === turn.id && frame.success === false) {
-          finishTurn(seat); throw responseError(turn.role, frame)
+          emitUsage(turn, seat, turn.usage); finishTurn(seat); throw responseError(turn.role, frame)
         }
       }
       const env = envelopeAt(returnPath, read, exists)
@@ -374,15 +418,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       if (env) {
         const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: env, timedOut: false })
         log({ at: now(), rpc_outcome: outcome, role: turn.role, id: turn.id, exit_code: exitCode })
+        emitUsage(turn, seat, turn.usage)
         finishTurn(seat)
         return env
       }
       if (exitCode !== null) {
         const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: null, timedOut: false })
+        emitUsage(turn, seat, turn.usage)
         finishTurn(seat)
         throw staged(`rpc-${outcome}`, `rpc ${outcome}: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
       }
       if (turn.state.settled) {
+        emitUsage(turn, seat, turn.usage)
         finishTurn(seat)
         throw staged('rpc-no-envelope', `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
       }
@@ -390,6 +437,10 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     }
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
     if (!turn.state.settled) killAfterTimeout(seat)
+    // SIGTERM/abort handling can append a complete frame after the last
+    // abort poll; drain it before the turn is cleared and usage is emitted.
+    pollSeat(seat)
+    emitUsage(turn, seat, turn.usage)
     finishTurn(seat)
     throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath}`, turn.role)
   }

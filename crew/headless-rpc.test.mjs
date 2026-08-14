@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { headlessRpcIo, rpcCommand, splitFrames } from './headless-rpc.mjs'
+import { foldRpcUsage, headlessRpcIo, rpcCommand, splitFrames } from './headless-rpc.mjs'
 
 function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
@@ -17,6 +17,7 @@ function fixture(options = {}) {
     existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
     writeFileSync, readFileSync, mkdirSync, log: () => {}, sleep: options.sleep || (() => {}),
     ...(options.now ? { now: options.now } : {}), ...(options.kill ? { kill: options.kill } : {}),
+    ...(options.emit ? { emit: options.emit } : {}),
   }
   const crew = options.crew || { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
   const adapter = { rpcCommand: (spec) => { specs.push(spec); return rpcCommand(spec) } }
@@ -190,4 +191,92 @@ test('timeout aborts in protocol before escalating the process group', () => {
     assert.ok(signals.some(([pid, signal]) => pid === -701 && signal === 'SIGTERM'))
     assert.ok(signals.some(([pid, signal]) => pid === -701 && signal === 'SIGKILL'))
   } finally { f.cleanup() }
+})
+
+test('timeout drains usage written during abort or kill before emitting', () => {
+  let clock = 0; let streamPath; let exitPath; let appended = false
+  const seen = []; const f = fixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    emit: (event) => seen.push(event),
+    kill: (_pid, signal) => {
+      if (signal === 'SIGTERM' && !appended) {
+        appended = true
+        writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { usage: { input: 6, output: 7, cacheRead: 8, cacheWrite: 9 } } })}\n`)
+        writeFileSync(exitPath, '137')
+      }
+    },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    streamPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+    exitPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'exit')
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-timeout')
+    assert.deepEqual(seen.map((event) => event.usage), [{
+      billed_input_tokens: 6, billed_output_tokens: 7,
+      billed_cache_write_tokens: 9, billed_cache_read_tokens: 8,
+    }])
+  } finally { f.cleanup() }
+})
+
+test('foldRpcUsage sums pi message_end deltas and excludes replay frames', () => {
+  const captured = readFileSync(new URL('../tasks/headless-worker/captures/pi-a1-json-baseline.jsonl', import.meta.url), 'utf8')
+  const frames = splitFrames(Buffer.from(captured)).lines.flatMap((line) => {
+    try { return [JSON.parse(line)] } catch { return [] }
+  })
+  assert.deepEqual(foldRpcUsage(frames), {
+    billed_input_tokens: 2443, billed_output_tokens: 54,
+    billed_cache_write_tokens: 0, billed_cache_read_tokens: 0,
+  })
+  assert.equal(foldRpcUsage([{ type: 'turn_end', message: { usage: { input: 1, output: 2 } } }]), null)
+})
+
+test('rpc usage accumulates across polls and emits null when unmeasured', () => {
+  const seen = []; let streamPath; let returnPath; let appended = false
+  const f = fixture({ emit: (event) => seen.push(event), sleep: () => {
+    if (appended) return
+    appended = true
+    writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5 } } })}\n${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
+    writeFileSync(returnPath, JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done' }))
+  } })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    streamPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'); returnPath = run.returnPath
+    writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } })}\n`)
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
+    assert.deepEqual(seen.map((event) => event.usage), [{
+      billed_input_tokens: 3, billed_output_tokens: 5,
+      billed_cache_write_tokens: 9, billed_cache_read_tokens: 7,
+    }])
+  } finally { f.cleanup() }
+
+  const emptySeen = []; const empty = fixture({ emit: (event) => emptySeen.push(event) })
+  try {
+    const run = empty.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(empty, run, [{ type: 'agent_settled' }])
+    assert.equal(empty.io.wait(run.returnPath, 1).status, 'done')
+    assert.deepEqual(emptySeen.map((event) => event.usage), [null])
+  } finally { empty.cleanup() }
+})
+
+test('rpc crashed and settled turns emit partial usage without changing stage or outcome', () => {
+  const make = (emit, settled) => {
+    const f = fixture({ emit })
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const frames = [{ type: 'message_end', message: { usage: { input: 7, output: 8 } } }]
+    if (settled) frames.push({ type: 'agent_settled' })
+    const seat = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    writeFileSync(join(seat, 'stream.jsonl'), `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)
+    return { f, run }
+  }
+  const seen = []; const crashed = make((event) => seen.push(event), false)
+  try {
+    writeFileSync(join(crashed.f.paths.taskDir, 'headless-rpc', 'builder', 'exit'), '137')
+    assert.throws(() => crashed.f.io.wait(crashed.run.returnPath, 1), (err) => err.stage === 'rpc-aborted')
+    assert.deepEqual(seen.at(-1).usage, { billed_input_tokens: 7, billed_output_tokens: 8, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
+  } finally { crashed.f.cleanup() }
+  const settled = make(() => { throw new Error('emitter down') }, true)
+  try {
+    assert.throws(() => settled.f.io.wait(settled.run.returnPath, 1), (err) => err.stage === 'rpc-no-envelope')
+  } finally { settled.f.cleanup() }
 })

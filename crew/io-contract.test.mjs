@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { realIo } from './realio.mjs'
+import { emitAdapter, realIo } from './realio.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './realio.mjs'
@@ -306,4 +306,68 @@ test('outer realIo keeps runClean available for headless-json and headless-rpc s
     assert.deepEqual(io.runClean.call(io, 'outer-realio-run'), { ok: true, output: '' })
   }
   assert.deepEqual(executed, [['-c', 'outer-realio-run'], ['-c', 'outer-realio-run']])
+})
+
+test('emitAdapter writes usage measurements to agent_sessions with explicit null context fields', () => {
+  const starts = []; const ends = []
+  const emitter = {
+    adwId: 'adw-usage',
+    emit: (fn) => fn({
+      startAgentSession: (row) => starts.push(row),
+      endAgentSession: (row) => ends.push(row),
+    }),
+  }
+  emitAdapter(emitter)({
+    kind: 'usage', id: 'd1', role: 'builder', model: 'sonnet', session_id: 's1', transcript_path: '/tmp/stream',
+    usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 },
+  })
+  assert.equal(starts.length, 1); assert.equal(ends.length, 1)
+  assert.deepEqual(ends[0], {
+    adw_id: 'adw-usage', claude_session_id: 's1',
+    context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+    billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4,
+  })
+})
+
+test('emitAdapter writes the running total for repeated usage on one worker session', () => {
+  const ends = []
+  const emitter = {
+    adwId: 'adw-total',
+    emit: (fn) => fn({ startAgentSession() {}, endAgentSession: (row) => ends.push(row) }),
+  }
+  const adapter = emitAdapter(emitter)
+  const base = { kind: 'usage', role: 'builder', model: 'sonnet', session_id: 's1', transcript_path: '/tmp/stream' }
+  adapter({ ...base, id: 'd1', usage: { billed_input_tokens: 10, billed_output_tokens: 20, billed_cache_write_tokens: 30, billed_cache_read_tokens: 40 } })
+  adapter({ ...base, id: 'd2', usage: { billed_input_tokens: 1, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 4 } })
+  assert.deepEqual(ends.map((row) => [row.billed_input_tokens, row.billed_output_tokens, row.billed_cache_write_tokens, row.billed_cache_read_tokens]), [[10, 20, 30, 40], [11, 22, 33, 44]])
+})
+
+test('emitAdapter leaves billed columns NULL when usage is unmeasured', () => {
+  const starts = []; const ends = []
+  const emitter = {
+    adwId: 'adw-null',
+    emit: (fn) => fn({ startAgentSession: (row) => starts.push(row), endAgentSession: (row) => ends.push(row) }),
+  }
+  emitAdapter(emitter)({ kind: 'usage', id: 'd1', role: 'builder', model: null, session_id: 's1', transcript_path: null, usage: null })
+  assert.equal(starts.length, 1); assert.equal(ends.length, 0)
+  assert.equal(starts[0].billed_input_tokens, undefined)
+})
+
+test('realIo passes a guarded transport emitter that routes through io.emit', () => {
+  const paths = dirs(); let received; const starts = []
+  const emitter = {
+    adwId: 'adw-route',
+    emit: (fn) => fn({ startAgentSession: (row) => starts.push(row), endAgentSession() {} }),
+  }
+  const transport = { assign: () => ({ id: 'd1', returnPath: '/tmp/d1' }), wait: () => ({ status: 'done' }) }
+  const crew = { members: { builder: { model: 'sonnet', transport: 'headless-json' } } }
+  const io = realIo(crew, paths, paths.dir, emitter, null, {}, {
+    headlessIo: (args) => { received = args; return transport }, resolveWorkerBin: () => '/bin/worker',
+  })
+  io.assign({ role: 'builder', briefFile: '/brief.md' })
+  assert.equal(typeof received.deps.emit, 'function')
+  received.deps.emit({ kind: 'usage', id: 'd1', role: 'builder', model: 'sonnet', session_id: 's1', transcript_path: '/tmp/s', usage: null })
+  assert.equal(starts.length, 1)
+  io.emit = () => { throw new Error('ledger down') }
+  assert.doesNotThrow(() => received.deps.emit({ kind: 'usage', usage: null }))
 })

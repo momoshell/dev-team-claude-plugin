@@ -181,6 +181,12 @@ runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`, or
 
 A daemon restart adopts an un-settled run when its driver is alive and resumes the file projection. If the driver is dead, it settles from a valid envelope or honestly marks the run orphaned. It never re-runs an orphan and never ties a run's lifetime to a subscriber or client connection.
 
+## factoryctl
+
+`factoryctl run --crew-dir <dir> --brief <file>` enqueues an already-booted crew directory; `factoryctl ls [--root <dir>] [--json]` lists daemon runs. It is a stateless client that owns nothing and never starts a daemon. If none is listening, start one as described in [The daemon](#the-daemon), for example with `daemon({root}).start()`.
+
+For `ls`, STATE comes from the daemon's `state()` projection (carried by `list()`) and OUTCOME comes only from `result()`; an unsettled run's outcome cell is empty because `idle` is not success.
+
 ## Readiness
 
 Before `run` drives a seat, it waits for that seat to render as ready:

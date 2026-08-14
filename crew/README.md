@@ -42,7 +42,10 @@ never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat
 stays a bare-id lookup, not `openai-codex/gpt-5.6-luna`, because an operator
 typing a model id is speaking their own CLI's namespace. Where it is
 recorded: `sources.<role>.model === 'override'` in the boot journal's
-`allocation` map (including any declared capability shortfalls).
+`allocation` map (including any declared capability shortfalls). A seat booted
+with a raw `--model-<role>` records `provider: null` and `id: null`, because the
+roster cell no longer describes it and a raw model string carries no derivable
+provider — the boot record never guesses one.
 
 ## The model
 

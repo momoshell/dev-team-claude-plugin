@@ -376,8 +376,47 @@ test('resolveSeatModels: a fake adapters map proves translation, raw passthrough
   }
   const out = resolveSeatModels(seats, adapters)
   assert.equal(out.a.model, 'translated')
+  assert.equal(out.a.provider, 'anthropic')
+  assert.equal(out.a.id, 'claude-opus-5')
   assert.equal(out.b.model, 'already-set')
+  assert.equal(out.b.provider, null)
+  assert.equal(out.b.id, null)
   assert.equal(out.c.model, 'bare-fallback')
+})
+
+test('resolveSeatModels: a --model-<role> override clears the roster cell it replaced and never guesses a provider (#161)', async () => {
+  const claudeMod = await import('./adapters/adapter-claude.mjs')
+  const piMod = await import('./adapters/adapter-pi.mjs')
+  const resolved = resolveTier(roster, 'build', { 'agent-reviewer': 'claude', 'model-reviewer': 'opus' })
+  const adapters = {
+    lead: { name: 'claude', adapter: claudeMod },
+    planner: { name: 'claude', adapter: claudeMod },
+    builder: { name: 'pi', adapter: piMod },
+    reviewer: { name: 'claude', adapter: claudeMod },
+  }
+  const out = resolveSeatModels(resolved.seats, adapters)
+  assert.deepEqual(out.reviewer, { agent: 'claude', effort: 'high', provider: null, id: null, model: 'opus' })
+  assert.equal(resolved.sources.reviewer.model, 'override')
+})
+
+test('resolveSeatModels: an agent-only override keeps the roster cell and translates it (#161)', async () => {
+  const claudeMod = await import('./adapters/adapter-claude.mjs')
+  const piMod = await import('./adapters/adapter-pi.mjs')
+  const resolved = resolveTier(roster, 'build', { 'agent-reviewer': 'claude' })
+  const adapters = {
+    lead: { name: 'claude', adapter: claudeMod },
+    planner: { name: 'claude', adapter: claudeMod },
+    builder: { name: 'pi', adapter: piMod },
+    reviewer: { name: 'claude', adapter: claudeMod },
+  }
+  const out = resolveSeatModels(resolved.seats, adapters)
+  assert.deepEqual(out.reviewer, {
+    agent: 'claude',
+    effort: 'high',
+    provider: 'openai',
+    id: 'gpt-5.6-terra',
+    model: 'gpt-5.6-terra',
+  })
 })
 
 test('resolveSeatModels end to end through the REAL adapters, on the real roster', async () => {

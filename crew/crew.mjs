@@ -204,12 +204,18 @@ export function resolveTier(roster, tier, args = {}) {
 export function resolveSeatModels(seats, adapters) {
   const out = {}
   for (const [role, seat] of Object.entries(seats)) {
+    // A raw --model-<role> override is the operator's own CLI namespace: it is
+    // never translated, AND it invalidates the roster cell it replaced. Keeping
+    // that cell's provider/id would make the boot record name a model the seat
+    // is not running (#161). Never guess a provider from a raw string — null is
+    // the honest answer.
+    if (seat.model) { out[role] = { ...seat, provider: null, id: null }; continue }
     const adapter = adapters[role]?.adapter
     // The typeof fallback keeps a third-party adapter without modelString
     // bootable.
-    const model = seat.model || (typeof adapter?.modelString === 'function'
+    const model = typeof adapter?.modelString === 'function'
       ? adapter.modelString({ provider: seat.provider, id: seat.id })
-      : seat.id)
+      : seat.id
     out[role] = { ...seat, model }
   }
   return out

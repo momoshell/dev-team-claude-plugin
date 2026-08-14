@@ -222,7 +222,7 @@ implementation made the check reachable, with the one repair already spent
 elsewhere. Post-build gate runs are unchanged: reviewer triage already
 separates a build defect from a gate defect there.
 
-The driver owns `gate_generation` (identity is the driver's, never the command string, which a repair may legitimately return unchanged). At the first green of each generation it runs the gate once on the pristine tree via the optional `io.runClean` and records `details.gate.discrimination` as `proven` / `failed` / `unproven` under the full `baselineGateDefect` predicate; this is measurement only in this slice — nothing bounces on it, and a stash or pop failure records `unproven` and never fails a run.
+The driver owns `gate_generation` (identity is the driver's, never the command string, which a repair may legitimately return unchanged). At the first green of each generation it runs the gate once on the pristine tree via the optional `io.runClean` and records `details.gate.discrimination` as `proven` / `failed` / `unproven` under the full `baselineGateDefect` predicate; a `failed` proof is a gate defect that bounces the planner against the single gate repair, a second failed proof escalates, the repaired gate's re-proof uses the same predicate rather than bare `pristine.ok`, `unproven` never blocks, and the task is bounded at `1 + gate_repairs` pristine runs.
 
 ## Contracts
 

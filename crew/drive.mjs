@@ -188,6 +188,26 @@ export function driveTask(ctx, io) {
   // commit...). On escalation it freezes at the failing stage.
   const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label); emit({ kind: 'stage', label }) }
 
+  // Per-run gate invocation counter. The ledger's gate_results is UNIQUE on
+  // (adw_id, gate_name, attempt) with INSERT OR IGNORE, so a repeated attempt
+  // number silently DROPS a verdict — this counter is monotonic per run so
+  // every invocation lands its own row. It is driver-owned on purpose: the
+  // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
+  let gateAttempt = 0
+  const runGate = (name, cmd, runner = io.run) => {
+    const res = runner(cmd)
+    gateAttempt += 1
+    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output) })
+    return res
+  }
+  // Attention fires ONLY where the gate loop stops being self-correcting:
+  // exhaustion, or escalation of the build-vs-gate question to triage. A
+  // red-then-green cycle is the loop working and raises nothing.
+  // park_id is explicitly null: #125 mints park ids and has not landed.
+  const gateAttention = (why, artifacts = []) =>
+    emit({ kind: 'attention', moment: 'gate', park_id: null, task: ctx.task, why, artifacts })
+  const gateEscalate = (why, extra = []) => { gateAttention(why, [journal, ...extra]); return escalate('gate', why, extra) }
+
   function assignAndWait(role, briefFile, note) {
     const { id, returnPath } = io.assign({ role, briefFile, note })
     io.log({ at: io.now(), assign: id, role, brief: briefFile })
@@ -428,19 +448,19 @@ export function driveTask(ctx, io) {
   const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
   if (gateCmd) {
     stage('gate-baseline')
-    const baseline = io.run(gateCmd)
+    const baseline = runGate('gate-baseline', gateCmd)
     if (baseline.ok) {
       stage('gate-baseline:green-bounce')
       const b = art('gate-vacuous-bounce.md')
       io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYour acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
       const env2 = assignAndWait('planner', b, 'gate-fix')
       if (env2.status !== 'done' || !env2.details?.gate_cmd) {
-        return escalate('gate', `baseline-green gate could not be repaired (planner returned ${env2.status}: ${env2.summary || 'no detail'})`)
+        return gateEscalate(`baseline-green gate could not be repaired (planner returned ${env2.status}: ${env2.summary || 'no detail'})`)
       }
       gateHistory.push(gateCmd)
       gateCmd = env2.details.gate_cmd
-      const re = io.run(gateCmd)
-      if (re.ok) return escalate('gate', 'repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
+      const re = runGate('gate-baseline:recheck', gateCmd)
+      if (re.ok) return gateEscalate('repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
     } else {
       // Red — but red HOW? (#153) Non-zero exit is also what a gate whose
       // every check throws produces, and at baseline everything is red, so a
@@ -455,14 +475,14 @@ export function driveTask(ctx, io) {
         io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYour gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
         const env3 = assignAndWait('planner', b, 'gate-fix')
         if (env3.status !== 'done' || !env3.details?.gate_cmd) {
-          return escalate('gate', `defective gate could not be repaired (planner returned ${env3.status}: ${env3.summary || 'no detail'})`)
+          return gateEscalate(`defective gate could not be repaired (planner returned ${env3.status}: ${env3.summary || 'no detail'})`)
         }
         gateHistory.push(gateCmd)
         gateCmd = env3.details.gate_cmd
-        const re = io.run(gateCmd)
-        if (re.ok) return escalate('gate', 'repaired gate is GREEN at baseline — vacuous acceptance cannot be built against')
+        const re = runGate('gate-baseline:recheck', gateCmd)
+        if (re.ok) return gateEscalate('repaired gate is GREEN at baseline — vacuous acceptance cannot be built against')
         defect = baselineGateDefect(re.output)
-        if (defect) return escalate('gate', `repaired gate STILL does not run at baseline: ${defect}`)
+        if (defect) return gateEscalate(`repaired gate STILL does not run at baseline: ${defect}`)
       }
     }
   }
@@ -541,9 +561,10 @@ export function driveTask(ctx, io) {
     // (pre-build) tree before it is trusted against the already-built tree.
     if (gateCmd) {
       stage(`gate:r${round}`)
-      let gateRes = io.run(gateCmd)
+      let gateRes = runGate(`gate:r${round}`, gateCmd)
       if (!gateRes.ok && round >= limits.gate_fails_to_triage && !gateTriaged && gateRepairs < limits.gate_repairs) {
         gateTriaged = true
+        gateAttention(`the acceptance gate failed ${round} rounds — escalated to reviewer triage (build defect vs gate defect)`, [planPath])
         const tBrief = art(`gate-triage-r${round}.md`)
         io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.`)
         const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
@@ -565,13 +586,13 @@ export function driveTask(ctx, io) {
             gateReverified = false
             if (typeof io.runClean === 'function') {
               stage(`gate-reverify:${gateRepairs}`)
-              const pristine = io.runClean(gateCmd)
+              const pristine = runGate(`gate-reverify:${gateRepairs}`, gateCmd, io.runClean)
               if (pristine.ok) {
-                return escalate('gate', `repaired gate is STILL green at baseline (pristine tree, builder's changes set aside): ${gateCmd} — vacuous acceptance cannot be built against`)
+                return gateEscalate(`repaired gate is STILL green at baseline (pristine tree, builder's changes set aside): ${gateCmd} — vacuous acceptance cannot be built against`)
               }
               gateReverified = true
             }
-            gateRes = io.run(gateCmd) // re-run immediately; no builder round consumed
+            gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd) // re-run immediately; no builder round consumed
           }
         }
       }
@@ -581,7 +602,7 @@ export function driveTask(ctx, io) {
             `The acceptance gate is still red after ${round} build rounds. Bounce once more with guidance, or escalate?`,
             ['bounce', 'escalate'], [planPath, journal],
           )
-          if (c.decision !== 'bounce') return escalate('gate', c.reason)
+          if (c.decision !== 'bounce') return gateEscalate(c.reason)
           extraRounds += 1
         }
         const b = art(`build-bounce-r${round}.md`)

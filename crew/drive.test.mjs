@@ -537,8 +537,57 @@ test('gate red after build feeds back verbatim and bounces without a lead consul
   assert.match(bounce, /immutable to you/)
 })
 
+test('gate invocations emit distinct verdicts and ordinary red-then-green raises no attention', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: false, output: 'still red' },
+      'gate-cmd:3': { ok: true, output: 'green' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  const gates = io.calls.emits.filter((event) => event.kind === 'gate')
+  assert.equal(res.status, 'done')
+  assert.deepEqual(gates.map(({ name }) => name), ['gate-baseline', 'gate:r1', 'gate:r2'])
+  assert.deepEqual(gates.map(({ attempt }) => attempt), [1, 2, 3])
+  assert.deepEqual(gates.map(({ ok }) => ok), [false, false, true])
+  assert.ok(gates.every(({ cmd }) => cmd === 'gate-cmd'))
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'attention').length, 0)
+})
+
+test('gate exhaustion emits exactly one gate attention with an explicit null park_id', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'lead:1': leadEnv('escalate'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) },
+      'gate-cmd:2': { ok: false, output: 'still red' },
+      'lane-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  const attention = io.calls.emits.filter((event) => event.kind === 'attention')
+  assert.equal(res.status, 'escalation')
+  assert.equal(attention.length, 1)
+  assert.equal(attention[0].moment, 'gate')
+  assert.ok(Object.hasOwn(attention[0], 'park_id'))
+  assert.equal(attention[0].park_id, null)
+})
+
 test('repeated gate failures trigger reviewer triage; gate-defect diagnosis lets the planner repair once and re-runs without a builder round', () => {
   const io = fakeIo({
+    emit: true,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
@@ -561,12 +610,17 @@ test('repeated gate failures trigger reviewer triage; gate-defect diagnosis lets
   assert.equal(res.details.gate.repairs, 1)
   // builder ran exactly twice — the repair re-run consumed NO builder round
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
+  const gateNames = io.calls.emits.filter((event) => event.kind === 'gate').map((event) => event.name)
+  assert.ok(gateNames.includes('gate-repair:1'))
+  assert.ok(gateNames.includes('gate-reverify:1') === false)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'attention').length, 1)
   const repair = Object.values(io.calls.writes).find((w) => /GATE DEFECT/.test(w))
   assert.match(repair, /may NOT weaken any legitimate check/)
 })
 
 test('a repaired gate proven red on the pristine tree proceeds — and the proof costs no builder round', () => {
   const io = fakeIo({
+    emit: true,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
@@ -589,6 +643,9 @@ test('a repaired gate proven red on the pristine tree proceeds — and the proof
   assert.equal(res.details.gate.cmd, 'gate-fixed')
   assert.equal(res.details.gate.reverified, true)
   assert.deepEqual(io.calls.runClean, [{ cmd: 'gate-fixed', n: 1 }])
+  const gateNames = io.calls.emits.filter((event) => event.kind === 'gate').map((event) => event.name)
+  assert.ok(gateNames.includes('gate-reverify:1'))
+  assert.ok(gateNames.includes('gate-repair:1'))
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 2)
   assert.equal(io.calls.commits.length, 1)
 })
@@ -1101,13 +1158,22 @@ test('emit mirrors lead decisions and dissents', () => {
 
 test('a throwing io.emit changes nothing', () => {
   const input = {
-    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
-    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
     changed: ['a.mjs', 'a.test.mjs'],
   }
-  const plain = driveTask(CTX, fakeIo(input))
-  const noisy = driveTask(CTX, fakeIo({ ...input, emit: () => { throw new Error('ledger unavailable') } }))
+  const plainIo = fakeIo(input)
+  const plain = driveTask(CTX, plainIo)
+  const noisyIo = fakeIo({ ...input, emit: () => { throw new Error('ledger unavailable') } })
+  const noisy = driveTask(CTX, noisyIo)
   assert.deepEqual(noisy, plain)
+  assert.deepEqual(noisyIo.calls.run, plainIo.calls.run)
 })
 
 test('review exhaustion at a non-final build round grants a real round and review', () => {

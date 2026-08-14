@@ -425,29 +425,41 @@ function adapterEvents() {
     { kind: 'envelope', id: 'd1', role: 'planner', status: 'done' },
     { kind: 'decision', decided: 'accept', why: 'green' },
     { kind: 'dissent', from: 'reviewer', recommendation: 'escalate', lead_decision: 'accept' },
+    { kind: 'gate', name: 'gate:r1', attempt: 1, ok: false, cmd: 'gate-cmd', summary: { total: 3, failed: 3, errored: 0 } },
+    { kind: 'attention', moment: 'gate', park_id: null, task: 'task', why: 'exhausted', artifacts: [] },
   ]
 }
 
 test('emitAdapter maps drive events to closed ledger vocabulary with explicit sequence', () => {
   let seq = 100
-  const calls = { phases: [], events: [] }
+  const calls = { phases: [], events: [], gates: [] }
   const emitter = {
     adwId: 'adw-test',
     phaseTransition: (phase) => calls.phases.push(phase),
-    emit: (fn) => fn({ recordEvent: (event) => calls.events.push(event) }, () => ++seq),
+    emit: (fn) => fn({
+      recordEvent: (event) => calls.events.push(event),
+      recordGateResult: (event) => calls.gates.push(event),
+    }, () => ++seq),
   }
   const adapter = emitAdapter(emitter)
   for (const event of adapterEvents()) adapter(event)
   adapter(null)
   adapter({ kind: 'unknown' })
   assert.ok(calls.phases.length >= 1)
-  assert.ok(calls.events.length >= 4)
+  assert.ok(calls.events.length >= 5)
   for (const event of calls.events) {
     assert.ok(EVENT_TYPES.includes(event.type))
     assert.ok(Object.keys(event.payload).every((key) => PAYLOAD_KEYS[event.type].includes(key)))
     assert.equal(event.adw_id, 'adw-test')
     assert.equal(typeof event.seq, 'number')
   }
+  assert.equal(calls.gates.length, 1)
+  assert.deepEqual(calls.gates[0], {
+    adw_id: 'adw-test', phase_id: null, gate_name: 'gate:r1', attempt: 1, ok: false,
+    checks: [{ total: 3, failed: 3, errored: 0 }], violations: [],
+  })
+  assert.equal(calls.events.filter((event) => event.type === 'log').length, 2)
+  assert.ok(calls.events.some((event) => event.type === 'log' && event.payload.level === 'warn'))
 })
 
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
@@ -523,6 +535,64 @@ test('a real ledger round trip mirrors the complete drive event set', { skip: !n
     assert.ok(rows.length >= 4)
     assert.ok(ledger.dumpTable('phases').length >= 1)
     assert.equal(ledger.getSession(emitter.adwId).status, 'ok')
+    assert.equal(emitter.stats().dropped, 0)
+    ledger.close()
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+})
+
+test('a real ledger round trip mirrors drive gate verdicts into distinct gate_results rows', { skip: !nodeMeetsLedgerFloor }, () => {
+  const stateDir = mkdtempSync(join(tmpdir(), 'crew-gate-state-'))
+  const dbPath = join(stateDir, 'ledger.db')
+  try {
+    const emitter = openRun({ stateDir, repoSlug: 'repo', taskSlug: 'gate-task', dbPath })
+    emitter.startRun()
+    const adapter = emitAdapter(emitter)
+    const counts = {}
+    const envelopes = {
+      'planner:1': {
+        status: 'done', role: 'planner', details: {
+          plan_path: '/tmp/gate-task/plan.md', files_in_scope: ['a.mjs'],
+          validation_lane: 'lane-cmd', gate_cmd: 'gate-cmd',
+        },
+      },
+      'builder:1': { status: 'done', role: 'builder', details: { files_changed: ['a.mjs'], commit_message: 'feat: gate' } },
+      'builder:2': { status: 'done', role: 'builder', details: { files_changed: ['a.mjs'], commit_message: 'feat: gate' } },
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { verdict: 'pass' } },
+    }
+    const io = {
+      emit: adapter,
+      assign({ role }) {
+        counts[role] = (counts[role] || 0) + 1
+        return { id: `${role}:${counts[role]}`, returnPath: `${role}:${counts[role]}` }
+      },
+      wait(path) { return envelopes[path] || null },
+      writeFile() {}, readFile() { return null },
+      run(cmd) {
+        counts[cmd] = (counts[cmd] || 0) + 1
+        if (cmd === 'gate-cmd') {
+          return counts[cmd] === 1
+            ? { ok: false, output: 'baseline\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' }
+            : counts[cmd] === 2 ? { ok: false, output: 'red' } : { ok: true, output: 'green' }
+        }
+        return { ok: true, output: '' }
+      },
+      changedFiles() { return ['a.mjs'] },
+      commit() { return 'abc1234' },
+      log() {}, status() {}, now() { return 0 },
+    }
+    const ctx = {
+      task: 'gate-task', briefFile: '/tmp/brief.md', taskDir: '/tmp/gate-task', checkout: '/tmp/repo',
+      roles: ['lead', 'planner', 'builder', 'reviewer'], lane: null, suite: 'suite-cmd',
+    }
+    const result = driveTask({ ...ctx, limits: { gate_fails_to_triage: 3 } }, io)
+    assert.equal(result.status, 'done')
+    emitter.endRun({ status: 'ok' })
+    const ledger = openLedger({ dbPath })
+    const rows = ledger.dumpTable('gate_results').filter((row) => row.adw_id === emitter.adwId)
+    assert.equal(rows.length, 3)
+    assert.equal(new Set(rows.map((row) => `${row.gate_name}:${row.attempt}`)).size, 3)
     assert.equal(emitter.stats().dropped, 0)
     ledger.close()
   } finally {

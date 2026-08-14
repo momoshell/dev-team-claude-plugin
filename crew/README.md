@@ -173,6 +173,14 @@ Headless workers use a frozen binary, resolved in this order:
 runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`, or
 `timeout`; a perfect stream without an envelope is still `no-envelope`.
 
+## The daemon
+
+`daemon.mjs` owns long-lived headless crew runs behind a Unix-socket JSONL protocol. Its socket and pidfile live at `<root>/daemon.sock` and `<root>/daemon.json` (the default root is `~/.crew/daemon`). The closed command set is `ping`, `enqueue`, `list`, `state`, `result`, `tail`, `untail`, and `stop`.
+
+`state()` is a query with the closed enum `working`, `blocked`, `done`, or `dead`; it carries no outcome. In particular, `idle` is not success: an escalation envelope is a settled `done` state, while its outcome is read separately through `result()` from the task envelope. The live feed is a normalized in-memory projection of the journal and worker streams, never a second record (ADR-029 §4); the envelope remains authoritative.
+
+A daemon restart adopts an un-settled run when its driver is alive and resumes the file projection. If the driver is dead, it settles from a valid envelope or honestly marks the run orphaned. It never re-runs an orphan and never ties a run's lifetime to a subscriber or client connection.
+
 ## Readiness
 
 Before `run` drives a seat, it waits for that seat to render as ready:
@@ -236,6 +244,7 @@ Everything durable is a FILE; pane chat is never the record.
 
 - `crew.mjs` — CLI: boot / run / handoff (legacy agent-driven mode) / wait /
   status / teardown.
+- `daemon.mjs` — the long-lived headless-run daemon, Unix-socket protocol, restart adoption, and live file projection.
 - `realio.mjs` — the io implementation: the injected-`deps` seam,
   `waitForEnvelope`, `emitAdapter`, and the cmux + git wiring.
 - `drive.mjs` — the deterministic task loop (dependency-injected io; fully

@@ -20,7 +20,7 @@ mutually exclusive (the tier defines the seating). Per-seat `--model-<role>`
 | tier | lead | planner | builder | reviewer | tech-lead |
 |---|---|---|---|---|---|
 | `mechanical` | — | claude/opus-5, medium | pi/luna, max | pi/terra, medium | — |
-| `build` | claude/opus-5, medium | claude/opus-5, medium | pi/luna, max | pi/terra, high | — |
+| `build` | claude/opus-5, medium | claude/opus-5, medium | pi/luna, max | pi/terra, max | — |
 | `judge` | claude/opus-5, high | claude/opus-5, high | pi/luna, max | claude/opus-5, high | pi/sol, xhigh |
 
 Cells are `<agent>/<model>, <effort>`; `roster.json` is the source of truth
@@ -36,6 +36,17 @@ that writes source, its output is what every later stage grades, and the
 ChatGPT-subscription routing makes the upgrade a latency cost rather than a
 billed one. `mechanical` stays cheap through its lead-less seating and its
 `medium` reviewer, not by thinking less about the code it writes.
+
+The same subscription argument now carries `build`'s **reviewer at `max`**: the
+reviewer is the last gate before commit, and on the same routing the upgrade
+costs wall-clock rather than money. This one is an explicitly **recorded
+experiment**, not a settled invariant — measured over 19 archived runs,
+`pi/terra` at `high` already sent work back in 68% of them (against 66% for an
+opus reviewer), so bounce rate cannot say whether more effort helps. The
+keep-or-revert evidence is the durable review outcome — normalized verdict and
+`must_fix` count — that #169 adds to the ledger. `judge` deliberately stays on
+opus review: the review-vendor rule is about correlated blind spots, and effort
+does not fix vendor correlation.
 
 A `--model-<role>` flag on a `--tier` boot is a **raw passthrough that is
 never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat

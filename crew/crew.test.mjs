@@ -489,7 +489,10 @@ test('resolveSeatModels: a --model-<role> override clears the roster cell it rep
     reviewer: { name: 'claude', adapter: claudeMod },
   }
   const out = resolveSeatModels(resolved.seats, adapters)
-  assert.deepEqual(out.reviewer, { agent: 'claude', effort: 'high', provider: null, id: null, model: 'opus' })
+  // Effort is read from the roster cell, not pinned as a literal: these tests
+  // are about what an OVERRIDE does, and a roster effort change is a policy
+  // decision that must not read as a broken override contract.
+  assert.deepEqual(out.reviewer, { agent: 'claude', effort: roster.tiers.build.reviewer.effort, provider: null, id: null, model: 'opus' })
   assert.equal(resolved.sources.reviewer.model, 'override')
 })
 
@@ -506,7 +509,7 @@ test('resolveSeatModels: an agent-only override keeps the roster cell and transl
   const out = resolveSeatModels(resolved.seats, adapters)
   assert.deepEqual(out.reviewer, {
     agent: 'claude',
-    effort: 'high',
+    effort: roster.tiers.build.reviewer.effort,
     provider: 'openai',
     id: 'gpt-5.6-terra',
     model: 'gpt-5.6-terra',

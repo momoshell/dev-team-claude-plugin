@@ -19,9 +19,9 @@ mutually exclusive (the tier defines the seating). Per-seat `--model-<role>`
 
 | tier | lead | planner | builder | reviewer | tech-lead |
 |---|---|---|---|---|---|
-| `mechanical` | — | claude/opus-5, medium | pi/luna, high | pi/terra, medium | — |
-| `build` | claude/opus-5, medium | claude/opus-5, medium | pi/luna, high | pi/terra, high | — |
-| `judge` | claude/opus-5, high | claude/opus-5, high | pi/luna, high | claude/opus-5, high | pi/sol, xhigh |
+| `mechanical` | — | claude/opus-5, medium | pi/luna, max | pi/terra, medium | — |
+| `build` | claude/opus-5, medium | claude/opus-5, medium | pi/luna, max | pi/terra, high | — |
+| `judge` | claude/opus-5, high | claude/opus-5, high | pi/luna, max | claude/opus-5, high | pi/sol, xhigh |
 
 Cells are `<agent>/<model>, <effort>`; `roster.json` is the source of truth
 and this table is a convenience copy of it. Two ratified invariants the tiers
@@ -30,7 +30,12 @@ tier, because the plan is the artifact every downstream stage inherits, so it
 is never the place to save — and the **review-vendor rule** — luna builds at
 every tier, and `judge` keeps opus on review so cross-vendor checking holds
 where the stakes are highest, while `build`/`mechanical` accept the
-same-vendor luna→terra pair with the opus lead as the backstop.
+same-vendor luna→terra pair with the opus lead as the backstop. A third:
+**luna builds at `max` thinking at every tier** — the builder is the only seat
+that writes source, its output is what every later stage grades, and the
+ChatGPT-subscription routing makes the upgrade a latency cost rather than a
+billed one. `mechanical` stays cheap through its lead-less seating and its
+`medium` reviewer, not by thinking less about the code it writes.
 
 A `--model-<role>` flag on a `--tier` boot is a **raw passthrough that is
 never namespace-translated**: `--model-builder gpt-5.6-luna` on a pi seat

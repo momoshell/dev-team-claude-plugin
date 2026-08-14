@@ -333,6 +333,15 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       return ar - br || String(a.role).localeCompare(String(b.role)) || String(a.sessionId).localeCompare(String(b.sessionId))
     })
   }
+  const frozenSpec = (park) => {
+    const spec = normalizeSpec(park?.spec)
+    if (!spec) return null
+    return Object.freeze({
+      run_id: spec.run_id,
+      resumes_park_id: spec.resumes_park_id,
+      decision: Object.freeze({ ...spec.decision }),
+    })
+  }
   const leasePath = (key) => join(leasesDir, `${key}.json`)
   const parkPath = (id) => join(parksDir, `${id}.json`)
   const readJson = (path) => {
@@ -374,6 +383,23 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     return { ok: true, spec }
   }
 
+  const overrideLease = (role, sessionId, input = {}) => {
+    const args = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+    if (!nonblank(role) || !nonblank(sessionId) || !nonblank(args.actor) || !nonblank(args.reason) || !validAttestation(args.attestation)) throw new Error('invalid lease override attestation')
+    const key = leaseKey(role, sessionId)
+    const path = leasePath(key)
+    let raw
+    try { raw = String(d.readFileSync(path, 'utf8')) } catch { throw new Error('lease override identity mismatch') }
+    const identity = args.reservation_id != null ? { kind: 'reservation_id', value: args.reservation_id } : args.digest != null ? { kind: 'digest', value: args.digest } : null
+    if (!identity || !nonblank(identity.value)) throw new Error('lease override identity mismatch')
+    if (identity.kind === 'reservation_id') {
+      let record
+      try { record = JSON.parse(raw) } catch { record = null }
+      if (record?.reservation_id !== identity.value) throw new Error('lease override identity mismatch')
+    } else if (digest(raw) !== identity.value) throw new Error('lease override identity mismatch')
+    appendLine(overridePath, { at: d.now(), actor: args.actor, reason: args.reason, kind: 'lease', key, identity, attestation: args.attestation }, d)
+  }
+
   const leaseEngine = (successorState) => reservationEngine({
     dir,
     actor,
@@ -390,6 +416,7 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     },
     deps: { ...d, now: () => stamp() },
     lock: { withLock, checkFence },
+    overrides: { kind: 'lease', attested: true },
   })
 
   const clearLease = (handle) => {
@@ -478,6 +505,12 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     })
   }
 
+  const specResidue = (parkSpec) => activeLeases().some((record) => {
+    if (record?.corrupt) return true
+    const recordSpec = normalizeSpec(record?.spec)
+    return !!(parkSpec && recordSpec && JSON.stringify(recordSpec) === JSON.stringify(parkSpec))
+  })
+
   const validateParkRecord = (record, id) => {
     if (!exactKeys(record, ['park_id', 'run_id', 'state', 'launch_state', 'seats', 'leases', 'decision', 'spec', 'linked_at', 'reason', 'parked_at', 'updated_at'])) return false
     if (!safeId(record.park_id) || record.park_id !== id || !nonblank(record.run_id) || !PARK_STATES.includes(record.state) || !LAUNCH_STATES.includes(record.launch_state)) return false
@@ -487,7 +520,7 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     if (!Number.isFinite(record.parked_at) || !Number.isFinite(record.updated_at) || !(record.linked_at === null || Number.isFinite(record.linked_at)) || typeof record.reason !== 'string') return false
     if (record.decision !== null && (!exactKeys(record.decision, ['decision_id', 'actor', 'at', 'answer']) || !nonblank(record.decision.decision_id) || !nonblank(record.decision.actor) || !nonblank(record.decision.answer) || !Number.isFinite(record.decision.at))) return false
     if (record.spec !== null && !normalizeSpec(record.spec)) return false
-    if (record.state === 'parked' && record.launch_state !== null) return false
+    if (record.state === 'parked' && (record.launch_state !== null || record.spec !== null || record.leases.length !== 0)) return false
     if (record.state === 'claimed' && (!['pending', 'enqueued'].includes(record.launch_state) || !record.decision || !record.spec)) return false
     if ((record.state === 'resumed' || record.state === 'abandoned') && (record.launch_state !== null || record.leases.length !== 0)) return false
     if (record.spec && normalizeSpec(record.spec).resumes_park_id !== record.park_id) return false
@@ -667,6 +700,95 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     return { ok: true, release, foreign }
   }
 
+  const rollbackPark = (park, lockHandle) => {
+    try {
+      const plan = planRelease(park)
+      if (!plan.ok) return 'unresolvable'
+      const released = releaseLeases(plan.release)
+      if (!released.ok) return 'unresolvable'
+      if (specResidue(normalizeSpec(park.spec))) return 'unresolvable'
+      const next = { ...park, state: 'parked', launch_state: null, leases: [], spec: null, updated_at: stamp() }
+      return writePark(park.park_id, next, lockHandle) ? 'restored' : 'unresolvable'
+    } catch { return 'unresolvable' }
+  }
+
+  const settleRow = (park, state, lockHandle, onFailure = null) => {
+    const fail = (reason = 'unresolvable') => {
+      if (typeof onFailure === 'function') onFailure(reason)
+      return 'unresolvable'
+    }
+    try {
+      const plan = planRelease(park)
+      if (!plan.ok) return fail()
+      const released = releaseLeases(plan.release)
+      if (!released.ok) return fail('lease-release-incomplete')
+      if (specResidue(normalizeSpec(park.spec))) return fail('lease-release-incomplete')
+      const linked_at = park.linked_at === null ? stamp() : park.linked_at
+      const next = { ...park, state, launch_state: null, leases: [], linked_at, updated_at: stamp() }
+      return writePark(park.park_id, next, lockHandle) ? 'settled' : fail()
+    } catch { return fail() }
+  }
+
+  const relaunchPark = (park, lockHandle, options = {}) => {
+    const args = options && typeof options === 'object' && !Array.isArray(options) ? options : {}
+    const parkSpec = normalizeSpec(park?.spec)
+    if (!parkSpec || typeof args.enqueue !== 'function' || typeof args.successorState !== 'function' || (args.order !== undefined && !Array.isArray(args.order))) return 'unresolvable'
+    let current = park
+    const engine = leaseEngine(args.successorState)
+    try {
+      for (const seat of orderSeats(park.seats, args.order)) {
+        if (!checkFence(lockHandle)) return 'unresolvable'
+        const key = leaseKey(seat.role, seat.sessionId)
+        const path = leasePath(key)
+        let record
+        try { record = readJson(path) } catch { record = undefined }
+        const valid = record && validateLeaseRecord(record, seat, path)
+        let reservation_id = null
+        if (valid?.ok && JSON.stringify(valid.spec) === JSON.stringify(parkSpec)) {
+          try {
+            engine.advance({ key, reservation_id: record.reservation_id }, LEASE_PHASES.HELD, { owner: { pid: d.pid, startedAt: stamp() } })
+            reservation_id = record.reservation_id
+          } catch { reservation_id = null }
+        }
+        if (!reservation_id) {
+          const persisted = current.leases.find((handle) => leaseKey(handle.role, handle.sessionId) === key)
+          let clearable = true
+          try {
+            if (record?.reservation_id === persisted?.reservation_id) {
+              clearable = engine.clear({ key, reservation_id: persisted.reservation_id })
+            } else {
+              const verdict = engine.reconcile(key)
+              if (verdict.verdict === VERDICTS.FREE) clearable = true
+              else if (verdict.verdict === VERDICTS.RECLAIMABLE) clearable = engine.clear(verdict.handle)
+              else clearable = false
+            }
+          } catch { clearable = false }
+          if (!clearable) return rollbackPark(current, lockHandle)
+          let reserved
+          try {
+            reserved = engine.reserve(key, { phase: LEASE_PHASES.HELD, role: seat.role, sessionId: seat.sessionId, spec: parkSpec })
+          } catch { reserved = { ok: false } }
+          if (!reserved?.ok) return rollbackPark(current, lockHandle)
+          reservation_id = reserved.handle.reservation_id
+        }
+        const next = {
+          ...current,
+          leases: current.leases.map((handle) => leaseKey(handle.role, handle.sessionId) === key ? { ...handle, reservation_id } : handle),
+          updated_at: stamp(),
+        }
+        if (!writePark(park.park_id, next, lockHandle)) return 'unresolvable'
+        current = next
+      }
+      if (!verifyLeaseSet(current).ok) return 'unresolvable'
+      const spec = frozenSpec(current)
+      if (!spec) return 'unresolvable'
+      let enqueued
+      try { enqueued = args.enqueue(spec) } catch { return 'unresolvable' }
+      if (!enqueued) return rollbackPark(current, lockHandle)
+      return 'relaunched'
+    } catch { return 'unresolvable' }
+  }
+
   function linkActive(park, lockHandle) {
     try {
       if (!checkFence(lockHandle)) return false
@@ -759,23 +881,56 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
         if (state === SUCCESSOR_STATES.ACTIVE) return { ok: false, reason: 'successor-active' }
         if (state === SUCCESSOR_STATES.UNKNOWN || state === SUCCESSOR_STATES.MISMATCH) return { ok: false, reason: 'unresolvable' }
         if (state === SUCCESSOR_STATES.ABSENT) return { ok: false, reason: 'no-terminal-evidence' }
-        const plan = planRelease(park)
-        if (!plan.ok) return { ok: false, reason: 'unresolvable' }
-        const released = releaseLeases(plan.release)
-        if (!released.ok) return { ok: false, reason: 'lease-release-incomplete' }
-        const parkSpec = normalizeSpec(park.spec)
-        for (const record of activeLeases()) {
-          if (record?.corrupt) return { ok: false, reason: 'lease-release-incomplete' }
-          const recordSpec = normalizeSpec(record?.spec)
-          if (recordSpec && JSON.stringify(recordSpec) === JSON.stringify(parkSpec)) return { ok: false, reason: 'lease-release-incomplete' }
-        }
-        const linked_at = park.linked_at === null ? stamp() : park.linked_at
-        const updated_at = stamp()
-        const next = { ...park, state, launch_state: null, leases: [], linked_at, updated_at }
-        if (!writePark(id, next, lockHandle)) return { ok: false, reason: 'unresolvable' }
-        return { ok: true, park: next }
+        let failureReason = 'unresolvable'
+        const outcome = settleRow(park, state, lockHandle, (reason) => { failureReason = reason })
+        if (outcome !== 'settled') return { ok: false, reason: failureReason }
+        return { ok: true, park: readPark(id) }
       })
     } catch { return { ok: false, reason: 'unresolvable' } }
+  }
+
+  const reconcileParks = (input = {}) => {
+    const args = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+    const result = { linked: [], relaunched: [], restored: [], unresolvable: [], waiting: [], settled: [] }
+    if (typeof args.enqueue !== 'function' || typeof args.successorState !== 'function' || (args.order !== undefined && !Array.isArray(args.order))) return result
+    let rows
+    try { rows = listParks() } catch { return result }
+    const bucket = (id, value) => {
+      if (Object.hasOwn(result, value)) result[value].push(id)
+      else result.unresolvable.push(id)
+    }
+    const filenameStem = (path) => String(path).split(/[\\/]/).pop().replace(/\.json$/, '')
+    for (const row of rows) {
+      const id = row?.corrupt ? filenameStem(row.path) : row?.park_id
+      if (row?.corrupt) {
+        result.unresolvable.push(id)
+        continue
+      }
+      try {
+        if (!safeId(id)) {
+          result.unresolvable.push(id)
+          continue
+        }
+        const outcome = withLock(parkLockName(id), (lockHandle) => {
+          const park = readPark(id)
+          if (!park) return 'unresolvable'
+          if (park.state === 'parked' && park.launch_state === null) return 'waiting'
+          if ((park.state === 'resumed' || park.state === 'abandoned') && park.launch_state === null) return terminalRowValid(park) ? 'settled' : 'unresolvable'
+          if (park.state !== 'claimed' || !['pending', 'enqueued'].includes(park.launch_state)) return 'unresolvable'
+          const state = probeSuccessor(args.successorState, frozenSpec(park))
+          if (state === SUCCESSOR_STATES.ACTIVE) return linkActive(park, lockHandle) ? 'linked' : 'unresolvable'
+          if (state === SUCCESSOR_STATES.RESUMED || state === SUCCESSOR_STATES.ABANDONED) return settleRow(park, state, lockHandle)
+          if (state === SUCCESSOR_STATES.ABSENT) {
+            if (park.launch_state === 'pending') return relaunchPark(park, lockHandle, args)
+            return rollbackPark(park, lockHandle)
+          }
+          return 'unresolvable'
+        })
+        bucket(id, outcome)
+      } catch { result.unresolvable.push(id) }
+    }
+    for (const values of Object.values(result)) values.sort()
+    return result
   }
 
   const phases = { allowed: [PHASES.RESERVED, PHASES.SPAWNING, PHASES.RUNNING], preEffect: PHASES.RESERVED }
@@ -795,10 +950,10 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
     return null
   }, probes, deps: d, lock: { withLock, checkFence } })
 
-  return { reserve: engine.reserve, advance: engine.advance, clear: engine.clear, reconcile: engine.reconcile, override: engine.override, probeEvidence: engine.probeEvidence, acquire, release, checkFence, withLock, overrideLock, acquireLeases, releaseLeases, reconcileLease, clearLease, activeLeases, verifyLeaseSet, transferLeases, mintPark, recordAnswer, claim, settlePark, readPark, listParks }
+  return { reserve: engine.reserve, advance: engine.advance, clear: engine.clear, reconcile: engine.reconcile, override: engine.override, probeEvidence: engine.probeEvidence, acquire, release, checkFence, withLock, overrideLock, overrideLease, acquireLeases, releaseLeases, reconcileLease, clearLease, activeLeases, verifyLeaseSet, transferLeases, mintPark, recordAnswer, claim, settlePark, reconcileParks, readPark, listParks }
 }
 
-export function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, completionProof = () => null, evidencePolicy = () => null, probes = {}, deps = {}, lock = null }) {
+export function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, completionProof = () => null, evidencePolicy = () => null, probes = {}, deps = {}, lock = null, overrides = {} }) {
   const d = normalDeps(deps)
   const withStore = lock || reclaimStore({ dir, actor, probes, deps: d, _lockOnly: true })
   const withLock = withStore.withLock
@@ -828,10 +983,13 @@ export function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, co
   function identityFor(key, item) {
     return item.marker && typeof item.marker.reservation_id === 'string' ? { key, reservation_id: item.marker.reservation_id } : item.raw != null ? { key, digest: digest(item.raw) } : { key, digest: '' }
   }
+  const overrideKind = overrides.kind || 'reservation'
+  const overrideAttested = overrides.attested === true
   function overrideMatches(key, item) {
     if (item.raw == null) return false
     return readOverrides(join(dir, 'overrides.jsonl'), d).some((record) => {
-      if (record?.kind !== 'reservation' || record.key !== key || !record.identity) return false
+      if (record?.kind !== overrideKind || record.key !== key || !record.identity) return false
+      if (overrideAttested && !validAttestation(record.attestation)) return false
       if (record.identity.kind === 'reservation_id') return item.marker?.reservation_id === record.identity.value
       return record.identity.kind === 'digest' && digest(item.raw) === record.identity.value
     })

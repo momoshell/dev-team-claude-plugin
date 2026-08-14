@@ -194,8 +194,17 @@ export function driveTask(ctx, io) {
   // every invocation lands its own row. It is driver-owned on purpose: the
   // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
   let gateAttempt = 0
+  // `runner` is an io METHOD, so it must be invoked as one: `realIo.runClean`
+  // calls `this.run(cmd)` (crew/realio.mjs:241,245), and passing it detached
+  // (`runGate(..., io.runClean)` below) made `this` undefined under ESM strict
+  // mode — a live driver crash at `gate-reverify`. The fake io in
+  // drive.test.mjs defines runClean as an arrow that never reads `this`, so
+  // the contract's own specification could not express the requirement the
+  // shipped implementation had. Bind here rather than forbid `this` in io
+  // implementations: every other io call site in this file is a method call,
+  // and this keeps that true for runners too.
   const runGate = (name, cmd, runner = io.run) => {
-    const res = runner(cmd)
+    const res = runner.call(io, cmd)
     gateAttempt += 1
     emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output) })
     return res

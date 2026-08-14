@@ -650,6 +650,44 @@ test('a repaired gate proven red on the pristine tree proceeds — and the proof
   assert.equal(io.calls.commits.length, 1)
 })
 
+// REGRESSION: realIo.runClean is a shorthand METHOD that calls `this.run(cmd)`
+// (crew/realio.mjs:241,245). #130 routed the reverify call through
+// runGate(..., io.runClean), detaching it, and every real gate-reverify
+// crashed with "Cannot read properties of undefined (reading 'run')" — caught
+// only by a live run. The fakes above cannot catch it: their runClean is an
+// arrow that never reads `this`. This one models the shipped shape.
+test('an io whose runClean is a this-using method survives gate-reverify', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: 'baseline red\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' },
+      'gate-bad:2': { ok: false, output: 'bogus fail A' },
+      'gate-bad:3': { ok: false, output: 'bogus fail B' },
+      'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  // Exactly realIo's shape: a method that reaches its sibling through `this`.
+  const pristine = { ok: false, output: 'red on pristine\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' }
+  let sawThis = false
+  io.runClean = function runClean(cmd) {
+    sawThis = true
+    this.run(cmd) // the line that threw when the method was passed detached
+    return pristine
+  }
+  const res = driveTask(CTX, io)
+  assert.equal(sawThis, true, 'runClean must actually have been reached')
+  assert.notEqual(res.details?.escalation?.where, 'driver', 'a detached runClean crashes the driver')
+  assert.equal(res.details.gate.reverified, true)
+})
+
 test('a repaired gate GREEN on the pristine tree is vacuous — escalate, never commit', () => {
   const io = fakeIo({
     envelopes: {

@@ -58,11 +58,19 @@ const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
 // the seat; overridable per task via --agent-<role>, default 'claude'.
 // `requires` names the capability keys the charter depends on; a seat whose
 // adapter cannot deliver one refuses to boot.
+// Only the PLANNER requires `subagents`, and the asymmetry is deliberate: its
+// charter is "domain lead + architect + scout-commander", and fan-out
+// discovery IS the third of those. The reviewer's charter — conformance to
+// plan, then correctness, plus gate-defect triage and perspective duty — names
+// no fan-out, and the roster deliberately seats pi/terra on review at
+// `build`/`mechanical` under the ratified review-vendor rule. Requiring it
+// there would make two of three tiers unbootable, which is how this landed the
+// first time (#144).
 export const SEAT_DEFAULTS = Object.freeze({
   lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'lead.md', agent: 'claude' },
   planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'planner.md', agent: 'claude' },
   builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', requires: [], prompt: 'builder.md', agent: 'claude' },
-  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'reviewer.md', agent: 'claude' },
+  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: [], prompt: 'reviewer.md', agent: 'claude' },
   'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'tech-lead.md', agent: 'claude' },
 })
 export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer'])

@@ -171,10 +171,12 @@ test('seat requirements refuse pi scouts, allow a named shortfall, and reject ma
     () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }),
     (err) => /planner/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
   )
-  await assert.rejects(
-    () => resolveAdapters(['reviewer'], { 'agent-reviewer': 'pi' }),
-    (err) => /reviewer/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
-  )
+  // The reviewer is deliberately NOT subject to this: the roster seats
+  // pi/terra on review at build/mechanical under the ratified review-vendor
+  // rule, so requiring subagents there would make two of three tiers
+  // unbootable. Pinned so a later "symmetry" tidy-up cannot reintroduce it.
+  const reviewer = await resolveAdapters(['reviewer'], { 'agent-reviewer': 'pi' })
+  assert.equal(reviewer.reviewer.name, 'pi')
   const builder = await resolveAdapters(['builder'], { 'agent-builder': 'pi' })
   assert.equal(builder.builder.name, 'pi')
   const planner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents' })
@@ -205,10 +207,23 @@ test('bootAllocation records only declared shortfalls and preserves tier provena
   assert.equal(bootAllocation(['planner', 'builder'], {}), null)
 })
 
-test('SEAT_DEFAULTS declares subagents only for planner and reviewer', () => {
+test('SEAT_DEFAULTS requires subagents for the planner ALONE — the scout-commander seat', () => {
   assert.deepEqual(SEAT_DEFAULTS.planner.requires, ['subagents'])
-  assert.deepEqual(SEAT_DEFAULTS.reviewer.requires, ['subagents'])
-  for (const role of ['lead', 'builder', 'tech-lead']) assert.deepEqual(SEAT_DEFAULTS[role].requires, [])
+  // Not the reviewer: its charter names no fan-out, and the roster seats
+  // pi/terra on review at build/mechanical by ratified policy. A requirement
+  // here makes two of three tiers unbootable — measured, not theorised.
+  for (const role of ['lead', 'builder', 'reviewer', 'tech-lead']) assert.deepEqual(SEAT_DEFAULTS[role].requires, [])
+})
+
+test('every roster tier still boots its seats — the requirement cannot strand a shipped tier', async () => {
+  const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+  for (const tier of Object.keys(roster.tiers)) {
+    const { roles, seats } = resolveTier(roster, tier, {})
+    await assert.doesNotReject(
+      () => resolveAdapters(roles, {}, seats),
+      `tier "${tier}" must boot with no shortfall override`,
+    )
+  }
 })
 
 test('resolveAdapters boots pi headless-rpc and refuses claude on that transport', async () => {

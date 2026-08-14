@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { classifyRun, headlessIo, shq } from './headless.mjs'
@@ -157,3 +157,27 @@ test('synchronous spawn failure rolls back and retries', () => { let fail = true
 test('unref failure retains SPAWNING reservation', () => { const f = makeFixture({ spawn: () => ({ pid: 901, unref() { throw Error('unref') } }) }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'headless', '.builder.active.json'))).phase, 'spawning') } finally { f.cleanup() } })
 test('timeout EPERM retains marker', () => { let clock = 0; const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill() { const e = Error('permission'); e.code = 'EPERM'; throw e } }); try { const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.throws(() => f.io.wait(run.returnPath, 0)); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), true) } finally { f.cleanup() } })
 test('timeout EPERM plus dead pgid clears marker', () => { let clock = 0; const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill(pid, signal) { if (signal === 'SIGTERM' || signal === 'SIGKILL') { const e = Error(); e.code = 'EPERM'; throw e } const e = Error(); e.code = 'ESRCH'; throw e } }); try { const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); mkdirSync(join(f.taskDir, 'headless', run.id), { recursive: true }); writeFileSync(join(f.taskDir, 'headless', run.id, 'pgid'), '111'); assert.throws(() => f.io.wait(run.returnPath, 0)); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), false) } finally { f.cleanup() } })
+
+test('the wrapper publishes its pgid atomically before the worker runs', () => {
+  let shell = null
+  const f = makeFixture({ spawn: (bin, args) => { shell = args[1]; return { pid: 901, unref() {} } } })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' })
+    const pgid = join(f.taskDir, 'headless', run.id, 'pgid')
+    assert.ok(shell.startsWith(`printf '%s' $$ >'${pgid}.tmp';`), 'wrapper must publish its pgid as its first act')
+    const published = shell.indexOf(`mv '${pgid}.tmp' '${pgid}'`)
+    assert.ok(published > -1, 'pgid must be published by an atomic rename')
+    assert.ok(published < shell.indexOf('/worker/bin'), 'pgid must exist before the worker starts')
+  } finally { f.cleanup() }
+})
+
+test('allocation never re-adopts an existing run directory', () => {
+  const f = makeFixture({ readdirSync: (p, opts) => (String(p).endsWith('/headless') ? [] : readdirSync(p, opts)) })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/b' })
+    writeFileSync(join(f.taskDir, 'headless', first.id, 'exit'), '0')
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/b' })
+    assert.notEqual(second.id, first.id)
+    assert.equal(existsSync(join(f.taskDir, 'headless', second.id, 'exit')), false)
+  } finally { f.cleanup() }
+})

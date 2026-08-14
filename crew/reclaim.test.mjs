@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, linkSync, readdirSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync, linkSync, readdirSync, appendFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
@@ -79,3 +79,23 @@ test('override digest is inert after marker bytes change', () => { const f = dea
 test('reservation id override survives a phase rewrite', () => { const f = deadFixture(); try { const r = f.s.reserve('a', { phase: PHASES.RUNNING }); const p = join(f.dir, '.a.active.json'); const m = JSON.parse(readFileSync(p)); m.owner.pid = 999999999; writeFileSync(p, JSON.stringify(m)); f.s.override('a', { actor: 'ops', reason: 'review', reservation_id: r.handle.reservation_id }); f.s.advance(r.handle, PHASES.SPAWNING); assert.equal(f.s.reconcile('a').verdict, VERDICTS.RECLAIMABLE) } finally { f.done() } })
 test('torn override tail does not swallow next record', () => { const f = deadFixture(); try { planted(f, marker(f)); writeFileSync(join(f.dir, 'overrides.jsonl'), '{torn', { flag: 'a' }); f.s.override('a', { actor: 'ops', reason: 'next', reservation_id: 'r1' }); assert.equal(f.s.reconcile('a').verdict, VERDICTS.RECLAIMABLE) } finally { f.done() } })
 test('mutation is serialized against nested reserve', () => { const f = deadFixture(); try { let nested; const original = f.deps.unlinkSync; f.deps.unlinkSync = (p) => { if (p.endsWith('.active.json')) nested = f.s.reserve('a', { phase: PHASES.RESERVED }); return original(p) }; const r = f.s.reserve('a', { phase: PHASES.RESERVED }); f.s.clear(r.handle); assert.ok(nested?.reason === 'contended' || f.s.reconcile('a').verdict === VERDICTS.FREE) } finally { f.done() } })
+
+test('release refuses a same-fence epoch rewritten by another actor', () => each(({ s, dir }) => {
+  const a = s.acquire('x')
+  const p = join(dir, 'locks', 'x.lock.1')
+  const foreign = JSON.stringify({ fence: 1, token: 'foreign', owner: { pid: 999999999 }, actor: 'other', released: false })
+  writeFileSync(p, foreign)
+  assert.equal(s.release(a.handle), false)
+  assert.equal(readFileSync(p, 'utf8'), foreign)
+}))
+
+test('an unattested lock override record is inert', () => {
+  for (const attestation of [undefined, { quiesced: false, method: 'stop' }, { quiesced: true, method: '  ' }]) {
+    each(({ s, dir }) => {
+      const a = s.acquire('x')
+      appendFileSync(join(dir, 'overrides.jsonl'), `\n${JSON.stringify({ kind: 'lock', name: 'x', fence: a.handle.fence, identity: { kind: 'token', value: a.handle.token }, actor: 'ops', reason: 'x', attestation })}\n`)
+      assert.equal(s.checkFence(a.handle), true)
+      assert.equal(s.acquire('x').ok, false)
+    })
+  }
+})

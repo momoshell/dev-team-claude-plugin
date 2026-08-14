@@ -7,6 +7,11 @@ import {
   appendFileSync as fsAppendFileSync,
   mkdirSync as fsMkdirSync,
   unlinkSync as fsUnlinkSync,
+  openSync as fsOpenSync,
+  readSync as fsReadSync,
+  fstatSync as fsFstatSync,
+  closeSync as fsCloseSync,
+  statSync as fsStatSync,
 } from 'node:fs'
 import { join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
@@ -15,7 +20,7 @@ import { randomUUID } from 'node:crypto'
 
 import { splitFrames } from './headless-rpc.mjs'
 import { driveTask as defaultDriveTask } from './drive.mjs'
-import { realIo as defaultRealIo } from './realio.mjs'
+import { realIo as defaultRealIo, DEFAULT_TRANSPORT } from './realio.mjs'
 
 const MAX_FRAME_BYTES = 1024 * 1024
 const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
@@ -23,6 +28,8 @@ const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
 export const RUN_STATES = Object.freeze(['working', 'blocked', 'done', 'dead'])
 export const EVENT_KINDS = Object.freeze(['started', 'tool-call', 'blocked', 'terminal-result', 'died', 'usage'])
 export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop'])
+// Keep a tail for post-settle clients; ADR-029 already makes the projection lossy, so bound rather than drop.
+export const SETTLED_FEED_RETENTION = 50
 
 // TODO(#165/#46): unresolved-attention snapshot derives here once parks are minted; ADR-029 §4 forbids live attention before the park id exists.
 
@@ -163,10 +170,15 @@ export function daemon(options = {}) {
   const append = injected.appendFileSync || fsAppendFileSync
   const mkdir = injected.mkdirSync || fsMkdirSync
   const unlink = injected.unlinkSync || fsUnlinkSync
-  const execSync = injected.execSync || cpExecSync
+  const open = injected.openSync || fsOpenSync
+  const readAt = injected.readSync || fsReadSync
+  const fstat = injected.fstatSync || fsFstatSync
+  const close = injected.closeSync || fsCloseSync
+  const stat = injected.statSync || fsStatSync
   const setEvery = injected.setInterval || setInterval
   const clearEvery = injected.clearInterval || clearInterval
   const pollMs = injected.pollMs ?? 250
+  const feedRetention = injected.feedRetention ?? SETTLED_FEED_RETENTION
 
   const runs = new Map()
   const subscribers = new Set()
@@ -209,6 +221,7 @@ export function daemon(options = {}) {
       sequence: 0,
       feed: [],
       journal: { offset: 0, rest: Buffer.alloc(0) },
+      crew_cache: null,
       workers: new Map(),
       blocked: false,
       envelope: null,
@@ -271,19 +284,39 @@ export function daemon(options = {}) {
     return stamped
   }
 
+  // Read [offset, EOF) without paying for the head of the file. Returns the file's size too, because size < offset is the truncation/rotation signal.
+  function readFrom(path, offset) {
+    const fd = open(path, 'r')
+    try {
+      const size = fstat(fd).size
+      if (size <= offset) return { size, bytes: Buffer.alloc(0) }
+      const buf = Buffer.allocUnsafe(size - offset)
+      let got = 0
+      while (got < buf.length) {
+        const n = readAt(fd, buf, got, buf.length - got, offset + got)
+        if (!n) break
+        got += n
+      }
+      return { size, bytes: got === buf.length ? buf : buf.subarray(0, got) }
+    } finally { close(fd) }
+  }
+
   function cursorLines(path, cursor) {
     if (!path || !exists(path)) return []
-    let raw
     try {
-      raw = read(path)
-      raw = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw ?? ''), 'utf8')
+      let { size, bytes } = readFrom(path, cursor.offset)
+      if (size < cursor.offset) {
+        cursor.offset = 0
+        cursor.rest = Buffer.alloc(0)
+        const reset = readFrom(path, 0)
+        size = reset.size
+        bytes = reset.bytes
+      }
+      cursor.offset += bytes.length
+      const split = splitFrames(Buffer.concat([cursor.rest || Buffer.alloc(0), bytes]))
+      cursor.rest = split.rest
+      return split.lines
     } catch { return [] }
-    if (raw.length < cursor.offset) { cursor.offset = 0; cursor.rest = Buffer.alloc(0) }
-    const chunk = raw.subarray(cursor.offset)
-    cursor.offset = raw.length
-    const split = splitFrames(Buffer.concat([cursor.rest || Buffer.alloc(0), chunk]))
-    cursor.rest = split.rest
-    return split.lines
   }
 
   function createWorker(run, row) {
@@ -314,12 +347,25 @@ export function daemon(options = {}) {
     } catch { return null }
   }
 
+  function crewConfig(run) {
+    const path = join(run.crew_dir, 'crew.json')
+    let stamp = null
+    try { const s = stat(path); stamp = `${s.mtimeMs}:${s.size}` } catch { return null }
+    if (run.crew_cache && run.crew_cache.stamp === stamp) return run.crew_cache.value
+    const value = jsonAt(path, exists, read)
+    run.crew_cache = { stamp, value }
+    return value
+  }
+
   function discoverRpcWorkers(run) {
-    const crew = jsonAt(join(run.crew_dir, 'crew.json'), exists, read)
+    const crew = crewConfig(run)
     for (const [role, member] of Object.entries(crew?.members || {})) {
       if (member?.transport !== 'headless-rpc' || run.workers.has(role)) continue
       const dir = join(run.crew_dir, 'task', 'headless-rpc', role)
-      createWorker(run, { id: role, role, pid: rpcPid(join(dir, 'pgid')), dir })
+      const pid = rpcPid(join(dir, 'pgid'))
+      const evidence = pid != null || exists(join(dir, 'stream.jsonl')) || exists(join(dir, 'exit'))
+      if (!evidence) continue
+      createWorker(run, { id: role, role, pid, dir })
     }
   }
 
@@ -373,12 +419,14 @@ export function daemon(options = {}) {
     if (run.lifecycle === 'settled') return
     run.envelope = envelope
     run.lifecycle = 'settled'
+    if (run.feed.length > feedRetention) run.feed.splice(0, run.feed.length - feedRetention)
     appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope' })
   }
 
   function attachChild(run, child) {
     const spawnError = (err) => {
       try {
+        if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
         orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
         appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: null }))
       } catch { /* an async child failure must never become an uncaught daemon error */ }
@@ -402,7 +450,7 @@ export function daemon(options = {}) {
   }
 
   function pollRun(run) {
-    if (run.lifecycle === 'orphaned') return
+    if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
     discoverRpcWorkers(run)
     pollJournal(run)
     for (const worker of run.workers.values()) pollWorker(run, worker)
@@ -502,7 +550,7 @@ export function daemon(options = {}) {
     }
     if (!hasPid(run.child_pid)) {
       orphanRun(run, 'child-spawn-error: fork returned no pid')
-      return { run_id: runId }
+      throw runError('child-spawn-error', `fork returned no pid for run ${runId}`)
     }
     run.lifecycle = 'started'
     appendRecord({ kind: 'started', run_id: runId, at: now(), child_pid: run.child_pid })
@@ -794,7 +842,7 @@ export function runChild(argv, injected = {}) {
   try {
     for (const role of roles) {
       const member = crew.members?.[role]
-      if (!member || !member.transport || member.transport === 'pane') throw new Error(`daemon run refuses pane transport for seat ${role}`)
+      if (!member || !member.transport || member.transport === DEFAULT_TRANSPORT) throw new Error(`daemon run refuses pane transport for seat ${role}`)
     }
     if (strictPreflight) {
       for (const role of ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)

@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync,
+  openSync, readSync, fstatSync, closeSync, statSync, utimesSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,7 +12,7 @@ import {
 } from './daemon.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 
-function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json' } = {}) {
+function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', feedRetention } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
   const root = join(dir, 'daemon')
   const crewDir = join(dir, 'crew')
@@ -36,6 +37,7 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
     },
     setInterval: () => null,
     clearInterval: () => {},
+    feedRetention,
   }
   const d = daemon({ root, deps })
   return {
@@ -68,6 +70,16 @@ function request(socketPath, requestLine, expected = 1) {
 
 function jsonFrame(frame) { return JSON.parse(frame) }
 function appendJournal(f, row) { writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`, { flag: 'a' }) }
+function instrumentCursorReads(f, positions) {
+  f.deps.openSync = (...args) => openSync(...args)
+  f.deps.readSync = (fd, buffer, offset, length, position) => {
+    positions.push({ position, length })
+    return readSync(fd, buffer, offset, length, position)
+  }
+  f.deps.fstatSync = (...args) => fstatSync(...args)
+  f.deps.closeSync = (...args) => closeSync(...args)
+  f.d = daemon({ root: f.root, deps: f.deps })
+}
 
 // 1. The byte splitter, rather than readline, owns LF framing.
 // Asserts OUR framing only. An earlier version also pinned readline's own
@@ -317,12 +329,40 @@ test('asynchronous child spawn errors orphan only their run', async () => {
   })
 })
 
+// A late child error cannot grow a feed after the run has settled and compacted.
+test('settled runs ignore late child spawn errors', async () => {
+  await each(async (f) => {
+    let onError
+    f.deps.fork = () => ({
+      pid: 901,
+      on(event, fn) { if (event === 'error') onError = fn },
+      unref() {},
+    })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    for (let i = 0; i < 5; i += 1) appendJournal(f, { headless_outcome: 'ok', role: 'builder' })
+    f.d.poll()
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    const retained = f.d.feed(run, 0)
+    assert.equal(retained.length, 3)
+    assert.equal(typeof onError, 'function')
+    onError(Error('late EAGAIN'))
+    onError(Error('later EAGAIN'))
+    assert.deepEqual(f.d.feed(run, 0), retained)
+  }, { feedRetention: 3 })
+})
+
 test('a fork with no pid is orphaned rather than adopted forever', async () => {
   const f = fixture()
   try {
     f.deps.fork = () => ({ on() {}, unref() {} })
     f.d = daemon({ root: f.root, deps: f.deps })
-    await f.d.start(); const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir }); await f.d.stop()
+    await f.d.start()
+    const run = 'pidless-run'
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: run }), (err) => err.code === 'child-spawn-error')
+    await f.d.stop()
     const next = daemon({ root: f.root, deps: f.deps }); await next.start(); next.poll()
     assert.equal(next.state({ run }).state, 'dead'); assert.equal(next.result({ run }).reason, 'orphaned-on-restart'); await next.stop()
   } finally { f.cleanup() }
@@ -447,4 +487,161 @@ test('injecting a driver does not skip preflight; only an explicit opt-out does'
     runChild({ crew_dir: opted.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
     assert.equal(JSON.parse(readFileSync(opted.taskReturn, 'utf8')).status, 'done', 'the explicit opt-out still runs the task')
   } finally { opted.cleanup() }
+})
+
+// Settling evicts the live feed from the front while preserving sequence order.
+test('settled feed compaction is structural and bounded', async () => {
+  const retention = 3
+  const bounded = fixture({ feedRetention: retention })
+  try {
+    await bounded.d.start()
+    const { run_id: run } = bounded.d.enqueue({ crew_dir: bounded.crewDir })
+    bounded.d.poll()
+    for (let i = 0; i < 5; i += 1) appendJournal(bounded, { headless_outcome: 'ok', role: 'builder' })
+    bounded.d.poll()
+    const before = bounded.d.feed(run, 0)
+    assert.ok(before.length > retention)
+    const firstSeq = before[0].seq
+    writeFileSync(bounded.taskReturn, JSON.stringify({ status: 'done' }))
+    bounded.d.poll()
+    const after = bounded.d.feed(run, 0)
+    assert.ok(after.length <= retention)
+    assert.ok(after.length > 0)
+    assert.ok(after[0].seq > firstSeq)
+  } finally { await bounded.d.stop(); bounded.cleanup() }
+})
+
+// Feed eviction must not remove the run registry projection or its answers.
+test('feed eviction costs the registry nothing', async () => {
+  const bounded = fixture({ feedRetention: 3 })
+  try {
+    const { run_id: run } = bounded.d.enqueue({ crew_dir: bounded.crewDir })
+    for (let i = 0; i < 6; i += 1) appendJournal(bounded, { headless_outcome: 'ok', role: 'builder' })
+    bounded.d.poll()
+    writeFileSync(bounded.taskReturn, JSON.stringify({ status: 'done' }))
+    bounded.d.poll()
+    assert.equal(bounded.d.list().find((row) => row.run_id === run).state, 'done')
+    assert.equal(bounded.d.state({ run }).state, 'done')
+    assert.equal(bounded.d.result({ run }).outcome, 'done')
+  } finally { await bounded.d.stop(); bounded.cleanup() }
+})
+
+// A post-settle tail still replays exactly the retained window.
+test('tail after settle replays the retained feed window', async () => {
+  const bounded = fixture({ feedRetention: 3 })
+  try {
+    await bounded.d.start()
+    const { run_id: run } = bounded.d.enqueue({ crew_dir: bounded.crewDir })
+    for (let i = 0; i < 6; i += 1) appendJournal(bounded, { headless_outcome: 'ok', role: 'builder' })
+    bounded.d.poll()
+    writeFileSync(bounded.taskReturn, JSON.stringify({ status: 'done' }))
+    bounded.d.poll()
+    const retained = bounded.d.feed(run, 0)
+    const frames = await request(
+      bounded.d.socketPath,
+      `${JSON.stringify({ id: 'tail-settled', cmd: 'tail', params: { run, since: 0 } })}\n`,
+      retained.length + 1,
+    )
+    const replay = frames.map(jsonFrame).filter((frame) => frame.event).map((frame) => frame.event)
+    assert.deepEqual(replay, retained)
+  } finally { await bounded.d.stop(); bounded.cleanup() }
+})
+
+// Positional journal reads begin at the prior EOF rather than rereading history.
+test('cursorLines reads only newly appended bytes', async () => {
+  await each(async (f) => {
+    const positions = []
+    instrumentCursorReads(f, positions)
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const firstRows = Array.from({ length: 4 }, () => ({ headless_outcome: 'ok', role: 'builder' }))
+    firstRows.forEach((row) => appendJournal(f, row))
+    f.d.poll()
+    const previousEof = statSync(join(f.crewDir, 'journal.jsonl')).size
+    positions.length = 0
+    const secondRows = Array.from({ length: 3 }, () => ({ headless_outcome: 'ok', role: 'builder' }))
+    const secondText = secondRows.map((row) => `${JSON.stringify(row)}\n`).join('')
+    writeFileSync(join(f.crewDir, 'journal.jsonl'), secondText, { flag: 'a' })
+    f.d.poll()
+    assert.ok(f.d.feed(run, 0).length > firstRows.length)
+    assert.ok(positions.length > 0)
+    assert.ok(positions.every(({ position }) => position === previousEof))
+    assert.equal(positions.reduce((sum, { length }) => sum + length, 0), Buffer.byteLength(secondText))
+  })
+})
+
+// A rotation that shrinks the file resets the cursor and projects fresh rows.
+test('cursorLines resets after journal truncation', async () => {
+  await each(async (f) => {
+    const positions = []
+    instrumentCursorReads(f, positions)
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    for (let i = 0; i < 8; i += 1) appendJournal(f, { headless_outcome: 'ok', role: 'builder' })
+    f.d.poll()
+    const seen = f.d.feed(run, 0).length
+    positions.length = 0
+    const fresh = `${JSON.stringify({ no_lead_escalation: 'rotated' })}\n`
+    writeFileSync(join(f.crewDir, 'journal.jsonl'), fresh)
+    f.d.poll()
+    const projected = f.d.feed(run, 0).slice(seen)
+    assert.ok(projected.some((event) => event.kind === 'blocked'))
+    assert.ok(positions.some(({ position }) => position === 0))
+  })
+})
+
+// The per-run crew config parse is cached until its mtime/size stamp changes.
+test('crew.json is parsed once per run and reread after an mtime change', async () => {
+  await each(async (f) => {
+    const crewPath = join(f.crewDir, 'crew.json')
+    const realRead = readFileSync
+    let crewReads = 0
+    f.deps.readFileSync = (path, ...args) => {
+      if (String(path) === crewPath) crewReads += 1
+      return realRead(path, ...args)
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const before = crewReads
+    for (let i = 0; i < 5; i += 1) f.d.poll()
+    assert.ok(crewReads - before <= 1)
+    const mark = crewReads
+    const crew = JSON.parse(realRead(crewPath, 'utf8'))
+    crew.members.builder.transport = 'headless-rpc'
+    writeFileSync(crewPath, JSON.stringify(crew))
+    const future = new Date(Date.now() + 5000)
+    utimesSync(crewPath, future, future)
+    f.d.poll()
+    assert.ok(crewReads - mark >= 1)
+  })
+})
+
+// Membership alone is not evidence that an rpc seat ever spawned.
+test('an rpc seat without spawn evidence is not reported working', async () => {
+  const rpc = fixture({ roles: ['builder'], transport: 'headless-rpc' })
+  try {
+    const { run_id: run } = rpc.d.enqueue({ crew_dir: rpc.crewDir })
+    rpc.d.poll()
+    assert.throws(() => rpc.d.state({ run, worker: 'builder' }), (err) => err.code === 'not-found')
+    const dir = join(rpc.taskDir, 'headless-rpc', 'builder')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'pgid'), '901\n')
+    rpc.d.poll()
+    assert.equal(rpc.d.state({ run, worker: 'builder' }).state, 'working')
+  } finally { await rpc.d.stop(); rpc.cleanup() }
+})
+
+// A pidless fork is an error on the real protocol and carries no success result.
+test('a pidless fork returns a socket error without a result', async () => {
+  const f = fixture()
+  try {
+    f.deps.fork = () => ({ on() {}, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const run = 'socket-pidless'
+    const frames = await request(f.d.socketPath, `${JSON.stringify({ id: 'pidless', cmd: 'enqueue', params: { crew_dir: f.crewDir, run_id: run } })}\n`)
+    const frame = jsonFrame(frames[0])
+    assert.equal(frame.ok, false)
+    assert.equal(frame.error.code, 'child-spawn-error')
+    assert.equal('result' in frame, false)
+    assert.match(readFileSync(join(f.root, 'runs.jsonl'), 'utf8'), /"orphaned"/)
+  } finally { await f.d.stop(); f.cleanup() }
 })

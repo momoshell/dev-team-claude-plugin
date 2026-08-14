@@ -199,11 +199,11 @@ replayed `turn_end` and `agent_end` usage.
 
 `state()` is a query with the closed enum `working`, `blocked`, `done`, or `dead`; it carries no outcome. In particular, `idle` is not success: an escalation envelope is a settled `done` state, while its outcome is read separately through `result()` from the task envelope. The live feed is a normalized in-memory projection of the journal and worker streams, never a second record (ADR-029 §4); the envelope remains authoritative.
 
-A daemon restart adopts an un-settled run when its driver is alive and resumes the file projection. If the driver is dead, it settles from a valid envelope or honestly marks the run orphaned. It never re-runs an orphan and never ties a run's lifetime to a subscriber or client connection.
+A daemon restart adopts an un-settled run when its driver is alive and resumes the file projection. If the driver is dead, it settles from a valid envelope or honestly marks the run orphaned. It never re-runs an orphan and never ties a run's lifetime to a subscriber or client connection. `enqueue` refuses a crew with any pane-transport seat up front (`invalid-spec`); `runChild` keeps the same guard for children launched by any other path.
 
 ## factoryctl
 
-`factoryctl run --crew-dir <dir> --brief <file>` enqueues an already-booted crew directory; `factoryctl ls [--root <dir>] [--json]` lists daemon runs. It is a stateless client that owns nothing and never starts a daemon. If none is listening, start one as described in [The daemon](#the-daemon), for example with `daemon({root}).start()`.
+`factoryctl run --crew-dir <dir> --brief <file>` enqueues an already-booted crew directory; `factoryctl ls [--root <dir>] [--json]` lists daemon runs. `factoryctl attach <run-id> [--root <dir>]` subscribes to the daemon's normalized feed, prints one JSON event per line, replays the retained window for a settled run and returns, unsubscribes on every exit path, and never claims an outcome. It is a stateless client that owns nothing and never starts a daemon. If none is listening, start one as described in [The daemon](#the-daemon), for example with `daemon({root}).start()`.
 
 For `ls`, STATE comes from the daemon's `state()` projection (carried by `list()`) and OUTCOME comes only from `result()`; an unsettled run's outcome cell is empty because `idle` is not success.
 

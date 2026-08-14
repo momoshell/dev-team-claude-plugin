@@ -152,6 +152,16 @@ function absoluteChildPath(root, value) {
   return resolvePath(root, String(value))
 }
 
+// A pane seat needs a human at a terminal; nothing the daemon forks has one.
+function paneSeat(crew) {
+  const roles = crew?.roles || Object.keys(crew?.members || {})
+  for (const role of roles) {
+    const member = crew?.members?.[role]
+    if (!member || !member.transport || member.transport === DEFAULT_TRANSPORT) return role
+  }
+  return null
+}
+
 export function daemon(options = {}) {
   const root = resolvePath(options.root || join(homedir(), '.crew', 'daemon'))
   const socketPath = join(root, 'daemon.sock')
@@ -201,6 +211,7 @@ export function daemon(options = {}) {
     if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
     run.lifecycle = 'orphaned'; run.orphaned = true; run.child_dead = true; run.orphan_reason = reason
     try { appendRecord({ kind: 'orphaned', run_id: run.run_id, at: now() }) } catch { /* preserve daemon liveness if the registry disk is unavailable */ }
+    endFeed(run, 'orphaned')
   }
 
   function freshRun(record) {
@@ -271,6 +282,16 @@ export function daemon(options = {}) {
     for (const subscriber of [...subscribers]) {
       if (subscriber.runId !== run.run_id || subscriber.socket.destroyed) continue
       try { subscriber.socket.write(`${JSON.stringify({ id: subscriber.id, event })}\n`) }
+      catch { subscribers.delete(subscriber) }
+    }
+  }
+
+  // Transport-level end of stream. Deliberately NOT an event: it says the feed
+  // is over, never what the run achieved — result() owns that answer.
+  function endFeed(run, reason) {
+    for (const subscriber of [...subscribers]) {
+      if (subscriber.runId !== run.run_id || subscriber.socket.destroyed) continue
+      try { subscriber.socket.write(`${JSON.stringify({ id: subscriber.id, end: { run_id: run.run_id, reason } })}\n`) }
       catch { subscribers.delete(subscriber) }
     }
   }
@@ -421,14 +442,15 @@ export function daemon(options = {}) {
     run.lifecycle = 'settled'
     if (run.feed.length > feedRetention) run.feed.splice(0, run.feed.length - feedRetention)
     appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope' })
+    endFeed(run, 'settled')
   }
 
   function attachChild(run, child) {
     const spawnError = (err) => {
       try {
         if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
-        orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
         appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: null }))
+        orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
       } catch { /* an async child failure must never become an uncaught daemon error */ }
     }
     const exited = (code, signal) => {
@@ -440,6 +462,9 @@ export function daemon(options = {}) {
           run.child_dead = true
           run.orphan_reason ||= signal ? `child-exit:${signal}` : `child-exit:${code ?? 'unknown'}`
           appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: code ?? null, signal: signal ?? null }))
+          const after = runEnvelope(run)
+          if (after) settle(run, after)
+          else orphanRun(run, run.orphan_reason)
         }
       } catch { /* diagnostics are subordinate to daemon liveness */ }
     }
@@ -465,6 +490,7 @@ export function daemon(options = {}) {
       }
       const after = runEnvelope(run)
       if (after) settle(run, after)
+      else if (run.child_dead) orphanRun(run, run.orphan_reason || 'child-dead')
     }
   }
 
@@ -493,6 +519,7 @@ export function daemon(options = {}) {
   function state(query = {}) {
     ensureFolded()
     const run = findRun(query.run)
+    pollRun(run)
     return { state: runState(run, query.worker) }
   }
 
@@ -523,6 +550,8 @@ export function daemon(options = {}) {
     const crewDir = resolvePath(spec.crew_dir)
     let crew
     try { crew = JSON.parse(String(read(join(crewDir, 'crew.json'), 'utf8'))) } catch (err) { throw runError('invalid-spec', `cannot read crew.json at ${join(crewDir, 'crew.json')}: ${err.message}`) }
+    const pane = paneSeat(crew)
+    if (pane) throw runError('invalid-spec', `daemon run refuses pane transport for seat ${pane}`)
     const active = [...runs.values()].find((run) => run.crew_dir === crewDir && !['settled', 'orphaned'].includes(run.lifecycle))
     if (active) throw runError('run-active', `run ${active.run_id} is already active for ${crewDir}`)
     const runId = String(spec.run_id || uuid())
@@ -672,8 +701,9 @@ export function daemon(options = {}) {
   function tail(socket, id, params) {
     const runId = String(params.run)
     const since = Number.isFinite(Number(params.since)) ? Number(params.since) : 0
-    findRun(runId)
+    const run = findRun(runId)
     removeSubscriber(socket, id, runId)
+    pollRun(run)
     for (const event of feed(runId, since)) writeFrame(socket, { id, event })
     subscribers.add({ socket, id, runId })
     writeFrame(socket, { id, ok: true, result: { tailing: true } })
@@ -789,7 +819,7 @@ export function daemon(options = {}) {
     }
   }
 
-  return { start, stop, poll, enqueue, state, result, list, feed, socketPath, root }
+  return { start, stop, poll, enqueue, state, result, list, feed, subscribers: () => [...subscribers].map(({ id, runId }) => ({ id, run_id: runId })), socketPath, root }
 }
 
 function childArguments(argv) {
@@ -840,10 +870,8 @@ export function runChild(argv, injected = {}) {
   })
   let result
   try {
-    for (const role of roles) {
-      const member = crew.members?.[role]
-      if (!member || !member.transport || member.transport === DEFAULT_TRANSPORT) throw new Error(`daemon run refuses pane transport for seat ${role}`)
-    }
+    const pane = paneSeat(crew)
+    if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
     if (strictPreflight) {
       for (const role of ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
       if (roles.includes('lead') && !crew.members?.lead) throw new Error(`v3 run requires a lead seat (booted roles: ${roles.join(', ')})`)

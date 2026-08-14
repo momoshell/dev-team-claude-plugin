@@ -5,9 +5,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
-import { formatRows, main } from './factoryctl.mjs'
+import { attachVerb, connect, formatRows, main, parseArgs } from './factoryctl.mjs'
 
-function fixture() {
+function fixture({ fork: forkImpl = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'factoryctl-'))
   const crewDir = join(root, 'crew')
   const returnsDir = join(crewDir, 'returns')
@@ -16,7 +16,7 @@ function fixture() {
   mkdirSync(returnsDir, { recursive: true })
   writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
     task: 'demo-task', checkout: process.cwd(), task_return: 'returns/task.json',
-    roles: ['builder'], members: { builder: { transport: 'pane' } },
+    roles: ['builder'], members: { builder: { transport: 'headless-json' } },
   }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
   writeFileSync(brief, '# brief\n')
@@ -24,7 +24,7 @@ function fixture() {
   const d = daemon({
     root,
     deps: {
-      fork: () => ({ pid: 4242, on() { return this }, unref() {} }),
+      fork: forkImpl || (() => ({ pid: 4242, on() { return this }, unref() {} })),
       kill: (_pid, signal) => { if (signal !== 0) return true },
       now: () => Date.now(), uuid: () => `run-${++uuid}`,
       setInterval: () => null, clearInterval: () => {},
@@ -55,6 +55,14 @@ async function invoke(f, argv, extra = {}) {
     stderr: (text) => { stderr += text },
   })
   return { code, stdout, stderr }
+}
+
+async function waitFor(check, timeout = 1000) {
+  const deadline = Date.now() + timeout
+  while (!check()) {
+    if (Date.now() > deadline) throw new Error('timed out waiting for factoryctl condition')
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
 }
 
 async function enqueue(f) {
@@ -175,4 +183,190 @@ test('formatRows renders an absent outcome as an empty cell', () => {
   assert.match(lines[2], /runbeta.*done.*escalation/)
   const residue = lines[1].replace(/runalpha|demotask|working/g, '')
   assert.doesNotMatch(residue, /[A-Za-z]/)
+})
+
+withDaemon("attach streams a live run's normalized events", async (f) => {
+  const { runId } = await enqueue(f)
+  const session = await connect(join(f.root, 'daemon.sock'))
+  const controller = new AbortController()
+  let stdout = ''
+  let stderr = ''
+  const running = attachVerb(parseArgs(['attach', runId]), {
+    connection: session,
+    signal: controller.signal,
+    stdout: (text) => { stdout += text },
+    stderr: (text) => { stderr += text },
+  })
+  try {
+    await waitFor(() => f.daemon.subscribers().length === 1)
+    writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify({ headless_outcome: 'ok', role: 'builder' })}\n`, { flag: 'a' })
+    f.daemon.poll()
+    await waitFor(() => stdout.includes('"kind":"terminal-result"'))
+    controller.abort()
+    const result = await running
+    assert.equal(result.reason, 'interrupted')
+    const events = stdout.trim().split('\n').map((line) => JSON.parse(line))
+    assert.ok(events.some((event) => event.kind === 'started'))
+    assert.ok(events.some((event) => event.kind === 'terminal-result'))
+    assert.match(stderr, /attach ended: interrupted/)
+  } finally { await session.close() }
+})
+
+withDaemon('attach on a settled run prints the retained window and returns', async (f) => {
+  const { runId } = await enqueue(f)
+  writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+  f.daemon.poll()
+  const result = await invoke(f, ['attach', runId])
+  assert.equal(result.code, 0)
+  const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line))
+  assert.ok(events.some((event) => event.kind === 'started'))
+  assert.match(result.stderr, /attach ended: run .* settled/)
+})
+
+withDaemon('attach projects pending terminal input before the state exit', async (f) => {
+  const { runId } = await enqueue(f)
+  writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify({ headless_outcome: 'ok', role: 'builder' })}\n`, { flag: 'a' })
+  writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+  const result = await invoke(f, ['attach', runId])
+  assert.equal(result.code, 0)
+  const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line))
+  assert.ok(events.some((event) => event.kind === 'started'))
+  assert.ok(events.some((event) => event.kind === 'terminal-result'))
+})
+
+test('attach on an unknown run refuses in the daemon vocabulary', async () => {
+  const f = fixture()
+  try {
+    await f.daemon.start()
+    const result = await invoke(f, ['attach', 'no-such-run'])
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /unknown run "no-such-run"/)
+    assert.doesNotMatch(result.stderr, /missing|not attached|invalid/i)
+  } finally { await f.daemon.stop(); f.cleanup() }
+})
+
+withDaemon('every attach exit path unsubscribes', async (f) => {
+  const { runId } = await enqueue(f)
+  const interrupted = await connect(join(f.root, 'daemon.sock'))
+  const controller = new AbortController()
+  const running = attachVerb(parseArgs(['attach', runId]), { connection: interrupted, signal: controller.signal, stdout: () => {}, stderr: () => {} })
+  await waitFor(() => f.daemon.subscribers().length === 1)
+  controller.abort()
+  await running
+  assert.deepEqual(f.daemon.subscribers(), [])
+  await interrupted.close()
+
+  writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+  f.daemon.poll()
+  const settled = await connect(join(f.root, 'daemon.sock'))
+  await attachVerb(parseArgs(['attach', runId]), { connection: settled, stdout: () => {}, stderr: () => {} })
+  assert.deepEqual(f.daemon.subscribers(), [])
+  await settled.close()
+
+  const { runId: pipeRun } = await enqueue(f)
+  const pipe = await connect(join(f.root, 'daemon.sock'))
+  const epipe = () => { const error = Error('closed'); error.code = 'EPIPE'; throw error }
+  const closed = await attachVerb(parseArgs(['attach', pipeRun]), { connection: pipe, stdout: epipe, stderr: () => {} })
+  assert.equal(closed.reason, 'stream-closed')
+  assert.deepEqual(f.daemon.subscribers(), [])
+  await pipe.close()
+})
+
+withDaemon('attach never implies an outcome for an unsettled run', async (f) => {
+  const { runId } = await enqueue(f)
+  const session = await connect(join(f.root, 'daemon.sock'))
+  const controller = new AbortController()
+  let text = ''
+  const running = attachVerb(parseArgs(['attach', runId]), {
+    connection: session,
+    signal: controller.signal,
+    stdout: (value) => { text += value },
+    stderr: (value) => { text += value },
+  })
+  try {
+    await waitFor(() => text.length > 0)
+    controller.abort()
+    await running
+    const banned = /\bidle\b|\bok\b|success|succeeded|passed|complete/i
+    assert.doesNotMatch(text, banned)
+  } finally { await session.close() }
+})
+
+withDaemon('run refuses a pane-transport crew through the CLI', async (f) => {
+  const paneDir = join(f.root, 'pane-crew')
+  mkdirSync(join(paneDir, 'returns'), { recursive: true })
+  writeFileSync(join(paneDir, 'crew.json'), JSON.stringify({
+    task: 'pane-task', checkout: process.cwd(), task_return: 'returns/task.json',
+    roles: ['builder'], members: { builder: { transport: 'pane' } },
+  }))
+  writeFileSync(join(paneDir, 'journal.jsonl'), '')
+  const result = await invoke(f, ['run', '--crew-dir', paneDir, '--brief', f.brief])
+  assert.equal(result.code, 1)
+  assert.match(result.stderr, /daemon run refuses pane transport for seat builder/)
+  assert.deepEqual(f.daemon.list(), [])
+})
+
+test('attach receives a died event before spawn-error stream end', async () => {
+  let onError = null
+  const f = fixture({
+    fork: () => ({
+      pid: 4242,
+      on(event, fn) { if (event === 'error') onError = fn; return this },
+      unref() { return this },
+    }),
+  })
+  try {
+    await f.daemon.start()
+    const { runId } = await enqueue(f)
+    const session = await connect(join(f.root, 'daemon.sock'))
+    let stdout = ''
+    const running = attachVerb(parseArgs(['attach', runId]), {
+      connection: session,
+      stdout: (text) => { stdout += text },
+      stderr: () => {},
+    })
+    await waitFor(() => f.daemon.subscribers().length === 1)
+    assert.equal(typeof onError, 'function')
+    onError(Error('EAGAIN'))
+    const result = await running
+    assert.equal(result.reason, 'orphaned')
+    const events = stdout.trim().split('\n').map((line) => JSON.parse(line))
+    const died = events.findIndex((event) => event.kind === 'died')
+    assert.ok(died >= 0)
+    assert.ok(events.some((event) => event.kind === 'started'))
+    assert.deepEqual(f.daemon.subscribers(), [])
+    await session.close()
+  } finally { await f.daemon.stop(); f.cleanup() }
+})
+
+test('attach ends a live run when its child exits without an envelope', async () => {
+  let onExit = null
+  const f = fixture({
+    fork: () => ({
+      pid: 4242,
+      on(event, fn) { if (event === 'exit') onExit = fn; return this },
+      unref() { return this },
+    }),
+  })
+  try {
+    await f.daemon.start()
+    const { runId } = await enqueue(f)
+    const session = await connect(join(f.root, 'daemon.sock'))
+    let stdout = ''
+    const running = attachVerb(parseArgs(['attach', runId]), {
+      connection: session,
+      stdout: (text) => { stdout += text },
+      stderr: () => {},
+    })
+    await waitFor(() => f.daemon.subscribers().length === 1)
+    assert.equal(typeof onExit, 'function')
+    onExit(1, null)
+    const result = await running
+    assert.equal(result.reason, 'orphaned')
+    const events = stdout.trim().split('\n').map((line) => JSON.parse(line))
+    assert.ok(events.some((event) => event.kind === 'started'))
+    assert.ok(events.some((event) => event.kind === 'died'))
+    assert.deepEqual(f.daemon.subscribers(), [])
+    await session.close()
+  } finally { await f.daemon.stop(); f.cleanup() }
 })

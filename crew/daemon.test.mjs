@@ -302,6 +302,27 @@ test('enqueue twice for one crew is run-active and forks once', async () => {
   })
 })
 
+test('enqueue refuses a pane crew before registering a run or forking', () => {
+  const f = fixture({ roles: ['builder'], transport: 'pane' })
+  try {
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), /pane transport for seat builder/)
+    assert.equal(f.forks.length, 0)
+    assert.deepEqual(f.d.list(), [])
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
+  } finally { f.cleanup() }
+})
+
+test('the enqueue refusal carries the daemon invalid-spec code over the socket', async () => {
+  const f = fixture({ roles: ['builder'], transport: 'pane' })
+  try {
+    await f.d.start()
+    const frames = await request(f.d.socketPath, `${JSON.stringify({ id: 'pane', cmd: 'enqueue', params: { crew_dir: f.crewDir } })}\n`)
+    const frame = jsonFrame(frames[0])
+    assert.equal(frame.ok, false)
+    assert.equal(frame.error.code, 'invalid-spec')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
 // 17/18. The runner has no pane fallback and removes lead from ctx roles.
 test('runChild refuses pane seats and omits lead from the mechanical ctx', () => {
   const pane = fixture({ roles: ['builder'], transport: 'pane' })
@@ -329,6 +350,95 @@ test('asynchronous child spawn errors orphan only their run', async () => {
   })
 })
 
+test('spawn errors send the died event before the terminal feed frame', async () => {
+  const f = fixture()
+  let onError
+  try {
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'error') onError = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    f.alive.add(901)
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const socket = net.connect(f.d.socketPath)
+    const frames = []
+    let rest = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      const split = splitFrames(Buffer.concat([rest, chunk])); rest = split.rest
+      frames.push(...split.lines.map(jsonFrame))
+    })
+    await new Promise((resolve) => socket.on('connect', resolve))
+    socket.write(`${JSON.stringify({ id: 'spawn-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(typeof onError, 'function')
+    onError(Error('EAGAIN'))
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const observations = frames.filter((frame) => frame.event || frame.end)
+    assert.equal(observations.at(-1)?.end?.reason, 'orphaned')
+    assert.ok(observations.findIndex((frame) => frame.event?.kind === 'died') >= 0)
+    assert.ok(observations.findIndex((frame) => frame.event?.kind === 'died') < observations.findIndex((frame) => frame.end))
+    socket.destroy()
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a child exit without an envelope ends the live feed after died', async () => {
+  const f = fixture()
+  let onExit
+  try {
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    f.alive.add(901)
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const socket = net.connect(f.d.socketPath)
+    const frames = []
+    let rest = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      const split = splitFrames(Buffer.concat([rest, chunk])); rest = split.rest
+      frames.push(...split.lines.map(jsonFrame))
+    })
+    await new Promise((resolve) => socket.on('connect', resolve))
+    socket.write(`${JSON.stringify({ id: 'exit-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.equal(typeof onExit, 'function')
+    onExit(1, null)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const observations = frames.filter((frame) => frame.event || frame.end)
+    assert.equal(observations.at(-1)?.end?.reason, 'orphaned')
+    const died = observations.findIndex((frame) => frame.event?.kind === 'died')
+    assert.ok(died >= 0)
+    assert.ok(died < observations.findIndex((frame) => frame.end))
+    assert.equal(f.d.state({ run }).state, 'dead')
+    socket.destroy()
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a dead child found by polling ends the live feed after died', async () => {
+  await each(async (f) => {
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const socket = net.connect(f.d.socketPath)
+    const frames = []
+    let rest = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      const split = splitFrames(Buffer.concat([rest, chunk])); rest = split.rest
+      frames.push(...split.lines.map(jsonFrame))
+    })
+    await new Promise((resolve) => socket.on('connect', resolve))
+    socket.write(`${JSON.stringify({ id: 'poll-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    f.alive.delete(900)
+    f.d.poll()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const observations = frames.filter((frame) => frame.event || frame.end)
+    assert.equal(observations.at(-1)?.end?.reason, 'orphaned')
+    const died = observations.findIndex((frame) => frame.event?.kind === 'died')
+    assert.ok(died >= 0)
+    assert.ok(died < observations.findIndex((frame) => frame.end))
+    assert.equal(f.d.state({ run }).state, 'dead')
+    socket.destroy()
+  })
+})
+
 // A late child error cannot grow a feed after the run has settled and compacted.
 test('settled runs ignore late child spawn errors', async () => {
   await each(async (f) => {
@@ -340,6 +450,7 @@ test('settled runs ignore late child spawn errors', async () => {
     })
     f.d = daemon({ root: f.root, deps: f.deps })
     await f.d.start()
+    f.alive.add(901)
     const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
     for (let i = 0; i < 5; i += 1) appendJournal(f, { headless_outcome: 'ok', role: 'builder' })
     f.d.poll()
@@ -545,6 +656,46 @@ test('tail after settle replays the retained feed window', async () => {
     const replay = frames.map(jsonFrame).filter((frame) => frame.event).map((frame) => frame.event)
     assert.deepEqual(replay, retained)
   } finally { await bounded.d.stop(); bounded.cleanup() }
+})
+
+test('settle sends a subscriber an end frame that claims no outcome', async () => {
+  await each(async (f) => {
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const socket = net.connect(f.d.socketPath)
+    const frames = []
+    let rest = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      const split = splitFrames(Buffer.concat([rest, chunk])); rest = split.rest
+      frames.push(...split.lines.map(jsonFrame))
+    })
+    await new Promise((resolve) => socket.on('connect', resolve))
+    socket.write(`${JSON.stringify({ id: 'end', cmd: 'tail', params: { run, since: 0 } })}\n`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const end = frames.find((frame) => frame.end)
+    assert.deepEqual(end?.end, { run_id: run, reason: 'settled' })
+    assert.doesNotMatch(JSON.stringify(end), /status|outcome|success|escalation/)
+    socket.destroy()
+  })
+})
+
+test('subscribers projects the daemon subscriber set', async () => {
+  await each(async (f) => {
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const socket = net.connect(f.d.socketPath)
+    await new Promise((resolve) => socket.on('connect', resolve))
+    socket.write(`${JSON.stringify({ id: 'inspect', cmd: 'tail', params: { run, since: 0 } })}\n`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.deepEqual(f.d.subscribers(), [{ id: 'inspect', run_id: run }])
+    socket.write(`${JSON.stringify({ id: 'untail', cmd: 'untail', params: { run } })}\n`)
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    assert.deepEqual(f.d.subscribers(), [])
+    socket.destroy()
+  })
 })
 
 // Positional journal reads begin at the prior EOF rather than rereading history.

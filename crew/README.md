@@ -215,9 +215,11 @@ Everything durable is a FILE; pane chat is never the record.
 - `drive.mjs` — the deterministic task loop (dependency-injected io; fully
   unit-tested without cmux). `io.emit(event)` is OPTIONAL: when `run` can open
   a factory ledger run, stage/assign/envelope/decision/dissent events are
-  mirrored through `emitAdapter` in `crew.mjs`. Instrumentation is never
-  load-bearing — a missing, broken or unwritable ledger changes nothing about
-  a run's outcome.
+  mirrored through `emitAdapter` in `crew.mjs`; `gate` events go to
+  `gate_results`, and `attention` events go to warn-level `log` rows. Attention
+  fires only on gate exhaustion or triage escalation and carries `park_id:
+  null` pending #125. Instrumentation is never load-bearing — a missing,
+  broken or unwritable ledger changes nothing about a run's outcome.
 - `driver.mjs` — the cmux layer: verified-send (echo-exactly-once,
   ctrl+u-guarded retype), context-aware ops, `assignmentLine`.
 - `reclaim.mjs` — append-only token-fenced transition locks, the serialized

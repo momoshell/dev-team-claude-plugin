@@ -443,6 +443,16 @@ export function emitAdapter(emitter) {
         why: `dissent from ${event.from}`,
         alternatives: [event.recommendation],
       })
+    } else if (event.kind === 'gate') {
+      // The ledger's own gate tables, not a generic log row (#130).
+      emitter.emit((handle) => handle.recordGateResult({
+        adw_id: emitter.adwId, phase_id: phaseId,
+        gate_name: String(event.name ?? 'gate'), attempt: event.attempt, ok: !!event.ok,
+        checks: event.summary ? [event.summary] : [], violations: [],
+      }))
+    } else if (event.kind === 'attention') {
+      // ADR-029 §4: attention rides the existing closed log vocabulary.
+      record('log', { level: 'warn', message: `attention:${event.moment} park_id=${event.park_id ?? 'null'} task=${event.task} ${event.why}` })
     }
   }
 }

@@ -59,6 +59,7 @@ export function connect(socketPath, deps = {}) {
     let sequence = 0
     let rest = Buffer.alloc(0)
     const pending = new Map()
+    const listeners = new Set()
 
     const rejectPending = (error) => {
       for (const entry of pending.values()) {
@@ -122,6 +123,10 @@ export function connect(socketPath, deps = {}) {
         let frame
         try { frame = JSON.parse(line) } catch { continue }
         if (!frame || typeof frame.id !== 'string') continue
+        if (frame.ok === undefined && frame.error === undefined) {
+          for (const listener of listeners) { try { listener(frame) } catch {} }
+          continue
+        }
         const entry = pending.get(frame.id)
         if (!entry) continue
         pending.delete(frame.id)
@@ -146,7 +151,7 @@ export function connect(socketPath, deps = {}) {
       if (settled || closed) return
       connected = true
       settled = true
-      resolve({ call, close })
+      resolve({ call, close, onEvent: (fn) => { listeners.add(fn); return () => listeners.delete(fn) } })
     })
   })
 }
@@ -204,27 +209,111 @@ export async function lsVerb(args, deps = {}) {
   return rows
 }
 
+function requireAttachArgs(args) {
+  if (typeof args?._?.[1] !== 'string' || !args._[1]) throw new Error('attach requires <run-id>')
+}
+
+function attachEndMessage(run, reason) {
+  if (reason === 'settled') return `attach ended: run ${run} settled — this stream is transport, not a verdict; ask \`factoryctl ls\` for the outcome\n`
+  if (reason === 'dead') return `attach ended: run ${run} is dead with no envelope — ask \`factoryctl ls\` for the outcome\n`
+  if (reason === 'interrupted') return `attach ended: interrupted — run ${run} was still streaming; the envelope is the record\n`
+  if (reason === 'stream-closed') return `attach ended: output stream closed — run ${run} was still streaming\n`
+  return `attach ended: run ${run} stream ended (${reason})\n`
+}
+
+export async function attachVerb(args, deps = {}) {
+  requireAttachArgs(args)
+  const run = args._[1]
+  const call = deps.call || deps.connection?.call
+  const onEvent = deps.onEvent || deps.connection?.onEvent
+  if (typeof call !== 'function' || typeof onEvent !== 'function') throw new Error('attach requires a daemon connection')
+  const stdout = outputSink(deps.stdout, process.stdout)
+  const stderr = outputSink(deps.stderr, process.stderr)
+  const signal = deps.signal
+  let ended = false
+  let reason = null
+  let finish
+  const done = new Promise((resolve) => {
+    finish = (value) => {
+      if (ended) return
+      ended = true
+      reason = value
+      resolve(value)
+    }
+  })
+  const listener = (frame) => {
+    if (ended) return
+    if (frame?.event !== undefined) {
+      try { stdout(`${JSON.stringify(frame.event)}\n`) }
+      catch { finish('stream-closed') }
+      return
+    }
+    if (frame?.end !== undefined) finish(frame.end?.reason)
+  }
+  const unsubscribe = onEvent(listener)
+  const abort = () => finish('interrupted')
+  signal?.addEventListener?.('abort', abort, { once: true })
+  try {
+    if (signal?.aborted) finish('interrupted')
+    if (!ended) {
+      await call('tail', { run, since: 0 })
+      if (!ended) {
+        const current = await call('state', { run })
+        if (!ended && current?.state === 'done') finish('settled')
+        else if (!ended && current?.state === 'dead') finish('dead')
+      }
+    }
+    if (!ended && signal?.aborted) finish('interrupted')
+    const finalReason = await done
+    stderr(attachEndMessage(run, finalReason))
+    return { run_id: run, reason: finalReason }
+  } finally {
+    signal?.removeEventListener?.('abort', abort)
+    try { await call('untail', { run }) } catch {}
+    try { unsubscribe?.() } catch {}
+  }
+}
+
 export async function main(argv, deps = {}) {
   const args = parseArgs(argv)
   const stderr = outputSink(deps.stderr, process.stderr)
   const verb = args._[0]
-  if (!['run', 'ls'].includes(verb)) {
-    stderr('usage: factoryctl <run|ls> ...\n')
+  if (!['run', 'ls', 'attach'].includes(verb)) {
+    stderr('usage: factoryctl <run|ls|attach> ...\n')
     return 2
   }
 
   let session = null
+  let controller = null
+  let signalProcess = null
+  let onInterrupt = null
+  let onTerminate = null
   try {
     if (verb === 'run') requireRunArgs(args)
+    if (verb === 'attach') requireAttachArgs(args)
+    if (verb === 'attach') {
+      controller = new AbortController()
+      signalProcess = deps.process ?? process
+      onInterrupt = () => controller.abort()
+      onTerminate = () => controller.abort()
+      signalProcess.on?.('SIGINT', onInterrupt)
+      signalProcess.on?.('SIGTERM', onTerminate)
+    }
     session = await connect(socketPathFor(args, deps.env || process.env), { net: deps.net, timeoutMs: deps.timeoutMs })
-    const commandDeps = { ...deps, call: session.call }
+    const commandDeps = { ...deps, call: session.call, onEvent: session.onEvent }
     if (verb === 'run') await runVerb(args, commandDeps)
-    else await lsVerb(args, commandDeps)
+    else if (verb === 'ls') await lsVerb(args, commandDeps)
+    else await attachVerb(args, { ...commandDeps, signal: deps.signal ?? controller.signal })
     return 0
   } catch (err) {
     stderr(`error: ${err?.message || String(err)}\n`)
     return 1
   } finally {
+    if (signalProcess) {
+      const remove = signalProcess.removeListener || signalProcess.off
+      remove?.call(signalProcess, 'SIGINT', onInterrupt)
+      remove?.call(signalProcess, 'SIGTERM', onTerminate)
+    }
     try { await session?.close?.() } catch {}
   }
 }

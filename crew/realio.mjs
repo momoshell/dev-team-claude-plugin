@@ -20,6 +20,15 @@ export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
 
+function addTotals(prev, delta) {
+  return {
+    billed_input_tokens: (prev?.billed_input_tokens ?? 0) + (delta?.billed_input_tokens ?? 0),
+    billed_output_tokens: (prev?.billed_output_tokens ?? 0) + (delta?.billed_output_tokens ?? 0),
+    billed_cache_write_tokens: (prev?.billed_cache_write_tokens ?? 0) + (delta?.billed_cache_write_tokens ?? 0),
+    billed_cache_read_tokens: (prev?.billed_cache_read_tokens ?? 0) + (delta?.billed_cache_read_tokens ?? 0),
+  }
+}
+
 export function saveCrew(paths, crew, fs = {}) {
   const writeFileSync = fs.writeFileSync || fsWriteFileSync
   const renameSync = fs.renameSync || fsRenameSync
@@ -79,6 +88,7 @@ export function emitAdapter(emitter) {
   // emitter, or events before the first stage) is what recordEvent already
   // stores today, so this can never change a run.
   let phaseId = null
+  const usageTotals = new Map()
   const record = (type, payload) => emitter.emit((handle, nextSeq) => handle.recordEvent({
     adw_id: emitter.adwId, type, seq: nextSeq('event'), phase_id: phaseId, payload,
   }))
@@ -123,6 +133,28 @@ export function emitAdapter(emitter) {
     } else if (event.kind === 'attention') {
       // ADR-029 §4: attention rides the existing closed log vocabulary.
       record('log', { level: 'warn', message: `attention:${event.moment} park_id=${event.park_id ?? 'null'} task=${event.task} ${event.why}` })
+    } else if (event.kind === 'usage') {
+      // agent_sessions is the per-assignment home; sessions.billed_* stays
+      // NULL (per-run totals + money are the #119 follow-up). The table is
+      // unique on (adw_id, claude_session_id) and a seat reuses ONE worker
+      // session across assignments, while endAgentSession overwrites without
+      // COALESCE — so what is written is the seat's RUNNING TOTAL, never a
+      // delta that would clobber the previous assignment.
+      emitter.emit((handle) => handle.startAgentSession({
+        adw_id: emitter.adwId, dispatch_id: event.id ?? null, role: event.role ?? null,
+        model: event.model ?? null, claude_session_id: event.session_id ?? null,
+        transcript_path: event.transcript_path ?? null,
+      }))
+      if (event.usage) {                       // absent usage stays NULL, never 0
+        const key = `${event.role}\u0000${event.session_id}`
+        const total = addTotals(usageTotals.get(key), event.usage)
+        usageTotals.set(key, total)
+        emitter.emit((handle) => handle.endAgentSession({
+          adw_id: emitter.adwId, claude_session_id: event.session_id ?? null,
+          context_tokens: null, context_window: null,
+          raw_read_tokens: null, raw_written_tokens: null, ...total,
+        }))
+      }
     }
   }
 }
@@ -193,7 +225,13 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     [HEADLESS_RPC_TRANSPORT]: deps.headlessRpcIo || defaultHeadlessRpcIo,
   }
   const transportInstances = new Map()
-  const transportArgs = { crew, paths, taskDir: paths.taskDir, checkout, adapters, bin: null, deps: { log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj) } }
+  const transportArgs = {
+    crew, paths, taskDir: paths.taskDir, checkout, adapters, bin: null,
+    deps: {
+      log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),
+      emit: (event) => { try { io.emit?.(event) } catch { /* never load-bearing */ } },
+    },
+  }
   function transportIo(name, role) {
     if (!transportFactories[name]) throw new Error(`unknown transport "${name}" for seat ${role}`)
     if (!transportInstances.has(name)) {

@@ -183,6 +183,15 @@ Headless workers use a frozen binary, resolved in this order:
 `headlessIo` treats the ReturnEnvelope as the record and classifies worker
 runs as `ok`, `ok-degraded`, `aborted`, `no-envelope`, `malformed`, or
 `timeout`; a perfect stream without an envelope is still `no-envelope`.
+When a headless turn settles it may emit a `usage` event with `{ id, role,
+model, session_id, transcript_path, usage }`, where `usage` is either the four
+`billed_*_tokens` fields or `null`. `emitAdapter` stores these measurements in
+`agent_sessions`, not `sessions`: the former has per-agent identity, while the
+latter is a per-run total (and also carries the out-of-scope money field).
+Claude headless-json treats the terminal `result` usage as the cumulative
+aggregate (assistant lines are repeated deltas) and otherwise dedupes repeated
+message ids before summing; pi RPC sums `message_end` deltas only, excluding
+replayed `turn_end` and `agent_end` usage.
 
 ## The daemon
 

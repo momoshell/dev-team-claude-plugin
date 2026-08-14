@@ -503,7 +503,11 @@ function realIo(crew, paths, checkout, emitter, adapters, args = {}) {
     : null
   const io = {
     assign(spec) {
-      const { role } = spec
+      // Destructure EVERY field the pane path uses: `briefFile` is not in
+      // realIo's scope (it is runCmd's local), so leaving it out of this
+      // pattern makes it a free identifier and every pane assignment dies
+      // with a bare ReferenceError before a single line is sent.
+      const { role, briefFile } = spec
       const m = crew.members[role]
       if (!m) throw new Error(`role ${role} not seated in this crew`)
       if (m.transport === HEADLESS_TRANSPORT) {

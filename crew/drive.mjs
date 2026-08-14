@@ -105,15 +105,68 @@ function verdictOf(env) {
     : null
 }
 
+// The closed severity set — the same three the charter has always used for
+// review.md findings (crew/roles/reviewer.md:19-21). Phase 1 makes it
+// machine-readable; it does not add a fourth.
+export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
+
+// Parse details.findings. Returns null when there is NO findings array at all
+// (an older seat or a degraded reply) — absence is not an error, and the
+// caller then behaves exactly as it did before #170. Malformed ENTRIES are
+// dropped and reported; they never throw and never change a verdict.
+export function reviewFindings(details) {
+  if (!Array.isArray(details?.findings)) return null
+  const findings = []
+  const rejected = []
+  const seen = new Set()
+  const trimmedOrNull = (value) => (typeof value === 'string' ? value.trim() : null)
+
+  details.findings.forEach((entry, index) => {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || entry.id.trim() === '') {
+      rejected.push({ index, why: 'missing id' })
+      return
+    }
+    if (!FINDING_SEVERITIES.includes(entry.severity)) {
+      rejected.push({ index, why: 'severity outside the closed set' })
+      return
+    }
+    if (seen.has(entry.id)) {
+      rejected.push({ index, why: 'duplicate id' })
+      return
+    }
+    seen.add(entry.id)
+    findings.push({
+      id: entry.id,
+      severity: entry.severity,
+      location: trimmedOrNull(entry.location),
+      summary: trimmedOrNull(entry.summary),
+    })
+  })
+  return { findings, rejected }
+}
+
 export function reviewOutcome(role, env) {
   if (role !== 'reviewer') return null
   const v = verdictOf(env)
   if (!v) return null
   const count = (n) => (Number.isInteger(n) && n >= 0 ? n : null)
   const d = env.details || {}
-  return {
+  const base = {
     verdict: v === 'pass' ? 'pass' : 'changes-needed',
     must_fix: count(d.must_fix), should_fix: count(d.should_fix), consider: count(d.consider),
+  }
+  const parsed = reviewFindings(d)
+  if (!parsed) return base
+  const n = (severity) => parsed.findings.filter((finding) => finding.severity === severity).length
+  const tally = { must_fix: n('must-fix'), should_fix: n('should-fix'), consider: n('consider') }
+  const count_mismatch = ['must_fix', 'should_fix', 'consider']
+    .filter((key) => base[key] !== null && base[key] !== tally[key])
+  return {
+    ...base,
+    findings: parsed.findings,
+    findings_report: {
+      total: parsed.findings.length, tally, rejected: parsed.rejected, count_mismatch,
+    },
   }
 }
 
@@ -237,6 +290,9 @@ export function driveTask(ctx, io) {
     const review = reviewOutcome(role, env)
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
     if (review) io.log({ at: io.now(), review_outcome: { dispatch: id, ...review } })
+    if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
+      io.log({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } })
+    }
     if (!validEnvelope(env, role, id)) throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
     io.log({ at: io.now(), envelope: id, role, status: env.status })
     return env

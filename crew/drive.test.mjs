@@ -4,11 +4,13 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   validateScopeEntries, scopeMatcher, composeCommitMessage,
-  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, reviewOutcome,
+  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
+  FINDING_SEVERITIES, reviewFindings, reviewOutcome,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -71,9 +73,12 @@ const buildEnv = (over = {}) => ({
   status: 'done', role: 'builder', summary: 'built',
   details: { files_changed: ['a.mjs', 'a.test.mjs'], commit_message: 'feat: the change' }, ...over,
 })
-const reviewEnv = (verdict) => ({
+const reviewEnv = (verdict, findings) => ({
   status: 'done', role: 'reviewer', summary: 'reviewed',
-  details: { verdict, review_path: `${TD}/review.md`, must_fix: verdict === 'pass' ? 0 : 1 },
+  details: {
+    verdict, review_path: `${TD}/review.md`, must_fix: verdict === 'pass' ? 0 : 1,
+    ...(findings === undefined ? {} : { findings }),
+  },
 })
 const checkEnv = (verdict) => ({
   status: 'done', role: 'tech-lead', summary: 'checked',
@@ -93,6 +98,118 @@ test('reviewOutcome normalizes reviewer verdicts and count fields', () => {
   }), { verdict: 'pass', must_fix: null, should_fix: null, consider: null })
   assert.equal(reviewOutcome('planner', { status: 'done', details: { verdict: 'pass' } }), null)
   assert.equal(reviewOutcome('reviewer', { status: 'done', details: { defect: 'gate' } }), null)
+})
+
+test('reviewOutcome carries reviewer findings verbatim and stable', () => {
+  const envelope = {
+    status: 'done', details: {
+      verdict: 'changes-needed', must_fix: 1, should_fix: 1, consider: 0,
+      findings: [
+        { id: 'RV1-2', severity: 'should-fix', location: ' a.mjs:12 ', summary: ' second ' },
+        { id: 'RV1-1', severity: 'must-fix', location: 'b.mjs:3', summary: 'first' },
+      ],
+    },
+  }
+  const first = reviewOutcome('reviewer', envelope)
+  const second = reviewOutcome('reviewer', envelope)
+  assert.deepEqual(first.findings, [
+    { id: 'RV1-2', severity: 'should-fix', location: 'a.mjs:12', summary: 'second' },
+    { id: 'RV1-1', severity: 'must-fix', location: 'b.mjs:3', summary: 'first' },
+  ])
+  assert.deepEqual(second.findings, first.findings)
+  assert.deepEqual(first.findings_report, {
+    total: 2,
+    tally: { must_fix: 1, should_fix: 1, consider: 0 },
+    rejected: [], count_mismatch: [],
+  })
+})
+
+test('malformed findings are dropped and reported, never thrown', () => {
+  const out = reviewOutcome('reviewer', {
+    status: 'done', details: {
+      verdict: 'changes-needed', must_fix: 1,
+      findings: [
+        { id: 'ok-1', severity: 'must-fix' },
+        { id: 'ok-1', severity: 'consider' },
+        { severity: 'consider' },
+        { id: 'bad-sev', severity: 'blocker' },
+        'not-an-object',
+      ],
+    },
+  })
+  assert.deepEqual(out.findings, [{ id: 'ok-1', severity: 'must-fix', location: null, summary: null }])
+  assert.deepEqual(out.findings_report.rejected, [
+    { index: 1, why: 'duplicate id' },
+    { index: 2, why: 'missing id' },
+    { index: 3, why: 'severity outside the closed set' },
+    { index: 4, why: 'missing id' },
+  ])
+  assert.deepEqual(reviewFindings({ findings: 'not-an-array' }), null)
+})
+
+test('an envelope without findings yields exactly today\'s outcome object', () => {
+  const expected = { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0 }
+  assert.deepEqual(reviewOutcome('reviewer', {
+    status: 'done', details: { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0 },
+  }), expected)
+  assert.deepEqual(reviewOutcome('reviewer', {
+    status: 'done', details: { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0, findings: 'nonsense' },
+  }), expected)
+})
+
+test('counts that disagree with findings are recorded, not corrected', () => {
+  const out = reviewOutcome('reviewer', {
+    status: 'done', details: {
+      verdict: 'changes-needed', must_fix: 3, should_fix: 2, consider: 0,
+      findings: [{ id: 'f1', severity: 'must-fix' }],
+    },
+  })
+  assert.equal(out.must_fix, 3)
+  assert.equal(out.should_fix, 2)
+  assert.equal(out.consider, 0)
+  assert.deepEqual(out.findings_report.count_mismatch, ['must_fix', 'should_fix'])
+})
+
+test('a drive with findings produces the same result as one without', () => {
+  const reviewer = (findings) => {
+    const base = reviewEnv('pass')
+    return {
+      ...base,
+      details: {
+        ...base.details, must_fix: 0, should_fix: 0, consider: 0,
+        ...(findings === undefined ? {} : { findings }),
+      },
+    }
+  }
+  const run = (review) => {
+    const io = fakeIo({
+      envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': review },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    return { result: driveTask(CTX, io), io }
+  }
+  const without = run(reviewer())
+  const withFindings = run(reviewer([
+    { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'failure scenario' },
+  ]))
+  assert.deepEqual(withFindings.result, without.result)
+  assert.ok(withFindings.io.calls.logs.some((line) => line.review_outcome?.findings?.some((f) => f.id === 'RV1-1')))
+  const note = withFindings.io.calls.logs.find((line) => line.review_findings_note)?.review_findings_note
+  assert.deepEqual(note?.count_mismatch, ['must_fix'])
+})
+
+test('the shared charter and validator agree on the findings contract', () => {
+  const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
+  const start = charter.indexOf('## Envelope details fields')
+  const end = charter.indexOf('## Gate triage', start)
+  assert.ok(start >= 0 && end > start)
+  const block = charter.slice(start, end)
+  for (const token of ['"findings"', '"id"', '"severity"']) assert.ok(block.includes(token))
+  const severityField = block.match(/"severity":\s*([^\n]+)/)?.[1]
+  assert.ok(severityField)
+  const documented = [...severityField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
+  assert.deepEqual(documented, [...FINDING_SEVERITIES])
 })
 
 test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero consults', () => {

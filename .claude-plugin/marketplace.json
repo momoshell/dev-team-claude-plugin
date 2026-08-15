@@ -7,7 +7,7 @@
   },
   "metadata": {
     "description": "Local marketplace for the dev-team plugin",
-    "version": "0.4.0"
+    "version": "0.5.0"
   },
   "plugins": [
     {
@@ -21,7 +21,7 @@
         "url": "https://github.com/momoshell/dev-team-claude-plugin.git",
         "ref": "main"
       },
-      "description": "Crew: a team runtime for cmux — whole team booted per task in one workspace, a deterministic driver runs the loop (plan, gate-first acceptance, build, review, suite, commit-on-green), agents kept for judgment via closed-enum decision envelopes.",
+      "description": "Crew: a team runtime \u2014 a whole team booted per task, with deterministic code running the loop (plan, gate-first acceptance, build, review, suite, commit-on-green) and agents kept for judgment via closed-enum decision envelopes. Two modes on one backbone: interactive cmux panes, or headless workers owned by a daemon and driven from factoryctl.",
       "homepage": "https://github.com/momoshell/dev-team-claude-plugin"
     }
   ]

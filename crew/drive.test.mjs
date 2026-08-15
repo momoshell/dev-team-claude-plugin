@@ -11,6 +11,7 @@ import {
   validateScopeEntries, scopeMatcher, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
   FINDING_SEVERITIES, reviewFindings, reviewOutcome,
+  CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -21,8 +22,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false } = {}) {
-  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [] }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {} } = {}) {
+  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [], files }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
@@ -37,7 +38,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       return typeof env === 'function' ? env() : env ?? null
     },
     writeFile(path, content) { calls.writes[path] = content },
-    readFile() { return null },
+    readFile(p) { return Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null },
     run(cmd) {
       counts[cmd] = (counts[cmd] || 0) + 1
       calls.run.push({ cmd, n: counts[cmd] })
@@ -66,7 +67,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
 const planEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'planned',
   artifacts: [`${TD}/plan.md`],
-  details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [] },
+  details: { plan_path: `${TD}/plan.md`, files_in_scope: ['a.mjs', 'a.test.mjs'], validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed' },
   ...over,
 })
 const buildEnv = (over = {}) => ({
@@ -1854,4 +1855,262 @@ test('done and escalation envelopes always record the grant list, including empt
   assert.deepEqual(done.details.extra_rounds_granted, [])
   const escalated = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv({ status: 'blocked' }), 'lead:1': leadEnv('escalate') } }))
   assert.deepEqual(escalated.details.extra_rounds_granted, [])
+})
+
+test('growthRecord and growthLines use the cumulative two-times threshold and null evidence', () => {
+  assert.equal(GROWTH_DIVERGENCE_FACTOR, 2)
+  const first = growthRecord(null, null, { round: 1, plan_bytes: 100, gate_bytes: 100, files_in_scope_count: 2 })
+  assert.deepEqual(first, {
+    round: 1, plan_bytes: 100, gate_bytes: 100, plan_delta: null, gate_delta: null,
+    combined_bytes: 200, round1_combined_bytes: null, files_in_scope_count: 2,
+    ratio: null, divergent: false,
+  })
+  const doubled = growthRecord(first, first, { round: 2, plan_bytes: 200, gate_bytes: 200, files_in_scope_count: 2 })
+  assert.equal(doubled.plan_delta, 100)
+  assert.equal(doubled.gate_delta, 100)
+  assert.equal(doubled.round1_combined_bytes, 200)
+  assert.equal(doubled.ratio, 2)
+  assert.equal(doubled.divergent, true)
+  const under = growthRecord(first, first, { round: 2, plan_bytes: 199, gate_bytes: 199, files_in_scope_count: 2 })
+  assert.equal(under.ratio, 1.99)
+  assert.equal(under.divergent, false)
+  const nulls = growthRecord(null, null, { round: 1, plan_bytes: null, gate_bytes: null, files_in_scope_count: null })
+  assert.equal(nulls.combined_bytes, null)
+  assert.match(growthLines(nulls).join('\n'), /plan_bytes=null.*gate_bytes=null.*combined_bytes=null.*ratio=null.*divergent=false/)
+})
+
+test('divergent growth is evidence in both the round-2 check and revision briefs, never a verdict', () => {
+  const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  let io
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv({ details }),
+      'tech-lead:1': checkEnv('revise'),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(30)
+        io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(30)
+        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': checkEnv('revise'),
+      'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'tech-lead:3': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io)
+  assert.equal(res.status, 'done')
+  const check = io.calls.writes[`${TD}/check-brief-r2.md`]
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r2.md`]
+  for (const brief of [check, bounce]) {
+    assert.match(brief, /divergent=true/)
+    assert.match(brief, /plan_bytes=30/)
+    assert.match(brief, /gate_bytes=30/)
+    assert.match(brief, /files_in_scope=2/)
+  }
+  assert.deepEqual(res.details.growth.map((record) => record.round), [1, 2, 3])
+})
+
+test('round-2 growth below two-times cumulative remains non-divergent', () => {
+  const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  let io
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
+        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  assert.match(io.calls.writes[`${TD}/check-brief-r2.md`], /combined_bytes=30/)
+  assert.match(io.calls.writes[`${TD}/check-brief-r2.md`], /divergent=false/)
+})
+
+test('missing plan and unreadable gate are null evidence with the same run outcome', () => {
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  const scenario = (files) => {
+    const io = fakeIo({
+      files,
+      envelopes: { 'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    return { io, result: driveTask(CTX_TL, io) }
+  }
+  const missing = scenario({})
+  const present = scenario({ [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) })
+  assert.equal(missing.result.status, 'done')
+  assert.equal(present.result.status, 'done')
+  assert.deepEqual(missing.result.details.stages, present.result.details.stages)
+  assert.match(missing.io.calls.writes[`${TD}/check-brief-r1.md`], /plan_bytes=null.*gate_bytes=null/s)
+})
+
+test('a gate path outside the task dir is rejected and cannot alter the run', () => {
+  const outside = '/tmp/outside-growth-gate.mjs'
+  const details = { ...planEnv().details, gate_path: outside }
+  const io = fakeIo({
+    files: { [`${TD}/plan.md`]: 'x'.repeat(10), [outside]: 'x'.repeat(500) },
+    envelopes: { 'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.growth[0].gate_bytes, null)
+  assert.ok(io.calls.logs.some((line) => line.gate_path_rejected === outside))
+})
+
+test('an omitted gate_path journals an explicit null rejection value', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  assert.equal(driveTask(CTX_TL, io).status, 'done')
+  const rejection = io.calls.logs.find((line) => Object.hasOwn(line, 'gate_path_rejected'))
+  assert.ok(rejection)
+  assert.equal(rejection.gate_path_rejected, null)
+  assert.deepEqual(JSON.parse(JSON.stringify(rejection)), { at: 0, gate_path_rejected: null })
+})
+
+test('a wildly divergent run still reaches commit', () => {
+  const files = { [`${TD}/plan.md`]: 'x', [`${TD}/gate.mjs`]: 'x' }
+  let io
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(1000)
+        io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(1000)
+        return planEnv({ details: { ...planEnv().details, gate_path: `${TD}/gate.mjs`, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(res.details.growth[1].divergent, true)
+})
+
+test('validateCarve enforces the closed verdict and first-slice scope contract', () => {
+  for (const verdict of [undefined, null, 'PROCEED', 'split']) {
+    const result = validateCarve({ carve_verdict: verdict })
+    assert.equal(result.verdict, null)
+    assert.equal(result.slices.length, 0)
+    assert.ok(result.why)
+  }
+  assert.deepEqual(validateCarve({ carve_verdict: 'proceed' }), { verdict: 'proceed', slices: [], defect: null, why: null })
+  const good = validateCarve({
+    carve_verdict: 'carve',
+    carve_slices: [
+      { summary: ' first ', files_in_scope: ['a.mjs'], extra: 'drop me' },
+      { summary: 'second', files_in_scope: ['b.mjs'] },
+    ],
+  })
+  assert.deepEqual(good, {
+    verdict: 'carve', slices: [
+      { summary: 'first', files_in_scope: ['a.mjs'] },
+      { summary: 'second', files_in_scope: ['b.mjs'] },
+    ], defect: null, why: null,
+  })
+  for (const carve_slices of [[], null, {}, [{ summary: 'bad', files_in_scope: ['../bad'] }]]) {
+    const result = validateCarve({ carve_verdict: 'carve', carve_slices })
+    assert.equal(result.verdict, 'carve')
+    assert.ok(result.defect)
+  }
+})
+
+const planRevisionRun = (revision, over = {}) => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': revision, 'tech-lead:2': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'], ...over,
+  })
+  return { io, result: driveTask(CTX_TL, io) }
+}
+
+test('a plan revision without carve_verdict escalates before check:r2', () => {
+  const { result } = planRevisionRun(planEnv({ details: { ...planEnv().details, carve_verdict: undefined } }))
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-carve')
+  assert.ok(!result.details.stages.includes('check:r2'))
+})
+
+test('a proceed verdict continues to check:r2', () => {
+  const { result } = planRevisionRun(planEnv({ details: { ...planEnv().details, carve_verdict: 'proceed' } }))
+  assert.equal(result.status, 'done')
+  assert.ok(result.details.stages.includes('check:r2'))
+})
+
+test('a valid carve escalates with its sanitized slices and no lead consult', () => {
+  const slices = [
+    { summary: 'slice one', files_in_scope: ['a.mjs'] },
+    { summary: 'slice two', files_in_scope: ['b.mjs'] },
+  ]
+  const { result } = planRevisionRun(planEnv({ details: { ...planEnv().details, carve_verdict: 'carve', carve_slices: slices } }))
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-carve')
+  assert.deepEqual(result.details.carve.slices, slices)
+  assert.equal(result.details.consults, undefined)
+})
+
+test('a malformed carve list escalates carrying a defect', () => {
+  const { result } = planRevisionRun(planEnv({ details: { ...planEnv().details, carve_verdict: 'carve', carve_slices: [] } }))
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-carve')
+  assert.ok(result.details.carve.defect)
+})
+
+test('round 1 does not require a carve verdict', () => {
+  const details = { ...planEnv().details }
+  delete details.carve_verdict
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'done')
+  assert.ok(result.details.stages.includes('build:r1'))
+})
+
+test('a gate-repair planner dispatch is not mistaken for a plan revision carve check', () => {
+  const repaired = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-fixed' } })
+  delete repaired.details.carve_verdict
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'wrong gate' } },
+      'planner:2': repaired, 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-bad:1': { ok: false, output: RED(3) }, 'gate-bad:2': { ok: false, output: 'fail one' },
+      'gate-bad:3': { ok: false, output: 'fail two' }, 'gate-fixed': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.ok(!result.details.stages.includes('escalate:plan-carve'))
 })

@@ -223,6 +223,24 @@ loop counts only `false` toward its dead-seat verdict, so a cmux hiccup can
 never kill a live run. Liveness is a give-up signal only: a quiet seat is not
 a failed one, and outcome comes from the envelope file, always.
 
+## Plan check: growth evidence and the carve verdict
+
+During each plan-check round the driver records the plan and gate byte counts,
+deltas, combined bytes, the round-1 combined baseline, the `files_in_scope`
+count, a ratio, and a `divergent` label. A round is `divergent` only when its
+combined bytes are at least 2x the round-1 combined bytes. The absolute
+`plan_bytes` and `gate_bytes` sit beside `files_in_scope` so a large plan is
+legible as evidence rather than being mistaken for a scope change.
+
+`gate_path` must be an absolute path inside the task directory; paths outside it
+are ignored, and the driver never parses `gate_cmd`. Growth is evidence in the
+next check or plan-revision brief, never a verdict: missing or unreadable files
+cannot fail a run. On every plan revision (round 2 and later), the planner must
+return the closed `carve_verdict` enum, `proceed` or `carve`. A `carve` carries
+its sanitized `carve_slices` to a human escalation (the first slice must be
+buildable alone); missing or out-of-enum verdicts escalate rather than silently
+proceeding.
+
 ## The acceptance gate (gate-first)
 
 The planner may author an executable gate in the TASK DIR (immutable to the

@@ -16,17 +16,16 @@ import {
 } from 'node:fs'
 import { dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
-import { fork as cpFork, execSync as cpExecSync } from 'node:child_process'
+import { fork as cpFork } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
 import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
-import { driveTask as defaultDriveTask } from './drive.mjs'
-import { realIo as defaultRealIo, DEFAULT_TRANSPORT } from './realio.mjs'
 
 const MAX_FRAME_BYTES = 1024 * 1024
 const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
 const HERE = dirname(SELF_PATH)
+const CHILD_PATH = join(HERE, 'child.mjs')
 const adapterCache = new Map()
 const SEND_INTERJECTION = 'boundary'
 const MAX_SEND_BYTES = 512
@@ -152,7 +151,8 @@ export function normalizeEvent(source, row) {
   return null
 }
 
-function isObject(value) { return value && typeof value === 'object' && !Array.isArray(value) }
+// Exported for the child entry, not part of the daemon protocol.
+export function isObject(value) { return value && typeof value === 'object' && !Array.isArray(value) }
 
 function hasPid(value) {
   const n = Number(value)
@@ -179,12 +179,17 @@ function absoluteChildPath(root, value) {
   return resolvePath(root, String(value))
 }
 
+// Deliberately duplicates realio.mjs:16: importing realio.mjs for one string is
+// the exact cost this change removes; daemon.test.mjs pins the two together.
+export const PANE_TRANSPORT = 'pane'
+
+// Exported for the child entry, not part of the daemon protocol.
 // A pane seat needs a human at a terminal; nothing the daemon forks has one.
-function paneSeat(crew) {
+export function paneSeat(crew) {
   const roles = crew?.roles || Object.keys(crew?.members || {})
   for (const role of roles) {
     const member = crew?.members?.[role]
-    if (!member || !member.transport || member.transport === DEFAULT_TRANSPORT) return role
+    if (!member || !member.transport || member.transport === PANE_TRANSPORT) return role
   }
   return null
 }
@@ -595,7 +600,7 @@ export function daemon(options = {}) {
     const childSpec = { ...spec, crew_dir: crewDir, task: record.task, brief_file: record.brief_file, lane: record.lane, suite: record.suite, checkout: record.checkout, task_return: taskReturn }
     let child
     try {
-      child = fork(SELF_PATH, ['--run-child', JSON.stringify(childSpec)], { detached: true, stdio: 'ignore' })
+      child = fork(CHILD_PATH, ['--run-child', JSON.stringify(childSpec)], { detached: true, stdio: 'ignore' })
       run.child_pid = child?.pid ?? null
       attachChild(run, child)
       child?.unref?.()
@@ -920,86 +925,4 @@ export function daemon(options = {}) {
   }
 
   return { start, stop, poll, enqueue, send, state, result, list, feed, subscribers: () => [...subscribers].map(({ id, runId }) => ({ id, run_id: runId })), socketPath, root }
-}
-
-function childArguments(argv) {
-  if (isObject(argv) && !Array.isArray(argv)) return argv
-  const values = Array.isArray(argv) ? argv : process.argv.slice(2)
-  const index = values.indexOf('--run-child')
-  const raw = index >= 0 ? values[index + 1] : values[0]
-  if (!raw) throw new Error('run child requires a JSON run specification')
-  try { return JSON.parse(raw) }
-  catch (err) { throw new Error(`invalid run-child specification: ${err.message}`) }
-}
-
-export function runChild(argv, injected = {}) {
-  const spec = childArguments(argv)
-  const read = injected.readFileSync || fsReadFileSync
-  const write = injected.writeFileSync || fsWriteFileSync
-  const existsChild = injected.existsSync || fsExistsSync
-  const mkdir = injected.mkdirSync || fsMkdirSync
-  const exec = injected.execSync || cpExecSync
-  // `harness` decides how a preflight failure is REPORTED — rethrown for a
-  // test driving runChild directly, or written as an escalation envelope in
-  // production. It deliberately no longer decides WHETHER preflight runs.
-  const harness = !!(injected.driveTask || injected.realIo)
-  // Preflight runs UNLESS a caller opts out explicitly. Deriving this from
-  // `harness` meant "I supplied a fake io" silently also meant "skip the seat,
-  // brief, checkout-identity and dirty-tree guards" — and DI is the crew's
-  // universal seam. Only tests inject today, so nothing shipped weaker; the
-  // switch was wrong-way-round for the first caller who injects in production.
-  const strictPreflight = injected.preflight !== false
-  const crewDir = resolvePath(spec.crew_dir)
-  const crewPath = join(crewDir, 'crew.json')
-  let crew
-  try { crew = JSON.parse(String(read(crewPath, 'utf8'))) } catch (err) { throw new Error(`cannot read crew.json at ${crewPath}: ${err.message}`) }
-  const roles = crew.roles || Object.keys(crew.members || {})
-  const taskDir = join(crewDir, 'task')
-  const returnsDir = join(crewDir, 'returns')
-  const taskReturn = resolvePath(crewDir, spec.task_return || crew.task_return || join('returns', 'task.json'))
-  const checkout = resolvePath(spec.checkout || crew.checkout || process.cwd())
-  const briefFile = spec.brief_file || spec.briefFile
-  const ctx = {
-    task: spec.task || crew.task, briefFile: briefFile ? resolvePath(briefFile) : null,
-    taskDir, checkout, journal: join(crewDir, 'journal.jsonl'),
-    roles: roles.filter((role) => role !== 'lead'), lane: spec.lane || null, suite: spec.suite || 'node --test',
-  }
-  const failure = (err) => ({
-    status: 'escalation', summary: `Task ${ctx.task} needs a human: the driver crashed (${err.message})`,
-    artifacts: [ctx.journal], details: { stages: null, commit: null, dissents: [], escalation: { where: err.stage || 'child-preflight', why: err.message } },
-  })
-  let result
-  try {
-    const pane = paneSeat(crew)
-    if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
-    if (strictPreflight) {
-      for (const role of ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
-      if (roles.includes('lead') && !crew.members?.lead) throw new Error(`v3 run requires a lead seat (booted roles: ${roles.join(', ')})`)
-      if (!briefFile) throw new Error('run requires --brief-file <path to the task brief>')
-      if (!existsChild(ctx.briefFile)) throw new Error(`brief file not found: ${ctx.briefFile}`)
-      if (crew.checkout && resolvePath(crew.checkout) !== checkout) throw new Error(`this crew was booted for ${resolvePath(crew.checkout)}, not ${checkout} — same directory name, different checkout`)
-      const dirty = String(exec('git status --porcelain', { cwd: checkout, encoding: 'utf8' }) || '').trim()
-      if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
-    }
-    mkdir(taskDir, { recursive: true }); mkdir(returnsDir, { recursive: true })
-    const realIo = injected.realIo || defaultRealIo
-    const driveTask = injected.driveTask || defaultDriveTask
-    const noCmux = injected.realIoDeps || {
-      cmux: () => ({ ok: true }), tree: () => ({ windows: [] }), locate: () => null,
-      sendLine: () => {}, closeSurface: () => {},
-    }
-    const io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, null, injected.adapters || null, spec, noCmux)
-    try { result = driveTask(ctx, io) } catch (err) { result = failure(err) }
-  } catch (err) {
-    if (harness) throw err
-    result = failure(err)
-  }
-  write(taskReturn, JSON.stringify(result, null, 2))
-  return result
-}
-
-const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === resolvePath(SELF_PATH)
-if (invokedDirectly && process.argv.includes('--run-child')) {
-  try { runChild(process.argv.slice(2)) }
-  catch (err) { process.stderr.write(`error: ${err.message}\n`); process.exitCode = 1 }
 }

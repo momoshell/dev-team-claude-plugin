@@ -315,6 +315,160 @@ test('eligibleTasks matches proof rows to the active gate generation', { skip: S
 })
 
 // ---------------------------------------------------------------------------
+// #59: one-run task readout
+// ---------------------------------------------------------------------------
+
+function seedTaskAgentSession(ledger, adwId, suffix, totals) {
+  const claudeSessionId = `claude-${suffix}`
+  ledger.startAgentSession({
+    adw_id: adwId, dispatch_id: `dispatch-${suffix}`, role: 'builder', model: 'sonnet',
+    claude_session_id: claudeSessionId, transcript_path: `/tmp/${claudeSessionId}.jsonl`,
+  })
+  ledger.endAgentSession({
+    adw_id: adwId, claude_session_id: claudeSessionId,
+    context_tokens: 100, context_window: 200000, raw_read_tokens: 80, raw_written_tokens: 40,
+    billed_input_tokens: totals[0], billed_output_tokens: totals[1],
+    billed_cache_write_tokens: totals[2], billed_cache_read_tokens: totals[3],
+  })
+}
+
+test('taskReadout sums billed_* across a run\'s agent_sessions rows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-usage', repo_slug: 'r', task_slug: 'usage' })
+  seedTaskAgentSession(ledger, 'task-usage', 'one', [100, 10, 5, 7])
+  seedTaskAgentSession(ledger, 'task-usage', 'two', [30, 4, 1, 3])
+
+  const usage = ledger.taskReadout('task-usage').usage
+  assert.deepEqual(usage, {
+    agent_sessions: 2,
+    billed_input_tokens: 130,
+    billed_output_tokens: 14,
+    billed_cache_write_tokens: 6,
+    billed_cache_read_tokens: 10,
+  })
+  assert.notEqual(usage.billed_input_tokens, 100, 'usage must not be the maximum running total')
+  assert.notEqual(usage.billed_input_tokens, 30, 'usage must not be the last running total')
+})
+
+test('taskReadout reports gate verdicts per generation with their discrimination', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-gates', repo_slug: 'r', task_slug: 'gates' })
+  ledger.recordGateResult({ adw_id: 'task-gates', phase_id: null, gate_name: 'g', attempt: 1, ok: false, gate_generation: 1, pristine: false })
+  ledger.recordGateResult({ adw_id: 'task-gates', phase_id: null, gate_name: 'g', attempt: 2, ok: true, gate_generation: 1, pristine: false })
+  ledger.recordGateDiscrimination({ adw_id: 'task-gates', gate_generation: 1, verdict: 'proven', checks_total: 9, checks_failed: 3, checks_errored: 0 })
+  ledger.recordGateResult({ adw_id: 'task-gates', phase_id: null, gate_name: 'g', attempt: 3, ok: true, gate_generation: 2, pristine: false })
+  ledger.recordGateDiscrimination({ adw_id: 'task-gates', gate_generation: 2, verdict: 'unproven', checks_total: 9, checks_failed: 0, checks_errored: 0 })
+
+  const generations = ledger.taskReadout('task-gates').gate_generations
+  assert.equal(generations.length, 2)
+  assert.deepEqual(generations.map(({ gate_generation, attempts, green }) => ({ gate_generation, attempts, green })), [
+    { gate_generation: 1, attempts: 2, green: 1 },
+    { gate_generation: 2, attempts: 1, green: 1 },
+  ])
+  assert.equal(generations[0].discrimination.verdict, 'proven')
+  assert.equal(generations[1].discrimination.verdict, 'unproven')
+})
+
+test('taskReadout carries review outcomes with their must_fix counts', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-reviews', repo_slug: 'r', task_slug: 'reviews' })
+  ledger.recordReviewOutcome({ adw_id: 'task-reviews', dispatch_id: 'review-1', role: 'reviewer', verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 3 })
+  ledger.recordReviewOutcome({ adw_id: 'task-reviews', dispatch_id: 'review-2', role: 'qa', verdict: 'pass', must_fix: 0, should_fix: 0, consider: 1 })
+
+  const rows = ledger.taskReadout('task-reviews').review_outcomes
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows.map(({ dispatch_id, role, verdict, must_fix, should_fix, consider }) => ({ dispatch_id, role, verdict, must_fix, should_fix, consider })), [
+    { dispatch_id: 'review-1', role: 'reviewer', verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 3 },
+    { dispatch_id: 'review-2', role: 'qa', verdict: 'pass', must_fix: 0, should_fix: 0, consider: 1 },
+  ])
+})
+
+test('a run with no usage, discrimination or findings reads as absent, not zero', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-bare', repo_slug: 'r', task_slug: 'bare' })
+  ledger.endSession({ adw_id: 'task-bare', status: 'ok' })
+
+  const readout = ledger.taskReadout('task-bare')
+  assert.equal(readout.usage, null)
+  assert.deepEqual(readout.gate_generations, [])
+  assert.deepEqual(readout.review_outcomes, [])
+  assert.deepEqual(readout.absent, {
+    usage: 'predates per-agent token measurement (#119) — not a measured zero',
+    gate_discrimination: 'predates gate discrimination (#168)',
+    review_outcomes: 'predates structured review outcomes (#169/#170)',
+    gate_results: 'predates gate verdict recording (#130)',
+    phases: 'no phase rows recorded for this run',
+  })
+})
+
+test('taskReadout resolves an unambiguous task_slug and refuses an ambiguous one', { skip: SKIP }, () => {
+  const one = openTestLedger()
+  one.startSession({ adw_id: 'slug-one', repo_slug: 'r', task_slug: 'remembered-slug' })
+  const resolved = one.taskReadout('remembered-slug')
+  assert.equal(resolved.adw_id, 'slug-one')
+  assert.equal(resolved.resolved_by, 'task_slug')
+
+  const many = openTestLedger()
+  many.startSession({ adw_id: 'slug-dupe-a', repo_slug: 'r', task_slug: 'ambiguous-slug' })
+  many.startSession({ adw_id: 'slug-dupe-b', repo_slug: 'r', task_slug: 'ambiguous-slug' })
+  const ambiguous = many.taskReadout('ambiguous-slug')
+  assert.equal(ambiguous.adw_id, null)
+  assert.deepEqual(ambiguous.candidates, ['slug-dupe-a', 'slug-dupe-b'])
+})
+
+test('the task verb refuses an unknown adw_id through the usage path', { skip: SKIP }, () => {
+  const res = run(['task', 'nope'])
+  assert.equal(res.status, 2)
+  assert.equal(res.stdout, '')
+  assert.doesNotMatch(res.stderr, /unknown verb/)
+})
+
+test('the task verb refuses an ambiguous slug and names every candidate', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'cli-dupe-a', repo_slug: 'r', task_slug: 'cli-ambiguous' })
+  ledger.startSession({ adw_id: 'cli-dupe-b', repo_slug: 'r', task_slug: 'cli-ambiguous' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['task', 'cli-ambiguous'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 2)
+  assert.match(res.stderr, /cli-dupe-a/)
+  assert.match(res.stderr, /cli-dupe-b/)
+})
+
+test('a degraded ledger answers task without throwing', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'corrupt.db')
+  writeFileSync(dbPath, 'not a sqlite database\\n')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  let readout
+  assert.doesNotThrow(() => { readout = ledger.taskReadout('degraded-run') })
+  assert.equal(readout.degraded, true)
+  assert.equal(readout.adw_id, null)
+
+  const res = run(['task', 'degraded-run'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 2)
+  assert.notEqual(res.status, 1)
+})
+
+test('taskReadout prints a schema-1 payload stating its question and definition', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'cli-readout', repo_slug: 'r', task_slug: 'readout' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['task', 'cli-readout'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.schema, 1)
+  assert.match(payload.question, /what ran/i)
+  assert.equal(typeof payload.definition, 'object')
+  for (const key of ['adw_id', 'resolved_by', 'session', 'phases', 'gate_generations', 'review_outcomes', 'usage', 'absent']) {
+    assert.ok(key in payload, `payload is missing ${key}`)
+  }
+})
+
+// ---------------------------------------------------------------------------
 // AC-6: polling query + index
 // ---------------------------------------------------------------------------
 

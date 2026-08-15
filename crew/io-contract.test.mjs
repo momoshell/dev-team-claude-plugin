@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { emitAdapter, realIo, nextRung } from './realio.mjs'
+import { emitAdapter, realIo, nextRung, nextModelRung } from './realio.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './realio.mjs'
@@ -434,13 +434,51 @@ test('headless-json reseat applies and reaches the next assignment command', () 
   assert.equal(spec.effort, result.to.effort)
 })
 
-test('headless-rpc reseat refuses and names respawn against the resumed session', () => {
-  const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: 'pi' })
+test('headless-rpc reseat retires the seat before it changes the cell', () => {
+  const calls = []
+  const f = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: 'pi',
+    headlessRpcIo: ({ crew }) => ({
+      assign: () => ({ id: 'd1', returnPath: '/dev/null' }),
+      wait: () => null,
+      retire: (role) => { calls.push({ role, effort: crew.members[role].effort }); return { retired: true } },
+    }),
+  })
   const result = f.io.reseat('reviewer', { reason: 'lane' })
-  assert.equal(result.applied, false)
-  assert.equal(result.reason, 'transport')
-  assert.match(result.why, /respawn/i)
-  assert.match(result.why, /resumed session/i)
+  assert.equal(result.applied, true)
+  assert.deepEqual(calls, [{ role: 'reviewer', effort: f.source.effort }])
+  assert.equal(f.crew.members.reviewer.effort, 'max')
+  assert.equal(f.logs[0].reseat.retired, true)
+})
+
+test('headless-rpc reseat refuses when the seat cannot be retired', () => {
+  const throwing = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: 'pi',
+    headlessRpcIo: () => ({
+      assign: () => ({ id: 'd1', returnPath: '/dev/null' }),
+      wait: () => null,
+      retire: () => { const err = new Error('rpc seat reviewer has an in-flight turn'); err.stage = 'rpc-session-busy'; throw err },
+    }),
+  })
+  const before = throwing.crew.members.reviewer.effort
+  const refused = throwing.io.reseat('reviewer', { reason: 'lane' })
+  assert.equal(refused.applied, false)
+  assert.equal(refused.reason, 'transport')
+  assert.match(refused.why, /in-flight/)
+  assert.equal(throwing.crew.members.reviewer.effort, before)
+
+  const missing = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: 'pi',
+    headlessRpcIo: () => ({
+      assign: () => ({ id: 'd1', returnPath: '/dev/null' }),
+      wait: () => null,
+    }),
+  })
+  const missingBefore = missing.crew.members.reviewer.effort
+  const missingResult = missing.io.reseat('reviewer', { reason: 'lane' })
+  assert.equal(missingResult.applied, false)
+  assert.equal(missingResult.reason, 'transport')
+  assert.equal(missing.crew.members.reviewer.effort, missingBefore)
 })
 
 test('reseat on a crew without a tier returns no-tier', () => {
@@ -457,14 +495,14 @@ test('reseat at judge tier returns exhausted', () => {
   assert.equal(result.reason, 'exhausted')
 })
 
-test('builder reseat names its identical cell at mechanical and build tiers', () => {
+test('builder reseat climbs a model rung when its tier cell never changes', () => {
   for (const tier of ['mechanical', 'build']) {
     const f = makeTierFixture({ role: 'builder', tier, transport: 'headless-json', agent: 'pi' })
     const result = f.io.reseat('builder', { reason: 'build' })
-    assert.equal(result.applied, false)
-    assert.equal(result.reason, 'exhausted')
-    assert.match(result.why, /gpt-5\.6-luna/)
-    assert.match(result.why, /max/)
+    assert.equal(result.applied, true)
+    assert.equal(result.to.id, 'gpt-5.6-terra')
+    assert.equal(result.to.provider, 'openai')
+    assert.equal(result.to.effort, 'max')
   }
 })
 
@@ -486,6 +524,17 @@ test('nextRung follows mechanical to build to judge and refuses missing or unkno
   assert.equal(nextRung(ROSTER, 'judge', 'reviewer'), null)
   assert.equal(nextRung(ROSTER, 'unknown', 'reviewer'), null)
   assert.equal(nextRung({ tiers: { mechanical: {}, build: {} } }, 'mechanical', 'reviewer'), null)
+})
+
+test('nextModelRung walks the cost catalog, holds the provider, and skips override-only', () => {
+  assert.equal(nextModelRung(ROSTER, ROSTER.tiers.mechanical.builder).cell.id, 'gpt-5.6-terra')
+  assert.equal(nextModelRung(ROSTER, { provider: 'openai', id: 'gpt-5.6-terra', effort: 'max', agent: 'pi' }).cell.id, 'gpt-5.6-sol')
+  assert.equal(nextModelRung(ROSTER, { provider: 'openai', id: 'gpt-5.6-sol' }), null)
+  assert.equal(nextModelRung(ROSTER, ROSTER.tiers.judge.planner), null)
+  assert.equal(nextModelRung(ROSTER, { provider: 'anthropic', id: 'claude-haiku-4-5', effort: 'low', agent: 'claude' }).cell.id, 'claude-sonnet-5')
+  assert.equal(nextModelRung(ROSTER, { provider: 'openai', id: 'unknown' }), null)
+  assert.equal(nextModelRung({ models: null }, { provider: 'openai', id: 'gpt-5.6-luna' }), null)
+  assert.equal(nextModelRung(null, { provider: 'openai', id: 'gpt-5.6-luna' }), null)
 })
 
 test('reseat never throws when roster loading fails or the tier is unknown', () => {

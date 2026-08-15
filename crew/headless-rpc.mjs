@@ -1,6 +1,7 @@
 // The stream is transport and observability, never the record; the envelope is
 // the record; idle ≠ success. This synchronous supervisor keeps one pi RPC
-// process per seat alive across assignments.
+// process per seat alive across assignments. retire is a boundary operation:
+// it refuses an in-flight turn and leaves the session id intact.
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync,
@@ -379,6 +380,32 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       if (proven && seat.handle) store.clear(seat.handle)
     }
   }
+  // Retire only at a settled boundary: kill the worker and release its seat,
+  // while deliberately preserving the session id for the next assignment.
+  function retire(role) {
+    const seat = seats.get(role)
+    if (seat?.turn && !seat.turn.state.settled) {
+      return {
+        retired: false,
+        reason: 'in-flight',
+        why: `rpc seat ${role} has an in-flight turn; retire it at a bounce boundary`,
+      }
+    }
+    if (!seat) {
+      return {
+        retired: false,
+        reason: 'not-running',
+        why: `rpc seat ${role} is not running; the next assignment will spawn it`,
+      }
+    }
+    try { closeFd(seat.fd) } catch {}
+    killAfterTimeout(seat)
+    if (seat.handle) { try { store.clear(seat.handle) } catch {} }
+    // The session id survives a retire on purpose: ensureProcess will resume it
+    // while reading the newly selected model and effort from the crew member.
+    seats.delete(role)
+    return { retired: true, sessionId: seat.sessionId }
+  }
   function abort(role, options = {}) {
     const seat = seats.get(role)
     if (!seat?.turn) throw staged('rpc-session-not-in-flight', `rpc seat ${role} has no in-flight turn`, role)
@@ -472,5 +499,5 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       seats.delete(seat.role)
     }
   }
-  return { assign, wait, steer, abort, entries, close }
+  return { assign, wait, steer, abort, entries, retire, close }
 }

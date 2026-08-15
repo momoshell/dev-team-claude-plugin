@@ -9,20 +9,25 @@ function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
   const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
-  const writes = []; const commands = []; const specs = []
+  const writes = []; const commands = []; const specs = []; const signals = []
+  const kill = (pid, signal) => {
+    signals.push([pid, signal])
+    if (options.kill) return options.kill(pid, signal)
+    if (signal !== 0) writeFileSync(join(paths.taskDir, 'headless-rpc', 'builder', 'exit'), '0')
+  }
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
     spawn: () => { commands.push({ kind: 'spawn' }); return { pid: options.spawnPid ?? 701, unref() {} } }, openSync: () => 10,
-    writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {},
+    writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
     existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
     writeFileSync, readFileSync, mkdirSync, log: () => {}, sleep: options.sleep || (() => {}),
-    ...(options.now ? { now: options.now } : {}), ...(options.kill ? { kill: options.kill } : {}),
+    ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
   }
   const crew = options.crew || { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
   const adapter = { rpcCommand: (spec) => { specs.push(spec); return rpcCommand(spec) } }
   const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { builder: adapter }, bin: '/bin/pi', deps })
-  return { dir, paths, crew, io, writes, commands, specs, cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) } }
+  return { dir, paths, crew, io, writes, commands, specs, signals, cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) } }
 }
 
 function settle(f, run, frames = [{ type: 'agent_settled' }]) {
@@ -111,6 +116,76 @@ test('session_resume: a second supervisor uses the persisted session', () => {
       assert.equal(second.specs.at(-1).resume, true)
       assert.equal(second.specs.at(-1).sessionId, 'session-1')
     } finally { second.cleanup() }
+  } finally { f.cleanup() }
+})
+
+test('retire: a settled seat is retired and the next assignment resumes the same session with the new cell', () => {
+  const f = fixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, first)
+    assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
+    f.crew.members.builder.model = 'new-model'
+    f.crew.members.builder.effort = 'high'
+    const retired = f.io.retire('builder')
+    assert.equal(retired.retired, true)
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 2)
+    assert.equal(f.specs.at(-1).resume, true)
+    assert.equal(f.specs.at(-1).sessionId, 'session-1')
+    const args = JSON.parse(readFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'))).args.map(String)
+    assert.ok(args.includes('--session'))
+    assert.ok(args.includes('session-1'))
+    assert.ok(args.includes('new-model'))
+    assert.ok(args.includes('--thinking'))
+    assert.ok(args.includes('high'))
+    assert.equal(args.includes('--session-id'), false)
+    void second
+  } finally { f.cleanup() }
+})
+
+test('retire: an in-flight turn is refused and the worker is left alone', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const result = f.io.retire('builder')
+    assert.deepEqual(result, {
+      retired: false,
+      reason: 'in-flight',
+      why: 'rpc seat builder has an in-flight turn; retire it at a bounce boundary',
+    })
+    assert.equal(f.signals.length, 0)
+    settle(f, run)
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
+  } finally { f.cleanup() }
+})
+
+test('retire: the reservation is released, so a fresh supervisor is not refused as rpc-session-busy', () => {
+  const f = fixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, first)
+    f.io.wait(first.returnPath, 1)
+    assert.equal(f.io.retire('builder').retired, true)
+    const second = fixture({ dir: f.dir, pid: 800, spawnPid: 801 })
+    try {
+      assert.doesNotThrow(() => second.io.assign({ role: 'builder', briefFile: '/brief.md' }))
+      assert.equal(second.specs.at(-1).resume, true)
+      assert.equal(second.specs.at(-1).sessionId, 'session-1')
+    } finally { second.cleanup() }
+  } finally { f.cleanup() }
+})
+
+test('retire: retiring a seat this supervisor never started is a no-op', () => {
+  const f = fixture()
+  try {
+    assert.deepEqual(f.io.retire('builder'), {
+      retired: false,
+      reason: 'not-running',
+      why: 'rpc seat builder is not running; the next assignment will spawn it',
+    })
+    assert.equal(f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd1')
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 1)
   } finally { f.cleanup() }
 })
 

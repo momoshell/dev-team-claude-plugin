@@ -49,12 +49,31 @@ trailer — both are worse than filling them in.
              "issues": [112, 114], // emits a Refs: trailer
              "validation_lane": "<the exact command the builder must run green>",
              "consult_wanted": true|false,
-             "consult_questions": ["..."] }
+             "consult_questions": ["..."],
+             "gate_path": "<abs path INSIDE the task dir>",
+             "carve_verdict": "proceed" | "carve",
+             "carve_slices": [{ "summary": "...", "files_in_scope": [...] }] }
 
 files_in_scope is the scope GATE: the driver diffs the builder's changes
 against it with git and bounces anything outside. A missing or empty list
 escalates the whole task — the gate cannot be skipped. Paths repo-relative,
 exactly as `git status --porcelain` prints them.
+
+`gate_path` is required whenever you return a `gate_cmd`; it must be an absolute
+path inside the task dir. The driver measures gate bytes from that path and
+never parses `gate_cmd`; a path outside the task dir is ignored.
+
+`carve_verdict` is required on every plan revision (round 2 and later; round 1
+is never asked). It must be exactly `proceed` or `carve`; missing or out of
+enum escalates the task to a human, and the driver never reads silence as
+`proceed`. When the verdict is `carve`, return `carve_slices` with a summary and
+files_in_scope for each slice. The first slice must be buildable alone and its
+scope must satisfy the same rules as the plan's. A carve always escalates to
+the human, carrying the slices as their starting point.
+
+The driver records plan+gate bytes each round and labels a round `divergent` at
+>=2x the round-1 combined bytes. This is evidence in your next brief, never a
+verdict — and the carve enum is where you answer it.
 
 ## The acceptance gate (gate-first, strongly encouraged)
 

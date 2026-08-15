@@ -110,6 +110,99 @@ function verdictOf(env) {
 // machine-readable; it does not add a fourth.
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
 
+export const CARVE_VERDICTS = Object.freeze(['proceed', 'carve'])
+
+// ADR-030 §5. Validate a planner's plan-revision carve choice without ever
+// treating silence as permission to proceed. Invalid later slices are dropped;
+// the first slice is special because it must be buildable on its own.
+export function validateCarve(details) {
+  const verdict = details?.carve_verdict
+  if (!CARVE_VERDICTS.includes(verdict)) {
+    return {
+      verdict: null,
+      slices: [],
+      defect: null,
+      why: `carve_verdict must be exactly "proceed" or "carve" on a plan revision (ADR-030 §5); got ${JSON.stringify(verdict)}`,
+    }
+  }
+  if (verdict === 'proceed') return { verdict: 'proceed', slices: [], defect: null, why: null }
+
+  const rawSlices = details?.carve_slices
+  if (!Array.isArray(rawSlices) || rawSlices.length === 0) {
+    return { verdict: 'carve', slices: [], defect: 'carve_slices must be a non-empty array', why: null }
+  }
+
+  const usable = []
+  let firstDefect = null
+  rawSlices.forEach((slice, index) => {
+    let defect = null
+    if (!slice || typeof slice !== 'object' || Array.isArray(slice)) {
+      defect = 'slice must be an object'
+    } else if (typeof slice.summary !== 'string' || slice.summary.trim() === '') {
+      defect = 'summary must be a non-empty string'
+    } else if (!Array.isArray(slice.files_in_scope) || slice.files_in_scope.length === 0) {
+      defect = 'files_in_scope must be a non-empty array'
+    } else {
+      const scopeErrors = validateScopeEntries(slice.files_in_scope)
+      if (scopeErrors.length > 0) {
+        defect = `files_in_scope is invalid: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`
+      }
+    }
+    if (defect) {
+      if (index === 0) firstDefect = defect
+      return
+    }
+    usable.push({ summary: slice.summary.trim(), files_in_scope: [...slice.files_in_scope] })
+  })
+
+  return {
+    verdict: 'carve',
+    slices: usable,
+    defect: firstDefect,
+    why: null,
+  }
+}
+
+export const GROWTH_DIVERGENCE_FACTOR = 2 // ADR-030 §4 as amended at §9.3
+
+const integerOrNull = (value) => (Number.isInteger(value) ? value : null)
+
+export function growthRecord(prev, first, { round, plan_bytes, gate_bytes, files_in_scope_count } = {}) {
+  const plan = integerOrNull(plan_bytes)
+  const gate = integerOrNull(gate_bytes)
+  const previous = prev && typeof prev === 'object' ? prev : null
+  const plan_delta = previous && plan !== null && Number.isInteger(previous.plan_bytes)
+    ? plan - previous.plan_bytes : null
+  const gate_delta = previous && gate !== null && Number.isInteger(previous.gate_bytes)
+    ? gate - previous.gate_bytes : null
+  const measured = [plan, gate].filter((value) => value !== null)
+  const combined_bytes = measured.length > 0 ? measured.reduce((sum, value) => sum + value, 0) : null
+  const round1_combined_bytes = first?.combined_bytes ?? null
+  const ratio = combined_bytes !== null && round1_combined_bytes !== null && round1_combined_bytes !== 0
+    ? Math.round((combined_bytes / round1_combined_bytes) * 100) / 100 : null
+  const divergent = round >= 2 && combined_bytes !== null && round1_combined_bytes > 0
+    && combined_bytes >= GROWTH_DIVERGENCE_FACTOR * round1_combined_bytes
+  return {
+    round,
+    plan_bytes: plan,
+    gate_bytes: gate,
+    plan_delta,
+    gate_delta,
+    combined_bytes,
+    round1_combined_bytes,
+    files_in_scope_count: integerOrNull(files_in_scope_count),
+    ratio,
+    divergent,
+  }
+}
+
+export function growthLines(record) {
+  return [
+    '## Plan growth (evidence, never a verdict — no measurement here can fail a run)',
+    `round=${record.round} plan_bytes=${record.plan_bytes} plan_delta=${record.plan_delta} gate_bytes=${record.gate_bytes} gate_delta=${record.gate_delta} combined_bytes=${record.combined_bytes} round1_combined_bytes=${record.round1_combined_bytes} files_in_scope=${record.files_in_scope_count} ratio=${record.ratio} divergent=${record.divergent}`,
+  ]
+}
+
 // Parse details.findings. Returns null when there is NO findings array at all
 // (an older seat or a degraded reply) — absence is not an error, and the
 // caller then behaves exactly as it did before #170. Malformed ENTRIES are
@@ -236,7 +329,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [] }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
@@ -415,13 +508,13 @@ export function driveTask(ctx, io) {
     io.log({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } })
   }
 
-  function escalate(where, why, extraArtifacts = []) {
+  function escalate(where, why, extraArtifacts = [], extraDetails = {}) {
     stage(`escalate:${where}`)
     return {
       status: 'escalation',
       summary: `Task ${ctx.task} needs a human: ${why}`,
       artifacts: [journal, ...extraArtifacts],
-      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants },
+      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants, growth: S.growth, ...extraDetails },
     }
   }
 
@@ -449,6 +542,42 @@ export function driveTask(ctx, io) {
       continue
     }
     planEnv = env
+    try {
+      const bytesOf = (p) => {
+        if (typeof p !== 'string' || !p) return null
+        try {
+          const content = io.readFile(p)
+          return typeof content === 'string' ? Buffer.byteLength(content, 'utf8') : null
+        } catch { return null }
+      }
+      const gatePathOf = (details) => {
+        const value = details?.gate_path ?? null
+        if (typeof value === 'string'
+          && value.startsWith(`${ctx.taskDir}/`)
+          && !value.split('/').some((segment) => segment === '.' || segment === '..')) return value
+        try { io.log({ at: io.now(), gate_path_rejected: value }) } catch { /* evidence only */ }
+        return null
+      }
+      const record = growthRecord(S.growth.at(-1), S.growth[0], {
+        round,
+        plan_bytes: bytesOf(env.details?.plan_path || art('plan.md')),
+        gate_bytes: bytesOf(gatePathOf(env.details)),
+        files_in_scope_count: Array.isArray(env.details?.files_in_scope) ? env.details.files_in_scope.length : null,
+      })
+      S.growth.push(record)
+      io.log({ at: io.now(), plan_growth: record })
+    } catch { /* measurement is never load-bearing */ }
+
+    if (round >= 2) {
+      const carve = validateCarve(env.details)
+      io.log({ at: io.now(), carve_verdict: { round, verdict: carve.verdict, defect: carve.defect } })
+      if (!carve.verdict) return escalate('plan-carve', carve.why, env.artifacts || [],
+        { carve: { verdict: null, slices: [], defect: null } })
+      if (carve.verdict === 'carve') return escalate('plan-carve',
+        `the planner returned carve_verdict=carve on plan round ${round} — the plan is too large to build whole; the slices below are the human's starting point${carve.defect ? ` (slice list defect: ${carve.defect})` : ''}`,
+        env.artifacts || [], { carve: { verdict: 'carve', slices: carve.slices, defect: carve.defect } })
+    }
+
     // ---- 1b. CHECK (only when a tech-lead is seated) ---------------------------
     if (!ctx.roles.includes('tech-lead')) break
     stage(`check:r${round}`)
@@ -460,6 +589,8 @@ export function driveTask(ctx, io) {
       `Falsify the plan's ground truth against the repo at ${ctx.checkout}.`,
       `Planner consult questions: ${JSON.stringify(env.details?.consult_questions || [])}`,
       `Write plan-check.md in the task dir. details.verdict must be approve or revise.`,
+      '',
+      ...growthLines(S.growth.at(-1)),
     ].join('\n'))
     const check = assignAndWait('tech-lead', checkBrief, 'plan-check')
     const v = verdictOf(check)
@@ -475,7 +606,12 @@ export function driveTask(ctx, io) {
         grant('plan-check', round)
         extraPlanRounds += 1
         const b = art(`plan-bounce-r${round}.md`)
-        io.writeFile(b, `# Plan revision (round ${round})\n\nRevise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`)
+        io.writeFile(b, [
+          `# Plan revision (round ${round})`, '',
+          `Revise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`,
+          '',
+          ...growthLines(S.growth.at(-1)),
+        ].join('\n'))
         planBrief = b
         planEnv = null
         continue
@@ -483,7 +619,12 @@ export function driveTask(ctx, io) {
       break // accept: proceed on the latest plan
     }
     const b = art(`plan-bounce-r${round}.md`)
-    io.writeFile(b, `# Plan revision (round ${round})\n\nRevise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`)
+    io.writeFile(b, [
+      `# Plan revision (round ${round})`, '',
+      `Revise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`,
+      '',
+      ...growthLines(S.growth.at(-1)),
+    ].join('\n'))
     planBrief = b
     planEnv = null
   }
@@ -908,7 +1049,7 @@ export function driveTask(ctx, io) {
     details: {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
-      extra_rounds_granted: S.grants,
+      extra_rounds_granted: S.grants, growth: S.growth,
       gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
     },
   }

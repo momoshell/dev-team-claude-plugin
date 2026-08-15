@@ -54,11 +54,18 @@ async function capabilityProfile(agent, transport) {
   }
 }
 
-export const RUN_STATES = Object.freeze(['working', 'blocked', 'done', 'dead'])
+export const RUN_STATES = Object.freeze(['queued', 'working', 'blocked', 'done', 'dead'])
 export const EVENT_KINDS = Object.freeze(['started', 'tool-call', 'blocked', 'terminal-result', 'died', 'usage'])
 export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
 // Keep a tail for post-settle clients; ADR-029 already makes the projection lossy, so bound rather than drop.
 export const SETTLED_FEED_RETENTION = 50
+// Two concurrent crews, not one and not "as many as you hand me". Each
+// running run is a full headless crew (3+ agent processes) drawing on
+// one shared API usage window, and this repo has already paid for
+// unbounded burn once (#39 cost discipline); a second slot keeps an
+// unrelated checkout moving while the first crew is mid-review without
+// doubling that risk again. Raise it per-daemon with daemon({concurrency}).
+export const DEFAULT_CONCURRENCY = 2
 
 // TODO(#165/#46): unresolved-attention snapshot derives here once parks are minted; ADR-029 §4 forbids live attention before the park id exists.
 
@@ -100,8 +107,9 @@ function usageEvent(row) {
   return roleEvent('usage', valueRole(row), fields)
 }
 
-export function deriveState({ terminal, alive, blocked }) {
+export function deriveState({ terminal, alive, blocked, queued }) {
   if (terminal) return 'done'
+  if (queued === true) return 'queued'
   if (alive === false) return 'dead'
   if (blocked === true) return 'blocked'
   return 'working'
@@ -198,6 +206,8 @@ export function paneSeat(crew) {
 }
 
 export function daemon(options = {}) {
+  const concurrency = options.concurrency === undefined ? DEFAULT_CONCURRENCY : options.concurrency
+  if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('concurrency must be an integer >= 1')
   const root = resolvePath(options.root || join(homedir(), '.crew', 'daemon'))
   const socketPath = join(root, 'daemon.sock')
   const pidPath = join(root, 'daemon.json')
@@ -247,6 +257,7 @@ export function daemon(options = {}) {
     run.lifecycle = 'orphaned'; run.orphaned = true; run.child_dead = true; run.orphan_reason = reason
     try { appendRecord({ kind: 'orphaned', run_id: run.run_id, at: now() }) } catch { /* preserve daemon liveness if the registry disk is unavailable */ }
     endFeed(run, 'orphaned')
+    pump()
   }
 
   function freshRun(record) {
@@ -261,7 +272,7 @@ export function daemon(options = {}) {
       tier_identity: record.tier_identity || null,
       task_return: record.task_return,
       child_pid: null,
-      lifecycle: 'enqueued',
+      lifecycle: 'queued',
       orphaned: false,
       orphan_reason: null,
       child_dead: false,
@@ -275,6 +286,10 @@ export function daemon(options = {}) {
     }
   }
 
+  const SETTLED_LIFECYCLES = ['settled', 'orphaned']
+  function isQueued(run) { return run.lifecycle === 'queued' }
+  function isRunning(run) { return run.lifecycle === 'started' || run.lifecycle === 'adopted' }
+
   function applyRecord(record) {
     if (!isObject(record) || typeof record.run_id !== 'string') return
     let run = runs.get(record.run_id)
@@ -286,6 +301,7 @@ export function daemon(options = {}) {
     if (!run) return
     if (record.kind === 'started') { run.child_pid = record.child_pid; run.lifecycle = 'started'; return }
     if (record.kind === 'adopted') { run.lifecycle = 'adopted'; return }
+    if (record.kind === 'requeued') { run.lifecycle = 'queued'; return }
     if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = 'orphaned-on-restart'; run.child_dead = true; return }
     if (record.kind === 'settled') { run.lifecycle = 'settled'; run.outcome_status = record.outcome_status; run.outcome_source = record.outcome_source; return }
   }
@@ -479,6 +495,7 @@ export function daemon(options = {}) {
     if (run.feed.length > feedRetention) run.feed.splice(0, run.feed.length - feedRetention)
     appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope' })
     endFeed(run, 'settled')
+    pump()
   }
 
   function attachChild(run, child) {
@@ -533,6 +550,7 @@ export function daemon(options = {}) {
   function poll() {
     ensureFolded()
     for (const run of runs.values()) pollRun(run)
+    pump()
   }
 
   function runState(run, workerId = null) {
@@ -547,9 +565,9 @@ export function daemon(options = {}) {
       return deriveState({ terminal, alive: exitSeen ? false : true, blocked: false })
     }
     const terminal = !!runEnvelope(run)
-    const alive = run.orphaned || run.child_dead || run.lifecycle === 'orphaned'
+    const alive = isQueued(run) ? null : run.orphaned || run.child_dead || run.lifecycle === 'orphaned'
       ? false : processAlive(kill, run.child_pid)
-    return deriveState({ terminal, alive, blocked: run.blocked })
+    return deriveState({ terminal, alive, blocked: run.blocked, queued: isQueued(run) })
   }
 
   function state(query = {}) {
@@ -625,7 +643,78 @@ export function daemon(options = {}) {
   function activeTierRun(spec) {
     const identity = tierIdentity(spec)
     if (!identity) return null
-    return [...runs.values()].find((run) => run.tier_identity === identity && !['settled', 'orphaned'].includes(run.lifecycle)) || null
+    return [...runs.values()].find((run) => run.tier_identity === identity && !SETTLED_LIFECYCLES.includes(run.lifecycle)) || null
+  }
+
+  function canonicalCheckout(value) {
+    return typeof value === 'string' && value ? resolvePath(String(value)) : null
+  }
+
+  function childSpecFor(run) {
+    return {
+      crew_dir: run.crew_dir, task: run.task, brief_file: run.brief_file,
+      lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
+    }
+  }
+
+  function startRun(run) {
+    if (!isQueued(run)) return null
+    // Sequential runs may share task_return; a settled predecessor owns its
+    // envelope, so preserve it while admitting the new run.
+    const recycledCrew = [...runs.values()].some((candidate) => candidate !== run
+      && candidate.crew_dir === run.crew_dir && candidate.lifecycle === 'settled')
+    const envelope = recycledCrew ? null : runEnvelope(run)
+    if (envelope) {
+      settle(run, envelope)
+      return null
+    }
+    let child
+    try {
+      child = fork(CHILD_PATH, ['--run-child', JSON.stringify(childSpecFor(run))], { detached: true, stdio: 'ignore' })
+      run.child_pid = child?.pid ?? null
+      attachChild(run, child)
+      child?.unref?.()
+    } catch (err) {
+      orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
+      return err
+    }
+    if (!hasPid(run.child_pid)) {
+      orphanRun(run, 'child-spawn-error: fork returned no pid')
+      return runError('child-spawn-error', `fork returned no pid for run ${run.run_id}`)
+    }
+    run.lifecycle = 'started'
+    appendRecord({ kind: 'started', run_id: run.run_id, at: now(), child_pid: run.child_pid })
+    appendEvent(run, normalizeEvent('daemon', { event: 'fork', run_id: run.run_id, pid: run.child_pid }))
+    return null
+  }
+
+  function runningCount() {
+    let n = 0
+    for (const run of runs.values()) if (isRunning(run)) n += 1
+    return n
+  }
+
+  function checkoutBusy(checkout) {
+    if (!checkout) return false
+    for (const run of runs.values()) if (isRunning(run) && run.checkout === checkout) return true
+    return false
+  }
+
+  let pumping = false
+  function pump() {
+    const failures = new Map()
+    if (pumping) return failures
+    pumping = true
+    try {
+      for (const run of runs.values()) {
+        if (!isQueued(run)) continue
+        if (runningCount() >= concurrency) break
+        if (checkoutBusy(run.checkout)) continue
+        const err = startRun(run)
+        if (err) failures.set(run.run_id, err)
+      }
+    } finally { pumping = false }
+    return failures
   }
 
   function enqueue(spec = {}) {
@@ -644,7 +733,7 @@ export function daemon(options = {}) {
     try { crew = JSON.parse(String(read(join(crewDir, 'crew.json'), 'utf8'))) } catch (err) { throw runError('invalid-spec', `cannot read crew.json at ${join(crewDir, 'crew.json')}: ${err.message}`) }
     const pane = paneSeat(crew)
     if (pane) throw runError('invalid-spec', `daemon run refuses pane transport for seat ${pane}`)
-    const active = [...runs.values()].find((run) => run.crew_dir === crewDir && !['settled', 'orphaned'].includes(run.lifecycle))
+    const active = [...runs.values()].find((run) => run.crew_dir === crewDir && !SETTLED_LIFECYCLES.includes(run.lifecycle))
     if (active) throw runError('run-active', `run ${active.run_id} is already active for ${crewDir}`)
     const runId = String(spec.run_id || uuid())
     if (runs.has(runId)) throw runError('run-active', `run ${runId} already exists`)
@@ -653,32 +742,16 @@ export function daemon(options = {}) {
     const record = {
       kind: 'enqueued', run_id: runId, at: now(), crew_dir: crewDir,
       task: spec.task || crew.task || null, brief_file: spec.brief_file || spec.briefFile || null,
-      lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: spec.checkout || crew.checkout || null,
+      lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: canonicalCheckout(spec.checkout || crew.checkout),
       ...(identity ? { tier_identity: identity } : {}),
       task_return: taskReturn,
     }
     appendRecord(record)
     const run = freshRun(record)
     runs.set(runId, run)
-    const childSpec = { ...spec, crew_dir: crewDir, task: record.task, brief_file: record.brief_file, lane: record.lane, suite: record.suite, checkout: record.checkout, task_return: taskReturn }
-    let child
-    try {
-      child = fork(CHILD_PATH, ['--run-child', JSON.stringify(childSpec)], { detached: true, stdio: 'ignore' })
-      run.child_pid = child?.pid ?? null
-      attachChild(run, child)
-      child?.unref?.()
-    } catch (err) {
-      orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
-      throw err
-    }
-    if (!hasPid(run.child_pid)) {
-      orphanRun(run, 'child-spawn-error: fork returned no pid')
-      throw runError('child-spawn-error', `fork returned no pid for run ${runId}`)
-    }
-    run.lifecycle = 'started'
-    appendRecord({ kind: 'started', run_id: runId, at: now(), child_pid: run.child_pid })
-    appendEvent(run, normalizeEvent('daemon', { event: 'fork', run_id: runId, pid: run.child_pid }))
-    return { run_id: runId, crew_dir: crewDir }
+    const failure = pump().get(runId)
+    if (failure) throw failure
+    return { run_id: runId, crew_dir: crewDir, state: runState(run) }
   }
 
   async function send(params = {}) {
@@ -686,8 +759,9 @@ export function daemon(options = {}) {
     if (!isObject(params)) throw runError('invalid-params', 'send requires params to be an object')
     const run = findRun(params.run)
     pollRun(run)
+    if (isQueued(run)) throw runError('not-live', `run ${run.run_id} is queued and has no workers yet`)
     if (typeof params.message !== 'string' || params.message.length === 0) throw runError('invalid-params', 'send requires a non-empty message')
-    if (['settled', 'orphaned'].includes(run.lifecycle) || run.child_dead) {
+    if (SETTLED_LIFECYCLES.includes(run.lifecycle) || run.child_dead) {
       throw runError('not-live', `run ${run.run_id} has settled — send reaches live workers only; the envelope is the record`)
     }
     const crew = crewConfig(run)
@@ -756,7 +830,11 @@ export function daemon(options = {}) {
 
   function adoptOrOrphan() {
     for (const run of runs.values()) {
-      if (['settled', 'orphaned'].includes(run.lifecycle)) continue
+      if (SETTLED_LIFECYCLES.includes(run.lifecycle)) continue
+      if (isQueued(run)) {
+        appendRecord({ kind: 'requeued', run_id: run.run_id, at: now() })
+        continue
+      }
       if (!hasPid(run.child_pid)) {
         const envelope = runEnvelope(run)
         if (envelope) settle(run, envelope)
@@ -963,6 +1041,7 @@ export function daemon(options = {}) {
     started = true
     ownsFiles = true
     adoptOrOrphan()
+    pump()
     interval = setEvery(() => poll(), pollMs)
     intervalSet = true
     return { pid, socket: socketPath }

@@ -9,7 +9,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  daemon, deriveState, normalizeEvent, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS,
+  daemon, deriveState, normalizeEvent, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY,
 } from './daemon.mjs'
 import { runChild } from './child.mjs'
 import { DEFAULT_TRANSPORT } from './realio.mjs'
@@ -24,7 +24,7 @@ const CHILD_CODE = sourceCode(CHILD_SOURCE)
 const DRIVE_MODULE = ['drive', 'mjs'].join('.')
 const REALIO_MODULE = ['realio', 'mjs'].join('.')
 
-function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention, bootCrewDir, spawnSync: spawnImpl } = {}) {
+function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention, bootCrewDir, spawnSync: spawnImpl, concurrency } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
   const root = join(dir, 'daemon')
   const crewDir = join(dir, 'crew')
@@ -67,11 +67,25 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
     clearInterval: () => {},
     feedRetention,
   }
-  const d = daemon({ root, deps })
+  const d = daemon({ root, concurrency, deps })
   return {
     dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
+}
+
+function mintCrew(f, { name = 'crew-2', checkout = f.dir, task = 'daemon80' } = {}) {
+  const crewDir = join(f.dir, name)
+  const taskDir = join(crewDir, 'task')
+  const returnsDir = join(crewDir, 'returns')
+  mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true })
+  const base = JSON.parse(readFileSync(join(f.crewDir, 'crew.json'), 'utf8'))
+  const taskReturn = join(returnsDir, 'task.json')
+  const brief = join(crewDir, 'brief.md')
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({ ...base, task, checkout, task_return: taskReturn }))
+  writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  writeFileSync(brief, '# brief\n')
+  return { crewDir, taskDir, returnsDir, taskReturn, brief, checkout }
 }
 
 async function each(fn, options) {
@@ -363,7 +377,7 @@ test('malformed requests are table-driven parse errors', async () => {
 
 // 8. State is a closed, terminal-first query.
 test('deriveState truth table is closed and terminal-first', () => {
-  assert.deepEqual(RUN_STATES, ['working', 'blocked', 'done', 'dead'])
+  assert.deepEqual(RUN_STATES, ['queued', 'working', 'blocked', 'done', 'dead'])
   assert.deepEqual([
     deriveState({ terminal: false, alive: true, blocked: false }),
     deriveState({ terminal: false, alive: true, blocked: true }),
@@ -371,7 +385,173 @@ test('deriveState truth table is closed and terminal-first', () => {
     deriveState({ terminal: true, alive: false, blocked: false }),
     deriveState({ terminal: true, alive: true, blocked: true }),
     deriveState({ terminal: false, alive: null, blocked: false }),
-  ], ['working', 'blocked', 'dead', 'done', 'done', 'working'])
+    deriveState({ terminal: false, alive: null, blocked: false, queued: true }),
+    deriveState({ terminal: true, alive: null, blocked: false, queued: true }),
+  ], ['working', 'blocked', 'dead', 'done', 'done', 'working', 'queued', 'done'])
+})
+
+test('over the limit, enqueue queues instead of forking', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    const first = f.d.enqueue({ crew_dir: f.crewDir })
+    const second = f.d.enqueue({ crew_dir: secondCrew.crewDir })
+    assert.ok(first.run_id); assert.ok(second.run_id)
+    assert.equal(f.forks.length, 1)
+    assert.equal(f.d.list().length, 2)
+  }, { concurrency: 1 })
+})
+
+test('a stale envelope settles before admission and never forks', async () => {
+  await each(async (f) => {
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    const result = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(f.forks.length, 0)
+    assert.equal(result.state, 'done')
+    assert.equal(f.d.state({ run: result.run_id }).state, 'done')
+    assert.equal(f.d.result({ run: result.run_id }).outcome, 'done')
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.kind === 'started'), false)
+  })
+})
+
+test('re-enqueueing a settled crew preserves its prior envelope', async () => {
+  await each(async (f) => {
+    const first = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' }))
+    f.d.poll()
+    const before = f.d.result({ run: first })
+    assert.equal(before.outcome, 'escalation')
+    const second = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.ok(second.run_id)
+    assert.equal(f.forks.length, 2)
+    assert.deepEqual(f.d.result({ run: first }), before)
+    assert.equal(f.d.state({ run: first }).state, 'done')
+  })
+})
+
+test('a queued run never claims it started', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    assert.equal(f.d.state({ run: queued }).state, 'queued')
+    assert.equal(f.d.list().find((row) => row.run_id === queued).state, 'queued')
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.run_id === queued && record.kind === 'started'), false)
+    assert.equal(f.d.feed(queued, 0).some((event) => event.kind === 'started'), false)
+  }, { concurrency: 1 })
+})
+
+test('a settling run starts the next queued run, FIFO, exactly once', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    const first = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    const second = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    assert.equal(f.forks.length, 1)
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    assert.equal(f.forks.length, 2)
+    assert.equal(f.d.state({ run: second }).state, 'working')
+    for (let i = 0; i < 4; i += 1) f.d.poll()
+    assert.equal(f.forks.length, 2)
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === first && record.kind === 'started').length, 1)
+    assert.equal(records.filter((record) => record.run_id === second && record.kind === 'started').length, 1)
+  }, { concurrency: 1 })
+})
+
+test('queued work starts in FIFO order', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    const thirdCrew = mintCrew(f, { name: 'crew-c', checkout: join(f.dir, 'checkout-c') })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const second = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    const third = f.d.enqueue({ crew_dir: thirdCrew.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    assert.equal(f.d.state({ run: second }).state, 'working')
+    assert.equal(f.d.state({ run: third }).state, 'queued')
+  }, { concurrency: 1 })
+})
+
+test('at most one running run per checkout', async () => {
+  await each(async (f) => {
+    const shared = join(f.dir, 'checkout-shared')
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: shared })
+    f.d.enqueue({ crew_dir: f.crewDir, checkout: shared })
+    const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    assert.equal(f.forks.length, 1)
+    assert.equal(f.d.state({ run: queued }).state, 'queued')
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    assert.equal(f.forks.length, 2)
+    assert.equal(f.d.state({ run: queued }).state, 'working')
+  }, { concurrency: 3 })
+})
+
+test('a settled escalation frees the slot and is never re-forked', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    const parked = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    const next = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' }))
+    f.d.poll()
+    assert.equal(f.d.result({ run: parked }).outcome, 'escalation')
+    assert.equal(f.d.state({ run: parked }).state, 'done')
+    assert.equal(f.d.state({ run: next }).state, 'working')
+    for (let i = 0; i < 5; i += 1) f.d.poll()
+    assert.equal(f.forks.length, 2)
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === parked && record.kind === 'started').length, 1)
+  }, { concurrency: 1 })
+})
+
+test('restart re-queues a run that never had a child', async () => {
+  const f = fixture({ concurrency: 1 })
+  const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+  let next
+  try {
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    await f.d.start(); await f.d.stop()
+    next = daemon({ root: f.root, concurrency: 1, deps: f.deps })
+    await next.start(); next.poll()
+    assert.equal(next.state({ run: queued }).state, 'queued')
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    const kinds = records.filter((record) => record.run_id === queued).map((record) => record.kind)
+    assert.equal(kinds.includes('requeued'), true)
+    assert.equal(kinds.includes('orphaned'), false)
+    assert.equal(kinds.includes('started'), false)
+  } finally {
+    await f.d.stop(); await next?.stop(); f.cleanup()
+  }
+})
+
+test('invalid concurrency is refused at construction and the default is two', async () => {
+  assert.throws(() => daemon({ concurrency: 0 }), Error)
+  assert.throws(() => daemon({ concurrency: 1.5 }), Error)
+  assert.equal(DEFAULT_CONCURRENCY, 2)
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    const thirdCrew = mintCrew(f, { name: 'crew-c', checkout: join(f.dir, 'checkout-c') })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    f.d.enqueue({ crew_dir: secondCrew.crewDir })
+    f.d.enqueue({ crew_dir: thirdCrew.crewDir })
+    assert.equal(f.forks.length, DEFAULT_CONCURRENCY)
+  })
+})
+
+test('send refuses a queued run', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    await assert.rejects(() => f.d.send({ run: queued, message: 'guidance' }), (err) => {
+      assert.equal(err.code, 'not-live')
+      assert.match(err.message, /queued/)
+      return true
+    })
+  }, { concurrency: 1 })
 })
 
 // 9. The projection vocabulary is table-driven and drops unknown rows.

@@ -134,7 +134,24 @@ export function phaseForStage(label) {
   return 'build'
 }
 
-export function emitAdapter(emitter) {
+// Map a transport's own err.stage onto the ledger's closed availability set.
+// The stage strings are the transports' (crew/headless.mjs:204-212/:298,
+// crew/headless-rpc.mjs:133-138, waitForEnvelope :248); anything unrecognised
+// is a transport error, never a silent drop.
+export function cellFailureKind(err) {
+  const stage = String((err && err.stage) || '')
+  if (stage === 'seat-died') return 'seat-died'
+  const tail = stage.replace(/^(headless|rpc)-/, '')
+  if (tail !== stage) {
+    if (tail === 'timeout') return 'timeout'
+    if (tail === 'no-envelope') return 'no-envelope'
+    if (tail === 'malformed' || tail === 'parse-error') return 'unusable-envelope'
+    if (tail === 'aborted') return 'aborted'
+  }
+  return 'transport-error'
+}
+
+export function emitAdapter(emitter, crew = null) {
   // The emitter owns the phase cursor and hands it back from every
   // phaseTransition; carry it onto every event so agent rows can be
   // associated with the phase they ran in (#123). A null cursor (degraded
@@ -196,6 +213,18 @@ export function emitAdapter(emitter) {
         cosmetic_count: residuals.filter((residual) => residual.type === 'cosmetic').length,
         unverified_count: unverified.length,
         invalid_reasons: errors.map(({ id, why }) => `${id ?? ''}: ${why}`).join('; '),
+      }))
+    } else if (event.kind === 'cell-failure') {
+      // AVAILABILITY, not quality: the cell could not hold its seat or produce
+      // anything usable. The cell itself is read from the booted crew, because
+      // the driver only ever knows the role.
+      const m = (crew && crew.members && crew.members[event.role]) || null
+      emitter.emit((handle) => handle.recordCellFailure({
+        adw_id: emitter.adwId, task_slug: (crew && crew.task) || null, phase_id: phaseId,
+        dispatch_id: event.id ?? null, role: event.role ?? null,
+        agent: m?.agent ?? null, provider: m?.provider ?? null, model_id: m?.id ?? null,
+        model: m?.model ?? null, effort: m?.effort ?? null, transport: m?.transport ?? null,
+        kind: event.failure, stage: event.stage ?? null, detail: event.detail ?? null,
       }))
     } else if (event.kind === 'attention') {
       // ADR-029 §4: attention rides the existing closed log vocabulary.
@@ -313,6 +342,14 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     return transportInstances.get(name)
   }
+  const noteCellFailure = (role, id, failure, err) => {
+    try {
+      io.emit?.({
+        kind: 'cell-failure', role, id: id ?? null, failure,
+        stage: (err && err.stage) || null, detail: (err && err.message) || null,
+      })
+    } catch { /* never load-bearing */ }
+  }
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
@@ -320,40 +357,54 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       // pattern makes it a free identifier and every pane assignment dies
       // with a bare ReferenceError before a single line is sent.
       const { role, briefFile } = spec
-      const m = crew.members[role]
-      if (!m) throw new Error(`role ${role} not seated in this crew`)
-      if (m.transport !== DEFAULT_TRANSPORT) {
-        const transport = transportIo(m.transport, role)
-        const result = transport.assign(spec)
-        transportForPath.set(result.returnPath, transport)
-        return result
+      let id = null
+      try {
+        const m = crew.members[role]
+        if (!m) throw new Error(`role ${role} not seated in this crew`)
+        if (m.transport !== DEFAULT_TRANSPORT) {
+          const transport = transportIo(m.transport, role)
+          const result = transport.assign(spec)
+          id = result?.id ?? null
+          transportForPath.set(result.returnPath, transport)
+          seatFor.set(result.returnPath, { role, id })
+          return result
+        }
+        seq += 1
+        id = `d${seq}`
+        const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
+        // Anti-replay: seq restarts every process, so a crashed/escalated run
+        // leaves files a re-run's wait() would instantly (and wrongly) accept.
+        if (existsSync(returnPath)) unlinkSync(returnPath)
+        seatFor.set(returnPath, { role, surface_id: m.surface_id, id })
+        sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
+        return { id, returnPath }
+      } catch (err) {
+        noteCellFailure(role, id, cellFailureKind(err), err)
+        throw err
       }
-      seq += 1
-      const id = `d${seq}`
-      const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
-      // Anti-replay: seq restarts every process, so a crashed/escalated run
-      // leaves files a re-run's wait() would instantly (and wrongly) accept.
-      if (existsSync(returnPath)) unlinkSync(returnPath)
-      seatFor.set(returnPath, { role, surface_id: m.surface_id })
-      sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
-      return { id, returnPath }
     },
     wait(returnPath, timeoutS) {
       const transport = transportForPath.get(returnPath)
-      if (transport) return transport.wait(returnPath, timeoutS)
-      const seat = seatFor.get(returnPath)
+      const info = seatFor.get(returnPath)
       try {
-        return waitForEnvelope({
-          returnPath, timeoutS, role: seat?.role || 'unknown',
-          readEnvelope: () => {
-            if (!existsSync(returnPath)) return null
-            try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { return null }
-          },
-          probeSeat: seat ? () => paneAlive(seat.surface_id, { tree, locate }) : null,
-          now, sleep,
-        })
+        const env = transport
+          ? transport.wait(returnPath, timeoutS)
+          : waitForEnvelope({
+            returnPath, timeoutS, role: info?.role || 'unknown',
+            readEnvelope: () => {
+              if (!existsSync(returnPath)) return null
+              try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { return null }
+            },
+            probeSeat: info ? () => paneAlive(info.surface_id, { tree, locate }) : null,
+            now, sleep,
+          })
+        if (env == null) {
+          noteCellFailure(info?.role, info?.id, 'timeout', { message: `no envelope at ${returnPath} within ${timeoutS}s` })
+        }
+        return env
       } catch (err) {
-        if (err.stage === 'seat-died') io.log({ at: now(), seat_died: seat?.role || 'unknown', returnPath })
+        if (err.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
+        noteCellFailure(info?.role, info?.id, cellFailureKind(err), err)
         throw err
       }
     },
@@ -552,6 +603,6 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },
     now() { return now() },
   }
-  if (emitter) io.emit = emitAdapter(emitter)
+  if (emitter) io.emit = emitAdapter(emitter, crew)
   return io
 }

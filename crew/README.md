@@ -310,7 +310,7 @@ Everything durable is a FILE; pane chat is never the record.
   `waitForEnvelope`, `emitAdapter`, and the cmux + git wiring.
 - `drive.mjs` — the deterministic task loop (dependency-injected io; fully
   unit-tested without cmux). `io.emit(event)` is OPTIONAL: when `run` can open
-  a factory ledger run, stage/assign/envelope/decision/dissent events are
+  a factory ledger run, stage/assign/envelope/decision/dissent/cell-failure events are
   mirrored through `emitAdapter` in `realio.mjs`; `gate` events go to
   `gate_results`; `discrimination` events land in `gate_discriminations`, and
   review-carrying `envelope` events land in `review_outcomes`. The

@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { emitAdapter, realIo, nextRung, nextModelRung } from './realio.mjs'
+import { cellFailureKind, emitAdapter, realIo, nextRung, nextModelRung } from './realio.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './realio.mjs'
@@ -308,6 +308,53 @@ test('realIo delegates headless transport through the injected headless factory'
   const io = realIo(crew, f.paths, f.paths.dir, null, null, {}, { headlessIo: () => delegated, resolveWorkerBin: () => '/bin/worker' })
   assert.deepEqual(io.assign({ role: 'builder' }), { id: 'h1', returnPath: '/tmp/h1' })
   assert.deepEqual(io.wait('/tmp/h1', 1), { status: 'done' })
+})
+
+test('cellFailureKind classifies every transport stage into the closed availability kinds', () => {
+  const cases = [
+    [{ stage: 'seat-died' }, 'seat-died'],
+    [{ stage: 'headless-timeout' }, 'timeout'],
+    [{ stage: 'rpc-timeout' }, 'timeout'],
+    [{ stage: 'headless-no-envelope' }, 'no-envelope'],
+    [{ stage: 'rpc-no-envelope' }, 'no-envelope'],
+    [{ stage: 'headless-malformed' }, 'unusable-envelope'],
+    [{ stage: 'rpc-parse-error' }, 'unusable-envelope'],
+    [{ stage: 'rpc-aborted' }, 'aborted'],
+    [{ stage: 'rpc-spawn-failed' }, 'transport-error'],
+    [{ stage: 'headless-session-busy' }, 'transport-error'],
+    [{}, 'transport-error'],
+    [null, 'transport-error'],
+  ]
+  for (const [err, expected] of cases) assert.equal(cellFailureKind(err), expected)
+})
+
+test('realIo emits timeout and transport cell failures with the dispatch cell identity', () => {
+  const pane = makeRealIo()
+  const paneEvents = []
+  pane.io.emit = (event) => paneEvents.push(event)
+  const assignment = pane.io.assign({ role: 'builder', briefFile: '/brief.md' })
+  assert.equal(pane.io.wait(assignment.returnPath, 0), null)
+  assert.deepEqual(paneEvents, [{
+    kind: 'cell-failure', role: 'builder', id: assignment.id, failure: 'timeout',
+    stage: null, detail: `no envelope at ${assignment.returnPath} within 0s`,
+  }])
+
+  const paths = dirs(); const transportEvents = []
+  const crew = { members: { builder: { transport: 'headless-json' } } }
+  const transport = {
+    assign: () => ({ id: 'h1', returnPath: '/tmp/h1' }),
+    wait: () => { const err = new Error('worker exited without an envelope'); err.stage = 'headless-no-envelope'; throw err },
+  }
+  const io = realIo(crew, paths, paths.dir, null, null, {}, {
+    headlessIo: () => transport, resolveWorkerBin: () => '/bin/worker',
+  })
+  io.emit = (event) => transportEvents.push(event)
+  const headless = io.assign({ role: 'builder', briefFile: '/brief.md' })
+  assert.throws(() => io.wait(headless.returnPath, 1), /worker exited without an envelope/)
+  assert.deepEqual(transportEvents, [{
+    kind: 'cell-failure', role: 'builder', id: 'h1', failure: 'no-envelope',
+    stage: 'headless-no-envelope', detail: 'worker exited without an envelope',
+  }])
 })
 
 test('realIo gives headless-rpc pi rather than the claude worker binary', () => {

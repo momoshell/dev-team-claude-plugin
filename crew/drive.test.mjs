@@ -890,6 +890,18 @@ test('lead timeout (no envelope) on a consult throws toward escalation, never si
   assert.throws(() => driveTask(CTX, io), /lead: no valid envelope/)
 })
 
+test('an arrived but invalid envelope emits unusable-envelope before the driver escalates', () => {
+  const io = fakeIo({ emit: true, envelopes: { 'planner:1': { status: 'done', role: 'not-planner' } } })
+  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope/)
+  assert.ok(io.calls.emits.some((event) => event.kind === 'cell-failure' && event.failure === 'unusable-envelope'))
+})
+
+test('a null envelope is not double-counted by the driver', () => {
+  const io = fakeIo({ emit: true, envelopes: { 'planner:1': null } })
+  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope/)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'cell-failure').length, 0)
+})
+
 test('review rounds exhausted + lead accepts -> commit proceeds with residuals', () => {
   const io = fakeIo({
     envelopes: {

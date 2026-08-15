@@ -503,6 +503,25 @@ export function openRun(opts = {}) {
   }
 }
 
+// A cell failure that happens BEFORE any run exists — a boot refusal, a pane
+// seat that never came up — has no adw_id to key on, and bootCmd never opens
+// a run (crew/crew.mjs:449 refuses at resolveAdapters, openRun lives at :610).
+// One-shot open, one row, close. NEVER throws: instrumentation is never
+// load-bearing, exactly like openRun and emit().
+export function recordCellFailure({ dbPath, stderr = process.stderr, _openLedger, ...fields } = {}) {
+  let handle = null
+  try {
+    handle = (_openLedger || openLedger)({ dbPath, stderr })
+    handle.recordCellFailure({ adw_id: null, ...fields })
+    return true
+  } catch (err) {
+    try { stderr.write(`emit: run-less cell failure not recorded (${err.message})\n`) } catch { /* best effort */ }
+    return false
+  } finally {
+    try { if (handle) handle.close() } catch { /* best effort */ }
+  }
+}
+
 function openRunInner({
   stateDir,
   repoSlug,

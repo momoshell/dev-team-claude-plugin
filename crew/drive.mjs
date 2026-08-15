@@ -914,7 +914,12 @@ export function driveTask(ctx, io) {
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } })
     }
-    if (!validEnvelope(env, role, id)) throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
+    if (!validEnvelope(env, role, id)) {
+      // env == null was already recorded by io.wait as a 'timeout'; this branch
+      // is the seat that DID answer, with something the driver cannot use.
+      if (env != null) emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
+      throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
+    }
     io.log({ at: io.now(), envelope: id, role, status: env.status })
     return env
   }

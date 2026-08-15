@@ -14,7 +14,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
-import { openRun, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
+import { openRun, recordCellFailure, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
 // A handful of this file's tests query the real SQLite mirror directly (via
@@ -111,6 +111,25 @@ test('SIDECAR CREATE IS EXCLUSIVE: a second in-process openRun against an existi
   const e1 = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't' })
   const e2 = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't' })
   assert.equal(e1.adwId, e2.adwId)
+})
+
+test('run-less recordCellFailure lands exactly one NULL-adw row and never throws on an unusable dbPath', { skip: SKIP }, () => {
+  const dir = freshDir('runless-cell-failure')
+  const dbPath = join(dir, 'ledger.db')
+  assert.equal(recordCellFailure({
+    dbPath, stderr: { write: () => {} }, task_slug: 'measure', role: 'reviewer',
+    agent: 'pi', provider: 'pi', model_id: 'terra', effort: 'max', kind: 'boot-refusal',
+  }), true)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('cell_failures')
+  ledger.close()
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].adw_id, null)
+  assert.equal(rows[0].role, 'reviewer')
+  assert.equal(recordCellFailure({
+    dbPath: '/proc/definitely/not/writable/x.db', stderr: { write: () => {} },
+    task_slug: 'measure', role: 'builder', kind: 'boot-refusal',
+  }), false)
 })
 
 // ---------------------------------------------------------------------------

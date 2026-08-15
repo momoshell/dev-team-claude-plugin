@@ -286,6 +286,18 @@ test('resolveAdapters rejects an unknown --agent-<role> naming the missing file,
   assert.equal(r.builder.name, 'claude')
 })
 
+test('resolveAdapters tags a refusal with the role and roster cell it rejected', async () => {
+  const cell = { agent: 'nope', provider: 'vendor', id: 'model-id', effort: 'high', model: null }
+  await assert.rejects(
+    () => resolveAdapters(['builder'], { 'agent-builder': 'nope' }, { builder: cell }),
+    (err) => {
+      assert.equal(err.role, 'builder')
+      assert.deepEqual(err.cell, cell)
+      return true
+    },
+  )
+})
+
 test('resolveAdapters boots headless claude and refuses the unshipped pi pair', async () => {
   const r = await resolveAdapters(['builder'], { headless: 'builder' })
   assert.equal(r.builder.transport, 'headless-json')
@@ -414,6 +426,33 @@ test('bootAllocation carries resolved transports alongside tier provenance', () 
     bootAllocation(['lead', 'builder'], {}, { lead: { model: 'roster' }, builder: { agent: 'roster' } }, { lead: 'headless-json', builder: 'headless-rpc' }),
     { lead: { model: 'roster', transport: 'headless-json' }, builder: { agent: 'roster', transport: 'headless-rpc' } },
   )
+})
+
+test('boot refusal records a run-less boot-refusal row naming the rejected cell', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-refusal-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-refusal-checkout-')
+  const dbPath = join(home, 'ledger.db')
+  const previous = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd({ task: 'boot-refusal', checkout, roles: 'lead,planner,builder,reviewer', 'agent-reviewer': 'no-such-agent' }, {
+        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+      }),
+      /unknown agent adapter/,
+    ))
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    const row = ledger.dumpTable('cell_failures').find((candidate) => candidate.kind === 'boot-refusal')
+    ledger.close()
+    assert.ok(row)
+    assert.equal(row.role, 'reviewer')
+    assert.equal(row.adw_id, null)
+    assert.equal(row.task_slug, 'boot-refusal')
+  } finally {
+    if (previous === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = previous
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {
@@ -647,6 +686,19 @@ test('awaitSeatsReady returns immediately without probing an all-headless crew',
   const cmux = callCounter()
   awaitSeatsReady({ members: { lead: { surface_id: null }, builder: { surface_id: null } } }, 1, null, { cmux })
   assert.equal(cmux.calls.length, 0)
+})
+
+test('awaitSeatsReady tags every seat still pending when readiness times out', () => {
+  let clock = 0
+  assert.throws(
+    () => awaitSeatsReady({ members: { builder: { surface_id: 'surface-builder' }, reviewer: { surface_id: 'surface-reviewer' } } }, 0, null, {
+      cmux: () => ({ ok: false, stdout: '' }), now: () => ++clock, sleep: () => {},
+    }),
+    (err) => {
+      assert.deepEqual(err.roles, ['builder', 'reviewer'])
+      return true
+    },
+  )
 })
 
 test('seatLiveness reports headless and preserves pane probe values', () => {
@@ -1022,6 +1074,34 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
 
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
+
+test('emitAdapter maps cell-failure events to the booted crew cell, with a null-cell fallback', () => {
+  const calls = []
+  const emitter = {
+    adwId: 'adw-cell',
+    phaseTransition: () => ({ phase_id: 9 }),
+    emit: (fn) => fn({ recordEvent() {}, recordCellFailure: (row) => calls.push(row) }, () => 1),
+  }
+  const crew = {
+    task: 'measure',
+    members: { builder: { agent: 'claude', provider: 'anthropic', id: 'sonnet-id', model: 'sonnet', effort: 'high', transport: 'pane' } },
+  }
+  const adapter = emitAdapter(emitter, crew)
+  adapter({ kind: 'stage', label: 'build:r1' })
+  adapter({ kind: 'cell-failure', role: 'builder', id: 'd4', failure: 'seat-died', stage: 'seat-died', detail: 'pane gone' })
+  assert.deepEqual(calls[0], {
+    adw_id: 'adw-cell', task_slug: 'measure', phase_id: 9, dispatch_id: 'd4', role: 'builder',
+    agent: 'claude', provider: 'anthropic', model_id: 'sonnet-id', model: 'sonnet', effort: 'high', transport: 'pane',
+    kind: 'seat-died', stage: 'seat-died', detail: 'pane gone',
+  })
+
+  emitAdapter(emitter)({ kind: 'cell-failure', role: 'reviewer', failure: 'timeout' })
+  assert.deepEqual(calls[1], {
+    adw_id: 'adw-cell', task_slug: null, phase_id: null, dispatch_id: null, role: 'reviewer',
+    agent: null, provider: null, model_id: null, model: null, effort: null, transport: null,
+    kind: 'timeout', stage: null, detail: null,
+  })
+})
 
 test('emitAdapter routes discrimination triples, review outcomes, and typed accept decisions', () => {
   const calls = { gates: [], discriminations: [], reviews: [], accepts: [], events: [] }

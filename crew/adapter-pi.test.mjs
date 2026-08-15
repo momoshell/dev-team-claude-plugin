@@ -3,7 +3,9 @@
 // well-intentioned edit would otherwise silently undo (#147).
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { seatCommand, modelString, translateDeny, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
+import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
+import { delimiter, dirname, join, basename } from 'node:path'
+import { seatCommand, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER } from './crew.mjs'
 
 const MODELS = ['sonnet', 'anthropic/claude-opus-5', 'openai-codex/gpt-5.6-luna']
@@ -24,6 +26,59 @@ function* seatShapes() {
 function escapeRegex(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
+
+function piOnPath() {
+  for (const directory of (process.env.PATH || '').split(delimiter)) {
+    const candidate = join(directory || '.', 'pi')
+    try {
+      accessSync(candidate, constants.X_OK)
+      if (statSync(candidate).isFile()) return candidate
+    } catch {}
+  }
+  return null
+}
+
+test('PI_BUILTIN_TOOLS and every seat activator stay pinned to pi\'s complete built-in set', () => {
+  const expected = ['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls']
+  const expectedActivator = '--tools "read,bash,edit,write,grep,find,ls"'
+  assert.deepEqual(PI_BUILTIN_TOOLS, expected)
+  assert.equal(`--tools "${PI_BUILTIN_TOOLS.join(',')}"`, expectedActivator)
+
+  let count = 0
+  for (const shape of seatShapes()) {
+    const command = seatCommand(shape)
+    const label = `role=${shape.role} model=${shape.model} effort=${shape.effort ?? 'none'}`
+    assert.match(command, new RegExp(`(^|\\s)${escapeRegex(expectedActivator)}(\\s|$)`), label)
+    const activator = command.match(/(?:^|\s)--tools "([^"]*)"/)?.[1]
+    assert.equal(activator, expected.join(','), label)
+    for (const tool of expected) assert.ok(activator.split(',').includes(tool), `${label} missing ${tool}`)
+    count += 1
+  }
+  assert.ok(count >= ROLE_ORDER.length * MODELS.length * EFFORTS.length, `seat matrix unexpectedly covered only ${count} shapes`)
+})
+
+test('PI_BUILTIN_TOOLS matches pi\'s bundle when pi is installed', (t) => {
+  const command = piOnPath()
+  if (!command) return t.skip('pi is not installed on PATH')
+
+  let cliPath
+  try { cliPath = realpathSync(command) } catch (error) {
+    return t.skip(`could not realpath pi on PATH: ${error.message}`)
+  }
+  if (basename(cliPath) !== 'cli.js' || basename(dirname(cliPath)) !== 'dist') {
+    return t.skip(`pi on PATH does not resolve to dist/cli.js: ${cliPath}`)
+  }
+
+  const toolsPath = join(dirname(cliPath), 'core', 'tools', 'index.js')
+  let source
+  try { source = readFileSync(toolsPath, 'utf8') } catch (error) {
+    return t.skip(`could not read pi's built-in tool bundle at ${toolsPath}: ${error.message}`)
+  }
+  const declaration = source.match(/allToolNames\s*=\s*new Set\(\s*\[([\s\S]*?)\]\s*\)/)
+  if (!declaration) return t.skip(`pi's built-in tool declaration was not found in ${toolsPath}`)
+  const parsed = [...declaration[1].matchAll(/(['"])([^'"]+)\1/g)].map((match) => match[2])
+  assert.deepEqual(new Set(parsed), new Set(PI_BUILTIN_TOOLS))
+})
 
 test('--provider never appears in any composed pi seat command', () => {
   let count = 0
@@ -84,7 +139,7 @@ test('the seat\'s claude-named `tools` allowlist cannot influence a composed pi 
   for (const shape of seatShapes()) {
     const reference = seatCommand(shape)
     const label = `role=${shape.role} model=${shape.model} effort=${shape.effort ?? 'none'}`
-    assert.doesNotMatch(reference, /(^|\s)(--tools|-t)(\s|=)/, label)
+    assert.match(reference, new RegExp(`(^|\\s)--tools "${escapeRegex(PI_BUILTIN_TOOLS.join(','))}"(\\s|$)`), label)
     for (const tools of variants) {
       const candidate = seatCommand({ ...shape, tools })
       assert.equal(candidate, reference, `${label} tools=${String(tools)}`)

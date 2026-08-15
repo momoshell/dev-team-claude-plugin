@@ -88,6 +88,13 @@ const PI_TOOL_NAMES = Object.freeze({
   NotebookEdit: null, Task: null, Agent: null,
 })
 
+// pi's COMPLETE built-in tool set, in pi's own namespace, as literals
+// (dist/core/tools/index.js:17 — allToolNames, pi 0.84.2). This is the
+// adapter's own knowledge of pi, NOT a translation of the seat's
+// claude-named `tools` allowlist: #146/#147 ratified that that list stays
+// unused, and mapping it here would undo both.
+export const PI_BUILTIN_TOOLS = Object.freeze(['read', 'bash', 'edit', 'write', 'grep', 'find', 'ls'])
+
 // Unknown claude names DROP rather than pass through: passing an unmatched
 // name would be inert inside pi anyway, and a typo must not look enforced.
 export function translateDeny(deny) {
@@ -107,23 +114,27 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
   // work regardless of which binary fills the seat.
   //
-  // #146: deny-only is the ratified tool-enforcement posture for pi seats.
-  // `tools` stays in the signature for contract symmetry: adapter-claude.mjs
-  // genuinely passes it as --allowedTools in both seatCommand and
-  // headlessCommand, so deleting it would break the shared adapter contract.
-  // There is no translateTools() counterpart: pi's complete built-in set is
-  // read/bash/edit/write/grep/find/ls (dist/core/tools/index.js:17, verified
-  // 2026-08-15 against pi 0.84.2) with no network/MCP/subagent surface, so a
-  // positive list would fence off nothing. Only read/bash/edit/write are
-  // active by default (dist/core/sdk.js:132), making --tools an activator;
-  // pi silently ignores an unmapped name (dist/cli/args.js:85-96), so a gap
-  // would disable a live tool while looking enforced. --exclude-tools beats
-  // --tools inside pi's filter (dist/core/agent-session.js:1945), just as
-  // --disallowedTools outranks bypass-inert --allowedTools on claude, so
-  // denial is the only real boundary on either adapter.
-  // Extension-registered tools from ~/.pi/agent/extensions are auto-discovered
-  // and auto-activated and are not named by any seat's deny list; --no-extensions
-  // is the instrument if that ever needs closing, out of scope for #146.
+  // #146/#217: deny-only for enforcement, full built-in activation for
+  // capability — #217 does not reverse #146. `tools` stays in the signature
+  // for contract symmetry: adapter-claude.mjs genuinely passes it as
+  // --allowedTools in both seatCommand and headlessCommand, so deleting it
+  // would break the shared adapter contract. There is no translateTools()
+  // counterpart: the activator below is a literal list in pi's namespace,
+  // never translated from `tools`; `tools` stays unused and stays
+  // enforced-unused by the test.
+  // Only read/bash/edit/write are active by default (dist/core/sdk.js:132),
+  // so --tools is an activator, not a restrictor; without it a pi-seated
+  // planner reaches the filesystem through bash alone. pi silently ignores
+  // an unmapped name (dist/cli/args.js:85-90), so a stale list would disable
+  // a live tool while looking enforced — hence the drift pin in
+  // crew/adapter-pi.test.mjs.
+  // --exclude-tools beats --tools on both of pi's filter paths
+  // (dist/core/sdk.js:137 and dist/core/agent-session.js:1945), so activation
+  // cannot widen a seat's deny boundary; denial remains the only real
+  // boundary, exactly as before.
+  // Passing an activator also narrows extension-registered tools from
+  // ~/.pi/agent/extensions. That is a tightening, and supersedes the old
+  // "--no-extensions is the instrument if that ever needs closing" note.
   // This posture is ENFORCED, not merely explained: crew/adapter-pi.test.mjs
   // fails if `tools` ever influences a composed seat command.
   //
@@ -160,6 +171,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     'pi',
     '--model', model,
     ...(effort ? ['--thinking', effort] : []),
+    '--tools', `"${PI_BUILTIN_TOOLS.join(',')}"`,
     ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),
     '--append-system-prompt', `"${promptFile}"`,
     `"${bootBrief}"`,

@@ -13,7 +13,8 @@
 // Verbs:
 //   crew.mjs boot  --task <slug> [--roles lead,planner,builder,reviewer[,tech-lead]]
 //                  [--checkout <dir>] [--model-<role> <id>] [--agent-<role> <name>]...
-//                  [--headless-all]
+//                  [--headless-all] [--memory-dir <dir>] [--memory-backend <name>]
+//                  [--memory-budget-bytes <n>]
 //   crew.mjs run   --task <slug> --brief-file <path>   # hand the task to the lead
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
@@ -40,6 +41,9 @@ export {
   LIVENESS_MISSES_TO_DIE,
 } from './realio.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
+import {
+  DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
+} from './memory.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROLES_DIR = join(HERE, 'roles')
@@ -79,6 +83,7 @@ export const SEAT_DEFAULTS = Object.freeze({
   'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'tech-lead.md', agent: 'claude' },
 })
 export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer'])
+export const MEMORY_ROLES = Object.freeze(['lead', 'planner'])
 // Canonical seating order — also layout order (index 0 takes the left half).
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
@@ -278,14 +283,69 @@ export async function resolveAdapters(roles, args, seats = null) {
   return out
 }
 
-function writeRolePrompt(role, taskDir) {
+export function memoryConfig(args = {}) {
+  const source = args || {}
+  const dir = source['memory-dir'] || process.env.CREW_MEMORY_DIR || null
+  if (!dir) return null
+  const backend = source['memory-backend'] || process.env.CREW_MEMORY_BACKEND || DEFAULT_BACKEND
+  const rawBudget = source['memory-budget-bytes'] || process.env.CREW_MEMORY_BUDGET_BYTES || DEFAULT_BUDGET_BYTES
+  const budget = typeof rawBudget === 'number'
+    ? rawBudget
+    : typeof rawBudget === 'string' && rawBudget.trim() ? Number(rawBudget) : NaN
+  const valid = Number.isFinite(budget) && budget >= 0
+  return {
+    dir, backend,
+    budgetBytes: valid ? budget : DEFAULT_BUDGET_BYTES,
+    ...(valid ? {} : { reason: 'invalid-budget' }),
+  }
+}
+
+export function memoryExtracts(roles, args, taskSlug) {
+  try {
+    const cfg = memoryConfig(args)
+    if (!cfg) return { sections: {}, record: null }
+    const memory = openMemory(cfg)
+    const sections = {}
+    const injected = []
+    let bytes = 0
+    let included = 0
+    let dropped = 0
+    let reason = cfg.reason || null
+    for (const role of roles || []) {
+      if (!MEMORY_ROLES.includes(role)) continue
+      const extract = memory.context({ task: taskSlug, role })
+      bytes += Number(extract.bytes) || 0
+      included += Array.isArray(extract.included) ? extract.included.length : 0
+      dropped += Array.isArray(extract.dropped) ? extract.dropped.length : 0
+      const section = renderSection(extract, { backend: cfg.backend })
+      if (section) {
+        sections[role] = section
+        injected.push(role)
+      }
+      if (!reason && extract.reason) reason = extract.reason
+    }
+    return {
+      sections,
+      record: {
+        backend: cfg.backend, dir: cfg.dir, budget_bytes: cfg.budgetBytes,
+        injected, bytes, included, dropped, reason,
+      },
+    }
+  } catch (err) {
+    return { sections: {}, record: { injected: [], error: err?.message || String(err) } }
+  }
+}
+
+function writeRolePrompt(role, taskDir, section = '') {
   const seat = SEAT_DEFAULTS[role]
   // --append-system-prompt-file is LAST-WINS, not cumulative (verified against
   // claude 2.1.229): passing shared + role as two flags silently drops shared.
   // So the shared contract and the role card are merged into ONE prompt file
   // per seat, generated in the task dir at boot.
   const merged = join(taskDir, `role-${role}.md`)
-  writeFileSync(merged, `${readFileSync(SHARED_PROMPT, 'utf8')}\n\n${readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')}`)
+  const shared = readFileSync(SHARED_PROMPT, 'utf8')
+  const card = readFileSync(join(ROLES_DIR, seat.prompt), 'utf8')
+  writeFileSync(merged, `${shared}\n\n${card}${section ? `\n\n${section}` : ''}`)
   return merged
 }
 
@@ -405,7 +465,8 @@ export async function bootCmd(args, deps = {}) {
   mkdirSync(paths.returnsDir, { recursive: true })
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
-  for (const role of roles) writeRolePrompt(role, paths.taskDir)
+  const memory = memoryExtracts(roles, args, taskSlug)
+  for (const role of roles) writeRolePrompt(role, paths.taskDir, memory.sections[role] || '')
   let workspace = null
   let windowId = null
   const members = {}
@@ -489,6 +550,7 @@ export async function bootCmd(args, deps = {}) {
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(allocation ? { allocation } : {}),
+    ...(memory.record ? { memory: memory.record } : {}),
   })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }

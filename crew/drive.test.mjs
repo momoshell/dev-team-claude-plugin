@@ -23,8 +23,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null } = {}) {
-  const calls = { assign: [], run: [], runClean: [], reseat: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null } = {}) {
+  const calls = { assign: [], run: [], runClean: [], reseat: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [], gh: [], files }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
@@ -65,6 +65,27 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   if (reseat) io.reseat = (role, options) => {
     calls.reseat.push({ role, options })
     return reseat(role, options)
+  }
+  if (gh) {
+    const spec = gh === true ? {} : gh
+    const scripted = (kind, index, args) => {
+      const value = spec[`${kind}Results`] ?? spec[kind]
+      if (typeof value === 'function') return value(args, index)
+      if (Array.isArray(value)) return value[index - 1]
+      return value
+    }
+    io.createIssue = (args) => {
+      const index = calls.gh.filter((call) => call.method === 'createIssue').length + 1
+      calls.gh.push({ method: 'createIssue', args })
+      if (spec.issueThrows) throw new Error(spec.issueThrows === true ? 'createIssue failed' : spec.issueThrows)
+      return scripted('createIssue', index, args) ?? { number: 700 + index, url: `https://example.invalid/issues/${700 + index}` }
+    }
+    io.createDraftPr = (args) => {
+      const index = calls.gh.filter((call) => call.method === 'createDraftPr').length + 1
+      calls.gh.push({ method: 'createDraftPr', args })
+      if (spec.prThrows) throw new Error(spec.prThrows === true ? 'createDraftPr failed' : spec.prThrows)
+      return scripted('createDraftPr', index, args) ?? { number: 42, url: 'https://example.invalid/pr/42' }
+    }
   }
   return io
 }
@@ -2286,4 +2307,236 @@ test('a gate-repair planner dispatch is not mistaken for a plan revision carve c
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
   assert.ok(!result.details.stages.includes('escalate:plan-carve'))
+})
+
+// --- converge terminal (#207) ---
+const CONVERGE_CTX = Object.freeze({
+  ...CTX,
+  limits: { plan_rounds: 1, build_rounds: 1, review_rounds: 1 },
+})
+const CONVERGE_PLAN = () => planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', commit_subject: 'feat: converge' } })
+const CONVERGE_GATE = RED(3)
+
+function convergeIo({ seam = true, suite = { ok: true, output: '' }, issueThrows = false, prThrows = false, findings = null } = {}) {
+  return fakeIo({
+    envelopes: {
+      'planner:1': CONVERGE_PLAN(),
+      'builder:1': buildEnv(),
+      'lead:1': leadEnv('escalate', 'the gate names its red checks'),
+    },
+    runs: {
+      'gate-cmd': { ok: false, output: CONVERGE_GATE },
+      'lane-cmd': { ok: true, output: '' },
+      'suite-cmd': suite,
+    },
+    changed: ['a.mjs'],
+    ...(findings ? {
+      envelopes: {
+        'planner:1': CONVERGE_PLAN(),
+        'builder:1': buildEnv(),
+        'reviewer:1': {
+          status: 'done', role: 'reviewer',
+          details: { verdict: 'changes-needed', defect: 'build', findings, must_fix: 1, should_fix: 1, consider: 0 },
+        },
+        'lead:1': leadEnv('escalate', 'the gate names its red checks'),
+      },
+    } : {}),
+    ...(seam ? { gh: { issueThrows, prThrows } } : {}),
+  })
+}
+
+function convergeRun(options = {}) {
+  const io = convergeIo(options)
+  return { io, result: driveTask(CONVERGE_CTX, io) }
+}
+
+test('converge happy path files must-fix residuals, commits once, and opens one draft PR', () => {
+  const { io, result } = convergeRun()
+  assert.equal(result.status, 'converge')
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 1)
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createIssue').length, 1)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(result.details.converge.draft, true)
+  assert.equal(result.details.converge.issues.length, 1)
+  assert.ok(io.calls.gh.find((call) => call.method === 'createDraftPr').args.body.includes(String(result.details.converge.issues[0].number)))
+})
+
+test('converge PR title and body are byte-stable through two identical seams', () => {
+  const first = convergeRun()
+  const second = convergeRun()
+  const pr1 = first.io.calls.gh.find((call) => call.method === 'createDraftPr').args
+  const pr2 = second.io.calls.gh.find((call) => call.method === 'createDraftPr').args
+  assert.equal(pr1.title, pr2.title)
+  assert.equal(pr1.body, pr2.body)
+})
+
+test('a red suite parks before any issue, PR, or commit side effect', () => {
+  const { io, result } = convergeRun({ suite: { ok: false, output: 'suite red' } })
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('without the seam the old gate escalation is byte-identical and never runs the suite', () => {
+  const { io, result } = convergeRun({ seam: false })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.ok(result.details.stages.every((label) => !label.startsWith('converge')))
+  assert.deepEqual(io.calls.run.map((run) => run.cmd), ['gate-cmd', 'lane-cmd', 'gate-cmd'])
+})
+
+test('a final gate with no summary parks before the seam', () => {
+  const io = convergeIo()
+  io.run = (cmd) => {
+    const count = (io.calls.run.filter((run) => run.cmd === cmd).length || 0) + 1
+    io.calls.run.push({ cmd, n: count })
+    if (cmd === 'gate-cmd' && count === 2) return { ok: false, output: 'Error: gate crashed' }
+    if (cmd === 'gate-cmd') return { ok: false, output: CONVERGE_GATE }
+    return cmd === 'lane-cmd' ? { ok: true, output: '' } : { ok: true, output: '' }
+  }
+  const result = driveTask(CONVERGE_CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.run.some((run) => run.cmd === 'suite-cmd'), false)
+})
+
+test('issue filing failure parks before commit', () => {
+  const { io, result } = convergeRun({ issueThrows: 'issue filing failed' })
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 0)
+})
+
+test('PR creation failure escalates while retaining the commit hash', () => {
+  const { io, result } = convergeRun({ prThrows: 'draft PR failed' })
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(result.details.commit, 'abc1234')
+  assert.match(result.details.escalation.why, /abc1234/)
+  assert.deepEqual(result.details.converge.pr, null)
+})
+
+test('reviewer findings become stable residuals and only must-fix findings file issues', () => {
+  const findings = [
+    { id: 'RV-2', severity: 'should-fix', location: 'a.mjs:2', summary: 'follow-up wording' },
+    { id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'close the defect' },
+  ]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': CONVERGE_PLAN(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': {
+        status: 'done', role: 'reviewer',
+        details: { verdict: 'changes-needed', defect: 'build', findings, must_fix: 1, should_fix: 1, consider: 0 },
+      },
+      'lead:1': leadEnv('escalate', 'the gate names its red checks'),
+    },
+    runs: {
+      'gate-cmd': { ok: false, output: CONVERGE_GATE },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs'],
+    gh: true,
+  })
+  const result = driveTask({ ...CONVERGE_CTX, limits: { plan_rounds: 1, build_rounds: 3, review_rounds: 1 } }, io)
+  assert.equal(result.status, 'converge')
+  assert.deepEqual(result.details.converge.residuals.map((entry) => entry.id), ['gate-red', 'RV-1', 'RV-2'])
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createIssue').length, 2)
+  const body = io.calls.gh.find((call) => call.method === 'createDraftPr').args.body
+  assert.ok(body.indexOf('RV-1') < body.indexOf('RV-2'))
+  assert.match(body, /follow-up: #/)
+})
+
+const REVIEW_GATE_PASS = `all checks passed\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+const REVIEW_FINDINGS = [
+  { id: 'RV-2', severity: 'should-fix', location: 'a.mjs:2', summary: 'follow-up wording' },
+  { id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'close the defect' },
+]
+
+function reviewConvergeIo({ suite = { ok: true, output: '' }, seam = true, gateless = false } = {}) {
+  const plan = gateless
+    ? planEnv({ details: { ...CONVERGE_PLAN().details, gate_cmd: undefined } })
+    : CONVERGE_PLAN()
+  return fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', REVIEW_FINDINGS),
+      'lead:1': leadEnv('escalate', 'the reviewer names unresolved findings'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: CONVERGE_GATE },
+      'gate-cmd': { ok: true, output: REVIEW_GATE_PASS },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': suite,
+    },
+    changed: ['a.mjs'],
+    ...(seam ? { gh: true } : {}),
+  })
+}
+
+function reviewConvergeRun({ buildRounds, ...options }) {
+  const io = reviewConvergeIo(options)
+  const result = driveTask({ ...CONVERGE_CTX, limits: { plan_rounds: 1, build_rounds: buildRounds, review_rounds: 1 } }, io)
+  return { io, result }
+}
+
+test('review-round exhaustion converges with review residuals and no gate-red entry', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 2 })
+  assert.equal(result.status, 'converge')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.deepEqual(result.details.converge.residuals.map((entry) => entry.id), ['RV-1', 'RV-2'])
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createIssue').length, 1)
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 1)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('build-round exhaustion with a revise verdict converges with review residuals', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1 })
+  assert.equal(result.status, 'converge')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.deepEqual(result.details.converge.residuals.map((entry) => entry.id), ['RV-1', 'RV-2'])
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createIssue').length, 1)
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 1)
+  assert.equal(io.calls.commits.length, 1)
+  const body = io.calls.gh.find((call) => call.method === 'createDraftPr').args.body
+  assert.doesNotMatch(body, /gate is red/)
+  assert.match(body, /RV-1/)
+})
+
+test('a red suite at build-round review exhaustion still parks without side effects', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1, suite: { ok: false, output: 'suite red' } })
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('review convergence without the gh seam remains a review escalation', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1, seam: false })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.run.some((run) => run.cmd === 'suite-cmd'), false)
+  assert.ok(io.calls.assign.every(({ role }) => role !== 'converge'))
+  assert.ok(result.details.stages.every((label) => !label.startsWith('converge')))
+})
+
+test('gateless review convergence parks instead of claiming a green acceptance gate', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1, gateless: true })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.run.some((run) => run.cmd === 'suite-cmd'), false)
+  assert.ok(result.details.stages.every((label) => !label.startsWith('converge')))
+})
+
+test('the converge seam exposes only issue creation and draft PR creation', () => {
+  const { io } = convergeRun()
+  assert.ok(io.calls.gh.every((call) => ['createIssue', 'createDraftPr'].includes(call.method)))
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  for (const banned of [/ready-for-review/, /ready_for_review/, /['\"]gh (pr|issue)/, /node:child_process/, /\bexecSync\s*\(/, /\bspawnSync\s*\(/]) {
+    assert.equal(banned.test(source), false, `unexpected direct seam path ${banned}`)
+  }
 })

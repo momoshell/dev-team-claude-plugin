@@ -1,3 +1,5 @@
+import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
+
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
 // "Code disposes, the lead decides." The mechanical loop lives HERE, as
@@ -331,6 +333,11 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 //        commit(files, message) -> hash,
 //        log(obj) -> void,                    // journal line (code-owned)
 //        emit(event) -> void,                 // OPTIONAL: mirror a drive event to the factory ledger; instrumentation is NEVER load-bearing
+//        createDraftPr({title, body}) -> {number, url},  // OPTIONAL: factory-mode
+//        createIssue({title, body})   -> {number, url},  // gh seam. Both present
+//                                                     // => the converge terminal is armed;
+//                                                     // absent (every shipped io today)
+//                                                     // => behavior is exactly as before.
 //        now() -> ms }
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
@@ -400,6 +407,7 @@ export function driveTask(ctx, io) {
   // every invocation lands its own row. It is driver-owned on purpose: the
   // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
   let gateAttempt = 0
+  let lastGateOutput = null
   // `runner` is an io METHOD, so it must be invoked as one: `realIo.runClean`
   // calls `this.run(cmd)` (crew/realio.mjs:241,245), and passing it detached
   // (`runGate(..., io.runClean)` below) made `this` undefined under ESM strict
@@ -423,6 +431,122 @@ export function driveTask(ctx, io) {
     emit({ kind: 'attention', moment: 'gate', park_id: null, task: ctx.task, why, artifacts })
   const gateEscalate = (why, extra = []) => { gateAttention(why, [journal, ...extra]); return escalate('gate', why, extra) }
 
+  // Factory-only terminal: an injected GH seam is the mode switch for this
+  // slice. Without both methods every precondition returns before any extra
+  // stage, run, log, or event, preserving the interactive path byte-for-byte.
+  const convergeSettle = ({ why, where, gateOutput, gateRed = true }) => {
+    if (typeof io.createDraftPr !== 'function' || typeof io.createIssue !== 'function') return null
+    if (!builderEnv) return null
+    if (!gateRed && gateOutput == null) return null
+    if (gateRed && baselineGateDefect(gateOutput) !== null) return null
+
+    const parsedGate = parseGateSummary(gateOutput)
+    const gateSummary = {
+      line: gateSummaryLine(gateOutput),
+      output: String(gateOutput || ''),
+      ...(parsedGate || {}),
+    }
+
+    stage('converge:suite')
+    const suiteRes = io.run(ctx.suite)
+    if (!suiteRes.ok) {
+      io.log({ at: io.now(), converge_declined: 'suite red' })
+      emit({ kind: 'converge', action: 'declined', where: 'suite', why: 'suite red' })
+      return null
+    }
+
+    stage('converge:issues')
+    const residuals = residualList({ findings: S.lastReview?.findings ?? null, gateSummary, gateRed })
+    if (residuals.length === 0) {
+      io.log({ at: io.now(), converge_declined: 'no residuals' })
+      emit({ kind: 'converge', action: 'declined', where: 'residuals', why: 'no residuals to record' })
+      return null
+    }
+    const issues = []
+    for (const residual of residuals) {
+      if (residual.severity !== 'must-fix') continue
+      let filed
+      try {
+        filed = io.createIssue({
+          title: followUpIssueTitle({ task: ctx.task, residual }),
+          body: followUpIssueBody({ task: ctx.task, residual, gateSummary, escalation: { where, why } }),
+        })
+      } catch (err) {
+        const detail = err?.message ?? String(err)
+        io.log({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail })
+        emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
+        return null
+      }
+      if (!filed || !Number.isInteger(filed.number)) {
+        const detail = `malformed issue result for ${residual.id}`
+        io.log({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail })
+        emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
+        return null
+      }
+      residual.issue = { number: filed.number, url: filed.url }
+      issues.push({ number: filed.number, url: filed.url })
+      emit({ kind: 'converge', action: 'issue-filed', residual: residual.id, number: filed.number })
+    }
+
+    stage('converge:commit')
+    const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
+    const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
+    if (!hasCommitSubject) io.log({ at: io.now(), commit_subject: 'fallback-from-plan-summary' })
+    const committing = io.changedFiles().filter(inScope)
+    S.commit = io.commit(committing, message)
+    emit({ kind: 'converge', action: 'committed', commit: S.commit, files: committing.length })
+
+    stage('converge:pr')
+    let pr
+    try {
+      pr = io.createDraftPr({
+        title: draftPrTitle({ task: ctx.task }),
+        body: draftPrBody({
+          gateSummary,
+          findings: residuals,
+          escalation: { where, why },
+          roundHistory: [...S.stages],
+          gateRed,
+        }),
+      })
+    } catch (err) {
+      const detail = err?.message ?? String(err)
+      return escalate(
+        'converge-pr',
+        `the work is committed at ${S.commit} but the draft PR could not be opened: ${detail}`,
+        [],
+        { commit: S.commit, converge: { pr: null, issues } },
+      )
+    }
+    if (!pr || !Number.isInteger(pr.number) || typeof pr.url !== 'string' || pr.url.length === 0) {
+      const detail = 'malformed draft PR result'
+      return escalate(
+        'converge-pr',
+        `the work is committed at ${S.commit} but the draft PR could not be opened: ${detail}`,
+        [],
+        { commit: S.commit, converge: { pr: null, issues } },
+      )
+    }
+
+    stage('converge')
+    emit({ kind: 'converge', action: 'settled', commit: S.commit, pr: pr.number, issues: issues.length })
+    return {
+      status: 'converge',
+      summary: `Task ${ctx.task} converged with residuals: committed ${S.commit} (${committing.length} files), suite green, ${gateRed ? 'gate red' : 'gate green with unresolved review findings'} — DRAFT PR #${pr.number}, ${issues.length} follow-up issue(s) filed. Merge authority stays human.`,
+      artifacts: [planPath, journal],
+      details: {
+        commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
+        dissents: S.dissents, accepted_via: null, escalation: { where, why },
+        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
+        gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
+        converge: {
+          pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
+          gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
+        },
+      },
+    }
+  }
+
   function assignAndWait(role, briefFile, note) {
     const { id, returnPath } = io.assign({ role, briefFile, note })
     io.log({ at: io.now(), assign: id, role, brief: briefFile })
@@ -431,6 +555,7 @@ export function driveTask(ctx, io) {
     const review = reviewOutcome(role, env)
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
     if (review) io.log({ at: io.now(), review_outcome: { dispatch: id, ...review } })
+    if (review?.findings) S.lastReview = review
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } })
     }
@@ -998,7 +1123,11 @@ export function driveTask(ctx, io) {
             `The acceptance gate is still red after ${round} build rounds. Bounce once more with guidance, or escalate?`,
             ['bounce', 'escalate'], [planPath, journal],
           )
-          if (c.decision !== 'bounce') return gateEscalate(c.reason)
+          if (c.decision !== 'bounce') {
+            const settled = convergeSettle({ why: c.reason, where: 'gate', gateOutput: gateRes.output })
+            if (settled) return settled
+            return gateEscalate(c.reason)
+          }
           extraRounds += 1
         }
         const b = art(`build-bounce-r${round}.md`)
@@ -1007,6 +1136,7 @@ export function driveTask(ctx, io) {
         buildBrief = b; buildNote = 'gate-fix'
         continue
       }
+      lastGateOutput = gateRes.output
     }
 
     // Gate C (judgment, but enum-consumed): the reviewer. An unreadable
@@ -1019,7 +1149,11 @@ export function driveTask(ctx, io) {
           `Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`,
           options, [planPath, lastReviewPath],
         )
-        if (c.decision === 'escalate') return escalate('review', c.reason)
+        if (c.decision === 'escalate') {
+          const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+          if (settled) return settled
+          return escalate('review', c.reason)
+        }
         if (c.decision === 'bounce') {
           grant('review', round)
           extraReviews += 1
@@ -1053,7 +1187,11 @@ export function driveTask(ctx, io) {
             `Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`,
             options, [planPath, lastReviewPath],
           )
-          if (c.decision === 'escalate') return escalate('review', c.reason)
+          if (c.decision === 'escalate') {
+            const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+            if (settled) return settled
+            return escalate('review', c.reason)
+          }
           if (c.decision === 'bounce') {
             grant('review', round)
             extraRounds += 1

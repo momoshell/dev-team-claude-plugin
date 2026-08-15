@@ -58,3 +58,7 @@ with it attached — and then you must decide. Requesting it twice escalates.
   most 3 lines of summary. The decision lives in the envelope, not the chat.
 - Never treat a member's chat output as evidence — the envelopes and the
   artifact files are the record.
+
+## Team memory
+
+A `## Team memory` section may be appended below; it is accumulated judgment from past runs — advisory context, outranked by the brief, the plan and the code; it may be partial (the trailing comment says what was dropped).

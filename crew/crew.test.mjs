@@ -10,6 +10,7 @@ import {
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, seatLiveness, awaitSeatsReady, teardownCore,
+  MEMORY_ROLES, memoryConfig,
 } from './crew.mjs'
 import { driveTask } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
@@ -374,7 +375,32 @@ async function withHome(home, fn) {
   finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous }
 }
 
+async function withoutMemoryEnv(fn) {
+  const previous = Object.fromEntries(['CREW_MEMORY_DIR', 'CREW_MEMORY_BACKEND', 'CREW_MEMORY_BUDGET_BYTES']
+    .map((key) => [key, process.env[key]]))
+  for (const key of Object.keys(previous)) delete process.env[key]
+  try { return await fn() }
+  finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value
+    }
+  }
+}
+
 function testCrewDir(home, checkout, task) { return join(home, '.crew', basename(checkout), task) }
+
+function memoryFixture() {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-boot-memory-'))
+  writeFileSync(join(dir, 'MEMORY.md'), '- [Alpha](alpha.md) — first hook\n- [Beta](beta.md) — second hook\n')
+  writeFileSync(join(dir, 'alpha.md'), `---\nname: alpha\n---\n\n${'A'.repeat(80)}\n`)
+  writeFileSync(join(dir, 'beta.md'), `---\nname: beta\n---\n\n${'B'.repeat(80)}\n`)
+  return dir
+}
+
+function bootRecord(dir) {
+  return readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n')
+    .map((line) => JSON.parse(line)).find((event) => event.event === 'boot')
+}
 
 function callCounter() {
   const calls = []
@@ -461,6 +487,130 @@ test('mixed boot still creates a workspace, seats panes, and leaves the headless
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+test('a missing memory budget value falls back to the default and records invalid-budget', () => {
+  const cfg = memoryConfig({ 'memory-dir': '/tmp/crew-memory-fixture', 'memory-budget-bytes': true })
+  assert.equal(cfg.budgetBytes, 8000)
+  assert.equal(cfg.reason, 'invalid-budget')
+})
+
+test('unconfigured boot keeps every merged prompt byte-identical and omits memory journal data', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-memory-plain-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-memory-plain-checkout-')
+  try {
+    await withoutMemoryEnv(() => withHome(home, () => bootCmd(
+      { task: 'memory-plain', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const dir = testCrewDir(home, checkout, 'memory-plain')
+    const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
+    for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
+      const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), `${shared}\n\n${card}`)
+    }
+    assert.equal(Object.hasOwn(bootRecord(dir), 'memory'), false)
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('configured boot injects memory into lead and planner while builder and reviewer stay lean', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-memory-configured-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-memory-configured-checkout-')
+  const fixture = memoryFixture()
+  try {
+    await withoutMemoryEnv(() => withHome(home, async () => {
+      const base = { checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath }
+      await bootCmd({ ...base, task: 'memory-plain' }, { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() })
+      await bootCmd({ ...base, task: 'memory-armed', 'memory-dir': fixture }, { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() })
+    }))
+    const plain = testCrewDir(home, checkout, 'memory-plain')
+    const armed = testCrewDir(home, checkout, 'memory-armed')
+    for (const role of ['lead', 'planner']) {
+      const prompt = readFileSync(join(armed, 'task', `role-${role}.md`), 'utf8')
+      assert.match(prompt, /## Team memory/)
+      assert.match(prompt, /first hook/)
+    }
+    for (const role of ['builder', 'reviewer']) {
+      assert.equal(
+        readFileSync(join(armed, 'task', `role-${role}.md`), 'utf8'),
+        readFileSync(join(plain, 'task', `role-${role}.md`), 'utf8'),
+      )
+    }
+    assert.deepEqual([...MEMORY_ROLES], ['lead', 'planner'])
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }) }
+})
+
+test('configured boot with a missing memory directory succeeds and records no-dir', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-memory-missing-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-memory-missing-checkout-')
+  const missing = join(home, 'not-present')
+  try {
+    await withoutMemoryEnv(() => withHome(home, () => bootCmd(
+      { task: 'memory-missing', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'memory-dir': missing },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const dir = testCrewDir(home, checkout, 'memory-missing')
+    const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
+    for (const role of ['lead', 'planner', 'builder', 'reviewer']) {
+      const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), `${shared}\n\n${card}`)
+    }
+    assert.equal(bootRecord(dir).memory.reason, 'no-dir')
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('unknown memory backend cannot fail boot and records its error', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-memory-backend-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-memory-backend-checkout-')
+  const fixture = memoryFixture()
+  try {
+    await withoutMemoryEnv(() => withHome(home, () => bootCmd(
+      { task: 'memory-backend', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'memory-dir': fixture, 'memory-backend': 'no-such-backend' },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const dir = testCrewDir(home, checkout, 'memory-backend')
+    const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
+    for (const role of ['lead', 'planner']) {
+      const card = readFileSync(new URL(`./roles/${role}.md`, import.meta.url), 'utf8')
+      assert.equal(readFileSync(join(dir, 'task', `role-${role}.md`), 'utf8'), `${shared}\n\n${card}`)
+    }
+    assert.match(bootRecord(dir).memory.error, /no-such-backend/)
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }) }
+})
+
+test('configured boot journal records memory byte and inclusion/drop counts', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-memory-record-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-memory-record-checkout-')
+  const fixture = memoryFixture()
+  try {
+    await withoutMemoryEnv(() => withHome(home, () => bootCmd(
+      { task: 'memory-record', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'memory-dir': fixture },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const record = bootRecord(testCrewDir(home, checkout, 'memory-record')).memory
+    assert.equal(typeof record.bytes, 'number')
+    assert.ok(record.bytes > 0)
+    assert.equal(typeof record.included, 'number')
+    assert.equal(typeof record.dropped, 'number')
+    assert.deepEqual(record.injected, ['lead', 'planner'])
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }) }
+})
+
+test('a tiny memory budget records dropped extracts even when no section is injected', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-memory-budget-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-memory-budget-checkout-')
+  const fixture = memoryFixture()
+  try {
+    await withoutMemoryEnv(() => withHome(home, () => bootCmd(
+      { task: 'memory-budget', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'memory-dir': fixture, 'memory-budget-bytes': '1' },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const record = bootRecord(testCrewDir(home, checkout, 'memory-budget')).memory
+    assert.deepEqual(record.injected, [])
+    assert.equal(record.bytes, 0)
+    assert.ok(record.dropped > 0)
+    assert.equal(record.reason, null)
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }); rmSync(fixture, { recursive: true, force: true }) }
 })
 
 test('source tripwire names crew/daemon.mjs paneSeat and its pane refusal', () => {

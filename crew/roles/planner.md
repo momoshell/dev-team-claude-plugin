@@ -120,3 +120,7 @@ the driver compares it to the lead's decision and records divergence — an
 answer without it silently opts out of the dissent record. You are advising
 a decision, not re-doing your role's work — no new artifacts, just the
 envelope.
+
+## Team memory
+
+A `## Team memory` section may be appended below; it is accumulated judgment from past runs — advisory context, outranked by the brief, the plan and the code; it may be partial (the trailing comment says what was dropped).

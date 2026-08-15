@@ -8,18 +8,18 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  daemon, deriveState, normalizeEvent, runChild, RUN_STATES, EVENT_KINDS,
+  daemon, deriveState, normalizeEvent, runChild, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS,
 } from './daemon.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 
-function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', feedRetention } = {}) {
+function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
   const root = join(dir, 'daemon')
   const crewDir = join(dir, 'crew')
   const taskDir = join(crewDir, 'task')
   const returnsDir = join(crewDir, 'returns')
   mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true })
-  const members = Object.fromEntries(roles.map((role) => [role, { model: 'x', transport }]))
+  const members = Object.fromEntries(roles.map((role) => [role, { model: 'x', transport, ...(agent ? { agent } : {}) }]))
   const taskReturn = join(returnsDir, 'task.json')
   writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({ task: 'daemon80', checkout: dir, roles, members, task_return: taskReturn }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
@@ -70,6 +70,13 @@ function request(socketPath, requestLine, expected = 1) {
 
 function jsonFrame(frame) { return JSON.parse(frame) }
 function appendJournal(f, row) { writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`, { flag: 'a' }) }
+function stageRpcSeat(f, role) {
+  const dir = join(f.taskDir, 'headless-rpc', role)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'pgid'), '900')
+  writeFileSync(join(dir, 'cmd.fifo'), '')
+  return dir
+}
 function instrumentCursorReads(f, positions) {
   f.deps.openSync = (...args) => openSync(...args)
   f.deps.readSync = (fd, buffer, offset, length, position) => {
@@ -795,4 +802,112 @@ test('a pidless fork returns a socket error without a result', async () => {
     assert.equal('result' in frame, false)
     assert.match(readFileSync(join(f.root, 'runs.jsonl'), 'utf8'), /"orphaned"/)
   } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('send delivers a steer frame to a steerable rpc seat', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const seat = stageRpcSeat(f, 'builder')
+    const result = await f.d.send({ run, message: 'guidance', role: 'builder' })
+    assert.equal(result.delivered, 'command-channel')
+    assert.equal(result.run_id, run)
+    const frame = JSON.parse(readFileSync(join(seat, 'cmd.fifo'), 'utf8').trim())
+    assert.equal(frame.type, 'steer')
+    assert.equal(frame.message, 'guidance')
+    assert.equal(typeof frame.id, 'string')
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('send refuses a transport that cannot be steered', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    await assert.rejects(() => f.d.send({ run, message: 'guidance' }), (err) => {
+      assert.equal(err.code, 'not-capable')
+      assert.match(err.message, /interjection/)
+      assert.match(err.message, /headless-json/)
+      assert.match(err.message, /turn/)
+      return true
+    })
+  }, { roles: ['builder'], transport: 'headless-json' })
+})
+
+test('send refuses an adapter with no profile for the transport', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    await assert.rejects(() => f.d.send({ run, message: 'guidance', role: 'builder' }), (err) => err.code === 'not-capable')
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'claude' })
+})
+
+test('send refuses an unknown run and an unknown role', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    stageRpcSeat(f, 'builder')
+    await assert.rejects(() => f.d.send({ run: 'missing', message: 'guidance' }), (err) => err.code === 'not-found')
+    await assert.rejects(() => f.d.send({ run, message: 'guidance', role: 'nobody' }), (err) => {
+      assert.equal(err.code, 'not-found')
+      assert.match(err.message, /seated roles: builder/)
+      return true
+    })
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('send refuses a settled run', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    stageRpcSeat(f, 'builder')
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    await assert.rejects(() => f.d.send({ run, message: 'guidance', role: 'builder' }), (err) => err.code === 'not-live')
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('send cannot settle a run or alter its outcome', async () => {
+  await each(async (f) => {
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    stageRpcSeat(f, 'builder')
+    const beforeFeed = f.d.feed(run, 0).length
+    const result = await f.d.send({ run, message: 'guidance', role: 'builder' })
+    assert.equal(result.interjection, 'boundary')
+    assert.deepEqual(f.d.result({ run }), { outcome: null, envelope: null, source: null, reason: 'pending' })
+    assert.equal(f.d.state({ run }).state, 'working')
+    assert.equal(f.d.feed(run, 0).length, beforeFeed)
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.kind === 'settled'), false)
+    assert.equal(records.some((record) => record.kind === 'sent'), true)
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('send command set stays closed', async () => {
+  assert.deepEqual(DAEMON_COMMANDS, ['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+  const f = fixture({ roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+  try {
+    await f.d.start()
+    for (const cmd of DAEMON_COMMANDS.filter((value) => value !== 'stop')) {
+      const params = cmd === 'enqueue' ? { crew_dir: f.crewDir } : {}
+      const frame = jsonFrame((await request(f.d.socketPath, `${JSON.stringify({ id: `closed-${cmd}`, cmd, params })}\n`))[0])
+      assert.notEqual(frame.error?.code, 'unknown-command', cmd)
+    }
+    const stop = jsonFrame((await request(f.d.socketPath, '{"id":"closed-stop","cmd":"stop"}\n'))[0])
+    assert.notEqual(stop.error?.code, 'unknown-command')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('send with no role picks the single steerable seat and refuses when there are several', async () => {
+  await each(async (single) => {
+    const { run_id: run } = single.d.enqueue({ crew_dir: single.crewDir })
+    const seat = stageRpcSeat(single, 'builder')
+    const result = await single.d.send({ run, message: 'guidance' })
+    assert.equal(result.role, 'builder')
+    assert.equal(JSON.parse(readFileSync(join(seat, 'cmd.fifo'), 'utf8').trim()).message, 'guidance')
+  }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+  await each(async (multiple) => {
+    const { run_id: run } = multiple.d.enqueue({ crew_dir: multiple.crewDir })
+    stageRpcSeat(multiple, 'planner'); stageRpcSeat(multiple, 'builder')
+    await assert.rejects(() => multiple.d.send({ run, message: 'guidance' }), (err) => {
+      assert.equal(err.code, 'invalid-params')
+      assert.match(err.message, /planner, builder/)
+      assert.match(err.message, /--role/)
+      return true
+    })
+  }, { roles: ['planner', 'builder'], transport: 'headless-rpc', agent: 'pi' })
 })

@@ -195,7 +195,7 @@ replayed `turn_end` and `agent_end` usage.
 
 ## The daemon
 
-`daemon.mjs` owns long-lived headless crew runs behind a Unix-socket JSONL protocol. Its socket and pidfile live at `<root>/daemon.sock` and `<root>/daemon.json` (the default root is `~/.crew/daemon`). The closed command set is `ping`, `enqueue`, `list`, `state`, `result`, `tail`, `untail`, and `stop`.
+`daemon.mjs` owns long-lived headless crew runs behind a Unix-socket JSONL protocol. Its socket and pidfile live at `<root>/daemon.sock` and `<root>/daemon.json` (the default root is `~/.crew/daemon`). The closed command set is `ping`, `enqueue`, `list`, `state`, `result`, `tail`, `untail`, `stop`, and `send`; `send` may refuse with `not-live` or `not-capable` (as well as the usual `not-found`/`invalid-params`).
 
 `state()` is a query with the closed enum `working`, `blocked`, `done`, or `dead`; it carries no outcome. In particular, `idle` is not success: an escalation envelope is a settled `done` state, while its outcome is read separately through `result()` from the task envelope. The live feed is a normalized in-memory projection of the journal and worker streams, never a second record (ADR-029 §4); the envelope remains authoritative.
 
@@ -203,7 +203,7 @@ A daemon restart adopts an un-settled run when its driver is alive and resumes t
 
 ## factoryctl
 
-`factoryctl run --crew-dir <dir> --brief <file>` enqueues an already-booted crew directory; `factoryctl ls [--root <dir>] [--json]` lists daemon runs. `factoryctl attach <run-id> [--root <dir>]` subscribes to the daemon's normalized feed, prints one JSON event per line, replays the retained window for a settled run and returns, unsubscribes on every exit path, and never claims an outcome. It is a stateless client that owns nothing and never starts a daemon. If none is listening, start one as described in [The daemon](#the-daemon), for example with `daemon({root}).start()`.
+`factoryctl run --crew-dir <dir> --brief <file>` enqueues an already-booted crew directory; `factoryctl ls [--root <dir>] [--json]` lists daemon runs. `factoryctl attach <run-id> [--root <dir>]` subscribes to the daemon's normalized feed, prints one JSON event per line, replays the retained window for a settled run and returns, unsubscribes on every exit path, and never claims an outcome. `factoryctl send <run-id> <message> [--role <role>]` delivers a boundary interjection to a steerable live seat. An `ok` response means the frame reached the seat's command channel and asserts nothing about the agent acting on it; a non-steerable transport is refused by name rather than queued. It is a stateless client that owns nothing and never starts a daemon. If none is listening, start one as described in [The daemon](#the-daemon), for example with `daemon({root}).start()`.
 
 For `ls`, STATE comes from the daemon's `state()` projection (carried by `list()`) and OUTCOME comes only from `result()`; an unsettled run's outcome cell is empty because `idle` is not success.
 

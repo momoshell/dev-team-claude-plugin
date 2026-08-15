@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { foldRpcUsage, headlessRpcIo, rpcCommand, splitFrames } from './headless-rpc.mjs'
+import { foldRpcUsage, headlessRpcIo, rpcCommand, seatCommandPath, splitFrames, steerFrame } from './headless-rpc.mjs'
 
 function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
@@ -53,6 +53,21 @@ test('recorded B6 capture remains LF-framed and carries the boundary events', ()
   assert.ok(names.indexOf('tool_execution_start') < names.indexOf('tool_execution_end'))
   assert.ok(names.includes('queue_update'))
   assert.ok(frames.some((frame) => frame.type === 'response' && frame.command === 'steer' && frame.success === true))
+})
+
+test('send command channel and steer frame are exported', () => {
+  const f = fixture()
+  try {
+    assert.ok(seatCommandPath('/t', 'builder').endsWith(join('headless-rpc', 'builder', 'cmd.fifo')))
+    assert.deepEqual(steerFrame('g'), { type: 'steer', message: 'g' })
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+    writeFileSync(stream, `${JSON.stringify({ type: 'response', id: 'd1-steer-1', command: 'steer', success: true })}\n`)
+    assert.doesNotThrow(() => f.io.steer('builder', 'guidance'))
+    const frame = f.writes.find((value) => value.type === 'steer')
+    assert.deepEqual(frame, { type: 'steer', message: 'guidance', id: 'd1-steer-1' })
+    void run
+  } finally { f.cleanup() }
 })
 
 test('interjection boundary: steer is sent as a boundary command', () => {

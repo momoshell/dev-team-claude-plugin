@@ -194,6 +194,24 @@ export async function runVerb(args, deps = {}) {
   return result
 }
 
+function requireSendArgs(args) {
+  if (typeof args?._?.[1] !== 'string' || !args._[1] || typeof args._?.[2] !== 'string' || !args._[2]) {
+    throw new Error('send requires <run-id> and <message>')
+  }
+  if (args.role !== undefined && (typeof args.role !== 'string' || !args.role)) throw new Error('send requires --role <role> when --role is present')
+}
+
+export async function sendVerb(args, deps = {}) {
+  requireSendArgs(args)
+  const call = deps.call || deps.connection?.call
+  if (typeof call !== 'function') throw new Error('send requires a daemon connection')
+  const role = args.role
+  const result = await call('send', { run: args._[1], message: args._[2], ...(role ? { role } : {}) })
+  const stdout = outputSink(deps.stdout, process.stdout)
+  stdout(`${JSON.stringify(result)}\n`)
+  return result
+}
+
 export async function lsVerb(args, deps = {}) {
   const call = deps.call || deps.connection?.call
   if (typeof call !== 'function') throw new Error('ls requires a daemon connection')
@@ -278,8 +296,8 @@ export async function main(argv, deps = {}) {
   const args = parseArgs(argv)
   const stderr = outputSink(deps.stderr, process.stderr)
   const verb = args._[0]
-  if (!['run', 'ls', 'attach'].includes(verb)) {
-    stderr('usage: factoryctl <run|ls|attach> ...\n')
+  if (!['run', 'ls', 'attach', 'send'].includes(verb)) {
+    stderr('usage: factoryctl <run|ls|attach|send> ...\n')
     return 2
   }
 
@@ -291,6 +309,7 @@ export async function main(argv, deps = {}) {
   try {
     if (verb === 'run') requireRunArgs(args)
     if (verb === 'attach') requireAttachArgs(args)
+    if (verb === 'send') requireSendArgs(args)
     if (verb === 'attach') {
       controller = new AbortController()
       signalProcess = deps.process ?? process
@@ -303,7 +322,8 @@ export async function main(argv, deps = {}) {
     const commandDeps = { ...deps, call: session.call, onEvent: session.onEvent }
     if (verb === 'run') await runVerb(args, commandDeps)
     else if (verb === 'ls') await lsVerb(args, commandDeps)
-    else await attachVerb(args, { ...commandDeps, signal: deps.signal ?? controller.signal })
+    else if (verb === 'attach') await attachVerb(args, { ...commandDeps, signal: deps.signal ?? controller.signal })
+    else await sendVerb(args, commandDeps)
     return 0
   } catch (err) {
     stderr(`error: ${err?.message || String(err)}\n`)

@@ -20,6 +20,12 @@ const ABORT_SETTLE_MS = 2000
 const FIFO_RETRIES = 20
 const FIFO_RETRY_MS = 100
 
+export const SEAT_COMMAND_FILE = 'cmd.fifo'
+export function seatCommandPath(taskDir, role) {
+  return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
+}
+export function steerFrame(message) { return { type: 'steer', message } }
+
 // Do not use node:readline here. captures/pi-b5-readline-trap.txt has two
 // LF-delimited records, while readline incorrectly exposes three around U+2028.
 export function splitFrames(buffer) {
@@ -264,7 +270,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     const dir = seatDir(role)
     mkdir(dir, { recursive: true })
     const stream = seatFile(role, 'stream.jsonl'), stderr = seatFile(role, 'stderr.log')
-    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), fifo = seatFile(role, 'cmd.fifo'), cmdPath = seatFile(role, 'cmd.json')
+    const exit = seatFile(role, 'exit'), pgid = seatFile(role, 'pgid'), fifo = seatFile(role, SEAT_COMMAND_FILE), cmdPath = seatFile(role, 'cmd.json')
     const old = session(role)
     const sessionId = member.session_id || old.sessionId || uuid()
     const resume = !!(member.started || old.sessionId)
@@ -392,7 +398,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   function steer(role, message) {
     const seat = seats.get(role)
     if (!seat?.turn || seat.turn.state.settled) throw staged('rpc-session-not-in-flight', `rpc seat ${role} has no in-flight turn`, role)
-    const id = send(seat, { type: 'steer', message }, 'steer')
+    const id = send(seat, steerFrame(message), 'steer')
     const response = commandResponse(seat, id)
     if (!response) throw staged('rpc-timeout', `timed out waiting for steer response for seat ${role}`, role)
     if (response.success === false) throw responseError(role, response)

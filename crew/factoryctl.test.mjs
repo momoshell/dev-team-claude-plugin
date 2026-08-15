@@ -370,3 +370,38 @@ test('attach ends a live run when its child exits without an envelope', async ()
     await session.close()
   } finally { await f.daemon.stop(); f.cleanup() }
 })
+
+test('send prints the daemon refusal and exits 1', async () => {
+  const f = fixture()
+  try {
+    await f.daemon.start()
+    const { runId } = await enqueue(f)
+    const result = await invoke(f, ['send', runId, 'guidance'])
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /interjection/)
+    assert.match(result.stderr, /headless-json/)
+    assert.equal(result.stdout, '')
+  } finally { await f.daemon.stop(); f.cleanup() }
+})
+
+test('send requires a run id and a message before connecting', async () => {
+  const f = fixture()
+  try {
+    await f.daemon.start()
+    let touched = false
+    const net = { connect: () => { touched = true; throw new Error('socket should not be touched') } }
+    const result = await invoke(f, ['send'], { net })
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /send requires <run-id> and <message>/)
+    assert.equal(touched, false)
+  } finally { await f.daemon.stop(); f.cleanup() }
+})
+
+test('factoryctl usage lists send', async () => {
+  const f = fixture()
+  try {
+    const result = await invoke(f, ['wat'])
+    assert.equal(result.code, 2)
+    assert.match(result.stderr, /usage: factoryctl <run\\|ls\\|attach\\|send>/)
+  } finally { f.cleanup() }
+})

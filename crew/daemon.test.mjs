@@ -6,11 +6,23 @@ import {
   openSync, readSync, fstatSync, closeSync, statSync, utimesSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
-  daemon, deriveState, normalizeEvent, runChild, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS,
+  daemon, deriveState, normalizeEvent, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS,
 } from './daemon.mjs'
+import { runChild } from './child.mjs'
+import { DEFAULT_TRANSPORT } from './realio.mjs'
 import { splitFrames } from './headless-rpc.mjs'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+const DAEMON_SOURCE = readFileSync(join(HERE, 'daemon.mjs'), 'utf8')
+const CHILD_SOURCE = readFileSync(join(HERE, 'child.mjs'), 'utf8')
+const sourceCode = (source) => source.split('\n').filter((line) => !line.trim().startsWith('//') && !line.trim().startsWith('*')).join('\n')
+const DAEMON_CODE = sourceCode(DAEMON_SOURCE)
+const CHILD_CODE = sourceCode(CHILD_SOURCE)
+const DRIVE_MODULE = ['drive', 'mjs'].join('.')
+const REALIO_MODULE = ['realio', 'mjs'].join('.')
 
 function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
@@ -87,6 +99,59 @@ function instrumentCursorReads(f, positions) {
   f.deps.closeSync = (...args) => closeSync(...args)
   f.d = daemon({ root: f.root, deps: f.deps })
 }
+
+test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', () => {
+  // Someone re-adding the convenience runner import at the top of daemon.mjs
+  // must trip this allowlist rather than quietly restoring the server coupling.
+  const lines = DAEMON_CODE.split('\n')
+  const imports = []
+  const isImportStart = (line) => /^import(?:[ \t]|\/\*)/.test(line)
+  const isDynamicStart = (line) => /^import[ \t]*(?:\/\*[\s\S]*?\*\/[ \t]*)*\(/.test(line)
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i].trim()
+    if (!/^import\b/.test(line) || !isImportStart(line) || isDynamicStart(line)) continue
+    const remainder = line.slice('import'.length).replace(/^(?:[ \t]*\/\*[\s\S]*?\*\/[ \t]*)+/, '').trimStart()
+    const sideEffect = remainder.match(/^(['"])([^'"]+)\1/)
+    if (sideEffect) { imports.push(sideEffect[2]); continue }
+    let found = false
+    for (let j = i; j < lines.length; j += 1) {
+      if (j > i && isImportStart(lines[j].trim())) break
+      const from = lines[j].match(/\bfrom\s+(['"])([^'"]+)\1/)
+      if (from) { imports.push(from[2]); i = j; found = true; break }
+    }
+    if (!found) imports.push(null)
+  }
+  assert.equal(
+    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs'),
+    true,
+    'every daemon import, including side-effect imports, must be a node builtin or the server-side rpc helper',
+  )
+  assert.equal(DAEMON_CODE.includes(DRIVE_MODULE), false, 'daemon must not name the driver module')
+  assert.equal(DAEMON_CODE.includes(REALIO_MODULE), false, 'daemon must not name the real io module')
+  const dynamicImports = DAEMON_CODE.match(/\bimport\s*\(/g) || []
+  const adapterImport = ['import', '(pathToFileURL(file).href)'].join('')
+  assert.equal(DAEMON_CODE.includes(adapterImport), true, 'daemon must retain its existing computed adapter import')
+  assert.equal(dynamicImports.length, 1, 'daemon must reject every dynamic import beyond its existing adapter loader')
+  assert.doesNotMatch(DAEMON_CODE, /export\s+\*\s+from/, 'daemon must not re-export a runner through a barrel')
+})
+
+test('the child entry owns the runner imports', () => {
+  assert.equal(CHILD_CODE.includes(`'./${DRIVE_MODULE}'`), true, 'child entry must import the driver')
+  assert.equal(CHILD_CODE.includes(`'./${REALIO_MODULE}'`), true, 'child entry must import real io')
+  assert.equal(CHILD_CODE.includes('--run-child'), true, 'child entry must own the run-child guard')
+})
+
+test('enqueue forks the child entry module', async () => {
+  await each(async (f) => {
+    await f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(f.forks[0][0].endsWith('child.mjs'), true, 'enqueue must fork crew/child.mjs')
+    assert.equal(f.forks[0][1][0], '--run-child', 'child fork must retain the run-child argv flag')
+  })
+})
+
+test('the daemon pane constant does not drift from realio DEFAULT_TRANSPORT', () => {
+  assert.equal(PANE_TRANSPORT, DEFAULT_TRANSPORT, 'daemon pane transport must stay pinned to realio DEFAULT_TRANSPORT')
+})
 
 // 1. The byte splitter, rather than readline, owns LF framing.
 // Asserts OUR framing only. An earlier version also pinned readline's own

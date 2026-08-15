@@ -91,8 +91,12 @@ export function runChild(argv, injected = {}) {
       if (!briefFile) throw new Error('run requires --brief-file <path to the task brief>')
       if (!existsChild(ctx.briefFile)) throw new Error(`brief file not found: ${ctx.briefFile}`)
       if (crew.checkout && resolvePath(crew.checkout) !== checkout) throw new Error(`this crew was booted for ${resolvePath(crew.checkout)}, not ${checkout} — same directory name, different checkout`)
-      const dirty = String(exec('git status --porcelain', { cwd: checkout, encoding: 'utf8' }) || '').trim()
-      if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
+      if (spec.continuation !== true) {
+        // The daemon's regrant hook is the sole caller that sets continuation:
+        // it resumes ON TOP OF the escalated round's uncommitted work.
+        const dirty = String(exec('git status --porcelain', { cwd: checkout, encoding: 'utf8' }) || '').trim()
+        if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
+      }
     }
     mkdir(taskDir, { recursive: true }); mkdir(returnsDir, { recursive: true })
     const realIo = injected.realIo || defaultRealIo

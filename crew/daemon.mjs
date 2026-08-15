@@ -14,9 +14,9 @@ import {
   closeSync as fsCloseSync,
   statSync as fsStatSync,
 } from 'node:fs'
-import { dirname, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
-import { fork as cpFork } from 'node:child_process'
+import { fork as cpFork, spawnSync as cpSpawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
@@ -26,6 +26,8 @@ const MAX_FRAME_BYTES = 1024 * 1024
 const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
 const HERE = dirname(SELF_PATH)
 const CHILD_PATH = join(HERE, 'child.mjs')
+// The daemon SPAWNS crew.mjs as a child process and must never import it; see the daemon.test.mjs import firewall.
+const CREW_PATH = join(HERE, 'crew.mjs')
 const adapterCache = new Map()
 const SEND_INTERJECTION = 'boundary'
 const MAX_SEND_BYTES = 512
@@ -202,6 +204,7 @@ export function daemon(options = {}) {
   const injected = options.deps || {}
   const net = injected.net || netDefault
   const fork = injected.fork || cpFork
+  const spawnSync = injected.spawnSync || cpSpawnSync
   const kill = injected.kill || ((pid, signal) => process.kill(pid, signal))
   const now = injected.now || (() => Date.now())
   const uuid = injected.uuid || randomUUID
@@ -254,6 +257,7 @@ export function daemon(options = {}) {
       lane: record.lane,
       suite: record.suite,
       checkout: record.checkout,
+      tier_identity: record.tier_identity || null,
       task_return: record.task_return,
       child_pid: null,
       lifecycle: 'enqueued',
@@ -575,10 +579,65 @@ export function daemon(options = {}) {
     return run.feed.filter((event) => event.seq > floor).map((event) => ({ ...event }))
   }
 
+  // Boot a crew for a tier in a CHILD PROCESS: importing crew.mjs would pull
+  // drive.mjs back into the server (#174/PR #191, daemon.test.mjs firewall).
+  function bootTierCrew(spec) {
+    const tier = String(spec.tier)
+    if (typeof spec.task !== 'string' || !spec.task) throw runError('invalid-spec', 'a tier enqueue requires task')
+    if (typeof spec.checkout !== 'string' || !spec.checkout) throw runError('invalid-spec', 'a tier enqueue requires checkout')
+    const checkout = resolvePath(spec.checkout)
+    const briefFile = spec.brief_file || spec.briefFile
+    if (typeof briefFile !== 'string' || !briefFile || !exists(resolvePath(briefFile))) {
+      throw runError('invalid-spec', `brief file not found: ${briefFile ? resolvePath(briefFile) : '<missing>'}`)
+    }
+    const argv = [CREW_PATH, 'boot', '--task', String(spec.task), '--checkout', checkout, '--tier', tier, '--headless-all']
+    const result = spawnSync(process.execPath, argv, { cwd: checkout, encoding: 'utf8' })
+    const stderr = String(result?.stderr || '').trim()
+    if (result?.error || result?.status !== 0) {
+      throw runError('boot-failed', `crew boot failed for tier "${tier}" in ${checkout} (exit ${result?.status ?? 'none'}): ${result?.error?.message || stderr || '<no stderr>'}`)
+    }
+    // Take the crew dir from what boot REPORTED — re-deriving it from the
+    // checkout basename is the #192 defect.
+    const printed = String(result?.stdout || '').split('\n').map((line) => line.trim()).filter(Boolean)
+    for (let i = printed.length - 1; i >= 0; i -= 1) {
+      let parsed
+      try { parsed = JSON.parse(printed[i]) } catch { continue }
+      if (parsed && typeof parsed.crew_json === 'string' && parsed.crew_json) return resolvePath(dirname(parsed.crew_json))
+    }
+    throw runError('boot-failed', `crew boot for tier "${tier}" in ${checkout} reported no crew_json: ${stderr || String(result?.stdout || '').trim() || '<no output>'}`)
+  }
+
+  function crewSlug(value) {
+    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+  }
+
+  // crew.mjs keys persistent state by its canonical checkout basename/task slug.
+  function tierIdentity(spec) {
+    if (typeof spec.task !== 'string' || !spec.task || typeof spec.checkout !== 'string' || !spec.checkout) return null
+    const task = crewSlug(spec.task)
+    if (!task) return null
+    const checkout = resolvePath(spec.checkout)
+    return `${crewSlug(basename(checkout)) || 'repo'}/${task}`
+  }
+
+  function activeTierRun(spec) {
+    const identity = tierIdentity(spec)
+    if (!identity) return null
+    return [...runs.values()].find((run) => run.tier_identity === identity && !['settled', 'orphaned'].includes(run.lifecycle)) || null
+  }
+
   function enqueue(spec = {}) {
     ensureFolded()
-    if (!isObject(spec) || typeof spec.crew_dir !== 'string' || !spec.crew_dir) throw runError('invalid-spec', 'enqueue requires crew_dir')
-    const crewDir = resolvePath(spec.crew_dir)
+    if (!isObject(spec)) throw runError('invalid-spec', 'enqueue requires a spec object')
+    const hasDir = typeof spec.crew_dir === 'string' && !!spec.crew_dir
+    const hasTier = typeof spec.tier === 'string' && !!spec.tier
+    if (hasDir && hasTier) throw runError('invalid-spec', 'enqueue takes crew_dir or tier, never both')
+    if (!hasDir && !hasTier) throw runError('invalid-spec', 'enqueue requires crew_dir or tier')
+    if (hasTier) {
+      const active = activeTierRun(spec)
+      if (active) throw runError('run-active', `run ${active.run_id} is already active for ${active.crew_dir}`)
+    }
+    const crewDir = hasDir ? resolvePath(spec.crew_dir) : bootTierCrew(spec)
     let crew
     try { crew = JSON.parse(String(read(join(crewDir, 'crew.json'), 'utf8'))) } catch (err) { throw runError('invalid-spec', `cannot read crew.json at ${join(crewDir, 'crew.json')}: ${err.message}`) }
     const pane = paneSeat(crew)
@@ -588,10 +647,12 @@ export function daemon(options = {}) {
     const runId = String(spec.run_id || uuid())
     if (runs.has(runId)) throw runError('run-active', `run ${runId} already exists`)
     const taskReturn = absoluteChildPath(crewDir, spec.task_return || crew.task_return || join('returns', 'task.json'))
+    const identity = hasTier ? tierIdentity(spec) : null
     const record = {
       kind: 'enqueued', run_id: runId, at: now(), crew_dir: crewDir,
       task: spec.task || crew.task || null, brief_file: spec.brief_file || spec.briefFile || null,
       lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: spec.checkout || crew.checkout || null,
+      ...(identity ? { tier_identity: identity } : {}),
       task_return: taskReturn,
     }
     appendRecord(record)
@@ -615,7 +676,7 @@ export function daemon(options = {}) {
     run.lifecycle = 'started'
     appendRecord({ kind: 'started', run_id: runId, at: now(), child_pid: run.child_pid })
     appendEvent(run, normalizeEvent('daemon', { event: 'fork', run_id: runId, pid: run.child_pid }))
-    return { run_id: runId }
+    return { run_id: runId, crew_dir: crewDir }
   }
 
   async function send(params = {}) {

@@ -1,6 +1,6 @@
 // factoryctl owns nothing — the daemon owns the workers, the registry and the projection; this is a socket client that prints.
 import netDefault from 'node:net'
-import { dirname, join, resolve as resolvePath } from 'node:path'
+import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -177,20 +177,35 @@ function outputSink(value, fallback) {
 }
 
 function requireRunArgs(args) {
-  if (typeof args['crew-dir'] !== 'string' || !args['crew-dir']) throw new Error('run requires --crew-dir <dir>')
+  const hasDir = typeof args['crew-dir'] === 'string' && !!args['crew-dir']
+  const hasTier = typeof args.tier === 'string' && !!args.tier
+  if (args['crew-dir'] !== undefined && !hasDir) throw new Error('run requires --crew-dir <dir>')
+  if (args.tier !== undefined && !hasTier) throw new Error('run requires --tier <tier>')
+  if (hasDir && hasTier) throw new Error('run takes --crew-dir <dir> or --tier <tier>, never both: --crew-dir runs a crew you booted, --tier asks the daemon to boot one')
+  if (!hasDir && !hasTier) throw new Error('run requires --crew-dir <dir> (a booted crew) or --tier <tier> (the daemon boots one)')
   if (typeof args.brief !== 'string' || !args.brief) throw new Error('run requires --brief <file>')
+  if (args.task !== undefined && (typeof args.task !== 'string' || !args.task)) throw new Error('run requires --task <slug> when --task is present')
+  if (args.checkout !== undefined && (typeof args.checkout !== 'string' || !args.checkout)) throw new Error('run requires --checkout <dir> when --checkout is present')
 }
+
+// The slug defaults to the brief's filename; crew.mjs slugs it and refuses a degenerate one.
+function briefTask(file) { return basename(file).replace(/\.[^.]+$/, '') }
 
 export async function runVerb(args, deps = {}) {
   requireRunArgs(args)
   const call = deps.call || deps.connection?.call
   if (typeof call !== 'function') throw new Error('run requires a daemon connection')
-  const result = await call('enqueue', {
-    crew_dir: resolvePath(args['crew-dir']),
-    brief_file: resolvePath(args.brief),
-  })
+  const params = { brief_file: resolvePath(args.brief) }
+  if (typeof args['crew-dir'] === 'string' && args['crew-dir']) params.crew_dir = resolvePath(args['crew-dir'])
+  else {
+    const cwd = typeof deps.cwd === 'function' ? deps.cwd() : process.cwd()
+    params.tier = args.tier
+    params.checkout = resolvePath(args.checkout || cwd)
+    params.task = typeof args.task === 'string' && args.task ? args.task : briefTask(args.brief)
+  }
+  const result = await call('enqueue', params)
   const stdout = outputSink(deps.stdout, process.stdout)
-  stdout(`${JSON.stringify({ run_id: result?.run_id })}\n`)
+  stdout(`${JSON.stringify({ run_id: result?.run_id, ...(params.tier && result?.crew_dir ? { crew_dir: result.crew_dir } : {}) })}\n`)
   return result
 }
 

@@ -147,6 +147,10 @@ export function runChild(argv, injected = {}) {
   }
   try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
   write(taskReturn, JSON.stringify(result, null, 2))
+  const mirror = join(returnsDir, 'task.json')
+  if (taskReturn !== mirror) {
+    try { write(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
+  }
   return result
 }
 

@@ -88,6 +88,10 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
   }
 }
 
+const returnFor = (f, runId, attempt = 1) => attempt <= 1
+  ? join(f.returnsDir, `${runId}.task.json`)
+  : join(f.returnsDir, `${runId}.task.a${attempt}.json`)
+
 function mintCrew(f, { name = 'crew-2', checkout = f.dir, task = 'daemon80' } = {}) {
   const crewDir = join(f.dir, name)
   const taskDir = join(crewDir, 'task')
@@ -197,10 +201,12 @@ test('the child entry owns the runner imports', () => {
 
 test('enqueue forks the child entry module', async () => {
   await each(async (f) => {
-    await f.d.enqueue({ crew_dir: f.crewDir })
+    const result = await f.d.enqueue({ crew_dir: f.crewDir })
     assert.equal(f.forks[0][0].endsWith('child.mjs'), true, 'enqueue must fork crew/child.mjs')
     assert.equal(f.forks[0][1][0], '--run-child', 'child fork must retain the run-child argv flag')
-    assert.equal(JSON.parse(f.forks[0][1][1]).budget_enabled, false, 'a no-budget daemon must keep child instrumentation non-load-bearing')
+    const spec = JSON.parse(f.forks[0][1][1])
+    assert.equal(spec.budget_enabled, false, 'a no-budget daemon must keep child instrumentation non-load-bearing')
+    assert.equal(spec.task_return, returnFor(f, result.run_id), 'daemon runs must use a run-addressed return path')
     assert.equal(f.boots.length, 0, 'a crew_dir enqueue must not boot a tier')
   })
 })
@@ -293,6 +299,20 @@ test('a tier enqueue refuses a missing brief file, task, or checkout', async () 
     assert.throws(() => f.d.enqueue({ ...base, checkout: '' }), (err) => err.code === 'invalid-spec')
     assert.equal(f.boots.length, 0)
     assert.equal(f.forks.length, 0)
+  })
+})
+
+test('run_id rejects path traversal and slash characters before admission', async () => {
+  await each(async (f) => {
+    for (const run_id of ['../escape', 'with/slash']) {
+      assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id }), (err) => {
+        assert.equal(err.code, 'invalid-spec')
+        assert.match(err.message, /A-Za-z0-9/)
+        return true
+      })
+    }
+    assert.equal(f.forks.length, 0)
+    assert.deepEqual(f.d.list(), [])
   })
 })
 
@@ -433,24 +453,22 @@ test('a crew dir holding an envelope refuses before admission', async () => {
   })
 })
 
-test('re-enqueueing a settled crew dir refuses by name and forks nothing', async () => {
+test('a settled daemon crew dir admits a second run without losing the first envelope', async () => {
   await each(async (f) => {
-    const first = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' }))
+    const first = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'first' }).run_id
+    const envelope = JSON.stringify({ status: 'escalation', summary: 'first' })
+    writeFileSync(returnFor(f, first), envelope)
+    writeFileSync(f.taskReturn, envelope)
     f.d.poll()
     const before = f.d.result({ run: first })
-    const beforeBytes = readFileSync(f.taskReturn)
+    const beforeBytes = readFileSync(returnFor(f, first))
+    const second = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'second' }).run_id
     assert.equal(before.outcome, 'escalation')
-    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => {
-      assert.equal(err.code, 'crew-settled')
-      assert.match(err.message, /boot/i)
-      assert.match(err.message, new RegExp(f.crewDir.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
-      return true
-    })
-    assert.equal(f.forks.length, 1)
-    assert.equal(f.d.list().length, 1)
+    assert.equal(f.forks.length, 2)
+    assert.notEqual(returnFor(f, first), returnFor(f, second))
     assert.deepEqual(f.d.result({ run: first }), before)
-    assert.equal(readFileSync(f.taskReturn).equals(beforeBytes), true)
+    assert.equal(readFileSync(returnFor(f, first)).equals(beforeBytes), true)
+    assert.equal(f.d.state({ run: second }).state, 'working')
   })
 })
 
@@ -467,20 +485,22 @@ test('crew-settled refusal carries its code over the socket', async () => {
   } finally { await f.d.stop(); f.cleanup() }
 })
 
-test('the RV3-1 sequence leaves one child per crew dir', async () => {
+test('the RV3-1 sequence keeps run-addressed envelopes distinct', async () => {
   await each(async (f) => {
     const shared = join(f.dir, 'checkout-shared')
     const secondCrew = mintCrew(f, { name: 'crew-b', checkout: shared })
-    const first = f.d.enqueue({ crew_dir: f.crewDir, checkout: shared }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    const first = f.d.enqueue({ crew_dir: f.crewDir, checkout: shared, run_id: 'first' }).run_id
+    const envelope = JSON.stringify({ status: 'done' })
+    writeFileSync(returnFor(f, first), envelope)
+    writeFileSync(f.taskReturn, envelope)
     f.d.poll()
-    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => err.code === 'crew-settled')
-    const second = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    const second = f.d.enqueue({ crew_dir: f.crewDir, checkout: shared, run_id: 'second' }).run_id
+    const third = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
     assert.equal(f.forks.length, 2)
-    const spec = JSON.parse(f.forks[1][1][1])
-    assert.equal(spec.crew_dir, secondCrew.crewDir)
+    assert.notEqual(returnFor(f, first), returnFor(f, second))
     assert.equal(f.d.state({ run: first }).state, 'done')
     assert.equal(f.d.state({ run: second }).state, 'working')
+    assert.equal(f.d.state({ run: third }).state, 'queued')
     const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
     assert.equal(records.filter((record) => record.run_id === first && record.kind === 'started').length, 1)
   })
@@ -491,8 +511,9 @@ test('a queued run that acquires an envelope settles instead of forking', async 
     const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
     f.d.enqueue({ crew_dir: f.crewDir })
     const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
-    writeFileSync(secondCrew.taskReturn, JSON.stringify({ status: 'done' }))
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    const first = f.d.list().find((row) => row.crew_dir === f.crewDir).run_id
+    writeFileSync(join(secondCrew.returnsDir, `${queued}.task.json`), JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, first), JSON.stringify({ status: 'done' }))
     f.d.poll()
     assert.equal(f.forks.length, 1)
     assert.equal(f.d.state({ run: queued }).state, 'done')
@@ -520,7 +541,7 @@ test('a settling run starts the next queued run, FIFO, exactly once', async () =
     const first = f.d.enqueue({ crew_dir: f.crewDir }).run_id
     const second = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
     assert.equal(f.forks.length, 1)
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, first), JSON.stringify({ status: 'done' }))
     f.d.poll()
     assert.equal(f.forks.length, 2)
     assert.equal(f.d.state({ run: second }).state, 'working')
@@ -536,10 +557,10 @@ test('queued work starts in FIFO order', async () => {
   await each(async (f) => {
     const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
     const thirdCrew = mintCrew(f, { name: 'crew-c', checkout: join(f.dir, 'checkout-c') })
-    f.d.enqueue({ crew_dir: f.crewDir })
+    const first = f.d.enqueue({ crew_dir: f.crewDir }).run_id
     const second = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
     const third = f.d.enqueue({ crew_dir: thirdCrew.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, first), JSON.stringify({ status: 'done' }))
     f.d.poll()
     assert.equal(f.d.state({ run: second }).state, 'working')
     assert.equal(f.d.state({ run: third }).state, 'queued')
@@ -550,11 +571,11 @@ test('at most one running run per checkout', async () => {
   await each(async (f) => {
     const shared = join(f.dir, 'checkout-shared')
     const secondCrew = mintCrew(f, { name: 'crew-b', checkout: shared })
-    f.d.enqueue({ crew_dir: f.crewDir, checkout: shared })
+    const first = f.d.enqueue({ crew_dir: f.crewDir, checkout: shared }).run_id
     const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
     assert.equal(f.forks.length, 1)
     assert.equal(f.d.state({ run: queued }).state, 'queued')
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, first), JSON.stringify({ status: 'done' }))
     f.d.poll()
     assert.equal(f.forks.length, 2)
     assert.equal(f.d.state({ run: queued }).state, 'working')
@@ -566,7 +587,7 @@ test('a settled escalation frees the slot and is never re-forked', async () => {
     const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
     const parked = f.d.enqueue({ crew_dir: f.crewDir }).run_id
     const next = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' }))
+    writeFileSync(returnFor(f, parked), JSON.stringify({ status: 'escalation' }))
     f.d.poll()
     assert.equal(f.d.result({ run: parked }).outcome, 'escalation')
     assert.equal(f.d.state({ run: parked }).state, 'done')
@@ -592,21 +613,23 @@ test('an eligible review escalation regrants once in place with a continuation b
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 2, findings: [] } })
     appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 1, findings: [{ id: 'RV3-1', severity: 'must-fix', location: 'crew/daemon.mjs:191', summary: 'close this defect' }] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify(envelope, null, 2))
+    writeFileSync(returnFor(f, run), JSON.stringify(envelope, null, 2))
     f.d.poll()
     const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
     assert.equal(records.some((record) => record.run_id === run && record.kind === 'settled'), false)
-    assert.equal(existsSync(f.taskReturn), false)
-    assert.equal(existsSync(join(f.crewDir, 'returns', 'task.regrant-1.json')), true)
+    assert.equal(existsSync(returnFor(f, run)), true)
+    assert.equal(existsSync(returnFor(f, run, 2)), false)
+    assert.equal(readdirSync(join(f.crewDir, 'returns')).some((name) => name.includes('regrant-1')), false)
     assert.equal(existsSync(join(f.taskDir, 'regrant-brief.md')), true)
     assert.notEqual(f.d.state({ run }).state, 'done')
     assert.equal(f.forks.length, 2)
     const spec = JSON.parse(f.forks[1][1][1])
     assert.equal(spec.brief_file, join(f.taskDir, 'regrant-brief.md'))
     assert.equal(spec.continuation, true)
+    assert.equal(spec.task_return, returnFor(f, run, 2))
 
-    writeFileSync(f.taskReturn, JSON.stringify(envelope, null, 2))
+    writeFileSync(returnFor(f, run, 2), JSON.stringify(envelope, null, 2))
     f.d.poll()
     const after = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
     assert.equal(after.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
@@ -631,7 +654,7 @@ test('a stale child callback cannot orphan the regranted continuation', async ()
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 2, findings: [] } })
     appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 1, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'continue on the same checkout' },
@@ -664,7 +687,7 @@ test('a failed regrant registry append restores the envelope before settlement',
     f.d = daemon({ root: f.root, deps: f.deps })
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'registry append fails' },
@@ -674,8 +697,9 @@ test('a failed regrant registry append restores the envelope before settlement',
     }))
     f.d.poll()
     const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
-    assert.equal(existsSync(f.taskReturn), true)
-    assert.equal(existsSync(join(f.crewDir, 'returns', 'task.regrant-1.json')), false)
+    assert.equal(existsSync(returnFor(f, run)), true)
+    assert.equal(existsSync(returnFor(f, run, 2)), false)
+    assert.equal(readdirSync(join(f.crewDir, 'returns')).some((name) => name.includes('regrant-1')), false)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 0)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
     assert.equal(f.d.result({ run }).outcome, 'escalation')
@@ -695,7 +719,7 @@ test('a failed continuation fork restores the terminal escalation', async () => 
     f.d = daemon({ root: f.root, deps: f.deps })
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'continuation fork fails' },
@@ -705,8 +729,9 @@ test('a failed continuation fork restores the terminal escalation', async () => 
     }))
     f.d.poll()
     const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
-    assert.equal(existsSync(f.taskReturn), true)
-    assert.equal(existsSync(join(f.crewDir, 'returns', 'task.regrant-1.json')), true)
+    assert.equal(existsSync(returnFor(f, run)), true)
+    assert.equal(existsSync(returnFor(f, run, 2)), false)
+    assert.equal(readdirSync(join(f.crewDir, 'returns')).some((name) => name.includes('regrant-1')), false)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
     assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
@@ -730,7 +755,7 @@ test('a post-record continuation launch failure settles the restored escalation'
     f.d = daemon({ root: f.root, deps: f.deps })
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'started record fails' },
@@ -740,7 +765,8 @@ test('a post-record continuation launch failure settles the restored escalation'
     }))
     f.d.poll()
     const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
-    assert.equal(existsSync(f.taskReturn), true)
+    assert.equal(existsSync(returnFor(f, run)), true)
+    assert.equal(existsSync(returnFor(f, run, 2)), false)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
     assert.equal(f.d.result({ run }).outcome, 'escalation')
@@ -782,7 +808,7 @@ test('a post-record continuation launch reaps the child it already forked', asyn
     f.d = daemon({ root: f.root, deps: f.deps })
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'started record fails after fork' },
@@ -807,7 +833,7 @@ test('a post-record continuation launch reaps the child it already forked', asyn
     assert.equal(f.forks.length, 2)
 
     assert.equal(f.alive.has(900), false)
-    if (f.alive.has(900)) writeFileSync(f.taskReturn, JSON.stringify({ status: 'done', details: {} }, null, 2))
+    if (f.alive.has(900)) writeFileSync(returnFor(f, run), JSON.stringify({ status: 'done', details: {} }, null, 2))
     assert.equal(f.d.result({ run }).outcome, 'escalation')
   } finally { await f.d.stop(); f.cleanup() }
 })
@@ -817,7 +843,7 @@ test('a rising must-fix sequence settles an escalation instead of regranting', a
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
     appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 2, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'must-fix rose' },
@@ -844,7 +870,7 @@ test('a regrant dependency failure falls back to terminal settlement', async () 
     f.d = daemon({ root: f.root, deps: f.deps })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'brief write fails' },
@@ -866,7 +892,7 @@ test('restart folds a regrant into a queued continuation run', async () => {
   try {
     appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
     const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'review', why: 'restart me' },
@@ -881,8 +907,12 @@ test('restart folds a regrant into a queued continuation run', async () => {
     assert.notEqual(next.state({ run }).state, 'done')
     assert.equal(next.list().find((row) => row.run_id === run).state, 'working')
     assert.equal(f.forks.length, 2)
-    assert.equal(JSON.parse(f.forks[1][1][1]).continuation, true)
-    assert.equal(JSON.parse(f.forks[1][1][1]).brief_file, join(f.taskDir, 'regrant-brief.md'))
+    const continuation = JSON.parse(f.forks[1][1][1])
+    assert.equal(continuation.continuation, true)
+    assert.equal(continuation.brief_file, join(f.taskDir, 'regrant-brief.md'))
+    assert.equal(continuation.task_return, returnFor(f, run, 2))
+    const regrant = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line)).find((record) => record.run_id === run && record.kind === 'regrant')
+    assert.equal(regrant.attempt, 2)
   } finally {
     await next?.stop()
     await f.d.stop()
@@ -1146,7 +1176,7 @@ test('enqueue forks once and projects journal, stream, and envelope evidence', a
     assert.ok(f.d.feed(run, 0).some((event) => event.kind === 'tool-call'))
     assert.ok(f.d.feed(run, 0).some((event) => event.kind === 'usage'))
     const envelope = { status: 'done', summary: 'ok' }
-    writeFileSync(f.taskReturn, JSON.stringify(envelope)); f.d.poll()
+    writeFileSync(returnFor(f, run), JSON.stringify(envelope)); f.d.poll()
     assert.equal(f.d.state({ run }).state, 'done')
     assert.equal(f.d.result({ run }).outcome, 'done')
   })
@@ -1169,7 +1199,7 @@ test('worker state stays working until terminal result and exit marker', async (
 test('idle is not success: an ineligible escalation envelope still yields done only', async () => {
   await each(async (f) => {
     await f.d.start(); const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir }); f.d.poll()
-    writeFileSync(f.taskReturn, JSON.stringify({
+    writeFileSync(returnFor(f, run), JSON.stringify({
       status: 'escalation',
       details: {
         escalation: { where: 'plan', why: 'plan exhaustion is not regrantable' },
@@ -1226,7 +1256,7 @@ test('restart settles a dead child from its envelope', async () => {
   const f = fixture()
   try {
     await f.d.start(); const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir }); await f.d.stop(); f.alive.delete(900)
-    const envelope = { status: 'done', summary: 'survived' }; writeFileSync(f.taskReturn, JSON.stringify(envelope))
+    const envelope = { status: 'done', summary: 'survived' }; writeFileSync(returnFor(f, run), JSON.stringify(envelope))
     const next = daemon({ root: f.root, deps: f.deps }); await next.start(); next.poll()
     assert.equal(next.state({ run }).state, 'done'); assert.equal(next.result({ run }).outcome, 'done'); await next.stop()
   } finally { f.cleanup() }
@@ -1407,7 +1437,7 @@ test('settled runs ignore late child spawn errors', async () => {
     const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
     for (let i = 0; i < 5; i += 1) appendJournal(f, { headless_outcome: 'ok', role: 'builder' })
     f.d.poll()
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, run), JSON.stringify({ status: 'done' }))
     f.d.poll()
     const retained = f.d.feed(run, 0)
     assert.equal(retained.length, 3)
@@ -1436,8 +1466,34 @@ test('runChild gives a task_return override precedence over crew.json', () => {
   const f = fixture(); const override = join(f.returnsDir, 'override.json')
   try {
     runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
-    assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done'); assert.equal(existsSync(f.taskReturn), false)
+    assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done'); assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
   } finally { f.cleanup() }
+})
+
+test('runChild mirrors per-run envelopes and writes the well-known path only once', () => {
+  const f = fixture()
+  try {
+    const own = join(f.returnsDir, 'r1.task.json')
+    const writes = []
+    const result = runChild({ crew_dir: f.crewDir, task_return: own, task: 'x' }, {
+      driveTask: () => ({ status: 'done', summary: 'per-run' }), realIo: () => ({}), preflight: false,
+      writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
+    })
+    assert.equal(result.status, 'done')
+    assert.deepEqual(JSON.parse(readFileSync(own, 'utf8')), JSON.parse(readFileSync(f.taskReturn, 'utf8')))
+    assert.equal(writes.filter((path) => path === own).length, 1)
+    assert.equal(writes.filter((path) => path === f.taskReturn).length, 1)
+  } finally { f.cleanup() }
+
+  const wellKnown = fixture()
+  try {
+    const writes = []
+    runChild({ crew_dir: wellKnown.crewDir, task_return: wellKnown.taskReturn, task: 'x' }, {
+      driveTask: () => ({ status: 'done', summary: 'well-known' }), realIo: () => ({}), preflight: false,
+      writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
+    })
+    assert.equal(writes.filter((path) => path === wellKnown.taskReturn).length, 1)
+  } finally { wellKnown.cleanup() }
 })
 
 test('runChild records to the explicit ledger and honors spec.ledger_db', () => {
@@ -1692,7 +1748,7 @@ test('settled feed compaction is structural and bounded', async () => {
     const before = bounded.d.feed(run, 0)
     assert.ok(before.length > retention)
     const firstSeq = before[0].seq
-    writeFileSync(bounded.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(bounded, run), JSON.stringify({ status: 'done' }))
     bounded.d.poll()
     const after = bounded.d.feed(run, 0)
     assert.ok(after.length <= retention)
@@ -1708,7 +1764,7 @@ test('feed eviction costs the registry nothing', async () => {
     const { run_id: run } = bounded.d.enqueue({ crew_dir: bounded.crewDir })
     for (let i = 0; i < 6; i += 1) appendJournal(bounded, { headless_outcome: 'ok', role: 'builder' })
     bounded.d.poll()
-    writeFileSync(bounded.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(bounded, run), JSON.stringify({ status: 'done' }))
     bounded.d.poll()
     assert.equal(bounded.d.list().find((row) => row.run_id === run).state, 'done')
     assert.equal(bounded.d.state({ run }).state, 'done')
@@ -1724,7 +1780,7 @@ test('tail after settle replays the retained feed window', async () => {
     const { run_id: run } = bounded.d.enqueue({ crew_dir: bounded.crewDir })
     for (let i = 0; i < 6; i += 1) appendJournal(bounded, { headless_outcome: 'ok', role: 'builder' })
     bounded.d.poll()
-    writeFileSync(bounded.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(bounded, run), JSON.stringify({ status: 'done' }))
     bounded.d.poll()
     const retained = bounded.d.feed(run, 0)
     const frames = await request(
@@ -1751,7 +1807,7 @@ test('settle sends a subscriber an end frame that claims no outcome', async () =
     await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'end', cmd: 'tail', params: { run, since: 0 } })}\n`)
     await new Promise((resolve) => setTimeout(resolve, 20))
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, run), JSON.stringify({ status: 'done' }))
     f.d.poll()
     await new Promise((resolve) => setTimeout(resolve, 20))
     const end = frames.find((frame) => frame.end)
@@ -1927,7 +1983,7 @@ test('send refuses a settled run', async () => {
   await each(async (f) => {
     const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
     stageRpcSeat(f, 'builder')
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(returnFor(f, run), JSON.stringify({ status: 'done' }))
     f.d.poll()
     await assert.rejects(() => f.d.send({ run, message: 'guidance', role: 'builder' }), (err) => err.code === 'not-live')
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })

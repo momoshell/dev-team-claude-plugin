@@ -287,6 +287,19 @@ test('the lead charter documents the typed exhaustion accept contract', () => {
   assert.match(charter, /code-refused/)
 })
 
+test('the planner charter documents how to discover files_in_scope', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  for (const token of [
+    'every test that pins it',
+    'crew/daemon.test.mjs',
+    'crew/factoryctl.test.mjs',
+    'crew/adapter-*.test.mjs',
+    '#193',
+    '#199',
+  ]) assert.ok(charter.includes(token), token)
+  assert.match(charter, /grep/i)
+})
+
 test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero consults', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },

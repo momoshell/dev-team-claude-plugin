@@ -59,6 +59,18 @@ against it with git and bounces anything outside. A missing or empty list
 escalates the whole task — the gate cannot be skipped. Paths repo-relative,
 exactly as `git status --porcelain` prints them.
 
+Discover that list; do not guess it. A contract is not just the file that
+defines it — it is every test that pins it. For each production file you put in
+scope, grep the repo for its exported symbols, its error codes, and the paths
+and filenames it writes; every test file that hits belongs in scope too. A
+`crew/daemon.mjs` admission or settle change pulls in `crew/daemon.test.mjs`
+AND `crew/factoryctl.test.mjs` — the latter settles a run by writing the
+well-known `returns/task.json`. An adapter change pulls in the matching
+`crew/adapter-*.test.mjs` files, listed literally (scope takes no globs). Twice
+— #193 and #199 — a scope fixed without that grep sent the run to
+`escalate:scope`: the builder needed a test file the plan had never looked for,
+and the gate was right to refuse it.
+
 `gate_path` is required whenever you return a `gate_cmd`; it must be an absolute
 path inside the task dir. The driver measures gate bytes from that path and
 never parses `gate_cmd`; a path outside the task dir is ignored.

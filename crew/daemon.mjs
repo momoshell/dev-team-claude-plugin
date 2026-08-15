@@ -8,26 +8,53 @@ import {
   mkdirSync as fsMkdirSync,
   unlinkSync as fsUnlinkSync,
   openSync as fsOpenSync,
+  writeSync as fsWriteSync,
   readSync as fsReadSync,
   fstatSync as fsFstatSync,
   closeSync as fsCloseSync,
   statSync as fsStatSync,
 } from 'node:fs'
-import { join, resolve as resolvePath } from 'node:path'
+import { dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fork as cpFork, execSync as cpExecSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
+import { pathToFileURL } from 'node:url'
 
-import { splitFrames } from './headless-rpc.mjs'
+import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { driveTask as defaultDriveTask } from './drive.mjs'
 import { realIo as defaultRealIo, DEFAULT_TRANSPORT } from './realio.mjs'
 
 const MAX_FRAME_BYTES = 1024 * 1024
 const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
+const HERE = dirname(SELF_PATH)
+const adapterCache = new Map()
+const SEND_INTERJECTION = 'boundary'
+const MAX_SEND_BYTES = 512
+
+function runError(code, message) { const err = new Error(message); err.code = code; return err }
+
+async function capabilityProfile(agent, transport) {
+  const name = String(agent || 'claude')
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw runError('not-capable', `invalid adapter name ${JSON.stringify(name)}`)
+  let mod = adapterCache.get(name)
+  if (!mod) {
+    const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
+    if (!fsExistsSync(file)) throw runError('not-capable', `no adapter "${name}" is installed`)
+    try { mod = await import(pathToFileURL(file).href) }
+    catch (err) { throw runError('not-capable', `cannot load adapter "${name}": ${err?.message || String(err)}`) }
+    adapterCache.set(name, mod)
+  }
+  try {
+    if (typeof mod.capabilitiesFor !== 'function') throw new Error(`adapter "${name}" has no capabilitiesFor export`)
+    return mod.capabilitiesFor({ transport })
+  } catch (err) {
+    throw runError('not-capable', err?.message || String(err))
+  }
+}
 
 export const RUN_STATES = Object.freeze(['working', 'blocked', 'done', 'dead'])
 export const EVENT_KINDS = Object.freeze(['started', 'tool-call', 'blocked', 'terminal-result', 'died', 'usage'])
-export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop'])
+export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
 // Keep a tail for post-settle clients; ADR-029 already makes the projection lossy, so bound rather than drop.
 export const SETTLED_FEED_RETENTION = 50
 
@@ -181,6 +208,7 @@ export function daemon(options = {}) {
   const mkdir = injected.mkdirSync || fsMkdirSync
   const unlink = injected.unlinkSync || fsUnlinkSync
   const open = injected.openSync || fsOpenSync
+  const writeAt = injected.writeSync || fsWriteSync
   const readAt = injected.readSync || fsReadSync
   const fstat = injected.fstatSync || fsFstatSync
   const close = injected.closeSync || fsCloseSync
@@ -199,8 +227,6 @@ export function daemon(options = {}) {
   let started = false
   let ownsFiles = false
   let folded = false
-
-  function runError(code, message) { const err = new Error(message); err.code = code; return err }
 
   function appendRecord(record) {
     mkdir(root, { recursive: true })
@@ -587,6 +613,79 @@ export function daemon(options = {}) {
     return { run_id: runId }
   }
 
+  async function send(params = {}) {
+    ensureFolded()
+    if (!isObject(params)) throw runError('invalid-params', 'send requires params to be an object')
+    const run = findRun(params.run)
+    pollRun(run)
+    if (typeof params.message !== 'string' || params.message.length === 0) throw runError('invalid-params', 'send requires a non-empty message')
+    if (['settled', 'orphaned'].includes(run.lifecycle) || run.child_dead) {
+      throw runError('not-live', `run ${run.run_id} has settled — send reaches live workers only; the envelope is the record`)
+    }
+    const crew = crewConfig(run)
+    if (!crew || !isObject(crew.members)) throw runError('invalid-spec', `cannot read crew.json at ${join(run.crew_dir, 'crew.json')}`)
+    const members = crew.members
+    const roles = Object.keys(members)
+    let role
+    let member
+    let caps
+    if (params.role !== undefined) {
+      role = params.role
+      if (!Object.prototype.hasOwnProperty.call(members, role)) {
+        throw runError('not-found', `unknown role ${JSON.stringify(role)} for run ${run.run_id} (seated roles: ${roles.join(', ')})`)
+      }
+      member = members[role]
+      caps = await capabilityProfile(member?.agent, member?.transport)
+    } else {
+      const profiles = []
+      for (const candidateRole of roles) {
+        const candidate = members[candidateRole]
+        try {
+          profiles.push({ role: candidateRole, member: candidate, caps: await capabilityProfile(candidate?.agent, candidate?.transport) })
+        } catch (error) {
+          profiles.push({ role: candidateRole, member: candidate, caps: null, error })
+        }
+      }
+      const steerable = profiles.filter((candidate) => candidate.caps?.interjection === SEND_INTERJECTION)
+      if (steerable.length === 1) {
+        ({ role, member, caps } = steerable[0])
+      } else if (steerable.length > 1) {
+        throw runError('invalid-params', `multiple steerable seats for run ${run.run_id}: ${steerable.map((candidate) => candidate.role).join(', ')} — specify --role`)
+      } else {
+        const listing = profiles.map((candidate) => {
+          const transport = JSON.stringify(candidate.member?.transport)
+          const interjection = JSON.stringify(candidate.caps?.interjection ?? 'unavailable')
+          return `${candidate.role}: transport ${transport}, interjection ${interjection}`
+        }).join('; ')
+        throw runError('not-capable', `no seat for run ${run.run_id} declares interjection "${SEND_INTERJECTION}"; ${listing}`)
+      }
+    }
+    if (caps.interjection !== SEND_INTERJECTION) {
+      throw runError('not-capable', `seat ${role} of run ${run.run_id} declares interjection ${JSON.stringify(caps.interjection)} on transport ${JSON.stringify(member.transport)}; send requires interjection "${SEND_INTERJECTION}" — refusing rather than queueing`)
+    }
+    if (member.transport !== 'headless-rpc') {
+      throw runError('not-capable', `no command channel is implemented for transport ${JSON.stringify(member.transport)}`)
+    }
+    const fifo = seatCommandPath(join(run.crew_dir, 'task'), role)
+    const seatDir = dirname(fifo)
+    if (exists(join(seatDir, 'exit'))) throw runError('not-live', `seat ${role} has exited`)
+    const workerPid = rpcPid(join(seatDir, 'pgid'))
+    if (workerPid == null || processAlive(kill, workerPid) === false) throw runError('not-live', `seat ${role} has no running worker`)
+    if (!exists(fifo)) throw runError('not-live', `seat ${role} has no command channel`)
+    const id = `send-${uuid()}`
+    const line = `${JSON.stringify({ ...steerFrame(params.message), id })}\n`
+    const size = Buffer.byteLength(line, 'utf8')
+    if (size > MAX_SEND_BYTES) throw runError('invalid-params', `send frame exceeds ${MAX_SEND_BYTES} bytes (actual ${size})`)
+    try {
+      const fd = open(fifo, 'r+')
+      try { writeAt(fd, line) } finally { close(fd) }
+    } catch (error) {
+      throw runError('not-live', `cannot write to the seat command channel: ${error?.message || String(error)}`)
+    }
+    appendRecord({ kind: 'sent', run_id: run.run_id, at: now(), role, command_id: id })
+    return { delivered: 'command-channel', run_id: run.run_id, role, transport: member.transport, interjection: SEND_INTERJECTION, command_id: id }
+  }
+
   function adoptOrOrphan() {
     for (const run of runs.values()) {
       if (['settled', 'orphaned'].includes(run.lifecycle)) continue
@@ -714,6 +813,7 @@ export function daemon(options = {}) {
     if (!isObject(params)) throw runError('invalid-params', 'params must be an object')
     if (cmd === 'ping') return { pid, socket: socketPath }
     if (cmd === 'enqueue') return enqueue(params)
+    if (cmd === 'send') return await send(params)
     if (cmd === 'list') return list()
     if (cmd === 'state') return state(params)
     if (cmd === 'result') return result(params)
@@ -819,7 +919,7 @@ export function daemon(options = {}) {
     }
   }
 
-  return { start, stop, poll, enqueue, state, result, list, feed, subscribers: () => [...subscribers].map(({ id, runId }) => ({ id, run_id: runId })), socketPath, root }
+  return { start, stop, poll, enqueue, send, state, result, list, feed, subscribers: () => [...subscribers].map(({ id, runId }) => ({ id, run_id: runId })), socketPath, root }
 }
 
 function childArguments(argv) {

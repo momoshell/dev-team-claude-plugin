@@ -42,6 +42,37 @@ export function nextRung(roster, tier, role) {
   }
 }
 
+export function nextModelRung(roster, cell) {
+  try {
+    const provider = cell?.provider
+    const id = cell?.id
+    if (typeof provider !== 'string' || provider.trim() === '' || typeof id !== 'string' || id.trim() === '') return null
+    const models = roster?.models
+    if (!models || typeof models !== 'object' || Array.isArray(models)) return null
+    const currentKey = `${provider}/${id}`
+    if (!Object.hasOwn(models, currentKey)) return null
+    const current = models[currentKey]
+    if (!current || typeof current !== 'object' || Array.isArray(current) || !Number.isFinite(current.cost_in_per_mtok)) return null
+    const prefix = `${provider}/`
+    const candidates = []
+    for (const [key, entry] of Object.entries(models)) {
+      if (!key.startsWith(prefix)) continue
+      const nextId = key.slice(prefix.length)
+      if (!nextId || !entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+      if (!Number.isFinite(entry.cost_in_per_mtok) || entry.cost_in_per_mtok <= current.cost_in_per_mtok) continue
+      if (Array.isArray(entry.tags) && entry.tags.includes('override-only')) continue
+      candidates.push({ id: nextId, cost: entry.cost_in_per_mtok })
+    }
+    candidates.sort((a, b) => a.cost - b.cost || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    const next = candidates[0]
+    if (!next) return null
+    return {
+      rung: `model:${id}→${next.id}`,
+      cell: { provider, id: next.id, effort: cell.effort, agent: cell.agent },
+    }
+  } catch { return null }
+}
+
 function addTotals(prev, delta) {
   return {
     billed_input_tokens: (prev?.billed_input_tokens ?? 0) + (delta?.billed_input_tokens ?? 0),
@@ -356,12 +387,10 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           model: cell?.model ?? null,
         })
         from = snapshot(live)
-        if (m.transport !== HEADLESS_TRANSPORT) {
-          const why = m.transport === HEADLESS_RPC_TRANSPORT
-            ? 'a headless-rpc seat reads its cell once at worker spawn (crew/headless-rpc.mjs:299); a mid-session change needs a respawn against the resumed session — the follow-up slice, not this one'
-            : m.transport === DEFAULT_TRANSPORT
-              ? 'a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
-              : `transport ${String(m.transport)} cannot change a seat cell in-session`
+        if (m.transport !== HEADLESS_TRANSPORT && m.transport !== HEADLESS_RPC_TRANSPORT) {
+          const why = m.transport === DEFAULT_TRANSPORT
+            ? 'a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
+            : `transport ${String(m.transport)} cannot change a seat cell in-session`
           return { applied: false, reason: 'transport', why, from, to: null }
         }
         if (!crew.tier) return { applied: false, reason: 'no-tier', why: 'booted with --roles rather than --tier, so there is no ladder', from, to: null }
@@ -373,7 +402,10 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           const message = err?.message ?? String(err)
           return { applied: false, reason: 'transport', why: `could not read the runtime roster: ${message}`, from, to: null }
         }
-        const rung = nextRung(roster, crew.tier, role)
+        const currentCell = roster?.tiers?.[crew.tier]?.[role] || roster?.[crew.tier]?.[role]
+        const currentCellOrLive = currentCell || live
+        const modelFallbackWhy = 'model catalog has no costlier same-provider, non-override-only candidate'
+        let rung = nextRung(roster, crew.tier, role)
         if (!rung) {
           const index = RESEAT_LADDER.indexOf(crew.tier)
           const why = index < 0
@@ -381,20 +413,27 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             : index === RESEAT_LADDER.length - 1
               ? `tier ${String(crew.tier)} is already at the top of the mechanical → build → judge ladder`
               : `the next tier ${RESEAT_LADDER[index + 1]} seats no ${roleName}`
-          return { applied: false, reason: 'exhausted', why, from, to: null }
+          // An unknown tier is not a usable ladder position, so retain its
+          // existing exhausted result rather than treating the live cell as a
+          // model-only upgrade opportunity.
+          if (index < 0) return { applied: false, reason: 'exhausted', why, from, to: null }
+          rung = nextModelRung(roster, currentCellOrLive)
+          if (!rung) return { applied: false, reason: 'exhausted', why: `${why}; ${modelFallbackWhy}`, from, to: null }
         }
-        const currentCell = roster?.tiers?.[crew.tier]?.[role] || roster?.[crew.tier]?.[role]
         const sameCell = currentCell
           && currentCell.provider === rung.cell.provider
           && currentCell.id === rung.cell.id
           && currentCell.effort === rung.cell.effort
         if (sameCell) {
-          return {
-            applied: false,
-            reason: 'exhausted',
-            why: `the next rung repeats the identical cell ${currentCell.id} with effort ${currentCell.effort}`,
-            from,
-            to: null,
+          rung = nextModelRung(roster, currentCellOrLive)
+          if (!rung) {
+            return {
+              applied: false,
+              reason: 'exhausted',
+              why: `the next rung repeats the identical cell ${currentCell.id} with effort ${currentCell.effort}; ${modelFallbackWhy}`,
+              from,
+              to: null,
+            }
           }
         }
         if (rung.cell.agent !== m.agent) {
@@ -411,6 +450,17 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           ? adapter.modelString({ provider: rung.cell.provider, id: rung.cell.id })
           : rung.cell.id
         const to = { ...rung.cell, model }
+        if (m.transport === HEADLESS_RPC_TRANSPORT) {
+          const refuse = (why) => ({ applied: false, reason: 'transport', why: String(why || `headless-rpc seat ${roleName} could not be retired`), from, to: null })
+          try {
+            const transport = transportIo(HEADLESS_RPC_TRANSPORT, role)
+            if (typeof transport?.retire !== 'function') return refuse(`headless-rpc seat ${roleName} has no retire operation`)
+            const retired = transport.retire(role)
+            if (retired?.retired !== true && retired?.reason !== 'not-running') return refuse(retired?.why || `headless-rpc seat ${roleName} could not be retired (${retired?.reason || 'unknown reason'})`)
+          } catch (err) {
+            return refuse(err?.why || err?.message || String(err))
+          }
+        }
         for (const target of [m, crew.seats?.[role]]) {
           if (!target) continue
           target.model = model
@@ -419,7 +469,9 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           target.id = rung.cell.id
         }
         try { saveCrew(paths, crew, { writeFileSync, renameSync }) } catch { /* persistence is best-effort */ }
-        try { io.log({ at: now(), reseat: { role, from, to, rung: rung.rung, reason } }) } catch { /* journal is diagnostics */ }
+        const record = { role, from, to, rung: rung.rung, reason }
+        if (m.transport === HEADLESS_RPC_TRANSPORT) record.retired = true
+        try { io.log({ at: now(), reseat: record }) } catch { /* journal is diagnostics */ }
         return { applied: true, from, to, rung: rung.rung }
       } catch (err) {
         return { applied: false, reason: 'transport', why: `io.reseat failed: ${err?.message ?? err}`, from, to: null }

@@ -375,6 +375,18 @@ async function withHome(home, fn) {
 
 function testCrewDir(home, checkout, task) { return join(home, '.crew', basename(checkout), task) }
 
+// `pathsFor` slugs the checkout BASENAME and `slug()` lowercases (crew.mjs:86),
+// so a mkdtemp name — whose random suffix is mixed case — only resolves back to
+// the state dir on a case-INSENSITIVE filesystem: green on macOS, ENOENT on
+// Linux CI. Nest a lowercase `checkout` inside the temp root so that
+// basename === slug(basename) on either filesystem.
+function testCheckout(prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  const checkout = join(root, 'checkout')
+  mkdirSync(checkout)
+  return { root, checkout }
+}
+
 function callCounter() {
   const calls = []
   const fn = (...args) => { calls.push(args); return { ok: true, stdout: '' } }
@@ -391,7 +403,7 @@ test('bootAllocation carries resolved transports alongside tier provenance', () 
 
 test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-headless-home-'))
-  const checkout = mkdtempSync(join(tmpdir(), 'crew-headless-checkout-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-headless-checkout-')
   const task = 'all-headless'
   const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
   try {
@@ -424,13 +436,13 @@ test('all-headless tier boot makes no cmux calls and records daemon-acceptable s
     assert.match(daemonSource, /paneSeat/)
   } finally {
     rmSync(home, { recursive: true, force: true })
-    rmSync(checkout, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
   }
 })
 
 test('mixed boot still creates a workspace, seats panes, and leaves the headless seat unsurfaced', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-mixed-home-'))
-  const checkout = mkdtempSync(join(tmpdir(), 'crew-mixed-checkout-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-mixed-checkout-')
   const task = 'mixed'
   const cmuxCalls = []
   const cmux = (verb, argv) => { cmuxCalls.push([verb, argv]); return { ok: true, stdout: '' } }
@@ -458,7 +470,7 @@ test('mixed boot still creates a workspace, seats panes, and leaves the headless
     assert.equal(renameTab.calls.length, paneRoles.length)
   } finally {
     rmSync(home, { recursive: true, force: true })
-    rmSync(checkout, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
   }
 })
 

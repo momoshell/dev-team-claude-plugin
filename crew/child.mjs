@@ -77,7 +77,9 @@ export function runChild(argv, injected = {}) {
     roles: roles.filter((role) => role !== 'lead'),
     continuation: spec.continuation === true,
     seatedRoles: [...roles],
-    lane: spec.lane || null, suite: spec.suite || 'node --test',
+    // This is the same lane as package.json's scripts.test; reasoning lives in
+    // crew/crew.mjs's ctx block, and crew/crew.test.mjs pins the agreement.
+    lane: spec.lane || null, suite: spec.suite || 'node --test --test-timeout=30000',
   }
   const failure = (err) => ({
     status: 'escalation', summary: `Task ${ctx.task} needs a human: the driver crashed (${err.message})`,

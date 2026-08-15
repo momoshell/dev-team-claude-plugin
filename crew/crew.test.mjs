@@ -1245,3 +1245,22 @@ test('a degraded emitter is inert for the adapter and drive', () => {
     rmSync(parent, { recursive: true, force: true })
   }
 })
+
+test('package, crew, and child test lanes stay identical and bounded', () => {
+  const packagePath = new URL('../package.json', import.meta.url)
+  const crewPath = new URL('./crew.mjs', import.meta.url)
+  const childPath = new URL('./child.mjs', import.meta.url)
+  const packageLane = JSON.parse(readFileSync(packagePath, 'utf8')).scripts?.test
+  const crewMatch = readFileSync(crewPath, 'utf8').match(/suite:\s*args\.suite\s*\|\|\s*'([^']*)'/)
+  const childMatch = readFileSync(childPath, 'utf8').match(/suite:\s*spec\.suite\s*\|\|\s*'([^']*)'/)
+  const agreement = 'package.json scripts.test, crew/crew.mjs default, and crew/child.mjs default must be changed together'
+
+  assert.ok(crewMatch, `expected the crew.mjs default suite in ${crewPath}`)
+  assert.ok(childMatch, `expected the child.mjs default suite in ${childPath}`)
+  assert.equal(crewMatch[1], packageLane, agreement)
+  assert.equal(childMatch[1], packageLane, agreement)
+
+  const timeout = packageLane?.match(/--test-timeout=(\d+)/)
+  assert.ok(timeout, `expected --test-timeout in package.json scripts.test at ${packagePath}`)
+  assert.ok(Number(timeout[1]) >= 30000, `expected package.json scripts.test timeout >= 30000ms at ${packagePath}`)
+})

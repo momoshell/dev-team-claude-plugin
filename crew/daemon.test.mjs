@@ -2,18 +2,21 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
   openSync, readSync, fstatSync, closeSync, statSync, utimesSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createRequire } from 'node:module'
 import {
-  daemon, deriveState, normalizeEvent, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY,
+  daemon, deriveState, normalizeEvent, usageWindow, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
 } from './daemon.mjs'
 import { runChild } from './child.mjs'
 import { DEFAULT_TRANSPORT } from './realio.mjs'
 import { splitFrames } from './headless-rpc.mjs'
+import { openRun } from '../scripts/factory/emit.mjs'
+import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON_SOURCE = readFileSync(join(HERE, 'daemon.mjs'), 'utf8')
@@ -23,8 +26,16 @@ const DAEMON_CODE = sourceCode(DAEMON_SOURCE)
 const CHILD_CODE = sourceCode(CHILD_SOURCE)
 const DRIVE_MODULE = ['drive', 'mjs'].join('.')
 const REALIO_MODULE = ['realio', 'mjs'].join('.')
+const require = createRequire(import.meta.url)
+function sqliteAvailable() {
+  try {
+    require('node:sqlite')
+    return true
+  } catch { return false }
+}
+const LEDGER_SQLITE_OK = Number.parseInt(process.versions.node, 10) >= Number.parseInt(NODE_FLOOR, 10) && sqliteAvailable()
 
-function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention, bootCrewDir, spawnSync: spawnImpl, concurrency } = {}) {
+function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention, bootCrewDir, spawnSync: spawnImpl, concurrency, budget, usageWindow: usageWindowImpl, now: nowImpl, nodeVersion: nodeVersionImpl } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
   const root = join(dir, 'daemon')
   const crewDir = join(dir, 'crew')
@@ -66,8 +77,11 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
     setInterval: () => null,
     clearInterval: () => {},
     feedRetention,
+    ...(usageWindowImpl ? { usageWindow: usageWindowImpl } : {}),
+    ...(nowImpl ? { now: nowImpl } : {}),
+    ...(nodeVersionImpl ? { nodeVersion: nodeVersionImpl } : {}),
   }
-  const d = daemon({ root, concurrency, deps })
+  const d = daemon({ root, concurrency, ...(budget === undefined ? {} : { budget }), deps })
   return {
     dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
@@ -184,6 +198,7 @@ test('enqueue forks the child entry module', async () => {
     await f.d.enqueue({ crew_dir: f.crewDir })
     assert.equal(f.forks[0][0].endsWith('child.mjs'), true, 'enqueue must fork crew/child.mjs')
     assert.equal(f.forks[0][1][0], '--run-child', 'child fork must retain the run-child argv flag')
+    assert.equal(JSON.parse(f.forks[0][1][1]).budget_enabled, false, 'a no-budget daemon must keep child instrumentation non-load-bearing')
     assert.equal(f.boots.length, 0, 'a crew_dir enqueue must not boot a tier')
   })
 })
@@ -596,6 +611,186 @@ test('invalid concurrency is refused at construction and the default is two', as
   })
 })
 
+test('budget options validate at construction and admit under the ceiling', async () => {
+  for (const bad of [0, -1, 1.5, '4000', null, new Date()]) {
+    assert.throws(() => daemon({ budget: { max_tokens: bad } }), /budget(?:\.max_tokens)?/)
+  }
+  assert.throws(() => daemon({ budget: 42 }), /budget/)
+  assert.throws(() => daemon({ budget: { max_tokens: 1, window_ms: 0 } }), /budget\.window_ms/)
+  assert.throws(() => daemon({ budget: { max_tokens: 1, window_ms: Number.MAX_SAFE_INTEGER } }), /budget\.window_ms/)
+  assert.throws(() => daemon({ budget: { max_tokens: 1, ledger_db: '' } }), /budget\.ledger_db/)
+  assert.throws(() => daemon({ budget: 'lots' }), /budget/)
+  assert.doesNotThrow(() => daemon({ budget: { max_tokens: 1 } }))
+  assert.doesNotThrow(() => daemon({ budget: null }))
+  assert.equal(DEFAULT_BUDGET_WINDOW_MS, 24 * 60 * 60 * 1000)
+  let seen
+  await each(async (f) => {
+    f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(f.forks.length, 1, 'under-ceiling admission must still fork')
+    assert.equal(typeof seen.dbPath, 'string')
+    assert.match(seen.since, /Z$/)
+    assert.equal(seen.nodeVersion, process.versions.node, 'an omitted nodeVersion must use the running runtime')
+  }, {
+    budget: { max_tokens: 100 },
+    usageWindow: (args) => { seen = args; return { measured: true, total: 99, sessions: 1 } },
+  })
+})
+
+test('budget exceeded refuses before boot, registration, queueing, and downgrade', () => {
+  const f = fixture({ budget: { max_tokens: 4000000 }, usageWindow: () => ({ measured: true, total: 4812340, sessions: 7 }) })
+  try {
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => {
+      assert.equal(err.code, 'budget-exceeded')
+      assert.match(err.message, /4812340/)
+      assert.match(err.message, /4000000/)
+      assert.match(err.message, /since/)
+      assert.match(err.message, /pane/i)
+      assert.match(err.message, /not counted/i)
+      return true
+    })
+    assert.equal(f.forks.length, 0)
+    assert.equal(f.boots.length, 0)
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
+    assert.deepEqual(f.d.list(), [])
+    assert.throws(() => f.d.enqueue({ tier: 'build', task: 'tier-task', checkout: f.dir, brief_file: f.brief }), (err) => err.code === 'budget-exceeded')
+    assert.equal(f.boots.length, 0, 'budget refusal must happen before crew boot')
+  } finally { f.cleanup() }
+})
+
+test('an unmeasurable budget window refuses with its path and reason', () => {
+  const ledgerPath = join(tmpdir(), `budget-unreadable-${process.pid}-${Date.now()}.db`)
+  const f = fixture({ budget: { max_tokens: 10, ledger_db: ledgerPath }, usageWindow: () => ({ measured: false, total: null, sessions: 0, why: 'disk on fire' }) })
+  try {
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => {
+      assert.equal(err.code, 'budget-unmeasurable')
+      assert.match(err.message, /disk on fire/)
+      assert.match(err.message, /ledger at/)
+      return true
+    })
+  } finally { f.cleanup() }
+})
+
+test('an absent ledger is measured only at the ledger floor and child specs carry budget state', async () => {
+  const ledgerPath = join(tmpdir(), `missing-budget-${process.pid}-${Date.now()}.db`)
+  const f = fixture({ budget: { max_tokens: 1, ledger_db: ledgerPath } })
+  try {
+    const usage = usageWindow({ dbPath: ledgerPath, since: '2026-01-01T00:00:00.000Z' })
+    if (!LEDGER_SQLITE_OK) {
+      assert.equal(usage.measured, false, 'an absent db cannot be called fresh when this runtime cannot read future rows')
+      assert.equal(usage.total, null)
+      assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => err.code === 'budget-unmeasurable')
+      assert.equal(f.forks.length, 0, 'an unmeasurable configured budget must not fork a JSONL-only child')
+      return
+    }
+    assert.deepEqual(usage, { measured: true, total: 0, sessions: 0 })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(f.forks.length, 1)
+    const spec = JSON.parse(f.forks[0][1][1])
+    assert.equal(typeof spec.ledger_db, 'string')
+    assert.equal(spec.ledger_db, ledgerPath)
+    assert.equal(spec.budget_enabled, true)
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('usageWindow fails closed below the emitter floor and preserves its at-floor absent-db fast path', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daemon-budget-floor-'))
+  const dbPath = join(dir, 'ledger.db')
+  const since = '2026-01-02T00:00:00.000Z'
+  try {
+    assert.equal(LEDGER_NODE_FLOOR, '24.0.0')
+    for (const nodeVersion of ['22.13.0', '20.20.2', 'not-a-version']) {
+      const result = usageWindow({ dbPath, since, nodeVersion })
+      assert.equal(result.measured, false, `node ${nodeVersion} must fail closed below the emitter floor`)
+      assert.equal(result.total, null)
+      assert.equal(result.sessions, 0)
+      assert.match(result.why, /24\.0\.0/)
+    }
+    for (const nodeVersion of ['24.0.0', '24.15.0']) {
+      const result = usageWindow({ dbPath, since, nodeVersion })
+      if (sqliteAvailable()) {
+        assert.deepEqual(result, { measured: true, total: 0, sessions: 0 })
+      } else {
+        assert.equal(result.measured, false, 'a simulated at-floor version cannot make this below-floor process require SQLite')
+        assert.match(result.why, /node:sqlite/)
+      }
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('the ledger floor gates a configured budget but not a no-budget daemon', () => {
+  const ledgerPath = join(tmpdir(), `floor-budget-${process.pid}-${Date.now()}.db`)
+  const budgeted = fixture({ budget: { max_tokens: 1, ledger_db: ledgerPath }, nodeVersion: '22.13.0' })
+  const free = fixture({ nodeVersion: '22.13.0' })
+  try {
+    assert.throws(() => budgeted.d.enqueue({ crew_dir: budgeted.crewDir }), (err) => {
+      assert.equal(err.code, 'budget-unmeasurable')
+      assert.match(err.message, /24\.0\.0/)
+      return true
+    })
+    assert.equal(budgeted.forks.length, 0)
+    assert.equal(existsSync(join(budgeted.root, 'runs.jsonl')), false)
+    free.d.enqueue({ crew_dir: free.crewDir })
+    assert.equal(free.forks.length, 1, 'the ledger floor must gate only configured budgets')
+  } finally {
+    budgeted.cleanup()
+    free.cleanup()
+  }
+})
+
+test('usageWindow sums in-window running totals and fails closed below the ledger floor', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'daemon-budget-reader-'))
+  const dbPath = join(dir, 'ledger.db')
+  const since = '2026-01-02T00:00:00.000Z'
+  try {
+    if (!LEDGER_SQLITE_OK) {
+      // The ledger intentionally leaves no SQLite mirror below NODE_FLOOR.
+      // A ledger file that does exist is unmeasurable, never a fabricated zero.
+      writeFileSync(dbPath, 'not a sqlite database')
+      const result = usageWindow({ dbPath, since })
+      assert.equal(result.measured, false, 'below-floor readers must fail closed for an existing ledger')
+      assert.equal(result.total, null)
+      assert.equal(result.sessions, 0)
+      assert.equal(typeof result.why, 'string')
+    } else {
+      const ledger = openLedger({ dbPath, now: () => Date.parse('2026-01-02T00:00:02.000Z') })
+      const add = (adwId, sessionId, startedAt, values) => {
+        ledger.startAgentSession({
+          adw_id: adwId, dispatch_id: `dispatch-${sessionId}`, role: 'builder', model: 'x',
+          claude_session_id: sessionId, transcript_path: null, started_at: startedAt,
+        })
+        ledger.endAgentSession({
+          adw_id: adwId, claude_session_id: sessionId,
+          context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+          billed_input_tokens: values[0], billed_output_tokens: values[1],
+          billed_cache_write_tokens: values[2], billed_cache_read_tokens: values[3],
+        })
+      }
+      try {
+        add('adw-a', 'session-boundary', since, [10, 20, 30, 40])
+        add('adw-a', 'session-inside', '2026-01-02T00:00:01.000Z', [1, 2, 3, 4])
+        add('adw-outside', 'session-outside', '2026-01-01T23:59:59.999Z', [100, 100, 100, 100])
+      } finally { ledger.close() }
+      assert.deepEqual(usageWindow({ dbPath, since }), { measured: true, total: 110, sessions: 2 })
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a budget window is recomputed from disk across fresh daemon construction', async () => {
+  const f = fixture({ budget: { max_tokens: 10 }, usageWindow: () => ({ measured: true, total: 10, sessions: 1 }), now: () => 1000 })
+  try {
+    const first = (() => { try { f.d.enqueue({ crew_dir: f.crewDir }); return null } catch (err) { return err } })()
+    assert.equal(first?.code, 'budget-exceeded')
+    await f.d.stop()
+    const fresh = daemon({ root: f.root, budget: { max_tokens: 10 }, deps: f.deps })
+    const second = (() => { try { fresh.enqueue({ crew_dir: f.crewDir }); return null } catch (err) { return err } })()
+    assert.equal(second?.code, 'budget-exceeded')
+    assert.equal(second.message, first.message)
+    await fresh.stop()
+    const entries = existsSync(f.root) ? readdirSync(f.root) : []
+    assert.equal(entries.some((name) => /budget|counter|usage/i.test(name)), false)
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
 test('send refuses a queued run', async () => {
   await each(async (f) => {
     const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
@@ -907,6 +1102,120 @@ test('runChild gives a task_return override precedence over crew.json', () => {
   try {
     runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
     assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done'); assert.equal(existsSync(f.taskReturn), false)
+  } finally { f.cleanup() }
+})
+
+test('runChild records to the explicit ledger and honors spec.ledger_db', () => {
+  const f = fixture()
+  const envDb = join(f.dir, 'env-ledger', 'ledger.db')
+  const specDb = join(f.dir, 'spec-ledger', 'ledger.db')
+  try {
+    const result = runChild({
+      crew_dir: f.crewDir, task: 'child-budget', checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: specDb,
+    }, {
+      preflight: false,
+      env: { DEVTEAM_LEDGER_DB: envDb },
+      driveTask: () => ({ status: 'done', summary: 'ok' }),
+      realIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    assert.equal(existsSync(envDb), false)
+    assert.equal(existsSync(join(f.crewDir, 'ledger', 'ledger.db')), false)
+    const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
+    assert.equal(sidecar.db_path, specDb)
+    if (LEDGER_SQLITE_OK) {
+      assert.equal(existsSync(specDb), true)
+      const ledger = openLedger({ dbPath: specDb })
+      try { assert.ok(ledger.listSessions().length >= 1) } finally { ledger.close() }
+    } else {
+      assert.equal(existsSync(specDb), false, 'below-floor emitters write JSONL but no SQLite mirror')
+      assert.equal(existsSync(join(dirname(specDb), 'ledger.jsonl')), true)
+    }
+  } finally { f.cleanup() }
+})
+
+test('runChild rejects a budget ledger that conflicts with a stale crew-local sidecar', () => {
+  const f = fixture()
+  const staleDb = join(f.dir, 'stale-ledger', 'ledger.db')
+  const budgetDb = join(f.dir, 'budget-ledger', 'ledger.db')
+  try {
+    const stale = openRun({ stateDir: f.crewDir, repoSlug: 'old', taskSlug: 'old', dbPath: staleDb })
+    stale.startRun()
+    stale.endRun({ status: 'ok' })
+    let staleSessions = null
+    if (LEDGER_SQLITE_OK) {
+      const ledger = openLedger({ dbPath: staleDb })
+      try { staleSessions = ledger.listSessions().length } finally { ledger.close() }
+    }
+    let drove = 0
+    const result = runChild({
+      crew_dir: f.crewDir, task: 'child-budget-isolated', checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: budgetDb, budget_enabled: true,
+    }, {
+      preflight: false,
+      driveTask: () => { drove += 1; return { status: 'done', summary: 'must not run' } },
+      realIo: () => ({}),
+    })
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'ledger-sidecar')
+    assert.match(result.details.escalation.why, /mismatched budget ledger/)
+    assert.equal(drove, 0, 'a mismatched sidecar must refuse before task execution')
+    const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
+    assert.equal(sidecar.db_path, staleDb)
+    assert.equal(existsSync(budgetDb), false)
+    if (LEDGER_SQLITE_OK) {
+      const staleLedger = openLedger({ dbPath: staleDb })
+      try { assert.equal(staleLedger.listSessions().length, staleSessions) } finally { staleLedger.close() }
+    } else {
+      assert.equal(existsSync(join(dirname(budgetDb), 'ledger.jsonl')), false)
+    }
+  } finally { f.cleanup() }
+})
+
+test('runChild lets no-budget instrumentation adopt a stale crew-local sidecar', () => {
+  const f = fixture()
+  const staleDb = join(f.dir, 'stale-ledger', 'ledger.db')
+  const requestedDb = join(f.dir, 'requested-ledger', 'ledger.db')
+  try {
+    const stale = openRun({ stateDir: f.crewDir, repoSlug: 'old', taskSlug: 'old', dbPath: staleDb })
+    stale.startRun()
+    stale.endRun({ status: 'ok' })
+    let drove = 0
+    let receivedEmitter = null
+    const result = runChild({
+      crew_dir: f.crewDir, task: 'child-no-budget-sidecar', checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: requestedDb, budget_enabled: false,
+    }, {
+      preflight: false,
+      driveTask: () => { drove += 1; return { status: 'done', summary: 'must run' } },
+      realIo: (_crew, _dirs, _checkout, emitter) => { receivedEmitter = emitter; return {} },
+    })
+    assert.equal(result.status, 'done')
+    assert.equal(drove, 1, 'a no-budget stale sidecar must not refuse task execution')
+    assert.ok(receivedEmitter, 'feature-off runs should retain their optional emitter')
+    const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
+    assert.equal(sidecar.db_path, staleDb)
+    assert.equal(existsSync(requestedDb), false)
+  } finally { f.cleanup() }
+})
+
+test('a degraded child emitter never fails the run or suppresses task_return', () => {
+  const f = fixture()
+  const parentFile = join(f.dir, 'not-a-directory')
+  const taskReturn = join(f.returnsDir, 'degraded.json')
+  writeFileSync(parentFile, 'not a directory')
+  try {
+    const result = runChild({
+      crew_dir: f.crewDir, task: 'child-budget-degraded', checkout: f.dir,
+      task_return: taskReturn, ledger_db: join(parentFile, 'ledger.db'),
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: 'still ran' }),
+      realIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    assert.equal(JSON.parse(readFileSync(taskReturn, 'utf8')).status, 'done')
   } finally { f.cleanup() }
 })
 

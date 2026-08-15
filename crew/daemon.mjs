@@ -16,6 +16,7 @@ import {
 } from 'node:fs'
 import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
+import { createRequire } from 'node:module'
 import { fork as cpFork, spawnSync as cpSpawnSync } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
@@ -66,6 +67,20 @@ export const SETTLED_FEED_RETENTION = 50
 // unrelated checkout moving while the first crew is mid-review without
 // doubling that risk again. Raise it per-daemon with daemon({concurrency}).
 export const DEFAULT_CONCURRENCY = 2
+// Budget windows count only measured headless daemon work. Pane seats report
+// no usage and are uncounted because enqueue refuses pane transport before a
+// run is admitted; no run this ceiling governs can contain one.
+export const DEFAULT_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000
+// Duplicated from scripts/factory/ledger.mjs:78 (NODE_FLOOR), which is the
+// source of truth. The import firewall forbids importing it here, the same
+// posture this file already takes for the ledger db-path convention and the
+// agent_sessions column names. The two literals must move together: below
+// this floor the emitter degrades to JSONL only and writes no DB, so a ceiling
+// read here would be zero forever.
+export const LEDGER_NODE_FLOOR = '24.0.0'
+// Date's representable millisecond range. A larger window makes the rolling
+// start invalid at admission, so reject it with the rest of budget validation.
+const MAX_BUDGET_WINDOW_MS = 8_640_000_000_000_000
 
 // TODO(#165/#46): unresolved-attention snapshot derives here once parks are minted; ADR-029 §4 forbids live attention before the park id exists.
 
@@ -165,6 +180,64 @@ export function normalizeEvent(source, row) {
 // Exported for the child entry, not part of the daemon protocol.
 export function isObject(value) { return value && typeof value === 'object' && !Array.isArray(value) }
 
+function isPlainObject(value) {
+  if (!isObject(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function versionAtLeast(value, floor) {
+  const parse = (version) => {
+    const match = String(version).match(/^(\d+)\.(\d+)\.(\d+)/)
+    return match ? match.slice(1).map(Number) : null
+  }
+  const actual = parse(value)
+  const minimum = parse(floor)
+  if (!actual || !minimum) return false
+  for (let index = 0; index < 3; index += 1) {
+    if (actual[index] > minimum[index]) return true
+    if (actual[index] < minimum[index]) return false
+  }
+  return true
+}
+
+// Each agent_sessions row is a running total for one session, not a delta;
+// SUM-over-rows is therefore correct (scripts/factory/ledger.mjs:1378), while
+// MAX or a last-row read silently under-reports a window.
+export function usageWindow({ dbPath, since, nodeVersion = process.versions.node } = {}) {
+  if (!versionAtLeast(nodeVersion, LEDGER_NODE_FLOOR)) {
+    return {
+      measured: false, total: null, sessions: 0,
+      why: `node ${nodeVersion} is below the ledger's ${LEDGER_NODE_FLOOR} floor — the run emitter records JSONL only and writes no database, so this window cannot be measured`,
+    }
+  }
+  let db = null
+  try {
+    // An absent db is fresh only when this runtime can read future ledger
+    // rows. Without node:sqlite, child emitters are JSONL-only and a configured
+    // ceiling must fail closed rather than remain zero forever.
+    const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
+    if (!fsExistsSync(dbPath)) return { measured: true, total: 0, sessions: 0 }
+    db = new DatabaseSync(dbPath, { readOnly: true })
+    db.exec('PRAGMA busy_timeout = 5000')
+    const row = db.prepare(`
+      SELECT COUNT(*) AS sessions,
+             COALESCE(SUM(billed_input_tokens),0)       AS input,
+             COALESCE(SUM(billed_output_tokens),0)      AS output,
+             COALESCE(SUM(billed_cache_write_tokens),0) AS cache_write,
+             COALESCE(SUM(billed_cache_read_tokens),0)  AS cache_read
+      FROM agent_sessions WHERE started_at >= ?
+    `).get(since)
+    const total = ['input', 'output', 'cache_write', 'cache_read']
+      .reduce((sum, key) => sum + Number(row?.[key] ?? 0), 0)
+    return { measured: true, total, sessions: Number(row?.sessions ?? 0) }
+  } catch (err) {
+    return { measured: false, total: null, sessions: 0, why: err?.message || String(err) }
+  } finally {
+    try { db?.close() } catch { /* a read-only close is best effort */ }
+  }
+}
+
 function hasPid(value) {
   const n = Number(value)
   return Number.isFinite(n) && n > 0
@@ -208,16 +281,42 @@ export function paneSeat(crew) {
 export function daemon(options = {}) {
   const concurrency = options.concurrency === undefined ? DEFAULT_CONCURRENCY : options.concurrency
   if (!Number.isInteger(concurrency) || concurrency < 1) throw new Error('concurrency must be an integer >= 1')
+  const injected = options.deps || {}
+  const env = injected.env || process.env
+  const budgetOption = options.budget
+  if (budgetOption !== undefined && budgetOption !== null && !isPlainObject(budgetOption)) {
+    throw new Error('budget must be a plain object')
+  }
+  if (budgetOption && (!Number.isInteger(budgetOption.max_tokens) || budgetOption.max_tokens < 1)) {
+    throw new Error('budget.max_tokens must be an integer >= 1')
+  }
+  if (budgetOption && budgetOption.window_ms !== undefined
+      && (!Number.isInteger(budgetOption.window_ms) || budgetOption.window_ms < 1 || budgetOption.window_ms > MAX_BUDGET_WINDOW_MS)) {
+    throw new Error(`budget.window_ms must be an integer from 1 through ${MAX_BUDGET_WINDOW_MS}`)
+  }
+  if (budgetOption && budgetOption.ledger_db !== undefined
+      && (typeof budgetOption.ledger_db !== 'string' || budgetOption.ledger_db.trim() === '')) {
+    throw new Error('budget.ledger_db must be a non-empty string')
+  }
+  const budgetLedgerDb = budgetOption?.ledger_db
+    || env.DEVTEAM_LEDGER_DB
+    || join(env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory'), 'ledger.db')
+  const budget = budgetOption == null ? null : {
+    max_tokens: budgetOption.max_tokens,
+    window_ms: budgetOption.window_ms ?? DEFAULT_BUDGET_WINDOW_MS,
+    ledger_db: budgetLedgerDb,
+  }
   const root = resolvePath(options.root || join(homedir(), '.crew', 'daemon'))
   const socketPath = join(root, 'daemon.sock')
   const pidPath = join(root, 'daemon.json')
   const registryPath = join(root, 'runs.jsonl')
-  const injected = options.deps || {}
   const net = injected.net || netDefault
   const fork = injected.fork || cpFork
   const spawnSync = injected.spawnSync || cpSpawnSync
   const kill = injected.kill || ((pid, signal) => process.kill(pid, signal))
   const now = injected.now || (() => Date.now())
+  const nodeVersion = injected.nodeVersion || process.versions.node
+  const readUsageWindow = injected.usageWindow || usageWindow
   const uuid = injected.uuid || randomUUID
   const pid = injected.pid ?? process.pid
   const exists = injected.existsSync || fsExistsSync
@@ -654,6 +753,7 @@ export function daemon(options = {}) {
     return {
       crew_dir: run.crew_dir, task: run.task, brief_file: run.brief_file,
       lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
+      ledger_db: budgetLedgerDb, budget_enabled: budget !== null,
     }
   }
 
@@ -716,6 +816,33 @@ export function daemon(options = {}) {
     return failures
   }
 
+  function budgetWindowLabel(windowMs) {
+    const hours = windowMs / (60 * 60 * 1000)
+    return Number.isInteger(hours) ? `${hours}h` : `${windowMs}ms`
+  }
+
+  // Recompute from the factory ledger for every admission. No counter or
+  // second registry record is held in daemon state, so restart survival is
+  // structural and ADR-029 §4's single run-state record remains intact.
+  function assertBudget() {
+    if (!budget) return
+    const since = new Date(now() - budget.window_ms).toISOString()
+    let usage
+    try {
+      usage = readUsageWindow({ dbPath: budgetLedgerDb, since, nodeVersion })
+    } catch (err) {
+      usage = { measured: false, total: null, sessions: 0, why: err?.message || String(err) }
+    }
+    if (!usage?.measured) {
+      const why = String(usage?.why || 'unknown error').replace(/\s+/g, ' ')
+      throw runError('budget-unmeasurable', `budget ceiling: a ceiling of ${budget.max_tokens} tokens is set but the ledger at ${budgetLedgerDb} could not be read (${why}) — refusing to admit a run whose spend cannot be measured (repair the ledger, or clear the ceiling with daemon({budget:null})).`)
+    }
+    if (usage.total >= budget.max_tokens) {
+      const panePolicy = 'Pane-transport seats report no usage and are not counted; the daemon refuses pane transport, so no run this ceiling governs contains one.'
+      throw runError('budget-exceeded', `budget ceiling: ${usage.total} tokens of measured crew spend since ${since} (${usage.sessions ?? 0} agent sessions) meets the ceiling of ${budget.max_tokens} for this ${budgetWindowLabel(budget.window_ms)} window — refusing to admit this run rather than seating it cheaper or queueing it (wait for the window to roll off, or raise/clear the ceiling with daemon({budget})). ${panePolicy}`)
+    }
+  }
+
   function enqueue(spec = {}) {
     ensureFolded()
     if (!isObject(spec)) throw runError('invalid-spec', 'enqueue requires a spec object')
@@ -723,6 +850,7 @@ export function daemon(options = {}) {
     const hasTier = typeof spec.tier === 'string' && !!spec.tier
     if (hasDir && hasTier) throw runError('invalid-spec', 'enqueue takes crew_dir or tier, never both')
     if (!hasDir && !hasTier) throw runError('invalid-spec', 'enqueue requires crew_dir or tier')
+    assertBudget()
     if (hasTier) {
       const active = activeTierRun(spec)
       if (active) throw runError('run-active', `run ${active.run_id} is already active for ${active.crew_dir}`)

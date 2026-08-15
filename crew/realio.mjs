@@ -2,7 +2,8 @@ import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, renameSync as fsRenameSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { execSync as cpExecSync, execFileSync as cpExecFileSync, spawnSync as cpSpawnSync } from 'node:child_process'
 
@@ -19,6 +20,27 @@ export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+// One rung stronger = the SAME seat's cell one tier up, read from the crew
+// RUNTIME's own roster (the rule crew/crew.mjs:364-371 states), never the
+// target checkout's. No new roster field, no ctx plumbing, no boot change.
+export const RESEAT_LADDER = Object.freeze(['mechanical', 'build', 'judge'])
+export const RESEAT_REASONS = Object.freeze(['transport', 'exhausted', 'no-tier', 'agent-change'])
+
+export function nextRung(roster, tier, role) {
+  const tiers = roster?.tiers || roster
+  const index = RESEAT_LADDER.indexOf(tier)
+  if (index < 0 || index >= RESEAT_LADDER.length - 1) return null
+  const next = RESEAT_LADDER[index + 1]
+  const cell = tiers?.[next]?.[role]
+  if (!cell || typeof cell !== 'object') return null
+  return {
+    rung: `${tier}→${next}`,
+    cell: { provider: cell.provider, id: cell.id, effort: cell.effort, agent: cell.agent },
+  }
+}
 
 function addTotals(prev, delta) {
   return {
@@ -212,6 +234,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const execFileSync = deps.execFileSync || cpExecFileSync
   const spawnSync = deps.spawnSync || cpSpawnSync
   const now = deps.now || (() => Date.now())
+  const readRoster = deps.readRoster || (() => JSON.parse(readFileSync(join(HERE, 'roster.json'), 'utf8')))
   const sleep = deps.sleep || ((ms) => {
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
@@ -315,6 +338,91 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       } finally {
         const pop = spawnSync('git', ['stash', 'pop'], { cwd: checkout, encoding: 'utf8' })
         if (pop.status !== 0) throw new Error(`runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash (git stash list):\n${pop.stderr || pop.stdout || ''}`)
+      }
+    },
+    reseat(role, options = {}) {
+      let from = null
+      try {
+        const { reason } = options || {}
+        const roleName = String(role)
+        const m = crew.members?.[role]
+        if (!m) return { applied: false, reason: 'transport', why: `role ${roleName} is not seated in this crew`, from: null, to: null }
+        const live = crew.seats?.[role] || m
+        const snapshot = (cell) => ({
+          provider: cell?.provider ?? null,
+          id: cell?.id ?? null,
+          effort: cell?.effort ?? null,
+          agent: cell?.agent ?? null,
+          model: cell?.model ?? null,
+        })
+        from = snapshot(live)
+        if (m.transport !== HEADLESS_TRANSPORT) {
+          const why = m.transport === HEADLESS_RPC_TRANSPORT
+            ? 'a headless-rpc seat reads its cell once at worker spawn (crew/headless-rpc.mjs:299); a mid-session change needs a respawn against the resumed session — the follow-up slice, not this one'
+            : m.transport === DEFAULT_TRANSPORT
+              ? 'a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
+              : `transport ${String(m.transport)} cannot change a seat cell in-session`
+          return { applied: false, reason: 'transport', why, from, to: null }
+        }
+        if (!crew.tier) return { applied: false, reason: 'no-tier', why: 'booted with --roles rather than --tier, so there is no ladder', from, to: null }
+
+        let roster
+        try {
+          roster = readRoster()
+        } catch (err) {
+          const message = err?.message ?? String(err)
+          return { applied: false, reason: 'transport', why: `could not read the runtime roster: ${message}`, from, to: null }
+        }
+        const rung = nextRung(roster, crew.tier, role)
+        if (!rung) {
+          const index = RESEAT_LADDER.indexOf(crew.tier)
+          const why = index < 0
+            ? `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`
+            : index === RESEAT_LADDER.length - 1
+              ? `tier ${String(crew.tier)} is already at the top of the mechanical → build → judge ladder`
+              : `the next tier ${RESEAT_LADDER[index + 1]} seats no ${roleName}`
+          return { applied: false, reason: 'exhausted', why, from, to: null }
+        }
+        const currentCell = roster?.tiers?.[crew.tier]?.[role] || roster?.[crew.tier]?.[role]
+        const sameCell = currentCell
+          && currentCell.provider === rung.cell.provider
+          && currentCell.id === rung.cell.id
+          && currentCell.effort === rung.cell.effort
+        if (sameCell) {
+          return {
+            applied: false,
+            reason: 'exhausted',
+            why: `the next rung repeats the identical cell ${currentCell.id} with effort ${currentCell.effort}`,
+            from,
+            to: null,
+          }
+        }
+        if (rung.cell.agent !== m.agent) {
+          return {
+            applied: false,
+            reason: 'agent-change',
+            why: `the next rung changes agent from ${m.agent} to ${rung.cell.agent}; the adapter is fixed at boot (crew/crew.mjs:389), so it cannot run in-session`,
+            from,
+            to: null,
+          }
+        }
+        const adapter = adapters?.[role]?.adapter
+        const model = typeof adapter?.modelString === 'function'
+          ? adapter.modelString({ provider: rung.cell.provider, id: rung.cell.id })
+          : rung.cell.id
+        const to = { ...rung.cell, model }
+        for (const target of [m, crew.seats?.[role]]) {
+          if (!target) continue
+          target.model = model
+          target.effort = rung.cell.effort
+          target.provider = rung.cell.provider
+          target.id = rung.cell.id
+        }
+        try { saveCrew(paths, crew, { writeFileSync, renameSync }) } catch { /* persistence is best-effort */ }
+        try { io.log({ at: now(), reseat: { role, from, to, rung: rung.rung, reason } }) } catch { /* journal is diagnostics */ }
+        return { applied: true, from, to, rung: rung.rung }
+      } catch (err) {
+        return { applied: false, reason: 'transport', why: `io.reseat failed: ${err?.message ?? err}`, from, to: null }
       }
     },
     changedFiles() {

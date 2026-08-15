@@ -603,6 +603,21 @@ export function daemon(options = {}) {
     }
   }
 
+  // A regrant that threw AFTER its fork owns a live, detached child. Sever it
+  // from the run first (generation bump + cleared pid make its exit callbacks
+  // no-ops), then signal it, so the restored escalation is the last word even
+  // if the signal itself fails.
+  function reapLaunchedContinuation(run) {
+    const pid = run.child_pid
+    if (!hasPid(pid)) return false
+    run.child_generation += 1
+    run.child_pid = null
+    run.child_dead = true
+    try { kill(pid, 'SIGTERM') } catch { /* an already-exited child is the outcome we wanted */ }
+    try { appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: 'SIGTERM' })) } catch { /* the feed must never re-throw inside a recovery path */ }
+    return true
+  }
+
   function regrantIfEligible(run, envelope) {
     let priorPath = null
     let priorWritten = false
@@ -650,6 +665,7 @@ export function daemon(options = {}) {
       if (launchFailure) throw launchFailure
       return true
     } catch {
+      reapLaunchedContinuation(run)
       if (terminalRemoved) {
         try { write(run.task_return, JSON.stringify(envelope, null, 2)) } catch { /* preserve the in-memory terminal path if disk recovery also fails */ }
       }

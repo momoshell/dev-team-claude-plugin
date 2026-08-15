@@ -17,6 +17,14 @@ roster, not the target checkout's — instead of `--roles`; the two flags are
 mutually exclusive (the tier defines the seating). Per-seat `--model-<role>`
 / `--agent-<role>` / `--effort-<role>` flags still override individual cells.
 
+`--headless-all` boots an all-headless crew with no cmux workspace at all. Each
+seat's adapter is asked through its own `capabilitiesFor`: claude resolves to
+`headless-json`, while pi resolves to `headless-rpc`. The resulting
+`crew.json` records `workspace_id: null` and `window_id: null`, and every seat
+carries its resolved non-pane transport — the shape `crew/daemon.mjs` accepts
+for a headless run. Explicit per-seat `--headless` / `--headless-rpc` flags
+still win over the one-flag form.
+
 | tier | lead | planner | builder | reviewer | tech-lead |
 |---|---|---|---|---|---|
 | `mechanical` | — | claude/opus-5, medium | pi/luna, max | pi/terra, medium | — |

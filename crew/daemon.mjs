@@ -21,6 +21,7 @@ import { randomUUID } from 'node:crypto'
 import { pathToFileURL } from 'node:url'
 
 import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
+import { slugOrNull } from './slug.mjs'
 
 const MAX_FRAME_BYTES = 1024 * 1024
 const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
@@ -607,17 +608,18 @@ export function daemon(options = {}) {
     throw runError('boot-failed', `crew boot for tier "${tier}" in ${checkout} reported no crew_json: ${stderr || String(result?.stdout || '').trim() || '<no output>'}`)
   }
 
-  function crewSlug(value) {
-    return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  }
-
-  // crew.mjs keys persistent state by its canonical checkout basename/task slug.
+  // crew.mjs keys persistent state by its canonical checkout basename/task slug,
+  // so this identity must use the SAME rule — hence the shared leaf module
+  // rather than the local copy this function used to carry. A degenerate task or
+  // basename yields no identity rather than throwing: an unidentifiable request
+  // falls through to the crew_dir collision check and then to boot, which fails
+  // loudly on its own.
   function tierIdentity(spec) {
     if (typeof spec.task !== 'string' || !spec.task || typeof spec.checkout !== 'string' || !spec.checkout) return null
-    const task = crewSlug(spec.task)
+    const task = slugOrNull(spec.task)
     if (!task) return null
     const checkout = resolvePath(spec.checkout)
-    return `${crewSlug(basename(checkout)) || 'repo'}/${task}`
+    return `${slugOrNull(basename(checkout)) || 'repo'}/${task}`
   }
 
   function activeTierRun(spec) {

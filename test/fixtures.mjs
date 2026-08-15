@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
-import { slug } from '../crew/crew.mjs'
+import { slug } from '../crew/slug.mjs'
 
 // Root cause this guards: a test that PREDICTS a path the code DERIVES.
 // Here: `pathsFor` slugs the checkout basename and `slug()` lowercases

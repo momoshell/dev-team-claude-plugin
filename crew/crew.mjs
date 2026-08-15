@@ -579,9 +579,18 @@ function runCmd(args) {
   if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
 
   const journal = join(paths.dir, 'journal.jsonl')
+  // Keep the test lane at 30 s per test: the slowest real test is ~25 ms,
+  // giving ~1200× headroom even when the machine is saturated by three crews.
+  // This is well below realIo.run's 900 s kill, so a hung test is reported by
+  // name as timed out instead of ending as an anonymous SIGTERM.
+  // --test-timeout is per-test: it bounds one hung test, not a pathological
+  // whole-suite case. A wall-clock bound on the lane would be a driver change,
+  // deliberately not done here. Keep this string identical to
+  // package.json's scripts.test and crew/child.mjs's default;
+  // crew/crew.test.mjs pins the three-way agreement.
   const ctx = {
     task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal,
-    roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test',
+    roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000',
   }
   // Seats are TUI processes and the first assignment must not race their
   // boot: characters typed into a pty before the TUI grabs it are silently

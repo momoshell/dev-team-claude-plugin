@@ -16,6 +16,7 @@ import {
   validateAcceptDecision, acceptContractLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
+  MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -117,6 +118,100 @@ const checkEnv = (verdict) => ({
 const CTX_TL = Object.freeze({ ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] })
 const leadEnv = (decision, guidance = 'do X then Y in a.mjs', details = {}) => ({
   status: 'done', role: 'lead', details: { decision, reason: 'because', guidance, ...details },
+})
+
+test('parseQuestions normalizes survivors, reports malformed entries, and is total', () => {
+  assert.equal(parseQuestions(null), null)
+  assert.equal(parseQuestions(undefined), null)
+  assert.equal(parseQuestions('not details'), null)
+  assert.equal(parseQuestions({ questions: 'not an array' }), null)
+
+  const parsed = parseQuestions({
+    questions: [
+      { id: ' q1 ', question: ' first? ' },
+      { question: 'missing id' },
+      { id: 'q2' },
+      'not an object',
+      ['nested array'],
+      { id: ' q1 ', question: 'duplicate' },
+      { id: 'q3', question: ' third? ' },
+    ],
+  })
+  assert.deepEqual(parsed.questions, [
+    { id: 'q1', question: 'first?' },
+    { id: 'q3', question: 'third?' },
+  ])
+  assert.ok(parsed.rejected.some(({ why }) => why === 'missing id'))
+  assert.ok(parsed.rejected.some(({ why }) => why === 'missing question'))
+  assert.ok(parsed.rejected.some(({ why }) => why === 'not a plain object'))
+  assert.ok(parsed.rejected.some(({ why }) => why === 'duplicate id'))
+  assert.ok(parsed.rejected.every(({ index, why }) => Number.isInteger(index) && typeof why === 'string' && why.length > 0))
+
+  const overCap = parseQuestions({
+    questions: Array.from({ length: MAX_QUESTIONS + 1 }, (_, index) => ({ id: `q${index}`, question: `question ${index}` })),
+  })
+  assert.equal(overCap.questions.length, MAX_QUESTIONS)
+  assert.deepEqual(overCap.rejected.at(-1), { index: MAX_QUESTIONS, why: `over the ${MAX_QUESTIONS}-question cap` })
+  for (const garbage of [null, 'string', 42, [[]]]) assert.doesNotThrow(() => parseQuestions(garbage))
+
+  const hostileLength = new Proxy([], {
+    get(target, property, receiver) {
+      if (property === 'length') return { [Symbol.toPrimitive]() { throw new Error('hostile length') } }
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  assert.doesNotThrow(() => parseQuestions({ questions: hostileLength }))
+  assert.doesNotThrow(() => matchAnswers(hostileLength, hostileLength))
+  assert.doesNotThrow(() => questionConsultLines('planner', hostileLength))
+  assert.doesNotThrow(() => answerBounceLines(hostileLength, { answered: hostileLength, rejected: hostileLength }))
+})
+
+test('matchAnswers matches keyed answers and never reads silence as assent', () => {
+  const questions = [{ id: 'q1', question: 'one?' }, { id: 'q2', question: 'two?' }, { id: 'q3', question: 'three?' }]
+  const matched = matchAnswers(questions, [
+    { id: ' q1 ', answer: ' answer one ' },
+    { id: 'q1', answer: 'duplicate' },
+    { id: 'unknown', answer: 'not asked' },
+    { id: 'q3', answer: '   ' },
+  ])
+  assert.deepEqual(matched.answered, [{ id: 'q1', answer: 'answer one' }])
+  assert.deepEqual(matched.unanswered, ['q2', 'q3'])
+  assert.deepEqual(matched.rejected, [
+    { id: 'q1', why: 'duplicate id' },
+    { id: 'unknown', why: 'unknown id' },
+    { id: 'q3', why: 'empty answer' },
+  ])
+  assert.deepEqual(matchAnswers(questions.slice(0, 1), [
+    { id: 'q1', answer: '   ' }, { id: 'q1', answer: ' usable ' },
+  ]), {
+    answered: [{ id: 'q1', answer: 'usable' }], unanswered: [],
+    rejected: [{ id: 'q1', why: 'empty answer' }],
+  })
+
+  assert.deepEqual(matchAnswers(questions, undefined), {
+    answered: [], unanswered: ['q1', 'q2', 'q3'],
+    rejected: [{ id: null, why: 'answers must be an array' }],
+  })
+  assert.deepEqual(matchAnswers(questions, null), {
+    answered: [], unanswered: ['q1', 'q2', 'q3'],
+    rejected: [{ id: null, why: 'answers must be an array' }],
+  })
+})
+
+test('question and answer composers are empty for an empty question set', () => {
+  assert.deepEqual(questionConsultLines('planner', []), [])
+  assert.deepEqual(answerBounceLines([], { answered: [], unanswered: [], rejected: [] }), [])
+  const consult = questionConsultLines('planner', [{ id: 'q1', question: 'Which path?' }]).join('\n')
+  assert.ok(consult.includes('## The planner returned 1 numbered question(s) — answer ALL of them'))
+  assert.ok(consult.includes('details.answers: [{"id": "<question id>", "answer": "..."}]'))
+  assert.match(consult, /id you leave out.*UNANSWERED/)
+  const bounce = answerBounceLines(
+    [{ id: 'q1', question: 'Which path?' }, { id: 'q2', question: 'Which test?' }],
+    { answered: [{ id: 'q1', answer: 'crew/drive.mjs' }], rejected: [{ id: 'q9', why: 'unknown id' }] },
+  ).join('\n')
+  assert.ok(bounce.includes('q1: Which path?\n  ANSWER: crew/drive.mjs'))
+  assert.ok(bounce.includes('q2: Which test?\n  UNANSWERED'))
+  assert.match(bounce, /Dropped answer entries.*q9.*unknown id/)
 })
 
 test('reviewOutcome normalizes reviewer verdicts and count fields', () => {
@@ -627,6 +722,153 @@ test('planner insufficient -> lead consult; bounce with guidance lands in the bo
   assert.equal(res.details.consults, 1)
   const bounce = Object.values(io.calls.writes).find((w) => /Plan bounce/.test(w))
   assert.match(bounce, /plan for X/)
+})
+
+test('planner questions make one consult and carry keyed answers into one bounce', () => {
+  const questions = [
+    { id: 'q1', question: 'Does X mean A or B?' },
+    { id: 'q2', question: 'Where does Y live?' },
+    { id: 'q3', question: 'Is Z in scope?' },
+  ]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'gaps in the brief', details: { questions } }),
+      'lead:1': leadEnv('bounce', 'steer the planner', { answers: [
+        { id: 'q1', answer: 'X means A' }, { id: 'q3', answer: 'Z is out' },
+      ] }),
+      'planner:2': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.consults, 1)
+  const decision = io.calls.writes[`${TD}/decision-1.md`]
+  for (const question of questions) {
+    assert.ok(decision.includes(question.id))
+    assert.ok(decision.includes(question.question))
+  }
+  assert.ok(decision.includes('details.answers'))
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.ok(bounce.includes('q1: Does X mean A or B?'))
+  assert.ok(bounce.includes('ANSWER: X means A'))
+  assert.ok(bounce.includes('q3: Is Z in scope?'))
+  assert.ok(bounce.includes('ANSWER: Z is out'))
+  assert.ok(bounce.includes('q2: Where does Y live?'))
+  assert.ok(bounce.includes('UNANSWERED'))
+  assert.ok(io.calls.logs.some((entry) => entry.member_questions?.role === 'planner' && entry.member_questions.total === 3))
+  assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['q2'])
+})
+
+test('builder questions make one consult and carry keyed answers into one build bounce', () => {
+  const questions = [
+    { id: 'b1', question: 'Which helper should change?' },
+    { id: 'b2', question: 'Which test should cover it?' },
+  ]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'plan gap', details: { questions } }),
+      'lead:1': leadEnv('bounce', 'steer the builder', { answers: [{ id: 'b2', answer: 'crew/drive.test.mjs' }] }),
+      'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.consults, 1)
+  const decision = io.calls.writes[`${TD}/decision-1.md`]
+  for (const question of questions) {
+    assert.ok(decision.includes(question.id))
+    assert.ok(decision.includes(question.question))
+  }
+  const bounce = io.calls.writes[`${TD}/build-bounce-r1.md`]
+  assert.ok(bounce.includes('b2: Which test should cover it?'))
+  assert.ok(bounce.includes('ANSWER: crew/drive.test.mjs'))
+  assert.ok(bounce.includes('b1: Which helper should change?'))
+  assert.ok(bounce.includes('UNANSWERED'))
+  assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['b1'])
+})
+
+test('questionless planner and builder bounces remain byte-identical', () => {
+  const plannerIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'planner stuck', details: {} }),
+      'lead:1': leadEnv('bounce', 'steer'), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  assert.equal(driveTask(CTX, plannerIo).status, 'done')
+  assert.equal(plannerIo.calls.writes[`${TD}/plan-bounce-r1.md`], `# Plan bounce (round 1)\n\nsteer\n\nOriginal brief: ${CTX.briefFile}\nPlanner said: planner stuck`)
+  assert.doesNotMatch(plannerIo.calls.writes[`${TD}/decision-1.md`], /## The planner returned/)
+
+  const builderIo = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv({ status: 'insufficient', summary: 'builder stuck', details: {} }),
+      'lead:1': leadEnv('bounce', 'steer'), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  assert.equal(driveTask(CTX, builderIo).status, 'done')
+  assert.equal(builderIo.calls.writes[`${TD}/build-bounce-r1.md`], `# Build bounce (round 1)\n\nsteer\n\nPlan: ${TD}/plan.md`)
+})
+
+test('malformed-only questions preserve the bounce and journal rejections', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'gaps in the brief', details: { questions: [{ question: 'no id' }, 'garbage', { id: '  ' }] } }),
+      'lead:1': leadEnv('bounce', 'steer'), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.writes[`${TD}/plan-bounce-r1.md`], `# Plan bounce (round 1)\n\nsteer\n\nOriginal brief: ${CTX.briefFile}\nPlanner said: gaps in the brief`)
+  assert.ok(io.calls.logs.some((entry) => entry.member_questions?.rejected?.length === 3))
+})
+
+test('omitted answers keep the bounce outcome and mark every id UNANSWERED', () => {
+  const questions = [{ id: 'q1', question: 'first?' }, { id: 'q2', question: 'second?' }]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'gaps', details: { questions } }),
+      'lead:1': leadEnv('bounce', 'steer', { answers: [] }), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.ok(bounce.includes('q1: first?'))
+  assert.ok(bounce.slice(bounce.indexOf('q1: first?')).includes('UNANSWERED'))
+  assert.ok(bounce.includes('q2: second?'))
+  assert.ok(bounce.slice(bounce.indexOf('q2: second?')).includes('UNANSWERED'))
+  assert.doesNotMatch(bounce, /ANSWER:/)
+  assert.deepEqual(io.calls.logs.find((entry) => entry.question_answers)?.question_answers.unanswered, ['q1', 'q2'])
+})
+
+test('charters pin the batched question and keyed answer conventions', () => {
+  const shared = readFileSync(new URL('./roles/_shared.md', import.meta.url), 'utf8')
+  const lead = readFileSync(new URL('./roles/lead.md', import.meta.url), 'utf8')
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const builder = readFileSync(new URL('./roles/builder.md', import.meta.url), 'utf8')
+  for (const token of ['"questions"', '"id"', '"question"']) assert.ok(shared.includes(token))
+  assert.match(shared, /one round instead of one round per gap/i)
+  const cap = shared.match(/at most ([0-9]+) questions/)
+  assert.equal(Number(cap?.[1]), MAX_QUESTIONS)
+  for (const token of ['"answers"', '"answer"', 'UNANSWERED']) assert.ok(lead.includes(token))
+  assert.ok(planner.includes('status: insufficient') && planner.includes('details.questions'))
+  assert.ok(builder.includes('insufficient') && builder.includes('details.questions'))
 })
 
 test('lead answering outside the offered options is treated as escalate', () => {

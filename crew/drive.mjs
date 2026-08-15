@@ -259,6 +259,249 @@ export function reviewFindings(details) {
   return { findings, rejected }
 }
 
+export const MAX_QUESTIONS = 10
+
+const isArray = (value) => {
+  try { return Array.isArray(value) } catch { return false }
+}
+
+const isPlainObject = (value) => {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+  } catch {
+    return false
+  }
+}
+
+const textOf = (value, fallback = '') => {
+  try { return value == null ? fallback : String(value) } catch { return fallback }
+}
+
+const safeArrayLength = (value) => {
+  try {
+    const length = Number(value.length)
+    return Number.isSafeInteger(length) && length >= 0 ? length : 0
+  } catch {
+    return 0
+  }
+}
+
+// Parse details.questions. Returns null when there is no questions array so
+// older member envelopes keep the byte-for-byte legacy path. Malformed
+// entries are dropped and reported; only the closed id/question shape survives.
+export function parseQuestions(details) {
+  let raw
+  try { raw = details?.questions } catch { return null }
+  if (!isArray(raw)) return null
+
+  const questions = []
+  const rejected = []
+  const seen = new Set()
+  const length = safeArrayLength(raw)
+  for (let index = 0; index < length; index += 1) {
+    let entry
+    try { entry = raw[index] } catch {
+      rejected.push({ index, why: 'not a plain object' })
+      continue
+    }
+    if (!isPlainObject(entry)) {
+      rejected.push({ index, why: 'not a plain object' })
+      continue
+    }
+
+    let id
+    let question
+    try {
+      id = typeof entry.id === 'string' ? entry.id.trim() : ''
+      question = typeof entry.question === 'string' ? entry.question.trim() : ''
+    } catch {
+      rejected.push({ index, why: 'missing id' })
+      continue
+    }
+    if (!id) {
+      rejected.push({ index, why: 'missing id' })
+      continue
+    }
+    if (!question) {
+      rejected.push({ index, why: 'missing question' })
+      continue
+    }
+    if (questions.length >= MAX_QUESTIONS) {
+      rejected.push({ index, why: `over the ${MAX_QUESTIONS}-question cap` })
+      continue
+    }
+    if (seen.has(id)) {
+      rejected.push({ index, why: 'duplicate id' })
+      continue
+    }
+    seen.add(id)
+    questions.push({ id, question })
+  }
+  return { questions, rejected }
+}
+
+// Match a lead's keyed answers against the normalized question ids. Silence
+// is explicit in `unanswered`; it is never treated as assent or omission of
+// the question itself.
+export function matchAnswers(questions, answers) {
+  const askedIds = []
+  const asked = new Set()
+  if (isArray(questions)) {
+    const length = safeArrayLength(questions)
+    for (let index = 0; index < length; index += 1) {
+      let question
+      try { question = questions[index] } catch { continue }
+      try {
+        const id = question && typeof question.id === 'string' ? question.id.trim() : ''
+        if (id && !asked.has(id)) {
+          asked.add(id)
+          askedIds.push(id)
+        }
+      } catch { /* malformed question input is ignored */ }
+    }
+  }
+
+  const answered = []
+  const rejected = []
+  const seen = new Set()
+  if (!isArray(answers)) {
+    rejected.push({ id: null, why: 'answers must be an array' })
+  } else {
+    const length = safeArrayLength(answers)
+    for (let index = 0; index < length; index += 1) {
+      let entry
+      try { entry = answers[index] } catch {
+        rejected.push({ id: null, why: 'missing id' })
+        continue
+      }
+      if (!isPlainObject(entry)) {
+        rejected.push({ id: null, why: 'missing id' })
+        continue
+      }
+
+      let id
+      let answer
+      try {
+        id = typeof entry.id === 'string' ? entry.id.trim() : ''
+        answer = typeof entry.answer === 'string' ? entry.answer.trim() : ''
+      } catch {
+        rejected.push({ id: null, why: 'missing id' })
+        continue
+      }
+      if (!id) {
+        rejected.push({ id: null, why: 'missing id' })
+        continue
+      }
+      if (!asked.has(id)) {
+        rejected.push({ id, why: 'unknown id' })
+        continue
+      }
+      if (seen.has(id)) {
+        rejected.push({ id, why: 'duplicate id' })
+        continue
+      }
+      if (!answer) {
+        rejected.push({ id, why: 'empty answer' })
+        continue
+      }
+      seen.add(id)
+      answered.push({ id, answer })
+    }
+  }
+
+  const answeredIds = new Set(answered.map(({ id }) => id))
+  return {
+    answered,
+    unanswered: askedIds.filter((id) => !answeredIds.has(id)),
+    rejected,
+  }
+}
+
+export function questionConsultLines(role, questions) {
+  if (!isArray(questions)) return []
+  const length = safeArrayLength(questions)
+  if (length === 0) return []
+  const questionLines = []
+  for (let index = 0; index < length; index += 1) {
+    let entry
+    try { entry = questions[index] } catch { entry = null }
+    let id = ''
+    let question = ''
+    try {
+      id = textOf(entry?.id)
+      question = textOf(entry?.question)
+    } catch { /* malformed entries still render without throwing */ }
+    questionLines.push(`- ${id}: ${question}`)
+  }
+  return [
+    '',
+    `## The ${textOf(role)} returned ${length} numbered question(s) — answer ALL of them`,
+    ...questionLines,
+    '',
+    'details.answers: [{"id": "<question id>", "answer": "..."}]',
+    'An id you leave out is carried to the member as UNANSWERED; it is never read as "no answer needed".',
+  ]
+}
+
+export function answerBounceLines(questions, matched) {
+  if (!isArray(questions)) return []
+  const length = safeArrayLength(questions)
+  if (length === 0) return []
+  const answerById = new Map()
+  let rawAnswered
+  try { rawAnswered = matched?.answered } catch { rawAnswered = null }
+  if (isArray(rawAnswered)) {
+    const answeredLength = safeArrayLength(rawAnswered)
+    for (let index = 0; index < answeredLength; index += 1) {
+      let entry
+      try { entry = rawAnswered[index] } catch { continue }
+      let id
+      let answer
+      try { id = entry?.id; answer = entry?.answer } catch { continue }
+      if (typeof id !== 'string' || typeof answer !== 'string') continue
+      if (!answerById.has(id)) answerById.set(id, answer)
+    }
+  }
+  const lines = [
+    '',
+    `## Answers to your ${length} question(s) (keyed by your ids)`,
+  ]
+  for (let index = 0; index < length; index += 1) {
+    let entry
+    try { entry = questions[index] } catch { entry = null }
+    let id = ''
+    let question = ''
+    try {
+      id = textOf(entry?.id)
+      question = textOf(entry?.question)
+    } catch { /* malformed entries still render without throwing */ }
+    lines.push(`- ${id}: ${question}`)
+    if (answerById.has(id)) {
+      lines.push(`  ANSWER: ${answerById.get(id)}`)
+    } else {
+      lines.push('  UNANSWERED — no answer came back for this id. Do NOT read the silence as "no answer needed": proceed on the parts that do not depend on it, and if it blocks you, return insufficient again naming ONLY this id.')
+    }
+  }
+  let rawRejected
+  try { rawRejected = matched?.rejected } catch { rawRejected = null }
+  if (isArray(rawRejected)) {
+    const rejectedLength = safeArrayLength(rawRejected)
+    const dropped = []
+    for (let index = 0; index < rejectedLength; index += 1) {
+      let entry
+      try { entry = rawRejected[index] } catch { entry = null }
+      let id
+      let why
+      try { id = entry?.id; why = entry?.why } catch { id = null; why = null }
+      dropped.push(`${id == null ? '(missing id)' : textOf(id)} (${why ? textOf(why) : 'malformed entry'})`)
+    }
+    if (dropped.length > 0) lines.push(`Dropped answer entries (reported): ${dropped.join('; ')}`)
+  }
+  return lines
+}
+
 export function reviewOutcome(role, env) {
   if (role !== 'reviewer') return null
   const v = verdictOf(env)
@@ -782,7 +1025,7 @@ export function driveTask(ctx, io) {
     emit({ kind: 'decision', decided: d.decision, why: d.reason || '', consult: S.consults, round })
     return {
       decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from,
-      residuals: d.residuals, refuted: d.refuted,
+      residuals: d.residuals, refuted: d.refuted, answers: d.answers,
     }
   }
 
@@ -853,14 +1096,25 @@ export function driveTask(ctx, io) {
     stage(`plan:r${round}`)
     const env = assignAndWait('planner', planBrief, round === 1 ? 'plan' : 'plan-revision')
     if (env.status !== 'done') {
+      const asked = parseQuestions(env.details)
+      const questions = asked?.questions ?? []
+      if (asked) io.log({ at: io.now(), member_questions: { role: 'planner', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } })
       const c = consultLead(
-        `The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?`,
+        [`The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?`,
+          ...questionConsultLines('planner', questions)].join('\n'),
         ['bounce', 'escalate'], [planBrief, ...(env.artifacts || [])],
       )
       if (c.decision === 'escalate') return escalate('plan', c.reason, env.artifacts || [])
+      const matched = matchAnswers(questions, c.answers)
+      if (questions.length > 0) io.log({ at: io.now(), question_answers: { role: 'planner', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } })
       const b = art(`plan-bounce-r${round}.md`)
       failureUpgrade('plan', 'planner')
-      io.writeFile(b, `# Plan bounce (round ${round})\n\n${c.guidance}\n\nOriginal brief: ${ctx.briefFile}\nPlanner said: ${env.summary || env.status}`)
+      io.writeFile(b, [
+        `# Plan bounce (round ${round})`, '', c.guidance, '',
+        `Original brief: ${ctx.briefFile}`,
+        `Planner said: ${env.summary || env.status}`,
+        ...answerBounceLines(questions, matched),
+      ].join('\n'))
       planBrief = b
       continue
     }
@@ -1371,15 +1625,25 @@ export function driveTask(ctx, io) {
     stage(`build:r${round}`)
     const env = assignAndWait('builder', buildBrief, buildNote)
     if (env.status !== 'done') {
+      const asked = parseQuestions(env.details)
+      const questions = asked?.questions ?? []
+      if (asked) io.log({ at: io.now(), member_questions: { role: 'builder', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } })
       const c = consultLead(
-        `The builder returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce with guidance, or escalate?`,
+        [`The builder returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce with guidance, or escalate?`,
+          ...questionConsultLines('builder', questions)].join('\n'),
         ['bounce', 'escalate'], [buildBrief, ...(env.artifacts || [])],
       )
       if (c.decision === 'escalate') return escalate('build', c.reason, env.artifacts || [])
       if (finalRound()) extraRounds += 1 // the granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('build', 'builder')
-      io.writeFile(b, `# Build bounce (round ${round})\n\n${c.guidance}\n\nPlan: ${planPath}`)
+      const matched = matchAnswers(questions, c.answers)
+      if (questions.length > 0) io.log({ at: io.now(), question_answers: { role: 'builder', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } })
+      io.writeFile(b, [
+        `# Build bounce (round ${round})`, '', c.guidance, '',
+        `Plan: ${planPath}`,
+        ...answerBounceLines(questions, matched),
+      ].join('\n'))
       buildBrief = b; buildNote = 'build-fix'
       continue
     }

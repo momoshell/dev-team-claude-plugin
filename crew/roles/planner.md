@@ -28,6 +28,11 @@ Write `plan.md` in the task dir with EXACTLY these sections:
 - **Tests** — which test files the builder writes/extends and what each pins.
   Testing is code: name the exact validation command(s) the builder must run
   green before returning.
+
+When the brief is under-specified, return `status: insufficient` with every
+gap as a numbered `details.questions` entry (see the shared charter), rather
+than surfacing one gap at a time.
+
 - **Acceptance criteria** — numbered, each mechanically checkable (a command,
   a file existence, an assertion — never vibes).
 - **Risks/consults** — anything you are <90% sure of. If a tech-lead pane

@@ -27,6 +27,33 @@ export function fleetCost() {
   return { usd: null, pending: 'money deferred — a subscription seat is not billed per token (#185)' }
 }
 
+export function rosterPanel(payload = {}) {
+  if (payload?.tiers == null) {
+    return {
+      tiers: [],
+      models: [],
+      updated_at: null,
+      path: payload?.path ?? null,
+      pending: payload?.error || 'roster unavailable — no reason was reported',
+    }
+  }
+
+  const tiers = Array.isArray(payload.tiers) ? payload.tiers.map((tier) => ({
+    ...tier,
+    seats: Array.isArray(tier?.seats) ? tier.seats.map((seat) => {
+      const model = seat?.model ?? null
+      return { ...seat, model, model_pending: model ? null : 'not in the roster model catalog' }
+    }) : [],
+  })) : []
+  return {
+    tiers,
+    models: Array.isArray(payload.models) ? payload.models : [],
+    updated_at: payload.updated_at ?? null,
+    path: payload.path ?? null,
+    pending: null,
+  }
+}
+
 export function gateChips(run = {}) {
   const generations = Array.isArray(run.gate_generations)
     ? [...run.gate_generations].sort((a, b) => (a?.gate_generation ?? 0) - (b?.gate_generation ?? 0))

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { acceptRows, fleetCost, fleetTokens, findingRows, gateChips, reviewRows } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterPanel } from '../visualizer/web/src/lib/panels.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -29,6 +29,34 @@ test('fleetCost never derives money from token totals', () => {
   const result = fleetCost([{ metrics: { billed_input_tokens: 999999999 } }])
   assert.equal(result.usd, null)
   assert.ok(result.pending)
+})
+
+test('rosterPanel passes through a degraded reason without presenting an empty roster', () => {
+  const result = rosterPanel({ tiers: null, models: null, path: '/tmp/roster.json', error: 'roster unreadable at /tmp/roster.json' })
+  assert.deepEqual(result.tiers, [])
+  assert.equal(result.pending, 'roster unreadable at /tmp/roster.json')
+  assert.notEqual(result.pending, '')
+})
+
+test('rosterPanel keeps healthy seats and never derives money', () => {
+  const result = rosterPanel({
+    tiers: [{ tier: 'build', seats: [{ role: 'reviewer', effort: 'max', model: { cost_in_per_mtok: 2, cost_out_per_mtok: 12 } }], unseated: [] }],
+    models: [{ key: 'openai/gpt-5.6-terra', cost_in_per_mtok: 2, cost_out_per_mtok: 12, last_verified: '2026-08-13' }],
+  })
+  assert.equal(result.pending, null)
+  assert.equal(result.tiers[0].seats[0].effort, 'max')
+  assert.doesNotMatch(JSON.stringify(result), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
+})
+
+test('rosterPanel marks an uncatalogued seat instead of fabricating rates', () => {
+  const result = rosterPanel({
+    tiers: [{ tier: 'build', seats: [{ role: 'builder', model_key: 'openai/ghost-1', model: null }], unseated: [] }],
+    models: [],
+  })
+  const seat = result.tiers[0].seats[0]
+  assert.ok(seat)
+  assert.equal(seat.model, null)
+  assert.ok(seat.model_pending)
 })
 
 test('gateChips keeps unproven distinct from failed and proven', () => {

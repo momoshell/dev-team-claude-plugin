@@ -48,9 +48,10 @@ function announce(child) {
     child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
   })
 }
-function startServer(ledgerDb, triageDb, crewRoot) {
+function startServer(ledgerDb, triageDb, crewRoot, rosterPath) {
   const args = ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
   if (crewRoot) args.push('--crew-root', crewRoot)
+  if (rosterPath) args.push('--roster', rosterPath)
   const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
@@ -235,6 +236,60 @@ test('a broken ledger reports degraded without throwing', { skip: SKIP }, () => 
     assert.equal(feed.health().degraded, true)
   } finally {
     feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('roster endpoint serves the runtime roster read-only and degrades honestly', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-roster-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const missing = join(dir, 'missing-roster.json'), malformed = join(dir, 'malformed-roster.json')
+  writeFileSync(malformed, '{ this is not json')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const response = await json(base, '/api/roster')
+    assert.equal(response.status, 200)
+    const roster = response.json
+    assert.equal(roster.path.endsWith('crew/roster.json'), true)
+    assert.equal(roster.degraded, false)
+    const onDisk = JSON.parse(readFileSync(roster.path, 'utf8'))
+    assert.deepEqual(roster.tiers.map((tier) => tier.tier), Object.keys(onDisk.tiers))
+    const buildReviewer = roster.tiers.find((tier) => tier.tier === 'build').seats.find((seat) => seat.role === 'reviewer')
+    assert.equal(buildReviewer.effort, 'max')
+    for (const field of ['provider', 'id', 'agent', 'effort']) assert.ok(buildReviewer[field])
+    const mechanical = roster.tiers.find((tier) => tier.tier === 'mechanical')
+    assert.equal(mechanical.seats.some((seat) => seat.role === 'lead'), false)
+    assert.ok(mechanical.unseated.includes('lead'))
+    const models = new Map(roster.models.map((model) => [model.key, model]))
+    for (const tier of roster.tiers) for (const seat of tier.seats) {
+      assert.ok(models.has(seat.model_key))
+      assert.equal(typeof models.get(seat.model_key).cost_in_per_mtok, 'number')
+      assert.equal(typeof models.get(seat.model_key).cost_out_per_mtok, 'number')
+      assert.equal(typeof models.get(seat.model_key).last_verified, 'string')
+    }
+    assert.equal((await json(base, '/api/roster', { method: 'POST' })).status, 405)
+    assert.equal((await json(base, '/api/roster', { method: 'PUT' })).status, 405)
+    await stopServer(child); child = null;
+
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, missing))
+    const absent = (await json(base, '/api/roster')).json
+    assert.equal(absent.degraded, true)
+    assert.ok(absent.error.includes(missing))
+    assert.equal(absent.tiers, null)
+    assert.notDeepEqual(absent.tiers, [])
+    await stopServer(child); child = null;
+
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, malformed))
+    const broken = (await json(base, '/api/roster')).json
+    assert.equal(broken.degraded, true)
+    assert.ok(broken.error.includes(malformed))
+    assert.equal(broken.tiers, null)
+    assert.equal(broken.models, null)
+    assert.doesNotMatch(JSON.stringify(broken), /claude-|gpt-/)
+  } finally {
+    if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
 })

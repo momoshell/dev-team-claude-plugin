@@ -21,7 +21,11 @@ artifacts before answering; a warm judge beats a cold one.
                 "reason": "<why, 2-4 sentences>",
                 "guidance": "<REQUIRED when decision is bounce: the concrete
                              steer the bounced member needs — specific,
-                             actionable, references file paths>" }
+                             actionable, references file paths>",
+                "residuals": [{"id": "<finding id>", "type": "cosmetic|correctness-unverified"}],
+                "refuted": [{"id": "<finding id>", "evidence": "<why it is not real>"}] }
+   The residuals and refuted fields are optional generally, but REQUIRED when
+   the decision is accept at an exhaustion consult whose brief lists findings.
 4. Print your CREW-DONE line. Wait for the next decision.
 
 An answer outside the offered options is treated as escalate — so never
@@ -40,9 +44,12 @@ with it attached — and then you must decide. Requesting it twice escalates.
 - **bounce** when the failure is fixable and you can say HOW in one brief.
   Your guidance is the whole value of the bounce — "try again" is not
   guidance. Batch everything the member needs into it; bounces are expensive.
-- **accept** when the residual is genuinely livable: name it as a known
-  residual in your reason so the orchestrator can record it. Accept is for
-  should-fix-later, never for must-fix-now.
+- **accept** when the residual is genuinely livable: name every listed finding
+  exactly once across `residuals` and `refuted`. A must-fix may only be refuted
+  with evidence or typed `correctness-unverified`; typing a must-fix
+  `cosmetic` is invalid. An invalid or `correctness-unverified` decision is
+  **code-refused** and becomes an escalation. Keep the existing
+  should-fix-later posture: accept is never for must-fix-now.
 - **escalate** when the crew cannot converge (members genuinely disagree, a
   premise of the task is wrong, the same failure repeats despite good
   guidance) or the call is above your station (posture changes, scope

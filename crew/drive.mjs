@@ -116,6 +116,7 @@ function verdictOf(env) {
 // review.md findings (crew/roles/reviewer.md:19-21). Phase 1 makes it
 // machine-readable; it does not add a fourth.
 export const FINDING_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
+export const RESIDUAL_TYPES = Object.freeze(['cosmetic', 'correctness-unverified'])
 
 export const CARVE_VERDICTS = Object.freeze(['proceed', 'carve'])
 
@@ -270,6 +271,103 @@ export function reviewOutcome(role, env) {
   }
 }
 
+// Validate an exhaustion-time accept against the canonical finding set.
+// `findings` is the normalized array from the LAST reviewer envelope that
+// carried one. Returns sanitized claims and every validation failure; the
+// caller decides whether correctness-unverified residuals require escalation.
+// This helper is deliberately total: malformed lead details never throw.
+export function validateAcceptDecision(input = {}) {
+  const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {}
+  const { findings, residuals, refuted } = source
+  const errors = []
+  const error = (id, why) => errors.push({ id: id ?? null, why })
+  const rawResiduals = residuals == null ? [] : residuals
+  const rawRefuted = refuted == null ? [] : refuted
+  const residualEntries = Array.isArray(rawResiduals) ? rawResiduals : []
+  const refutedEntries = Array.isArray(rawRefuted) ? rawRefuted : []
+  if (!Array.isArray(rawResiduals)) error(null, 'residuals must be an array')
+  if (!Array.isArray(rawRefuted)) error(null, 'refuted must be an array')
+
+  const canonical = Array.isArray(findings) ? findings : []
+  const findingById = new Map()
+  for (const finding of canonical) {
+    if (finding && typeof finding.id === 'string' && finding.id.length > 0 && !findingById.has(finding.id)) {
+      findingById.set(finding.id, finding)
+    }
+  }
+
+  const residualClaims = residualEntries.map((entry) => {
+    const isObject = entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+    const id = isObject && typeof entry.id === 'string' && entry.id.trim() !== '' ? entry.id : null
+    const type = isObject ? entry.type : undefined
+    if (id === null) error(null, 'missing id')
+    if (!RESIDUAL_TYPES.includes(type)) error(id, 'invalid type')
+    return { id, type }
+  })
+  const refutedClaims = refutedEntries.map((entry) => {
+    const isObject = entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+    const id = isObject && typeof entry.id === 'string' && entry.id.trim() !== '' ? entry.id : null
+    const evidence = isObject ? entry.evidence : undefined
+    const evidenceValid = typeof evidence === 'string' && evidence.trim().length > 0
+    if (id === null) error(null, 'missing id')
+    if (!evidenceValid) error(id, 'empty refutation evidence')
+    return { id, evidenceValid }
+  })
+
+  const claims = [...residualClaims, ...refutedClaims]
+  const claimedIds = new Set()
+  for (const { id } of claims) {
+    if (id !== null && !findingById.has(id)) error(id, 'unknown id')
+  }
+  for (const { id } of claims) {
+    if (id === null) continue
+    if (claimedIds.has(id)) error(id, 'duplicate id')
+    claimedIds.add(id)
+  }
+  for (const { id, type } of residualClaims) {
+    const finding = id === null ? null : findingById.get(id)
+    if (finding && type === 'cosmetic' && finding.severity === 'must-fix') {
+      error(id, 'must-fix may not be typed cosmetic')
+    }
+  }
+  for (const id of findingById.keys()) {
+    if (!claimedIds.has(id)) error(id, 'omitted id')
+  }
+
+  const residualsOut = residualClaims
+    .filter(({ id, type }) => id !== null && findingById.has(id) && RESIDUAL_TYPES.includes(type))
+    .map(({ id, type }) => ({ id, type, severity: findingById.get(id).severity }))
+  const refutedOut = refutedClaims
+    .filter(({ id, evidenceValid }) => id !== null && findingById.has(id) && evidenceValid)
+    .map(({ id }) => ({ id }))
+  const unverified = residualsOut
+    .filter((residual) => residual.type === 'correctness-unverified')
+    .map((residual) => residual.id)
+  const result = {
+    ok: errors.length === 0,
+    residuals: residualsOut,
+    refuted: refutedOut,
+    unverified,
+  }
+  if (errors.length > 0) result.errors = errors
+  return result
+}
+
+// Render the exhaustion-time accept contract without changing the legacy
+// question when no reviewer envelope carried findings.
+export function acceptContractLines(findings) {
+  if (findings === null) return []
+  const entries = Array.isArray(findings) ? findings : []
+  const lines = entries.map((finding) => (
+    `- ${finding.id} (${finding.severity}) ${finding.location || '(location unspecified)'} — ${finding.summary || '(no summary)'}`
+  ))
+  lines.push(
+    'For an accept, name every listed finding exactly once across details.residuals: [{id, type}] (type must be "cosmetic" or "correctness-unverified") or details.refuted: [{id, evidence}] with non-empty evidence.',
+    'A must-fix finding may not be typed cosmetic. A correctness-unverified residual is legitimate but asks a human and is refused by code into escalation.',
+  )
+  return lines
+}
+
 // An entry ending in '/' is a DIRECTORY PREFIX; anything else is a literal
 // path matched exactly. Nothing else is supported — and unsupported shapes
 // are rejected loudly (validateScopeEntries), never silently ignored.
@@ -342,7 +440,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [] }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
@@ -555,6 +653,7 @@ export function driveTask(ctx, io) {
     const review = reviewOutcome(role, env)
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
     if (review) io.log({ at: io.now(), review_outcome: { dispatch: id, ...review } })
+    if (review) S.acceptFindings = review.findings ?? null
     if (review?.findings) S.lastReview = review
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } })
@@ -668,7 +767,10 @@ export function driveTask(ctx, io) {
     }
     io.log({ at: io.now(), decision: d.decision, consult: S.consults, round, reason: d.reason })
     emit({ kind: 'decision', decided: d.decision, why: d.reason || '', consult: S.consults, round })
-    return { decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from }
+    return {
+      decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from,
+      residuals: d.residuals, refuted: d.refuted,
+    }
   }
 
   // A lead-granted extra round at an exhaustion point that could not grant
@@ -689,6 +791,40 @@ export function driveTask(ctx, io) {
       artifacts: [journal, ...extraArtifacts],
       details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, ...extraDetails },
     }
+  }
+
+  // Settle a lead accept at either exhaustion point. A missing findings array
+  // is the older reviewer contract and remains a legacy accept; an explicit
+  // array is always checked against the latest canonical set and recorded.
+  function settleAccept(c, where) {
+    const findings = S.acceptFindings
+    const check = findings === null
+      ? { ok: true, residuals: [], refuted: [], unverified: [] }
+      : validateAcceptDecision({ findings, residuals: c.residuals, refuted: c.refuted })
+    const errors = check.errors || []
+    const outcome = check.ok && check.unverified.length === 0 ? 'accepted' : 'escalated'
+    const errorWhy = errors.map(({ id, why }) => `${id ?? 'decision'} ${why}`)
+    const unverifiedWhy = check.unverified.map((id) => `${id} is correctness-unverified`)
+    const whyParts = [...errorWhy, ...unverifiedWhy]
+    const why = outcome === 'accepted' ? null
+      : `${errors.length > 0 ? 'accept-with-residuals rejected' : 'accept-with-residuals escalated'}: ${whyParts.join('; ')}`
+    const record = {
+      where,
+      outcome,
+      findings_total: Array.isArray(findings) ? findings.length : 0,
+      residuals: check.residuals,
+      refuted: check.refuted,
+      unverified: check.unverified,
+      errors,
+    }
+    io.log({ at: io.now(), accept_decision: record })
+    emit({ kind: 'accept-decision', ...record })
+    return { ok: outcome === 'accepted', why, record }
+  }
+
+  const acceptQuestion = (question) => {
+    const lines = acceptContractLines(S.acceptFindings)
+    return lines.length > 0 ? `${question}\n\n${lines.join('\n')}` : question
   }
 
   // Fired at most once per run: the plan viewer is a singleton. Today plan
@@ -1146,7 +1282,7 @@ export function driveTask(ctx, io) {
       if (reviews >= limits.review_rounds + extraReviews) {
         const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
         const c = consultLead(
-          `Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`,
+          acceptQuestion(`Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`),
           options, [planPath, lastReviewPath],
         )
         if (c.decision === 'escalate') {
@@ -1163,6 +1299,12 @@ export function driveTask(ctx, io) {
           io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
           buildBrief = b; buildNote = 'review-fix'
           continue build
+        }
+        const settledAccept = settleAccept(c, 'review-exhausted')
+        if (!settledAccept.ok) {
+          const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+          if (settled) return settled
+          return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
         }
         accepted = 'lead accepted with residuals (review rounds exhausted)'
         break build
@@ -1184,7 +1326,7 @@ export function driveTask(ctx, io) {
         if (finalRound()) {
           const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
           const c = consultLead(
-            `Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`,
+            acceptQuestion(`Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`),
             options, [planPath, lastReviewPath],
           )
           if (c.decision === 'escalate') {
@@ -1201,6 +1343,12 @@ export function driveTask(ctx, io) {
             io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
             buildBrief = b; buildNote = 'review-fix'
             continue build
+          }
+          const settledAccept = settleAccept(c, 'build-exhausted')
+          if (!settledAccept.ok) {
+            const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+            if (settled) return settled
+            return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
           }
           accepted = 'lead accepted with residuals (build rounds exhausted)'
           break build

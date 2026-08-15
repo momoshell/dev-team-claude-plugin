@@ -5,13 +5,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
+import { regrantVerdict } from './escalation-policy.mjs'
 
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
-  FINDING_SEVERITIES, reviewFindings, reviewOutcome,
+  FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
+  validateAcceptDecision, acceptContractLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
 } from './drive.mjs'
 
@@ -112,8 +114,8 @@ const checkEnv = (verdict) => ({
   details: { verdict, check_path: `${TD}/plan-check.md` },
 })
 const CTX_TL = Object.freeze({ ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] })
-const leadEnv = (decision, guidance = 'do X then Y in a.mjs') => ({
-  status: 'done', role: 'lead', details: { decision, reason: 'because', guidance },
+const leadEnv = (decision, guidance = 'do X then Y in a.mjs', details = {}) => ({
+  status: 'done', role: 'lead', details: { decision, reason: 'because', guidance, ...details },
 })
 
 test('reviewOutcome normalizes reviewer verdicts and count fields', () => {
@@ -226,6 +228,45 @@ test('a drive with findings produces the same result as one without', () => {
   assert.deepEqual(note?.count_mismatch, ['must_fix'])
 })
 
+test('validateAcceptDecision collects each typed residual error without throwing', () => {
+  const cases = [
+    ['residuals must be an array', { findings: [], residuals: {} }],
+    ['refuted must be an array', { findings: [], refuted: {} }],
+    ['missing id', { findings: [], residuals: [{}] }],
+    ['invalid type', { findings: [{ id: 'RV1-1', severity: 'should-fix' }], residuals: [{ id: 'RV1-1', type: 'other' }] }],
+    ['empty refutation evidence', { findings: [{ id: 'RV1-1', severity: 'should-fix' }], refuted: [{ id: 'RV1-1', evidence: '  ' }] }],
+    ['unknown id', { findings: [], residuals: [{ id: 'RV1-9', type: 'cosmetic' }] }],
+    ['duplicate id', { findings: [{ id: 'RV1-1', severity: 'should-fix' }], residuals: [{ id: 'RV1-1', type: 'cosmetic' }], refuted: [{ id: 'RV1-1', evidence: 'not real' }] }],
+    ['must-fix may not be typed cosmetic', { findings: [{ id: 'RV1-1', severity: 'must-fix' }], residuals: [{ id: 'RV1-1', type: 'cosmetic' }] }],
+    ['omitted id', { findings: [{ id: 'RV1-1', severity: 'must-fix' }] }],
+  ]
+  for (const [why, input] of cases) {
+    const result = validateAcceptDecision(input)
+    assert.equal(result.ok, false, why)
+    assert.ok(result.errors.some((error) => error.why === why), why)
+  }
+})
+
+test('validateAcceptDecision accepts empty findings with an empty decision', () => {
+  assert.deepEqual(validateAcceptDecision({ findings: [], residuals: [], refuted: [] }), {
+    ok: true, residuals: [], refuted: [], unverified: [],
+  })
+})
+
+test('acceptContractLines lists findings and the typed residual/refutation instructions', () => {
+  const findings = [
+    { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'close this' },
+    { id: 'RV1-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'consider this' },
+  ]
+  const lines = acceptContractLines(findings)
+  const text = lines.join('\n')
+  assert.ok(text.includes('- RV1-1 (must-fix) a.mjs:1 — close this'))
+  assert.match(text, /residuals/)
+  assert.match(text, /refuted/)
+  for (const finding of findings) assert.equal(text.split(finding.id).length - 1, 1)
+  assert.deepEqual(acceptContractLines(null), [])
+})
+
 test('the shared charter and validator agree on the findings contract', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const start = charter.indexOf('## Envelope details fields')
@@ -237,6 +278,12 @@ test('the shared charter and validator agree on the findings contract', () => {
   assert.ok(severityField)
   const documented = [...severityField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
   assert.deepEqual(documented, [...FINDING_SEVERITIES])
+})
+
+test('the lead charter documents the typed exhaustion accept contract', () => {
+  const charter = readFileSync(new URL('./roles/lead.md', import.meta.url), 'utf8')
+  for (const token of ['residuals', 'refuted', ...RESIDUAL_TYPES]) assert.ok(charter.includes(token), token)
+  assert.match(charter, /code-refused/)
 })
 
 test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero consults', () => {
@@ -618,6 +665,180 @@ test('review rounds exhausted + lead escalates -> escalation envelope, NO commit
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.equal(io.calls.commits.length, 0)
+})
+
+const ACCEPT_FINDINGS = [
+  { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'load-bearing defect' },
+  { id: 'RV1-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'cosmetic follow-up' },
+]
+
+function exhaustionAcceptIo(details = {}, options = {}) {
+  return fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'reviewer:2': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'lead:1': leadEnv('accept', 'because these are bounded residuals', details),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    ...options,
+  })
+}
+
+test('valid typed accept at review exhaustion commits with residuals', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
+    refuted: [{ id: 'RV1-1', evidence: 'the reviewer mistook a test fixture for runtime code' }],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.match(res.details.accepted_via, /residuals/)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('must-fix typed cosmetic accept fails closed to review escalation', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-1', type: 'cosmetic' }],
+    refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.match(res.details.escalation.why, /RV1-1.*must-fix may not be typed cosmetic/)
+})
+
+test('correctness-unverified residual fails closed to review escalation', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-1', type: 'correctness-unverified' }],
+    refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.match(res.details.escalation.why, /RV1-1.*correctness-unverified/)
+})
+
+test('omitted finding id fails closed to review escalation', () => {
+  const io = exhaustionAcceptIo({ refuted: [{ id: 'RV1-1', evidence: 'not real' }] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.match(res.details.escalation.why, /RV1-2.*omitted id/)
+})
+
+test('duplicate finding id fails closed to review escalation', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
+    refuted: [
+      { id: 'RV1-2', evidence: 'not real' },
+      { id: 'RV1-1', evidence: 'not real' },
+    ],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.match(res.details.escalation.why, /RV1-2.*duplicate id/)
+})
+
+test('unknown finding id fails closed to review escalation', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [
+      { id: 'RV1-2', type: 'cosmetic' },
+      { id: 'RV1-9', type: 'cosmetic' },
+    ],
+    refuted: [{ id: 'RV1-1', evidence: 'not real' }],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.match(res.details.escalation.why, /RV1-9.*unknown id/)
+})
+
+test('empty refutation evidence fails closed to review escalation', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
+    refuted: [{ id: 'RV1-1', evidence: '   ' }],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.match(res.details.escalation.why, /RV1-1.*empty refutation evidence/)
+})
+
+test('no-lead tier remains a mechanical escalation with zero lead assigns', () => {
+  const mechanical = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'reviewer:2': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask({ ...CTX, roles: ['planner', 'builder', 'reviewer'] }, mechanical)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'review')
+  assert.ok(mechanical.calls.assign.every((a) => a.role !== 'lead'))
+  assert.equal(mechanical.calls.assign.filter((a) => a.role === 'lead').length, 0)
+})
+
+test('exhaustion accept brief lists every finding and the typed fields', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
+    refuted: [{ id: 'RV1-1', evidence: 'not real' }],
+  })
+  driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/decision-1.md`]
+  assert.ok(brief)
+  for (const finding of ACCEPT_FINDINGS) assert.match(brief, new RegExp(finding.id))
+  assert.match(brief, /residuals/)
+  assert.match(brief, /refuted/)
+})
+
+test('accept decision records accepted and refused outcomes in the journal and emit stream', () => {
+  const acceptedIo = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
+    refuted: [{ id: 'RV1-1', evidence: 'not real' }],
+  }, { emit: true })
+  driveTask(CTX, acceptedIo)
+  const acceptedLog = acceptedIo.calls.logs.find((line) => line.accept_decision)?.accept_decision
+  assert.equal(acceptedLog.outcome, 'accepted')
+  assert.ok(acceptedIo.calls.emits.some((event) => event.kind === 'accept-decision' && event.outcome === 'accepted'))
+
+  const refusedIo = exhaustionAcceptIo({
+    residuals: [{ id: 'RV1-1', type: 'cosmetic' }],
+    refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+  }, { emit: true })
+  driveTask(CTX, refusedIo)
+  const refusedLog = refusedIo.calls.logs.find((line) => line.accept_decision)?.accept_decision
+  assert.equal(refusedLog.outcome, 'escalated')
+  assert.ok(refusedLog.errors.some((error) => error.id === 'RV1-1'))
+})
+
+test('fail-closed accept escalation composes with the regrant policy shape', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'reviewer:2': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'lead:1': leadEnv('bounce'),
+      'lead:2': leadEnv('accept', 'invalid typed decision', {
+        residuals: [{ id: 'RV1-1', type: 'cosmetic' }],
+        refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+      }),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1, review_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  const verdict = regrantVerdict(result, [{ must_fix: 2 }, { must_fix: 1 }])
+  assert.equal(verdict.reasons.find((reason) => reason.condition === 'where-review').ok, true)
+  assert.equal(verdict.reasons.find((reason) => reason.condition === 'grant-spent').ok, true)
 })
 
 test('red full suite after review pass escalates and never commits', () => {

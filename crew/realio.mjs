@@ -183,6 +183,20 @@ export function emitAdapter(emitter) {
         checks_failed: event.summary?.failed ?? null, checks_errored: event.summary?.errored ?? null,
         note: event.note ?? null,
       }))
+    } else if (event.kind === 'accept-decision') {
+      const residuals = Array.isArray(event.residuals) ? event.residuals : []
+      const refuted = Array.isArray(event.refuted) ? event.refuted : []
+      const unverified = Array.isArray(event.unverified) ? event.unverified : []
+      const errors = Array.isArray(event.errors) ? event.errors : []
+      emitter.emit((handle) => handle.recordAcceptDecision({
+        adw_id: emitter.adwId, phase_id: phaseId, where: event.where, outcome: event.outcome,
+        findings_total: event.findings_total ?? null,
+        residual_count: residuals.length,
+        refuted_count: refuted.length,
+        cosmetic_count: residuals.filter((residual) => residual.type === 'cosmetic').length,
+        unverified_count: unverified.length,
+        invalid_reasons: errors.map(({ id, why }) => `${id ?? ''}: ${why}`).join('; '),
+      }))
     } else if (event.kind === 'attention') {
       // ADR-029 §4: attention rides the existing closed log vocabulary.
       record('log', { level: 'warn', message: `attention:${event.moment} park_id=${event.park_id ?? 'null'} task=${event.task} ${event.why}` })

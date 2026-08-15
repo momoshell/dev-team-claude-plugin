@@ -89,6 +89,7 @@ export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped']
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
+export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 
 // Per-event-type closed payload key allowlist. gate_pass/gate_fail, decision
 // and error are ratified (ADR-024); the remaining seven are backend-lead
@@ -237,6 +238,24 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'dispatch_id']],
     indexes: [],
   },
+  accept_decisions: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'where_at', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'findings_total', decl: 'INTEGER' },
+      { name: 'residual_count', decl: 'INTEGER' },
+      { name: 'refuted_count', decl: 'INTEGER' },
+      { name: 'cosmetic_count', decl: 'INTEGER' },
+      { name: 'unverified_count', decl: 'INTEGER' },
+      { name: 'invalid_reasons', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'where_at', 'created_at']],
+    indexes: [],
+  },
   processes: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -285,7 +304,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError',
 ])
 
@@ -994,6 +1013,32 @@ export function openLedger({
     return args
   }
 
+  function recordAcceptDecision(input = {}) {
+    requireFields(input, ['adw_id', 'outcome'], 'recordAcceptDecision')
+    requireEnum(input.outcome, ACCEPT_DECISION_OUTCOMES, 'recordAcceptDecision', 'outcome')
+    const args = redact({
+      adw_id: input.adw_id,
+      phase_id: input.phase_id ?? null,
+      where_at: input.where_at ?? input.where ?? null,
+      outcome: input.outcome,
+      findings_total: input.findings_total ?? null,
+      residual_count: input.residual_count ?? null,
+      refuted_count: input.refuted_count ?? null,
+      cosmetic_count: input.cosmetic_count ?? null,
+      unverified_count: input.unverified_count ?? null,
+      invalid_reasons: input.invalid_reasons == null ? null : String(input.invalid_reasons),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (args.invalid_reasons != null) args.invalid_reasons = args.invalid_reasons.slice(0, 500)
+    appendJsonl('recordAcceptDecision', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('accept_decisions').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO accept_decisions (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function startProcess(input = {}) {
     requireFields(input, ['adw_id', 'dispatch_id', 'pid', 'command'], 'startProcess')
     const args = redact({
@@ -1350,6 +1395,7 @@ export function openLedger({
       phases: [],
       gate_generations: [],
       review_outcomes: [],
+      accept_decisions: [],
       usage: null,
       absent: {},
     })
@@ -1397,6 +1443,11 @@ export function openLedger({
       SELECT dispatch_id, role, verdict, must_fix, should_fix, consider, created_at
       FROM review_outcomes WHERE adw_id = ? ORDER BY created_at, id
     `, [adwId])
+    const acceptDecisions = queryRows(`
+      SELECT where_at, outcome, findings_total, residual_count, refuted_count,
+        cosmetic_count, unverified_count, invalid_reasons, created_at
+      FROM accept_decisions WHERE adw_id = ? ORDER BY created_at, id
+    `, [adwId])
     // Each row holds a running total, not a delta (`endAgentSession` overwrites, :1129) — a MAX or a last-row read silently misreports.
     const usageRow = queryRows(`
       SELECT COUNT(*) AS agent_sessions,
@@ -1425,6 +1476,9 @@ export function openLedger({
     const reviewCount = queryRows(
       'SELECT COUNT(*) AS count FROM review_outcomes WHERE adw_id = ?', [adwId],
     )[0]?.count ?? 0
+    const acceptDecisionCount = queryRows(
+      'SELECT COUNT(*) AS count FROM accept_decisions WHERE adw_id = ?', [adwId],
+    )[0]?.count ?? 0
     const absent = {}
     if (agentSessions === 0 || everyBilledSumNull) {
       absent.usage = 'predates per-agent token measurement (#119) — not a measured zero'
@@ -1434,6 +1488,9 @@ export function openLedger({
     }
     if (Number(reviewCount) === 0) {
       absent.review_outcomes = 'predates structured review outcomes (#169/#170)'
+    }
+    if (Number(acceptDecisionCount) === 0) {
+      absent.accept_decisions = 'predates typed accept decisions (#170)'
     }
     if (gateGenerations.length === 0) {
       absent.gate_results = 'predates gate verdict recording (#130)'
@@ -1451,6 +1508,7 @@ export function openLedger({
       phases,
       gate_generations: gateGenerations,
       review_outcomes: reviewOutcomes,
+      accept_decisions: acceptDecisions,
       usage,
       absent,
     }
@@ -1491,7 +1549,7 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError,
     listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks, runSet, taskReadout,
@@ -1945,6 +2003,7 @@ export function main(argv) {
         phases: readout.phases,
         gate_generations: readout.gate_generations,
         review_outcomes: readout.review_outcomes,
+        accept_decisions: readout.accept_decisions,
         usage: readout.usage,
         absent: readout.absent,
       }

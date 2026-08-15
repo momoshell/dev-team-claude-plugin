@@ -6,7 +6,8 @@ The factory ledger is the register for run facts. When a session asks what happe
 
 | Question | Command |
 | --- | --- |
-| What happened in this run? | `node scripts/factory/ledger.mjs task <adw_id\|task_slug>` — prints the resolved run session, phase rows, gate generations (attempts, green and pristine-run counts, latest gate timestamp, and per-generation discrimination), structured review outcomes, token usage, and `absent` markers. The unit is one run; usage is token counts across its agent sessions. |
+| What happened in this run? | `node scripts/factory/ledger.mjs task <adw_id\|task_slug>` — prints the resolved run session, phase rows, gate generations (attempts, green and pristine-run counts, latest gate timestamp, and per-generation discrimination), structured review outcomes, typed accept decisions, token usage, and `absent` markers. The unit is one run; usage is token counts across its agent sessions. |
+| Did a lead accept with residuals, and did the typed decision hold? | `node scripts/factory/ledger.mjs task <adw_id\|task_slug>` — prints the `accept_decisions` rows: where the accept was attempted, whether it was accepted or fell closed to escalate, the residual/refuted/cosmetic/unverified counts, and the reasons an invalid decision was refused. The unit is one accept attempt. |
 | Which runs exist? | `node scripts/factory/ledger.mjs sessions` — prints the session rows, one row per run, including task slug, status, timestamps, and the session-level token and cost columns. The unit is one run. |
 | What phases did a run go through? | `node scripts/factory/ledger.mjs phases <adw_id>` — prints phase rows ordered by sequence, with the phase name, status, and start/end timestamps. The unit is one phase. |
 | What events did a run emit? | `node scripts/factory/ledger.mjs tail <adw_id> [--after n] [--limit n]` — prints ordered event rows and their bounded payloads; `--after` is an exclusive event-row cursor and `--limit` is the page size. The unit is one event. |
@@ -21,6 +22,6 @@ Replace `<adw_id>` or `<task_slug>` placeholders with the run's identifier, and 
 
 Run facts are answered by the queries above. A memory entry or other prose that restates those facts is the thing being retired; durable conventions, user preferences, and decision rationale remain prose.
 
-The register's honesty rule is that no rows for an older run answer **“not measured then,” not “nothing happened.”** The `task` readout says this explicitly through its `absent` markers: a null fact with a marker is not a measured zero. This distinction applies independently to phases, gate verdict recording, gate discrimination, structured review outcomes, and usage.
+The register's honesty rule is that no rows for an older run answer **“not measured then,” not “nothing happened.”** The `task` readout says this explicitly through its `absent` markers: a null fact with a marker is not a measured zero. This distinction applies independently to phases, gate verdict recording, gate discrimination, structured review outcomes, typed accept decisions, and usage.
 
 Usage is tokens only and is a **sum of running totals** across the run's `agent_sessions` rows. Each row stores that agent session's running total, not a delta, so the readout sums the rows. Money is deliberately out of scope (#119); the query surface reports no cost calculation.

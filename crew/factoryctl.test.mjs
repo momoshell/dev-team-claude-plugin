@@ -16,12 +16,12 @@ function mintCrew(root, name) {
     roles: ['builder'], members: { builder: { transport: 'headless-json' } },
   }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
-  return { crewDir, taskReturn: join(returnsDir, 'task.json') }
+  return { crewDir }
 }
 
 function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewDir = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'factoryctl-'))
-  const { crewDir, taskReturn } = mintCrew(root, 'crew')
+  const { crewDir } = mintCrew(root, 'crew')
   const brief = join(root, 'brief.md')
   const reportedCrewDir = bootCrewDir || join(root, 'reported-tier-crew')
   writeFileSync(brief, '# brief\n')
@@ -51,7 +51,7 @@ function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewD
       setInterval: () => null, clearInterval: () => {},
     },
   })
-  return { root, crewDir, taskReturn, brief, boots, reportedCrewDir, daemon: d, mintCrew: (name) => mintCrew(root, name), cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, crewDir, brief, boots, reportedCrewDir, daemon: d, mintCrew: (name) => mintCrew(root, name), cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 async function withDaemon(name, fn, options = {}) {

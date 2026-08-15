@@ -431,7 +431,13 @@ export function daemon(options = {}) {
       return
     }
     if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = 'orphaned-on-restart'; run.child_dead = true; return }
-    if (record.kind === 'settled') { run.lifecycle = 'settled'; run.outcome_status = record.outcome_status; run.outcome_source = record.outcome_source; return }
+    if (record.kind === 'settled') {
+      if (record.task_return) {
+        run.task_return = record.task_return
+        run.attempt = record.attempt ?? run.attempt
+      }
+      run.lifecycle = 'settled'; run.outcome_status = record.outcome_status; run.outcome_source = record.outcome_source; return
+    }
   }
 
   function foldRegistry() {
@@ -458,6 +464,14 @@ export function daemon(options = {}) {
   }
 
   function runEnvelope(run) { return jsonAt(run.task_return, exists, read) }
+
+  function sameFile(leftPath, rightPath) {
+    if (!leftPath || !rightPath) return false
+    try {
+      const left = stat(leftPath), right = stat(rightPath)
+      return left.dev === right.dev && left.ino === right.ino
+    } catch { return false }
+  }
 
   function notify(run, event) {
     for (const subscriber of [...subscribers]) {
@@ -687,7 +701,7 @@ export function daemon(options = {}) {
     run.envelope = envelope
     run.lifecycle = 'settled'
     if (run.feed.length > feedRetention) run.feed.splice(0, run.feed.length - feedRetention)
-    appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope' })
+    appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope', task_return: run.task_return, attempt: run.attempt })
     endFeed(run, 'settled')
     pump()
   }
@@ -971,7 +985,10 @@ export function daemon(options = {}) {
       : runReturnPath(crewDir, runId)
     const wellKnown = join(crewDir, 'returns', 'task.json')
     const settled = jsonAt(wellKnown, exists, read)
-    const ownsIt = [...runs.values()].some((run) => run.crew_dir === crewDir && run.lifecycle === 'settled')
+    const ownsIt = [...runs.values()].some((run) => run.crew_dir === crewDir
+      && run.lifecycle === 'settled'
+      && !sameFile(run.task_return, wellKnown)
+      && !!jsonAt(run.task_return, exists, read))
     if (settled && !ownsIt) {
       throw runError('crew-settled', `crew dir ${crewDir} already holds a terminal envelope`
         + ` (status ${JSON.stringify(settled.status ?? null)}) at ${wellKnown}`

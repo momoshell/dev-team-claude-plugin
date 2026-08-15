@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
-  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync,
+  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync, symlinkSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -472,6 +472,37 @@ test('a settled daemon crew dir admits a second run without losing the first env
   })
 })
 
+test('a well-known task_return override cannot surrender the first run on re-enqueue', async () => {
+  const f = fixture()
+  let next
+  try {
+    const first = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'mirror-owner', task_return: 'returns/task.json' }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done', summary: 'first' }))
+    f.d.poll()
+    assert.equal(f.d.result({ run: first }).envelope.summary, 'first')
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: 'second' }), (err) => err.code === 'crew-settled')
+
+    await f.d.stop()
+    next = daemon({ root: f.root, deps: f.deps })
+    assert.throws(() => next.enqueue({ crew_dir: f.crewDir, run_id: 'after-restart' }), (err) => err.code === 'crew-settled')
+  } finally {
+    await f.d.stop()
+    await next?.stop()
+    f.cleanup()
+  }
+})
+
+test('a symlink alias of the mirror cannot claim separate return ownership', async () => {
+  await each(async (f) => {
+    symlinkSync('task.json', join(f.returnsDir, 'alias.json'))
+    const first = f.d.enqueue({ crew_dir: f.crewDir, run_id: 'alias-owner', task_return: 'returns/alias.json' }).run_id
+    writeFileSync(join(f.returnsDir, 'alias.json'), JSON.stringify({ status: 'done', summary: 'first' }))
+    f.d.poll()
+    assert.equal(f.d.result({ run: first }).envelope.summary, 'first')
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: 'alias-second' }), (err) => err.code === 'crew-settled')
+  })
+})
+
 test('crew-settled refusal carries its code over the socket', async () => {
   const f = fixture()
   try {
@@ -709,6 +740,7 @@ test('a failed regrant registry append restores the envelope before settlement',
 
 test('a failed continuation fork restores the terminal escalation', async () => {
   const f = fixture()
+  let next
   try {
     let forks = 0
     f.deps.fork = (...args) => {
@@ -737,7 +769,16 @@ test('a failed continuation fork restores the terminal escalation', async () => 
     assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
     assert.equal(f.d.result({ run }).outcome, 'escalation')
     assert.equal(f.d.state({ run }).state, 'done')
-  } finally { await f.d.stop(); f.cleanup() }
+
+    await f.d.stop()
+    next = daemon({ root: f.root, deps: f.deps })
+    assert.equal(next.result({ run }).outcome, 'escalation')
+    assert.equal(next.state({ run }).state, 'done')
+  } finally {
+    await f.d.stop()
+    await next?.stop()
+    f.cleanup()
+  }
 })
 
 test('a post-record continuation launch failure settles the restored escalation', async () => {

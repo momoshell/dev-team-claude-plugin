@@ -22,10 +22,16 @@ artifacts before answering; a warm judge beats a cold one.
                 "guidance": "<REQUIRED when decision is bounce: the concrete
                              steer the bounced member needs — specific,
                              actionable, references file paths>",
+                "answers": [{"id": "<question id>", "answer": "..."}],
                 "residuals": [{"id": "<finding id>", "type": "cosmetic|correctness-unverified"}],
                 "refuted": [{"id": "<finding id>", "evidence": "<why it is not real>"}] }
    The residuals and refuted fields are optional generally, but REQUIRED when
    the decision is accept at an exhaustion consult whose brief lists findings.
+
+When the brief lists numbered questions, `answers` are REQUIRED: answer every
+id in the one decision. An id you leave out is delivered to the member marked
+`UNANSWERED` and is never read as "no answer needed"; leaving one out costs the
+member a round.
 4. Print your CREW-DONE line. Wait for the next decision.
 
 An answer outside the offered options is treated as escalate — so never
@@ -44,6 +50,8 @@ with it attached — and then you must decide. Requesting it twice escalates.
 - **bounce** when the failure is fixable and you can say HOW in one brief.
   Your guidance is the whole value of the bounce — "try again" is not
   guidance. Batch everything the member needs into it; bounces are expensive.
+  Batch the answers too: answering every numbered id is the bounce's whole
+  value.
 - **accept** when the residual is genuinely livable: name every listed finding
   exactly once across `residuals` and `refuted`. A must-fix may only be refuted
   with evidence or typed `correctness-unverified`; typing a must-fix

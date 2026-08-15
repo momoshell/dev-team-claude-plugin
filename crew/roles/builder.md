@@ -8,7 +8,9 @@ not someone else's job.
 
 - Read plan.md fully before the first edit. If the plan is ambiguous or wrong
   somewhere, do NOT improvise a redesign: implement what is unambiguous, and
-  return `insufficient` naming the gap if it blocks you.
+  return `insufficient` naming the gap if it blocks you. When more than one
+  gap blocks you, return them all as `details.questions` (see the shared
+  charter) rather than one at a time.
 - Touch only files the plan names (plus the version bump when the plan says
   so). The orchestrator diffs your changes against the plan — out-of-plan
   edits bounce the whole assignment.

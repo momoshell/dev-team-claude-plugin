@@ -34,6 +34,22 @@ files in the task directory.
 what is missing in `summary`. `blocked` = an external obstacle. NEVER fake a
 `done`.
 
+## Asking questions (batched, id-addressable)
+
+When you cannot finish because the brief or the plan leaves gaps, do not
+surface one gap and wait. Find them ALL, then return them as a numbered set in
+the SAME envelope:
+
+    "details": { "questions": [ {"id": "q1", "question": "<one specific gap>"},
+                                {"id": "q2", "question": "..."} ] }
+
+Ids are yours and must be unique within the envelope; at most 10 questions per
+envelope; each `question` must be a real question, not a topic. The lead
+answers them keyed to your ids and every answer comes back in ONE bounce brief
+— one round instead of one round per gap. Malformed entries are dropped and
+reported; they never change the round's outcome. Only the planner's and the
+builder's status returns consume this field today.
+
 ## Hard rules
 
 - Your final chat message per assignment is the CREW-DONE line, preceded at

@@ -42,7 +42,7 @@
 //
 // CLI verbs: `sessions` | `phases <adw_id>` | `tail <adw_id> [--after n]
 // [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
-// `eligible-tasks` — the read-only verbs the npm `ledger:*` recipes invoke
+// `eligible-tasks` | `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
 // (spellings are a contract with package.json; see do-40-02) — plus `doctor`
 // (capability + state readout) and `kill` (operator-invoked process
 // termination, its own refusal-gated helper).
@@ -1273,11 +1273,11 @@ export function openLedger({
     }
   }
 
-  function queryRows(sql) {
+  function queryRows(sql, params = []) {
     const conn = ensureDb()
     if (!conn) return []
     try {
-      return conn.prepare(sql).all()
+      return conn.prepare(sql).all(...params)
     } catch (err) {
       stats.mirror_errors += 1
       if (!stats.mirror_first_code) {
@@ -1308,6 +1308,130 @@ export function openLedger({
              AND d.gate_generation = (SELECT MAX(g2.gate_generation) FROM gate_results g2 WHERE g2.adw_id = s.adw_id)) AS proven_active
       FROM sessions s ORDER BY s.adw_id
     `)
+  }
+
+  function taskReadout(selector) {
+    // Resolve an adw_id before trying task_slug; a slug match is only usable
+    // when it names exactly one run, so an ambiguity can be refused upstream.
+    const byId = queryRows('SELECT adw_id FROM sessions WHERE adw_id = ?', [selector])
+    const slugMatches = byId.length === 1
+      ? []
+      : queryRows('SELECT adw_id FROM sessions WHERE task_slug = ? ORDER BY adw_id', [selector])
+        .map((row) => row.adw_id)
+    const ambiguousCandidates = slugMatches.length > 1 ? slugMatches : []
+    const unresolved = (candidates = []) => ({
+      degraded,
+      adw_id: null,
+      resolved_by: null,
+      candidates,
+      session: null,
+      phases: [],
+      gate_generations: [],
+      review_outcomes: [],
+      usage: null,
+      absent: {},
+    })
+
+    if (byId.length !== 1 && slugMatches.length !== 1) {
+      return unresolved(ambiguousCandidates)
+    }
+
+    const adwId = byId.length === 1 ? byId[0].adw_id : slugMatches[0]
+    const resolvedBy = byId.length === 1 ? 'adw_id' : 'task_slug'
+    const session = queryRows('SELECT * FROM sessions WHERE adw_id = ?', [adwId])[0] ?? null
+    const phases = queryRows('SELECT * FROM phases WHERE adw_id = ? ORDER BY seq', [adwId])
+    const gateRows = queryRows(`
+      SELECT g.gate_generation,
+        COUNT(*) AS attempts,
+        SUM(g.ok = 1 AND COALESCE(g.pristine, 0) = 0) AS green,
+        SUM(COALESCE(g.pristine, 0) = 1) AS pristine_runs,
+        MAX(g.created_at) AS last_created_at,
+        d.id AS discrimination_id,
+        d.verdict AS discrimination_verdict,
+        d.checks_total AS discrimination_checks_total,
+        d.checks_failed AS discrimination_checks_failed,
+        d.checks_errored AS discrimination_checks_errored
+      FROM gate_results g
+      LEFT JOIN gate_discriminations d
+        ON d.adw_id = g.adw_id AND d.gate_generation = g.gate_generation
+      WHERE g.adw_id = ?
+      GROUP BY g.gate_generation
+      ORDER BY g.gate_generation
+    `, [adwId])
+    const gateGenerations = gateRows.map((row) => ({
+      gate_generation: row.gate_generation,
+      attempts: row.attempts,
+      green: row.green,
+      pristine_runs: row.pristine_runs,
+      last_created_at: row.last_created_at,
+      discrimination: row.discrimination_id == null ? null : {
+        verdict: row.discrimination_verdict,
+        checks_total: row.discrimination_checks_total,
+        checks_failed: row.discrimination_checks_failed,
+        checks_errored: row.discrimination_checks_errored,
+      },
+    }))
+    const reviewOutcomes = queryRows(`
+      SELECT dispatch_id, role, verdict, must_fix, should_fix, consider, created_at
+      FROM review_outcomes WHERE adw_id = ? ORDER BY created_at, id
+    `, [adwId])
+    // Each row holds a running total, not a delta (`endAgentSession` overwrites, :1129) — a MAX or a last-row read silently misreports.
+    const usageRow = queryRows(`
+      SELECT COUNT(*) AS agent_sessions,
+        SUM(billed_input_tokens) AS billed_input_tokens,
+        SUM(billed_output_tokens) AS billed_output_tokens,
+        SUM(billed_cache_write_tokens) AS billed_cache_write_tokens,
+        SUM(billed_cache_read_tokens) AS billed_cache_read_tokens
+      FROM agent_sessions WHERE adw_id = ?
+    `, [adwId])[0] ?? null
+    const agentSessions = usageRow == null ? 0 : Number(usageRow.agent_sessions)
+    const billedKeys = [
+      'billed_input_tokens', 'billed_output_tokens',
+      'billed_cache_write_tokens', 'billed_cache_read_tokens',
+    ]
+    const everyBilledSumNull = usageRow == null || billedKeys.every((key) => usageRow[key] == null)
+    const usage = agentSessions === 0 ? null : {
+      agent_sessions: agentSessions,
+      billed_input_tokens: usageRow.billed_input_tokens,
+      billed_output_tokens: usageRow.billed_output_tokens,
+      billed_cache_write_tokens: usageRow.billed_cache_write_tokens,
+      billed_cache_read_tokens: usageRow.billed_cache_read_tokens,
+    }
+    const discriminationCount = queryRows(
+      'SELECT COUNT(*) AS count FROM gate_discriminations WHERE adw_id = ?', [adwId],
+    )[0]?.count ?? 0
+    const reviewCount = queryRows(
+      'SELECT COUNT(*) AS count FROM review_outcomes WHERE adw_id = ?', [adwId],
+    )[0]?.count ?? 0
+    const absent = {}
+    if (agentSessions === 0 || everyBilledSumNull) {
+      absent.usage = 'predates per-agent token measurement (#119) — not a measured zero'
+    }
+    if (Number(discriminationCount) === 0) {
+      absent.gate_discrimination = 'predates gate discrimination (#168)'
+    }
+    if (Number(reviewCount) === 0) {
+      absent.review_outcomes = 'predates structured review outcomes (#169/#170)'
+    }
+    if (gateGenerations.length === 0) {
+      absent.gate_results = 'predates gate verdict recording (#130)'
+    }
+    if (phases.length === 0) {
+      absent.phases = 'no phase rows recorded for this run'
+    }
+
+    return {
+      degraded,
+      adw_id: adwId,
+      resolved_by: resolvedBy,
+      candidates: [],
+      session,
+      phases,
+      gate_generations: gateGenerations,
+      review_outcomes: reviewOutcomes,
+      usage,
+      absent,
+    }
   }
 
   // ---- lifecycle / meta -----------------------------------------------------
@@ -1348,7 +1472,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -1641,7 +1765,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | task | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -1704,6 +1828,39 @@ export function main(argv) {
       const rows = ledger.eligibleTasks()
       const eligible = rows.filter((row) => row.proven_active > 0 && row.reviews > 0).length
       stdout.write(`${JSON.stringify({ schema: 1, horizon: 20, eligible, rows })}\n`)
+      return 0
+    }
+
+    if (verb === 'task') {
+      const selector = positional[0]
+      if (!selector) refuse('task: requires an adw_id or task_slug argument')
+      if (positional.length > 1) refuse('task: takes exactly one positional argument')
+      const readout = ledger.taskReadout(selector)
+      if (readout.degraded) refuse('task: the ledger mirror is degraded — this run is unanswerable, not absent')
+      if (!readout.adw_id) {
+        if (readout.candidates.length > 1) {
+          refuse(`task: that task_slug matches ${readout.candidates.length} runs — pass one adw_id: ${readout.candidates.join(', ')}`)
+        }
+        refuse('task: no run matches that adw_id or task_slug')
+      }
+      const payload = {
+        schema: 1,
+        question: 'For one run: what ran, what passed, what did the gate say, and what did it cost?',
+        definition: {
+          usage: "usage sums billed_* across the run's agent_sessions rows — each row holds a running total, not a delta",
+          gate_generation: 'one gate generation is one authored gate; attempts within it are re-runs',
+          absent: 'null with an `absent` marker means the fact was never measured for this run — never a measured zero',
+        },
+        adw_id: readout.adw_id,
+        resolved_by: readout.resolved_by,
+        session: readout.session,
+        phases: readout.phases,
+        gate_generations: readout.gate_generations,
+        review_outcomes: readout.review_outcomes,
+        usage: readout.usage,
+        absent: readout.absent,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
       return 0
     }
 

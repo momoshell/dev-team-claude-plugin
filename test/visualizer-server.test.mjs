@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawn as spawnProcess } from 'node:child_process'
 import { openLedger, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
+import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 
 const require = createRequire(import.meta.url)
 function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
@@ -78,6 +79,17 @@ function fixture(path, { filler = 0 } = {}) {
   ledger.recordEvent({ adw_id: done, type: 'agent_start', phase_id: 2, payload: { role: 'builder', dispatch_id: 'd2' } })
   ledger.recordEvent({ adw_id: done, type: 'agent_end', phase_id: 2, payload: { role: 'builder', dispatch_id: 'd2', outcome: 'done' } })
   for (let i = 0; i < filler; i += 1) ledger.recordEvent({ adw_id: done, type: 'log', payload: { level: 'info', message: `filler ${i}` } })
+  for (const [index, claudeSessionId] of ['claude-done-1', 'claude-done-2'].entries()) {
+    const dispatchId = `agent-done-${index + 1}`
+    ledger.startAgentSession({ adw_id: done, dispatch_id: dispatchId, role: 'builder', model: 'test-model', claude_session_id: claudeSessionId, transcript_path: `/tmp/${claudeSessionId}.jsonl` })
+    ledger.endAgentSession({ adw_id: done, claude_session_id: claudeSessionId, context_tokens: 100, context_window: 200, raw_read_tokens: 20, raw_written_tokens: 10,
+      billed_input_tokens: index === 0 ? 10 : 5, billed_output_tokens: index === 0 ? 4 : 6,
+      billed_cache_write_tokens: index === 0 ? 2 : 3, billed_cache_read_tokens: index === 0 ? 1 : 7 })
+  }
+  ledger.recordGateDiscrimination({ adw_id: done, phase_id: 3, gate_generation: 1, verdict: 'failed', checks_total: 2, checks_failed: 2, checks_errored: 0, created_at: '2024-01-01T00:00:01.000Z' })
+  ledger.recordGateDiscrimination({ adw_id: done, phase_id: 3, gate_generation: 2, verdict: 'proven', checks_total: 2, checks_failed: 0, checks_errored: 0, created_at: '2024-01-01T00:00:02.000Z' })
+  ledger.recordReviewOutcome({ adw_id: done, phase_id: 3, dispatch_id: 'd1', role: 'reviewer', verdict: 'changes-needed', must_fix: 1, should_fix: 2, consider: 0, created_at: '2024-01-01T00:00:03.000Z' })
+  ledger.recordReviewOutcome({ adw_id: done, phase_id: 3, dispatch_id: 'd2', role: 'reviewer', verdict: 'pass', must_fix: 0, should_fix: 0, consider: 0, created_at: '2024-01-01T00:00:04.000Z' })
   ledger.endSession({ adw_id: done, status: 'ok' })
   ledger.startSession({ adw_id: live, repo_slug: 'repo', task_slug: 'live' })
   ledger.startPhase({ adw_id: live, seq: 1, name: 'plan' })
@@ -148,6 +160,75 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
     readonly.close()
   } finally {
     if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('sessions expose token, gate, and review measurements while live runs stay pending', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-measurements-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done, live } = fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const runs = (await json(base, '/api/sessions')).json.runs
+    const historical = runs.find((run) => run.adw_id === done), running = runs.find((run) => run.adw_id === live)
+    assert.equal(historical.metrics.billed_input_tokens, 15)
+    assert.equal(historical.metrics.billed_output_tokens, 10)
+    assert.equal(historical.metrics.billed_cache_write_tokens, 5)
+    assert.equal(historical.metrics.billed_cache_read_tokens, 8)
+    assert.equal(historical.gate_generations.length, 2)
+    assert.equal(historical.gate_discrimination, 'proven')
+    assert.equal(historical.reviews.length, 2)
+    for (const field of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+      assert.equal(running.metrics[field], null)
+      assert.ok(running.pending[field])
+      assert.notEqual(running.metrics[field], 0)
+    }
+    for (const field of ['gate_discrimination', 'reviews']) {
+      assert.equal(running[field], null)
+      assert.ok(running.pending[field])
+    }
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('missing measurement tables do not break the read-only feed', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-missing-tables-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  for (const table of ['agent_sessions', 'gate_discriminations', 'review_outcomes']) writable.exec(`DROP TABLE ${table}`)
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    let result
+    assert.doesNotThrow(() => { result = feed.listRuns({}) })
+    const run = result.runs.find((candidate) => candidate.adw_id === done)
+    assert.ok(run)
+    assert.ok(run.pending.billed_input_tokens)
+    assert.ok(run.pending.gate_discrimination)
+    assert.ok(run.pending.reviews)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a broken ledger reports degraded without throwing', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-degraded-'))
+  const feed = createLedgerFeed({ ledgerDb: join(dir, 'missing', 'ledger.db'), triageDb: join(dir, 'visualizer.db') })
+  try {
+    let result
+    assert.doesNotThrow(() => { result = feed.listRuns({}) })
+    assert.deepEqual(result.runs, [])
+    assert.equal(result.degraded, true)
+    assert.ok(result.probe)
+    assert.equal(feed.health().degraded, true)
+  } finally {
+    feed.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

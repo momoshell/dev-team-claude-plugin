@@ -2,6 +2,7 @@
   import { getEvents, postTriage } from './api.js'
   import { drainEvents, createDrainQueue } from './drain.js'
   import PhaseDots from './PhaseDots.svelte'
+  import GateChips from './GateChips.svelte'
   let { run, onopen = () => {} } = $props()
   let expanded = $state(false)
   let events = $state([])
@@ -43,7 +44,7 @@
 </script>
 <article class="card">
   <header><div><strong>{run.goal || 'Untitled run'}</strong><small>{run.repo_slug || 'repository pending'}</small></div><span class="status">{run.status}</span></header>
-  <div class="meta"><span class:muted={!run.mode} title={run.pending.mode}>mode {run.mode || '—'}</span><span>{Math.round((run.duration_ms || 0) / 1000)}s</span><PhaseDots phases={run.phases} laneSource={run.phase_lanes} /><span>{run.engineer || 'engineer —'}</span></div>
+  <div class="meta"><span class:muted={!run.mode} title={run.pending.mode}>mode {run.mode || '—'}</span><span>{Math.round((run.duration_ms || 0) / 1000)}s</span><PhaseDots phases={run.phases} laneSource={run.phase_lanes} /><GateChips {run} /><span>{run.engineer || 'engineer —'}</span></div>
   <div class="agents">{#each run.agents as agent (agent.dispatch_id)}<span class="agent" style={`--lane-color: var(--lane-${agent.lane ?? 0})`} title={agent.outcome || 'running'}>lane {agent.lane}: {agent.role}</span>{/each}</div>
   <footer><button onclick={triage}>{run.triage.reviewed_at ? 'Unarchive' : 'Archive'}</button><button onclick={toggleEvents}>{expanded ? 'Hide events' : 'Events'}</button><button onclick={() => onopen(run)}>Detail</button></footer>
   {#if expanded}<div class="events wide">{#if historyTruncated}<p class="muted">History was cut at the page guard.</p>{/if}{#each events as event (event.id)}<div><code>#{event.id}</code> {event.type} {event.payload_json}</div>{/each}</div>{/if}

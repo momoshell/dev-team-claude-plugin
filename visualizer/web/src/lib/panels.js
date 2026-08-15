@@ -1,0 +1,100 @@
+const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+const FINDINGS_PENDING = 'findings unavailable — this review predates structured findings (#170)'
+const UNPROVEN_TITLE = 'no evidence was obtainable — a direct DI caller without runClean, or a contained stash failure. Absence of evidence is not evidence of absence (ADR-030).'
+
+export function fleetTokens(runs = []) {
+  const source = Array.isArray(runs) ? runs : []
+  let total = null
+  let measured = 0
+  for (const run of source) {
+    const metrics = run?.metrics ?? run ?? {}
+    let runTotal = null
+    for (const field of TOKEN_FIELDS) {
+      const value = metrics?.[field]
+      if (typeof value === 'number' && Number.isFinite(value)) runTotal = (runTotal ?? 0) + value
+    }
+    if (runTotal == null) continue
+    total = (total ?? 0) + runTotal
+    measured += 1
+  }
+  const pending = total == null ? (source[0]?.pending?.billed_input_tokens || 'predates this measurement') : null
+  return { total, measured, runs: source.length, pending }
+}
+
+export function fleetCost() {
+  return { usd: null, pending: 'money deferred — a subscription seat is not billed per token (#185)' }
+}
+
+export function gateChips(run = {}) {
+  const generations = Array.isArray(run.gate_generations)
+    ? [...run.gate_generations].sort((a, b) => (a?.gate_generation ?? 0) - (b?.gate_generation ?? 0))
+    : []
+  if (!generations.length) return { chips: [], repaired: false, pending: run.pending?.gate_discrimination ?? 'predates this measurement' }
+  const chips = generations.map((row) => {
+    const verdict = row?.verdict
+    const tone = verdict === 'proven' || verdict === 'failed' || verdict === 'unproven' ? verdict : 'unproven'
+    const generation = row?.gate_generation ?? null
+    const labelGeneration = generation ?? '—'
+    const label = tone === 'proven'
+      ? `gate proven to discriminate (gen ${labelGeneration})`
+      : tone === 'failed'
+        ? `gate did not discriminate (gen ${labelGeneration})`
+        : `gate discrimination unproven (gen ${labelGeneration})`
+    const title = tone === 'unproven'
+      ? UNPROVEN_TITLE
+      : tone === 'proven'
+        ? 'gate evidence shows the check discriminated'
+        : 'gate evidence shows the check did not discriminate'
+    return {
+      generation,
+      verdict: tone,
+      tone,
+      label,
+      title,
+      checks: {
+        total: row?.checks_total ?? null,
+        failed: row?.checks_failed ?? null,
+        errored: row?.checks_errored ?? null,
+      },
+    }
+  })
+  return { chips, repaired: chips.length > 1, pending: null }
+}
+
+export function reviewRows(run = {}) {
+  const reviews = Array.isArray(run.reviews) ? run.reviews : []
+  if (!reviews.length) return { rows: [], pending: run.pending?.reviews ?? 'predates this measurement' }
+  const rows = reviews.map((row, index) => ({
+    round: index + 1,
+    role: row?.role ?? null,
+    dispatch_id: row?.dispatch_id ?? null,
+    verdict: row?.verdict ?? null,
+    must_fix: row?.must_fix ?? null,
+    should_fix: row?.should_fix ?? null,
+    consider: row?.consider ?? null,
+    created_at: row?.created_at ?? null,
+  }))
+  return { rows, pending: null }
+}
+
+export function findingRows(returns = {}) {
+  const envelopes = Array.isArray(returns?.envelopes) ? returns.envelopes : []
+  const groups = []
+  let measured = false
+  for (const envelope of envelopes) {
+    const findings = envelope?.details && Array.isArray(envelope.details.findings) ? envelope.details.findings : null
+    if (findings == null) continue
+    measured = true
+    groups.push({
+      role: envelope?.role ?? null,
+      dispatch_seq: envelope?.dispatch_seq ?? null,
+      findings: findings.map((finding) => ({
+        id: finding?.id ?? null,
+        severity: finding?.severity ?? null,
+        location: finding?.location ?? null,
+        summary: finding?.summary ?? null,
+      })),
+    })
+  }
+  return { groups, pending: measured ? null : FINDINGS_PENDING }
+}

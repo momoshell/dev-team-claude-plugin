@@ -131,6 +131,15 @@ test('judge tech-lead and planner come from different vendors', () => {
   assert.notEqual(roster.tiers.judge['tech-lead'].provider, roster.tiers.judge.planner.provider)
 })
 
+test('every panel-capable tier pairs reviewer and partner across vendors', () => {
+  for (const [tier, seats] of Object.entries(roster.tiers)) {
+    const reviewer = seats.reviewer
+    const partnerRole = ['tech-lead', 'planner'].find((role) => seats[role])
+    if (!reviewer || !partnerRole) continue
+    assert.notEqual(reviewer.provider, seats[partnerRole].provider, `${tier}: reviewer and ${partnerRole} must be cross-vendor`)
+  }
+})
+
 test('every seated model resolves into the models map', () => {
   for (const seats of Object.values(roster.tiers)) {
     for (const entry of Object.values(seats)) {

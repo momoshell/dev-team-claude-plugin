@@ -6,6 +6,153 @@ export const REGRANT_CONDITIONS = Object.freeze([
   'regrant-budget',
 ])
 
+const PANEL_SEVERITIES = Object.freeze(['must-fix', 'should-fix', 'consider'])
+
+function emptyLocation() {
+  return { file: null, start: null, end: null }
+}
+
+function parsedLocation(file, start = null, end = null) {
+  return { file, start, end }
+}
+
+function safeLine(value) {
+  const number = Number(value)
+  return Number.isSafeInteger(number) && number >= 0 ? number : null
+}
+
+export function parseLocation(location) {
+  if (typeof location !== 'string') return emptyLocation()
+  const value = location.trim()
+  if (!value) return emptyLocation()
+
+  const range = value.match(/^(.+):(\d+)-(\d+)$/)
+  if (range) {
+    const file = range[1].trim()
+    const start = safeLine(range[2])
+    const end = safeLine(range[3])
+    if (!file || start === null || end === null || end < start) return emptyLocation()
+    return parsedLocation(file, start, end)
+  }
+
+  const column = value.match(/^(.+):(\d+):(\d+)$/)
+  if (column) {
+    const file = column[1].trim()
+    const line = safeLine(column[2])
+    if (!file || line === null || safeLine(column[3]) === null) return emptyLocation()
+    return parsedLocation(file, line, line)
+  }
+
+  const line = value.match(/^(.+):(\d+)$/)
+  if (line) {
+    const file = line[1].trim()
+    const number = safeLine(line[2])
+    if (!file || number === null) return emptyLocation()
+    return parsedLocation(file, number, number)
+  }
+
+  // A location with a colon that did not match one of the supported forms is
+  // not a file-level location. This keeps malformed paths from accidentally
+  // matching a finding in a different part of the file.
+  if (value.includes(':')) return emptyLocation()
+  return parsedLocation(value)
+}
+
+function findingEntry(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  if (typeof value.id !== 'string' || value.id.trim() === '') return null
+  if (!PANEL_SEVERITIES.includes(value.severity)) return null
+  return value
+}
+
+function rangesOverlap(a, b) {
+  if (a.start === null || a.end === null || b.start === null || b.end === null) return true
+  return Math.max(a.start, b.start) <= Math.min(a.end, b.end)
+}
+
+function findingsMatch(a, b) {
+  if (a.severity !== b.severity) return false
+  const left = parseLocation(a.location)
+  const right = parseLocation(b.location)
+  if (left.file === null || right.file === null || left.file !== right.file) return false
+  return rangesOverlap(left, right)
+}
+
+export function fuseFindings(a, b, options = {}) {
+  const sourceA = options && typeof options === 'object' && !Array.isArray(options) && options.sourceA !== undefined
+    ? options.sourceA : 'a'
+  const sourceB = options && typeof options === 'object' && !Array.isArray(options) && options.sourceB !== undefined
+    ? options.sourceB : 'b'
+  const left = (Array.isArray(a) ? a : []).map(findingEntry).filter(Boolean)
+  const right = (Array.isArray(b) ? b : []).map(findingEntry).filter(Boolean)
+  const consumed = new Set()
+  const consensus = []
+  const unmatchedA = []
+
+  for (const leftFinding of left) {
+    let partner = null
+    let partnerIndex = -1
+    for (let index = 0; index < right.length; index += 1) {
+      if (consumed.has(index)) continue
+      if (!findingsMatch(leftFinding, right[index])) continue
+      partner = right[index]
+      partnerIndex = index
+      break
+    }
+    if (!partner) {
+      unmatchedA.push(leftFinding)
+      continue
+    }
+    consumed.add(partnerIndex)
+    consensus.push({
+      id: leftFinding.id,
+      severity: leftFinding.severity,
+      location: leftFinding.location,
+      summary: leftFinding.summary,
+      sources: [sourceA, sourceB],
+      matched: { [sourceA]: leftFinding.id, [sourceB]: partner.id },
+    })
+  }
+
+  const divergent = [
+    ...unmatchedA.map((finding) => ({
+      id: finding.id, severity: finding.severity, location: finding.location, summary: finding.summary, source: sourceA,
+    })),
+    ...right.filter((_, index) => !consumed.has(index)).map((finding) => ({
+      id: finding.id, severity: finding.severity, location: finding.location, summary: finding.summary, source: sourceB,
+    })),
+  ]
+  return { consensus, divergent }
+}
+
+export function adjudicatePanel(divergent, details) {
+  const entries = Array.isArray(divergent) ? divergent : []
+  const source = details && typeof details === 'object' && !Array.isArray(details) ? details : null
+  const adjudications = source && Array.isArray(source.adjudications) ? source.adjudications : []
+  const byId = new Map()
+  for (const entry of adjudications) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry) || typeof entry.id !== 'string') continue
+    if (!byId.has(entry.id)) byId.set(entry.id, entry)
+  }
+  const upheld = []
+  const dismissed = []
+  for (const entry of entries) {
+    const copy = entry && typeof entry === 'object' && !Array.isArray(entry) ? { ...entry } : entry
+    const decision = copy && typeof copy === 'object' ? byId.get(copy.id) : null
+    if (decision?.disposition === 'dismiss') {
+      dismissed.push({ ...copy, reason: decision.reason })
+    } else {
+      upheld.push(copy)
+    }
+  }
+  return {
+    upheld,
+    dismissed,
+    classInvariant: typeof source?.class_invariant === 'string' ? source.class_invariant : null,
+    closesClass: source?.closes_class === true,
+  }
+}
+
 function object(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null
 }

@@ -74,7 +74,10 @@ export function runChild(argv, injected = {}) {
   const ctx = {
     task: spec.task || crew.task, briefFile: briefFile ? resolvePath(briefFile) : null,
     taskDir, checkout, journal: join(crewDir, 'journal.jsonl'),
-    roles: roles.filter((role) => role !== 'lead'), lane: spec.lane || null, suite: spec.suite || 'node --test',
+    roles: roles.filter((role) => role !== 'lead'),
+    continuation: spec.continuation === true,
+    seatedRoles: [...roles],
+    lane: spec.lane || null, suite: spec.suite || 'node --test',
   }
   const failure = (err) => ({
     status: 'escalation', summary: `Task ${ctx.task} needs a human: the driver crashed (${err.message})`,

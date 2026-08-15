@@ -106,6 +106,12 @@ where judgment lives.
   divergence as `dissents` on the task envelope. One binding rule: lead
   `accept` over an advisor's independent `escalate` recommendation escalates
   — compounding may only strengthen outcomes toward safety.
+- **Regrant panel**: on a continuation round only, code assigns the seated
+  reviewer and a blind cross-vendor partner, fuses their typed findings, then
+  sends only structured divergences plus the standing class question to the
+  adjudicator. Its `dissents` carry `kind: "panel-divergence"`; the existing
+  consult dissent shape (`from`, `recommendation`, `lead_decision`, `consult`)
+  remains distinct and unchanged.
 - Escalation ladder: **code → lead → orchestrator/human**, each hop only
   when an enum says so. A lead-less crew (`mechanical` tier) has nobody at
   the middle rung: every consult that would have asked the lead escalates

@@ -15,6 +15,7 @@ import {
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
+  PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -2760,4 +2761,145 @@ test('the converge seam exposes only issue creation and draft PR creation', () =
   for (const banned of [/ready-for-review/, /ready_for_review/, /['\"]gh (pr|issue)/, /node:child_process/, /\bexecSync\s*\(/, /\bspawnSync\s*\(/]) {
     assert.equal(banned.test(source), false, `unexpected direct seam path ${banned}`)
   }
+})
+
+test('panelSeats chooses the first available partner and distinct adjudicator', () => {
+  assert.deepEqual(PANEL_PARTNERS, ['tech-lead', 'planner'])
+  assert.deepEqual(PANEL_ADJUDICATORS, ['lead', 'tech-lead'])
+  assert.deepEqual(panelSeats(['reviewer', 'planner', 'lead']), { partner: 'planner', adjudicator: 'lead' })
+  assert.deepEqual(panelSeats(['reviewer', 'tech-lead', 'lead', 'planner']), { partner: 'tech-lead', adjudicator: 'lead' })
+  assert.deepEqual(panelSeats(['reviewer', 'tech-lead']), null)
+  assert.deepEqual(panelSeats(['reviewer', 'lead']), null)
+  assert.deepEqual(panelSeats(null), null)
+})
+
+test('non-continuation keeps the ordinary assignment and review brief write set byte-identical', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: false }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.map(({ role, briefFile }) => ({ role, briefFile })), [
+    { role: 'planner', briefFile: '/tmp/brief.md' },
+    { role: 'builder', briefFile: `${TD}/plan.md` },
+    { role: 'reviewer', briefFile: `${TD}/review-brief-1.md` },
+  ])
+  assert.deepEqual(Object.keys(io.calls.writes), [`${TD}/review-brief-1.md`])
+  assert.equal(io.calls.writes[`${TD}/review-brief-1.md`], [
+    '# Review (round 1)', '',
+    `Plan of record: ${TD}/plan.md. Changes are uncommitted in /tmp/repo — read the diff with git.`,
+    'Re-run the validation lane yourself: lane-cmd',
+    'Write review.md in the task dir. details.verdict must be pass or changes-needed.',
+  ].join('\n'))
+})
+
+test('continuation panel assigns reviewer, partner, and adjudicator with blind briefs', () => {
+  const findingsA = [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:10-20', summary: 'only A' }]
+  const findingsB = [{ id: 'B1', severity: 'must-fix', location: 'a.mjs:12-18', summary: 'only B' }]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', findingsA),
+      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'changes-needed', findings: findingsB } },
+      'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true } },
+      'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass', []),
+      'planner:3': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'lead:2': { status: 'done', role: 'lead', details: { adjudications: [], closes_class: true } },
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: true }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.slice(0, 5).map(({ role }) => role), ['planner', 'builder', 'reviewer', 'planner', 'lead'])
+  const panelRow = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
+  assert.equal(panelRow.findings[0].reviewer, 'both')
+  assert.equal(io.calls.writes[`${TD}/panel-a-brief-1.md`].includes('only B'), false)
+  assert.equal(io.calls.writes[`${TD}/panel-b-brief-1.md`].includes('only A'), false)
+})
+
+test('panel degradation falls back to reviewer A without escalating', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
+      // planner:1 is the plan; planner:2 (the panel partner) is deliberately absent.
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: true }, io)
+  assert.equal(result.status, 'done')
+  assert.ok(io.calls.logs.some((line) => line.panel_degraded === 'planner'))
+  assert.equal(io.calls.logs.some((line) => line.review_outcome?.panel), false)
+})
+
+test('panel dismissals become panel dissents and are removed from the fused verdict', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A only' }]),
+      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'lead:1': { status: 'done', role: 'lead', details: { adjudications: [{ id: 'A1', disposition: 'dismiss', reason: 'not a defect' }], closes_class: true } },
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: true }, io)
+  assert.equal(result.status, 'done')
+  const dissent = result.details.dissents.find((entry) => entry.kind === 'panel-divergence')
+  assert.deepEqual(dissent, {
+    kind: 'panel-divergence', from: 'reviewer', finding_id: 'A1', severity: 'must-fix',
+    location: 'a.mjs:1', summary: 'A only', disposition: 'dismissed', reason: 'not a defect', round: 1,
+  })
+  const outcome = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
+  assert.deepEqual(outcome.findings, [])
+})
+
+test('an unclosed panel class adds a synthetic must-fix and preserves a review bounce without findings', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('pass', []),
+      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'lead:1': { status: 'done', role: 'lead', details: { closes_class: false, class_invariant: 'class remains open' } },
+      'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass', []),
+      'planner:3': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'lead:2': { status: 'done', role: 'lead', details: { closes_class: true } },
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: true, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  assert.equal(result.status, 'done')
+  const outcome = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
+  assert.equal(outcome.verdict, 'changes-needed')
+  assert.deepEqual(outcome.findings[0], {
+    id: 'panel-class-1', severity: 'must-fix', location: null,
+    summary: 'class remains open', reviewer: 'adjudicator',
+  })
+  assert.match(Object.values(io.calls.writes).find((value) => /Review bounce/.test(value)) || '', /panel-class-1/)
+})
+
+test('a changes-needed reviewer without typed findings cannot be upgraded by an empty panel', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'),
+      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'changes-needed', findings: [{ id: 'B1', severity: 'should-fix', location: 'a.mjs:2', summary: 'partner note' }] } },
+      'lead:1': { status: 'done', role: 'lead', details: { closes_class: true } },
+      'lead:2': leadEnv('escalate'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: true, limits: { build_rounds: 1, review_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(io.calls.commits.length, 0)
+  const outcome = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
+  assert.equal(outcome.verdict, 'changes-needed')
+  assert.equal(outcome.must_fix, 1)
+  assert.equal(outcome.findings[0].id, 'B1')
 })

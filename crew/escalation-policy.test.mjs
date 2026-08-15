@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { REGRANT_CONDITIONS, regrantVerdict, continuationBrief } from './escalation-policy.mjs'
+import {
+  REGRANT_CONDITIONS, regrantVerdict, continuationBrief,
+  parseLocation, fuseFindings, adjudicatePanel,
+} from './escalation-policy.mjs'
 
 const LEAD_WHY = 'I cannot accept this as a livable residual. The whole point of the slice is a gate that refuses when spend is unknown (plan decision 3); RV3-1 is that gate quietly reading zero forever on Node 22 — a user who configures a ceiling believes it is on when it is not, which is precisely the unbounded-burn failure #39 exists to prevent. So it is must-fix-now, not should-fix-later, and \'accept\' is the wrong instrument. Nor can I bounce: build rounds are exhausted, and this is the third round in a row surfacing the same class of defect (r1: interactive-only measurement; r2: Node 20 absent-db reads zero; r3: Node 22 requireable-but-below-floor reads zero) — the crew keeps closing the instance and missing the class, which is the escalation trigger. The call to spend beyond the allotted rounds, or to ship a knowingly non-enforcing ceiling, belongs to the orchestrator.'
 const escalation = {
@@ -37,6 +40,77 @@ const rows = [
   },
 ]
 const clone = (value) => JSON.parse(JSON.stringify(value))
+
+const finding = (id, severity = 'must-fix', location = 'a.mjs:1', summary = id) => ({
+  id, severity, location, summary,
+})
+
+test('panel locations parse the supported forms and reject malformed values', () => {
+  const cases = [
+    ['a/b.mjs', { file: 'a/b.mjs', start: null, end: null }],
+    [' a/b.mjs:12 ', { file: 'a/b.mjs', start: 12, end: 12 }],
+    ['a/b.mjs:12-30', { file: 'a/b.mjs', start: 12, end: 30 }],
+    ['a/b.mjs:12:5', { file: 'a/b.mjs', start: 12, end: 12 }],
+    ['', { file: null, start: null, end: null }],
+    ['a/b.mjs:bad', { file: null, start: null, end: null }],
+    [null, { file: null, start: null, end: null }],
+    [{ toString: () => 'a/b.mjs:1' }, { file: null, start: null, end: null }],
+  ]
+  for (const [input, expected] of cases) assert.deepEqual(parseLocation(input), expected, JSON.stringify(input))
+})
+
+test('fuseFindings matches ranges greedily and leaves ordered divergences', () => {
+  const a = [
+    finding('a1', 'must-fix', 'a.mjs:10-20'),
+    finding('a2', 'should-fix', 'a.mjs:40-42'),
+  ]
+  const b = [
+    finding('b1', 'must-fix', 'a.mjs:15-25'),
+    finding('b2', 'must-fix', 'a.mjs:18-19'),
+    finding('b3', 'should-fix', 'a.mjs:60'),
+  ]
+  const out = fuseFindings(a, b, { sourceA: 'reviewer', sourceB: 'planner' })
+  assert.deepEqual(out.consensus.map(({ id, matched }) => [id, matched]), [['a1', { reviewer: 'a1', planner: 'b1' }]])
+  assert.deepEqual(out.divergent.map(({ id, source }) => [id, source]), [
+    ['a2', 'reviewer'], ['b2', 'planner'], ['b3', 'planner'],
+  ])
+})
+
+test('fuseFindings treats file-level findings as whole-file and skips malformed entries', () => {
+  const a = [null, finding('a1', 'must-fix', 'a.mjs'), finding('', 'must-fix', 'a.mjs'), finding('a2', 'must-fix', null)]
+  const b = [finding('b1', 'must-fix', 'a.mjs:99'), finding('b2', 'must-fix', 'a.mjs:1-2')]
+  const before = clone({ a, b })
+  const first = fuseFindings(a, b)
+  const second = fuseFindings(a, b)
+  assert.equal(first.consensus.length, 1)
+  assert.deepEqual(first.divergent.map(({ id }) => id), ['a2', 'b2'])
+  assert.deepEqual(a, before.a)
+  assert.deepEqual(b, before.b)
+  assert.deepEqual(second, first)
+  assert.deepEqual(fuseFindings([finding('x', 'must-fix', 'a.mjs:1')], [finding('y', 'should-fix', 'a.mjs:1')]).divergent.map(({ id }) => id), ['x', 'y'])
+})
+
+test('adjudicatePanel dismisses only explicit dismiss decisions and fails closed', () => {
+  const divergent = [
+    { ...finding('a1'), source: 'reviewer' },
+    { ...finding('b1'), source: 'planner' },
+    { ...finding('c1'), source: 'planner' },
+  ]
+  const out = adjudicatePanel(divergent, {
+    adjudications: [
+      { id: 'a1', disposition: 'dismiss', reason: 'not a defect' },
+      { id: 'b1', disposition: 'unknown' },
+      { id: 'missing', disposition: 'dismiss' },
+    ],
+    class_invariant: 'the class remains open', closes_class: true,
+  })
+  assert.deepEqual(out.dismissed.map(({ id, reason }) => [id, reason]), [['a1', 'not a defect']])
+  assert.deepEqual(out.upheld.map(({ id }) => id), ['b1', 'c1'])
+  assert.equal(out.classInvariant, 'the class remains open')
+  assert.equal(out.closesClass, true)
+  assert.deepEqual(adjudicatePanel(divergent, null).upheld.map(({ id }) => id), ['a1', 'b1', 'c1'])
+  assert.equal(adjudicatePanel(divergent, { closes_class: 'true' }).closesClass, false)
+})
 
 test('the replay shape is eligible and reasons stay ordered', () => {
   const verdict = regrantVerdict(escalation, rows, { regranted: false })

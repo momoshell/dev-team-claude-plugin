@@ -7,19 +7,23 @@ import { join } from 'node:path'
 import { daemon } from './daemon.mjs'
 import { attachVerb, connect, formatRows, main, parseArgs } from './factoryctl.mjs'
 
-function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewDir = null } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'factoryctl-'))
-  const crewDir = join(root, 'crew')
+function mintCrew(root, name) {
+  const crewDir = join(root, name)
   const returnsDir = join(crewDir, 'returns')
-  const taskReturn = join(returnsDir, 'task.json')
-  const brief = join(root, 'brief.md')
-  const reportedCrewDir = bootCrewDir || join(root, 'reported-tier-crew')
   mkdirSync(returnsDir, { recursive: true })
   writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
     task: 'demo-task', checkout: process.cwd(), task_return: 'returns/task.json',
     roles: ['builder'], members: { builder: { transport: 'headless-json' } },
   }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  return { crewDir, taskReturn: join(returnsDir, 'task.json') }
+}
+
+function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewDir = null } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'factoryctl-'))
+  const { crewDir, taskReturn } = mintCrew(root, 'crew')
+  const brief = join(root, 'brief.md')
+  const reportedCrewDir = bootCrewDir || join(root, 'reported-tier-crew')
   writeFileSync(brief, '# brief\n')
   const boots = []
   const defaultSpawnSync = (_command, argv, options) => {
@@ -47,7 +51,7 @@ function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewD
       setInterval: () => null, clearInterval: () => {},
     },
   })
-  return { root, crewDir, taskReturn, brief, boots, reportedCrewDir, daemon: d, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, crewDir, taskReturn, brief, boots, reportedCrewDir, daemon: d, mintCrew: (name) => mintCrew(root, name), cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 async function withDaemon(name, fn, options = {}) {
@@ -82,8 +86,8 @@ async function waitFor(check, timeout = 1000) {
   }
 }
 
-async function enqueue(f) {
-  const result = await invoke(f, ['run', '--crew-dir', f.crewDir, '--brief', f.brief])
+async function enqueue(f, crewDir = f.crewDir) {
+  const result = await invoke(f, ['run', '--crew-dir', crewDir, '--brief', f.brief])
   assert.equal(result.code, 0)
   return { result, runId: JSON.parse(result.stdout).run_id }
 }
@@ -323,7 +327,10 @@ withDaemon('every attach exit path unsubscribes', async (f) => {
   assert.deepEqual(f.daemon.subscribers(), [])
   await settled.close()
 
-  const { runId: pipeRun } = await enqueue(f)
+  // A settled crew dir is refused at admission (terminal-first), and this scenario only needs A run — not that crew dir again: what it is about
+  // is attach unsubscribing when stdout throws EPIPE.
+  const epipeCrew = f.mintCrew('crew-epipe')
+  const { runId: pipeRun } = await enqueue(f, epipeCrew.crewDir)
   const pipe = await connect(join(f.root, 'daemon.sock'))
   const epipe = () => { const error = Error('closed'); error.code = 'EPIPE'; throw error }
   const closed = await attachVerb(parseArgs(['attach', pipeRun]), { connection: pipe, stdout: epipe, stderr: () => {} })

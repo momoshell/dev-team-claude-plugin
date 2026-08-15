@@ -1,4 +1,5 @@
 import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
+import { adjudicatePanel, fuseFindings } from './escalation-policy.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -49,6 +50,18 @@ export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhaust
 // exchange counts as ONE consult against the limit.
 export const SECOND_OPINION = 'second-opinion'
 export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead', 'planner'])
+export const PANEL_PARTNERS = Object.freeze(['tech-lead', 'planner'])
+export const PANEL_ADJUDICATORS = Object.freeze(['lead', 'tech-lead'])
+
+export function panelSeats(seated) {
+  if (!Array.isArray(seated)) return null
+  const partner = PANEL_PARTNERS.find((role) => role !== 'reviewer' && seated.includes(role))
+  if (!partner) return null
+  const adjudicator = PANEL_ADJUDICATORS.find((role) => (
+    role !== 'reviewer' && role !== partner && seated.includes(role)
+  ))
+  return adjudicator ? { partner, adjudicator } : null
+}
 
 // The gate's machine-readable summary line (#153). A gate must print it, and
 // the driver reads it to tell "every check RAN and failed" from "the command
@@ -1154,6 +1167,203 @@ export function driveTask(ctx, io) {
   let extraRounds = 0
   let extraReviews = 0
   let lastReviewPath = art('review.md')
+  let panelBriefText = ''
+  let panelBounceFindings = ''
+  const panelStandingQuestion = 'state the invariant the prior rounds\' instances share; does this diff close it?'
+  const panelLog = (entry) => {
+    try { io.log({ at: io.now(), ...entry }) } catch { /* panel evidence is never load-bearing */ }
+  }
+  const panelDegraded = (role) => panelLog({ panel_degraded: role })
+  const panelReview = (n, panel) => {
+    panelBounceFindings = ''
+    stage(`review:panel-r${n}`)
+    const panelInstructions = [
+      '',
+      'You are one of two independent reviewers on a regranted continuation round.',
+      'Report typed findings in details.findings (id, severity from the closed set must-fix|should-fix|consider, location as path:line or path:start-end, summary).',
+      'Return the identical details.verdict shape: verdict must be pass or changes-needed, with must_fix, should_fix, and consider counts.',
+    ].join('\n')
+    const base = panelBriefText
+    const aBrief = art(`panel-a-brief-${n}.md`)
+    io.writeFile(aBrief, `${base}${panelInstructions}`)
+    let aEnv = assignAndWait('reviewer', aBrief, 'panel-a')
+    const reviewerAVerdict = verdictOf(aEnv)
+    const reviewerAHasFindings = (reviewFindings(aEnv?.details)?.findings?.length || 0) > 0
+    if (!aEnv || aEnv.status !== 'done' || !reviewerAVerdict) {
+      panelDegraded('reviewer')
+      return aEnv
+    }
+
+    const bBrief = art(`panel-b-brief-${n}.md`)
+    const partnerInstructions = [
+      panelInstructions,
+      '',
+      `For this assignment you are reviewing the diff, not re-doing your seat's work (partner role: ${panel.partner}).`,
+      'Use the identical details.findings (id, severity, location, summary) and details.verdict shape.',
+    ].join('\n')
+    let bEnv
+    try {
+      io.writeFile(bBrief, `${base}${partnerInstructions}`)
+      bEnv = assignAndWait(panel.partner, bBrief, 'panel-b')
+    } catch {
+      panelDegraded(panel.partner)
+      return aEnv
+    }
+    if (!bEnv || bEnv.status !== 'done' || !verdictOf(bEnv)) {
+      panelDegraded(panel.partner)
+      return aEnv
+    }
+
+    const findingsOf = (env) => reviewFindings(env?.details)?.findings ?? []
+    const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {
+      sourceA: 'reviewer', sourceB: panel.partner,
+    })
+    const structuredDivergences = fused.divergent.map(({ id, source, severity, location, summary }) => ({
+      id, source, severity, location, summary,
+    }))
+    const divergenceLines = structuredDivergences.length > 0
+      ? structuredDivergences.map((entry) => `- ${JSON.stringify(entry)}`)
+      : ['- (none)']
+    const adjBrief = art(`panel-adjudication-${n}.md`)
+    const adjText = [
+      `# Panel adjudication (round ${n})`,
+      '',
+      '## Structured divergences',
+      ...divergenceLines,
+      '',
+      `## Plan of record: ${planPath}`,
+      '',
+      '## Standing class question',
+      panelStandingQuestion,
+      '',
+      '## Required envelope details shape',
+      '{"adjudications":[{"id":"<divergence id>","disposition":"uphold"|"dismiss","reason":"..."}],"class_invariant":"...","closes_class":true|false}',
+    ].join('\n')
+    let adjEnv
+    try {
+      io.writeFile(adjBrief, adjText)
+      adjEnv = assignAndWait(panel.adjudicator, adjBrief, 'panel-adjudication')
+    } catch {
+      panelDegraded(panel.adjudicator)
+      return aEnv
+    }
+    if (!adjEnv || adjEnv.status !== 'done') {
+      panelDegraded(panel.adjudicator)
+      return aEnv
+    }
+
+    const adjudicated = adjudicatePanel(fused.divergent, adjEnv.details)
+    const findings = [
+      ...fused.consensus.map(({ id, severity, location, summary }) => ({
+        id, severity, location, summary, reviewer: 'both',
+      })),
+      ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => ({
+        id, severity, location, summary, reviewer: source,
+      })),
+    ]
+    if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
+      findings.push({
+        id: `panel-class-${n}`,
+        severity: 'must-fix',
+        location: null,
+        summary: adjudicated.classInvariant || panelStandingQuestion,
+        reviewer: 'adjudicator',
+      })
+    }
+    panelBounceFindings = findings.map(({ id, severity, location, summary }) => (
+      `- ${id} (${severity}) ${location || '(location unspecified)'} — ${summary || '(no summary)'}`
+    )).join('\n')
+    for (const dismissed of adjudicated.dismissed) {
+      const dissent = {
+        kind: 'panel-divergence',
+        from: dismissed.source,
+        finding_id: dismissed.id,
+        severity: dismissed.severity,
+        location: dismissed.location,
+        summary: dismissed.summary,
+        disposition: 'dismissed',
+        reason: dismissed.reason,
+        round: n,
+      }
+      S.dissents.push(dissent)
+      panelLog({ dissent })
+      emit({ kind: 'dissent', ...dissent })
+    }
+
+    // An older/valid reviewer envelope may carry a changes-needed verdict
+    // without a surviving typed finding. An empty fusion must not turn that
+    // single-review bounce into a pass merely because the partner was quiet.
+    const verdict = findings.some((finding) => finding.severity === 'must-fix')
+      || (reviewerAVerdict === 'revise' && !reviewerAHasFindings)
+      ? 'changes-needed' : 'pass'
+    const count = (severity) => findings.filter((finding) => finding.severity === severity).length
+    const rawCount = (key) => Number.isInteger(aEnv.details?.[key]) && aEnv.details[key] >= 0 ? aEnv.details[key] : 0
+    const preserveReviewerCounts = reviewerAVerdict === 'revise' && !reviewerAHasFindings
+    const mustFix = Math.max(count('must-fix'), preserveReviewerCounts ? rawCount('must_fix') : 0)
+    const shouldFix = Math.max(count('should-fix'), preserveReviewerCounts ? rawCount('should_fix') : 0)
+    const consider = Math.max(count('consider'), preserveReviewerCounts ? rawCount('consider') : 0)
+    const reviewPath = typeof aEnv.details?.review_path === 'string'
+      ? aEnv.details.review_path : art('review.md')
+    const review = {
+      status: 'done',
+      role: 'reviewer',
+      summary: aEnv.summary || 'panel review complete',
+      artifacts: [
+        ...(Array.isArray(aEnv.artifacts) ? aEnv.artifacts : []),
+        aBrief, bBrief, adjBrief,
+      ],
+      details: {
+        verdict,
+        review_path: reviewPath,
+        must_fix: mustFix,
+        should_fix: shouldFix,
+        consider,
+        findings,
+        panel: {
+          partner: panel.partner,
+          adjudicator: panel.adjudicator,
+          consensus: fused.consensus,
+          divergent: fused.divergent,
+          upheld: adjudicated.upheld,
+          dismissed: adjudicated.dismissed,
+          class_invariant: adjudicated.classInvariant,
+          closes_class: adjudicated.closesClass,
+        },
+      },
+    }
+    const outcome = {
+      dispatch: `panel-r${n}`,
+      panel: true,
+      verdict,
+      must_fix: review.details.must_fix,
+      should_fix: review.details.should_fix,
+      consider: review.details.consider,
+      findings,
+      sources: ['reviewer', panel.partner],
+      adjudicator: panel.adjudicator,
+      class_invariant: adjudicated.classInvariant,
+      closes_class: adjudicated.closesClass,
+    }
+    panelLog({ review_outcome: outcome })
+    S.acceptFindings = findings
+    S.lastReview = {
+      verdict,
+      must_fix: review.details.must_fix,
+      should_fix: review.details.should_fix,
+      consider: review.details.consider,
+      findings,
+      panel: review.details.panel,
+    }
+    return review
+  }
+  const reviewBounceBrief = (round, reviewPath) => {
+    const panelNote = panelBounceFindings
+      ? `\n\nPanel fused findings (close every one):\n${panelBounceFindings}` : ''
+    return `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${reviewPath}. Plan: ${planPath}${panelNote}`
+  }
+  const seatList = Array.isArray(ctx.seatedRoles) ? ctx.seatedRoles : ctx.roles
+  const panel = ctx.continuation === true ? panelSeats(seatList) : null
+  if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
   build:
   for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
@@ -1296,7 +1506,7 @@ export function driveTask(ctx, io) {
           if (finalRound()) extraRounds += 1
           const b = art(`build-bounce-r${round}.md`)
           failureUpgrade('review', 'builder')
-          io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
+          io.writeFile(b, reviewBounceBrief(round, lastReviewPath))
           buildBrief = b; buildNote = 'review-fix'
           continue build
         }
@@ -1311,13 +1521,14 @@ export function driveTask(ctx, io) {
       }
       stage(`review:r${reviews + 1}`)
       const revBrief = art(`review-brief-${reviews + 1}.md`)
-      io.writeFile(revBrief, [
+      panelBriefText = [
         `# Review (round ${reviews + 1})`, '',
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
         `Re-run the validation lane yourself: ${lane}`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
-      ].join('\n'))
-      const review = assignAndWait('reviewer', revBrief, 'review')
+      ].join('\n')
+      io.writeFile(revBrief, panelBriefText)
+      const review = panel ? panelReview(reviews + 1, panel) : assignAndWait('reviewer', revBrief, 'review')
       reviews += 1
       lastReviewPath = review.details?.review_path || art('review.md')
       const v = verdictOf(review)
@@ -1340,7 +1551,7 @@ export function driveTask(ctx, io) {
             extraReviews += 1
             const b = art(`build-bounce-r${round}.md`)
             failureUpgrade('review', 'builder')
-            io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
+            io.writeFile(b, reviewBounceBrief(round, lastReviewPath))
             buildBrief = b; buildNote = 'review-fix'
             continue build
           }
@@ -1355,7 +1566,7 @@ export function driveTask(ctx, io) {
         }
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('review', 'builder')
-        io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${review.details?.review_path || art('review.md')}. Plan: ${planPath}`)
+        io.writeFile(b, reviewBounceBrief(round, review.details?.review_path || art('review.md')))
         buildBrief = b; buildNote = 'review-fix'
         continue build
       }

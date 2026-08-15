@@ -1276,6 +1276,20 @@ test('runChild refuses pane seats and omits lead from the mechanical ctx', () =>
   } finally { lead.cleanup() }
 })
 
+test('runChild threads continuation and the unfiltered seated role list into ctx', () => {
+  const f = fixture({ roles: ['lead', 'planner', 'builder', 'reviewer'] })
+  try {
+    const seen = []
+    const driveTask = (ctx) => { seen.push(ctx); return { status: 'done' } }
+    runChild({ crew_dir: f.crewDir, task: 'x', continuation: true }, { driveTask, realIo: () => ({}), preflight: false })
+    runChild({ crew_dir: f.crewDir, task: 'x' }, { driveTask, realIo: () => ({}), preflight: false })
+    assert.equal(seen[0].continuation, true)
+    assert.equal(seen[1].continuation, false)
+    assert.deepEqual(seen[0].seatedRoles, ['lead', 'planner', 'builder', 'reviewer'])
+    assert.equal(seen[0].roles.includes('lead'), false)
+  } finally { f.cleanup() }
+})
+
 // ChildProcess errors are asynchronous and must remain inside the daemon.
 test('asynchronous child spawn errors orphan only their run', async () => {
   await each(async (f) => {

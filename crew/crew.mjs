@@ -13,6 +13,7 @@
 // Verbs:
 //   crew.mjs boot  --task <slug> [--roles lead,planner,builder,reviewer[,tech-lead]]
 //                  [--checkout <dir>] [--model-<role> <id>] [--agent-<role> <name>]...
+//                  [--headless-all]
 //   crew.mjs run   --task <slug> --brief-file <path>   # hand the task to the lead
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
@@ -42,6 +43,8 @@ import { openRun } from '../scripts/factory/emit.mjs'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROLES_DIR = join(HERE, 'roles')
 const SHARED_PROMPT = join(ROLES_DIR, '_shared.md')
+
+export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
 
 // Per-seat defaults. Model is overridable per task (--model-<role>) so the
 // orchestrator can size the crew: cheap seats for mechanical work, capable
@@ -123,6 +126,25 @@ export function transportFor(role, args = {}) {
   return DEFAULT_TRANSPORT
 }
 
+export function seatTransport({ role, args = {}, adapter, agentName } = {}) {
+  const explicit = transportFor(role, args)
+  if (explicit !== DEFAULT_TRANSPORT) return explicit
+  const raw = args['headless-all']
+  if (raw === undefined) return DEFAULT_TRANSPORT
+  if (raw !== true && raw !== 'true') throw new Error(`--headless-all takes no value (got ${JSON.stringify(raw)})`)
+  const refusals = []
+  for (const transport of HEADLESS_TRANSPORTS) {
+    try {
+      adapter.capabilitiesFor({ transport })
+      return transport
+    } catch (err) {
+      refusals.push(err?.message || String(err))
+    }
+  }
+  const last = refusals.at(-1) || 'unknown refusal'
+  throw new Error(`seat ${role}: agent "${agentName}" ships no headless transport — tried ${HEADLESS_TRANSPORTS.join(', ')} (last refusal: ${last})`)
+}
+
 export function assertCapabilities(role, agentName, capabilities, allowed = []) {
   if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
     throw new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
@@ -140,11 +162,16 @@ export function seatShortfalls(role, args = {}) {
   return String(raw || '').split(',').map((s) => s.trim()).filter(Boolean)
 }
 
-export function bootAllocation(roles, args = {}, sources = null) {
+export function bootAllocation(roles, args = {}, sources = null, transports = null) {
   const out = {}
   for (const role of roles) {
     const shortfall = seatShortfalls(role, args)
-    const cell = { ...(sources?.[role] || {}), ...(shortfall.length ? { shortfall } : {}) }
+    const transport = transports?.[role]
+    const cell = {
+      ...(sources?.[role] || {}),
+      ...(shortfall.length ? { shortfall } : {}),
+      ...(transport !== undefined ? { transport } : {}),
+    }
     if (Object.keys(cell).length) out[role] = cell
   }
   return Object.keys(out).length ? out : null
@@ -241,7 +268,7 @@ export async function resolveAdapters(roles, args, seats = null) {
     const adapter = await import(pathToFileURL(file).href)
     if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
     if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
-    const transport = transportFor(role, args)
+    const transport = seatTransport({ role, args, adapter, agentName: name })
     assertCapabilities(role, name, adapter.capabilitiesFor({ transport }), seatShortfalls(role, args))
     if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
       throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
@@ -327,7 +354,8 @@ export function parkOnOutcome(result, { crew, runId, dir, reason, actor = 'crew'
   return { park_id: res.park.park_id, error: null }
 }
 
-async function bootCmd(args) {
+export async function bootCmd(args, deps = {}) {
+  const { cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   let roles, tierName = null, tierSeats = null, sources = null
@@ -360,9 +388,9 @@ async function bootCmd(args) {
   // capability shortfall must fail before a workspace gets created.
   const adapters = await resolveAdapters(roles, args, tierSeats)
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters) : null
-  const paneRoles = roles.filter((role) => transportFor(role, args) === DEFAULT_TRANSPORT)
-  if (paneRoles.length === 0) throw new Error('boot requires at least one pane seat (the lead is a pane seat in this slice)')
-  const workerBin = headlessNames.length ? resolveWorkerBin(args) : null
+  const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
+  const headlessOnly = paneRoles.length === 0
+  const workerBin = roles.some((role) => adapters[role].transport === HEADLESS_TRANSPORT) ? resolveWorkerBin(args) : null
 
   const paths = pathsFor(taskSlug, checkout)
   // The state dir keys on the checkout's BASENAME — two different checkouts
@@ -378,69 +406,82 @@ async function bootCmd(args) {
 
   const bootBrief = `Crew for task ${taskSlug}. Task dir ${paths.taskDir}. Read your role in the system prompt, reply exactly ready: your-role, then wait.`
   for (const role of roles) writeRolePrompt(role, paths.taskDir)
-  const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role] })
-  const layout = composeLayout(paneRoles, mk)
-
-  const before = tree()
-  const res = cmux('new-workspace', ['--name', `crew-${taskSlug}`, '--cwd', checkout, '--layout', JSON.stringify(layout), '--focus', 'true'])
-  if (!res.ok) throw new Error(`new-workspace --layout failed: ${res.error.message}`)
-  const after = tree()
-
-  // Identify OUR workspace by the name we just set, never positionally —
-  // "the last unseen id" mis-targets the moment two boots race. Name plus
-  // new-since-before must yield exactly one workspace.
-  const beforeWs = new Set()
-  for (const w of before.windows || []) for (const ws of w.workspaces || []) beforeWs.add(ws.id)
-  const candidates = []
-  for (const w of after.windows || []) for (const ws of w.workspaces || []) {
-    if (!beforeWs.has(ws.id) && (ws.name === undefined || ws.name === `crew-${taskSlug}`)) candidates.push({ ws, windowId: w.id })
-  }
-  if (candidates.length !== 1) throw new Error(`boot: expected exactly one new crew-${taskSlug} workspace, found ${candidates.length}`)
-  const { ws: workspace, windowId } = candidates[0]
-  const panes = workspace.panes || []
-  if (panes.length !== paneRoles.length) throw new Error(`boot: expected ${paneRoles.length} panes, found ${panes.length}`)
-
-  // Seat every role by its SURFACE NAME (set in the layout) — positional
-  // mapping mis-seats every role silently if the tree's pane order ever
-  // differs from layout order. Fall back to position only when the tree
-  // carries no surface names at all, and fail loudly on a partial match.
+  let workspace = null
+  let windowId = null
   const members = {}
-  const byName = new Map()
-  for (const p of panes) {
-    const s = (p.surfaces || [])[0]
-    if (s?.name) byName.set(String(s.name).toLowerCase(), { pane: p, surface: s })
-  }
   const memberFor = (role, pane = null, surface = null) => ({
     pane_id: pane?.id || null, surface_id: surface?.id || null,
     transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
     tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
     ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
   })
-  if (byName.size > 0) {
-    for (const role of paneRoles) {
-      const hit = byName.get(role)
-      if (!hit) throw new Error(`boot: no surface named ${role} in the new workspace (tree names: ${[...byName.keys()].join(', ')})`)
-      members[role] = memberFor(role, hit.pane, hit.surface)
-    }
+  if (headlessOnly) {
+    for (const role of roles) members[role] = memberFor(role)
   } else {
-    paneRoles.forEach((role, i) => {
-      const surface = (panes[i].surfaces || [])[0]
-      members[role] = memberFor(role, panes[i], surface)
-    })
+    const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role] })
+    const layout = composeLayout(paneRoles, mk)
+
+    const before = treeFn()
+    const res = cmuxFn('new-workspace', ['--name', `crew-${taskSlug}`, '--cwd', checkout, '--layout', JSON.stringify(layout), '--focus', 'true'])
+    if (!res.ok) throw new Error(`new-workspace --layout failed: ${res.error.message}`)
+    const after = treeFn()
+
+    // Identify OUR workspace by the name we just set, never positionally —
+    // "the last unseen id" mis-targets the moment two boots race. Name plus
+    // new-since-before must yield exactly one workspace.
+    const beforeWs = new Set()
+    for (const w of before.windows || []) for (const ws of w.workspaces || []) beforeWs.add(ws.id)
+    const candidates = []
+    for (const w of after.windows || []) for (const ws of w.workspaces || []) {
+      if (!beforeWs.has(ws.id) && (ws.name === undefined || ws.name === `crew-${taskSlug}`)) candidates.push({ ws, windowId: w.id })
+    }
+    if (candidates.length !== 1) throw new Error(`boot: expected exactly one new crew-${taskSlug} workspace, found ${candidates.length}`)
+    const found = candidates[0]
+    workspace = found.ws
+    windowId = found.windowId
+    const panes = workspace.panes || []
+    if (panes.length !== paneRoles.length) throw new Error(`boot: expected ${paneRoles.length} panes, found ${panes.length}`)
+
+    // Seat every role by its SURFACE NAME (set in the layout) — positional
+    // mapping mis-seats every role silently if the tree's pane order ever
+    // differs from layout order. Fall back to position only when the tree
+    // carries no surface names at all, and fail loudly on a partial match.
+    const byName = new Map()
+    for (const p of panes) {
+      const s = (p.surfaces || [])[0]
+      if (s?.name) byName.set(String(s.name).toLowerCase(), { pane: p, surface: s })
+    }
+    if (byName.size > 0) {
+      for (const role of paneRoles) {
+        const hit = byName.get(role)
+        if (!hit) throw new Error(`boot: no surface named ${role} in the new workspace (tree names: ${[...byName.keys()].join(', ')})`)
+        members[role] = memberFor(role, hit.pane, hit.surface)
+      }
+    } else {
+      paneRoles.forEach((role, i) => {
+        const surface = (panes[i].surfaces || [])[0]
+        members[role] = memberFor(role, panes[i], surface)
+      })
+    }
+    for (const role of roles.filter((r) => adapters[r].transport !== DEFAULT_TRANSPORT)) members[role] = memberFor(role)
+    for (const role of paneRoles) renameTabFn(members[role].surface_id, role)
   }
-  for (const role of roles.filter((r) => transportFor(r, args) !== DEFAULT_TRANSPORT)) members[role] = memberFor(role)
-  for (const role of paneRoles) renameTab(members[role].surface_id, role)
 
   const crew = {
     schema_version: 3, task: taskSlug, checkout,
-    workspace_id: workspace.id, window_id: windowId,
+    workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
   }
+  // crew/daemon.mjs paneSeat() is the consumer: daemon run refuses pane transport.
+  if (headlessOnly) {
+    const offender = roles.find((role) => !members[role]?.transport || members[role].transport === DEFAULT_TRANSPORT)
+    if (offender) throw new Error(`boot: all-headless crew has a missing or pane transport for seat ${offender}`)
+  }
   saveCrew(paths, crew)
-  const allocation = bootAllocation(roles, args, sources)
+  const allocation = bootAllocation(roles, args, sources, Object.fromEntries(roles.map((r) => [r, members[r].transport])))
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles,
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
@@ -449,7 +490,7 @@ async function bootCmd(args) {
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(allocation ? { allocation } : {}),
   })
-  process.stdout.write(`${JSON.stringify({ workspace_id: workspace.id, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
+  process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
 
 function ledgerDbPath() {
@@ -580,24 +621,30 @@ export function seatReadySignal(screen, role) {
   return READY_CHROME.some((re) => re.test(s)) ? 'chrome' : null
 }
 
-function awaitSeatsReady(crew, timeoutS = 120, journal = null) {
-  const deadline = Date.now() + timeoutS * 1000
+export function awaitSeatsReady(crew, timeoutS = 120, journal = null, deps = {}) {
+  const cmuxFn = deps.cmux || cmux
+  const logLineFn = deps.logLine || logLine
+  const now = deps.now || (() => Date.now())
+  const sleep = deps.sleep || ((ms) => {
+    const sab = new SharedArrayBuffer(4)
+    Atomics.wait(new Int32Array(sab), 0, 0, ms)
+  })
+  const deadline = now() + timeoutS * 1000
   const pending = new Set(Object.keys(crew.members).filter((role) => crew.members[role].surface_id))
   while (pending.size > 0) {
     for (const role of [...pending]) {
-      const res = cmux('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
+      const res = cmuxFn('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
       const sig = res.ok && seatReadySignal(res.stdout, role)
       if (sig) {
         pending.delete(role)
-        if (journal) logLine(journal, { at: new Date().toISOString(), event: 'seat-ready', role, signal: sig })
+        if (journal) logLineFn(journal, { at: new Date().toISOString(), event: 'seat-ready', role, signal: sig })
       }
     }
     if (pending.size === 0) break
-    if (Date.now() > deadline) {
+    if (now() > deadline) {
       throw new Error(`seats never became ready within ${timeoutS}s: ${[...pending].join(', ')}`)
     }
-    const sab = new SharedArrayBuffer(4)
-    Atomics.wait(new Int32Array(sab), 0, 0, 2000)
+    sleep(2000)
   }
 }
 
@@ -680,6 +727,12 @@ function waitCmd(args) {
   process.exitCode = 1
 }
 
+export function seatLiveness(crew, probe = paneAlive) {
+  const alive = {}
+  for (const [role, m] of Object.entries(crew.members)) alive[role] = m.surface_id ? probe(m.surface_id) : 'headless'
+  return alive
+}
+
 function statusCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -690,8 +743,7 @@ function statusCmd(args) {
   }
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
-  const alive = {}
-  for (const [role, m] of Object.entries(crew.members)) alive[role] = m.surface_id ? paneAlive(m.surface_id) : 'headless'
+  const alive = seatLiveness(crew)
   process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive })}\n`)
 }
 
@@ -699,17 +751,20 @@ function statusCmd(args) {
 // and close the ephemeral view (panes, workspace). Everything evidentiary is
 // on disk by contract before this runs — deliverables live in files, never
 // pane scrollback.
-function teardownCore(paths, crew) {
-  for (const m of Object.values(crew.members)) if (m.surface_id) closeSurface(m.surface_id)
+export function teardownCore(paths, crew, deps = {}) {
+  const closeSurfaceFn = deps.closeSurface || closeSurface
+  const closeWorkspaceFn = deps.closeWorkspace || closeWorkspace
+  const renameSyncFn = deps.renameSync || renameSync
+  for (const m of Object.values(crew.members)) if (m.surface_id) closeSurfaceFn(m.surface_id)
   // The viewer is not in crew.members, so the loop above never sees it, and
   // close-workspace is documented to no-op while a live pane occupies the
   // workspace — close it by id rather than trusting the workspace close.
-  if (crew.doc_viewer?.surface_id) closeSurface(crew.doc_viewer.surface_id)
-  closeWorkspace(crew.workspace_id)
+  if (crew.doc_viewer?.surface_id) closeSurfaceFn(crew.doc_viewer.surface_id)
+  if (crew.workspace_id) closeWorkspaceFn(crew.workspace_id)
   // Full timestamp, not date-only: a second same-day run of the same slug
   // must never ENOTEMPTY onto the first run's archive.
   const archived = `${paths.dir}.archive-${new Date().toISOString().replace(/[:.]/g, '-')}`
-  renameSync(paths.dir, archived)
+  renameSyncFn(paths.dir, archived)
   return archived
 }
 

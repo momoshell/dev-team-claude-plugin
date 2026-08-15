@@ -345,6 +345,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: checkout, encoding: 'utf8' }).trim()
     },
     status(label) {
+      if (!crew.workspace_id) return // A workspace-less (all-headless) crew has no pill to set.
       // Workspace pill: glanceable "which code stage is running" for the
       // humans watching. Best-effort — a pill failure never touches the loop.
       cmux('set-status', ['crew-stage', label, '--workspace', crew.workspace_id])
@@ -357,6 +358,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // Best-effort like status(): a mount failure warns and returns.
     showDoc(path) {
       try {
+        if (!crew.workspace_id) return // A workspace-less (all-headless) crew has no plan viewer to mount.
         if (crew.doc_viewer?.path === path) return
         if (crew.doc_viewer?.surface_id) closeSurface(crew.doc_viewer.surface_id)
         const before = tree()

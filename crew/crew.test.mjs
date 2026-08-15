@@ -1,20 +1,21 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
-  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
+  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, seatLiveness, awaitSeatsReady, teardownCore,
 } from './crew.mjs'
 import { driveTask } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
+import { realIo } from './realio.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 
@@ -237,6 +238,35 @@ test('transportFor selects each named transport and rejects an ambiguous seat', 
   assert.throws(() => transportFor('builder', { headless: 'builder', 'headless-rpc': 'builder' }), /builder.*headless.*headless-rpc/)
 })
 
+test('seatTransport resolves each real adapter under --headless-all through its capabilities probe', () => {
+  assert.deepEqual([...HEADLESS_TRANSPORTS], ['headless-json', 'headless-rpc'])
+  assert.equal(seatTransport({ role: 'lead', args: { 'headless-all': true }, adapter: { capabilitiesFor }, agentName: 'claude' }), 'headless-json')
+  assert.equal(seatTransport({ role: 'builder', args: { 'headless-all': 'true' }, adapter: { capabilitiesFor: piCapabilitiesFor }, agentName: 'pi' }), 'headless-rpc')
+})
+
+test('seatTransport keeps explicit transports ahead of --headless-all and defaults to pane', () => {
+  let probes = 0
+  const adapter = { capabilitiesFor() { probes += 1; throw new Error('must not probe') } }
+  assert.equal(seatTransport({ role: 'builder', args: { 'headless-all': true, 'headless-rpc': 'builder' }, adapter, agentName: 'stub' }), 'headless-rpc')
+  assert.equal(seatTransport({ role: 'builder', args: {}, adapter, agentName: 'stub' }), 'pane')
+  assert.equal(probes, 0)
+})
+
+test('seatTransport names the seat, agent, and every refusal when no headless pair is shipped', () => {
+  const adapter = { capabilitiesFor({ transport }) { throw new Error(`stub refusal for ${transport}`) } }
+  assert.throws(
+    () => seatTransport({ role: 'builder', args: { 'headless-all': true }, adapter, agentName: 'stub-agent' }),
+    (err) => ['builder', 'stub-agent', 'headless-json', 'headless-rpc', 'stub refusal for headless-rpc'].every((part) => err.message.includes(part)),
+  )
+})
+
+test('seatTransport rejects a value supplied to the boolean-only --headless-all flag', () => {
+  assert.throws(
+    () => seatTransport({ role: 'builder', args: { 'headless-all': 'builder' }, adapter: { capabilitiesFor }, agentName: 'claude' }),
+    /--headless-all takes no value/,
+  )
+})
+
 test('assertCapabilities rejects an adapter that cannot enforce tool denial, naming seat + adapter + capability', () => {
   assert.throws(
     () => assertCapabilities('builder', 'weakling', { tool_deny: false }),
@@ -334,6 +364,191 @@ test('resolveWorkerBin prefers an explicit existing path over the environment', 
   process.env.CREW_CLAUDE_BIN = env
   try { assert.equal(resolveWorkerBin({ 'claude-bin': explicit }), explicit) }
   finally { if (old === undefined) delete process.env.CREW_CLAUDE_BIN; else process.env.CREW_CLAUDE_BIN = old; rmSync(dir, { recursive: true, force: true }) }
+})
+
+async function withHome(home, fn) {
+  const previous = process.env.HOME
+  process.env.HOME = home
+  try { return await fn() }
+  finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous }
+}
+
+function testCrewDir(home, checkout, task) { return join(home, '.crew', basename(checkout), task) }
+
+// `pathsFor` slugs the checkout BASENAME and `slug()` lowercases (crew.mjs:86),
+// so a mkdtemp name — whose random suffix is mixed case — only resolves back to
+// the state dir on a case-INSENSITIVE filesystem: green on macOS, ENOENT on
+// Linux CI. Nest a lowercase `checkout` inside the temp root so that
+// basename === slug(basename) on either filesystem.
+function testCheckout(prefix) {
+  const root = mkdtempSync(join(tmpdir(), prefix))
+  const checkout = join(root, 'checkout')
+  mkdirSync(checkout)
+  return { root, checkout }
+}
+
+function callCounter() {
+  const calls = []
+  const fn = (...args) => { calls.push(args); return { ok: true, stdout: '' } }
+  fn.calls = calls
+  return fn
+}
+
+test('bootAllocation carries resolved transports alongside tier provenance', () => {
+  assert.deepEqual(
+    bootAllocation(['lead', 'builder'], {}, { lead: { model: 'roster' }, builder: { agent: 'roster' } }, { lead: 'headless-json', builder: 'headless-rpc' }),
+    { lead: { model: 'roster', transport: 'headless-json' }, builder: { agent: 'roster', transport: 'headless-rpc' } },
+  )
+})
+
+test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-headless-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-headless-checkout-')
+  const task = 'all-headless'
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+  try {
+    await withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux, tree, renameTab },
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
+    const dir = testCrewDir(home, checkout, task)
+    const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+    assert.equal(crew.workspace_id, null)
+    assert.equal(crew.window_id, null)
+    const expected = { lead: 'headless-json', planner: 'headless-json', builder: 'headless-rpc', reviewer: 'headless-rpc' }
+    assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, crew.members[role].transport])), expected)
+    for (const role of crew.roles) {
+      assert.equal(crew.members[role].pane_id, null)
+      assert.equal(crew.members[role].surface_id, null)
+      assert.equal(existsSync(join(dir, 'task', `role-${role}.md`)), true)
+      assert.ok(crew.members[role].transport && crew.members[role].transport !== 'pane')
+    }
+    const boot = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line)).find((event) => event.event === 'boot')
+    assert.deepEqual(Object.fromEntries(crew.roles.map((role) => [role, boot.allocation[role].transport])), expected)
+    assert.equal(boot.allocation.lead.model, 'roster')
+
+    // crew/daemon.mjs's paneSeat() is the consumer and must keep refusing pane transport.
+    const daemonSource = readFileSync(new URL('./daemon.mjs', import.meta.url), 'utf8')
+    assert.match(daemonSource, /daemon run refuses pane transport/)
+    assert.match(daemonSource, /paneSeat/)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('mixed boot still creates a workspace, seats panes, and leaves the headless seat unsurfaced', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-mixed-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-mixed-checkout-')
+  const task = 'mixed'
+  const cmuxCalls = []
+  const cmux = (verb, argv) => { cmuxCalls.push([verb, argv]); return { ok: true, stdout: '' } }
+  let treeCalls = 0
+  const paneRoles = ['lead', 'planner', 'reviewer']
+  const tree = () => {
+    treeCalls += 1
+    if (treeCalls === 1) return { windows: [] }
+    return { windows: [{ id: 'window-1', workspaces: [{ id: 'workspace-1', name: `crew-${task}`, panes: paneRoles.map((role) => ({ id: `pane-${role}`, surfaces: [{ id: `surface-${role}`, name: role }] })) }] }] }
+  }
+  const renameTab = callCounter()
+  try {
+    await withHome(home, () => bootCmd(
+      { task, checkout, roles: 'lead,planner,builder,reviewer', headless: 'builder', 'claude-bin': process.execPath },
+      { cmux, tree, renameTab },
+    ))
+    const crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
+    assert.equal(crew.workspace_id, 'workspace-1')
+    assert.equal(crew.window_id, 'window-1')
+    assert.ok(cmuxCalls.some(([verb]) => verb === 'new-workspace'))
+    assert.deepEqual(crew.members.lead, { pane_id: 'pane-lead', surface_id: 'surface-lead', transport: 'pane', model: 'opus', agent: 'claude', tools: SEAT_DEFAULTS.lead.tools, deny: SEAT_DEFAULTS.lead.deny })
+    assert.equal(crew.members.builder.transport, 'headless-json')
+    assert.equal(crew.members.builder.pane_id, null)
+    assert.equal(crew.members.builder.surface_id, null)
+    assert.equal(renameTab.calls.length, paneRoles.length)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('source tripwire names crew/daemon.mjs paneSeat and its pane refusal', () => {
+  const daemonSource = readFileSync(new URL('./daemon.mjs', import.meta.url), 'utf8')
+  assert.match(daemonSource, /daemon run refuses pane transport/)
+  assert.match(daemonSource, /function paneSeat/)
+  const testSource = readFileSync(new URL('./crew.test.mjs', import.meta.url), 'utf8')
+  assert.match(testSource, /daemon\.mjs/)
+  assert.match(testSource, /paneSeat/)
+})
+
+test('teardownCore skips all cmux closes without a workspace and still closes a real workspace', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-teardown-'))
+  const closeSurface = callCounter(); const closeWorkspace = callCounter()
+  try {
+    const dir = join(parent, 'headless')
+    mkdirSync(dir, { recursive: true })
+    const paths = { dir }
+    const archived = teardownCore(paths, { workspace_id: null, members: { builder: { surface_id: null } } }, { closeSurface, closeWorkspace })
+    assert.equal(existsSync(archived), true)
+    assert.equal(closeSurface.calls.length, 0)
+    assert.equal(closeWorkspace.calls.length, 0)
+
+    const paned = join(parent, 'paned')
+    mkdirSync(paned, { recursive: true })
+    const second = teardownCore({ dir: paned }, { workspace_id: 'workspace-1', members: { lead: { surface_id: null } } }, { closeSurface, closeWorkspace })
+    assert.equal(existsSync(second), true)
+    assert.equal(closeWorkspace.calls.length, 1)
+    assert.deepEqual(closeWorkspace.calls[0], ['workspace-1'])
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('awaitSeatsReady returns immediately without probing an all-headless crew', () => {
+  const cmux = callCounter()
+  awaitSeatsReady({ members: { lead: { surface_id: null }, builder: { surface_id: null } } }, 1, null, { cmux })
+  assert.equal(cmux.calls.length, 0)
+})
+
+test('seatLiveness reports headless and preserves pane probe values', () => {
+  const probed = []
+  const crew = { members: {
+    lead: { surface_id: 'surface-lead' }, planner: { surface_id: 'surface-planner' }, builder: { surface_id: null },
+  } }
+  const alive = seatLiveness(crew, (surface) => { probed.push(surface); return surface === 'surface-lead' ? true : null })
+  assert.deepEqual(alive, { lead: true, planner: null, builder: 'headless' })
+  assert.deepEqual(probed, ['surface-lead', 'surface-planner'])
+})
+
+test('realIo status and showDoc make no cmux calls without a workspace and status still works with one', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-realio-'))
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  const cmuxHeadless = callCounter()
+  try {
+    const headless = realIo({ workspace_id: null, window_id: null, members: { builder: { surface_id: null } } }, paths, parent, null, null, {}, { cmux: cmuxHeadless, tree: () => ({ windows: [] }) })
+    headless.status('build')
+    headless.showDoc(join(parent, 'plan.md'))
+    assert.equal(cmuxHeadless.calls.length, 0)
+
+    const cmuxPanes = callCounter()
+    const paned = realIo({ workspace_id: 'workspace-1', window_id: 'window-1', members: { lead: { surface_id: 'surface-lead' } } }, paths, parent, null, null, {}, { cmux: cmuxPanes, tree: () => ({ windows: [] }) })
+    paned.status('build')
+    assert.equal(cmuxPanes.calls.length, 1)
+    assert.equal(cmuxPanes.calls[0][0], 'set-status')
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('parkOnOutcome escalation parks a workspace-less crew with transport-role fallback keys', () => {
+  const calls = []
+  const crew = { roles: ['builder'], workspace_id: null, members: { builder: { pane_id: null, surface_id: null, transport: 'headless-rpc' } } }
+  const result = parkOnOutcome({ status: 'escalation' }, {
+    crew, runId: 'run-headless', dir: '/tmp/reclaim', reason: 'needs human',
+    openStore: () => ({ mintPark: (spec) => { calls.push(spec); return { ok: true, park: { park_id: 'park-headless' } } } }),
+  })
+  assert.equal(result.park_id, 'park-headless')
+  assert.equal(result.error, null)
+  assert.deepEqual(calls[0].seats, [{ role: 'builder', sessionId: 'headless-rpc:builder', warm: false }])
 })
 
 const PI_SAMPLE = {

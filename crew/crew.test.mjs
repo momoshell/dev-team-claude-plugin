@@ -1023,8 +1023,8 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
 
-test('emitAdapter routes discrimination triples and only review-carrying envelopes to outcome tables', () => {
-  const calls = { gates: [], discriminations: [], reviews: [], events: [] }
+test('emitAdapter routes discrimination triples, review outcomes, and typed accept decisions', () => {
+  const calls = { gates: [], discriminations: [], reviews: [], accepts: [], events: [] }
   const emitter = {
     adwId: 'adw-outcomes',
     phaseTransition: () => ({ phase_id: 9 }),
@@ -1033,6 +1033,7 @@ test('emitAdapter routes discrimination triples and only review-carrying envelop
       recordGateResult: (event) => calls.gates.push(event),
       recordGateDiscrimination: (event) => calls.discriminations.push(event),
       recordReviewOutcome: (event) => calls.reviews.push(event),
+      recordAcceptDecision: (event) => calls.accepts.push(event),
     }, () => 1),
   }
   const adapter = emitAdapter(emitter)
@@ -1041,6 +1042,11 @@ test('emitAdapter routes discrimination triples and only review-carrying envelop
   adapter({ kind: 'discrimination', generation: 2, verdict: 'proven', summary: { total: 5, failed: 5, errored: 0 }, note: 'proof' })
   adapter({ kind: 'envelope', id: 'reviewer1', role: 'reviewer', status: 'done', review: { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0 } })
   adapter({ kind: 'envelope', id: 'builder1', role: 'builder', status: 'done' })
+  adapter({
+    kind: 'accept-decision', where: 'review-exhausted', outcome: 'escalated', findings_total: 2,
+    residuals: [{ id: 'RV1-2', type: 'cosmetic', severity: 'should-fix' }],
+    refuted: [{ id: 'RV1-1' }], unverified: [], errors: [{ id: 'RV1-1', why: 'bad decision' }],
+  })
 
   assert.deepEqual(calls.gates[0], {
     adw_id: 'adw-outcomes', phase_id: 9, gate_name: 'gate:r1', attempt: 1, ok: true,
@@ -1053,6 +1059,11 @@ test('emitAdapter routes discrimination triples and only review-carrying envelop
   assert.deepEqual(calls.reviews, [{
     adw_id: 'adw-outcomes', phase_id: 9, dispatch_id: 'reviewer1', role: 'reviewer',
     verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0,
+  }])
+  assert.deepEqual(calls.accepts, [{
+    adw_id: 'adw-outcomes', phase_id: 9, where: 'review-exhausted', outcome: 'escalated',
+    findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 1,
+    unverified_count: 0, invalid_reasons: 'RV1-1: bad decision',
   }])
 })
 

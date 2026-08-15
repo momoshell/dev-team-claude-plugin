@@ -212,6 +212,11 @@ function exerciseEveryWriter(ledger, adwId) {
     adw_id: adwId, phase_id: phaseId, dispatch_id: 'review-1', role: 'reviewer',
     verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0,
   })
+  ledger.recordAcceptDecision({
+    adw_id: adwId, phase_id: phaseId, where: 'review-exhausted', outcome: 'accepted',
+    findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 1,
+    unverified_count: 0, invalid_reasons: null,
+  })
   ledger.startProcess({ adw_id: adwId, dispatch_id: 'd1', pid: 4242, command: 'node x.mjs' })
   ledger.heartbeat({ adw_id: adwId, target: 'process', pid: 4242, started_at: ledger.dumpTable('processes')[0].started_at })
   ledger.endProcess({
@@ -271,6 +276,7 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
   const ledger = openTestLedger()
   const badGate = 'gate-verdict-secret'
   const badReview = 'review-verdict-secret'
+  const badAccept = 'accept-outcome-secret'
   assert.throws(
     () => ledger.recordGateDiscrimination({ adw_id: 'enum-1', gate_generation: 1, verdict: badGate }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badGate),
@@ -278,6 +284,10 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
   assert.throws(
     () => ledger.recordReviewOutcome({ adw_id: 'enum-1', dispatch_id: 'd1', verdict: badReview }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badReview),
+  )
+  assert.throws(
+    () => ledger.recordAcceptDecision({ adw_id: 'enum-1', outcome: badAccept }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes(badAccept),
   )
 })
 
@@ -383,6 +393,23 @@ test('taskReadout carries review outcomes with their must_fix counts', { skip: S
   ])
 })
 
+test('taskReadout carries typed accept decisions and bounds invalid reasons', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-accepts', repo_slug: 'r', task_slug: 'accepts' })
+  ledger.recordAcceptDecision({
+    adw_id: 'task-accepts', phase_id: 3, where: 'review-exhausted', outcome: 'escalated',
+    findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 0,
+    unverified_count: 1, invalid_reasons: 'x'.repeat(700), created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const rows = ledger.taskReadout('task-accepts').accept_decisions
+  assert.equal(rows.length, 1)
+  assert.deepEqual({ ...rows[0] }, {
+    where_at: 'review-exhausted', outcome: 'escalated', findings_total: 2,
+    residual_count: 1, refuted_count: 1, cosmetic_count: 0, unverified_count: 1,
+    invalid_reasons: 'x'.repeat(500), created_at: '2024-01-01T00:00:00.000Z',
+  })
+})
+
 test('a run with no usage, discrimination or findings reads as absent, not zero', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'task-bare', repo_slug: 'r', task_slug: 'bare' })
@@ -392,10 +419,12 @@ test('a run with no usage, discrimination or findings reads as absent, not zero'
   assert.equal(readout.usage, null)
   assert.deepEqual(readout.gate_generations, [])
   assert.deepEqual(readout.review_outcomes, [])
+  assert.deepEqual(readout.accept_decisions, [])
   assert.deepEqual(readout.absent, {
     usage: 'predates per-agent token measurement (#119) — not a measured zero',
     gate_discrimination: 'predates gate discrimination (#168)',
     review_outcomes: 'predates structured review outcomes (#169/#170)',
+    accept_decisions: 'predates typed accept decisions (#170)',
     gate_results: 'predates gate verdict recording (#130)',
     phases: 'no phase rows recorded for this run',
   })
@@ -463,7 +492,7 @@ test('taskReadout prints a schema-1 payload stating its question and definition'
   assert.equal(payload.schema, 1)
   assert.match(payload.question, /what ran/i)
   assert.equal(typeof payload.definition, 'object')
-  for (const key of ['adw_id', 'resolved_by', 'session', 'phases', 'gate_generations', 'review_outcomes', 'usage', 'absent']) {
+  for (const key of ['adw_id', 'resolved_by', 'session', 'phases', 'gate_generations', 'review_outcomes', 'accept_decisions', 'usage', 'absent']) {
     assert.ok(key in payload, `payload is missing ${key}`)
   }
 })
@@ -558,6 +587,11 @@ function seedAllWritersWithMarker(ledger) {
   ledger.recordSourceError({
     adw_id: ctx, source_path: MARKER_ADW, source_kind: 'return-envelope', byte_size: 1,
     violation_names: [], reason: 'SyntaxError',
+  })
+  ledger.recordAcceptDecision({
+    adw_id: ctx, phase_id: phaseId, where: MARKER_ADW, outcome: 'escalated',
+    findings_total: 1, residual_count: 0, refuted_count: 0, cosmetic_count: 0,
+    unverified_count: 0, invalid_reasons: MARKER_ADW,
   })
   ledger.endPhase({ adw_id: ctx, seq: 1, status: 'ok' })
   ledger.endSession({ adw_id: ctx, status: 'ok' })

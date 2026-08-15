@@ -16,12 +16,12 @@ function mintCrew(root, name) {
     roles: ['builder'], members: { builder: { transport: 'headless-json' } },
   }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
-  return { crewDir, taskReturn: join(returnsDir, 'task.json') }
+  return { crewDir }
 }
 
 function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewDir = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'factoryctl-'))
-  const { crewDir, taskReturn } = mintCrew(root, 'crew')
+  const { crewDir } = mintCrew(root, 'crew')
   const brief = join(root, 'brief.md')
   const reportedCrewDir = bootCrewDir || join(root, 'reported-tier-crew')
   writeFileSync(brief, '# brief\n')
@@ -51,7 +51,7 @@ function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewD
       setInterval: () => null, clearInterval: () => {},
     },
   })
-  return { root, crewDir, taskReturn, brief, boots, reportedCrewDir, daemon: d, mintCrew: (name) => mintCrew(root, name), cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, crewDir, brief, boots, reportedCrewDir, daemon: d, mintCrew: (name) => mintCrew(root, name), cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 async function withDaemon(name, fn, options = {}) {
@@ -91,6 +91,8 @@ async function enqueue(f, crewDir = f.crewDir) {
   assert.equal(result.code, 0)
   return { result, runId: JSON.parse(result.stdout).run_id }
 }
+
+function returnFor(f, runId, crewDir = f.crewDir) { return join(crewDir, 'returns', `${runId}.task.json`) }
 
 withDaemon('run enqueues against the daemon and prints the run id', async (f) => {
   // Pins run as a socket enqueue and not as a locally invented run record.
@@ -198,7 +200,7 @@ withDaemon('ls never reports an outcome for an unsettled run', async (f) => {
 withDaemon('a settled ESCALATION shows as done with no success implied', async (f) => {
   // Pins settled escalation as done plus result-derived escalation, not success from state.
   const { runId } = await enqueue(f)
-  writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' }))
+  writeFileSync(returnFor(f, runId), JSON.stringify({ status: 'escalation' }))
   f.daemon.poll()
   const listed = await invoke(f, ['ls'])
   assert.equal(listed.code, 0)
@@ -278,7 +280,7 @@ withDaemon("attach streams a live run's normalized events", async (f) => {
 
 withDaemon('attach on a settled run prints the retained window and returns', async (f) => {
   const { runId } = await enqueue(f)
-  writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+  writeFileSync(returnFor(f, runId), JSON.stringify({ status: 'done' }))
   f.daemon.poll()
   const result = await invoke(f, ['attach', runId])
   assert.equal(result.code, 0)
@@ -290,7 +292,7 @@ withDaemon('attach on a settled run prints the retained window and returns', asy
 withDaemon('attach projects pending terminal input before the state exit', async (f) => {
   const { runId } = await enqueue(f)
   writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify({ headless_outcome: 'ok', role: 'builder' })}\n`, { flag: 'a' })
-  writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+  writeFileSync(returnFor(f, runId), JSON.stringify({ status: 'done' }))
   const result = await invoke(f, ['attach', runId])
   assert.equal(result.code, 0)
   const events = result.stdout.trim().split('\n').map((line) => JSON.parse(line))
@@ -320,7 +322,7 @@ withDaemon('every attach exit path unsubscribes', async (f) => {
   assert.deepEqual(f.daemon.subscribers(), [])
   await interrupted.close()
 
-  writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+  writeFileSync(returnFor(f, runId), JSON.stringify({ status: 'done' }))
   f.daemon.poll()
   const settled = await connect(join(f.root, 'daemon.sock'))
   await attachVerb(parseArgs(['attach', runId]), { connection: settled, stdout: () => {}, stderr: () => {} })

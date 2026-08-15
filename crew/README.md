@@ -291,8 +291,9 @@ Everything durable is a FILE; pane chat is never the record.
   the return path named in the assignment line.
 - **Assignment line**: single line, safe charset, composed by
   `assignmentLine()` — content travels in brief files, the line only points.
-- **Task envelope**: written by the driver to `task.json` — status, commit,
-  stages, consults, dissents, gate record, escalation.
+- **Task envelope**: a daemon run writes its envelope to
+  `returns/<run_id>.task.json` (continuations use `.a<n>` before `.json`).
+  `returns/task.json` mirrors the most recent run for `wait`/`status`/archive/visualizer readers.
 - **Lifecycle** (code as policy): `done` → archive the crew dir + close the
   workspace (`--keep` to inspect); `escalation` → the workspace always
   survives (it IS the context the human needs), and mints a `parked/null` park

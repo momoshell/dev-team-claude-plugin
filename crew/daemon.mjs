@@ -265,6 +265,15 @@ function absoluteChildPath(root, value) {
   return resolvePath(root, String(value))
 }
 
+const RUN_ID_OK = /^[A-Za-z0-9._-]{1,64}$/
+function runReturnPath(crewDir, runId) { return join(crewDir, 'returns', `${runId}.task.json`) }
+function attemptPath(base, attempt) {
+  if (attempt <= 1) return base
+  return base.endsWith('.json')
+    ? `${base.slice(0, -'.json'.length)}.a${attempt}.json`
+    : `${base}.a${attempt}.json`
+}
+
 // Deliberately duplicates realio.mjs:16: importing realio.mjs for one string is
 // the exact cost this change removes; daemon.test.mjs pins the two together.
 export const PANE_TRANSPORT = 'pane'
@@ -372,6 +381,8 @@ export function daemon(options = {}) {
       checkout: record.checkout,
       tier_identity: record.tier_identity || null,
       task_return: record.task_return,
+      task_return_base: record.task_return_base || record.task_return,
+      attempt: record.attempt ?? 1,
       child_pid: null,
       child_generation: 0,
       lifecycle: 'queued',
@@ -410,13 +421,23 @@ export function daemon(options = {}) {
       const key = record.task_key || run.tier_identity || run.crew_dir
       if (key) regranted.add(key)
       run.brief_file = record.brief_file
+      if (record.task_return) {
+        run.task_return = record.task_return
+        run.attempt = record.attempt ?? run.attempt + 1
+      }
       run.continuation = true
       run.lifecycle = 'queued'
       run.child_pid = null
       return
     }
     if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = 'orphaned-on-restart'; run.child_dead = true; return }
-    if (record.kind === 'settled') { run.lifecycle = 'settled'; run.outcome_status = record.outcome_status; run.outcome_source = record.outcome_source; return }
+    if (record.kind === 'settled') {
+      if (record.task_return) {
+        run.task_return = record.task_return
+        run.attempt = record.attempt ?? run.attempt
+      }
+      run.lifecycle = 'settled'; run.outcome_status = record.outcome_status; run.outcome_source = record.outcome_source; return
+    }
   }
 
   function foldRegistry() {
@@ -443,6 +464,14 @@ export function daemon(options = {}) {
   }
 
   function runEnvelope(run) { return jsonAt(run.task_return, exists, read) }
+
+  function sameFile(leftPath, rightPath) {
+    if (!leftPath || !rightPath) return false
+    try {
+      const left = stat(leftPath), right = stat(rightPath)
+      return left.dev === right.dev && left.ino === right.ino
+    } catch { return false }
+  }
 
   function notify(run, event) {
     for (const subscriber of [...subscribers]) {
@@ -619,10 +648,8 @@ export function daemon(options = {}) {
   }
 
   function regrantIfEligible(run, envelope) {
-    let priorPath = null
-    let priorWritten = false
-    let terminalRemoved = false
-    let registryRecorded = false
+    const priorAttempt = run.attempt ?? 1
+    const priorReturn = run.task_return
     try {
       if (envelope?.status !== 'escalation') return false
       pollJournal(run)
@@ -637,20 +664,16 @@ export function daemon(options = {}) {
         branch: null,
         commit: envelope.details?.commit ?? null,
       }))
-      priorPath = run.task_return?.endsWith('.json')
-        ? `${run.task_return.slice(0, -'.json'.length)}.regrant-1.json`
-        : `${run.task_return}.regrant-1.json`
-      write(priorPath, JSON.stringify(envelope, null, 2))
-      priorWritten = true
-      unlink(run.task_return)
-      terminalRemoved = true
+      const nextReturn = attemptPath(run.task_return_base ?? run.task_return, priorAttempt + 1)
       appendRecord({
         kind: 'regrant', run_id: run.run_id, at: now(), crew_dir: run.crew_dir,
         task: run.task, task_key: key, brief_file: briefPath,
+        task_return: nextReturn, attempt: priorAttempt + 1,
         prior_envelope: envelope, eligible: true, reasons: verdict.reasons,
       })
-      registryRecorded = true
       regranted.add(key)
+      run.attempt = priorAttempt + 1
+      run.task_return = nextReturn
       run.child_generation += 1
       run.brief_file = briefPath
       run.continuation = true
@@ -666,12 +689,8 @@ export function daemon(options = {}) {
       return true
     } catch {
       reapLaunchedContinuation(run)
-      if (terminalRemoved) {
-        try { write(run.task_return, JSON.stringify(envelope, null, 2)) } catch { /* preserve the in-memory terminal path if disk recovery also fails */ }
-      }
-      if (priorWritten && !registryRecorded) {
-        try { unlink(priorPath) } catch { /* the original envelope is the load-bearing recovery artifact */ }
-      }
+      run.attempt = priorAttempt
+      run.task_return = priorReturn
       return false
     }
   }
@@ -682,7 +701,7 @@ export function daemon(options = {}) {
     run.envelope = envelope
     run.lifecycle = 'settled'
     if (run.feed.length > feedRetention) run.feed.splice(0, run.feed.length - feedRetention)
-    appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope' })
+    appendRecord({ kind: 'settled', run_id: run.run_id, at: now(), outcome_status: envelope.status, outcome_source: 'envelope', task_return: run.task_return, attempt: run.attempt })
     endFeed(run, 'settled')
     pump()
   }
@@ -853,8 +872,8 @@ export function daemon(options = {}) {
   function startRun(run, { preserveOnFailure = false } = {}) {
     if (!isQueued(run)) return null
     // An envelope here can only be one that appeared AFTER admission —
-    // enqueue refuses a crew dir that already holds one — so settling on it
-    // is this run's own result, never a predecessor's.
+    // this run's path is unique — so settling on it is this run's own result,
+    // never a predecessor's.
     const envelope = runEnvelope(run)
     if (envelope) {
       settle(run, envelope)
@@ -946,6 +965,8 @@ export function daemon(options = {}) {
     const hasTier = typeof spec.tier === 'string' && !!spec.tier
     if (hasDir && hasTier) throw runError('invalid-spec', 'enqueue takes crew_dir or tier, never both')
     if (!hasDir && !hasTier) throw runError('invalid-spec', 'enqueue requires crew_dir or tier')
+    const runId = String(spec.run_id || uuid())
+    if (!RUN_ID_OK.test(runId)) throw runError('invalid-spec', 'run_id must match /^[A-Za-z0-9._-]{1,64}$/')
     assertBudget()
     if (hasTier) {
       const active = activeTierRun(spec)
@@ -958,21 +979,24 @@ export function daemon(options = {}) {
     if (pane) throw runError('invalid-spec', `daemon run refuses pane transport for seat ${pane}`)
     const active = [...runs.values()].find((run) => run.crew_dir === crewDir && !SETTLED_LIFECYCLES.includes(run.lifecycle))
     if (active) throw runError('run-active', `run ${active.run_id} is already active for ${crewDir}`)
-    const runId = String(spec.run_id || uuid())
     if (runs.has(runId)) throw runError('run-active', `run ${runId} already exists`)
-    const taskReturn = absoluteChildPath(crewDir, spec.task_return || crew.task_return || join('returns', 'task.json'))
-    // task_return is per CREW DIR, so run identity and envelope identity are
-    // the same thing (child.mjs:54/92 resolves the same path from the same
-    // dir). A crew dir whose envelope is already the record cannot host a
-    // second run: honouring the envelope never starts the new run, and
-    // starting it overwrites the old one. Refuse the request like boot-failed;
-    // the envelope is never deleted, moved or ignored.
-    const settled = jsonAt(taskReturn, exists, read)
-    if (settled) {
+    const taskReturn = spec.task_return
+      ? absoluteChildPath(crewDir, spec.task_return)
+      : runReturnPath(crewDir, runId)
+    const wellKnown = join(crewDir, 'returns', 'task.json')
+    const settled = jsonAt(wellKnown, exists, read)
+    const ownsIt = [...runs.values()].some((run) => run.crew_dir === crewDir
+      && run.lifecycle === 'settled'
+      && !sameFile(run.task_return, wellKnown)
+      && !!jsonAt(run.task_return, exists, read))
+    if (settled && !ownsIt) {
       throw runError('crew-settled', `crew dir ${crewDir} already holds a terminal envelope`
-        + ` (status ${JSON.stringify(settled.status ?? null)}) at ${taskReturn}`
-        + ' — a settled crew dir is re-BOOTED, not re-enqueued: boot a fresh crew'
-        + ' (factoryctl run --tier …) and enqueue that')
+        + ` (status ${JSON.stringify(settled.status ?? null)}) at ${wellKnown}`
+        + ' — this envelope is not run-addressed; boot a fresh crew, or let this daemon\'s own settled run own it')
+    }
+    if (exists(taskReturn)) {
+      throw runError('crew-settled', `return path ${taskReturn} is already occupied`
+        + ' — a reused run id cannot overwrite an existing run-addressed envelope')
     }
     const identity = hasTier ? tierIdentity(spec) : null
     const record = {
@@ -980,7 +1004,7 @@ export function daemon(options = {}) {
       task: spec.task || crew.task || null, brief_file: spec.brief_file || spec.briefFile || null,
       lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: canonicalCheckout(spec.checkout || crew.checkout),
       ...(identity ? { tier_identity: identity } : {}),
-      task_return: taskReturn,
+      task_return: taskReturn, attempt: 1,
     }
     appendRecord(record)
     const run = freshRun(record)

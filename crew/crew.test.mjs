@@ -20,6 +20,11 @@ import { realIo } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+// Hoisted: tests both above and below this point branch on it. Below the
+// ledger's Node floor the emitter degrades to JSONL and writes no database,
+// so a real-row assertion there would assert the absence of a feature.
+const floorMajor = Number.parseInt(NODE_FLOOR, 10)
+const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
 
 const PARK_CREW = {
   roles: ['lead', 'planner', 'builder', 'reviewer'],
@@ -444,6 +449,13 @@ test('boot refusal records a run-less boot-refusal row naming the rejected cell'
     const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
     const row = ledger.dumpTable('cell_failures').find((candidate) => candidate.kind === 'boot-refusal')
     ledger.close()
+    if (!nodeMeetsLedgerFloor) {
+      // Below the floor the emitter records JSONL only and writes no database.
+      // The refusal itself (asserted above) is the behaviour that must hold on
+      // every runtime; a recorded row is a capability of Node >= NODE_FLOOR.
+      assert.equal(row, undefined)
+      return
+    }
     assert.ok(row)
     assert.equal(row.role, 'reviewer')
     assert.equal(row.adw_id, null)
@@ -1072,8 +1084,6 @@ test('emitAdapter maps drive events to closed ledger vocabulary with explicit se
   assert.ok(calls.events.some((event) => event.type === 'log' && event.payload.level === 'warn'))
 })
 
-const floorMajor = Number.parseInt(NODE_FLOOR, 10)
-const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
 
 test('emitAdapter maps cell-failure events to the booted crew cell, with a null-cell fallback', () => {
   const calls = []

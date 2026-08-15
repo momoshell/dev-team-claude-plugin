@@ -1,21 +1,30 @@
 # crew
 
-**A team runtime for cmux: code disposes, agents decide.**
+**A team runtime: code disposes, agents decide.**
 
-One task gets one cmux workspace with a whole team booted in a single
-declarative call — planner, builder, reviewer, an optional tech-lead
-adversary, and a lead that serves as the in-workspace judge. A deterministic
-driver runs the entire task loop (plan → gate-first acceptance → build →
-scope gate → validation → review → full suite → commit-on-green); agents are
-consulted only where judgment genuinely lives, and every consultation is a
-closed-enum decision the code branches on.
+One task gets a whole team booted in a single declarative call — planner,
+builder, reviewer, an optional tech-lead adversary, and a lead that serves as
+the judge. A deterministic driver runs the entire task loop (plan → gate-first
+acceptance → build → scope gate → validation → review → full suite →
+commit-on-green); agents are consulted only where judgment genuinely lives, and
+every consultation is a closed-enum decision the code branches on.
+
+**Two modes on one backbone.** On the *shop floor* the team lives in a cmux
+workspace you watch. In *factory* mode the same driver runs headless workers
+owned by a long-lived daemon, and a stateless client drives it — no terminal,
+no human in the loop.
 
 **→ [crew/README.md](crew/README.md)** for the full model, verbs, seat
 charters, contracts, and posture.
 
 ```bash
+# shop floor — a cmux workspace per task
 node crew/crew.mjs boot --task my-task --roles lead,planner,builder,reviewer
 node crew/crew.mjs run  --task my-task --brief-file /abs/path/brief.md
+
+# factory — no workspace; the daemon boots and owns the workers
+node crew/factoryctl.mjs run --brief /abs/path/brief.md --tier build
+node crew/factoryctl.mjs ls
 ```
 
 ## What's in this repo

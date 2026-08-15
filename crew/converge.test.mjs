@@ -127,6 +127,21 @@ test('residualList drops malformed entries and sorts severity stably', () => {
   assert.deepEqual(SEVERITY_RANK, { 'must-fix': 0, 'should-fix': 1, consider: 2 })
 })
 
+test('residualList omits the synthetic gate residual for a green gate', () => {
+  const findings = [
+    { id: 'c1', severity: 'consider', summary: 'c1' },
+    { id: 's1', severity: 'should-fix', summary: 's1' },
+    { id: 'm1', severity: 'must-fix', summary: 'm1' },
+  ]
+  assert.deepEqual(residualList({ findings, gateSummary: { total: 3, failed: 0 }, gateRed: false }).map(({ id }) => id), ['m1', 's1', 'c1'])
+  assert.deepEqual(residualList({ gateSummary: { total: 3, failed: 0 }, gateRed: false }), [])
+})
+
+test('residualList defaults to the existing gate-red shape', () => {
+  const args = { findings: FINDINGS, gateSummary: GATE_SUMMARY }
+  assert.deepEqual(residualList(args), residualList({ ...args, gateRed: true }))
+})
+
 test('follow-up title truncates at 120 characters and PR title is fixed', () => {
   const title = followUpIssueTitle({ task: 't207', residual: { id: 'F', summary: 'z'.repeat(200) } })
   assert.equal(title.length, 120)
@@ -158,4 +173,17 @@ line two
 The work shipped as a DRAFT PR; this issue is its residual record.
 `
   assert.equal(followUpIssueBody({ task: 't207', residual, gateSummary: GATE_SUMMARY, escalation: { where: 'gate', why: 'line one\nline two' } }), expected)
+})
+
+test('draftPrBody changes the opening only for a green gate', () => {
+  const body = draftPrBody({
+    gateSummary: { ...GATE_SUMMARY, line: 'GATE-SUMMARY {"total":3,"failed":0,"errored":0}' },
+    findings: FINDINGS,
+    escalation: { where: 'review', why: 'review findings remain' },
+    roundHistory: HISTORY,
+    gateRed: false,
+  })
+  assert.equal(body.includes('gate is red'), false)
+  assert.match(body, /acceptance gate is green — but unresolved review findings remain/)
+  assert.match(fixtureBody(), /gate is red/)
 })

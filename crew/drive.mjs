@@ -407,6 +407,7 @@ export function driveTask(ctx, io) {
   // every invocation lands its own row. It is driver-owned on purpose: the
   // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
   let gateAttempt = 0
+  let lastGateOutput = null
   // `runner` is an io METHOD, so it must be invoked as one: `realIo.runClean`
   // calls `this.run(cmd)` (crew/realio.mjs:241,245), and passing it detached
   // (`runGate(..., io.runClean)` below) made `this` undefined under ESM strict
@@ -433,10 +434,11 @@ export function driveTask(ctx, io) {
   // Factory-only terminal: an injected GH seam is the mode switch for this
   // slice. Without both methods every precondition returns before any extra
   // stage, run, log, or event, preserving the interactive path byte-for-byte.
-  const convergeSettle = ({ why, where, gateOutput }) => {
+  const convergeSettle = ({ why, where, gateOutput, gateRed = true }) => {
     if (typeof io.createDraftPr !== 'function' || typeof io.createIssue !== 'function') return null
     if (!builderEnv) return null
-    if (baselineGateDefect(gateOutput) !== null) return null
+    if (!gateRed && gateOutput == null) return null
+    if (gateRed && baselineGateDefect(gateOutput) !== null) return null
 
     const parsedGate = parseGateSummary(gateOutput)
     const gateSummary = {
@@ -454,7 +456,12 @@ export function driveTask(ctx, io) {
     }
 
     stage('converge:issues')
-    const residuals = residualList({ findings: S.lastReview?.findings ?? null, gateSummary })
+    const residuals = residualList({ findings: S.lastReview?.findings ?? null, gateSummary, gateRed })
+    if (residuals.length === 0) {
+      io.log({ at: io.now(), converge_declined: 'no residuals' })
+      emit({ kind: 'converge', action: 'declined', where: 'residuals', why: 'no residuals to record' })
+      return null
+    }
     const issues = []
     for (const residual of residuals) {
       if (residual.severity !== 'must-fix') continue
@@ -499,6 +506,7 @@ export function driveTask(ctx, io) {
           findings: residuals,
           escalation: { where, why },
           roundHistory: [...S.stages],
+          gateRed,
         }),
       })
     } catch (err) {
@@ -524,7 +532,7 @@ export function driveTask(ctx, io) {
     emit({ kind: 'converge', action: 'settled', commit: S.commit, pr: pr.number, issues: issues.length })
     return {
       status: 'converge',
-      summary: `Task ${ctx.task} converged with residuals: committed ${S.commit} (${committing.length} files), suite green, gate red — DRAFT PR #${pr.number}, ${issues.length} follow-up issue(s) filed. Merge authority stays human.`,
+      summary: `Task ${ctx.task} converged with residuals: committed ${S.commit} (${committing.length} files), suite green, ${gateRed ? 'gate red' : 'gate green with unresolved review findings'} — DRAFT PR #${pr.number}, ${issues.length} follow-up issue(s) filed. Merge authority stays human.`,
       artifacts: [planPath, journal],
       details: {
         commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
@@ -1128,6 +1136,7 @@ export function driveTask(ctx, io) {
         buildBrief = b; buildNote = 'gate-fix'
         continue
       }
+      lastGateOutput = gateRes.output
     }
 
     // Gate C (judgment, but enum-consumed): the reviewer. An unreadable
@@ -1140,7 +1149,11 @@ export function driveTask(ctx, io) {
           `Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`,
           options, [planPath, lastReviewPath],
         )
-        if (c.decision === 'escalate') return escalate('review', c.reason)
+        if (c.decision === 'escalate') {
+          const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+          if (settled) return settled
+          return escalate('review', c.reason)
+        }
         if (c.decision === 'bounce') {
           grant('review', round)
           extraReviews += 1
@@ -1174,7 +1187,11 @@ export function driveTask(ctx, io) {
             `Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`,
             options, [planPath, lastReviewPath],
           )
-          if (c.decision === 'escalate') return escalate('review', c.reason)
+          if (c.decision === 'escalate') {
+            const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
+            if (settled) return settled
+            return escalate('review', c.reason)
+          }
           if (c.decision === 'bounce') {
             grant('review', round)
             extraRounds += 1

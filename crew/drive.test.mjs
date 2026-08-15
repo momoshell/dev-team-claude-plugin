@@ -2448,6 +2448,90 @@ test('reviewer findings become stable residuals and only must-fix findings file 
   assert.match(body, /follow-up: #/)
 })
 
+const REVIEW_GATE_PASS = `all checks passed\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+const REVIEW_FINDINGS = [
+  { id: 'RV-2', severity: 'should-fix', location: 'a.mjs:2', summary: 'follow-up wording' },
+  { id: 'RV-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'close the defect' },
+]
+
+function reviewConvergeIo({ suite = { ok: true, output: '' }, seam = true, gateless = false } = {}) {
+  const plan = gateless
+    ? planEnv({ details: { ...CONVERGE_PLAN().details, gate_cmd: undefined } })
+    : CONVERGE_PLAN()
+  return fakeIo({
+    envelopes: {
+      'planner:1': plan,
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', REVIEW_FINDINGS),
+      'lead:1': leadEnv('escalate', 'the reviewer names unresolved findings'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: CONVERGE_GATE },
+      'gate-cmd': { ok: true, output: REVIEW_GATE_PASS },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': suite,
+    },
+    changed: ['a.mjs'],
+    ...(seam ? { gh: true } : {}),
+  })
+}
+
+function reviewConvergeRun({ buildRounds, ...options }) {
+  const io = reviewConvergeIo(options)
+  const result = driveTask({ ...CONVERGE_CTX, limits: { plan_rounds: 1, build_rounds: buildRounds, review_rounds: 1 } }, io)
+  return { io, result }
+}
+
+test('review-round exhaustion converges with review residuals and no gate-red entry', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 2 })
+  assert.equal(result.status, 'converge')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.deepEqual(result.details.converge.residuals.map((entry) => entry.id), ['RV-1', 'RV-2'])
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createIssue').length, 1)
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 1)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('build-round exhaustion with a revise verdict converges with review residuals', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1 })
+  assert.equal(result.status, 'converge')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.deepEqual(result.details.converge.residuals.map((entry) => entry.id), ['RV-1', 'RV-2'])
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createIssue').length, 1)
+  assert.equal(io.calls.gh.filter((call) => call.method === 'createDraftPr').length, 1)
+  assert.equal(io.calls.commits.length, 1)
+  const body = io.calls.gh.find((call) => call.method === 'createDraftPr').args.body
+  assert.doesNotMatch(body, /gate is red/)
+  assert.match(body, /RV-1/)
+})
+
+test('a red suite at build-round review exhaustion still parks without side effects', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1, suite: { ok: false, output: 'suite red' } })
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('review convergence without the gh seam remains a review escalation', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1, seam: false })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.run.some((run) => run.cmd === 'suite-cmd'), false)
+  assert.ok(io.calls.assign.every(({ role }) => role !== 'converge'))
+  assert.ok(result.details.stages.every((label) => !label.startsWith('converge')))
+})
+
+test('gateless review convergence parks instead of claiming a green acceptance gate', () => {
+  const { io, result } = reviewConvergeRun({ buildRounds: 1, gateless: true })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.run.some((run) => run.cmd === 'suite-cmd'), false)
+  assert.ok(result.details.stages.every((label) => !label.startsWith('converge')))
+})
+
 test('the converge seam exposes only issue creation and draft PR creation', () => {
   const { io } = convergeRun()
   assert.ok(io.calls.gh.every((call) => ['createIssue', 'createDraftPr'].includes(call.method)))

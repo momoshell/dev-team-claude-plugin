@@ -30,7 +30,7 @@ function sortResiduals(entries) {
     .map(({ entry }) => entry)
 }
 
-export function residualList({ findings, gateSummary } = {}) {
+export function residualList({ findings, gateSummary, gateRed = true } = {}) {
   const total = gateSummary && Number.isSafeInteger(gateSummary.total) ? gateSummary.total : null
   const failed = gateSummary && Number.isSafeInteger(gateSummary.failed) ? gateSummary.failed : null
   const gateResidual = {
@@ -54,7 +54,7 @@ export function residualList({ findings, gateSummary } = {}) {
       })
     }
   }
-  return [gateResidual, ...sortResiduals(reviewResiduals)]
+  return gateRed ? [gateResidual, ...sortResiduals(reviewResiduals)] : sortResiduals(reviewResiduals)
 }
 
 export function followUpIssueTitle({ task, residual } = {}) {
@@ -94,15 +94,18 @@ export function draftPrTitle({ task } = {}) {
   return `crew(${text(task)}): converged with residuals — DRAFT, not mergeable`
 }
 
-export function draftPrBody({ gateSummary, findings, escalation, roundHistory } = {}) {
+export function draftPrBody({ gateSummary, findings, escalation, roundHistory, gateRed = true } = {}) {
   const supplied = Array.isArray(findings) ? findings.filter((entry) => entry && typeof entry === 'object') : []
-  const residuals = sortResiduals(supplied.length ? supplied : residualList({ gateSummary }))
+  const residuals = sortResiduals(supplied.length ? supplied : residualList({ gateSummary, gateRed }))
   const line = gateSummary?.line ?? gateSummaryLine(gateSummary?.output)
   const output = text(gateSummary?.output)
   const tail = output.slice(-GATE_OUTPUT_TAIL)
   const why = text(escalation?.why)
   const where = text(escalation?.where)
   const history = Array.isArray(roundHistory) ? roundHistory : []
+  const opening = gateRed
+    ? 'This is a DRAFT PR: the work is committed, the full suite is green, and the acceptance gate is red. Merge authority is human; nothing here marks this PR ready.'
+    : 'This is a DRAFT PR: the work is committed, the full suite is green, and the acceptance gate is green — but unresolved review findings remain. Merge authority is human; nothing here marks this PR ready.'
   const bullets = residuals.map((entry) => {
     let bullet = `- **${text(entry.severity)}** \`${text(entry.id)}\` — ${text(entry.summary)}`
     if (entry.location) bullet += ` (at ${text(entry.location)})`
@@ -111,7 +114,7 @@ export function draftPrBody({ gateSummary, findings, escalation, roundHistory } 
   })
   const historyLines = history.map((entry, index) => `${index + 1}. ${text(entry)}`)
   return [
-    'This is a DRAFT PR: the work is committed, the full suite is green, and the acceptance gate is red. Merge authority is human; nothing here marks this PR ready.',
+    opening,
     '',
     '## Residuals (unresolved — read these first)',
     ...bullets,

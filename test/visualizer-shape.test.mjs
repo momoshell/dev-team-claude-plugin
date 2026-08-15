@@ -45,6 +45,81 @@ test('every unmeasured field is null and has a non-empty pending reason', () => 
   assert.equal(run.metrics.written_tokens, null)
 })
 
+test('shapeRun aggregates billed token totals from agent sessions', () => {
+  const run = shapeRun({ ...base, billed_input_tokens: 999, billed_output_tokens: 999 }, [], [], null, {}, Date.parse(end), {
+    agentSessions: [
+      { billed_input_tokens: 10, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 },
+      { billed_input_tokens: 5, billed_output_tokens: 6, billed_cache_write_tokens: 3, billed_cache_read_tokens: 7 },
+    ],
+  })
+  assert.equal(run.metrics.billed_input_tokens, 15)
+  assert.equal(run.metrics.billed_output_tokens, 10)
+  assert.equal(run.metrics.billed_cache_write_tokens, 5)
+  assert.equal(run.metrics.billed_cache_read_tokens, 8)
+})
+
+test('shapeRun honors pre-119 session token fallbacks without agent rows', () => {
+  const run = shapeRun({ ...base, billed_input_tokens: 12 }, [], [], null, {}, Date.parse(end))
+  assert.equal(run.metrics.billed_input_tokens, 12)
+  assert.equal(run.pending.billed_input_tokens, undefined)
+})
+
+test('shapeRun leaves all billed token fields null when no source measured them', () => {
+  const run = shapeRun(base, [], [], null, {}, Date.parse(end))
+  for (const field of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+    assert.equal(run.metrics[field], null)
+    assert.notEqual(run.metrics[field], 0)
+    assert.match(run.pending[field], /predates/i)
+  }
+})
+
+test('shapeRun never derives a billed money value', () => {
+  const run = shapeRun({ ...base, billed_input_tokens: 1000000 }, [], [], null, {}, Date.parse(end), {
+    agentSessions: [{ billed_input_tokens: 1000000 }],
+  })
+  assert.equal(run.metrics.billed_cost_usd, null)
+  assert.ok(run.pending.billed_cost_usd)
+})
+
+test('shapeRun keeps gate generations and selects the newest verdict', () => {
+  const run = shapeRun(base, [], [], null, {}, Date.parse(end), {
+    gateDiscriminations: [
+      { gate_generation: 1, verdict: 'failed', checks_total: 2 },
+      { gate_generation: 2, verdict: 'proven', checks_total: 2 },
+    ],
+  })
+  assert.equal(run.gate_generations.length, 2)
+  assert.equal(run.gate_discrimination, 'proven')
+  assert.equal(run.gate_generations[0].gate_generation, 1)
+})
+
+test('shapeRun leaves absent gate measurements null and pending', () => {
+  const run = shapeRun(base, [], [], null, {}, Date.parse(end))
+  assert.equal(run.gate_discrimination, null)
+  assert.equal(run.gate_generations, null)
+  assert.ok(run.pending.gate_discrimination)
+  assert.notEqual(run.pending.gate_discrimination, 'failed')
+  assert.notEqual(run.pending.gate_discrimination, 'unproven')
+})
+
+test('shapeRun maps review outcomes and preserves null counts', () => {
+  const run = shapeRun(base, [], [], null, {}, Date.parse(end), {
+    reviewOutcomes: [{ dispatch_id: 'd1', role: 'reviewer', verdict: 'changes-needed', must_fix: null }],
+  })
+  assert.equal(run.reviews.length, 1)
+  assert.equal(run.reviews[0].must_fix, null)
+  const absent = shapeRun(base, [], [], null, {}, Date.parse(end))
+  assert.equal(absent.reviews, null)
+  assert.ok(absent.pending.reviews)
+})
+
+test('shapeRun uses the NULL probe wording for missing new measurements', () => {
+  const run = shapeRun(base, [], [], null, { missing: ['billed_input_tokens', 'gate_discrimination', 'reviews'] }, Date.parse(end))
+  assert.equal(run.pending.billed_input_tokens, 'predates this measurement')
+  assert.equal(run.pending.gate_discrimination, 'predates this measurement')
+  assert.equal(run.pending.reviews, 'predates this measurement')
+})
+
 test('real emitted events leave phase lanes honestly unavailable, while linked events resolve', () => {
   const phases = [{ id: 1, seq: 1, name: 'plan', status: 'ok', started_at: start, ended_at: end }]
   const emitted = [{ type: 'agent_start', phase_id: null, payload_json: JSON.stringify({ role: 'planner', dispatch_id: 'd1' }), started_at: start }]

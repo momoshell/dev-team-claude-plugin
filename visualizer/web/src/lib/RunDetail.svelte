@@ -3,6 +3,7 @@
   import { drainEvents } from './drain.js'
   import PhaseGantt from './PhaseGantt.svelte'
   import EnvelopeInspector from './EnvelopeInspector.svelte'
+  import ReviewPanel from './ReviewPanel.svelte'
   import EventStream from './EventStream.svelte'
   let { run, onback = () => {} } = $props()
   let returns = $state({ envelopes: [], task: null }), events = $state([]), selectedPhaseId = $state(null), error = $state('')
@@ -20,6 +21,7 @@
   {#if error}<p class="error">{error}</p>{/if}
   <PhaseGantt {run} {events} onselectphase={(id) => selectedPhaseId = id} />
   <EnvelopeInspector {run} {returns} />
+  <ReviewPanel {run} {returns} />
   <EventStream {run} phaseFilter={selectedPhaseId} />
 </main>
 <style>.detail { max-width:1200px; margin:auto; padding:1rem; display:grid; gap:1rem; }.detail > header { display:flex; align-items:center; gap:1rem; }.detail h1 { margin:.2rem 0; }.detail p { color:var(--muted); }.error { color:#b42318; }</style>

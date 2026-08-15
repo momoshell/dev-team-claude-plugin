@@ -40,12 +40,26 @@ export function foldAgents(events = []) {
   return [...agents.values()]
 }
 
+function sumBilled(rows, column, fallback) {
+  let total = null
+  for (const row of rows) {
+    const value = row?.[column]
+    if (typeof value === 'number' && Number.isFinite(value)) total = (total ?? 0) + value
+  }
+  // One agent_sessions row per claude_session_id holds that seat's RUNNING
+  // total, so summing rows is correct and does not double-count assignments.
+  return total ?? (typeof fallback === 'number' ? fallback : null)
+}
+
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
+  if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
   const missing = probe?.missing || []
   if (missing.includes(field)) return 'predates this measurement'
   if (field === 'read_tokens' || field === 'written_tokens') return 'awaiting the metering daemon (#83)'
+  if (field === 'gate_discrimination' || field === 'gate_generations' || field === 'reviews') return 'predates this measurement'
+  if (field.startsWith('billed_')) return 'predates this measurement'
   return 'not measured yet'
 }
 
@@ -55,7 +69,9 @@ function dateValue(v) {
   return Number.isFinite(n) ? n : null
 }
 
-export function shapeRun(session, phases = [], agentEvents = [], triageRow = null, probe = {}, now = Date.now()) {
+export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
+                         probe = {}, now = Date.now(), extras = {}) {
+  const { agentSessions = [], gateDiscriminations = [], reviewOutcomes = [] } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -63,15 +79,38 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   const mode = Object.prototype.hasOwnProperty.call(session, 'mode') ? session.mode : null
   const engineer = Object.prototype.hasOwnProperty.call(session, 'engineer') ? session.engineer : null
   const metrics = {
-    billed_cost_usd: session.billed_cost_usd ?? null,
-    billed_input_tokens: session.billed_input_tokens ?? null,
-    billed_output_tokens: session.billed_output_tokens ?? null,
+    billed_cost_usd: null,
+    billed_input_tokens: sumBilled(agentSessions, 'billed_input_tokens', session.billed_input_tokens),
+    billed_output_tokens: sumBilled(agentSessions, 'billed_output_tokens', session.billed_output_tokens),
+    billed_cache_write_tokens: sumBilled(agentSessions, 'billed_cache_write_tokens', session.billed_cache_write_tokens),
+    billed_cache_read_tokens: sumBilled(agentSessions, 'billed_cache_read_tokens', session.billed_cache_read_tokens),
     read_tokens: null,
     written_tokens: null,
   }
+  const gateRows = [...gateDiscriminations].sort((a, b) => (a.gate_generation ?? 0) - (b.gate_generation ?? 0))
+  const gateGenerations = gateRows.length ? gateRows.map((row) => ({
+    gate_generation: row.gate_generation ?? null,
+    verdict: row.verdict ?? null,
+    checks_total: row.checks_total ?? null,
+    checks_failed: row.checks_failed ?? null,
+    checks_errored: row.checks_errored ?? null,
+    note: row.note ?? null,
+    created_at: row.created_at ?? null,
+  })) : null
+  const gateDiscrimination = gateGenerations ? (gateGenerations.at(-1).verdict ?? null) : null
+  const reviews = reviewOutcomes.length ? reviewOutcomes.map((row) => ({
+    dispatch_id: row.dispatch_id ?? null, role: row.role ?? null, verdict: row.verdict ?? null,
+    must_fix: row.must_fix ?? null, should_fix: row.should_fix ?? null,
+    consider: row.consider ?? null, created_at: row.created_at ?? null,
+  })) : null
   const pending = {}
-  for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens']) {
+  for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
     const value = field === 'mode' ? mode : field === 'engineer' ? engineer : metrics[field]
+    const reason = pendingFor(field, probe, value)
+    if (reason) pending[field] = reason
+  }
+  for (const field of ['gate_discrimination', 'gate_generations', 'reviews']) {
+    const value = field === 'gate_discrimination' ? gateDiscrimination : field === 'gate_generations' ? gateGenerations : reviews
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
@@ -107,6 +146,9 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     phase_lanes: phaseLaneSource,
     agents: foldAgents(agentEvents),
     metrics,
+    gate_discrimination: gateDiscrimination,
+    gate_generations: gateGenerations,
+    reviews,
     triage: { reviewed_at: triageRow?.reviewed_at ?? null },
     pending: { ...pending, ...(phaseLanePending ? { phase_lanes: phaseLanePending } : {}) },
   }

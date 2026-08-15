@@ -134,6 +134,8 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // (:398-422) then synthesizes a google model whose id is the literal
   // pattern, returning it with only a warning — a phantom seat that dies on
   // its first message instead of failing to boot.
+  // This omission is ENFORCED, not merely explained: crew/adapter-pi.test.mjs
+  // fails if `--provider` ever appears in a composed seat command (#147).
   // effort is OPTIONAL and additive: absent, the command is unchanged. It
   // maps to --thinking (NOT the ':<level>' model-string shorthand, so a
   // roster model id passes through untouched and effort stays a separate,

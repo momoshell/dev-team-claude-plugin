@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { isAbsolute, join, resolve as resolvePath } from 'node:path'
@@ -128,6 +128,119 @@ test('propose round trips a memory body and index line through context', () => {
     const extract = mem.context({})
     assert.match(extract.text, /memory must never fail boot/)
     assert.match(extract.text, /\[boot-seam\]\(boot-seam\.md\)/)
+  } finally { clean(dir) }
+})
+
+test('propose rejects a delta that restates a run fact and writes nothing', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-propose-lint-'))
+  try {
+    const mem = memory.openMemory({ dir })
+    const samples = [
+      ['adw-id', 'The run 550e8400-e29b-41d4-a716-446655440000 escalated after review.'],
+      ['suite-count', 'Suite ran 638/638 green on this task.'],
+      ['pr-outcome', 'PR #219 merged after review.'],
+      ['token-cost', 'The seat burned 1.2M tokens on that run.'],
+      ['commit-sha', 'Landed as commit 9b31896 on main.'],
+    ]
+    const indexPath = join(dir, 'MEMORY.md')
+    for (const [rule, body] of samples) {
+      const name = `run-fact-${rule}`
+      let err
+      assert.throws(
+        () => mem.propose({ name, description: 'a run fact', type: 'project', body }),
+        (thrown) => {
+          err = thrown
+          return /ledger\.mjs/.test(thrown.message)
+        },
+      )
+      assert.equal(err.code, 'run-fact')
+      assert.equal(existsSync(join(dir, `${name}.md`)), false)
+      const index = existsSync(indexPath) ? readFileSync(indexPath, 'utf8') : ''
+      assert.doesNotMatch(index, new RegExp(`\\]\\(${name}\\.md\\)`))
+    }
+    assert.deepEqual(readdirSync(dir), [])
+  } finally { clean(dir) }
+})
+
+test('reconcile rejects a run-fact delta', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-reconcile-lint-'))
+  try {
+    const mem = memory.openMemory({ dir })
+    const name = 'run-fact-reconcile'
+    let err
+    assert.throws(
+      () => mem.reconcile({
+        name,
+        description: 'a run fact',
+        type: 'project',
+        body: 'PR #219 merged after review.',
+      }),
+      (thrown) => {
+        err = thrown
+        return /ledger\.mjs/.test(thrown.message)
+      },
+    )
+    assert.equal(err.code, 'run-fact')
+    assert.equal(existsSync(join(dir, `${name}.md`)), false)
+    assert.equal(existsSync(join(dir, 'MEMORY.md')), false)
+  } finally { clean(dir) }
+})
+
+test('judgment deltas pass the lint unchanged', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-judgment-'))
+  try {
+    const mem = memory.openMemory({ dir, budgetBytes: 10000 })
+    const bodies = [
+      "Deny-only is the pi seat's tool posture, because pi's built-ins contain no surface a positive list could fence.",
+      'The scope escalation convention is documented in (#139).',
+      'Use conventional-commit subjects for durable memory entries.',
+    ]
+    for (const [index, body] of bodies.entries()) {
+      const name = `judgment-${index}`
+      const result = mem.propose({ name, description: 'durable judgment', type: 'feedback', body })
+      assert.equal(result.ok, true)
+      assert.equal(readFileSync(join(dir, `${name}.md`), 'utf8').endsWith(body), true)
+    }
+    const extract = mem.context({})
+    for (const body of bodies) assert.ok(extract.text.includes(body))
+  } finally { clean(dir) }
+})
+
+test('lintMemoryDelta is a pure verdict', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-pure-lint-'))
+  try {
+    const verdict = memory.lintMemoryDelta({
+      name: 'sample',
+      description: 'sample',
+      body: 'The run 550e8400-e29b-41d4-a716-446655440000 escalated.',
+    })
+    assert.equal(verdict.ok, false)
+    assert.equal(verdict.findings[0].rule, 'adw-id')
+    assert.match(verdict.findings[0].query, /ledger\.mjs/)
+    assert.match(verdict.reason, /ledger\.mjs/)
+    assert.deepEqual(
+      memory.lintMemoryDelta({ body: "Deny-only is the pi seat's tool posture." }),
+      { ok: true, findings: [] },
+    )
+    assert.deepEqual(readdirSync(dir), [])
+  } finally { clean(dir) }
+})
+
+test('gc and context do not lint', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-read-lint-'))
+  try {
+    const indexPath = join(dir, 'MEMORY.md')
+    const entryPath = join(dir, 'stale.md')
+    const index = '- [Stale](stale.md) — planted run fact\n'
+    const entry = '---\nname: stale\ndescription: planted run fact\nmetadata:\n  type: project\n---\n\nPR #219 merged after review.\n'
+    writeFileSync(indexPath, index)
+    writeFileSync(entryPath, entry)
+    const mem = memory.openMemory({ dir, budgetBytes: 10000 })
+    const report = mem.gc()
+    assert.equal(report.ok, true)
+    assert.equal(readFileSync(entryPath, 'utf8'), entry)
+    assert.equal(readFileSync(indexPath, 'utf8'), index)
+    assert.match(mem.context({}).text, /PR #219 merged after review\./)
   } finally { clean(dir) }
 })
 

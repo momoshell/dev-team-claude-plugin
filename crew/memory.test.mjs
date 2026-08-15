@@ -145,7 +145,7 @@ test('propose is idempotent on the index and rejects invalid names and types', (
   } finally { clean(dir) }
 })
 
-test('memory namespace and handle expose only the slice verbs, with reconcile and gc absent', () => {
+test('memory namespace and handle expose the slice verbs without module-level reconcile or gc', () => {
   const dir = fixture()
   try {
     assert.equal(typeof memory.openMemory, 'function')
@@ -156,7 +156,120 @@ test('memory namespace and handle expose only the slice verbs, with reconcile an
     const handle = memory.openMemory({ dir })
     assert.equal(typeof handle.context, 'function')
     assert.equal(typeof handle.propose, 'function')
-    assert.equal(Object.hasOwn(handle, 'reconcile'), false)
-    assert.equal(Object.hasOwn(handle, 'gc'), false)
+    assert.equal(typeof handle.reconcile, 'function')
+    assert.equal(typeof handle.gc, 'function')
+  } finally { clean(dir) }
+})
+
+test('reconcile updates an entry in place and context reflects it', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-reconcile-update-'))
+  try {
+    const mem = memory.openMemory({ dir, budgetBytes: 10000 })
+    mem.propose({ name: 'reconcile-entry', description: 'original description', type: 'feedback', body: 'old body' })
+    const result = mem.reconcile({ name: 'reconcile-entry', body: 'new body' })
+    assert.equal(result.created, false)
+    assert.equal(result.updated, true)
+    const index = readFileSync(join(dir, 'MEMORY.md'), 'utf8')
+    assert.equal((index.match(/\]\(reconcile-entry\.md\)/g) || []).length, 1)
+    const extract = mem.context({})
+    assert.match(extract.text, /new body/)
+    assert.doesNotMatch(extract.text, /old body/)
+    const file = readFileSync(join(dir, 'reconcile-entry.md'), 'utf8')
+    assert.match(file, /description: original description/)
+    assert.match(file, /  type: feedback/)
+  } finally { clean(dir) }
+})
+
+test('reconcile creates a missing entry and repairs a drifted index line', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-reconcile-create-'))
+  try {
+    const mem = memory.openMemory({ dir })
+    const created = mem.reconcile({ name: 'repair-entry', description: 'first description', type: 'project', body: 'body' })
+    assert.equal(created.created, true)
+    const indexPath = join(dir, 'MEMORY.md')
+    writeFileSync(indexPath, readFileSync(indexPath, 'utf8').replace('first description', 'stale description'))
+    const repaired = mem.reconcile({ name: 'repair-entry', description: 'new description' })
+    assert.equal(repaired.created, false)
+    assert.equal(repaired.indexUpdated, true)
+    const index = readFileSync(indexPath, 'utf8')
+    assert.match(index, /- \[repair-entry\]\(repair-entry\.md\) — new description\n/)
+    assert.equal((index.match(/\]\(repair-entry\.md\)/g) || []).length, 1)
+  } finally { clean(dir) }
+})
+
+test('reconcile rejects invalid names and untyped creates', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-reconcile-invalid-'))
+  try {
+    const mem = memory.openMemory({ dir })
+    assert.throws(() => mem.reconcile({ name: 'Bad Name', type: 'project' }), /invalid memory name/)
+    assert.throws(() => mem.reconcile({ name: 'missing-type', body: 'body' }), /invalid memory type/)
+  } finally { clean(dir) }
+})
+
+test('gc prunes orphaned and escaping index lines and leaves files alone', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-gc-prune-'))
+  try {
+    const mem = memory.openMemory({ dir, budgetBytes: 10000 })
+    mem.propose({ name: 'live-entry', description: 'live', type: 'project', body: 'live body' })
+    const livePath = join(dir, 'live-entry.md')
+    const liveBefore = readFileSync(livePath, 'utf8')
+    const indexPath = join(dir, 'MEMORY.md')
+    writeFileSync(indexPath, `${readFileSync(indexPath, 'utf8')}- [Gone](gone.md) — orphan\n- [Escape](../escape.md) — escape\n`)
+    const report = mem.gc()
+    assert.deepEqual(report.pruned, [
+      { path: 'gone.md', reason: 'orphaned' },
+      { path: '../escape.md', reason: 'escaping' },
+    ])
+    const index = readFileSync(indexPath, 'utf8')
+    assert.match(index, /live-entry\.md/)
+    assert.doesNotMatch(index, /gone\.md/)
+    assert.doesNotMatch(index, /\.\.\/escape\.md/)
+    assert.equal(readFileSync(livePath, 'utf8'), liveBefore)
+    const extract = mem.context({})
+    assert.match(extract.text, /live body/)
+    assert.equal(extract.dropped.some((entry) => entry.reason === 'unreadable' || entry.reason === 'outside-dir'), false)
+  } finally { clean(dir) }
+})
+
+test('gc reports unlinked files and over-budget drops without acting', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-gc-report-'))
+  try {
+    const mem = memory.openMemory({ dir, budgetBytes: 1 })
+    mem.propose({ name: 'budget-entry', description: 'budget', type: 'reference', body: 'budget body' })
+    const orphanPath = join(dir, 'orphan-file.md')
+    writeFileSync(orphanPath, 'unindexed body')
+    const before = readFileSync(orphanPath, 'utf8')
+    const report = mem.gc()
+    assert.ok(report.unlinked.includes('orphan-file.md'))
+    assert.ok(report.overBudget.length > 0)
+    assert.equal(readFileSync(orphanPath, 'utf8'), before)
+    assert.equal(readFileSync(join(dir, 'budget-entry.md'), 'utf8').includes('budget body'), true)
+  } finally { clean(dir) }
+})
+
+test('gc on a missing dir or missing index returns an empty report', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-memory-gc-missing-'))
+  const missing = join(parent, 'missing')
+  const noIndex = join(parent, 'no-index')
+  try {
+    const expected = { ok: true, dryRun: false, pruned: [], kept: 0, unlinked: [], overBudget: [] }
+    assert.deepEqual(memory.openMemory({ dir: missing }).gc(), expected)
+    mkdirSync(noIndex)
+    assert.deepEqual(memory.openMemory({ dir: noIndex }).gc(), expected)
+  } finally { clean(parent) }
+})
+
+test('gc dry run reports without mutating MEMORY.md', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-memory-gc-dry-run-'))
+  try {
+    const mem = memory.openMemory({ dir })
+    mem.propose({ name: 'dry-entry', description: 'dry', type: 'project', body: 'dry body' })
+    const indexPath = join(dir, 'MEMORY.md')
+    writeFileSync(indexPath, `${readFileSync(indexPath, 'utf8')}- [Gone](dry-gone.md) — orphan\n`)
+    const snapshot = readFileSync(indexPath, 'utf8')
+    const report = mem.gc({ dryRun: true })
+    assert.equal(report.dryRun, true)
+    assert.ok(report.pruned.some((entry) => entry.path === 'dry-gone.md'))
+    assert.equal(readFileSync(indexPath, 'utf8'), snapshot)
   } finally { clean(dir) }
 })

@@ -90,6 +90,8 @@ function fixture(path, { filler = 0 } = {}) {
   ledger.recordGateDiscrimination({ adw_id: done, phase_id: 3, gate_generation: 2, verdict: 'proven', checks_total: 2, checks_failed: 0, checks_errored: 0, created_at: '2024-01-01T00:00:02.000Z' })
   ledger.recordReviewOutcome({ adw_id: done, phase_id: 3, dispatch_id: 'd1', role: 'reviewer', verdict: 'changes-needed', must_fix: 1, should_fix: 2, consider: 0, created_at: '2024-01-01T00:00:03.000Z' })
   ledger.recordReviewOutcome({ adw_id: done, phase_id: 3, dispatch_id: 'd2', role: 'reviewer', verdict: 'pass', must_fix: 0, should_fix: 0, consider: 0, created_at: '2024-01-01T00:00:04.000Z' })
+  ledger.recordAcceptDecision({ adw_id: done, phase_id: 3, where_at: 'review-exhausted', outcome: 'accepted', findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 0, unverified_count: 0, invalid_reasons: '', created_at: '2024-01-01T00:00:05.000Z' })
+  ledger.recordAcceptDecision({ adw_id: done, phase_id: 3, where_at: 'review-exhausted', outcome: 'escalated', findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 0, unverified_count: 0, invalid_reasons: 'f1: unresolved', created_at: '2024-01-01T00:00:06.000Z' })
   ledger.endSession({ adw_id: done, status: 'ok' })
   ledger.startSession({ adw_id: live, repo_slug: 'repo', task_slug: 'live' })
   ledger.startPhase({ adw_id: live, seq: 1, name: 'plan' })
@@ -180,12 +182,14 @@ test('sessions expose token, gate, and review measurements while live runs stay 
     assert.equal(historical.gate_generations.length, 2)
     assert.equal(historical.gate_discrimination, 'proven')
     assert.equal(historical.reviews.length, 2)
+    assert.equal(historical.accept_decisions.length, 2)
+    assert.deepEqual(historical.accept_decisions.map((row) => row.outcome), ['accepted', 'escalated'])
     for (const field of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
       assert.equal(running.metrics[field], null)
       assert.ok(running.pending[field])
       assert.notEqual(running.metrics[field], 0)
     }
-    for (const field of ['gate_discrimination', 'reviews']) {
+    for (const field of ['gate_discrimination', 'reviews', 'accept_decisions']) {
       assert.equal(running[field], null)
       assert.ok(running.pending[field])
     }
@@ -200,7 +204,7 @@ test('missing measurement tables do not break the read-only feed', { skip: SKIP 
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
   const { done } = fixture(ledgerDb)
   const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
-  for (const table of ['agent_sessions', 'gate_discriminations', 'review_outcomes']) writable.exec(`DROP TABLE ${table}`)
+  for (const table of ['agent_sessions', 'gate_discriminations', 'review_outcomes', 'accept_decisions']) writable.exec(`DROP TABLE ${table}`)
   writable.close()
   const feed = createLedgerFeed({ ledgerDb, triageDb })
   try {
@@ -211,6 +215,8 @@ test('missing measurement tables do not break the read-only feed', { skip: SKIP 
     assert.ok(run.pending.billed_input_tokens)
     assert.ok(run.pending.gate_discrimination)
     assert.ok(run.pending.reviews)
+    assert.equal(run.accept_decisions, null)
+    assert.equal(run.pending.accept_decisions, 'predates this measurement')
   } finally {
     feed.close()
     rmSync(dir, { recursive: true, force: true })

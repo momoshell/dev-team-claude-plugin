@@ -71,7 +71,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { agentSessions = [], gateDiscriminations = [], reviewOutcomes = [] } = extras || {}
+  const { agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [] } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -103,14 +103,27 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     must_fix: row.must_fix ?? null, should_fix: row.should_fix ?? null,
     consider: row.consider ?? null, created_at: row.created_at ?? null,
   })) : null
+  const accepts = acceptDecisions.length ? acceptDecisions.map((row) => ({
+    where_at: row.where_at ?? null,
+    outcome: row.outcome ?? null,
+    findings_total: row.findings_total ?? null,
+    residual_count: row.residual_count ?? null,
+    refuted_count: row.refuted_count ?? null,
+    cosmetic_count: row.cosmetic_count ?? null,
+    unverified_count: row.unverified_count ?? null,
+    // realio writes '' when there were no invalid residuals; an empty string
+    // is not a diagnostic, so it degrades to null.
+    invalid_reasons: row.invalid_reasons ? row.invalid_reasons : null,
+    created_at: row.created_at ?? null,
+  })) : null
   const pending = {}
   for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
     const value = field === 'mode' ? mode : field === 'engineer' ? engineer : metrics[field]
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
-  for (const field of ['gate_discrimination', 'gate_generations', 'reviews']) {
-    const value = field === 'gate_discrimination' ? gateDiscrimination : field === 'gate_generations' ? gateGenerations : reviews
+  for (const field of ['gate_discrimination', 'gate_generations', 'reviews', 'accept_decisions']) {
+    const value = field === 'gate_discrimination' ? gateDiscrimination : field === 'gate_generations' ? gateGenerations : field === 'reviews' ? reviews : accepts
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
@@ -149,6 +162,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     gate_discrimination: gateDiscrimination,
     gate_generations: gateGenerations,
     reviews,
+    accept_decisions: accepts,
     triage: { reviewed_at: triageRow?.reviewed_at ?? null },
     pending: { ...pending, ...(phaseLanePending ? { phase_lanes: phaseLanePending } : {}) },
   }

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { fleetCost, fleetTokens, findingRows, gateChips, reviewRows } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, fleetCost, fleetTokens, findingRows, gateChips, reviewRows } from '../visualizer/web/src/lib/panels.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -72,6 +72,28 @@ test('reviewRows preserves null counts while retaining recorded zero', () => {
   assert.notEqual(result.rows[0].must_fix, 0)
   assert.equal(result.rows[1].must_fix, 0)
   assert.equal(result.pending, null)
+})
+
+test('acceptRows keeps held and refused decisions visually distinct', () => {
+  const result = acceptRows({ accept_decisions: [
+    { outcome: 'accepted', where_at: 'review-exhausted', residual_count: 1, refuted_count: 0, cosmetic_count: 1, unverified_count: 0 },
+    { outcome: 'escalated', where_at: 'review-exhausted', residual_count: 2, invalid_reasons: 'f1: unresolved' },
+  ] })
+  const [held, refused] = result.rows
+  assert.equal(held.tone, 'held')
+  assert.equal(held.label, 'accepted with residuals')
+  assert.equal(refused.tone, 'refused')
+  assert.equal(refused.label, 'accept refused — failed closed to escalate')
+  assert.notEqual(held.tone, refused.tone)
+  assert.equal(refused.invalid_reasons, 'f1: unresolved')
+  assert.equal(result.refused, 1)
+})
+
+test('acceptRows leaves absent decisions pending without fabricated counts', () => {
+  const result = acceptRows({ accept_decisions: null, pending: { accept_decisions: 'predates this measurement' } })
+  assert.deepEqual(result.rows, [])
+  assert.ok(result.pending)
+  assert.notEqual(result.pending, 0)
 })
 
 test('findingRows distinguishes absent findings from an explicit empty measurement', () => {

@@ -1,6 +1,8 @@
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 const FINDINGS_PENDING = 'findings unavailable — this review predates structured findings (#170)'
 const UNPROVEN_TITLE = 'no evidence was obtainable — a direct DI caller without runClean, or a contained stash failure. Absence of evidence is not evidence of absence (ADR-030).'
+const ACCEPTED_TITLE = 'typed accept held — residuals were accepted'
+const REFUSED_TITLE = 'typed accept refused — loop failed closed to escalate'
 
 export function fleetTokens(runs = []) {
   const source = Array.isArray(runs) ? runs : []
@@ -75,6 +77,30 @@ export function reviewRows(run = {}) {
     created_at: row?.created_at ?? null,
   }))
   return { rows, pending: null }
+}
+
+export function acceptRows(run = {}) {
+  const decisions = Array.isArray(run.accept_decisions) ? run.accept_decisions : []
+  if (!decisions.length) return { rows: [], refused: 0, pending: run.pending?.accept_decisions ?? 'predates this measurement' }
+  const rows = decisions.map((row, index) => {
+    const held = row?.outcome === 'accepted'
+    return {
+      seq: index + 1,
+      where_at: row?.where_at ?? null,
+      outcome: row?.outcome ?? null,
+      tone: held ? 'held' : 'refused',
+      label: held ? 'accepted with residuals' : 'accept refused — failed closed to escalate',
+      title: held ? ACCEPTED_TITLE : REFUSED_TITLE,
+      findings_total: row?.findings_total ?? null,
+      residual_count: row?.residual_count ?? null,
+      refuted_count: row?.refuted_count ?? null,
+      cosmetic_count: row?.cosmetic_count ?? null,
+      unverified_count: row?.unverified_count ?? null,
+      invalid_reasons: row?.invalid_reasons ?? null,
+      created_at: row?.created_at ?? null,
+    }
+  })
+  return { rows, refused: rows.filter((row) => row.tone === 'refused').length, pending: null }
 }
 
 export function findingRows(returns = {}) {

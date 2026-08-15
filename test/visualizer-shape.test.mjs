@@ -113,6 +113,30 @@ test('shapeRun maps review outcomes and preserves null counts', () => {
   assert.ok(absent.pending.reviews)
 })
 
+test('shapeRun maps accept decisions in ledger order and normalizes empty diagnostics', () => {
+  const run = shapeRun(base, [], [], null, {}, Date.parse(end), {
+    acceptDecisions: [
+      { where_at: 'review-exhausted', outcome: 'accepted', findings_total: 2, residual_count: null, refuted_count: 1, cosmetic_count: 0, unverified_count: 1, invalid_reasons: '', created_at: '2024-01-01T00:00:03.000Z' },
+      { where_at: 'review-exhausted', outcome: 'escalated', findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 0, unverified_count: 0, invalid_reasons: 'f1: still open', created_at: '2024-01-01T00:00:04.000Z' },
+    ],
+  })
+  assert.deepEqual(run.accept_decisions.map((row) => row.created_at), ['2024-01-01T00:00:03.000Z', '2024-01-01T00:00:04.000Z'])
+  assert.equal(run.accept_decisions[0].outcome, 'accepted')
+  assert.equal(run.accept_decisions[0].residual_count, null)
+  assert.equal(run.accept_decisions[0].invalid_reasons, null)
+  assert.equal(run.accept_decisions[1].invalid_reasons, 'f1: still open')
+})
+
+test('shapeRun distinguishes missing and present-empty accept measurements', () => {
+  const missing = shapeRun(base, [], [], null, { missing: ['accept_decisions'] }, Date.parse(end), { acceptDecisions: [] })
+  assert.equal(missing.accept_decisions, null)
+  assert.equal(missing.pending.accept_decisions, 'predates this measurement')
+  const present = shapeRun(base, [], [], null, { missing: [] }, Date.parse(end), { acceptDecisions: [] })
+  assert.equal(present.accept_decisions, null)
+  assert.ok(present.pending.accept_decisions)
+  assert.notEqual(present.pending.accept_decisions, 'predates this measurement')
+})
+
 test('shapeRun uses the NULL probe wording for missing new measurements', () => {
   const run = shapeRun(base, [], [], null, { missing: ['billed_input_tokens', 'gate_discrimination', 'reviews'] }, Date.parse(end))
   assert.equal(run.pending.billed_input_tokens, 'predates this measurement')

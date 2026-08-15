@@ -42,7 +42,8 @@
 //
 // CLI verbs: `sessions` | `phases <adw_id>` | `tail <adw_id> [--after n]
 // [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
-// `eligible-tasks` | `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
+// `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
+// `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
 // (spellings are a contract with package.json; see do-40-02) — plus `doctor`
 // (capability + state readout) and `kill` (operator-invoked process
 // termination, its own refusal-gated helper).
@@ -1310,6 +1311,27 @@ export function openLedger({
     `)
   }
 
+  // A run-set is a VIEW, never a stored batch: the ledger has no group column,
+  // so the set is delimited by the window [since, until) over sessions.started_at
+  // — the same delimiter slice B's budget window uses (crew/daemon.mjs:105).
+  // Each agent_sessions row is a running total, not a delta (endAgentSession
+  // overwrites, :1129) — SUM over rows, never MAX or a last-row read.
+  function runSet({ since, until = null } = {}) {
+    const untilClause = until == null ? '' : ' AND s.started_at < ?'
+    const params = until == null ? [since] : [since, until]
+    return queryRows(`
+      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
+        (SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions,
+        (SELECT SUM(a.billed_input_tokens)       FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens,
+        (SELECT SUM(a.billed_output_tokens)      FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens,
+        (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens,
+        (SELECT SUM(a.billed_cache_read_tokens)  FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens
+      FROM sessions s
+      WHERE s.started_at >= ?${untilClause}
+      ORDER BY s.started_at, s.adw_id
+    `, params)
+  }
+
   function taskReadout(selector) {
     // Resolve an adw_id before trying task_slug; a slug match is only usable
     // when it names exactly one run, so an ambiguity can be refused upstream.
@@ -1472,7 +1494,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -1755,6 +1777,17 @@ function parseArgs(argv) {
   return { verb, positional, flags }
 }
 
+// isoMs() only accepts an already-ms-ISO string (:394); a human types
+// `--since 2026-08-15T00:00:00Z`. Parse first, then normalise, so a bad
+// timestamp is a refusal (exit 2) and not an internal stack trace (exit 1).
+function windowBound(value, flagName) {
+  const ms = Date.parse(value)
+  if (!Number.isFinite(ms)) {
+    refuse(`run-set: --${flagName} must be an ISO-8601 timestamp, e.g. 2026-08-15T00:00:00Z`)
+  }
+  return isoMs(ms)
+}
+
 // The unaudited fields this ledger records but never verifies against any
 // external source — mirrors task-cost-log.mjs's frozen `unverified` array.
 const UNVERIFIED_FIELDS = Object.freeze(['task_slug', 'repo_slug'])
@@ -1765,7 +1798,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | task | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | task | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -1828,6 +1861,61 @@ export function main(argv) {
       const rows = ledger.eligibleTasks()
       const eligible = rows.filter((row) => row.proven_active > 0 && row.reviews > 0).length
       stdout.write(`${JSON.stringify({ schema: 1, horizon: 20, eligible, rows })}\n`)
+      return 0
+    }
+
+    if (verb === 'run-set') {
+      if (positional.length > 0) refuse('run-set: takes no positional arguments — use --since and --until')
+      if (flags.since == null) refuse('run-set: --since <iso> is required — a run-set is a window over the ledger, and an implicit window makes its numbers unattributable')
+      const since = windowBound(flags.since, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const until = hasUntil ? windowBound(flags.until, 'until') : null
+      if (until != null && until <= since) refuse('run-set: --until must be later than --since')
+      // A degraded mirror must never print "0 runs": the window is unanswerable,
+      // not empty. Mirrors the `task` verb's degraded refusal (:1839).
+      const rows = ledger.runSet({ since, until })
+      if (ledger.stats().degraded) refuse('run-set: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const settled = { running: 0, ok: 0, fail: 0, aborted: 0 }
+      for (const row of rows) {
+        if (Object.prototype.hasOwnProperty.call(settled, row.status)) settled[row.status] += 1
+      }
+      const billedKeys = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+      const agentSessions = rows.reduce((n, row) => n + Number(row.agent_sessions ?? 0), 0)
+      const usage = agentSessions === 0 ? null : {
+        agent_sessions: agentSessions,
+        ...Object.fromEntries(billedKeys.map((key) => {
+          const measured = rows.filter((row) => row[key] != null)
+          return [key, measured.length === 0 ? null : measured.reduce((n, row) => n + Number(row[key]), 0)]
+        })),
+      }
+      const absent = {
+        parked: 'not measured here — a park is a per-crew-dir file in the reclaim store (crew/reclaim.mjs), which the ledger has no key to enumerate; this view reads the ledger only, so parks are unmeasured, never zero',
+      }
+      const hasUnmeasuredUsage = rows.some((row) => billedKeys.some((key) => row[key] == null))
+      if (rows.length > 0 && (agentSessions === 0 || hasUnmeasuredUsage)) {
+        absent.usage = agentSessions === 0
+          ? 'no agent_sessions rows for any run in this window — predates per-agent token measurement (#119), not a measured zero'
+          : 'one or more agent_sessions rows for runs in this window have no billed token totals — unmeasured, not a measured zero'
+      }
+      const payload = {
+        schema: 1,
+        question: 'For one run-set: what ran, how did each run settle, and what did it cost?',
+        definition: {
+          run_set: 'the runs whose sessions.started_at falls in [since, until) — a view over the ledger, never a stored batch id; the ledger has no group column',
+          settled: "sessions.status, the ledger's closed enum (running|ok|fail|aborted); today both run drivers map outcome done -> ok and every other terminal outcome, escalation included, -> aborted (crew/crew.mjs:644, crew/child.mjs:141), and fail is reserved for the ledger finalizer's claim that a run died",
+          usage: "usage sums billed_* across each run's agent_sessions rows — each row holds a running total, not a delta; tokens only, no cost calculation (#119)",
+          absent: 'null with an `absent` marker means the fact was never measured — never a measured zero',
+        },
+        since,
+        until,
+        runs: rows.length,
+        settled,
+        usage,
+        rows,
+        absent,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
+      stderr.write(`ledger: ${rows.length} run(s) in [${since}, ${until ?? 'now'})\n`)
       return 0
     }
 

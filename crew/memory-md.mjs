@@ -1,5 +1,5 @@
 import {
-  appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync,
+  appendFileSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync,
 } from 'node:fs'
 import {
   isAbsolute, join, relative, resolve as resolvePath, sep,
@@ -8,6 +8,38 @@ import {
 const LINK_RE = /\[[^\]]*\]\(([^)\s]+)\)/g
 const NAME_RE = /^[a-z0-9][a-z0-9-]*$/
 const TYPE_RE = /^(user|feedback|project|reference)$/
+
+function parseEntry(text) {
+  const match = /^---\n([\s\S]*?)\n---\n\n([\s\S]*)$/.exec(text)
+  if (!match) return { body: text }
+
+  let name
+  let description
+  let type
+  for (const line of match[1].split('\n')) {
+    if (line.startsWith('name: ')) name = line.slice('name: '.length)
+    else if (line.startsWith('description: ')) description = line.slice('description: '.length)
+    else if (line.startsWith('  type: ')) type = line.slice('  type: '.length)
+  }
+  return { name, description, type, body: match[2] }
+}
+
+function renderEntry({ name, description, type, body }) {
+  return [
+    '---',
+    `name: ${name}`,
+    `description: ${description ?? ''}`,
+    'metadata:',
+    `  type: ${type}`,
+    '---',
+    '',
+    `${body ?? ''}`,
+  ].join('\n')
+}
+
+function indexLine(title, link, description) {
+  return `- [${title}](${link}) — ${description ?? ''}\n`
+}
 
 function byteLength(text) {
   return Buffer.byteLength(text, 'utf8')
@@ -135,17 +167,7 @@ export function openMarkdownMemory({ dir, budgetBytes = Infinity } = {}) {
     mkdirSync(root, { recursive: true })
     const path = join(root, `${name}.md`)
     const indexPath = join(root, 'MEMORY.md')
-    const content = [
-      '---',
-      `name: ${name}`,
-      `description: ${description ?? ''}`,
-      'metadata:',
-      `  type: ${type}`,
-      '---',
-      '',
-      `${body ?? ''}`,
-    ].join('\n')
-    writeFileSync(path, content)
+    writeFileSync(path, renderEntry({ name, description, type, body }))
 
     let index = ''
     try { index = readFileSync(indexPath, 'utf8') } catch (err) {
@@ -155,10 +177,146 @@ export function openMarkdownMemory({ dir, budgetBytes = Infinity } = {}) {
     const indexed = index.split(/\r?\n/).some((line) => line.includes(`](${link})`))
     if (!indexed) {
       const prefix = index.length > 0 && !index.endsWith('\n') ? '\n' : ''
-      appendFileSync(indexPath, `${prefix}- [${title || name}](${link}) — ${description ?? ''}\n`)
+      appendFileSync(indexPath, `${prefix}${indexLine(title || name, link, description)}`)
     }
     return { ok: true, path, indexPath, indexed }
   }
 
-  return { name: 'markdown', dir, budgetBytes: budget, context, propose }
+  function reconcile(delta = {}) {
+    const { name, description, type, body, title } = delta
+    if (typeof name !== 'string' || !NAME_RE.test(name)) throw new Error(`invalid memory name "${name}"`)
+
+    mkdirSync(root, { recursive: true })
+    const path = join(root, `${name}.md`)
+    const indexPath = join(root, 'MEMORY.md')
+    let existingText
+    let existing = {}
+    let created = false
+    try {
+      existingText = readFileSync(path, 'utf8')
+      existing = parseEntry(existingText)
+    } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+      created = true
+    }
+
+    const next = {
+      name,
+      description: description ?? existing.description,
+      type: type ?? existing.type,
+      body: body ?? existing.body,
+    }
+    if (typeof next.type !== 'string' || !TYPE_RE.test(next.type)) throw new Error(`invalid memory type "${next.type}"`)
+
+    const content = renderEntry(next)
+    const updated = existingText !== content
+    writeFileSync(path, content)
+
+    let index = ''
+    try { index = readFileSync(indexPath, 'utf8') } catch (err) {
+      if (err?.code !== 'ENOENT') throw err
+    }
+    const link = `${name}.md`
+    const desiredLine = indexLine(title || name, link, next.description)
+    const lines = index.split('\n')
+    const indexAt = lines.findIndex((line) => line.includes(`](${link})`))
+    let indexUpdated = false
+    if (indexAt === -1) {
+      const prefix = index.length > 0 && !index.endsWith('\n') ? '\n' : ''
+      writeFileSync(indexPath, `${index}${prefix}${desiredLine}`)
+      indexUpdated = true
+    } else {
+      const currentLine = lines[indexAt]
+      const currentText = currentLine.endsWith('\r') ? currentLine.slice(0, -1) : currentLine
+      const desiredText = desiredLine.slice(0, -1)
+      if (currentText !== desiredText) {
+        lines[indexAt] = `${desiredText}${currentLine.endsWith('\r') ? '\r' : ''}`
+        writeFileSync(indexPath, lines.join('\n'))
+        indexUpdated = true
+      }
+    }
+    return { ok: true, path, indexPath, created, updated, indexUpdated }
+  }
+
+  function gc({ dryRun = false } = {}) {
+    const emptyReport = () => ({ ok: true, dryRun, pruned: [], kept: 0, unlinked: [], overBudget: [] })
+    let directory
+    try { directory = statSync(root) } catch { return emptyReport() }
+    if (!directory.isDirectory()) return emptyReport()
+
+    const indexPath = join(root, 'MEMORY.md')
+    let index
+    try {
+      const indexStat = statSync(indexPath)
+      if (!indexStat.isFile()) throw new Error('index is not a regular file')
+      index = readFileSync(indexPath, 'utf8')
+    } catch (err) {
+      if (err?.code === 'ENOENT') return emptyReport()
+      throw err
+    }
+
+    const trailingNewline = index.endsWith('\n')
+    const lines = index.split('\n')
+    if (trailingNewline) lines.pop()
+    const keptLines = []
+    const pruned = []
+    const liveTargets = new Set()
+    const rootPrefix = root.endsWith(sep) ? root : `${root}${sep}`
+
+    for (const line of lines) {
+      const links = []
+      let match
+      LINK_RE.lastIndex = 0
+      while ((match = LINK_RE.exec(line)) !== null) links.push(match[1])
+      if (!links.length) {
+        keptLines.push(line)
+        continue
+      }
+
+      const stale = []
+      for (const target of links) {
+        const resolved = resolvePath(root, target)
+        let reason = null
+        if (isAbsolute(target) || resolved === root || !resolved.startsWith(rootPrefix)) {
+          reason = 'escaping'
+        } else {
+          try {
+            const targetStat = statSync(resolved)
+            if (!targetStat.isFile()) throw new Error('memory target is not a regular file')
+            liveTargets.add(resolved)
+          } catch {
+            reason = 'orphaned'
+          }
+        }
+        if (reason) stale.push({ path: target, reason })
+      }
+
+      if (stale.length === links.length) {
+        pruned.push(...stale)
+      } else {
+        keptLines.push(line)
+      }
+    }
+
+    const unlinked = readdirSync(root)
+      .filter((name) => name.endsWith('.md') && name !== 'MEMORY.md')
+      .filter((name) => {
+        const path = join(root, name)
+        try { return statSync(path).isFile() && !liveTargets.has(path) } catch { return false }
+      })
+      .sort()
+
+    const overBudget = context({}).dropped
+      .filter((entry) => entry.reason === 'over-budget')
+      .map((entry) => ({ path: entry.path, bytes: entry.bytes }))
+
+    if (!dryRun && pruned.length) {
+      const rewritten = keptLines.join('\n') + (trailingNewline ? '\n' : '')
+      writeFileSync(indexPath, rewritten)
+    }
+
+    return { ok: true, dryRun, pruned, kept: keptLines.length, unlinked, overBudget }
+  }
+
+  return { name: 'markdown', dir, budgetBytes: budget, context, propose, reconcile, gc }
 }

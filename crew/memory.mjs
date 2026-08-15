@@ -1,8 +1,7 @@
 // Team memory contract. The ratified verbs are context(task, role), propose(delta),
-// reconcile, and gc; this slice ships context and propose only, so reconcile and
-// gc are deliberately absent rather than throwing stubs. An extract is bounded
-// markdown text with included/dropped byte accounting. recall and embeddings are
-// rung 2 and are not part of this seam.
+// reconcile, and gc; this seam ships all four. An extract is bounded markdown
+// text with included/dropped byte accounting. recall and embeddings are rung 2
+// and are not part of this seam.
 import { openMarkdownMemory } from './memory-md.mjs'
 
 export const BACKENDS = Object.freeze({ markdown: openMarkdownMemory })

@@ -28,6 +28,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { execSync } from 'node:child_process'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
+import { slug } from './slug.mjs'
 import { driveTask } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
@@ -82,11 +83,10 @@ export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'revie
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
-export function slug(s) {
-  const out = String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
-  if (!out) throw new Error(`slug: empty/degenerate input ${JSON.stringify(s)}`)
-  return out
-}
+// The rule itself lives in the leaf module `slug.mjs`, so daemon.mjs can share
+// it without importing this file (which pulls in drive.mjs). Re-exported here
+// because this module's own consumers already reach for it by this name.
+export { slug }
 
 function pathsFor(taskSlug, checkout) {
   const repo = slug(checkout.split('/').filter(Boolean).pop() || 'repo')

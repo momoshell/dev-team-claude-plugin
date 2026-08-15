@@ -137,11 +137,19 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
     }
     if (!found) imports.push(null)
   }
+  // The allowlist admits two first-party modules: the server-side rpc helper,
+  // and the slug leaf. A leaf is only safe while it stays a leaf, so the next
+  // assertion pins that — otherwise allowlisting it would be a hole in the
+  // firewall rather than an exception to it.
   assert.equal(
-    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs'),
+    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs'),
     true,
-    'every daemon import, including side-effect imports, must be a node builtin or the server-side rpc helper',
+    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, or the slug leaf',
   )
+  // Mutation killed: someone adding an import to slug.mjs — which would pull
+  // that dependency into the server process through the allowlisted edge.
+  const slugCode = readFileSync(new URL('./slug.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(slugCode, /^\s*import[\s(]/m, 'crew/slug.mjs must stay import-free: the daemon allowlists it as a LEAF')
   assert.equal(DAEMON_CODE.includes(DRIVE_MODULE), false, 'daemon must not name the driver module')
   assert.equal(DAEMON_CODE.includes(REALIO_MODULE), false, 'daemon must not name the real io module')
   const dynamicImports = DAEMON_CODE.match(/\bimport\s*\(/g) || []

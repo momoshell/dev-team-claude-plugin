@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, rmSync } from 'node:fs'
 import { basename } from 'node:path'
-import { slug } from '../crew/crew.mjs'
+import { slug } from '../crew/slug.mjs'
 import { assertSlugStable, testCheckout } from './fixtures.mjs'
 
 test('assertSlugStable rejects a mixed-case fixture basename', () => {
@@ -16,7 +16,7 @@ test('assertSlugStable accepts lowercase basenames regardless of their parent', 
 
 test('fixture guard imports production slug without copying its rule', () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
-  assert.match(source, /import \{ slug \} from ['"]\.\.\/crew\/crew\.mjs['"]/)
+  assert.match(source, /import \{ slug \} from ['"]\.\.\/crew\/slug\.mjs['"]/)
   assert.doesNotMatch(source, /toLowerCase/)
 })
 

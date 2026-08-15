@@ -24,7 +24,7 @@ const CHILD_CODE = sourceCode(CHILD_SOURCE)
 const DRIVE_MODULE = ['drive', 'mjs'].join('.')
 const REALIO_MODULE = ['realio', 'mjs'].join('.')
 
-function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention } = {}) {
+function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention, bootCrewDir, spawnSync: spawnImpl } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
   const root = join(dir, 'daemon')
   const crewDir = join(dir, 'crew')
@@ -33,16 +33,32 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
   mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true })
   const members = Object.fromEntries(roles.map((role) => [role, { model: 'x', transport, ...(agent ? { agent } : {}) }]))
   const taskReturn = join(returnsDir, 'task.json')
+  const brief = join(dir, 'brief.md')
   writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({ task: 'daemon80', checkout: dir, roles, members, task_return: taskReturn }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  writeFileSync(brief, '# brief\n')
   const alive = new Set([700, 900])
   const forks = []
+  const boots = []
+  const reportedCrewDir = bootCrewDir || join(dir, 'reported-crew-state')
+  const defaultSpawnSync = (_command, argv, options) => {
+    const task = argv[argv.indexOf('--task') + 1]
+    const checkout = argv[argv.indexOf('--checkout') + 1]
+    const taskDir = join(reportedCrewDir, 'task')
+    const returnsDir = join(reportedCrewDir, 'returns')
+    mkdirSync(taskDir, { recursive: true }); mkdirSync(returnsDir, { recursive: true })
+    const taskReturn = join(returnsDir, 'task.json')
+    writeFileSync(join(reportedCrewDir, 'crew.json'), JSON.stringify({ task, checkout: checkout || options.cwd, roles, members, task_return: taskReturn }))
+    writeFileSync(join(reportedCrewDir, 'journal.jsonl'), '')
+    return { status: 0, stdout: JSON.stringify({ workspace_id: null, members: {}, task_dir: taskDir, crew_json: join(reportedCrewDir, 'crew.json') }), stderr: '' }
+  }
   let clock = 1
   const deps = {
     pid: 700,
     now: () => clock++,
     uuid: (() => { let n = 0; return () => `run-${++n}` })(),
     fork(...args) { forks.push(args); return { pid: 900, on() {}, kill() {}, unref() {}, disconnect() {} } },
+    spawnSync(...args) { boots.push(args); return (spawnImpl || defaultSpawnSync)(...args) },
     kill(pid, signal) {
       if (signal === 0 && !alive.has(pid)) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
       return true
@@ -53,7 +69,7 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
   }
   const d = daemon({ root, deps })
   return {
-    dir, root, crewDir, taskDir, returnsDir, taskReturn, d, deps, forks, alive,
+    dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
@@ -146,6 +162,98 @@ test('enqueue forks the child entry module', async () => {
     await f.d.enqueue({ crew_dir: f.crewDir })
     assert.equal(f.forks[0][0].endsWith('child.mjs'), true, 'enqueue must fork crew/child.mjs')
     assert.equal(f.forks[0][1][0], '--run-child', 'child fork must retain the run-child argv flag')
+    assert.equal(f.boots.length, 0, 'a crew_dir enqueue must not boot a tier')
+  })
+})
+
+test('a tier enqueue boots through the spawn seam and forks the run child', async () => {
+  await each(async (f) => {
+    const result = f.d.enqueue({ tier: 'build', task: 'tier-task', checkout: f.dir, brief_file: f.brief })
+    assert.ok(result.run_id)
+    assert.equal(f.boots.length, 1)
+    const [command, argv, options] = f.boots[0]
+    const flat = [command, ...argv].map(String).join(' ')
+    assert.match(flat, /crew\.mjs/)
+    assert.match(flat, /\bboot\b/)
+    assert.match(flat, /--tier build/)
+    assert.match(flat, /--headless-all/)
+    assert.match(flat, new RegExp(`--checkout ${f.dir.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}`))
+    assert.match(flat, /--task tier-task/)
+    assert.equal(options.cwd, f.dir)
+    assert.equal(f.forks.length, 1)
+    assert.equal(f.forks[0][0].endsWith('child.mjs'), true)
+  })
+})
+
+test('a tier enqueue takes the crew dir from what boot reported', async () => {
+  const reported = join(tmpdir(), 'crew-reported-neither-checkout-nor-task')
+  const f = fixture({ bootCrewDir: reported })
+  try {
+    const result = f.d.enqueue({ tier: 'build', task: 'tier-task', checkout: f.dir, brief_file: f.brief })
+    assert.equal(f.d.list()[0].run_id, result.run_id)
+    assert.equal(f.d.list()[0].crew_dir, reported)
+  } finally { await f.d.stop(); f.cleanup(); rmSync(reported, { recursive: true, force: true }) }
+})
+
+test('an active equivalent tier run refuses before rebooting its crew', async () => {
+  await each(async (f) => {
+    f.d.enqueue({ tier: 'build', task: 'Same Task', checkout: f.dir, brief_file: f.brief })
+    const before = readFileSync(join(f.reportedCrewDir, 'crew.json'), 'utf8')
+    assert.throws(() => f.d.enqueue({ tier: 'mechanical', task: 'same-task', checkout: f.dir, brief_file: f.brief }), (err) => err.code === 'run-active')
+    assert.equal(f.boots.length, 1)
+    assert.equal(readFileSync(join(f.reportedCrewDir, 'crew.json'), 'utf8'), before)
+    assert.equal(f.d.list().length, 1)
+  })
+})
+
+test('a tier boot does not reject a distinct manually supplied crew directory', async () => {
+  await each(async (f) => {
+    f.d.enqueue({ crew_dir: f.crewDir, task: 'same-task', checkout: f.dir, brief_file: f.brief })
+    const result = f.d.enqueue({ tier: 'mechanical', task: 'same-task', checkout: f.dir, brief_file: f.brief })
+    assert.ok(result.run_id)
+    assert.equal(f.boots.length, 1)
+    assert.equal(f.d.list().length, 2)
+    assert.notEqual(f.d.list().find((run) => run.run_id === result.run_id).crew_dir, f.crewDir)
+  })
+})
+
+test('a boot that exits non-zero refuses by name and registers no run', async () => {
+  await each(async (f) => {
+    f.deps.spawnSync = (...args) => { f.boots.push(args); return { status: 1, stderr: 'error: unknown tier "nope" — valid tiers: mechanical, build, judge\n' } }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    assert.throws(() => f.d.enqueue({ tier: 'nope', task: 'tier-task', checkout: f.dir, brief_file: f.brief }), (err) => err.code === 'boot-failed' && /nope/.test(err.message) && /unknown tier/.test(err.message))
+    assert.deepEqual(f.d.list(), [])
+    assert.equal(f.forks.length, 0)
+  })
+})
+
+test('a boot that prints no crew_json refuses', async () => {
+  await each(async (f) => {
+    f.deps.spawnSync = (...args) => { f.boots.push(args); return { status: 0, stdout: 'boot complete\n', stderr: '' } }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    assert.throws(() => f.d.enqueue({ tier: 'build', task: 'tier-task', checkout: f.dir, brief_file: f.brief }), (err) => err.code === 'boot-failed' && /no crew_json/.test(err.message))
+    assert.deepEqual(f.d.list(), [])
+    assert.equal(f.forks.length, 0)
+  })
+})
+
+test('enqueue refuses crew_dir with tier, and refuses neither', async () => {
+  await each(async (f) => {
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, tier: 'build' }), (err) => err.code === 'invalid-spec')
+    assert.throws(() => f.d.enqueue({}), (err) => err.code === 'invalid-spec')
+    assert.equal(f.boots.length, 0)
+    assert.equal(f.forks.length, 0)
+  })
+})
+
+test('a tier enqueue refuses a missing brief file, task, or checkout', async () => {
+  await each(async (f) => {
+    const base = { tier: 'build', task: 'tier-task', checkout: f.dir, brief_file: f.brief }
+    assert.throws(() => f.d.enqueue({ ...base, brief_file: join(f.dir, 'missing.md') }), (err) => err.code === 'invalid-spec')
+    assert.throws(() => f.d.enqueue({ ...base, task: '' }), (err) => err.code === 'invalid-spec')
+    assert.throws(() => f.d.enqueue({ ...base, checkout: '' }), (err) => err.code === 'invalid-spec')
+    assert.equal(f.boots.length, 0)
+    assert.equal(f.forks.length, 0)
   })
 })
 

@@ -7,12 +7,13 @@ import { join } from 'node:path'
 import { daemon } from './daemon.mjs'
 import { attachVerb, connect, formatRows, main, parseArgs } from './factoryctl.mjs'
 
-function fixture({ fork: forkImpl = null } = {}) {
+function fixture({ fork: forkImpl = null, spawnSync: spawnImpl = null, bootCrewDir = null } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'factoryctl-'))
   const crewDir = join(root, 'crew')
   const returnsDir = join(crewDir, 'returns')
   const taskReturn = join(returnsDir, 'task.json')
   const brief = join(root, 'brief.md')
+  const reportedCrewDir = bootCrewDir || join(root, 'reported-tier-crew')
   mkdirSync(returnsDir, { recursive: true })
   writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
     task: 'demo-task', checkout: process.cwd(), task_return: 'returns/task.json',
@@ -20,22 +21,38 @@ function fixture({ fork: forkImpl = null } = {}) {
   }))
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
   writeFileSync(brief, '# brief\n')
+  const boots = []
+  const defaultSpawnSync = (_command, argv, options) => {
+    const task = argv[argv.indexOf('--task') + 1]
+    const checkout = argv[argv.indexOf('--checkout') + 1]
+    const taskDir = join(reportedCrewDir, 'task')
+    const returns = join(reportedCrewDir, 'returns')
+    mkdirSync(taskDir, { recursive: true }); mkdirSync(returns, { recursive: true })
+    const returnedTask = join(returns, 'task.json')
+    writeFileSync(join(reportedCrewDir, 'crew.json'), JSON.stringify({
+      task, checkout: checkout || options.cwd, task_return: returnedTask,
+      roles: ['builder'], members: { builder: { transport: 'headless-json' } },
+    }))
+    writeFileSync(join(reportedCrewDir, 'journal.jsonl'), '')
+    return { status: 0, stdout: JSON.stringify({ workspace_id: null, members: {}, task_dir: taskDir, crew_json: join(reportedCrewDir, 'crew.json') }), stderr: '' }
+  }
   let uuid = 0
   const d = daemon({
     root,
     deps: {
       fork: forkImpl || (() => ({ pid: 4242, on() { return this }, unref() {} })),
+      spawnSync(...args) { boots.push(args); return (spawnImpl || defaultSpawnSync)(...args) },
       kill: (_pid, signal) => { if (signal !== 0) return true },
       now: () => Date.now(), uuid: () => `run-${++uuid}`,
       setInterval: () => null, clearInterval: () => {},
     },
   })
-  return { root, crewDir, taskReturn, brief, daemon: d, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, crewDir, taskReturn, brief, boots, reportedCrewDir, daemon: d, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
-async function withDaemon(name, fn) {
+async function withDaemon(name, fn, options = {}) {
   test(name, async () => {
-    const f = fixture()
+    const f = fixture(options)
     try {
       await f.daemon.start()
       await fn(f)
@@ -108,6 +125,49 @@ withDaemon('run rejects a missing --crew-dir/--brief before touching the socket'
   assert.match(noBrief.stderr, /--brief/)
   assert.equal(touched, false)
 })
+
+withDaemon('run --tier sends tier, checkout, task and brief_file and prints the booted crew dir', async (f) => {
+  const result = await invoke(f, ['run', '--brief', f.brief, '--tier', 'build', '--checkout', f.root, '--task', 'tier-task'])
+  assert.equal(result.code, 0)
+  const output = JSON.parse(result.stdout)
+  assert.ok(output.run_id)
+  assert.equal(output.crew_dir, f.reportedCrewDir)
+  const row = f.daemon.list().find((run) => run.run_id === output.run_id)
+  assert.equal(row?.crew_dir, f.reportedCrewDir)
+  assert.equal(f.boots.length, 1)
+  const [command, argv] = f.boots[0]
+  const flat = [command, ...argv].map(String).join(' ')
+  assert.match(flat, /--tier build/)
+  assert.match(flat, /--checkout/)
+  assert.match(flat, /--task tier-task/)
+  assert.match(flat, /crew\.mjs/)
+})
+
+withDaemon('run --task defaults to the brief filename', async (f) => {
+  const result = await invoke(f, ['run', '--brief', f.brief, '--tier', 'build', '--checkout', f.root])
+  assert.equal(result.code, 0)
+  assert.equal(f.boots.length, 1)
+  const argv = f.boots[0][1]
+  assert.equal(argv[argv.indexOf('--task') + 1], 'brief')
+})
+
+withDaemon('run refuses --crew-dir with --tier before touching the socket', async (f) => {
+  let touched = false
+  const net = { connect: () => { touched = true; throw new Error('socket should not be touched') } }
+  const result = await invoke(f, ['run', '--brief', f.brief, '--crew-dir', f.crewDir, '--tier', 'build'], { net })
+  assert.equal(result.code, 1)
+  assert.match(result.stderr, /--crew-dir/)
+  assert.match(result.stderr, /--tier/)
+  assert.equal(touched, false)
+})
+
+withDaemon('run --tier surfaces the daemon boot refusal verbatim', async (f) => {
+  const result = await invoke(f, ['run', '--brief', f.brief, '--tier', 'nope', '--checkout', f.root, '--task', 'tier-task'])
+  assert.equal(result.code, 1)
+  assert.match(result.stderr, /nope/)
+  assert.match(result.stderr, /unknown tier/)
+  assert.deepEqual(f.daemon.list(), [])
+}, { spawnSync: () => ({ status: 1, stderr: 'error: unknown tier "nope" — valid tiers: mechanical, build, judge\n' }) })
 
 withDaemon("ls lists the daemon's runs with their daemon-derived state", async (f) => {
   // Pins STATE to the daemon's list projection rather than a client lifecycle guess.

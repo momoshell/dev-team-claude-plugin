@@ -23,7 +23,9 @@ import { pathToFileURL } from 'node:url'
 
 import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { slugOrNull } from './slug.mjs'
+import { regrantVerdict, continuationBrief } from './escalation-policy.mjs'
 
+const regranted = new Set()
 const MAX_FRAME_BYTES = 1024 * 1024
 const SELF_PATH = decodeURIComponent(new URL(import.meta.url).pathname)
 const HERE = dirname(SELF_PATH)
@@ -371,6 +373,7 @@ export function daemon(options = {}) {
       tier_identity: record.tier_identity || null,
       task_return: record.task_return,
       child_pid: null,
+      child_generation: 0,
       lifecycle: 'queued',
       orphaned: false,
       orphan_reason: null,
@@ -380,6 +383,8 @@ export function daemon(options = {}) {
       journal: { offset: 0, rest: Buffer.alloc(0) },
       crew_cache: null,
       workers: new Map(),
+      review_outcomes: [],
+      continuation: false,
       blocked: false,
       envelope: null,
     }
@@ -401,12 +406,22 @@ export function daemon(options = {}) {
     if (record.kind === 'started') { run.child_pid = record.child_pid; run.lifecycle = 'started'; return }
     if (record.kind === 'adopted') { run.lifecycle = 'adopted'; return }
     if (record.kind === 'requeued') { run.lifecycle = 'queued'; return }
+    if (record.kind === 'regrant') {
+      const key = record.task_key || run.tier_identity || run.crew_dir
+      if (key) regranted.add(key)
+      run.brief_file = record.brief_file
+      run.continuation = true
+      run.lifecycle = 'queued'
+      run.child_pid = null
+      return
+    }
     if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = 'orphaned-on-restart'; run.child_dead = true; return }
     if (record.kind === 'settled') { run.lifecycle = 'settled'; run.outcome_status = record.outcome_status; run.outcome_source = record.outcome_source; return }
   }
 
   function foldRegistry() {
     runs.clear()
+    regranted.clear()
     if (exists(registryPath)) {
       try {
         const text = String(read(registryPath, 'utf8'))
@@ -583,12 +598,87 @@ export function daemon(options = {}) {
           if (worker) worker.terminal = true
         }
       }
+      if (isObject(row.review_outcome)) run.review_outcomes.push(row.review_outcome)
       if (row.event === 'headless-spawn') createWorker(run, row)
+    }
+  }
+
+  // A regrant that threw AFTER its fork owns a live, detached child. Sever it
+  // from the run first (generation bump + cleared pid make its exit callbacks
+  // no-ops), then signal it, so the restored escalation is the last word even
+  // if the signal itself fails.
+  function reapLaunchedContinuation(run) {
+    const pid = run.child_pid
+    if (!hasPid(pid)) return false
+    run.child_generation += 1
+    run.child_pid = null
+    run.child_dead = true
+    try { kill(pid, 'SIGTERM') } catch { /* an already-exited child is the outcome we wanted */ }
+    try { appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: 'SIGTERM' })) } catch { /* the feed must never re-throw inside a recovery path */ }
+    return true
+  }
+
+  function regrantIfEligible(run, envelope) {
+    let priorPath = null
+    let priorWritten = false
+    let terminalRemoved = false
+    let registryRecorded = false
+    try {
+      if (envelope?.status !== 'escalation') return false
+      pollJournal(run)
+      const key = run.tier_identity || run.crew_dir
+      const verdict = regrantVerdict(envelope, run.review_outcomes, { regranted: regranted.has(key) })
+      if (!verdict.eligible) return false
+      const briefPath = join(run.crew_dir, 'task', 'regrant-brief.md')
+      const lastOutcome = run.review_outcomes.at(-1)
+      write(briefPath, continuationBrief({
+        findings: lastOutcome?.findings ?? [],
+        guidance: envelope.details?.escalation?.why,
+        branch: null,
+        commit: envelope.details?.commit ?? null,
+      }))
+      priorPath = run.task_return?.endsWith('.json')
+        ? `${run.task_return.slice(0, -'.json'.length)}.regrant-1.json`
+        : `${run.task_return}.regrant-1.json`
+      write(priorPath, JSON.stringify(envelope, null, 2))
+      priorWritten = true
+      unlink(run.task_return)
+      terminalRemoved = true
+      appendRecord({
+        kind: 'regrant', run_id: run.run_id, at: now(), crew_dir: run.crew_dir,
+        task: run.task, task_key: key, brief_file: briefPath,
+        prior_envelope: envelope, eligible: true, reasons: verdict.reasons,
+      })
+      registryRecorded = true
+      regranted.add(key)
+      run.child_generation += 1
+      run.brief_file = briefPath
+      run.continuation = true
+      run.lifecycle = 'queued'
+      run.child_pid = null
+      run.child_dead = false
+      run.orphan_reason = null
+      run.envelope = null
+      run.blocked = false
+      const failures = pump(run)
+      const launchFailure = failures.get(run.run_id)
+      if (launchFailure) throw launchFailure
+      return true
+    } catch {
+      reapLaunchedContinuation(run)
+      if (terminalRemoved) {
+        try { write(run.task_return, JSON.stringify(envelope, null, 2)) } catch { /* preserve the in-memory terminal path if disk recovery also fails */ }
+      }
+      if (priorWritten && !registryRecorded) {
+        try { unlink(priorPath) } catch { /* the original envelope is the load-bearing recovery artifact */ }
+      }
+      return false
     }
   }
 
   function settle(run, envelope) {
     if (run.lifecycle === 'settled') return
+    if (regrantIfEligible(run, envelope)) return
     run.envelope = envelope
     run.lifecycle = 'settled'
     if (run.feed.length > feedRetention) run.feed.splice(0, run.feed.length - feedRetention)
@@ -597,17 +687,19 @@ export function daemon(options = {}) {
     pump()
   }
 
-  function attachChild(run, child) {
+  function attachChild(run, child, generation) {
+    const childPid = child?.pid ?? null
+    const isCurrentChild = () => run.child_generation === generation && run.child_pid === childPid
     const spawnError = (err) => {
       try {
-        if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
+        if (!isCurrentChild() || run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
         appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: null }))
         orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
       } catch { /* an async child failure must never become an uncaught daemon error */ }
     }
     const exited = (code, signal) => {
       try {
-        if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
+        if (!isCurrentChild() || run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
         const envelope = runEnvelope(run)
         if (envelope) settle(run, envelope)
         else {
@@ -753,11 +845,12 @@ export function daemon(options = {}) {
     return {
       crew_dir: run.crew_dir, task: run.task, brief_file: run.brief_file,
       lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
+      continuation: run.continuation === true,
       ledger_db: budgetLedgerDb, budget_enabled: budget !== null,
     }
   }
 
-  function startRun(run) {
+  function startRun(run, { preserveOnFailure = false } = {}) {
     if (!isQueued(run)) return null
     // An envelope here can only be one that appeared AFTER admission —
     // enqueue refuses a crew dir that already holds one — so settling on it
@@ -768,17 +861,20 @@ export function daemon(options = {}) {
       return null
     }
     let child
+    const generation = ++run.child_generation
     try {
       child = fork(CHILD_PATH, ['--run-child', JSON.stringify(childSpecFor(run))], { detached: true, stdio: 'ignore' })
       run.child_pid = child?.pid ?? null
-      attachChild(run, child)
+      attachChild(run, child, generation)
       child?.unref?.()
     } catch (err) {
-      orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
+      if (preserveOnFailure) { run.child_pid = null; run.lifecycle = 'queued' }
+      else orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
       return err
     }
     if (!hasPid(run.child_pid)) {
-      orphanRun(run, 'child-spawn-error: fork returned no pid')
+      if (preserveOnFailure) { run.child_pid = null; run.lifecycle = 'queued' }
+      else orphanRun(run, 'child-spawn-error: fork returned no pid')
       return runError('child-spawn-error', `fork returned no pid for run ${run.run_id}`)
     }
     run.lifecycle = 'started'
@@ -800,7 +896,7 @@ export function daemon(options = {}) {
   }
 
   let pumping = false
-  function pump() {
+  function pump(protectedRun = null) {
     const failures = new Map()
     if (pumping) return failures
     pumping = true
@@ -809,7 +905,7 @@ export function daemon(options = {}) {
         if (!isQueued(run)) continue
         if (runningCount() >= concurrency) break
         if (checkoutBusy(run.checkout)) continue
-        const err = startRun(run)
+        const err = startRun(run, { preserveOnFailure: run === protectedRun })
         if (err) failures.set(run.run_id, err)
       }
     } finally { pumping = false }

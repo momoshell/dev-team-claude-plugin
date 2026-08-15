@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
-  openSync, readSync, fstatSync, closeSync, statSync, utimesSync,
+  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -170,14 +170,16 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   // assertion pins that — otherwise allowlisting it would be a hole in the
   // firewall rather than an exception to it.
   assert.equal(
-    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs'),
+    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs'),
     true,
-    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, or the slug leaf',
+    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, or the escalation policy leaf',
   )
   // Mutation killed: someone adding an import to slug.mjs — which would pull
   // that dependency into the server process through the allowlisted edge.
   const slugCode = readFileSync(new URL('./slug.mjs', import.meta.url), 'utf8')
   assert.doesNotMatch(slugCode, /^\s*import[\s(]/m, 'crew/slug.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  const policyCode = readFileSync(new URL('./escalation-policy.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(policyCode, /^\s*import[\s(]/m, 'crew/escalation-policy.mjs must stay import-free: the daemon allowlists it as a LEAF')
   assert.equal(DAEMON_CODE.includes(DRIVE_MODULE), false, 'daemon must not name the driver module')
   assert.equal(DAEMON_CODE.includes(REALIO_MODULE), false, 'daemon must not name the real io module')
   const dynamicImports = DAEMON_CODE.match(/\bimport\s*\(/g) || []
@@ -576,6 +578,318 @@ test('a settled escalation frees the slot and is never re-forked', async () => {
   }, { concurrency: 1 })
 })
 
+test('an eligible review escalation regrants once in place with a continuation brief', async () => {
+  await each(async (f) => {
+    const envelope = {
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'close the remaining defect' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+        commit: null,
+      },
+    }
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 2, findings: [] } })
+    appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 1, findings: [{ id: 'RV3-1', severity: 'must-fix', location: 'crew/daemon.mjs:191', summary: 'close this defect' }] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify(envelope, null, 2))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'settled'), false)
+    assert.equal(existsSync(f.taskReturn), false)
+    assert.equal(existsSync(join(f.crewDir, 'returns', 'task.regrant-1.json')), true)
+    assert.equal(existsSync(join(f.taskDir, 'regrant-brief.md')), true)
+    assert.notEqual(f.d.state({ run }).state, 'done')
+    assert.equal(f.forks.length, 2)
+    const spec = JSON.parse(f.forks[1][1][1])
+    assert.equal(spec.brief_file, join(f.taskDir, 'regrant-brief.md'))
+    assert.equal(spec.continuation, true)
+
+    writeFileSync(f.taskReturn, JSON.stringify(envelope, null, 2))
+    f.d.poll()
+    const after = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(after.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
+    assert.equal(after.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+  })
+})
+
+test('a stale child callback cannot orphan the regranted continuation', async () => {
+  await each(async (f) => {
+    const children = []
+    f.deps.fork = (...args) => {
+      const handlers = {}
+      const child = {
+        pid: 900,
+        on(event, fn) { handlers[event] = fn; return this },
+        unref() {},
+      }
+      children.push({ args, handlers })
+      return child
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 2, findings: [] } })
+    appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'continue on the same checkout' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    assert.equal(children.length, 2)
+    children[0].handlers.exit(1, null)
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'settled'), false)
+    assert.equal(f.d.state({ run }).state, 'working')
+  })
+})
+
+test('a failed regrant registry append restores the envelope before settlement', async () => {
+  const f = fixture()
+  try {
+    let failRegrant = true
+    const originalAppend = appendFileSync
+    f.deps.appendFileSync = (path, data, options) => {
+      if (failRegrant && String(data).includes('"kind":"regrant"')) {
+        failRegrant = false
+        throw new Error('registry append failed')
+      }
+      return originalAppend(path, data, options)
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'registry append fails' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(existsSync(f.taskReturn), true)
+    assert.equal(existsSync(join(f.crewDir, 'returns', 'task.regrant-1.json')), false)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 0)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(f.d.result({ run }).outcome, 'escalation')
+    assert.equal(f.d.state({ run }).state, 'done')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a failed continuation fork restores the terminal escalation', async () => {
+  const f = fixture()
+  try {
+    let forks = 0
+    f.deps.fork = (...args) => {
+      forks += 1
+      if (forks === 2) throw new Error('EAGAIN')
+      return { pid: 900, on() {}, unref() {} }
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'continuation fork fails' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(existsSync(f.taskReturn), true)
+    assert.equal(existsSync(join(f.crewDir, 'returns', 'task.regrant-1.json')), true)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
+    assert.equal(f.d.result({ run }).outcome, 'escalation')
+    assert.equal(f.d.state({ run }).state, 'done')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a post-record continuation launch failure settles the restored escalation', async () => {
+  const f = fixture()
+  try {
+    let started = 0
+    const originalAppend = appendFileSync
+    f.deps.appendFileSync = (path, data, options) => {
+      if (String(data).includes('"kind":"started"')) {
+        started += 1
+        if (started === 2) throw new Error('started record failed')
+      }
+      return originalAppend(path, data, options)
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'started record fails' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(existsSync(f.taskReturn), true)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(f.d.result({ run }).outcome, 'escalation')
+    assert.equal(f.d.state({ run }).state, 'done')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a post-record continuation launch reaps the child it already forked', async () => {
+  const f = fixture()
+  try {
+    const children = []
+    const kills = []
+    f.deps.fork = (...args) => {
+      const handlers = {}
+      const child = {
+        pid: 900,
+        on(event, fn) { handlers[event] = fn; return this },
+        unref() {},
+      }
+      children.push({ args, handlers })
+      f.forks.push(args)
+      return child
+    }
+    let started = 0
+    const originalAppend = appendFileSync
+    f.deps.appendFileSync = (path, data, options) => {
+      if (String(data).includes('"kind":"started"')) {
+        started += 1
+        if (started === 2) throw new Error('started record failed')
+      }
+      return originalAppend(path, data, options)
+    }
+    const originalKill = f.deps.kill
+    f.deps.kill = (pid, signal) => {
+      kills.push([pid, signal])
+      if (signal !== 0) f.alive.delete(pid)
+      return originalKill(pid, signal)
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'started record fails after fork' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(kills.some(([pid, signal]) => pid === 900 && signal !== 0), true)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'orphaned').length, 0)
+    assert.equal(f.d.result({ run }).outcome, 'escalation')
+    assert.equal(f.d.state({ run }).state, 'done')
+
+    children[1].handlers.exit(0, null)
+    f.d.poll()
+    const after = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(after.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(after.filter((record) => record.run_id === run && record.kind === 'orphaned').length, 0)
+    assert.equal(f.forks.length, 2)
+
+    assert.equal(f.alive.has(900), false)
+    if (f.alive.has(900)) writeFileSync(f.taskReturn, JSON.stringify({ status: 'done', details: {} }, null, 2))
+    assert.equal(f.d.result({ run }).outcome, 'escalation')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a rising must-fix sequence settles an escalation instead of regranting', async () => {
+  await each(async (f) => {
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 2, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'must-fix rose' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 0)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(f.forks.length, 1)
+  })
+})
+
+test('a regrant dependency failure falls back to terminal settlement', async () => {
+  const f = fixture()
+  try {
+    const originalWrite = writeFileSync
+    f.deps.writeFileSync = (path, value, options) => {
+      if (String(path).endsWith('/task/regrant-brief.md')) throw new Error('brief disk failure')
+      return originalWrite(path, value, options)
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'brief write fails' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 0)
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
+    assert.equal(f.d.state({ run }).state, 'done')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('restart folds a regrant into a queued continuation run', async () => {
+  const f = fixture()
+  let next
+  try {
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'restart me' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    await f.d.stop()
+    next = daemon({ root: f.root, deps: f.deps })
+    await next.start()
+    assert.notEqual(next.state({ run }).state, 'done')
+    assert.equal(next.list().find((row) => row.run_id === run).state, 'working')
+    assert.equal(f.forks.length, 2)
+    assert.equal(JSON.parse(f.forks[1][1][1]).continuation, true)
+    assert.equal(JSON.parse(f.forks[1][1][1]).brief_file, join(f.taskDir, 'regrant-brief.md'))
+  } finally {
+    await next?.stop()
+    await f.d.stop()
+    f.cleanup()
+  }
+})
+
 test('restart re-queues a run that never had a child', async () => {
   const f = fixture({ concurrency: 1 })
   const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
@@ -852,10 +1166,17 @@ test('worker state stays working until terminal result and exit marker', async (
 })
 
 // 11. A settled escalation is still state=done, not success.
-test('idle is not success: escalation envelope still yields done only', async () => {
+test('idle is not success: an ineligible escalation envelope still yields done only', async () => {
   await each(async (f) => {
     await f.d.start(); const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir }); f.d.poll()
-    writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' })); f.d.poll()
+    writeFileSync(f.taskReturn, JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'plan', why: 'plan exhaustion is not regrantable' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    })); f.d.poll()
     const answer = f.d.state({ run })
     assert.equal(answer.state, 'done'); assert.deepEqual(Object.keys(answer), ['state'])
     assert.equal(f.d.result({ run }).outcome, 'escalation')
@@ -1307,6 +1628,18 @@ test('a dirty checkout refuses and its listing is capped at ten lines', () => {
     const why = JSON.parse(readFileSync(f.taskReturn, 'utf8')).details.escalation.why
     assert.match(why, /checkout is dirty/)
     assert.equal(why.split('\n').length - 1, 10, 'exactly ten listing lines survive the cap')
+  } finally { f.cleanup() }
+})
+
+test('a continuation child resumes on top of a dirty checkout', () => {
+  const f = fixture()
+  try {
+    const brief = join(f.crewDir, 'b.md'); writeFileSync(brief, '# brief')
+    runChild(
+      { crew_dir: f.crewDir, task: 'x', brief_file: brief, continuation: true },
+      { execSync: () => ' M prior-round.js', driveTask: () => ({ status: 'done' }), realIo: () => ({}) },
+    )
+    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
   } finally { f.cleanup() }
 })
 

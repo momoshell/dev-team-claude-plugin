@@ -338,6 +338,49 @@ test('a second bounce records spent and never calls reseat again', () => {
   assert.equal(io.calls.reseat.length, 1)
 })
 
+// The budget is spent by an APPLIED upgrade, never by a refused attempt. The
+// mutation this kills: moving `upgradeSpent = true` back above the io.reseat
+// call, which is what the factory's own boot shape would have hit — builder and
+// reviewer are headless-rpc seats that refuse, so a refused builder bounce would
+// have burned the budget the planner's headless-json seat could still have used.
+test('a refused reseat does not spend the budget, and a later bounce can still apply', () => {
+  const outcomes = [
+    { applied: false, reason: 'transport', why: 'a headless-rpc seat reads its cell once at worker spawn' },
+    { applied: true, from: { id: 'old', effort: 'medium' }, to: { id: 'old', effort: 'max' }, rung: 'mechanical→build' },
+  ]
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'FAIL one' }, 'lane-cmd:2': { ok: false, output: 'FAIL two' },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => outcomes.shift(),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ outcome }) => outcome), ['transport', 'applied'])
+  assert.equal(io.calls.reseat.length, 2)
+})
+
+// An io with no reseat method cannot grow one mid-run, so that fact is recorded
+// once rather than once per bounce. Mutation killed: dropping the spend on the
+// no-method branch, which would repeat the same entry for every later bounce.
+test('an io with no reseat records the fact once, not once per bounce', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'FAIL one' }, 'lane-cmd:2': { ok: false, output: 'FAIL two' },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  delete io.reseat
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ outcome }) => outcome), ['transport', 'spent'])
+})
+
 test('a plan bounce spends the failure upgrade for the planner', () => {
   const io = fakeIo({
     envelopes: {

@@ -350,26 +350,34 @@ export function driveTask(ctx, io) {
   // (ADR-024/026 clause 1): an absent, throwing, or refusing reseat leaves the
   // loop behaving exactly as it does without this modifier. Every ATTEMPT is
   // recorded — the record is the deliverable, the upgrade is a bonus.
+  // The budget is spent by an APPLIED upgrade, not by an attempt. A refusal is
+  // per-seat and per-transport: in the shape factory mode actually boots
+  // (`--headless-all --tier build`), builder and reviewer are headless-rpc seats
+  // that refuse in this slice while planner and lead are headless-json seats
+  // that can re-seat — so spending on the first refused builder bounce would
+  // mean the modifier could never fire on the seats that support it. The one
+  // exception is an io with no `reseat` method at all: that is a static property
+  // of the io, it cannot change mid-run, and re-asking would record the same
+  // fact once per bounce.
   let upgradeSpent = false
   const failureUpgrade = (kind, role) => {
     let entry
     try {
       if (upgradeSpent) {
         entry = { outcome: 'spent', why: 'the task failure-upgrade budget was already spent' }
-      } else {
+      } else if (typeof io.reseat !== 'function') {
         upgradeSpent = true
-        if (typeof io.reseat !== 'function') {
-          entry = { outcome: 'transport', why: 'this io provides no reseat' }
+        entry = { outcome: 'transport', why: 'this io provides no reseat' }
+      } else {
+        const result = io.reseat(role, { reason: `${kind}-bounce` })
+        if (result?.applied === true) {
+          upgradeSpent = true
+          entry = { outcome: 'applied', from: result.from, to: result.to, rung: result.rung }
         } else {
-          const result = io.reseat(role, { reason: `${kind}-bounce` })
-          if (result?.applied === true) {
-            entry = { outcome: 'applied', from: result.from, to: result.to, rung: result.rung }
-          } else {
-            entry = {
-              outcome: MODIFIER_OUTCOMES.includes(result?.reason) ? result.reason : 'transport',
-              why: result?.why ?? null,
-              from: result?.from ?? null,
-            }
+          entry = {
+            outcome: MODIFIER_OUTCOMES.includes(result?.reason) ? result.reason : 'transport',
+            why: result?.why ?? null,
+            from: result?.from ?? null,
           }
         }
       }

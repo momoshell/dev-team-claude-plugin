@@ -14,3 +14,4 @@ export const getEvents = (adwId, after = 0, limit, filters = {}) => {
 export const getReturns = (repoSlug, taskSlug, adwId) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
 export const getRoster = () => request('/api/roster')
 export const postTriage = (adwId, reviewed) => request('/api/triage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adw_id: adwId, reviewed }) })
+export const proposeRosterEdit = (tier, role, cell) => request('/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier, role, cell }) })

@@ -13,3 +13,6 @@ write and is kept in a separate `visualizer.db` sidecar, never in the ledger.
 The ledger feed is a read-only sqlite source and the swap point for the planned
 #80 daemon; the returns source is a separate read-only filesystem source over
 `~/.crew`. These sources are intentionally never merged behind one interface.
+
+`POST /api/roster/propose` validates an edit and returns an applyable unified diff; it never writes `crew/roster.json`.
+A human ratifies the proposal by applying the diff with `git apply` (or `patch -p1`).

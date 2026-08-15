@@ -401,32 +401,87 @@ test('over the limit, enqueue queues instead of forking', async () => {
   }, { concurrency: 1 })
 })
 
-test('a stale envelope settles before admission and never forks', async () => {
+test('a crew dir holding an envelope refuses before admission', async () => {
   await each(async (f) => {
     writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
-    const result = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => {
+      assert.equal(err.code, 'crew-settled')
+      assert.match(err.message, new RegExp(f.crewDir.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
+      assert.match(err.message, /boot/i)
+      return true
+    })
     assert.equal(f.forks.length, 0)
-    assert.equal(result.state, 'done')
-    assert.equal(f.d.state({ run: result.run_id }).state, 'done')
-    assert.equal(f.d.result({ run: result.run_id }).outcome, 'done')
-    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
-    assert.equal(records.some((record) => record.kind === 'started'), false)
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
+    assert.deepEqual(f.d.list(), [])
   })
 })
 
-test('re-enqueueing a settled crew preserves its prior envelope', async () => {
+test('re-enqueueing a settled crew dir refuses by name and forks nothing', async () => {
   await each(async (f) => {
     const first = f.d.enqueue({ crew_dir: f.crewDir }).run_id
     writeFileSync(f.taskReturn, JSON.stringify({ status: 'escalation' }))
     f.d.poll()
     const before = f.d.result({ run: first })
+    const beforeBytes = readFileSync(f.taskReturn)
     assert.equal(before.outcome, 'escalation')
-    const second = f.d.enqueue({ crew_dir: f.crewDir })
-    assert.ok(second.run_id)
-    assert.equal(f.forks.length, 2)
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => {
+      assert.equal(err.code, 'crew-settled')
+      assert.match(err.message, /boot/i)
+      assert.match(err.message, new RegExp(f.crewDir.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
+      return true
+    })
+    assert.equal(f.forks.length, 1)
+    assert.equal(f.d.list().length, 1)
     assert.deepEqual(f.d.result({ run: first }), before)
-    assert.equal(f.d.state({ run: first }).state, 'done')
+    assert.equal(readFileSync(f.taskReturn).equals(beforeBytes), true)
   })
+})
+
+test('crew-settled refusal carries its code over the socket', async () => {
+  const f = fixture()
+  try {
+    await f.d.start()
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    const frame = jsonFrame((await request(f.d.socketPath, `${JSON.stringify({ id: 'settled', cmd: 'enqueue', params: { crew_dir: f.crewDir } })}\n`))[0])
+    assert.equal(frame.ok, false)
+    assert.equal(frame.error.code, 'crew-settled')
+    assert.match(frame.error.message, /boot/i)
+    assert.equal(f.forks.length, 0)
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('the RV3-1 sequence leaves one child per crew dir', async () => {
+  await each(async (f) => {
+    const shared = join(f.dir, 'checkout-shared')
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: shared })
+    const first = f.d.enqueue({ crew_dir: f.crewDir, checkout: shared }).run_id
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => err.code === 'crew-settled')
+    const second = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    assert.equal(f.forks.length, 2)
+    const spec = JSON.parse(f.forks[1][1][1])
+    assert.equal(spec.crew_dir, secondCrew.crewDir)
+    assert.equal(f.d.state({ run: first }).state, 'done')
+    assert.equal(f.d.state({ run: second }).state, 'working')
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === first && record.kind === 'started').length, 1)
+  })
+})
+
+test('a queued run that acquires an envelope settles instead of forking', async () => {
+  await each(async (f) => {
+    const secondCrew = mintCrew(f, { name: 'crew-b', checkout: join(f.dir, 'checkout-b') })
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const queued = f.d.enqueue({ crew_dir: secondCrew.crewDir }).run_id
+    writeFileSync(secondCrew.taskReturn, JSON.stringify({ status: 'done' }))
+    writeFileSync(f.taskReturn, JSON.stringify({ status: 'done' }))
+    f.d.poll()
+    assert.equal(f.forks.length, 1)
+    assert.equal(f.d.state({ run: queued }).state, 'done')
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.run_id === queued && record.kind === 'started'), false)
+  }, { concurrency: 1 })
 })
 
 test('a queued run never claims it started', async () => {

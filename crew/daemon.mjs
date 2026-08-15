@@ -659,11 +659,10 @@ export function daemon(options = {}) {
 
   function startRun(run) {
     if (!isQueued(run)) return null
-    // Sequential runs may share task_return; a settled predecessor owns its
-    // envelope, so preserve it while admitting the new run.
-    const recycledCrew = [...runs.values()].some((candidate) => candidate !== run
-      && candidate.crew_dir === run.crew_dir && candidate.lifecycle === 'settled')
-    const envelope = recycledCrew ? null : runEnvelope(run)
+    // An envelope here can only be one that appeared AFTER admission —
+    // enqueue refuses a crew dir that already holds one — so settling on it
+    // is this run's own result, never a predecessor's.
+    const envelope = runEnvelope(run)
     if (envelope) {
       settle(run, envelope)
       return null
@@ -738,6 +737,19 @@ export function daemon(options = {}) {
     const runId = String(spec.run_id || uuid())
     if (runs.has(runId)) throw runError('run-active', `run ${runId} already exists`)
     const taskReturn = absoluteChildPath(crewDir, spec.task_return || crew.task_return || join('returns', 'task.json'))
+    // task_return is per CREW DIR, so run identity and envelope identity are
+    // the same thing (child.mjs:54/92 resolves the same path from the same
+    // dir). A crew dir whose envelope is already the record cannot host a
+    // second run: honouring the envelope never starts the new run, and
+    // starting it overwrites the old one. Refuse the request like boot-failed;
+    // the envelope is never deleted, moved or ignored.
+    const settled = jsonAt(taskReturn, exists, read)
+    if (settled) {
+      throw runError('crew-settled', `crew dir ${crewDir} already holds a terminal envelope`
+        + ` (status ${JSON.stringify(settled.status ?? null)}) at ${taskReturn}`
+        + ' — a settled crew dir is re-BOOTED, not re-enqueued: boot a fresh crew'
+        + ' (factoryctl run --tier …) and enqueue that')
+    }
     const identity = hasTier ? tierIdentity(spec) : null
     const record = {
       kind: 'enqueued', run_id: runId, at: now(), crew_dir: crewDir,

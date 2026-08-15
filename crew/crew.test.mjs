@@ -16,6 +16,7 @@ import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 import { realIo } from './realio.mjs'
+import { testCheckout } from '../test/fixtures.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 
@@ -374,18 +375,6 @@ async function withHome(home, fn) {
 }
 
 function testCrewDir(home, checkout, task) { return join(home, '.crew', basename(checkout), task) }
-
-// `pathsFor` slugs the checkout BASENAME and `slug()` lowercases (crew.mjs:86),
-// so a mkdtemp name — whose random suffix is mixed case — only resolves back to
-// the state dir on a case-INSENSITIVE filesystem: green on macOS, ENOENT on
-// Linux CI. Nest a lowercase `checkout` inside the temp root so that
-// basename === slug(basename) on either filesystem.
-function testCheckout(prefix) {
-  const root = mkdtempSync(join(tmpdir(), prefix))
-  const checkout = join(root, 'checkout')
-  mkdirSync(checkout)
-  return { root, checkout }
-}
 
 function callCounter() {
   const calls = []

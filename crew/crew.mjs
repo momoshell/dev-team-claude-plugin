@@ -82,7 +82,7 @@ export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'revie
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
-function slug(s) {
+export function slug(s) {
   const out = String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
   if (!out) throw new Error(`slug: empty/degenerate input ${JSON.stringify(s)}`)
   return out

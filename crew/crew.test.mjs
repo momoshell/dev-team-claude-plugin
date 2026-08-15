@@ -1246,19 +1246,23 @@ test('a degraded emitter is inert for the adapter and drive', () => {
   }
 })
 
-test('package, crew, and child test lanes stay identical and bounded', () => {
+test('package, crew, child, and CI test lanes stay identical and bounded', () => {
   const packagePath = new URL('../package.json', import.meta.url)
   const crewPath = new URL('./crew.mjs', import.meta.url)
   const childPath = new URL('./child.mjs', import.meta.url)
+  const workflowPath = new URL('../.github/workflows/test.yml', import.meta.url)
   const packageLane = JSON.parse(readFileSync(packagePath, 'utf8')).scripts?.test
   const crewMatch = readFileSync(crewPath, 'utf8').match(/suite:\s*args\.suite\s*\|\|\s*'([^']*)'/)
   const childMatch = readFileSync(childPath, 'utf8').match(/suite:\s*spec\.suite\s*\|\|\s*'([^']*)'/)
-  const agreement = 'package.json scripts.test, crew/crew.mjs default, and crew/child.mjs default must be changed together'
+  const workflowRuns = [...readFileSync(workflowPath, 'utf8').matchAll(/^\s*-\s*run:\s*(.+?)\s*$/gm)].map((match) => match[1])
+  const agreement = 'package.json scripts.test, crew/crew.mjs default, crew/child.mjs default, and .github/workflows/test.yml CI lane must be changed together'
 
   assert.ok(crewMatch, `expected the crew.mjs default suite in ${crewPath}`)
   assert.ok(childMatch, `expected the child.mjs default suite in ${childPath}`)
   assert.equal(crewMatch[1], packageLane, agreement)
   assert.equal(childMatch[1], packageLane, agreement)
+  assert.ok(workflowRuns.some((run) => /^npm (run )?test$/.test(run)), `expected npm test in ${workflowPath}`)
+  assert.ok(!workflowRuns.some((run) => /^node\s+--test\b/.test(run)), `CI must not invoke raw node --test in ${workflowPath}`)
 
   const timeout = packageLane?.match(/--test-timeout=(\d+)/)
   assert.ok(timeout, `expected --test-timeout in package.json scripts.test at ${packagePath}`)

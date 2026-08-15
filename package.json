@@ -3,6 +3,7 @@
   "private": true,
   "type": "module",
   "description": "Dev-only metadata for the dev-team Claude Code plugin (tests/CI). Not part of the plugin runtime.",
+  "engines": { "node": ">=24.0.0" },
   "scripts": {
     "test": "node --test --test-timeout=30000",
     "ledger:sessions": "node scripts/factory/ledger.mjs sessions",

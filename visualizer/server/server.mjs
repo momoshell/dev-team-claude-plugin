@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
+import { createRosterSource } from './roster-source.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -13,7 +14,7 @@ const schema = 1
 
 function defaults() {
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew') }
+  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined }
 }
 function args(argv) {
   const out = defaults()
@@ -24,6 +25,7 @@ function args(argv) {
     else if (arg === '--ledger-db') out.ledgerDb = argv[++i]
     else if (arg === '--triage-db') out.triageDb = argv[++i]
     else if (arg === '--crew-root') out.crewRoot = argv[++i]
+    else if (arg === '--roster') out.rosterPath = argv[++i]
   }
   return out
 }
@@ -69,6 +71,7 @@ export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
+  const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const server = createServer(async (req, res) => {
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
     try {
@@ -94,6 +97,10 @@ export function startServer(options = {}) {
         if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = returns.listEnvelopes({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/roster') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        return json(res, 200, { schema, ...roster.readRoster() })
       }
       if (url.pathname === '/api/health') {
         if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })

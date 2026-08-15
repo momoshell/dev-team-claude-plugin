@@ -33,6 +33,11 @@ export const WAITS_S = Object.freeze({
 // escalate (fail toward the human, never toward silent progress).
 export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 
+// #45 Tier B slice 1. The failure upgrade is spent ONCE PER TASK, across all
+// roles and all bounce kinds — the ratified budget is per task, not per role.
+export const FAILURE_UPGRADE = 'failure-upgrade'
+export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent'])
+
 // The compounding valve: on the FIRST round of a consult the lead may answer
 // decision='second-opinion' with details.from=<a seated judgment member>.
 // CODE then gathers that member's perspective — same question and context,
@@ -321,6 +326,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 //        runClean(cmd) -> {ok, output},      // OPTIONAL: run cmd against the
 //                                            // checkout with the uncommitted
 //                                            // changes temporarily set aside
+//        reseat(role, {reason}) -> closed result // OPTIONAL, never load-bearing
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
 //        commit(files, message) -> hash,
 //        log(obj) -> void,                    // journal line (code-owned)
@@ -329,7 +335,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 export function driveTask(ctx, io) {
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [] }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [] }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
@@ -339,6 +345,48 @@ export function driveTask(ctx, io) {
   // emitter itself never throws, and this try/catch means an io that does
   // still cannot change a run's outcome, exit code, or timing.
   const emit = (event) => { try { io.emit?.(event) } catch { /* never load-bearing */ } }
+
+  // Ask for one rung on a bounce. Nothing here may change a run's outcome
+  // (ADR-024/026 clause 1): an absent, throwing, or refusing reseat leaves the
+  // loop behaving exactly as it does without this modifier. Every ATTEMPT is
+  // recorded — the record is the deliverable, the upgrade is a bonus.
+  // The budget is spent by an APPLIED upgrade, not by an attempt. A refusal is
+  // per-seat and per-transport: in the shape factory mode actually boots
+  // (`--headless-all --tier build`), builder and reviewer are headless-rpc seats
+  // that refuse in this slice while planner and lead are headless-json seats
+  // that can re-seat — so spending on the first refused builder bounce would
+  // mean the modifier could never fire on the seats that support it. The one
+  // exception is an io with no `reseat` method at all: that is a static property
+  // of the io, it cannot change mid-run, and re-asking would record the same
+  // fact once per bounce.
+  let upgradeSpent = false
+  const failureUpgrade = (kind, role) => {
+    let entry
+    try {
+      if (upgradeSpent) {
+        entry = { outcome: 'spent', why: 'the task failure-upgrade budget was already spent' }
+      } else if (typeof io.reseat !== 'function') {
+        upgradeSpent = true
+        entry = { outcome: 'transport', why: 'this io provides no reseat' }
+      } else {
+        const result = io.reseat(role, { reason: `${kind}-bounce` })
+        if (result?.applied === true) {
+          upgradeSpent = true
+          entry = { outcome: 'applied', from: result.from, to: result.to, rung: result.rung }
+        } else {
+          entry = {
+            outcome: MODIFIER_OUTCOMES.includes(result?.reason) ? result.reason : 'transport',
+            why: result?.why ?? null,
+            from: result?.from ?? null,
+          }
+        }
+      }
+    } catch (err) {
+      entry = { outcome: 'transport', why: `io.reseat threw: ${err?.message ?? err}` }
+    }
+    const record = { modifier: FAILURE_UPGRADE, kind, role, ...entry }
+    try { S.modifiers.push(record); io.log({ at: io.now(), modifier: record }) } catch { /* never load-bearing */ }
+  }
 
   // Every stage transition goes to the journal AND (when io provides it) to
   // a live status surface — the workspace pill — so a quiet team is never
@@ -514,7 +562,7 @@ export function driveTask(ctx, io) {
       status: 'escalation',
       summary: `Task ${ctx.task} needs a human: ${why}`,
       artifacts: [journal, ...extraArtifacts],
-      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants, growth: S.growth, ...extraDetails },
+      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, ...extraDetails },
     }
   }
 
@@ -537,6 +585,7 @@ export function driveTask(ctx, io) {
       )
       if (c.decision === 'escalate') return escalate('plan', c.reason, env.artifacts || [])
       const b = art(`plan-bounce-r${round}.md`)
+      failureUpgrade('plan', 'planner')
       io.writeFile(b, `# Plan bounce (round ${round})\n\n${c.guidance}\n\nOriginal brief: ${ctx.briefFile}\nPlanner said: ${env.summary || env.status}`)
       planBrief = b
       continue
@@ -606,6 +655,7 @@ export function driveTask(ctx, io) {
         grant('plan-check', round)
         extraPlanRounds += 1
         const b = art(`plan-bounce-r${round}.md`)
+        failureUpgrade('plan', 'planner')
         io.writeFile(b, [
           `# Plan revision (round ${round})`, '',
           `Revise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`,
@@ -619,6 +669,7 @@ export function driveTask(ctx, io) {
       break // accept: proceed on the latest plan
     }
     const b = art(`plan-bounce-r${round}.md`)
+    failureUpgrade('plan', 'planner')
     io.writeFile(b, [
       `# Plan revision (round ${round})`, '',
       `Revise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`,
@@ -856,6 +907,7 @@ export function driveTask(ctx, io) {
       if (c.decision === 'escalate') return escalate('build', c.reason, env.artifacts || [])
       if (finalRound()) extraRounds += 1 // the granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
+      failureUpgrade('build', 'builder')
       io.writeFile(b, `# Build bounce (round ${round})\n\n${c.guidance}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'build-fix'
       continue
@@ -869,6 +921,7 @@ export function driveTask(ctx, io) {
     if (outOfScope.length > 0) {
       if (finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
       const b = art(`build-bounce-r${round}.md`)
+      failureUpgrade('scope', 'builder')
       io.writeFile(b, `# Scope bounce (round ${round})\n\nThese files are OUTSIDE the plan's scope — revert them or stop touching them:\n${outOfScope.map((f) => `- ${f}`).join('\n')}\n\nIn-scope set:\n${scopeFiles.map((f) => `- ${f}`).join('\n')}\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'scope-fix'
       continue
@@ -887,6 +940,7 @@ export function driveTask(ctx, io) {
         extraRounds += 1
       }
       const b = art(`build-bounce-r${round}.md`)
+      failureUpgrade('lane', 'builder')
       io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'lane-fix'
       continue
@@ -948,6 +1002,7 @@ export function driveTask(ctx, io) {
           extraRounds += 1
         }
         const b = art(`build-bounce-r${round}.md`)
+        failureUpgrade('gate', 'builder')
         io.writeFile(b, `# Gate bounce (round ${round})\n\nThe ACCEPTANCE GATE is red — the build does not yet do what was asked. The gate is immutable to you; make the build satisfy it:\n\n    ${gateCmd}\n\nFailures (verbatim):\n${gateRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
         buildBrief = b; buildNote = 'gate-fix'
         continue
@@ -970,6 +1025,7 @@ export function driveTask(ctx, io) {
           extraReviews += 1
           if (finalRound()) extraRounds += 1
           const b = art(`build-bounce-r${round}.md`)
+          failureUpgrade('review', 'builder')
           io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
           buildBrief = b; buildNote = 'review-fix'
           continue build
@@ -1003,6 +1059,7 @@ export function driveTask(ctx, io) {
             extraRounds += 1
             extraReviews += 1
             const b = art(`build-bounce-r${round}.md`)
+            failureUpgrade('review', 'builder')
             io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${lastReviewPath}. Plan: ${planPath}`)
             buildBrief = b; buildNote = 'review-fix'
             continue build
@@ -1011,6 +1068,7 @@ export function driveTask(ctx, io) {
           break build
         }
         const b = art(`build-bounce-r${round}.md`)
+        failureUpgrade('review', 'builder')
         io.writeFile(b, `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${review.details?.review_path || art('review.md')}. Plan: ${planPath}`)
         buildBrief = b; buildNote = 'review-fix'
         continue build
@@ -1049,7 +1107,7 @@ export function driveTask(ctx, io) {
     details: {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
-      extra_rounds_granted: S.grants, growth: S.growth,
+      extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
       gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
     },
   }

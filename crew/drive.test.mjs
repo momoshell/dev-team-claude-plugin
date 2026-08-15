@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs'
 
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
+  FAILURE_UPGRADE, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
   FINDING_SEVERITIES, reviewFindings, reviewOutcome,
@@ -22,8 +23,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {} } = {}) {
-  const calls = { assign: [], run: [], runClean: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null } = {}) {
+  const calls = { assign: [], run: [], runClean: [], reseat: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [], files }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
@@ -61,6 +62,10 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   }
   if (showDoc) io.showDoc = (p) => { calls.showDoc.push(p) }
   if (emit) io.emit = emit === true ? (event) => { calls.emits.push(event) } : emit
+  if (reseat) io.reseat = (role, options) => {
+    calls.reseat.push({ role, options })
+    return reseat(role, options)
+  }
   return io
 }
 
@@ -298,6 +303,174 @@ test('red lane bounces the builder with the failure output, then green -> done',
   assert.match(bounceBrief, /RED/)
   assert.match(bounceBrief, /FAIL x/)
   assert.equal(res.details.consults, 0) // mechanical bounce, no lead needed
+})
+
+test('a lane bounce records an applied failure-upgrade on the envelope and journal', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'old', effort: 'medium' }, to: { id: 'new', effort: 'max' }, rung: 'mechanical→build' }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers, [{
+    modifier: FAILURE_UPGRADE, kind: 'lane', role: 'builder', outcome: 'applied',
+    from: { id: 'old', effort: 'medium' }, to: { id: 'new', effort: 'max' }, rung: 'mechanical→build',
+  }])
+  assert.equal(io.calls.reseat.length, 1)
+  assert.ok(io.calls.logs.some((line) => line.modifier?.modifier === FAILURE_UPGRADE))
+})
+
+test('a second bounce records spent and never calls reseat again', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'FAIL one' }, 'lane-cmd:2': { ok: false, output: 'FAIL two' },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: {}, to: {}, rung: 'mechanical→build' }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ outcome }) => outcome), ['applied', 'spent'])
+  assert.equal(io.calls.reseat.length, 1)
+})
+
+// The budget is spent by an APPLIED upgrade, never by a refused attempt. The
+// mutation this kills: moving `upgradeSpent = true` back above the io.reseat
+// call, which is what the factory's own boot shape would have hit — builder and
+// reviewer are headless-rpc seats that refuse, so a refused builder bounce would
+// have burned the budget the planner's headless-json seat could still have used.
+test('a refused reseat does not spend the budget, and a later bounce can still apply', () => {
+  const outcomes = [
+    { applied: false, reason: 'transport', why: 'a headless-rpc seat reads its cell once at worker spawn' },
+    { applied: true, from: { id: 'old', effort: 'medium' }, to: { id: 'old', effort: 'max' }, rung: 'mechanical→build' },
+  ]
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'FAIL one' }, 'lane-cmd:2': { ok: false, output: 'FAIL two' },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => outcomes.shift(),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ outcome }) => outcome), ['transport', 'applied'])
+  assert.equal(io.calls.reseat.length, 2)
+})
+
+// An io with no reseat method cannot grow one mid-run, so that fact is recorded
+// once rather than once per bounce. Mutation killed: dropping the spend on the
+// no-method branch, which would repeat the same entry for every later bounce.
+test('an io with no reseat records the fact once, not once per bounce', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'lane-cmd:1': { ok: false, output: 'FAIL one' }, 'lane-cmd:2': { ok: false, output: 'FAIL two' },
+      'lane-cmd:3': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  delete io.reseat
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ outcome }) => outcome), ['transport', 'spent'])
+})
+
+test('a plan bounce spends the failure upgrade for the planner', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ status: 'insufficient', summary: 'ambiguous' }),
+      'lead:1': leadEnv('bounce'), 'planner:2': planEnv(),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: false, reason: 'exhausted', why: 'top rung', from: null }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers[0], {
+    modifier: FAILURE_UPGRADE, kind: 'plan', role: 'planner', outcome: 'exhausted', why: 'top rung', from: null,
+  })
+  assert.deepEqual(io.calls.reseat[0].role, 'planner')
+})
+
+test('an io without reseat records transport without changing the bounce loop', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.modifiers.length, 1)
+  assert.equal(res.details.modifiers[0].outcome, 'transport')
+  assert.match(res.details.modifiers[0].why, /no reseat/)
+})
+
+test('a throwing reseat is recorded as transport and never escapes driveTask', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => { throw new Error('reseat exploded') },
+  })
+  let res
+  assert.doesNotThrow(() => { res = driveTask(CTX, io) })
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.modifiers[0].outcome, 'transport')
+  assert.match(res.details.modifiers[0].why, /reseat exploded/)
+})
+
+test('failure-upgrade refusals preserve closed reasons and normalize unknown reasons', () => {
+  const run = (result) => driveTask(CTX, fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'], reseat: () => result,
+  }))
+  for (const reason of ['exhausted', 'no-tier', 'agent-change']) {
+    const res = run({ applied: false, reason, why: `${reason} refusal`, from: null })
+    assert.equal(res.details.modifiers[0].outcome, reason)
+  }
+  const normalized = run({ applied: false, reason: 'banana', why: 'unknown', from: null })
+  assert.equal(normalized.details.modifiers[0].outcome, 'transport')
+  assert.ok(MODIFIER_OUTCOMES.includes(normalized.details.modifiers[0].outcome))
+})
+
+test('failure-upgrade is neutral to the task envelope apart from its record', () => {
+  const run = (reseat) => driveTask(CTX, fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'], ...(reseat ? { reseat } : {}),
+  }))
+  const strip = (result) => {
+    const out = JSON.parse(JSON.stringify(result))
+    delete out.details.modifiers
+    return out
+  }
+  const plain = run(null)
+  const throwing = run(() => { throw new Error('boom') })
+  const applying = run(() => ({ applied: true, from: {}, to: {}, rung: 'mechanical→build' }))
+  assert.deepEqual(strip(throwing), strip(plain))
+  assert.deepEqual(strip(applying), strip(plain))
+})
+
+test('an escalation carries failure-upgrade modifiers', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'lead:1': leadEnv('escalate') },
+    runs: { 'lane-cmd': { ok: false, output: 'FAIL forever' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true, from: {}, to: {}, rung: 'mechanical→build' }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.ok(res.details.modifiers.length >= 1)
+  assert.equal(res.details.modifiers[0].modifier, FAILURE_UPGRADE)
 })
 
 test('bounced lane run commits the planner subject, round-2 builder body, and issue refs', () => {

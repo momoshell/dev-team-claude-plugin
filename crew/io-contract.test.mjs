@@ -4,14 +4,14 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { emitAdapter, realIo } from './realio.mjs'
+import { emitAdapter, realIo, nextRung } from './realio.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './realio.mjs'
 import { assignmentLine } from './driver.mjs'
 
 const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'commit', 'log', 'now']
-const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit']
+const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit', 'reseat']
 const FAULT = process.env.CREW_IO_CONTRACT_FAULT || ''
 
 function dirs() {
@@ -84,6 +84,41 @@ function makeRealIo() {
   const crew = { workspace_id: 'ws', window_id: 'win', members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }
   const io = realIo(crew, paths, paths.dir, null, null, {}, deps)
   return { io, paths, sent, added, commands, clock: () => clock, setResult: (p) => { resultPath = p }, setDirty: (v) => { dirtyMode = v }, setPopFailure: (v) => { popFailure = v }, assignmentPolls: () => polls }
+}
+
+const ROSTER = JSON.parse(fsReadFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+
+function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, readRoster, ...deps } = {}) {
+  const source = cell || ROSTER.tiers[tier]?.[role] || ROSTER.tiers.mechanical[role]
+  const selectedAgent = agent || source.agent
+  const member = {
+    transport, agent: selectedAgent, model: source.id, effort: source.effort,
+    provider: source.provider, id: source.id,
+  }
+  const crew = {
+    members: { [role]: member },
+    ...(tier ? { tier, seats: { [role]: { ...member } } } : {}),
+  }
+  const paths = dirs()
+  const logs = []
+  const io = realIo(crew, paths, paths.dir, null, { [role]: { adapter } }, {}, {
+    readRoster: readRoster || (() => ROSTER),
+    logLine: (_path, obj) => logs.push(obj),
+    ...deps,
+  })
+  return { io, crew, paths, logs, source }
+}
+
+function makeHeadlessReseatIo(crew, adapter, paths) {
+  return headlessIo({
+    crew, paths, taskDir: paths.taskDir, checkout: paths.dir,
+    adapters: { reviewer: adapter }, bin: '/bin/worker',
+    deps: {
+      spawn: () => ({ pid: 4242, unref() {} }), now: () => 0, sleep: () => {}, pid: 777,
+      uuid: () => 'session-reseat', existsSync: fsExistsSync, readFileSync: fsReadFileSync,
+      writeFileSync: fsWriteFileSync, unlinkSync: fsUnlinkSync, mkdirSync, readdirSync, log: () => {},
+    },
+  })
 }
 
 function makeHeadlessIo() {
@@ -370,4 +405,105 @@ test('realIo passes a guarded transport emitter that routes through io.emit', ()
   assert.equal(starts.length, 1)
   io.emit = () => { throw new Error('ledger down') }
   assert.doesNotThrow(() => received.deps.emit({ kind: 'usage', usage: null }))
+})
+
+test('realIo exposes reseat as an optional function', () => {
+  assert.equal(typeof makeRealIo().io.reseat, 'function')
+})
+
+test('pane reseat refuses with a transport-specific explanation', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: 'build', transport: 'pane', agent: 'pi' })
+  const result = f.io.reseat('reviewer', { reason: 'lane' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'transport')
+  assert.match(result.why, /pane/i)
+  assert.match(result.why, /new work|settled seat|reassign/i)
+})
+
+test('headless-json reseat applies and reaches the next assignment command', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi' })
+  const result = f.io.reseat('reviewer', { reason: 'lane' })
+  assert.equal(result.applied, true)
+  assert.equal(result.to.effort, 'max')
+  assert.equal(f.crew.members.reviewer.effort, 'max')
+  let spec = null
+  const adapter = { headlessCommand: (received) => { spec = received; return { bin: '/bin/worker', args: [] } } }
+  const hio = makeHeadlessReseatIo(f.crew, adapter, f.paths)
+  hio.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') })
+  assert.equal(spec.model, result.to.model)
+  assert.equal(spec.effort, result.to.effort)
+})
+
+test('headless-rpc reseat refuses and names respawn against the resumed session', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-rpc', agent: 'pi' })
+  const result = f.io.reseat('reviewer', { reason: 'lane' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'transport')
+  assert.match(result.why, /respawn/i)
+  assert.match(result.why, /resumed session/i)
+})
+
+test('reseat on a crew without a tier returns no-tier', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: null, transport: 'headless-json', agent: 'pi' })
+  const result = f.io.reseat('reviewer', { reason: 'lane' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'no-tier')
+})
+
+test('reseat at judge tier returns exhausted', () => {
+  const f = makeTierFixture({ role: 'planner', tier: 'judge', transport: 'headless-json', agent: 'claude' })
+  const result = f.io.reseat('planner', { reason: 'plan' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'exhausted')
+})
+
+test('builder reseat names its identical cell at mechanical and build tiers', () => {
+  for (const tier of ['mechanical', 'build']) {
+    const f = makeTierFixture({ role: 'builder', tier, transport: 'headless-json', agent: 'pi' })
+    const result = f.io.reseat('builder', { reason: 'build' })
+    assert.equal(result.applied, false)
+    assert.equal(result.reason, 'exhausted')
+    assert.match(result.why, /gpt-5\.6-luna/)
+    assert.match(result.why, /max/)
+  }
+})
+
+test('build reviewer reseat refuses an agent change', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: 'build', transport: 'headless-json', agent: 'pi' })
+  const result = f.io.reseat('reviewer', { reason: 'review' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'agent-change')
+  assert.match(result.why, /pi/)
+  assert.match(result.why, /claude/)
+})
+
+test('nextRung follows mechanical to build to judge and refuses missing or unknown rungs', () => {
+  assert.deepEqual(nextRung(ROSTER, 'mechanical', 'reviewer'), {
+    rung: 'mechanical→build',
+    cell: { provider: 'openai', id: 'gpt-5.6-terra', effort: 'max', agent: 'pi' },
+  })
+  assert.equal(nextRung(ROSTER, 'build', 'reviewer').rung, 'build→judge')
+  assert.equal(nextRung(ROSTER, 'judge', 'reviewer'), null)
+  assert.equal(nextRung(ROSTER, 'unknown', 'reviewer'), null)
+  assert.equal(nextRung({ tiers: { mechanical: {}, build: {} } }, 'mechanical', 'reviewer'), null)
+})
+
+test('reseat never throws when roster loading fails or the tier is unknown', () => {
+  const broken = makeTierFixture({ role: 'reviewer', tier: 'build', transport: 'headless-json', agent: 'pi', readRoster: () => { throw new Error('roster unavailable') } })
+  assert.doesNotThrow(() => broken.io.reseat('reviewer', { reason: 'lane' }))
+  assert.equal(broken.io.reseat('reviewer').reason, 'transport')
+  const unknown = makeTierFixture({ role: 'reviewer', tier: 'no-such-tier', transport: 'headless-json', agent: 'pi', cell: ROSTER.tiers.build.reviewer })
+  assert.doesNotThrow(() => unknown.io.reseat('reviewer', { reason: 'lane' }))
+  assert.equal(unknown.io.reseat('reviewer').reason, 'exhausted')
+})
+
+test('reseat translates models through the adapter and falls back to bare ids', () => {
+  const translated = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi', adapter: { modelString: ({ id }) => `X:${id}` } })
+  const first = translated.io.reseat('reviewer')
+  assert.equal(first.applied, true)
+  assert.equal(translated.crew.members.reviewer.model, 'X:gpt-5.6-terra')
+  const fallback = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi' })
+  const second = fallback.io.reseat('reviewer')
+  assert.equal(second.applied, true)
+  assert.equal(fallback.crew.members.reviewer.model, 'gpt-5.6-terra')
 })

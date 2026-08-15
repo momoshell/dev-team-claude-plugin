@@ -8,12 +8,15 @@ import {
   mkdirSync as fsMkdirSync,
 } from 'node:fs'
 import { execSync as cpExecSync } from 'node:child_process'
-import { join, resolve as resolvePath } from 'node:path'
+import { basename, join, resolve as resolvePath } from 'node:path'
+import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { driveTask as defaultDriveTask } from './drive.mjs'
 import { realIo as defaultRealIo } from './realio.mjs'
+import { openRun } from '../scripts/factory/emit.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
+import { slugOrNull } from './slug.mjs'
 
 const SELF_PATH = fileURLToPath(import.meta.url)
 
@@ -25,6 +28,20 @@ function childArguments(argv) {
   if (!raw) throw new Error('run child requires a JSON run specification')
   try { return JSON.parse(raw) }
   catch (err) { throw new Error(`invalid run-child specification: ${err.message}`) }
+}
+
+function ledgerDbPath(env) {
+  return env.DEVTEAM_LEDGER_DB
+    || join(env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory'), 'ledger.db')
+}
+
+function ledgerSidecarDbPath(crewDir, exists, read) {
+  const path = join(crewDir, 'ledger', 'run.json')
+  if (!exists(path)) return null
+  try {
+    const sidecar = JSON.parse(String(read(path, 'utf8')))
+    return typeof sidecar?.db_path === 'string' ? sidecar.db_path : null
+  } catch { return null }
 }
 
 export function runChild(argv, injected = {}) {
@@ -64,6 +81,7 @@ export function runChild(argv, injected = {}) {
     artifacts: [ctx.journal], details: { stages: null, commit: null, dissents: [], escalation: { where: err.stage || 'child-preflight', why: err.message } },
   })
   let result
+  let emitter = null
   try {
     const pane = paneSeat(crew)
     if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
@@ -83,12 +101,44 @@ export function runChild(argv, injected = {}) {
       cmux: () => ({ ok: true }), tree: () => ({ windows: [] }), locate: () => null,
       sendLine: () => {}, closeSurface: () => {},
     }
-    const io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, null, injected.adapters || null, spec, noCmux)
-    try { result = driveTask(ctx, io) } catch (err) { result = failure(err) }
+    // Keep daemon-forked runs in the factory ledger too. openRun deliberately
+    // adopts a crew-local ledger/run.json's db_path. That identity is
+    // load-bearing only for a configured ceiling: feature-off instrumentation
+    // must keep adopting its sidecar and must never become an admission refusal.
+    // nodeVersion is deliberately not passed: openRun's own default is
+    // process.versions.node.
+    const dbPath = spec.ledger_db || ledgerDbPath(injected.env || process.env)
+    const enforceBudgetLedger = spec.budget_enabled === true
+    let sidecarDbPath = ledgerSidecarDbPath(crewDir, existsChild, read)
+    if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) {
+      try {
+        emitter = openRun({
+          stateDir: crewDir,
+          repoSlug: slugOrNull(basename(checkout)) || 'repo',
+          taskSlug: slugOrNull(ctx.task) || 'task',
+          dbPath,
+        })
+        // Re-read after openRun's own locked adopt/create decision so a sidecar
+        // changed between the first read and the open cannot redirect budgeted
+        // work away from the ledger the daemon reads.
+        sidecarDbPath = emitter?.sidecar?.()?.db_path ?? null
+        if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) emitter.startRun()
+      } catch { emitter = null }
+    }
+    if (enforceBudgetLedger && sidecarDbPath && sidecarDbPath !== dbPath) {
+      emitter = null
+      const err = new Error(`ledger sidecar at ${join(crewDir, 'ledger', 'run.json')} targets ${sidecarDbPath}, not the daemon ledger ${dbPath} — refusing to run with a mismatched budget ledger; boot a fresh crew or repair the stale sidecar`)
+      err.stage = 'ledger-sidecar'
+      result = failure(err)
+    } else {
+      const io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
+      try { result = driveTask(ctx, io) } catch (err) { result = failure(err) }
+    }
   } catch (err) {
     if (harness) throw err
     result = failure(err)
   }
+  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
   write(taskReturn, JSON.stringify(result, null, 2))
   return result
 }

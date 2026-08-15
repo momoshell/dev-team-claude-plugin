@@ -11,6 +11,7 @@
     "ledger:procs": "node scripts/factory/ledger.mjs procs",
     "ledger:gate-review-gap": "node scripts/factory/ledger.mjs gate-review-gap",
     "ledger:eligible-tasks": "node scripts/factory/ledger.mjs eligible-tasks",
+    "ledger:run-set": "node scripts/factory/ledger.mjs run-set",
     "ledger:task": "node scripts/factory/ledger.mjs task",
     "viz:serve": "node visualizer/server/server.mjs",
     "viz:build": "vite build --config visualizer/web/vite.config.mjs",

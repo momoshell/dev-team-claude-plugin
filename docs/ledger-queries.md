@@ -13,8 +13,9 @@ The factory ledger is the register for run facts. When a session asks what happe
 | What processes did a run spawn? | `node scripts/factory/ledger.mjs procs <adw_id>` — prints process rows with dispatch, PID, command, state, exit data, and lifecycle timestamps. The unit is one process. |
 | How often does a green gate precede must-fix review findings? | `node scripts/factory/ledger.mjs gate-review-gap` — prints the numerator, denominator, rate, and per-run gate/review aggregates. The units are runs, gate runs, reviews, and must-fix findings; green means a non-pristine `gate_results` row with `ok = 1`. |
 | Which tasks are eligible? | `node scripts/factory/ledger.mjs eligible-tasks` — prints the horizon, eligible count, and per-run active gate generation, review count, and proven-active flag. The unit is one run/task. |
+| What did this run-set do and cost? | `node scripts/factory/ledger.mjs run-set --since <iso> [--until <iso>]` — prints the window, the run count, the per-status settled tally, the summed token usage, and one row per run with its status, timestamps and billed totals. A run-set is a **view**: the runs whose `started_at` falls in `[since, until)`, never a stored batch id. Parks are not measured here — they live in the per-crew-dir reclaim store, so the readout carries an `absent.parked` marker. The unit is one run-set; rows are runs. |
 
-Replace each angle-bracket argument with the run's `adw_id` or remembered `task_slug`; the optional tail flags are literal command-line options.
+Replace `<adw_id>` or `<task_slug>` placeholders with the run's identifier, and replace `<iso>` placeholders with an ISO-8601 timestamp such as `2026-08-15T00:00:00Z`; the optional tail flags are literal command-line options.
 
 ## Honesty rules
 

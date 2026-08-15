@@ -21,7 +21,7 @@ import { ROOT } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
-  TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
+  SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
 } from '../scripts/factory/ledger.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
@@ -1015,4 +1015,212 @@ test('none of the four read verbs is present in WRITERS (they never reach a writ
   for (const verb of ['sessions', 'phases', 'tail', 'procs']) {
     assert.ok(!WRITERS.includes(verb))
   }
+})
+
+// ---------------------------------------------------------------------------
+// #193: one-run-set readout
+// ---------------------------------------------------------------------------
+
+const RUNSET_SINCE = '2026-08-15T00:00:00.000Z'
+const RUNSET_UNTIL = '2026-08-15T01:00:00.000Z'
+
+function seedRun(ledger, adwId, startedAt, status = 'running') {
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: startedAt })
+  if (status !== 'running') ledger.endSession({ adw_id: adwId, status })
+}
+
+test('runSet returns only the runs whose started_at falls in the window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'before', '2026-08-14T23:00:00.000Z')
+  seedRun(ledger, 'at-since', RUNSET_SINCE)
+  seedRun(ledger, 'at-until', RUNSET_UNTIL)
+  seedRun(ledger, 'after', '2026-08-15T02:00:00.000Z')
+
+  const openEnded = ledger.runSet({ since: RUNSET_SINCE })
+  assert.deepEqual(openEnded.map((row) => row.adw_id), ['at-since', 'at-until', 'after'])
+
+  const halfOpen = ledger.runSet({ since: RUNSET_SINCE, until: RUNSET_UNTIL })
+  assert.deepEqual(halfOpen.map((row) => row.adw_id), ['at-since'])
+  assert.ok(halfOpen.some((row) => row.adw_id === 'at-since'), 'the run exactly at since must be included')
+  assert.ok(!halfOpen.some((row) => row.adw_id === 'at-until'), 'the run exactly at until must be excluded')
+})
+
+test('runSet sums billed_* across each run\'s agent_sessions rows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-usage', RUNSET_SINCE)
+  seedTaskAgentSession(ledger, 'runset-usage', 'runset-one', [100, 10, 5, 7])
+  seedTaskAgentSession(ledger, 'runset-usage', 'runset-two', [30, 4, 1, 3])
+
+  const row = ledger.runSet({ since: RUNSET_SINCE })[0]
+  assert.deepEqual({
+    agent_sessions: row.agent_sessions,
+    billed_input_tokens: row.billed_input_tokens,
+    billed_output_tokens: row.billed_output_tokens,
+    billed_cache_write_tokens: row.billed_cache_write_tokens,
+    billed_cache_read_tokens: row.billed_cache_read_tokens,
+  }, {
+    agent_sessions: 2,
+    billed_input_tokens: 130,
+    billed_output_tokens: 14,
+    billed_cache_write_tokens: 6,
+    billed_cache_read_tokens: 10,
+  })
+  assert.notEqual(row.billed_input_tokens, 100, 'usage must not be the maximum running total')
+  assert.notEqual(row.billed_input_tokens, 30, 'usage must not be the last running total')
+})
+
+test('run-set keeps unmeasured billing null and marks usage absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-live', RUNSET_SINCE)
+  ledger.startAgentSession({
+    adw_id: 'runset-live', dispatch_id: 'open-dispatch', role: 'builder', model: 'sonnet',
+    claude_session_id: 'open-claude', transcript_path: '/tmp/open-claude.jsonl',
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0)
+  const payload = JSON.parse(res.stdout)
+  const billedKeys = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+  assert.equal(payload.rows[0].agent_sessions, 1)
+  for (const key of billedKeys) {
+    assert.equal(payload.rows[0][key], null)
+    assert.equal(payload.usage[key], null)
+  }
+  assert.equal(payload.usage.agent_sessions, 1)
+  assert.match(payload.absent.usage, /not a measured zero/)
+})
+
+test('run-set reconciles to the task readout for every run it covers', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const runs = [
+    ['reconcile-a', '2026-08-15T00:10:00.000Z', [[100, 10, 5, 7], [30, 4, 1, 3]]],
+    ['reconcile-b', '2026-08-15T00:20:00.000Z', [[200, 20, 6, 8]]],
+    ['reconcile-c', '2026-08-15T00:30:00.000Z', [[50, 5, 2, 4], [25, 3, 1, 2]]],
+  ]
+  for (const [adwId, startedAt, sessions] of runs) {
+    seedRun(ledger, adwId, startedAt)
+    sessions.forEach((totals, index) => seedTaskAgentSession(ledger, adwId, `reconcile-${adwId}-${index}`, totals))
+  }
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const runSetRes = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(runSetRes.status, 0)
+  const payload = JSON.parse(runSetRes.stdout)
+  const billedKeys = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+  const expectedUsage = { agent_sessions: 0 }
+  for (const key of billedKeys) expectedUsage[key] = 0
+
+  for (const row of payload.rows) {
+    const taskRes = run(['task', row.adw_id], { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(taskRes.status, 0)
+    const task = JSON.parse(taskRes.stdout)
+    assert.ok(task.usage)
+    assert.equal(row.agent_sessions, task.usage.agent_sessions)
+    expectedUsage.agent_sessions += row.agent_sessions
+    for (const key of billedKeys) {
+      assert.equal(row[key], task.usage[key], `${row.adw_id} ${key} drifted from task readout`)
+      expectedUsage[key] += row[key]
+    }
+  }
+  assert.deepEqual(payload.usage, expectedUsage)
+})
+
+test('run-set prints a schema-1 payload stating its question, definition and window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-schema', RUNSET_SINCE)
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', '2026-08-15T00:00:00Z', '--until', '2026-08-15T01:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.schema, 1)
+  assert.equal(payload.since, RUNSET_SINCE)
+  assert.equal(payload.until, RUNSET_UNTIL)
+  assert.match(payload.question, /what ran/i)
+  assert.equal(typeof payload.definition, 'object')
+  for (const key of ['question', 'definition', 'since', 'until', 'runs', 'settled', 'usage', 'rows', 'absent']) {
+    assert.ok(key in payload, `payload is missing ${key}`)
+  }
+})
+
+test('run-set tallies the sessions status enum', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  SESSION_STATUSES.forEach((status, index) => {
+    seedRun(ledger, `status-${status}`, `2026-08-15T00:0${index}:00.000Z`, status)
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE, '--until', RUNSET_UNTIL], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.runs, 4)
+  assert.deepEqual(payload.settled, { running: 1, ok: 1, fail: 1, aborted: 1 })
+})
+
+test('run-set marks parks absent rather than reporting zero', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-park', RUNSET_SINCE)
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(typeof payload.absent.parked, 'string')
+  assert.match(payload.absent.parked, /reclaim store/)
+  const keys = []
+  const collectKeys = (value) => {
+    if (!value || typeof value !== 'object') return
+    if (Array.isArray(value)) return value.forEach(collectKeys)
+    for (const [key, child] of Object.entries(value)) {
+      keys.push(key)
+      collectKeys(child)
+    }
+  }
+  collectKeys(payload)
+  assert.ok(!keys.some((key) => /park.*(?:count|state)/i.test(key)), 'payload must not claim a park count or state')
+})
+
+test('run-set reports an empty window as a measured zero', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.runs, 0)
+  assert.equal(payload.usage, null)
+  assert.ok(!('runs' in payload.absent))
+})
+
+test('run-set refuses a missing, malformed or inverted window', { skip: SKIP }, () => {
+  const cases = [
+    { args: ['run-set'], pattern: /--since.*required/ },
+    { args: ['run-set', '--since', 'notatimestamp'], pattern: /must be an ISO-8601 timestamp/ },
+    { args: ['run-set', '--since', '2026-08-15T00:00:00Z', '--until', '2026-08-15T00:00:00Z'], pattern: /--until must be later/ },
+    { args: ['run-set', '--since', '2026-08-15T00:00:00Z', '--until', '2026-08-14T00:00:00Z'], pattern: /--until must be later/ },
+    { args: ['run-set', '--since', '2026-08-15T00:00:00Z', '--until'], pattern: /--until.*ISO-8601 timestamp/ },
+    { args: ['run-set', 'unexpected', '--since', '2026-08-15T00:00:00Z'], pattern: /takes no positional/ },
+  ]
+  for (const { args, pattern } of cases) {
+    const res = run(args)
+    assert.equal(res.status, 2, `${args.join(' ')} did not refuse`)
+    assert.match(res.stderr, pattern)
+  }
+})
+
+test('run-set refuses a degraded mirror rather than printing an empty window', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'corrupt.db')
+  writeFileSync(dbPath, 'not a sqlite database\n')
+
+  const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 2)
+  assert.match(res.stderr, /unanswerable/)
 })

@@ -77,3 +77,32 @@ test('modelString refuses an unmapped provider rather than guessing', () => {
   assert.equal(modelString({ provider: 'anthropic', id: 'claude-opus-5' }), `${PI_PROVIDERS.anthropic}/claude-opus-5`)
   assert.throws(() => modelString({ provider: 'google', id: 'x' }), /google/)
 })
+
+test('the seat\'s claude-named `tools` allowlist cannot influence a composed pi seat command', () => {
+  let count = 0
+  const variants = ['', 'Read', 'Bash,Write,Edit,Glob,Grep', 'NoSuchTool,Read', undefined]
+  for (const shape of seatShapes()) {
+    const reference = seatCommand(shape)
+    const label = `role=${shape.role} model=${shape.model} effort=${shape.effort ?? 'none'}`
+    assert.doesNotMatch(reference, /(^|\s)(--tools|-t)(\s|=)/, label)
+    for (const tools of variants) {
+      const candidate = seatCommand({ ...shape, tools })
+      assert.equal(candidate, reference, `${label} tools=${String(tools)}`)
+    }
+    count += 1
+  }
+  assert.ok(count >= ROLE_ORDER.length * MODELS.length * EFFORTS.length, `seat matrix unexpectedly covered only ${count} shapes`)
+})
+
+test('--exclude-tools is the pi seat\'s only tool boundary, and unmapped deny names drop', () => {
+  assert.deepEqual(translateDeny('Read,NoSuchTool'), ['read'])
+  assert.deepEqual(translateDeny('Task,Agent'), [])
+  for (const role of ROLE_ORDER) {
+    const shape = [...seatShapes()].find((candidate) => candidate.role === role)
+    const translated = translateDeny(SEAT_DEFAULTS[role].deny)
+    const command = seatCommand(shape)
+    const label = `role=${role}`
+    if (translated.length) assert.match(command, new RegExp(`--exclude-tools "${escapeRegex(translated.join(','))}"`), label)
+    else assert.doesNotMatch(command, /--exclude-tools/, label)
+  }
+})

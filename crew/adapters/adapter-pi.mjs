@@ -107,11 +107,25 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
   // work regardless of which binary fills the seat.
   //
-  // `tools` (the claude-named allowedTools list) is intentionally accepted
-  // and unused: pi's --tools/-t allowlist takes pi-namespaced names
-  // (read/bash/edit/write/find/grep/ls), so feeding it the seat's
-  // claude-named allowlist would disable every real tool. It stays in the
-  // signature for contract symmetry with the adapter interface.
+  // #146: deny-only is the ratified tool-enforcement posture for pi seats.
+  // `tools` stays in the signature for contract symmetry: adapter-claude.mjs
+  // genuinely passes it as --allowedTools in both seatCommand and
+  // headlessCommand, so deleting it would break the shared adapter contract.
+  // There is no translateTools() counterpart: pi's complete built-in set is
+  // read/bash/edit/write/grep/find/ls (dist/core/tools/index.js:17, verified
+  // 2026-08-15 against pi 0.84.2) with no network/MCP/subagent surface, so a
+  // positive list would fence off nothing. Only read/bash/edit/write are
+  // active by default (dist/core/sdk.js:132), making --tools an activator;
+  // pi silently ignores an unmapped name (dist/cli/args.js:85-96), so a gap
+  // would disable a live tool while looking enforced. --exclude-tools beats
+  // --tools inside pi's filter (dist/core/agent-session.js:1945), just as
+  // --disallowedTools outranks bypass-inert --allowedTools on claude, so
+  // denial is the only real boundary on either adapter.
+  // Extension-registered tools from ~/.pi/agent/extensions are auto-discovered
+  // and auto-activated and are not named by any seat's deny list; --no-extensions
+  // is the instrument if that ever needs closing, out of scope for #146.
+  // This posture is ENFORCED, not merely explained: crew/adapter-pi.test.mjs
+  // fails if `tools` ever influences a composed seat command.
   //
   // `deny` (the claude-named disallowedTools list, e.g. "Edit,NotebookEdit")
   // is translated via translateDeny() into pi's own tool namespace before it

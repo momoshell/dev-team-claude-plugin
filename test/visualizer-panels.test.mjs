@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { acceptRows, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterEditForm, rosterPanel, rosterProposal } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterEditForm, rosterPanel, rosterProposal } from '../visualizer/web/src/lib/panels.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -157,6 +157,40 @@ test('acceptRows leaves absent decisions pending without fabricated counts', () 
   assert.deepEqual(result.rows, [])
   assert.ok(result.pending)
   assert.notEqual(result.pending, 0)
+})
+
+test('cellHealthPanel states the window and never invents one', () => {
+  const result = cellHealthPanel({ window: { since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 7 days' }, cells: [] })
+  assert.match(result.window_label, /2024-01-01T00:00:00.000Z/)
+  assert.equal(result.note, 'this window is the board’s own; the boot breaker (#45) owns cell policy and its own window')
+  assert.equal(cellHealthPanel({ cells: [] }).window_label, 'window unavailable')
+})
+
+test('cellHealthPanel keeps silence, run-less and recorded visually distinct', () => {
+  const result = cellHealthPanel({ cells: [
+    { key: 'a', provider: 'a', model_id: 'a', agent: 'a', effort: 'a', roles: [], tiers: [], state: 'silent', failures: 0, run_less: 0, in_run: 0, by_kind: [] },
+    { key: 'b', provider: 'b', model_id: 'b', agent: 'b', effort: 'b', roles: [], tiers: [], state: 'run-less-only', failures: 2, run_less: 2, in_run: 0, by_kind: [] },
+    { key: 'c', provider: 'c', model_id: 'c', agent: 'c', effort: 'c', roles: [], tiers: [], state: 'recorded', failures: 2, run_less: 1, in_run: 1, by_kind: [] },
+  ] })
+  assert.equal(new Set(result.rows.map((row) => row.tone)).size, 3)
+  assert.equal(new Set(result.rows.map((row) => row.label)).size, 3)
+  assert.match(result.rows[0].label, /no failures recorded/)
+  assert.doesNotMatch(result.rows[0].label, /^0\b/)
+})
+
+test('cellHealthPanel exposes the kind breakdown on the row', () => {
+  const result = cellHealthPanel({ cells: [{ key: 'a', provider: 'anthropic', model_id: 'cell', agent: 'claude', effort: 'high', roles: ['planner'], tiers: ['build'], state: 'recorded', failures: 2, run_less: 1, in_run: 1, by_kind: [
+    { kind: 'boot-refusal', failures: 1, run_less: 1 },
+    { kind: 'timeout', failures: 1, run_less: 0 },
+  ] }] })
+  assert.deepEqual(result.rows[0].kinds.map((kind) => kind.label), ['boot-refusal ×1', 'timeout ×1'])
+})
+
+test('cellHealthPanel passes an absent reason through without rows', () => {
+  const result = cellHealthPanel({ absent: 'cell_failures predates this ledger mirror', cells: [] })
+  assert.equal(result.absent, 'cell_failures predates this ledger mirror')
+  assert.deepEqual(result.rows, [])
+  assert.doesNotMatch(JSON.stringify(result), /"(failures|run_less|in_run)":\s*0/)
 })
 
 test('findingRows distinguishes absent findings from an explicit empty measurement', () => {

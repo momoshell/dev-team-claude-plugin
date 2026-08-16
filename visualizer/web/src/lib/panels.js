@@ -167,6 +167,65 @@ export function acceptRows(run = {}) {
   return { rows, refused: rows.filter((row) => row.tone === 'refused').length, pending: null }
 }
 
+const CELL_HEALTH_NOTE = 'this window is the board’s own; the boot breaker (#45) owns cell policy and its own window'
+
+function cellDisplayPart(value) {
+  return value == null ? '—' : String(value)
+}
+
+export function cellHealthPanel(payload = {}) {
+  const absent = payload?.absent ?? null
+  const window = payload?.window
+  const window_label = window && typeof window === 'object'
+    ? `${window.label} · since ${window.since} · until ${window.until || 'now'}`
+    : 'window unavailable'
+  const view = {
+    absent,
+    silent_unknown: payload?.silent_unknown ?? null,
+    window_label,
+    note: CELL_HEALTH_NOTE,
+    rows: [],
+  }
+  if (absent) return view
+
+  view.rows = (Array.isArray(payload?.cells) ? payload.cells : []).map((row) => {
+    const state = row?.state
+    const tone = state === 'silent' ? 'silent' : state === 'run-less-only' ? 'run-less' : 'recorded'
+    const failures = row?.failures ?? null
+    const run_less = row?.run_less ?? null
+    const in_run = row?.in_run ?? null
+    const label = state === 'silent'
+      ? 'no failures recorded in this window'
+      : state === 'run-less-only'
+        ? `${failures} failure${failures === 1 ? '' : 's'}, all run-less — refused before any run existed`
+        : `${in_run} in run · ${run_less} run-less`
+    const roles = Array.isArray(row?.roles) ? row.roles : []
+    const tiers = Array.isArray(row?.tiers) ? row.tiers : []
+    return {
+      key: row?.key ?? null,
+      title: `${cellDisplayPart(row?.provider)}/${cellDisplayPart(row?.model_id)} · ${cellDisplayPart(row?.agent)} · ${cellDisplayPart(row?.effort)}`,
+      roles_label: roles.length ? roles.join(', ') : '—',
+      tiers_label: tiers.length ? tiers.join(', ') : '—',
+      state,
+      tone,
+      label,
+      failures,
+      run_less,
+      in_run,
+      kinds: (Array.isArray(row?.by_kind) ? row.by_kind : []).map((kind) => ({
+        kind: kind?.kind ?? null,
+        failures: kind?.failures ?? null,
+        run_less: kind?.run_less ?? null,
+        label: `${kind?.kind ?? '—'} ×${kind?.failures ?? '—'}`,
+      })),
+      first_at: row?.first_at ?? null,
+      last_at: row?.last_at ?? null,
+      seated: row?.seated ?? false,
+    }
+  })
+  return view
+}
+
 export function findingRows(returns = {}) {
   const envelopes = Array.isArray(returns?.envelopes) ? returns.envelopes : []
   const groups = []

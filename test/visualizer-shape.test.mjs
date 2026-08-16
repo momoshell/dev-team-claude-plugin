@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
+import { defaultCellWindow, shapeCellHealth, shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
@@ -184,6 +184,63 @@ test('matchesFilters covers mode, status, since, until and pending mode', () => 
   assert.equal(matchesFilters(complete, { status: 'running' }), false)
   assert.equal(matchesFilters(complete, { since: '2024-01-02' }), false)
   assert.equal(matchesFilters(complete, { until: '2024-01-01' }), false)
+})
+
+test('shapeCellHealth folds kinds into one cell and keeps run-less separate', () => {
+  const result = shapeCellHealth({
+    rows: [
+      { provider: 'anthropic', model_id: 'cell', agent: 'claude', effort: 'high', role: 'planner', kind: 'boot-refusal', failures: 1, run_less: 1, first_at: '2024-01-01T00:00:00.000Z', last_at: '2024-01-01T00:00:00.000Z' },
+      { provider: 'anthropic', model_id: 'cell', agent: 'claude', effort: 'high', role: 'builder', kind: 'timeout', failures: 1, run_less: 0, first_at: '2024-01-02T00:00:00.000Z', last_at: '2024-01-02T00:00:00.000Z' },
+    ],
+    roster: { tiers: [] }, since: start, until: null, label: 'last 7 days',
+  })
+  assert.equal(result.cells.length, 1)
+  const cell = result.cells[0]
+  assert.equal(cell.failures, 2)
+  assert.equal(cell.run_less, 1)
+  assert.equal(cell.in_run, 1)
+  assert.deepEqual(cell.by_kind.map((kind) => kind.kind), ['boot-refusal', 'timeout'])
+  assert.deepEqual(cell.roles, ['builder', 'planner'])
+})
+
+test('shapeCellHealth marks a cell whose every failure is run-less', () => {
+  const result = shapeCellHealth({
+    rows: [{ provider: 'openai', model_id: 'cell', agent: 'pi', effort: 'max', role: 'reviewer', kind: 'no-envelope', failures: 2, run_less: 2 }],
+    roster: { tiers: [] }, since: start, until: null, label: 'last 7 days',
+  })
+  assert.equal(result.cells[0].state, 'run-less-only')
+})
+
+test('shapeCellHealth reports a seated cell with no rows as silent, not healthy', () => {
+  const result = shapeCellHealth({
+    rows: [],
+    roster: { tiers: [{ tier: 'build', seats: [{ role: 'builder', provider: 'openai', id: 'quiet', agent: 'pi', effort: 'max' }] }] },
+    since: start, until: null, label: 'last 7 days',
+  })
+  assert.equal(result.cells.length, 1)
+  assert.equal(result.cells[0].state, 'silent')
+  assert.doesNotMatch(JSON.stringify(result), /"(verdict|open|closed|healthy|threshold)"/i)
+})
+
+test('shapeCellHealth refuses to render zeros for an absent table', () => {
+  const result = shapeCellHealth({ rows: null, absent: 'cell_failures predates this ledger mirror', roster: { tiers: [] }, since: start, until: null, label: 'last 7 days' })
+  assert.deepEqual(result.cells, [])
+  assert.equal(result.absent, 'cell_failures predates this ledger mirror')
+  assert.doesNotMatch(JSON.stringify(result), /"(failures|run_less|in_run)":\s*0/)
+})
+
+test('shapeCellHealth cannot enumerate silent cells without a roster', () => {
+  const result = shapeCellHealth({ rows: [], roster: { tiers: null, error: 'unreadable' }, since: start, until: null, label: 'last 7 days' })
+  assert.equal(result.silent_unknown, 'unreadable')
+  assert.equal(result.cells.some((cell) => cell.state === 'silent'), false)
+})
+
+test('defaultCellWindow states a seven-day trailing window', () => {
+  const now = Date.parse('2024-01-08T00:00:00.000Z')
+  const result = defaultCellWindow(now)
+  assert.equal(result.since, '2024-01-01T00:00:00.000Z')
+  assert.equal(result.until, null)
+  assert.ok(result.label)
 })
 
 test('drainEvents exhausts pages, stops stalled cursors, and reports max-page truncation', async () => {

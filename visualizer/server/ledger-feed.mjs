@@ -6,7 +6,7 @@ import { shapeRun, matchesFilters } from './shape.mjs'
 
 const require = createRequire(import.meta.url)
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
-const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'review_outcomes', 'accept_decisions']
+const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'review_outcomes', 'accept_decisions', 'cell_failures']
 // Which shape fields a missing table makes unknowable. Feeding these into the
 // probe reuses #48's NULL-probe path (shape.mjs) instead of inventing a second
 // mechanism for the same idea.
@@ -112,6 +112,27 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     const max = handle.prepare('SELECT max(id) AS max_id FROM events WHERE adw_id = ?').get(adw_id)?.max_id
     return { events, cursor: events.length === limit ? events.at(-1).id : (max ?? after), ...(unsupported_filters.length ? { unsupported_filters } : {}) }
   }
+  function cellFailures({ since = null, until = null } = {}) {
+    probeColumns()
+    const handle = open()
+    if (!handle) return { rows: null, absent: degradedReason || 'the ledger could not be opened' }
+    if (probe.missing_tables.includes('cell_failures')) return { rows: null, absent: 'cell_failures predates this ledger mirror' }
+    try {
+      const rows = handle.prepare(`
+      SELECT provider, model_id, agent, effort, role, kind,
+        COUNT(*) AS failures, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
+        SUM(CASE WHEN adw_id IS NULL THEN 1 ELSE 0 END) AS run_less
+      FROM cell_failures
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY provider, model_id, agent, effort, role, kind
+      ORDER BY provider, model_id, agent, effort, role, kind
+    `).all(since, since, until, until)
+      return { rows, absent: null }
+    } catch (err) {
+      if (!probe.missing_tables.includes('cell_failures')) probe.missing_tables.push('cell_failures')
+      return { rows: null, absent: err?.message || String(err) }
+    }
+  }
   function health() {
     probeColumns()
     const triageHealth = triage.health()
@@ -120,6 +141,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
   return {
     listRuns,
     listEvents,
+    cellFailures,
     setTriage: (input) => triage.setTriage(input),
     health,
     close: () => { closed = true; if (db) { try { db.close() } catch {} db = null }; triage.close() },

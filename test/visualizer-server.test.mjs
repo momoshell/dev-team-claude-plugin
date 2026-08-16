@@ -93,6 +93,11 @@ function fixture(path, { filler = 0 } = {}) {
   ledger.recordReviewOutcome({ adw_id: done, phase_id: 3, dispatch_id: 'd2', role: 'reviewer', verdict: 'pass', must_fix: 0, should_fix: 0, consider: 0, created_at: '2024-01-01T00:00:04.000Z' })
   ledger.recordAcceptDecision({ adw_id: done, phase_id: 3, where_at: 'review-exhausted', outcome: 'accepted', findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 0, unverified_count: 0, invalid_reasons: '', created_at: '2024-01-01T00:00:05.000Z' })
   ledger.recordAcceptDecision({ adw_id: done, phase_id: 3, where_at: 'review-exhausted', outcome: 'escalated', findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 0, unverified_count: 0, invalid_reasons: 'f1: unresolved', created_at: '2024-01-01T00:00:06.000Z' })
+  const recentFailure = new Date(Date.now() - 3600e3).toISOString()
+  ledger.recordCellFailure({ provider: 'anthropic', model_id: 'viz-cell-a', agent: 'claude', effort: 'high', role: 'planner', kind: 'boot-refusal', adw_id: null, created_at: recentFailure })
+  ledger.recordCellFailure({ provider: 'anthropic', model_id: 'viz-cell-a', agent: 'claude', effort: 'high', role: 'planner', kind: 'timeout', adw_id: done, created_at: recentFailure })
+  ledger.recordCellFailure({ provider: 'anthropic', model_id: 'viz-cell-a', agent: 'claude', effort: 'high', role: 'builder', kind: 'seat-died', adw_id: done, created_at: new Date(Date.now() - 30 * 24 * 3600e3).toISOString() })
+  ledger.recordCellFailure({ provider: 'openai', model_id: 'viz-cell-b', agent: 'pi', effort: 'max', role: 'reviewer', kind: 'no-envelope', adw_id: null, created_at: recentFailure })
   ledger.endSession({ adw_id: done, status: 'ok' })
   ledger.startSession({ adw_id: live, repo_slug: 'repo', task_slug: 'live' })
   ledger.startPhase({ adw_id: live, seq: 1, name: 'plan' })
@@ -143,6 +148,7 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
     assert.ok(byPhase.json.events.length > 0); assert.ok(byPhase.json.events.every((event) => event.phase_id === 1)); assert.ok(Number.isFinite(byPhase.json.cursor))
     assert.equal((await json(base, `/api/events?adw_id=${live}&limit=50`)).json.events.length, 1)
     await json(base, '/api/health'); await json(base, '/api/health')
+    await json(base, '/api/cell-health')
     assert.equal((await json(base, '/api/events?adw_id=x&after=bad')).status, 400)
     assert.equal((await json(base, '/api/events?adw_id=x&limit=wat')).status, 400)
     assert.equal((await json(base, '/api/nope')).status, 404)
@@ -218,6 +224,57 @@ test('missing measurement tables do not break the read-only feed', { skip: SKIP 
     assert.ok(run.pending.reviews)
     assert.equal(run.accept_decisions, null)
     assert.equal(run.pending.accept_decisions, 'predates this measurement')
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('cell health reports a stated window, run-less rows and kinds without a verdict', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-health-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const response = await json(base, '/api/cell-health')
+    assert.equal(response.status, 200)
+    assert.ok(Number.isFinite(Date.parse(response.json.window.since)))
+    const cellA = response.json.cells.find((cell) => cell.model_id === 'viz-cell-a')
+    assert.ok(cellA)
+    assert.equal(cellA.failures, 2)
+    assert.equal(cellA.run_less, 1)
+    assert.equal(cellA.in_run, 1)
+    assert.deepEqual(cellA.by_kind.map((kind) => kind.kind), ['boot-refusal', 'timeout'])
+    const cellB = response.json.cells.find((cell) => cell.model_id === 'viz-cell-b')
+    assert.equal(cellB.state, 'run-less-only')
+    assert.ok(response.json.cells.some((cell) => cell.state === 'silent'))
+
+    const wide = await json(base, `/api/cell-health?since=${encodeURIComponent(new Date(0).toISOString())}`)
+    assert.equal(wide.status, 200)
+    assert.equal(wide.json.cells.find((cell) => cell.model_id === 'viz-cell-a').failures, 3)
+    assert.equal((await json(base, '/api/cell-health', { method: 'POST' })).status, 405)
+    assert.equal((await json(base, '/api/cell-health?since=not-a-date')).status, 400)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a mirror without cell_failures renders the panel absent, not zero', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-health-absent-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE cell_failures')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    let result
+    assert.doesNotThrow(() => { result = feed.cellFailures({}) })
+    assert.ok(result.absent)
+    assert.equal(result.rows, null)
+    assert.doesNotMatch(JSON.stringify(result), /"(failures|run_less|in_run)":\s*0/)
   } finally {
     feed.close()
     rmSync(dir, { recursive: true, force: true })

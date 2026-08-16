@@ -381,6 +381,33 @@ test('dispatchRepair reads an escalation envelope and retains its task return pa
   } finally { cleanup(world) }
 })
 
+// Orchestrator close-out pin (mutation-found gap): the sibling guard to the test
+// below. There, the printed line carries no crew status at all. Here it carries a
+// well-formed status:"done" while the process exited non-zero — the shape a stale
+// envelope from a prior run actually takes. Neutralising the status/exit agreement
+// check left the whole suite green before this existed.
+test('a result line whose status disagrees with the exit code is unreadable, never done', () => {
+  const world = makeWorld()
+  try {
+    const taskReturn = join(world.crew, 'returns', 'task.json')
+    const before = readFileSync(taskReturn, 'utf8')
+    for (const [status, exit] of [['done', 1], ['escalation', 0]]) {
+      const result = dispatchRepair({
+        cycle: 1,
+        briefPath: join(world.crew, 'task', 'brief.md'),
+        crew: { task: 'repair-task', checkout: world.host, task_return: taskReturn },
+        crewDir: world.crew,
+        checkout: world.host,
+        row: { local_lane: 'node --test' },
+        deps: { spawnSync: () => ({ status: exit, stdout: `${JSON.stringify({ status, commit: 'deadbee' })}\n`, stderr: '' }) },
+      })
+      assert.equal(result.outcome, 'unreadable', `status=${status} exit=${exit} must not be trusted`)
+      assert.match(result.why, /status-exit-mismatch/)
+      assert.equal(readFileSync(taskReturn, 'utf8'), before)
+    }
+  } finally { cleanup(world) }
+})
+
 test('a preflight failure cannot reuse a settled envelope from the prior run', () => {
   const world = makeWorld()
   try {

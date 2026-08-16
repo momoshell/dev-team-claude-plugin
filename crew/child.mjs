@@ -131,7 +131,10 @@ export function runChild(argv, injected = {}) {
         // changed between the first read and the open cannot redirect budgeted
         // work away from the ledger the daemon reads.
         sidecarDbPath = emitter?.sidecar?.()?.db_path ?? null
-        if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) emitter.startRun()
+        if (!enforceBudgetLedger || sidecarDbPath == null || sidecarDbPath === dbPath) {
+          emitter.startRun()
+          emitter.linkRun(spec.run_id, { crewDir })
+        }
       } catch { emitter = null }
     }
     if (enforceBudgetLedger && sidecarDbPath && sidecarDbPath !== dbPath) {

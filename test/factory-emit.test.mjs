@@ -116,6 +116,37 @@ test('SIDECAR CREATE IS EXCLUSIVE: a second in-process openRun against an existi
   assert.equal(e1.adwId, e2.adwId)
 })
 
+test('linkRun emits a daemon-to-sidecar association into the real ledger', { skip: SKIP }, () => {
+  const dir = freshDir('link-run')
+  const dbPath = join(dir, 'ledger', 'ledger.db')
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', dbPath, stderr: { write: () => {} } })
+  emitter.startRun()
+  emitter.linkRun('daemon-emitter-run', { crewDir: dir })
+  emitter.dispose()
+
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.deepEqual(ledger.dumpTable('run_links').map(({ run_id, adw_id, crew_dir }) => ({ run_id, adw_id, crew_dir })), [
+      { run_id: 'daemon-emitter-run', adw_id: emitter.adwId, crew_dir: dir },
+    ])
+  } finally { ledger.close() }
+})
+
+test('linkRun(null) and linkRun(\'\') are no-ops, including on a degraded emitter', () => {
+  const dir = freshDir('link-run-noop')
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
+  assert.doesNotThrow(() => emitter.linkRun(null))
+  assert.doesNotThrow(() => emitter.linkRun(''))
+  emitter.dispose()
+  assert.equal(existsSync(join(dir, 'ledger', 'ledger.jsonl')), false)
+
+  const parent = freshDir('link-run-degraded')
+  const blocked = join(parent, 'blocked')
+  writeFileSync(blocked, 'not a directory')
+  const degraded = openRun({ stateDir: join(blocked, 'state'), repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })
+  assert.doesNotThrow(() => degraded.linkRun('daemon-degraded-run'))
+})
+
 test('run-less recordCellFailure lands exactly one NULL-adw row and never throws on an unusable dbPath', { skip: SKIP }, () => {
   const dir = freshDir('runless-cell-failure')
   const dbPath = join(dir, 'ledger.db')
@@ -769,6 +800,7 @@ test('M3: openRun against an unwritable parent directory returns a fully-formed,
     })
     assert.equal(emitter.adwId, null)
     assert.doesNotThrow(() => emitter.startRun())
+    assert.doesNotThrow(() => emitter.linkRun('daemon-degraded-run'))
     assert.deepEqual(emitter.reserveSeq('event', 1), [])
     assert.equal(emitter.updateSidecar(() => {}), false)
     assert.equal(emitter.bumpGateAttempt('gate-a'), 0)

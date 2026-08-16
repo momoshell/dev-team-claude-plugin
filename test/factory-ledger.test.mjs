@@ -215,6 +215,7 @@ test('AC-4: a db created by an earlier migration prefix opens cleanly under the 
 
 function exerciseEveryWriter(ledger, adwId) {
   ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'task' })
+  ledger.linkRun({ run_id: 'daemon-run-1', adw_id: adwId, crew_dir: '/tmp/crew' })
   const phaseId = ledger.startPhase({ adw_id: adwId, name: 'plan' })
   ledger.recordEvent({
     adw_id: adwId, type: 'phase_start', phase_id: phaseId, payload: { name: 'plan' },
@@ -534,6 +535,69 @@ test('eligibleTasks matches proof rows to the active gate generation', { skip: S
   assert.deepEqual({ ...row }, { adw_id: 'eligible-1', task_slug: 'eligible', active_generation: 2, reviews: 1, proven_active: 1 })
 })
 
+test('linkRun records one idempotent association and taskReadout resolves it by run_id', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'ledger-session-A'
+  const runId = 'daemon-run-A'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'linked-task' })
+  ledger.linkRun({ run_id: runId, adw_id: adwId, crew_dir: '/tmp/crew' })
+  ledger.linkRun({ run_id: runId, adw_id: adwId, crew_dir: '/tmp/crew' })
+
+  const rows = ledger.dumpTable('run_links')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].run_id, runId)
+  assert.equal(rows[0].adw_id, adwId)
+  const readout = ledger.taskReadout(runId)
+  assert.equal(readout.resolved_by, 'run_id')
+  assert.equal(readout.adw_id, adwId)
+  assert.deepEqual(readout.run_ids, [runId])
+})
+
+test('taskReadout precedence is adw_id, then run_id, then task_slug', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'session-run-A', repo_slug: 'r', task_slug: 'shared-selector' })
+  ledger.startSession({ adw_id: 'session-slug-B', repo_slug: 'r', task_slug: 'shared-selector' })
+  ledger.linkRun({ run_id: 'shared-selector', adw_id: 'session-run-A' })
+  const byRun = ledger.taskReadout('shared-selector')
+  assert.equal(byRun.resolved_by, 'run_id')
+  assert.equal(byRun.adw_id, 'session-run-A')
+
+  ledger.startSession({ adw_id: 'direct-selector', repo_slug: 'r', task_slug: 'direct-task' })
+  ledger.linkRun({ run_id: 'direct-selector', adw_id: 'session-run-A' })
+  const byAdw = ledger.taskReadout('direct-selector')
+  assert.equal(byAdw.resolved_by, 'adw_id')
+  assert.equal(byAdw.adw_id, 'direct-selector')
+})
+
+test('taskReadout exposes shared adopted sessions and refuses ambiguous or sessionless links', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'adopted-session-A'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'adopted-task' })
+  ledger.linkRun({ run_id: 'daemon-run-one', adw_id: adwId })
+  ledger.linkRun({ run_id: 'daemon-run-two', adw_id: adwId })
+  for (const runId of ['daemon-run-one', 'daemon-run-two']) {
+    const readout = ledger.taskReadout(runId)
+    assert.equal(readout.resolved_by, 'run_id')
+    assert.equal(readout.adw_id, adwId)
+    assert.deepEqual(readout.run_ids, ['daemon-run-one', 'daemon-run-two'])
+    assert.match(readout.absent.run_scope, /adopted sidecar/)
+  }
+
+  ledger.startSession({ adw_id: 'ambiguous-session-A', repo_slug: 'r', task_slug: 'a' })
+  ledger.startSession({ adw_id: 'ambiguous-session-B', repo_slug: 'r', task_slug: 'b' })
+  ledger.linkRun({ run_id: 'ambiguous-daemon-run', adw_id: 'ambiguous-session-A' })
+  ledger.linkRun({ run_id: 'ambiguous-daemon-run', adw_id: 'ambiguous-session-B' })
+  const ambiguous = ledger.taskReadout('ambiguous-daemon-run')
+  assert.equal(ambiguous.adw_id, null)
+  assert.deepEqual(ambiguous.candidates, ['ambiguous-session-A', 'ambiguous-session-B'])
+  assert.deepEqual(ambiguous.run_ids, [])
+
+  ledger.linkRun({ run_id: 'sessionless-daemon-run', adw_id: 'never-started-session' })
+  const sessionless = ledger.taskReadout('sessionless-daemon-run')
+  assert.equal(sessionless.adw_id, null)
+  assert.deepEqual(sessionless.candidates, [])
+})
+
 // ---------------------------------------------------------------------------
 // #59: one-run task readout
 // ---------------------------------------------------------------------------
@@ -770,6 +834,7 @@ const MARKER_ADW = 'devteam-done-marker-should-never-persist-anywhere'
 function seedAllWritersWithMarker(ledger) {
   const ctx = 'marker-run'
   ledger.startSession({ adw_id: ctx, repo_slug: 'r', task_slug: 't', DEVTEAM_SECRET: MARKER_ADW })
+  ledger.linkRun({ run_id: MARKER_ADW, adw_id: ctx, crew_dir: MARKER_ADW })
   const phaseId = ledger.startPhase({ adw_id: ctx, name: MARKER_ADW })
   ledger.recordEvent({ adw_id: ctx, type: 'phase_start', phase_id: phaseId, payload: { name: MARKER_ADW } })
   ledger.recordEnvelope({

@@ -3,6 +3,7 @@
 // run checkouts.
 
 import { spawnSync as cpSpawnSync } from 'node:child_process'
+import { randomUUID } from 'node:crypto'
 import {
   appendFileSync as fsAppendFileSync,
   existsSync as fsExistsSync,
@@ -11,6 +12,7 @@ import {
 } from 'node:fs'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { harvestRun } from './harvest.mjs'
 
 export const ARM_AXES = Object.freeze(['prompt', 'roster', 'model'])
@@ -48,6 +50,7 @@ function normalDeps(deps = {}) {
     appendFileSync: source.appendFileSync || fsAppendFileSync,
     mkdirSync: source.mkdirSync || fsMkdirSync,
     now: source.now || (() => new Date().toISOString()),
+    uuid: source.uuid || randomUUID,
     harvest: source.harvest || harvestRun,
     ledger: source.ledger || null,
   }
@@ -425,5 +428,341 @@ export function collectArms({ manifestPath, repo = null, deps = {} } = {}) {
     counts,
     refused_arms: refusedArms,
     skipped: set.skipped,
+  }
+}
+
+export const ARM_SPAWN_DEFAULT_N = 2
+export const ARM_SPAWN_MAX_N = 4
+export const ARM_SPAWN_STATUSES = Object.freeze({
+  SPAWNED: 'spawned', PARTIAL: 'partial', REFUSED: 'refused',
+})
+export const ARM_SPAWN_REASONS = Object.freeze([
+  'set-id-invalid', 'n-invalid', 'n-over-cap', 'repo-missing',
+  'worktree-root-missing', 'worktree-exists', 'manifest-path-invalid',
+  'axes-invalid', 'axis-unknown', 'pin-unresolved', 'worktree-failed',
+  'arm-pin-mismatch', 'spawn-failed', 'spawn-id-missing', 'append-failed',
+])
+
+function spawnMessage(err, fallback) {
+  const message = String(err?.message || err || '').trim()
+  return message || fallback
+}
+
+function spawnRefusal(reason, message, extra = {}) {
+  return {
+    ok: false,
+    status: ARM_SPAWN_STATUSES.REFUSED,
+    reason,
+    message,
+    ...extra,
+  }
+}
+
+function spawnPartial({ setId, manifestPath, pin, arms, index, phase, reason, message, failure = {}, ...extra }) {
+  return {
+    ok: false,
+    status: ARM_SPAWN_STATUSES.PARTIAL,
+    set_id: setId,
+    manifest_path: manifestPath,
+    pin,
+    arms,
+    failed: {
+      index,
+      phase,
+      reason,
+      message,
+      ...extra,
+      ...failure,
+    },
+  }
+}
+
+function usablePath(value) {
+  return typeof value === 'string' && value.trim().length > 0
+}
+
+function armSlug(setId, index) {
+  return `${setId}-${String(index).padStart(2, '0')}`
+}
+
+function worktreeName(setId, index) {
+  return `${setId}-arm${String(index).padStart(2, '0')}`
+}
+
+function factoryctlPath() {
+  return fileURLToPath(new URL('./factoryctl.mjs', import.meta.url))
+}
+
+export function factoryctlSpawner(input = {}) {
+  const args = input && typeof input === 'object' ? input : {}
+  const axes = args.axes && typeof args.axes === 'object' && !Array.isArray(args.axes) ? args.axes : {}
+  if (Object.prototype.hasOwnProperty.call(axes, 'model')) {
+    return {
+      ok: false,
+      reason: 'axis-unsupported',
+      message: 'factoryctl run does not support axis model',
+    }
+  }
+
+  const d = normalDeps(args.deps)
+  const brief = axes.prompt ?? args.brief
+  const tier = axes.roster ?? args.tier
+  const checkout = args.checkout
+  const task = args.armSlug
+  let result
+  try {
+    result = d.spawnSync(process.execPath, [
+      factoryctlPath(), 'run',
+      '--brief', brief,
+      '--tier', tier,
+      '--checkout', checkout,
+      '--task', task,
+    ], { encoding: 'utf8' })
+  } catch (err) {
+    return { ok: false, reason: 'spawn-failed', message: spawnMessage(err, 'factoryctl failed to start') }
+  }
+
+  if (result?.error || result?.status !== 0) {
+    const stderr = String(result?.stderr || '').trim()
+    return {
+      ok: false,
+      reason: 'spawn-failed',
+      message: stderr || spawnMessage(result?.error, `factoryctl exited with status ${String(result?.status)}`),
+    }
+  }
+
+  const lines = String(result?.stdout || '').split(/\r?\n/).reverse()
+  let payload = null
+  for (const line of lines) {
+    if (!line.trim()) continue
+    try {
+      const parsed = JSON.parse(line)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        payload = parsed
+        break
+      }
+    } catch { /* keep looking for the JSON result line */ }
+  }
+  if (!payload) {
+    return {
+      ok: false,
+      reason: 'spawn-failed',
+      message: 'factoryctl returned no JSON run result',
+    }
+  }
+  return { ok: true, adwId: payload.run_id, crewDir: payload.crew_dir }
+}
+
+export function spawnArmSet(input = {}) {
+  const args = input && typeof input === 'object' ? input : {}
+  const d = normalDeps(args.deps)
+
+  const repo = args.repo
+  if (!usablePath(repo)) {
+    return spawnRefusal('repo-missing', 'repo must be a non-empty existing directory')
+  }
+  let repoExists = false
+  try { repoExists = d.existsSync(repo) } catch { repoExists = false }
+  if (!repoExists) {
+    return spawnRefusal('repo-missing', `repo does not exist: ${repo}`)
+  }
+
+  const worktreeRoot = args.worktreeRoot
+  if (!usablePath(worktreeRoot)) {
+    return spawnRefusal('worktree-root-missing', 'worktreeRoot must be a non-empty path')
+  }
+
+  let setId = args.setId
+  if (setId === undefined) {
+    try {
+      setId = `set-${String(d.uuid()).slice(0, 8)}`
+    } catch (err) {
+      return spawnRefusal('set-id-invalid', spawnMessage(err, 'could not create a set id'))
+    }
+  }
+  if (!validSetId(setId)) {
+    return spawnRefusal('set-id-invalid', `invalid set id: ${String(setId)}`)
+  }
+
+  const hasArms = args.arms !== undefined
+  let n = hasArms ? (Array.isArray(args.arms) ? args.arms.length : null) : args.n
+  if (!hasArms && (n === undefined || n === null)) n = ARM_SPAWN_DEFAULT_N
+  if (!Number.isInteger(n) || n < 1) {
+    return spawnRefusal('n-invalid', `n must be an integer greater than or equal to 1: ${String(n)}`)
+  }
+  if (n > ARM_SPAWN_MAX_N) {
+    return spawnRefusal('n-over-cap', `n ${n} exceeds ARM_SPAWN_MAX_N cap ${ARM_SPAWN_MAX_N}`)
+  }
+
+  let armSpecs
+  if (hasArms) {
+    if (!Array.isArray(args.arms)) {
+      return spawnRefusal('n-invalid', 'arms must be an array when supplied')
+    }
+    armSpecs = args.arms.map((arm) => {
+      if (!arm || typeof arm !== 'object' || Array.isArray(arm)) return { axes: null }
+      return { axes: arm.axes === undefined ? {} : arm.axes }
+    })
+  } else {
+    armSpecs = Array.from({ length: n }, () => ({ axes: {} }))
+  }
+
+  for (const spec of armSpecs) {
+    const axesFailure = axisReason(spec?.axes)
+    if (axesFailure) {
+      return spawnRefusal(axesFailure, axesFailure === 'axis-unknown'
+        ? 'arm axes contain an unknown axis'
+        : 'arm axes must be a non-empty string map')
+    }
+  }
+
+  let manifestPath = args.manifestPath
+  if (manifestPath === undefined) {
+    try { manifestPath = armsManifestPath({ setId }) } catch { manifestPath = null }
+  }
+  if (!usablePath(manifestPath) || manifestPath.includes('\u0000')) {
+    return spawnRefusal('manifest-path-invalid', 'manifestPath must be a non-empty path')
+  }
+
+  const git = gitRunner(d)
+  const pin = args.pin === undefined ? 'HEAD' : args.pin
+  if (!validPin(pin)) {
+    return spawnRefusal('pin-unresolved', `pin ${String(pin)} cannot be resolved in ${repo}`)
+  }
+  const pinResult = git(
+    ['-C', repo],
+    ['rev-parse', '--verify', '--quiet', `${pin}^{commit}`],
+  )
+  if (pinResult.status !== 0 || !pinResult.stdout) {
+    return spawnRefusal('pin-unresolved', `pin ${String(pin)} cannot be resolved in ${repo}`)
+  }
+  const setPin = pinResult.stdout
+
+  const planned = armSpecs.map((_spec, offset) => {
+    const index = offset + 1
+    return {
+      index,
+      dir: join(worktreeRoot, worktreeName(setId, index)),
+      branch: `arms/${setId}/${String(index).padStart(2, '0')}`,
+    }
+  })
+  for (const plan of planned) {
+    let exists = false
+    try { exists = d.existsSync(plan.dir) } catch { exists = true }
+    if (exists) {
+      return spawnRefusal('worktree-exists', `worktree path already exists: ${plan.dir}`, { path: plan.dir })
+    }
+  }
+
+  const spawner = args.spawn === undefined ? factoryctlSpawner : args.spawn
+  const spawnedArms = []
+  for (let offset = 0; offset < planned.length; offset += 1) {
+    const plan = planned[offset]
+    const axes = armSpecs[offset].axes
+    const spawnResult = git(
+      ['-C', repo],
+      ['worktree', 'add', '-b', plan.branch, plan.dir, setPin],
+    )
+    if (spawnResult.status !== 0) {
+      return spawnPartial({
+        setId, manifestPath, pin: setPin, arms: spawnedArms,
+        index: plan.index, phase: 'worktree', reason: 'worktree-failed',
+        message: spawnResult.stderr || `git worktree add exited with status ${String(spawnResult.status)}`,
+      })
+    }
+
+    const head = git(['-C', plan.dir], ['rev-parse', '--verify', 'HEAD'])
+    const found = head.status === 0 && head.stdout ? head.stdout : null
+    if (found !== setPin) {
+      return spawnPartial({
+        setId, manifestPath, pin: setPin, arms: spawnedArms,
+        index: plan.index, phase: 'worktree', reason: 'arm-pin-mismatch',
+        message: `arm ${plan.index} pin mismatch: expected ${setPin}, found ${found || 'unresolved'}`,
+        found,
+        failure: { pin: setPin },
+      })
+    }
+
+    let admitted
+    try {
+      const spawnInput = {
+        setId,
+        index: plan.index,
+        armSlug: armSlug(setId, plan.index),
+        checkout: plan.dir,
+        branch: plan.branch,
+        axes,
+        pin: setPin,
+        brief: args.brief,
+        tier: args.tier,
+      }
+      if (spawner === factoryctlSpawner) spawnInput.deps = d
+      admitted = typeof spawner === 'function'
+        ? spawner(spawnInput)
+        : { ok: false, reason: 'spawn-failed', message: 'spawn must be a function' }
+    } catch (err) {
+      admitted = { ok: false, reason: 'spawn-failed', message: spawnMessage(err, 'spawner failed') }
+    }
+    if (!admitted || admitted.ok !== true) {
+      const spawnReason = admitted?.reason
+      return spawnPartial({
+        setId, manifestPath, pin: setPin, arms: spawnedArms,
+        index: plan.index, phase: 'spawn', reason: 'spawn-failed',
+        message: admitted?.message || 'spawner refused the arm',
+        ...(spawnReason ? { spawn_reason: spawnReason } : {}),
+      })
+    }
+
+    if (!usablePath(admitted.adwId) || !usablePath(admitted.crewDir)) {
+      return spawnPartial({
+        setId, manifestPath, pin: setPin, arms: spawnedArms,
+        index: plan.index, phase: 'spawn', reason: 'spawn-id-missing',
+        message: 'spawner returned no usable adwId and crewDir',
+      })
+    }
+
+    let appended
+    try {
+      appended = appendArm({
+        manifestPath,
+        setId,
+        adwId: admitted.adwId,
+        axes,
+        pin: setPin,
+        crewDir: admitted.crewDir,
+        checkout: plan.dir,
+        deps: d,
+      })
+    } catch (err) {
+      appended = { ok: false, reason: 'write-failed', message: spawnMessage(err, 'manifest append failed') }
+    }
+    if (!appended || appended.ok !== true) {
+      const appendReason = appended?.reason || 'write-failed'
+      return spawnPartial({
+        setId, manifestPath, pin: setPin, arms: spawnedArms,
+        index: plan.index, phase: 'append', reason: 'append-failed',
+        message: appended?.message || `appendArm refused the arm: ${appendReason}`,
+        append_reason: appendReason,
+      })
+    }
+
+    spawnedArms.push({
+      adw_id: admitted.adwId,
+      index: plan.index,
+      axes,
+      checkout: plan.dir,
+      branch: plan.branch,
+      crew_dir: admitted.crewDir,
+    })
+  }
+
+  return {
+    ok: true,
+    status: ARM_SPAWN_STATUSES.SPAWNED,
+    set_id: setId,
+    manifest_path: manifestPath,
+    pin: setPin,
+    arms: spawnedArms,
+    count: spawnedArms.length,
   }
 }

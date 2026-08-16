@@ -5,6 +5,8 @@ import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFi
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { cellFailureKind, emitAdapter, realIo, nextRung, nextModelRung } from './realio.mjs'
+import { resolveSeatModels } from './crew.mjs'
+import * as piAdapter from './adapters/adapter-pi.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './realio.mjs'
@@ -88,7 +90,7 @@ function makeRealIo() {
 
 const ROSTER = JSON.parse(fsReadFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 
-function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, readRoster, ...deps } = {}) {
+function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, adapters, readRoster, ...deps } = {}) {
   const source = cell || ROSTER.tiers[tier]?.[role] || ROSTER.tiers.mechanical[role]
   const selectedAgent = agent || source.agent
   const member = {
@@ -101,7 +103,7 @@ function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json
   }
   const paths = dirs()
   const logs = []
-  const io = realIo(crew, paths, paths.dir, null, { [role]: { adapter } }, {}, {
+  const io = realIo(crew, paths, paths.dir, null, adapters === undefined ? { [role]: { adapter } } : adapters, {}, {
     readRoster: readRoster || (() => ROSTER),
     logLine: (_path, obj) => logs.push(obj),
     ...deps,
@@ -257,6 +259,26 @@ test('realIo run reports status, spawn errors, and signals', () => {
   assert.deepEqual(f.io.run('ok'), { ok: true, output: '' })
   assert.equal(f.io.run('fail').ok, false)
   assert.match(f.io.run('signal').output, /spawn error|killed by SIGTERM/)
+})
+
+test('realIo run neutralises colour while preserving the inherited environment', () => {
+  const saved = process.env.FORCE_COLOR
+  process.env.FORCE_COLOR = '3'
+  try {
+    let options = null
+    const paths = dirs()
+    const io = realIo({ members: {} }, paths, paths.dir, null, null, {}, {
+      spawnSync: (_bin, _argv, opts) => { options = opts; return { status: 0, stdout: '', stderr: '' } },
+    })
+    io.run('anything')
+    assert.equal(options.env.FORCE_COLOR, undefined)
+    assert.equal(options.env.CLICOLOR_FORCE, undefined)
+    assert.equal(options.env.NO_COLOR, '1')
+    assert.equal(options.env.PATH, process.env.PATH)
+  } finally {
+    if (saved === undefined) delete process.env.FORCE_COLOR
+    else process.env.FORCE_COLOR = saved
+  }
 })
 
 test('realIo runClean skips stash on a clean tree and restores dirty work on command failure', () => {
@@ -593,13 +615,58 @@ test('reseat never throws when roster loading fails or the tier is unknown', () 
   assert.equal(unknown.io.reseat('reviewer').reason, 'exhausted')
 })
 
-test('reseat translates models through the adapter and falls back to bare ids', () => {
+test('reseat translates through injected and run-path adapters and persists the boot model string', () => {
   const translated = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi', adapter: { modelString: ({ id }) => `X:${id}` } })
   const first = translated.io.reseat('reviewer')
   assert.equal(first.applied, true)
   assert.equal(translated.crew.members.reviewer.model, 'X:gpt-5.6-terra')
-  const fallback = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi' })
-  const second = fallback.io.reseat('reviewer')
+
+  const expected = resolveSeatModels(
+    { reviewer: ROSTER.tiers.build.reviewer },
+    { reviewer: { name: 'pi', adapter: piAdapter } },
+  ).reviewer.model
+  const runPath = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi', adapters: null })
+  const second = runPath.io.reseat('reviewer')
   assert.equal(second.applied, true)
-  assert.equal(fallback.crew.members.reviewer.model, 'gpt-5.6-terra')
+  assert.equal(second.to.model, expected)
+  assert.equal(runPath.crew.members.reviewer.model, expected)
+  assert.notEqual(runPath.crew.members.reviewer.model, 'gpt-5.6-terra')
+})
+
+test('reseat refuses when no adapter can translate the next cell', () => {
+  const unknownRoster = JSON.parse(JSON.stringify(ROSTER))
+  for (const tier of ['mechanical', 'build']) unknownRoster.tiers[tier].reviewer.agent = 'nosuchagent'
+  const unknown = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'nosuchagent',
+    readRoster: () => unknownRoster,
+  })
+  const unknownBefore = { ...unknown.crew.members.reviewer }
+  const unknownResult = unknown.io.reseat('reviewer')
+  assert.equal(unknownResult.applied, false)
+  assert.equal(unknownResult.reason, 'transport')
+  assert.equal(unknownResult.to, null)
+  assert.match(unknownResult.why, /adapter/i)
+  assert.deepEqual(unknown.crew.members.reviewer, unknownBefore)
+  assert.equal(fsExistsSync(join(unknown.paths.dir, 'crew.json')), false)
+
+  const googleRoster = {
+    tiers: {
+      mechanical: { reviewer: { provider: 'google', id: 'gem-9', effort: 'medium', agent: 'pi' } },
+      build: { reviewer: { provider: 'google', id: 'gem-10', effort: 'max', agent: 'pi' } },
+      judge: {},
+    },
+    models: {},
+  }
+  const google = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi',
+    cell: googleRoster.tiers.mechanical.reviewer, readRoster: () => googleRoster,
+  })
+  const googleBefore = { ...google.crew.members.reviewer }
+  const googleResult = google.io.reseat('reviewer')
+  assert.equal(googleResult.applied, false)
+  assert.equal(googleResult.reason, 'transport')
+  assert.equal(googleResult.to, null)
+  assert.match(googleResult.why, /google/)
+  assert.deepEqual(google.crew.members.reviewer, googleBefore)
+  assert.equal(fsExistsSync(join(google.paths.dir, 'crew.json')), false)
 })

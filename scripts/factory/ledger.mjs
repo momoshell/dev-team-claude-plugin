@@ -45,6 +45,7 @@
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
 // `cell-failures [--since <iso>] [--until <iso>]` |
 // `modifier-attempts [--since <iso>] [--until <iso>]` |
+// `ci-cycles [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
 // (spellings are a contract with package.json; see do-40-02) — plus `doctor`
 // (capability + state readout) and `kill` (operator-invoked process
@@ -120,6 +121,13 @@ export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unk
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
+
+// The adjudication of one watched CI check. 'green' is a MEASURED fact, not
+// a gap — recording it is what gives "how often does CI catch what the local
+// lane missed" a denominator. 'unknown' is an honest non-answer carrying its
+// own reason; it is never a green and never a repair.
+export const CI_CLASSIFICATIONS = Object.freeze(['green', 'reproduced', 'platform-divergent', 'unknown'])
+export const CI_DECISIONS = Object.freeze(['none', 'repair', 'park'])
 
 // The closed set of CELL availability failures — a cell that could not hold a
 // seat, died mid-assignment, or returned nothing usable. Deliberately NOT a
@@ -443,6 +451,29 @@ export const TABLES = Object.freeze({
     unique: [['run_id', 'adw_id']],
     indexes: [{ name: 'run_links_run_id_idx', cols: ['run_id'] }],
   },
+  ci_cycles: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },        // NULL is a FACT: a host watch
+      { name: 'task_slug', decl: 'TEXT' },     // may precede any crew run
+      { name: 'repo_slug', decl: 'TEXT' },
+      { name: 'branch', decl: 'TEXT' },
+      { name: 'head_sha', decl: 'TEXT' },
+      { name: 'check_name', decl: 'TEXT' },
+      { name: 'cycle', decl: 'INTEGER' },
+      { name: 'conclusion', decl: 'TEXT' },     // the platform's own word, verbatim
+      { name: 'classification', decl: 'TEXT' }, // this module's adjudication
+      { name: 'decision', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'excerpt', decl: 'TEXT' },        // VERBATIM — never sliced here
+      { name: 'excerpt_source', decl: 'TEXT' },
+      { name: 'local_lane', decl: 'TEXT' },
+      { name: 'local_exit', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['branch', 'head_sha', 'check_name', 'cycle']],
+    indexes: [{ name: 'ci_cycles_classification_idx', cols: ['check_name', 'classification', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -450,7 +481,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1233,6 +1264,60 @@ export function openLedger({
     return args
   }
 
+  function recordCiCycle(input = {}) {
+    requireFields(input, ['branch', 'head_sha', 'check_name', 'cycle', 'conclusion', 'classification', 'decision'], 'recordCiCycle')
+    requireEnum(input.classification, CI_CLASSIFICATIONS, 'recordCiCycle', 'classification')
+    requireEnum(input.decision, CI_DECISIONS, 'recordCiCycle', 'decision')
+    if (input.decision === 'repair' && input.classification !== 'reproduced') {
+      refuse("recordCiCycle: decision 'repair' requires classification 'reproduced'")
+    }
+    if (input.classification === 'unknown' && !input.reason) {
+      refuse("recordCiCycle: classification 'unknown' requires a reason")
+    }
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      task_slug: input.task_slug ?? null,
+      repo_slug: input.repo_slug ?? null,
+      branch: input.branch ?? null,
+      head_sha: input.head_sha ?? null,
+      check_name: input.check_name ?? null,
+      cycle: input.cycle ?? null,
+      conclusion: input.conclusion ?? null,
+      classification: input.classification,
+      decision: input.decision,
+      reason: input.reason == null ? null : String(input.reason),
+      excerpt: input.excerpt ?? null,
+      excerpt_source: input.excerpt_source ?? null,
+      local_lane: input.local_lane == null ? null : String(input.local_lane),
+      local_exit: input.local_exit ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    // A nonce-bearing reason is dropped by redact(), but an unknown row still
+    // needs a non-empty reason so its JSONL remains replayable. Keep the
+    // hygiene boundary honest with a safe sentinel rather than restoring the
+    // caller's secret-bearing bytes.
+    if (input.classification === 'unknown' && input.reason != null && args.reason === undefined) {
+      args.reason = 'redacted'
+    }
+    if (args.reason != null) args.reason = args.reason.slice(0, 500)
+    if (args.conclusion != null) args.conclusion = String(args.conclusion).slice(0, 120)
+    if (args.check_name != null) args.check_name = String(args.check_name).slice(0, 200)
+    if (args.local_lane != null) args.local_lane = args.local_lane.slice(0, 500)
+    // Truncating a failure is the thing this column exists to prevent; the
+    // EXCERPT boundary is chosen in ci-watch.mjs and recorded in excerpt_source.
+    if (input.excerpt != null && args.excerpt === undefined) {
+      args.excerpt = null
+      args.excerpt_source = 'redacted'
+    }
+    appendJsonl('recordCiCycle', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('ci_cycles').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO ci_cycles (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordModifierAttempt(input = {}) {
     requireFields(input, ['role', 'modifier', 'outcome'], 'recordModifierAttempt')
     requireEnum(input.modifier, MODIFIER_KINDS, 'recordModifierAttempt', 'modifier')
@@ -1629,6 +1714,17 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function ciCycles({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT check_name, classification, cycle,
+        COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM ci_cycles
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY check_name, classification, cycle
+      ORDER BY check_name, classification, cycle
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -1859,10 +1955,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -2166,7 +2262,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | task | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | task | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -2314,6 +2410,30 @@ export function main(argv) {
       const rows = ledger.modifierAttempts({ since, until })
       if (ledger.stats().degraded) refuse('modifier-attempts: the ledger mirror is degraded — this window is unanswerable, not empty')
       stdout.write(`${JSON.stringify({ schema: 1, question: "How often does a modifier fire, and how often does firing change anything?", since, until, modifiers: MODIFIER_KINDS, outcomes: MODIFIER_ATTEMPT_OUTCOMES, rows })}\n`)
+      return 0
+    }
+
+    if (verb === 'ci-cycles') {
+      if (positional.length > 0) refuse('ci-cycles: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'ci-cycles') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'ci-cycles') : null
+      if (until != null && since != null && until <= since) refuse('ci-cycles: --until must be later than --since')
+      const rows = ledger.ciCycles({ since, until })
+      if (ledger.stats().degraded) refuse('ci-cycles: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const watched = rows.reduce((n, row) => n + Number(row.count ?? 0), 0)
+      const caught = rows.reduce((n, row) => n + (row.classification === 'reproduced' ? Number(row.count ?? 0) : 0), 0)
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: "How often does CI catch what the local lane missed, and does one repair cycle fix it?",
+        since, until,
+        classifications: CI_CLASSIFICATIONS,
+        decisions: CI_DECISIONS,
+        watched,
+        caught,
+        rows,
+      })}\n`)
       return 0
     }
 

@@ -251,6 +251,71 @@ test('fences are sorted and no fence register is explicit when omitted', () => {
   assert.match(section(without, '## Fences'), /no fence register supplied \(`--fences` not given\)/)
 })
 
+test('a named lane declares its fence as the write surface and keeps discovery distinct', () => {
+  const root = fixture('named-lane')
+  const fencesPath = put(root, 'fences.json', JSON.stringify({
+    lanes: [
+      { lane: 'own', files: ['lib/widget.mjs', 'test/widget-new.test.mjs'] },
+      { lane: 'other', files: ['test/reads-config.test.mjs'] },
+    ],
+  }, null, 2) + '\n')
+  const { brief } = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'])
+  const conventions = section(brief, '## Conventions')
+  const writeLine = conventions.split('\n').find((line) => line.startsWith('files_in_scope'))
+  const readLine = conventions.split('\n').find((line) => line.startsWith('read-and-keep-green'))
+  assert.equal(writeLine, 'files_in_scope (expected write surface; basis: fence register, lane "own"): lib/widget.mjs, test/widget-new.test.mjs')
+  assert.ok(readLine)
+  assert.match(readLine, /test\/widget\.test\.mjs/)
+  assert.doesNotMatch(writeLine, /test\/(?:reads-config\.test|widget\.test)\.mjs/)
+  const writeFiles = writeLine.slice(writeLine.indexOf('): ') + 3).split(', ')
+  const readFiles = readLine.slice(readLine.indexOf(': ') + 2).split(', ')
+  assert.ok(writeFiles.every((file) => !readFiles.includes(file)))
+})
+
+test('an unknown lane and a lane without fences both refuse with unknown-lane', () => {
+  const root = fixture('unknown-lane')
+  const fencesPath = put(root, 'fences.json', JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
+  }) + '\n')
+  const unknown = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--fences', fencesPath, '--lane', 'nope',
+  ])
+  assert.equal(unknown.status, 2)
+  assert.match(unknown.stderr, /unknown-lane/)
+  const withoutFences = run(root, [
+    '--request', request(root), '--checkout', root, '--lane', 'own',
+  ])
+  assert.equal(withoutFences.status, 2)
+  assert.match(withoutFences.stderr, /unknown-lane/)
+  assert.ok(REFUSAL_REASONS.includes('unknown-lane'))
+})
+
+test('without fences the write surface is the authored where paths and names its basis', () => {
+  const root = fixture('authored-where')
+  const { brief } = compile(root)
+  const conventions = section(brief, '## Conventions')
+  const writeLine = conventions.split('\n').find((line) => line.startsWith('files_in_scope'))
+  const readLine = conventions.split('\n').find((line) => line.startsWith('read-and-keep-green'))
+  assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/widget.mjs')
+  assert.doesNotMatch(writeLine, /test\/widget\.test\.mjs/)
+  assert.match(readLine, /test\/widget\.test\.mjs/)
+})
+
+test('the lane is never inferred from the output filename', () => {
+  const root = fixture('lane-output-name')
+  const fencesPath = put(root, 'fences.json', JSON.stringify({
+    lanes: [
+      { lane: 'own', files: ['lib/widget.mjs', 'test/widget-new.test.mjs'] },
+      { lane: 'other', files: ['test/reads-config.test.mjs'] },
+    ],
+  }, null, 2) + '\n')
+  const { brief } = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'], 'other.md')
+  const writeLine = section(brief, '## Conventions')
+    .split('\n').find((line) => line.startsWith('files_in_scope'))
+  assert.equal(writeLine, 'files_in_scope (expected write surface; basis: fence register, lane "own"): lib/widget.mjs, test/widget-new.test.mjs')
+})
+
 test('standing blocks and unfilled slots render verbatim', () => {
   const root = fixture('standing')
   const { brief } = compile(root)
@@ -451,7 +516,7 @@ test('shape proposal stays deferred while tier proposal wiring is present', () =
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 11)
+  assert.equal(REFUSAL_REASONS.length, 12)
   assert.ok(REFUSAL_REASONS.includes('bad-protected'))
 })
 

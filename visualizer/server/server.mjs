@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
+import { proposeEdit } from './roster-edit.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -101,6 +102,16 @@ export function startServer(options = {}) {
       if (url.pathname === '/api/roster') {
         if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
         return json(res, 200, { schema, ...roster.readRoster() })
+      }
+      if (url.pathname === '/api/roster/propose') {
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.tier !== 'string' || typeof input.role !== 'string') return json(res, 400, { schema, error: 'tier and role are required' })
+        if (input.cell !== null && (typeof input.cell !== 'object' || Array.isArray(input.cell))) return json(res, 400, { schema, error: 'cell must be an object or null' })
+        const raw = roster.readRaw()
+        const result = proposeEdit({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, tier: input.tier, role: input.role, cell: input.cell })
+        return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/health') {
         if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })

@@ -294,6 +294,57 @@ test('roster endpoint serves the runtime roster read-only and degrades honestly'
   }
 })
 
+test('roster proposals validate, refuse safely, and never write the roster', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-roster-propose-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db'), crewRoot = join(dir, 'crew')
+  const { done } = fixture(ledgerDb)
+  returnsFixture(crewRoot, done)
+  const rosterPath = join(process.cwd(), 'crew', 'roster.json')
+  const rosterBefore = digest(rosterPath)
+  const crewBefore = treeDigest(crewRoot)
+  const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot))
+    assert.equal((await json(base, '/api/roster/propose')).status, 405)
+    assert.equal((await json(base, '/api/roster/propose', { method: 'PUT' })).status, 405)
+    assert.equal((await json(base, '/api/roster/propose', { method: 'POST', body: '{ not json' })).status, 400)
+    assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
+    assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: 'opus' }) })).status, 400)
+    const legal = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }) })
+    assert.equal(legal.status, 200)
+    assert.equal(legal.json.ok, true)
+    assert.match(legal.json.diff, /^--- a\/crew\/roster\.json$/m)
+    assert.match(legal.json.diff, /^\+\+\+ b\/crew\/roster\.json$/m)
+    const cross = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }) })
+    assert.equal(cross.status, 200)
+    assert.equal(cross.json.ok, false)
+    assert.equal(cross.json.diff, null)
+    assert.match(JSON.stringify(cross.json.refusals), /cross-vendor/)
+    assert.match(JSON.stringify(cross.json.refusals), /planner/)
+    assert.doesNotMatch(JSON.stringify(legal.json), /cost_in_per_mtok|cost_out_per_mtok|usd|spend/i)
+    const read = await json(base, '/api/roster')
+    assert.equal(read.status, 200)
+    assert.equal(read.json.degraded, false)
+    assert.equal(read.json.tiers.find((tier) => tier.tier === 'build').seats.find((seat) => seat.role === 'reviewer').effort, 'max')
+    assert.equal((await json(base, '/api/roster', { method: 'POST' })).status, 405)
+    await stopServer(child); child = null
+
+    const missing = join(dir, 'missing-roster.json');
+    ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot, missing))
+    const absent = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: roster.tiers.build.reviewer }) })
+    assert.equal(absent.status, 200)
+    assert.equal(absent.json.ok, false)
+    assert.equal(absent.json.diff, null)
+    assert.match(JSON.stringify(absent.json.refusals), /missing-roster\.json/)
+  } finally {
+    if (child) await stopServer(child)
+    assert.equal(digest(rosterPath), rosterBefore)
+    assert.equal(treeDigest(crewRoot), crewBefore)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('optional-column probe latches after both columns land', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-probe-'))
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')

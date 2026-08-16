@@ -54,6 +54,43 @@ export function rosterPanel(payload = {}) {
   }
 }
 
+export function rosterEditForm(payload = {}, selection = {}) {
+  const unavailable = payload?.error || 'roster unavailable — no reason was reported'
+  if (!Array.isArray(payload?.tiers) || payload.tiers.length === 0) {
+    return { tiers: [], roles: [], cell: null, pending: unavailable }
+  }
+  const tiers = payload.tiers
+    .map((tier) => tier?.tier)
+    .filter((tier) => typeof tier === 'string' && tier.length > 0)
+  if (!tiers.length) return { tiers: [], roles: [], cell: null, pending: unavailable }
+  const selectedTier = tiers.includes(selection?.tier) ? selection.tier : tiers[0]
+  const tier = payload.tiers.find((candidate) => candidate?.tier === selectedTier)
+  const roles = []
+  for (const seat of Array.isArray(tier?.seats) ? tier.seats : []) {
+    if (typeof seat?.role === 'string' && !roles.includes(seat.role)) roles.push(seat.role)
+  }
+  for (const role of Array.isArray(tier?.unseated) ? tier.unseated : []) {
+    if (typeof role === 'string' && !roles.includes(role)) roles.push(role)
+  }
+  if (!roles.length) return { tiers, roles: [], cell: null, pending: unavailable }
+  const selectedRole = roles.includes(selection?.role) ? selection.role : roles[0]
+  const seat = (Array.isArray(tier?.seats) ? tier.seats : []).find((candidate) => candidate?.role === selectedRole)
+  const cell = seat ? {
+    provider: seat.provider ?? '',
+    id: seat.id ?? '',
+    agent: seat.agent ?? '',
+    effort: seat.effort ?? '',
+  } : null
+  return { tiers, roles, cell, pending: null }
+}
+
+export function rosterProposal(response = null) {
+  const refusals = Array.isArray(response?.refusals) ? response.refusals : []
+  if (response?.ok === true && typeof response.diff === 'string') return { diff: response.diff, refusals, pending: null }
+  const pending = response?.error || (refusals.length ? 'roster edit refused' : 'roster proposal unavailable')
+  return { diff: null, refusals, pending }
+}
+
 export function gateChips(run = {}) {
   const generations = Array.isArray(run.gate_generations)
     ? [...run.gate_generations].sort((a, b) => (a?.gate_generation ?? 0) - (b?.gate_generation ?? 0))

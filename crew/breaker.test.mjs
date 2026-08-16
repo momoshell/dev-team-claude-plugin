@@ -4,6 +4,7 @@ import assert from 'node:assert/strict'
 import {
   BREAKER_ENV, DEFAULT_BREAKER_WINDOW_MS, assertCellsClosed, breakerPolicy, cellHealth,
 } from './breaker.mjs'
+import { NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
 const CELL = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }
 const SEATS = { builder: { ...CELL } }
@@ -234,3 +235,139 @@ test('cellHealth closes a ledger handle even when cellFailures throws', () => {
   assert.equal(record.verdict, 'unmeasurable')
   assert.equal(openLedger.closes(), 1)
 })
+
+// kills: policy-empty-not-null — treats an empty threshold as malformed instead of no policy.
+test('breakerPolicy treats an empty threshold as no policy at all', () => {
+  assert.equal(breakerPolicy({ [BREAKER_ENV.threshold]: '' }), null)
+})
+
+// kills: version-lt-becomes-lte — treats a version exactly at NODE_FLOOR as below the floor.
+// kills: version-equal-is-below — returns false for a version exactly equal to NODE_FLOOR.
+// kills: version-unparseable-passes — lets an unparseable version pass the floor check.
+test('cellHealth measures at exactly NODE_FLOOR and refuses an unparseable version', () => {
+  const atFloor = health([], { nodeVersion: NODE_FLOOR }).record
+  assert.notEqual(atFloor.verdict, 'unmeasurable')
+
+  const unparseable = health([], { nodeVersion: 'not-a-version' }).record
+  assert.equal(unparseable.verdict, 'unmeasurable')
+  assert.ok(unparseable.why.includes(NODE_FLOOR))
+})
+
+// equivalent: version-gt-becomes-gte — versionAtLeast is only called with NODE_FLOOR = '24.0.0', whose minor and patch are both 0; returning early on an equal part can differ only when a later part is below a nonzero floor, which cannot happen here.
+// equivalent: version-major-only — with NODE_FLOOR = '24.0.0', the minor and patch comparisons cannot change the answer, so comparing only the major part is equivalent until the floor gains a nonzero minor or patch.
+test('cellHealth skips a seat missing either half of its cell identity', () => {
+  // kills: seat-null-provider-admitted — admits a seat whose provider is null.
+  const nullProvider = health(
+    [row({ provider: null, failures: 100 })],
+    { seats: { builder: { ...CELL, provider: null } } },
+  ).record
+  assert.equal(nullProvider.verdict, 'closed')
+  assert.deepEqual(nullProvider.cells, [])
+
+  // kills: seat-null-id-admitted — admits a seat whose id is null.
+  const nullId = health(
+    [row({ model_id: null, failures: 100 })],
+    { seats: { builder: { ...CELL, id: null } } },
+  ).record
+  assert.equal(nullId.verdict, 'closed')
+  assert.deepEqual(nullId.cells, [])
+})
+
+// kills: null-row-not-skipped — does not skip a null ledger row before reading its fields.
+// kills: rows-not-array-guarded — iterates a non-array cellFailures result.
+test('cellHealth survives a null row and a non-array cellFailures result', () => {
+  let withNullRow
+  assert.doesNotThrow(() => {
+    withNullRow = health([null, row({ failures: 2 })]).record
+  })
+  assert.equal(withNullRow.verdict, 'open')
+
+  let withUndefinedRows
+  assert.doesNotThrow(() => {
+    withUndefinedRows = health(undefined).record
+  })
+  assert.equal(withUndefinedRows.verdict, 'closed')
+  assert.equal(withUndefinedRows.cells[0].counted, 0)
+})
+
+// kills: counted-floor-removed — leaves a negative counted value when run_less exceeds failures.
+// kills: number-value-not-guarded — retains a non-finite value instead of coercing it to zero.
+test('cellHealth floors a negative count and ignores a non-numeric failure count', () => {
+  const negative = health([row({ failures: 1, run_less: 3 })]).record
+  assert.equal(negative.cells[0].counted, 0)
+
+  const nonNumeric = health([row({ failures: 'lots' })]).record
+  assert.equal(nonNumeric.cells[0].failures, 0)
+  assert.equal(nonNumeric.cells[0].counted, 0)
+})
+
+// kills: cellkey-no-separator — concatenates cell identity fields without a separator.
+test('cellHealth keeps cells distinct when their fields would concatenate alike', () => {
+  const seats = {
+    a: { provider: 'open', id: 'ai-x', agent: 'pi', effort: 'max' },
+    b: { provider: 'openai', id: '-x', agent: 'pi', effort: 'max' },
+  }
+  const record = health([], { seats }).record
+  assert.equal(record.cells.length, 2)
+})
+
+// kills: open-cells-not-filtered — includes non-open cells in an open refusal.
+test('an open refusal names only the open cells', () => {
+  const seats = {
+    builder: { ...CELL },
+    reviewer: { ...CELL, effort: 'medium' },
+  }
+  const record = health([
+    row({ role: 'builder', failures: 2 }),
+    row({ role: 'reviewer', effort: 'medium', failures: 1 }),
+  ], { seats }).record
+  let error
+  assert.throws(() => assertCellsClosed(record), (caught) => {
+    error = caught
+    return caught.code === 'breaker-open'
+  })
+  assert.ok(error.message.includes('effort=max'))
+  assert.doesNotMatch(error.message, /effort=medium/)
+})
+
+// kills: window-label-hours — omits the hour form from a refusal window label.
+// kills: window-label-minutes — omits the minute form from a refusal window label.
+test('an open refusal labels the window in hours, minutes, or milliseconds', () => {
+  const refusal = (window_ms) => {
+    const record = health([row({ failures: 2 })], { window_ms }).record
+    let error
+    assert.throws(() => assertCellsClosed(record), (caught) => {
+      error = caught
+      return caught.code === 'breaker-open'
+    })
+    return error.message
+  }
+
+  assert.match(refusal(3600000), /\(1h\)/)
+  assert.match(refusal(900000), /\(15m\)/)
+  assert.match(refusal(1000), /\(1000ms\)/)
+})
+
+// kills: cell-sort-dropped — leaves cells in seat insertion order.
+// kills: roles-sort-dropped — leaves shared-cell roles in seat insertion order.
+// kills: by-kind-sort-dropped — leaves by_kind keys in row insertion order.
+test('cellHealth returns cells, roles, and by_kind in sorted order', () => {
+  const seats = {
+    zeta: { ...CELL, provider: 'openai' },
+    alpha: { ...CELL, provider: 'openai' },
+    beta: { ...CELL, provider: 'anthropic' },
+  }
+  const record = health([
+    row({ role: 'zeta', kind: 'timeout', failures: 1 }),
+    row({ role: 'alpha', kind: 'boot-refusal', failures: 1 }),
+  ], { seats }).record
+  assert.deepEqual(record.cells.map((cell) => cell.provider), ['anthropic', 'openai'])
+  const shared = record.cells.find((cell) => cell.provider === 'openai')
+  assert.deepEqual(shared.roles, ['alpha', 'zeta'])
+  assert.deepEqual(Object.keys(shared.by_kind), ['boot-refusal', 'timeout'])
+})
+
+// equivalent: assert-passthrough-closed-dropped — after the pass-through line, every verdict other than unmeasurable and open already returns, so removing the explicit closed check cannot change behavior.
+// equivalent: assert-passthrough-degraded-dropped — after the pass-through line, every verdict other than unmeasurable and open already returns, so removing the explicit degraded check cannot change behavior.
+// equivalent: assert-passthrough-na-dropped — after the pass-through line, every verdict other than unmeasurable and open already returns, so removing the explicit not-applicable check cannot change behavior.
+// equivalent: assert-passthrough-whole-line-dropped — the whole pass-through line minus its !record half is redundant because the later verdict checks return for closed, degraded, and not-applicable; the !record half remains load-bearing.

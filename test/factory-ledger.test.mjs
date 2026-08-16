@@ -23,8 +23,9 @@ import {
   openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES,
+  RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
 } from '../scripts/factory/ledger.mjs'
-import { MODIFIER_OUTCOMES } from '../crew/drive.mjs'
+import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
 // AC-13 (both test files never reference the CLI-only default-db-path
@@ -636,6 +637,7 @@ test('a run with no usage, discrimination or findings reads as absent, not zero'
     accept_decisions: 'predates typed accept decisions (#170)',
     gate_results: 'predates gate verdict recording (#130)',
     phases: 'no phase rows recorded for this run',
+    variant: "this run's first recorded event is not a shape marker — the run shape is unmeasured (#251), never a measured \"full\"",
   })
 })
 
@@ -701,7 +703,7 @@ test('taskReadout prints a schema-1 payload stating its question and definition'
   assert.equal(payload.schema, 1)
   assert.match(payload.question, /what ran/i)
   assert.equal(typeof payload.definition, 'object')
-  for (const key of ['adw_id', 'resolved_by', 'session', 'phases', 'gate_generations', 'review_outcomes', 'accept_decisions', 'usage', 'absent']) {
+  for (const key of ['adw_id', 'resolved_by', 'session', 'phases', 'gate_generations', 'review_outcomes', 'accept_decisions', 'usage', 'variant', 'absent']) {
     assert.ok(key in payload, `payload is missing ${key}`)
   }
 })
@@ -1281,6 +1283,92 @@ function seedRun(ledger, adwId, startedAt, status = 'running') {
   ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: startedAt })
   if (status !== 'running') ledger.endSession({ adw_id: adwId, status })
 }
+
+test('run variant registers stay equal to the driver enum and marker values', { skip: SKIP }, () => {
+  assert.deepEqual([...RUN_VARIANTS], [...VARIANT_NAMES])
+  assert.deepEqual([...new Set(Object.values(RUN_VARIANT_MARKERS))].sort(), [...RUN_VARIANTS].sort())
+})
+
+test('taskReadout derives full and scout from their first stage markers', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'variant-task-full', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-task-full', type: 'log', payload: { level: 'info', message: 'plan:r1' } })
+  ledger.recordEvent({ adw_id: 'variant-task-full', type: 'log', payload: { level: 'info', message: 'build:r1' } })
+  seedRun(ledger, 'variant-task-scout', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-task-scout', type: 'log', payload: { level: 'info', message: 'scout:r1' } })
+  ledger.recordEvent({ adw_id: 'variant-task-scout', type: 'log', payload: { level: 'info', message: 'envelope-accept' } })
+
+  const full = ledger.taskReadout('variant-task-full')
+  const scout = ledger.taskReadout('variant-task-scout')
+  assert.equal(full.variant, 'full')
+  assert.equal(scout.variant, 'scout')
+  assert.equal('variant' in full.absent, false)
+  assert.equal('variant' in scout.absent, false)
+})
+
+test('taskReadout uses only the first log row and marks absent shape evidence', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'variant-task-noisy', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-task-noisy', type: 'log', payload: { level: 'warn', message: 'attention:gate plan:r1 mentioned' } })
+  ledger.recordEvent({ adw_id: 'variant-task-noisy', type: 'log', payload: { level: 'info', message: 'plan:r1' } })
+  seedRun(ledger, 'variant-task-silent', RUNSET_SINCE)
+
+  const noisy = ledger.taskReadout('variant-task-noisy')
+  const silent = ledger.taskReadout('variant-task-silent')
+  assert.equal(noisy.variant, null)
+  assert.equal(typeof noisy.absent.variant, 'string')
+  assert.equal(silent.variant, null)
+  assert.equal(typeof silent.absent.variant, 'string')
+})
+
+test('variantFromFirstMessage recognizes only complete shape markers', { skip: SKIP }, () => {
+  assert.equal(variantFromFirstMessage('plan:r1'), 'full')
+  assert.equal(variantFromFirstMessage('scout:r1'), 'scout')
+  for (const value of ['plan', '', null, undefined, 42, 'attention:gate plan:r1']) {
+    assert.equal(variantFromFirstMessage(value), null, JSON.stringify(value))
+  }
+})
+
+test('runSet carries each run variant and marks an unmeasured row absent in the CLI', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'variant-set-full', RUNSET_SINCE)
+  ledger.recordEvent({ adw_id: 'variant-set-full', type: 'log', payload: { level: 'info', message: 'plan:r1' } })
+  seedRun(ledger, 'variant-set-scout', '2026-08-15T00:01:00.000Z')
+  ledger.recordEvent({ adw_id: 'variant-set-scout', type: 'log', payload: { level: 'info', message: 'scout:r1' } })
+  seedRun(ledger, 'variant-set-silent', '2026-08-15T00:02:00.000Z')
+  const rows = ledger.runSet({ since: RUNSET_SINCE })
+  assert.deepEqual(rows.map((row) => ({ adw_id: row.adw_id, variant: row.variant })), [
+    { adw_id: 'variant-set-full', variant: 'full' },
+    { adw_id: 'variant-set-scout', variant: 'scout' },
+    { adw_id: 'variant-set-silent', variant: null },
+  ])
+
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(typeof payload.absent.variant, 'string')
+})
+
+test('runSet derives variants in bounded chunks', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const total = STAGE_MARKER_CHUNK * 2 + 3
+  for (let i = 0; i < total; i += 1) {
+    const adwId = `variant-chunk-${String(i).padStart(4, '0')}`
+    seedRun(ledger, adwId, RUNSET_SINCE)
+    ledger.recordEvent({
+      adw_id: adwId, type: 'log',
+      payload: { level: 'info', message: i % 2 === 0 ? 'plan:r1' : 'scout:r1' },
+    })
+  }
+  const rows = ledger.runSet({ since: RUNSET_SINCE })
+  assert.equal(rows.length, total)
+  for (const row of rows) {
+    const index = Number(row.adw_id.slice('variant-chunk-'.length))
+    assert.equal(row.variant, index % 2 === 0 ? 'full' : 'scout', row.adw_id)
+  }
+})
 
 test('runSet returns only the runs whose started_at falls in the window', { skip: SKIP }, () => {
   const ledger = openTestLedger()

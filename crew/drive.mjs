@@ -49,6 +49,95 @@ export const PROTECTED_PATHS = Object.freeze([
   '.github/workflows/', 'crew/roster.json', 'crew/roster.schema.json',
   'crew/reclaim.mjs', 'crew/escalation-policy.mjs', 'crew/drive.mjs', 'docs/adr/',
 ])
+
+// #251 — blueprint variants: a CLOSED enum of run shapes over this one driver.
+// A variant is DATA this code consults at fixed sites — never a composition
+// engine, never a user-authored chain, and nothing here ever loops over a stage
+// list or executes a stage name. `escalate:*` and `done` are universal
+// terminals, so they are not a shape's own declared stages.
+export const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
+export const WRITE_SURFACES = Object.freeze(['planned', 'none'])
+export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
+export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
+export const VARIANTS = Object.freeze({
+  full: Object.freeze({
+    execution: 'reviewed',
+    required_seats: 'tier', // the tier seats this shape; it has no single seat
+    stages: Object.freeze(['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
+      'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
+      'suite', 'commit', 'converge']),
+    writes: 'planned',
+    // All THREE terminals, not just the first: :1876, :1860, :1905.
+    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
+    envelope_fields: Object.freeze([]),
+    assignment: null,
+  }),
+  scout: Object.freeze({
+    execution: 'envelope',
+    required_seats: Object.freeze(['planner']),
+    stages: Object.freeze(['scout', 'scope-gate', 'envelope-accept']),
+    writes: 'none',
+    accepted_by: 'envelope shape',
+    envelope_fields: Object.freeze([
+      Object.freeze({ name: 'findings', kind: 'records', item_fields: Object.freeze(['summary', 'evidence']) }),
+    ]),
+    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
+  }),
+})
+export const VARIANT_NAMES = Object.freeze(Object.keys(VARIANTS))
+export const DEFAULT_VARIANT = 'full'
+
+// Does this shape run that stage? The one question the declaration answers.
+// A fixed `if (runs('x'))` site consults it; nothing iterates the list.
+export function stageEnabled(shape, head) {
+  return Array.isArray(shape?.stages) && shape.stages.includes(head)
+}
+
+// The declaration BOUNDS execution: a run may not emit a stage its shape did not
+// declare. Enforced in `stage()` (the one recording point), so a shape cannot
+// silently widen at runtime. Returns null, or the reason it is a violation.
+export function undeclaredStage(shape, label) {
+  const head = String(label ?? '').split(':')[0]
+  if (UNIVERSAL_STAGE_HEADS.includes(head)) return null
+  if (stageEnabled(shape, head)) return null
+  return `stage ${JSON.stringify(label)} is not declared by this shape (declared: ${(shape?.stages || []).join(', ')})`
+}
+
+// Can this driver honour the declaration at all? A shape it cannot execute is
+// REFUSED with a reason — never silently run as something else. This is what
+// stops a future `quality`/`document` entry from falling through the whole
+// reviewed loop: today the reviewed executor implements exactly `full`'s stage
+// set, so a reviewed shape declaring a subset is refused until the slice that
+// gives it declared sources for scope, lane and gate lands.
+export function shapeDefect(shape) {
+  if (!shape || typeof shape !== 'object') return 'no declaration'
+  if (!EXECUTIONS.includes(shape.execution)) return `execution must be one of ${EXECUTIONS.join(', ')}`
+  if (!WRITE_SURFACES.includes(shape.writes)) return `writes must be one of ${WRITE_SURFACES.join(', ')}`
+  if (typeof shape.accepted_by !== 'string' || !shape.accepted_by.trim()) return 'accepted_by must say what accepts this shape'
+  if (!Array.isArray(shape.stages) || shape.stages.length === 0) return 'stages must declare the heads this shape emits'
+  for (const field of shape.envelope_fields || []) {
+    if (!ENVELOPE_FIELD_KINDS.includes(field?.kind)) return `envelope field ${JSON.stringify(field?.name)} must declare a kind in ${ENVELOPE_FIELD_KINDS.join(', ')}`
+  }
+  if (shape.execution === 'reviewed') {
+    if (shape.required_seats !== 'tier') return 'a reviewed shape is seated by the tier; required_seats must be "tier"'
+    const missing = VARIANTS.full.stages.filter((head) => !shape.stages.includes(head))
+    if (missing.length) {
+      return `the reviewed executor implements exactly the full stage set; this declaration omits ${missing.join(', ')}, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run`
+    }
+    return null
+  }
+  const seats = shape.required_seats
+  if (!Array.isArray(seats) || seats.length !== 1 || typeof seats[0] !== 'string' || !seats[0]) {
+    return 'an envelope shape runs exactly one declared seat; required_seats must be a one-role array'
+  }
+  if (!stageEnabled(shape, 'envelope-accept')) return 'an envelope shape must declare its envelope-accept stage'
+  if (shape.writes !== 'none') return 'an envelope shape has no plan to source a write surface from; writes must be "none"'
+  if (!stageEnabled(shape, 'scope-gate')) {
+    return 'a shape that claims to write nothing must declare the scope-gate stage that proves it'
+  }
+  return null
+}
+
 export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent'])
 
 // The compounding valve: on the FIRST round of a consult the lead may answer
@@ -126,6 +215,39 @@ function validEnvelope(env, role, id) {
     && typeof env.status === 'string'
     && (env.role === undefined || env.role === role)
     && (env.assignment_id === undefined || env.assignment_id === id)
+}
+
+// What accepts an envelope-shape run: the SHAPE of what came back. Deliberately
+// stricter than validEnvelope (:124), which only guards against a stale or
+// mis-addressed file. The required fields and their kinds come from the shape's
+// declaration, so a later member names its own without new code here.
+export function envelopeDefect(env, shape, { taskDir } = {}) {
+  if (!env || typeof env !== 'object') return 'no envelope'
+  if (typeof env.summary !== 'string' || !env.summary.trim()) return 'summary must be a non-empty string'
+  if (!Array.isArray(env.artifacts)) return 'artifacts must be an array'
+  for (const artifact of env.artifacts) {
+    if (typeof artifact !== 'string' || !artifact) return `artifacts must be paths, found ${JSON.stringify(artifact)}`
+    if (taskDir && !artifact.startsWith(`${taskDir}/`)) return `artifact ${JSON.stringify(artifact)} is outside the task dir`
+    if (artifact.split('/').some((segment) => segment === '.' || segment === '..')) return `artifact ${JSON.stringify(artifact)} must not contain . or .. segments`
+  }
+  if (!env.details || typeof env.details !== 'object' || Array.isArray(env.details)) return 'details must be an object'
+  const text = (v) => typeof v === 'string' && v.trim().length > 0
+  for (const field of shape?.envelope_fields || []) {
+    const value = env.details[field.name]
+    if (field.kind === 'text') {
+      if (!text(value)) return `details.${field.name} must be a non-empty string`
+      continue
+    }
+    // 'records'
+    if (!Array.isArray(value) || value.length === 0) return `details.${field.name} must be a non-empty array`
+    for (const item of value) {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return `every details.${field.name} entry must be an object`
+      for (const key of field.item_fields || []) {
+        if (!text(item[key])) return `every details.${field.name} entry needs a non-empty ${key}`
+      }
+    }
+  }
+  return null
 }
 
 function verdictOf(env) {
@@ -664,6 +786,13 @@ export function scopeMatcher(entries) {
     : repoRelativePath === entry)
 }
 
+// The scope gate's arithmetic, in ONE place: what the tree changed, minus what
+// the shape's write surface allows. The reviewed loop and every envelope shape
+// call it — one implementation, one meaning of "out of scope".
+export function outOfScopeFiles(changed, inScope) {
+  return (Array.isArray(changed) ? changed : []).filter((f) => !inScope(f))
+}
+
 export function protectedHits(entries) {
   const hits = []
   for (const raw of Array.isArray(entries) ? entries : []) {
@@ -718,6 +847,15 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 //                                                     // => behavior is exactly as before.
 //        now() -> ms }
 export function driveTask(ctx, io) {
+  const variant = ctx.variant ?? DEFAULT_VARIANT
+  if (!VARIANT_NAMES.includes(variant)) {
+    throw fail('variant', `unknown variant ${JSON.stringify(variant)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+  }
+  const shape = VARIANTS[variant]
+  const declarationDefect = shapeDefect(shape)
+  if (declarationDefect) {
+    throw fail('variant', `the ${variant} shape's declaration cannot be honoured: ${declarationDefect}`)
+  }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null }
@@ -812,7 +950,11 @@ export function driveTask(ctx, io) {
   // a live status surface — the workspace pill — so a quiet team is never
   // illegible: the pill says which CODE stage is running (suite, gate,
   // commit...). On escalation it freezes at the failing stage.
-  const stage = (label) => { S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label); emit({ kind: 'stage', label }) }
+  const stage = (label) => {
+    const violation = undeclaredStage(shape, label)
+    if (violation) throw fail('variant', `the ${variant} shape ${violation}`)
+    S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label); emit({ kind: 'stage', label })
+  }
 
   // Per-run gate invocation counter. The ledger's gate_results is UNIQUE on
   // (adw_id, gate_name, attempt) with INSERT OR IGNORE, so a repeated attempt
@@ -1151,6 +1293,92 @@ export function driveTask(ctx, io) {
   // acceptance happens exactly once, so this is defensive — a future re-entry
   // into acceptance must never mount a second pane.
   let docShown = false
+
+  // ---- 0b. ENVELOPE SHAPES (#251) --------------------------------------------
+  // A shape whose execution is `envelope`: one declared seat, one written brief,
+  // then the SAME mechanical scope check the reviewed loop uses, with the
+  // in-scope set its declared write surface implies. No build seat, no acceptance
+  // gate, no reviewer, no commit — what accepts it is the SHAPE OF ITS ENVELOPE,
+  // which is deliberately not the reviewed shapes' vocabulary. Nothing here
+  // branches on the shape's name: that is what makes the issue's other
+  // envelope-only shape (`prompt`) a VARIANTS entry rather than new code.
+  const driveEnvelopeShape = () => {
+    const runs = (head) => stageEnabled(shape, head)
+    const seat = shape.required_seats[0]
+    const briefPath = art(`${variant}-brief.md`)
+    stage(`${variant}:r1`)
+    // The brief is a FILE, not a note: the pane transport discards `note`
+    // (crew/realio.mjs:417) and the seat's charter would otherwise apply.
+    io.writeFile(briefPath, [
+      `# ${variant} assignment`, '',
+      shape.assignment, '',
+      "This assignment SUPERSEDES your charter's usual deliverable for this run.",
+      `Task brief: ${ctx.briefFile}`,
+      `Checkout: ${ctx.checkout}`,
+      `Task dir: ${ctx.taskDir}`,
+      ...(shape.writes === 'none' ? ['',
+        'You may not create, edit or delete anything in the checkout. The driver checks',
+        'mechanically that this run changed zero files, and stops the run if it did not.'] : []),
+      '',
+      'What accepts this assignment is the SHAPE OF YOUR ENVELOPE — there is no',
+      'acceptance gate, no verdict and no commit. Return:',
+      '  status: "done"',
+      '  summary: a non-empty sentence',
+      `  artifacts: absolute paths you wrote, every one inside ${ctx.taskDir}`,
+      ...shape.envelope_fields.map((f) => (f.kind === 'records'
+        ? `  details.${f.name}: a non-empty array of records, each with a non-empty ${f.item_fields.join(' and a non-empty ')}`
+        : `  details.${f.name}: a non-empty string`)),
+    ].join('\n'))
+    let env = null
+    let seatFailure = null
+    try {
+      env = assignAndWait(seat, briefPath, variant)
+    } catch (err) {
+      // assignAndWait THROWS on a timeout or an unusable envelope. The zero-write
+      // proof is this shape's whole product, so it is taken BEFORE the failure is
+      // reported: a seat that wrote and then died must never be recorded as a
+      // mere seat failure.
+      seatFailure = err
+    }
+    if (runs('scope-gate')) {
+      stage('scope-gate:r1')
+      // The declared write surface IS the in-scope set: `none` means the EMPTY
+      // set, under which every changed file is out of scope. Same matcher, same
+      // filter, same gate as :1730 — never a second write check.
+      // `writes: 'none'` (the only surface shapeDefect lets an envelope shape
+      // declare) means the EMPTY in-scope set, under which every changed file is
+      // out of scope. Same matcher, same filter, same gate as :1730.
+      const outOfScope = outOfScopeFiles(io.changedFiles(), scopeMatcher([]))
+      if (outOfScope.length > 0) {
+        return escalate('scope',
+          `a ${variant} run writes nothing, but the tree carries ${outOfScope.length} changed file(s): ${outOfScope.join(', ')}`,
+          env?.artifacts || [])
+      }
+    }
+    if (seatFailure) return escalate(variant, `the ${seat} seat failed: ${seatFailure.message}`)
+    if (env.status !== 'done') {
+      return escalate(variant, `the ${seat} seat returned status=${env.status}: ${env.summary || ''}`, env.artifacts || [])
+    }
+    const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
+    if (defect) {
+      return escalate('envelope', `the ${variant} envelope is not the shape that accepts it: ${defect}`, Array.isArray(env.artifacts) ? env.artifacts : [])
+    }
+    stage('envelope-accept')
+    io.log({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: shape.envelope_fields.map((f) => f.name) } })
+    stage('done')
+    return {
+      status: 'done',
+      summary: `${variant} ${ctx.task} complete: envelope accepted on shape, 0 files changed. Stages: ${S.stages.join(' | ')}`,
+      artifacts: [journal, ...env.artifacts],
+      details: {
+        variant, commit: null, stages: S.stages, files_committed: [], consults: S.consults,
+        dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
+        extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, gate: null,
+        envelope: { seat, fields: shape.envelope_fields.map((f) => f.name), files_changed: 0 },
+      },
+    }
+  }
+  if (shape.execution === 'envelope') return driveEnvelopeShape()
 
   // ---- 1. PLAN ----------------------------------------------------------------
   let planEnv = null
@@ -1729,7 +1957,7 @@ export function driveTask(ctx, io) {
     // Gate A (mechanical): scope by git, never by self-report.
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
-    const outOfScope = changed.filter((f) => !inScope(f))
+    const outOfScope = outOfScopeFiles(changed, inScope)
     if (outOfScope.length > 0) {
       if (finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
       const b = art(`build-bounce-r${round}.md`)

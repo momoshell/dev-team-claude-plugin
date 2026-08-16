@@ -142,6 +142,33 @@ export const CELL_FAILURE_KINDS = Object.freeze([
 export const MODIFIER_KINDS = Object.freeze([
   'failure-upgrade', 'sensitivity-floor', 'vendor-diversity', 'budget-ceiling',
 ])
+
+// The run shapes the driver can execute (#251). MUST equal crew/drive.mjs
+// VARIANT_NAMES — the driver is the source of truth and this file never imports
+// it; test/factory-ledger.test.mjs pins the two lists equal, the same convention
+// MODIFIER_KINDS uses above.
+export const RUN_VARIANTS = Object.freeze(['full', 'scout'])
+// The stage-label head that identifies each shape: `full` opens with `plan:r1`,
+// every other shape with its own name (crew/drive.mjs driveEnvelopeShape).
+export const RUN_VARIANT_MARKERS = Object.freeze({ plan: 'full', scout: 'scout' })
+// How many run ids one marker query may bind. `run-set` windows are unbounded and
+// queryRows swallows a too-many-host-parameters error into [] (:1500-1512), which
+// would make every shape read absent.
+export const STAGE_MARKER_CHUNK = 200
+
+// Which shape a run used, from the FIRST log row it recorded. `log` is not a
+// stage-only type — attention lines ride it too (crew/realio.mjs:270-272) — so
+// only the first row is classified: scanning on to the first RECOGNISED row would
+// let a later colliding message rewrite the answer. Anything else is null:
+// an unmeasured shape is NEVER reported as the default one, or every degraded and
+// pre-#251 run would be attributed to `full` and corrupt cost-per-shape.
+export function variantFromFirstMessage(message) {
+  if (typeof message !== 'string') return null
+  const [head, marker] = message.split(':')
+  if (!marker) return null
+  return Object.prototype.hasOwnProperty.call(RUN_VARIANT_MARKERS, head) ? RUN_VARIANT_MARKERS[head] : null
+}
+
 // MUST equal crew/drive.mjs MODIFIER_OUTCOMES (drive.mjs:42) — the driver is
 // the producer, this is the register; the ledger never imports crew (the
 // subsystem direction is one-way, crew -> factory), so a test holds them equal.
@@ -1473,6 +1500,28 @@ export function openLedger({
     }
   }
 
+  // adw_id -> the shape derived from that run's FIRST log row (or null).
+  function variantsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    const out = new Map()
+    for (let i = 0; i < ids.length; i += STAGE_MARKER_CHUNK) {
+      const slice = ids.slice(i, i + STAGE_MARKER_CHUNK)
+      const holes = slice.map(() => '?').join(',')
+      const rows = queryRows(`
+        SELECT e.adw_id, e.payload_json FROM events e
+        JOIN (SELECT adw_id, MIN(id) AS first_id FROM events
+              WHERE type = 'log' AND adw_id IN (${holes}) GROUP BY adw_id) f
+          ON f.adw_id = e.adw_id AND e.id = f.first_id
+      `, slice)
+      for (const row of rows) {
+        let message = null
+        try { message = JSON.parse(row.payload_json)?.message ?? null } catch { /* an unparseable payload is no evidence */ }
+        out.set(row.adw_id, variantFromFirstMessage(message))
+      }
+    }
+    return out
+  }
+
   function dumpTable(name) {
     if (!Object.prototype.hasOwnProperty.call(TABLES, name)) {
       // Never embed the raw (caller-controlled) table name in the message —
@@ -1572,7 +1621,7 @@ export function openLedger({
   function runSet({ since, until = null } = {}) {
     const untilClause = until == null ? '' : ' AND s.started_at < ?'
     const params = until == null ? [since] : [since, until]
-    return queryRows(`
+    const rows = queryRows(`
       SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
         (SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions,
         (SELECT SUM(a.billed_input_tokens)       FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens,
@@ -1583,6 +1632,8 @@ export function openLedger({
       WHERE s.started_at >= ?${untilClause}
       ORDER BY s.started_at, s.adw_id
     `, params)
+    const variants = variantsFor(rows.map((row) => row.adw_id))
+    return rows.map((row) => ({ ...row, variant: variants.get(row.adw_id) ?? null }))
   }
 
   function taskReadout(selector) {
@@ -1605,6 +1656,7 @@ export function openLedger({
       review_outcomes: [],
       accept_decisions: [],
       usage: null,
+      variant: null,
       absent: {},
     })
 
@@ -1616,6 +1668,7 @@ export function openLedger({
     const resolvedBy = byId.length === 1 ? 'adw_id' : 'task_slug'
     const session = queryRows('SELECT * FROM sessions WHERE adw_id = ?', [adwId])[0] ?? null
     const phases = queryRows('SELECT * FROM phases WHERE adw_id = ? ORDER BY seq', [adwId])
+    const variant = variantsFor([adwId]).get(adwId) ?? null
     const gateRows = queryRows(`
       SELECT g.gate_generation,
         COUNT(*) AS attempts,
@@ -1706,6 +1759,9 @@ export function openLedger({
     if (phases.length === 0) {
       absent.phases = 'no phase rows recorded for this run'
     }
+    if (variant === null) {
+      absent.variant = "this run's first recorded event is not a shape marker — the run shape is unmeasured (#251), never a measured \"full\""
+    }
 
     return {
       degraded,
@@ -1718,6 +1774,7 @@ export function openLedger({
       review_outcomes: reviewOutcomes,
       accept_decisions: acceptDecisions,
       usage,
+      variant,
       absent,
     }
   }
@@ -2163,6 +2220,9 @@ export function main(argv) {
           ? 'no agent_sessions rows for any run in this window — predates per-agent token measurement (#119), not a measured zero'
           : 'one or more agent_sessions rows for runs in this window have no billed token totals — unmeasured, not a measured zero'
       }
+      if (rows.some((row) => row.variant === null)) {
+        absent.variant = 'one or more runs in this window recorded no shape marker — unmeasured (#251), never a measured "full"'
+      }
       const payload = {
         schema: 1,
         question: 'For one run-set: what ran, how did each run settle, and what did it cost?',
@@ -2170,6 +2230,7 @@ export function main(argv) {
           run_set: 'the runs whose sessions.started_at falls in [since, until) — a view over the ledger, never a stored batch id; the ledger has no group column',
           settled: "sessions.status, the ledger's closed enum (running|ok|fail|aborted); today both run drivers map outcome done -> ok and every other terminal outcome, escalation included, -> aborted (crew/crew.mjs:644, crew/child.mjs:141), and fail is reserved for the ledger finalizer's claim that a run died",
           usage: "usage sums billed_* across each run's agent_sessions rows — each row holds a running total, not a delta; tokens only, no cost calculation (#119)",
+          variant: 'the run shape derived from the first recorded stage marker; null with absent.variant means unmeasured, never an inferred full',
           absent: 'null with an `absent` marker means the fact was never measured — never a measured zero',
         },
         since,
@@ -2229,6 +2290,7 @@ export function main(argv) {
         definition: {
           usage: "usage sums billed_* across the run's agent_sessions rows — each row holds a running total, not a delta",
           gate_generation: 'one gate generation is one authored gate; attempts within it are re-runs',
+          variant: 'the run shape derived from the first recorded stage marker; null with absent.variant means unmeasured, never an inferred full',
           absent: 'null with an `absent` marker means the fact was never measured for this run — never a measured zero',
         },
         adw_id: readout.adw_id,
@@ -2239,6 +2301,7 @@ export function main(argv) {
         review_outcomes: readout.review_outcomes,
         accept_decisions: readout.accept_decisions,
         usage: readout.usage,
+        variant: readout.variant,
         absent: readout.absent,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)

@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
-import { normalizeCatalog, diffModels, renderReport } from './roster-refresh.mjs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { normalizeCatalog, diffModels, readRosterModels, renderReport } from './roster-refresh.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
@@ -268,4 +268,138 @@ test('renderReport body is deterministic', () => {
   const r2 = renderReport(diff, { generatedAt: 't2', rosterUpdatedAt: '2026-08-13' })
   const strip = (s) => s.split('\n').filter((line) => !line.startsWith('generated_at:')).join('\n')
   assert.equal(strip(r1), strip(r2))
+})
+
+import { spawnSync } from 'node:child_process'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
+
+const REFRESH_TOOL = new URL('./roster-refresh.mjs', import.meta.url).pathname
+const fixtureRecord = (costIn, costOut, context) => ({ cost_in_per_mtok: costIn, cost_out_per_mtok: costOut, context })
+
+function withFixtureDirectory(fn) {
+  const dir = mkdtempSync(join(tmpdir(), 'roster-refresh-241-'))
+  try {
+    return fn(dir)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+test('readRosterModels refuses an array-shaped models block', () => {
+  const rosterPath = '/tmp/roster-array-shaped.json'
+  const badRoster = { models: ['luna', 'terra', 'sol', 'opus', 'sonnet', 'fable', 'haiku'] }
+  assert.throws(
+    () => readRosterModels(badRoster, rosterPath),
+    (err) => {
+      assert.ok(err.message.includes(rosterPath))
+      assert.match(err.message, /expected "models" to be an object mapping/)
+      assert.match(err.message, /an array of 7 entries/)
+      return true
+    }
+  )
+})
+
+test('readRosterModels refuses a record with no numeric cost', () => {
+  const key = 'anthropic/not-a-model'
+  assert.throws(
+    () => readRosterModels({ models: { [key]: { cost_out_per_mtok: 1, context: 1000 } } }, '/tmp/roster-bad-record.json'),
+    (err) => {
+      assert.ok(err.message.includes(`models["${key}"]`))
+      assert.match(err.message, /no numeric cost_in_per_mtok/)
+      return true
+    }
+  )
+})
+
+test('readRosterModels accepts the shipped roster', () => {
+  const models = readRosterModels(roster, 'crew/roster.json')
+  assert.equal(Object.keys(models).length, 7)
+})
+
+test('a seated model with no catalog entry is reported as unverifiable, not as unchanged', () => {
+  const before = { 'fixture/missing': fixtureRecord(1, 2, 1000) }
+  const after = normalizeCatalog({ fixture: { models: { present: { cost: { input: 3, output: 4 }, limit: { context: 2000 } } } } })
+  const report = renderReport(diffModels(before, after), {
+    generatedAt: 'now',
+    rosterUpdatedAt: 'today',
+    seatedCount: Object.keys(before).length,
+  })
+  assert.match(report, /## Seated models the catalog cannot confirm — unverifiable \(1\)/)
+  assert.match(report, /- fixture\/missing: no catalog entry; roster values unverified \(cost_in=1 cost_out=2 context=1000\)/)
+  assert.doesNotMatch(report, /## Disappeared/)
+})
+
+test('the report states how many seated models the catalog confirmed', () => {
+  const before = {
+    'fixture/changed': fixtureRecord(1, 2, 1000),
+    'fixture/same': fixtureRecord(3, 4, 2000),
+    'fixture/missing': fixtureRecord(5, 6, 3000),
+  }
+  const after = normalizeCatalog({ fixture: { models: {
+    changed: { cost: { input: 2, output: 2 }, limit: { context: 1000 } },
+    same: { cost: { input: 3, output: 4 }, limit: { context: 2000 } },
+  } } })
+  const opts = { generatedAt: 'now', rosterUpdatedAt: 'today', seatedCount: 3 }
+  assert.match(renderReport(diffModels(before, after), opts), /## Seated models confirmed by the catalog \(2 of 3\)/)
+  assert.match(renderReport(diffModels(before, before), opts), /## Seated models confirmed by the catalog \(3 of 3\)/)
+})
+
+test('the CLI refuses an unreadable roster and prints no diff', () => {
+  withFixtureDirectory((dir) => {
+    const badPath = join(dir, 'roster-bad.json')
+    const catalogPath = join(dir, 'catalog.json')
+    writeFileSync(badPath, JSON.stringify({ models: ['luna', 'terra', 'sol', 'opus', 'sonnet', 'fable', 'haiku'] }))
+    writeFileSync(catalogPath, JSON.stringify({}))
+    const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', badPath, '--catalog', catalogPath], { encoding: 'utf8' })
+    assert.equal(result.status, 1)
+    assert.ok(result.stderr.includes(badPath))
+    assert.match(result.stderr, /object/)
+    assert.match(result.stderr, /array of 7 entries/)
+    assert.doesNotMatch(result.stdout, /# roster-refresh report|## New models/)
+  })
+})
+
+test('the CLI still diffs a well-formed roster', () => {
+  withFixtureDirectory((dir) => {
+    const rosterPath = join(dir, 'roster-good.json')
+    const catalogPath = join(dir, 'catalog.json')
+    const goodRoster = {
+      updated_at: 'today',
+      tiers: { build: { lead: { provider: 'fixture', id: 'changed' }, reviewer: { provider: 'fixture', id: 'same' } } },
+      models: {
+        'fixture/changed': fixtureRecord(1, 2, 1000),
+        'fixture/same': fixtureRecord(3, 4, 2000),
+        'fixture/missing': fixtureRecord(5, 6, 3000),
+      },
+    }
+    const catalog = {
+      fixture: { models: {
+        changed: { cost: { input: 2, output: 2 }, limit: { context: 1000 } },
+        same: { cost: { input: 3, output: 4 }, limit: { context: 2000 } },
+        added: { cost: { input: 7, output: 8 }, limit: { context: 4000 } },
+      } },
+    }
+    writeFileSync(rosterPath, JSON.stringify(goodRoster))
+    writeFileSync(catalogPath, JSON.stringify(catalog))
+    const result = spawnSync(process.execPath, [REFRESH_TOOL, '--roster', rosterPath, '--catalog', catalogPath], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    assert.match(result.stdout, /## New models/)
+    assert.match(result.stdout, /fixture\/added/)
+    assert.match(result.stdout, /fixture\/changed: cost_in_per_mtok 1->2/)
+    assert.match(result.stdout, /unverifiable/)
+    assert.match(result.stdout, /2 of 3/)
+  })
+})
+
+test('the module imports cleanly with no process.argv[1]', () => {
+  const moduleUrl = new URL('./roster-refresh.mjs', import.meta.url).href
+  const result = spawnSync(process.execPath, ['-e', `import(${JSON.stringify(moduleUrl)})`], { encoding: 'utf8' })
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('renderReport preserves removed models for legacy callers', () => {
+  const report = renderReport(diffModels(NA, NB), { generatedAt: 'now', rosterUpdatedAt: 'today' })
+  assert.match(report, /## Disappeared \(1\)/)
+  assert.match(report, /openai\/gpt-5\.6-sol/)
 })

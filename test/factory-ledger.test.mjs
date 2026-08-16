@@ -94,7 +94,7 @@ test('mkdirpBounded creates a deep path, and refuses promptly under a regular fi
 })
 
 test('factory directory creation does not regress to recursive mkdirSync', () => {
-  for (const relative of ['scripts/factory/ledger.mjs', 'scripts/factory/emit.mjs']) {
+  for (const relative of ['scripts/factory/ledger.mjs', 'scripts/factory/emit.mjs', 'scripts/factory/make-brief.mjs']) {
     const source = readFileSync(join(ROOT, relative), 'utf8')
     const recursiveMkdirLine = source.split('\n').find((line) => (
       /mkdirSync\s*\(/.test(line) && /recursive\s*:\s*true/.test(line)

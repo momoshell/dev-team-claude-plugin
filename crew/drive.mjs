@@ -59,6 +59,47 @@ export const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 export const WRITE_SURFACES = Object.freeze(['planned', 'none'])
 export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
+// #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
+// round would have produced. Closed per key, and only values this driver
+// implements: an unimplemented value would pass validation and then be run as
+// something else, which is the drift the enum exists to stop.
+export const SHAPE_SOURCES = Object.freeze({
+  scope: Object.freeze(['plan', 'inherited']),
+  lane: Object.freeze(['plan', 'ctx']),
+  gate: Object.freeze(['plan', 'none']),
+})
+// The stages the reviewed executor emits unconditionally after the plan loop —
+// they ARE the reviewed loop, and no declaration may skip them (:1930-2167).
+export const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'review', 'suite', 'commit'])
+// The ONE partial reviewed topology this driver implements: a bounded triage
+// round in place of the plan round, no gate, nothing else changed. A shape that
+// omits a `full` stage is honoured only if it is EXACTLY this — same sources,
+// same stages, and registered under exactly this enum key, because a run opens
+// with its KEY as the stage head (:1309 and the triage round below). Declaring
+// sources is what a shape may SAY, never proof the executor can run it. Get
+// this wrong and the run does not fail at the declaration, it crashes later in
+// stage() on the first undeclared head it reaches (:953-957).
+export const TRIAGE_STAGE_HEAD = 'repair'
+export const TRIAGE_SOURCES = Object.freeze({ scope: 'inherited', lane: 'ctx', gate: 'none' })
+export const TRIAGE_STAGES = Object.freeze([TRIAGE_STAGE_HEAD, ...REVIEWED_CORE_STAGES])
+
+// Why a declaration's sources cannot be honoured, or null. The supplied key set
+// must EQUAL the schema's: a key nothing reads is not a harmless extra, it is a
+// declaration claiming behaviour this driver does not implement.
+export function sourcesDefect(sources) {
+  if (!sources || typeof sources !== 'object') return 'no sources declared'
+  const keys = Object.keys(SHAPE_SOURCES)
+  const extra = Object.keys(sources).filter((key) => !keys.includes(key))
+  if (extra.length) {
+    return `sources declares ${extra.join(', ')}, which nothing reads — the source keys are exactly ${keys.join(', ')}`
+  }
+  for (const key of keys) {
+    if (!SHAPE_SOURCES[key].includes(sources[key])) {
+      return `sources.${key} must be one of ${SHAPE_SOURCES[key].join(', ')}`
+    }
+  }
+  return null
+}
 export const VARIANTS = Object.freeze({
   full: Object.freeze({
     execution: 'reviewed',
@@ -83,6 +124,19 @@ export const VARIANTS = Object.freeze({
     ]),
     assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
   }),
+  repair: Object.freeze({
+    execution: 'reviewed',
+    required_seats: 'tier',
+    // No plan, no check: a bounded triage opens the run. No gate*, no converge:
+    // this shape declares gate source 'none', and undeclaredStage is what makes
+    // that mechanical rather than a promise.
+    stages: Object.freeze(['repair', 'build', 'scope-gate', 'lane', 'review', 'suite', 'commit']),
+    writes: 'planned',
+    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
+    envelope_fields: Object.freeze([]),
+    assignment: 'Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.',
+    sources: Object.freeze({ scope: 'inherited', lane: 'ctx', gate: 'none' }),
+  }),
 })
 export const VARIANT_NAMES = Object.freeze(Object.keys(VARIANTS))
 export const DEFAULT_VARIANT = 'full'
@@ -106,10 +160,10 @@ export function undeclaredStage(shape, label) {
 // Can this driver honour the declaration at all? A shape it cannot execute is
 // REFUSED with a reason — never silently run as something else. This is what
 // stops a future `quality`/`document` entry from falling through the whole
-// reviewed loop: today the reviewed executor implements exactly `full`'s stage
-// set, so a reviewed shape declaring a subset is refused until the slice that
-// gives it declared sources for scope, lane and gate lands.
-export function shapeDefect(shape) {
+// reviewed loop: the executor implements `full`'s stage set, except for the
+// one declared bounded-triage topology whose sources and identity are checked
+// below. Any other reviewed subset is refused before it can reach stage().
+export function shapeDefect(shape, variantName) {
   if (!shape || typeof shape !== 'object') return 'no declaration'
   if (!EXECUTIONS.includes(shape.execution)) return `execution must be one of ${EXECUTIONS.join(', ')}`
   if (!WRITE_SURFACES.includes(shape.writes)) return `writes must be one of ${WRITE_SURFACES.join(', ')}`
@@ -122,7 +176,25 @@ export function shapeDefect(shape) {
     if (shape.required_seats !== 'tier') return 'a reviewed shape is seated by the tier; required_seats must be "tier"'
     const missing = VARIANTS.full.stages.filter((head) => !shape.stages.includes(head))
     if (missing.length) {
-      return `the reviewed executor implements exactly the full stage set; this declaration omits ${missing.join(', ')}, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run`
+      const undeclared = sourcesDefect(shape.sources)
+      if (undeclared) {
+        return `the reviewed executor implements exactly the full stage set; this declaration omits ${missing.join(', ')}, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run: ${undeclared}`
+      }
+      // Declared sources are necessary, never sufficient: the executor
+      // implements ONE partial topology, under ONE name, and anything else it
+      // would crash on is refused here rather than at the stage that reaches
+      // it. The name matters because a run opens with its enum KEY as the
+      // stage head — an alias would emit a head its own declaration lacks.
+      if (variantName !== TRIAGE_STAGE_HEAD) {
+        return `the only partial reviewed shape this driver implements is the bounded triage, which is the ${TRIAGE_STAGE_HEAD} variant; a declaration registered as ${JSON.stringify(variantName ?? null)} would open ${JSON.stringify(`${variantName}:r1`)}, a stage it does not declare`
+      }
+      const sourced = Object.keys(SHAPE_SOURCES).map((key) => `${key}=${shape.sources[key]}`).join(', ')
+      if (Object.keys(SHAPE_SOURCES).some((key) => shape.sources[key] !== TRIAGE_SOURCES[key])) {
+        return `the bounded triage sources ${Object.entries(TRIAGE_SOURCES).map(([k, v]) => `${k}=${v}`).join(', ')}; this declaration sources ${sourced}`
+      }
+      if (shape.stages.length !== TRIAGE_STAGES.length || TRIAGE_STAGES.some((head, i) => shape.stages[i] !== head)) {
+        return `a bounded-triage shape runs exactly ${TRIAGE_STAGES.join(', ')}; this declaration runs ${shape.stages.join(', ')}`
+      }
     }
     return null
   }
@@ -852,7 +924,7 @@ export function driveTask(ctx, io) {
     throw fail('variant', `unknown variant ${JSON.stringify(variant)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
   }
   const shape = VARIANTS[variant]
-  const declarationDefect = shapeDefect(shape)
+  const declarationDefect = shapeDefect(shape, variant)
   if (declarationDefect) {
     throw fail('variant', `the ${variant} shape's declaration cannot be honoured: ${declarationDefect}`)
   }
@@ -1380,11 +1452,109 @@ export function driveTask(ctx, io) {
   }
   if (shape.execution === 'envelope') return driveEnvelopeShape()
 
+  // A repair shape replaces the planner's revision loop with one bounded triage
+  // seat. Its product is deliberately normalized to the reviewed loop's plan
+  // envelope so every later scope, lane, review and finish check stays shared.
+  const driveTriageRound = () => {
+    const inherited = shape.sources.scope === 'inherited' ? ctx.files_in_scope : null
+    if (!Array.isArray(inherited) || inherited.length === 0) {
+      return { stop: escalate('triage', `a ${variant} run inherits the failing run's files_in_scope and ctx carries none — the scope gate is never relaxed to let a repair run without a declared scope`) }
+    }
+    const inheritedErrors = validateScopeEntries(inherited)
+    if (inheritedErrors.length > 0) {
+      return { stop: escalate('triage', `files_in_scope carries entries the scope gate cannot honor — fix the inherited scope, not the repair: ${inheritedErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`) }
+    }
+    const laneCmd = shape.sources.lane === 'ctx' ? ctx.lane : null
+    if (!laneCmd) {
+      return { stop: escalate('triage', `a ${variant} run takes its validation lane from the failing run (--lane) and ctx carries none`) }
+    }
+
+    stage(`${variant}:r1`)
+    const briefPath = art(`${variant}-brief.md`)
+    io.writeFile(briefPath, [
+      `# ${variant} triage assignment`, '',
+      shape.assignment, '',
+      "This assignment SUPERSEDES the seat's usual deliverable for this run.",
+      `Failure brief (verbatim): ${ctx.briefFile}`,
+      `Checkout: ${ctx.checkout}`,
+      `Task dir: ${ctx.taskDir}`,
+      '',
+      'Inherited files_in_scope (the failing run accepted this list):',
+      ...inherited.map((entry) => `- ${entry}`),
+      'You may NARROW this list, never widen it — a wider surface is an escalation, not a re-plan.',
+      '',
+      `Validation lane (fixed): ${laneCmd}`,
+      'This shape runs NO acceptance gate — do not author one.',
+      '',
+      'Return contract:',
+      '  status: "done"',
+      '  summary: a non-empty sentence',
+      `  artifacts: absolute paths you wrote, every one inside ${ctx.taskDir}`,
+      '  details.plan_path: one of those artifacts, containing the triage note the builder will be briefed from',
+      '  details.files_in_scope: optional narrowed scope, never wider than the inherited list',
+      '  details.commit_subject / details.issues: optional',
+    ].join('\n'))
+
+    const env = assignAndWait('planner', briefPath, 'triage')
+    if (env.status !== 'done') {
+      return { stop: escalate('triage', `the triage seat returned status=${env.status}: ${env.summary || ''} — a ${variant} run's triage is bounded to one round, so there is no revision to bounce it to`, env.artifacts || []) }
+    }
+    const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
+    if (defect) {
+      return { stop: escalate('triage', `the triage envelope is not one the driver can build from: ${defect}`, Array.isArray(env.artifacts) ? env.artifacts : []) }
+    }
+    const planPath = env.details.plan_path
+    if (typeof planPath !== 'string' || !env.artifacts.includes(planPath)) {
+      return { stop: escalate('triage', `details.plan_path must name one of the artifacts the triage round wrote (it becomes the builder's first brief); found ${JSON.stringify(planPath ?? null)} against ${JSON.stringify(env.artifacts)}`, env.artifacts) }
+    }
+    let note = null
+    try { note = io.readFile(planPath) } catch { note = null }
+    if (typeof note !== 'string' || !note.trim()) {
+      return { stop: escalate('triage', `the triage note at ${planPath} is empty or unreadable — the builder is briefed from that file and would be sent to a 404`, env.artifacts) }
+    }
+    if (shape.sources.gate === 'none' && env.details.gate_cmd) {
+      return { stop: escalate('triage', 'the triage round returned a gate_cmd — this shape declares gate source "none", and a gate the crew authors for its own repair has no proof (ADR-030)', env.artifacts) }
+    }
+
+    const asked = env.details.files_in_scope
+    let scope = inherited
+    if (asked !== undefined) {
+      if (!Array.isArray(asked) || asked.length === 0) {
+        return { stop: escalate('triage-scope', 'the triage round returned an empty or non-array files_in_scope; it may narrow the inherited scope, but may not remove the declared scope') }
+      }
+      const askedErrors = validateScopeEntries(asked)
+      if (askedErrors.length > 0) {
+        return { stop: escalate('triage-scope', `files_in_scope carries entries the scope gate cannot honor — fix the triage, not the build: ${askedErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`, env.artifacts) }
+      }
+      const extra = outOfScopeFiles(asked, scopeMatcher(inherited))
+      if (extra.length > 0) {
+        return { stop: escalate('triage-scope', `the triage round asked to widen the inherited scope with ${extra.join(', ')} — a triage that needs a wider surface is an escalation, not a re-plan`, env.artifacts) }
+      }
+      scope = asked
+    }
+    io.log({ at: io.now(), triage: {
+      variant, seat: 'planner', scope_source: shape.sources.scope, lane_source: shape.sources.lane,
+      gate_source: shape.sources.gate, inherited: inherited.length, scope: scope.length,
+    } })
+    return { plan: {
+      status: 'done', role: 'planner', summary: env.summary,
+      artifacts: env.artifacts,
+      details: {
+        plan_path: planPath,
+        files_in_scope: scope,
+        validation_lane: laneCmd,
+        commit_subject: env.details.commit_subject,
+        issues: env.details.issues,
+      },
+    } }
+  }
+
   // ---- 1. PLAN ----------------------------------------------------------------
+  const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = null
   let planBrief = ctx.briefFile
   let extraPlanRounds = 0
-  for (let round = 1; round <= limits.plan_rounds + extraPlanRounds; round += 1) {
+  for (let round = 1; plans && round <= limits.plan_rounds + extraPlanRounds; round += 1) {
     stage(`plan:r${round}`)
     const env = assignAndWait('planner', planBrief, round === 1 ? 'plan' : 'plan-revision')
     if (env.status !== 'done') {
@@ -1498,6 +1668,11 @@ export function driveTask(ctx, io) {
     ].join('\n'))
     planBrief = b
     planEnv = null
+  }
+  if (!plans) {
+    const triaged = driveTriageRound()
+    if (triaged.stop) return triaged.stop
+    planEnv = triaged.plan
   }
   if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds + extraPlanRounds} rounds`)
 
@@ -1959,7 +2134,7 @@ export function driveTask(ctx, io) {
     const changed = io.changedFiles()
     const outOfScope = outOfScopeFiles(changed, inScope)
     if (outOfScope.length > 0) {
-      if (finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
+      if (!plans || finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('scope', 'builder')
       io.writeFile(b, `# Scope bounce (round ${round})\n\nThese files are OUTSIDE the plan's scope — revert them or stop touching them:\n${outOfScope.map((f) => `- ${f}`).join('\n')}\n\nIn-scope set:\n${scopeFiles.map((f) => `- ${f}`).join('\n')}\nPlan: ${planPath}`)

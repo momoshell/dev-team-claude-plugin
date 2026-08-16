@@ -147,10 +147,10 @@ export const MODIFIER_KINDS = Object.freeze([
 // VARIANT_NAMES — the driver is the source of truth and this file never imports
 // it; test/factory-ledger.test.mjs pins the two lists equal, the same convention
 // MODIFIER_KINDS uses above.
-export const RUN_VARIANTS = Object.freeze(['full', 'scout'])
+export const RUN_VARIANTS = Object.freeze(['full', 'scout', 'repair'])
 // The stage-label head that identifies each shape: `full` opens with `plan:r1`,
 // every other shape with its own name (crew/drive.mjs driveEnvelopeShape).
-export const RUN_VARIANT_MARKERS = Object.freeze({ plan: 'full', scout: 'scout' })
+export const RUN_VARIANT_MARKERS = Object.freeze({ plan: 'full', scout: 'scout', repair: 'repair' })
 // How many run ids one marker query may bind. `run-set` windows are unbounded and
 // queryRows swallows a too-many-host-parameters error into [] (:1500-1512), which
 // would make every shape read absent.

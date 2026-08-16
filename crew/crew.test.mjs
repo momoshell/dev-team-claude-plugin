@@ -1337,7 +1337,7 @@ test('ROLE_ORDER is key-identical to SEAT_DEFAULTS — one truth for seating ord
 
 test('phaseForStage maps every driver stage and defaults unknown labels to build', () => {
   const table = {
-    'plan:r1': 'planning', 'check:r1': 'planning', 'scout:r1': 'planning', 'envelope-accept': 'finish',
+    'plan:r1': 'planning', 'check:r1': 'planning', 'scout:r1': 'planning', 'repair:r1': 'planning', 'envelope-accept': 'finish',
     'gate-baseline': 'build', 'gate-repair:1': 'build',
     'gate-reverify:1': 'build', 'scope-gate:r1': 'build', 'lane:r1': 'build', 'gate:r1': 'build',
     'review:pass': 'review', suite: 'finish', commit: 'finish', done: 'done', 'escalate:lane': 'escalation',

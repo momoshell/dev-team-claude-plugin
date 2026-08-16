@@ -497,6 +497,7 @@ test('a lane bounce records an applied failure-upgrade on the envelope and journ
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
+    emit: true,
     reseat: () => ({ applied: true, from: { id: 'old', effort: 'medium' }, to: { id: 'new', effort: 'max' }, rung: 'mechanical→build' }),
   })
   const res = driveTask(CTX, io)
@@ -507,6 +508,52 @@ test('a lane bounce records an applied failure-upgrade on the envelope and journ
   }])
   assert.equal(io.calls.reseat.length, 1)
   assert.ok(io.calls.logs.some((line) => line.modifier?.modifier === FAILURE_UPGRADE))
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'modifier'), [{
+    kind: 'modifier', modifier: FAILURE_UPGRADE, bounce: 'lane', role: 'builder', outcome: 'applied',
+    why: null, from: { id: 'old', effort: 'medium' }, to: { id: 'new', effort: 'max' }, rung: 'mechanical→build',
+  }])
+})
+
+test('a refused reseat emits one transport modifier attempt without a to cell', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: false, reason: 'transport', why: 'headless seat cannot re-seat', from: { id: 'old', effort: 'max' } }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'modifier'), [{
+    kind: 'modifier', modifier: FAILURE_UPGRADE, bounce: 'lane', role: 'builder', outcome: 'transport',
+    why: 'headless seat cannot re-seat', from: { id: 'old', effort: 'max' }, to: null, rung: null,
+  }])
+})
+
+test('a run without a bounce emits no modifier attempts', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(io.calls.emits.filter((event) => event.kind === 'modifier'), [])
+})
+
+test('throwing on modifier emission leaves stages, commit, and status unchanged', () => {
+  const input = {
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: false, reason: 'transport', why: 'refused' }),
+  }
+  const plain = driveTask(CTX, fakeIo(input))
+  const noisy = driveTask(CTX, fakeIo({ ...input, emit: () => { throw new Error('ledger unavailable') } }))
+  assert.deepEqual({ stages: noisy.details.stages, commit: noisy.details.commit, status: noisy.status }, {
+    stages: plain.details.stages, commit: plain.details.commit, status: plain.status,
+  })
 })
 
 test('a second bounce records spent and never calls reseat again', () => {

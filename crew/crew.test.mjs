@@ -1274,6 +1274,41 @@ test('emitAdapter maps cell-failure events to the booted crew cell, with a null-
   })
 })
 
+test('emitAdapter maps modifier attempts with transport and from/to cells, including null crew', () => {
+  const calls = []
+  const emitter = {
+    adwId: 'adw-modifier',
+    phaseTransition: () => ({ phase_id: 12 }),
+    emit: (fn) => fn({ recordEvent() {}, recordModifierAttempt: (row) => calls.push(row) }, () => 1),
+  }
+  const crew = {
+    task: 'modifier-task',
+    members: { builder: { agent: 'pi', provider: 'openai', id: 'luna', model: 'gpt-luna', effort: 'max', transport: 'headless-rpc' } },
+  }
+  const adapter = emitAdapter(emitter, crew)
+  adapter({ kind: 'stage', label: 'build:r1' })
+  adapter({
+    kind: 'modifier', modifier: 'failure-upgrade', bounce: 'lane', role: 'builder', outcome: 'applied',
+    why: null, rung: 'mechanical→build', from: { provider: 'anthropic', id: 'old', model: 'sonnet', agent: 'claude', effort: 'high' },
+    to: { provider: 'openai', id: 'new', model: 'gpt-new', agent: 'pi', effort: 'max' },
+  })
+  assert.deepEqual(calls[0], {
+    adw_id: 'adw-modifier', task_slug: 'modifier-task', phase_id: 12, role: 'builder', modifier: 'failure-upgrade',
+    bounce: 'lane', outcome: 'applied', why: null, rung: 'mechanical→build', transport: 'headless-rpc',
+    from_provider: 'anthropic', from_model_id: 'old', from_model: 'sonnet', from_agent: 'claude', from_effort: 'high',
+    to_provider: 'openai', to_model_id: 'new', to_model: 'gpt-new', to_agent: 'pi', to_effort: 'max',
+  })
+  assert.doesNotThrow(() => emitAdapter(emitter)({
+    kind: 'modifier', modifier: 'failure-upgrade', bounce: 'gate', role: 'reviewer', outcome: 'transport',
+  }))
+  assert.deepEqual(calls[1], {
+    adw_id: 'adw-modifier', task_slug: null, phase_id: null, role: 'reviewer', modifier: 'failure-upgrade',
+    bounce: 'gate', outcome: 'transport', why: null, rung: null, transport: null,
+    from_provider: null, from_model_id: null, from_model: null, from_agent: null, from_effort: null,
+    to_provider: null, to_model_id: null, to_model: null, to_agent: null, to_effort: null,
+  })
+})
+
 test('emitAdapter routes discrimination triples, review outcomes, and typed accept decisions', () => {
   const calls = { gates: [], discriminations: [], reviews: [], accepts: [], events: [] }
   const emitter = {

@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   ARM_APPEND_REASONS, ARM_AXES, ARM_SET_REASONS, ARM_SET_STATUSES,
-  armsManifestPath, appendArm, collectArms, readManifest,
+  ARM_SPAWN_DEFAULT_N, ARM_SPAWN_MAX_N, ARM_SPAWN_REASONS, ARM_SPAWN_STATUSES,
+  armsManifestPath, appendArm, collectArms, factoryctlSpawner, readManifest, spawnArmSet,
 } from './arms.mjs'
 
 const ID_A = '11111111-2222-3333-4444-555555555555'
@@ -42,6 +43,11 @@ function makeWorld() {
   git(host, 'add', 'seed.txt')
   git(host, 'commit', '-q', '-m', 'base')
   const pin = git(host, 'rev-parse', 'HEAD')
+  writeFileSync(join(host, 'other.txt'), 'other\n')
+  git(host, 'add', 'other.txt')
+  git(host, 'commit', '-q', '-m', 'other')
+  const other = git(host, 'rev-parse', 'HEAD')
+  git(host, 'checkout', '-q', '-B', 'main', pin)
   const manifest = join(root, 'factory', 'arms', 'set-a.jsonl')
   let serial = 0
 
@@ -49,6 +55,7 @@ function makeWorld() {
     root,
     host,
     pin,
+    other,
     manifest,
     arm(adwId, { base = pin, commits = 1 } = {}) {
       const run = join(root, `run-${serial += 1}`)
@@ -81,6 +88,30 @@ function makeWorld() {
 function withWorld(fn) {
   const world = makeWorld()
   try { return fn(world) } finally { world.done() }
+}
+
+function recordingSpawner(world, { failOnIndex = null, onCall = null } = {}) {
+  const calls = []
+  const spawn = (input = {}) => {
+    calls.push(input)
+    if (onCall) onCall(input, calls.length)
+    if (failOnIndex !== null && calls.length === failOnIndex) {
+      return { ok: false, reason: 'spawn-failed', message: 'injected spawner failure' }
+    }
+    const crewDir = join(world.root, `spawned-crew-${calls.length}`)
+    mkdirSync(crewDir, { recursive: true })
+    writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+      checkout: input.checkout, base: world.pin,
+    }))
+    const adwId = `1111111${calls.length}-2222-3333-4444-55555555555${calls.length}`
+    return { ok: true, adwId, crewDir }
+  }
+  return { spawn, calls }
+}
+
+function manifestLines(path) {
+  if (!existsSync(path)) return []
+  return readFileSync(path, 'utf8').split(/\r?\n/).filter((line) => line.trim())
 }
 
 function add(world, arm, { axes = {}, pin = world.pin, setId = 'set-a' } = {}) {
@@ -120,6 +151,184 @@ test('arm vocabularies are frozen and have the documented values', () => {
   assert.deepEqual(ARM_SET_STATUSES, { COLLECTED: 'collected', REFUSED: 'refused' })
   assert.deepEqual(ARM_SET_REASONS, expectedSetReasons)
 })
+
+test('spawn vocabularies are frozen and the cap bounds the default', () => {
+  assert.equal(Object.isFrozen(ARM_SPAWN_STATUSES), true)
+  assert.equal(Object.isFrozen(ARM_SPAWN_REASONS), true)
+  assert.deepEqual(ARM_SPAWN_STATUSES, { SPAWNED: 'spawned', PARTIAL: 'partial', REFUSED: 'refused' })
+  assert.deepEqual(ARM_SPAWN_REASONS, [
+    'set-id-invalid', 'n-invalid', 'n-over-cap', 'repo-missing',
+    'worktree-root-missing', 'worktree-exists', 'manifest-path-invalid',
+    'axes-invalid', 'axis-unknown', 'pin-unresolved', 'worktree-failed',
+    'arm-pin-mismatch', 'spawn-failed', 'spawn-id-missing', 'append-failed',
+  ])
+  assert.ok(ARM_SPAWN_DEFAULT_N >= 1)
+  assert.ok(ARM_SPAWN_DEFAULT_N <= ARM_SPAWN_MAX_N)
+})
+
+test('spawnArmSet creates distinct branch worktrees at one pin', () => withWorld((world) => {
+  const worktreeRoot = join(world.root, 'worktrees')
+  const { spawn, calls } = recordingSpawner(world)
+  const result = spawnArmSet({
+    repo: world.host,
+    worktreeRoot,
+    manifestPath: world.manifest,
+    setId: 'set-a',
+    pin: world.pin,
+    n: 2,
+    brief: join(world.root, 'brief.md'),
+    tier: 'test',
+    spawn,
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.equal(result.status, 'spawned')
+  assert.equal(result.count, 2)
+  assert.equal(calls.length, 2)
+  assert.equal(result.pin, world.pin)
+  const listed = git(world.host, 'worktree', 'list')
+  for (const [offset, arm] of result.arms.entries()) {
+    assert.equal(arm.index, offset + 1)
+    assert.equal(existsSync(arm.checkout), true)
+    assert.equal(git(arm.checkout, 'rev-parse', 'HEAD'), world.pin)
+    assert.equal(git(arm.checkout, 'branch', '--show-current'), `arms/set-a/${String(offset + 1).padStart(2, '0')}`)
+    assert.ok(listed.includes(arm.checkout), `${arm.checkout} not in worktree list`)
+  }
+  assert.equal(manifestLines(world.manifest).length, 2)
+}))
+
+test('spawnArmSet appends each arm before invoking the next spawner call', () => withWorld((world) => {
+  const observed = []
+  const { spawn } = recordingSpawner(world, {
+    onCall: () => { observed.push(manifestLines(world.manifest).length) },
+  })
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot: join(world.root, 'worktrees'),
+    manifestPath: world.manifest, setId: 'set-a', pin: world.pin, n: 2, spawn,
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.deepEqual(observed, [0, 1])
+  assert.equal(manifestLines(world.manifest).length, 2)
+}))
+
+test('spawnArmSet output remains collectable after work in both worktrees', () => withWorld((world) => {
+  const { spawn } = recordingSpawner(world)
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot: join(world.root, 'worktrees'),
+    manifestPath: world.manifest, setId: 'set-a', pin: world.pin, n: 2, spawn,
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  for (const arm of result.arms) {
+    const file = join(arm.checkout, `${arm.adw_id}.txt`)
+    writeFileSync(file, 'work\n')
+    git(arm.checkout, 'add', '--', file)
+    git(arm.checkout, 'commit', '-q', '-m', 'arm work')
+  }
+  const report = collectArms({ manifestPath: world.manifest, repo: world.host })
+  assert.equal(report.ok, true, JSON.stringify(report))
+  assert.equal(report.counts.created, 2)
+  assert.equal(report.pin, world.pin)
+}))
+
+test('spawnArmSet rejects over-cap before creating paths or calling the spawner', () => withWorld((world) => {
+  let calls = 0
+  const worktreeRoot = join(world.root, 'worktrees')
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot, manifestPath: world.manifest,
+    setId: 'set-a', pin: world.pin, n: ARM_SPAWN_MAX_N + 1,
+    spawn: () => { calls += 1; return { ok: true } },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'refused')
+  assert.equal(result.reason, 'n-over-cap')
+  assert.match(result.message, /n.*cap/)
+  assert.equal(calls, 0)
+  assert.equal(existsSync(world.manifest), false)
+  assert.equal(existsSync(worktreeRoot), false)
+}))
+
+test('spawnArmSet detects a worktree that lands off the shared pin', () => withWorld((world) => {
+  const { spawn } = recordingSpawner(world)
+  const rigged = (command, args, options) => {
+    const argv = [...args]
+    if (command === 'git' && argv.includes('worktree') && argv.includes('add')) {
+      const pinIndex = argv.indexOf(world.pin)
+      if (pinIndex >= 0) argv[pinIndex] = world.other
+    }
+    return cpSpawnSync(command, argv, options)
+  }
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot: join(world.root, 'worktrees'),
+    manifestPath: world.manifest, setId: 'set-a', pin: world.pin, n: 1,
+    spawn, deps: { spawnSync: rigged },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.failed.reason, 'arm-pin-mismatch')
+  assert.match(JSON.stringify(result), new RegExp(`${world.pin}.*${world.other}|${world.other}.*${world.pin}`))
+}))
+
+test('spawnArmSet keeps both worktrees when the second spawner call fails', () => withWorld((world) => {
+  const worktreeRoot = join(world.root, 'worktrees')
+  const { spawn, calls } = recordingSpawner(world, { failOnIndex: 2 })
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot, manifestPath: world.manifest,
+    setId: 'set-a', pin: world.pin, n: 2, spawn,
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'partial')
+  assert.equal(result.failed.index, 2)
+  assert.equal(result.failed.phase, 'spawn')
+  assert.equal(result.failed.reason, 'spawn-failed')
+  assert.equal(calls.length, 2)
+  assert.equal(result.arms.length, 1)
+  assert.equal(manifestLines(world.manifest).length, 1)
+  assert.equal(existsSync(join(worktreeRoot, 'set-a-arm01')), true)
+  assert.equal(existsSync(join(worktreeRoot, 'set-a-arm02')), true)
+}))
+
+test('spawn axes reject unknown values and factoryctl refuses model without a child', () => withWorld((world) => {
+  let calls = 0
+  const worktreeRoot = join(world.root, 'worktrees')
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot, manifestPath: world.manifest,
+    setId: 'set-a', pin: world.pin, n: 1,
+    arms: [{ axes: { temperature: 'hot' } }],
+    spawn: () => { calls += 1; return { ok: true } },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.status, 'refused')
+  assert.equal(result.reason, 'axis-unknown')
+  assert.equal(calls, 0)
+  assert.equal(existsSync(world.manifest), false)
+  assert.equal(existsSync(worktreeRoot), false)
+
+  let childCalls = 0
+  const model = factoryctlSpawner({
+    axes: { model: 'opus' },
+    deps: { spawnSync: () => { childCalls += 1; throw new Error('should not shell') } },
+  })
+  assert.equal(model.ok, false)
+  assert.equal(model.reason, 'axis-unsupported')
+  assert.equal(childCalls, 0)
+}))
+
+test('spawnArmSet sends all git commands through the injected seam', () => withWorld((world) => {
+  const seen = []
+  const { spawn } = recordingSpawner(world)
+  const spawnSync = (command, args, options) => {
+    seen.push([command, ...args])
+    return cpSpawnSync(command, args, options)
+  }
+  const result = spawnArmSet({
+    repo: world.host, worktreeRoot: join(world.root, 'worktrees'),
+    manifestPath: world.manifest, setId: 'set-a', pin: world.pin, n: 2,
+    spawn, deps: { spawnSync },
+  })
+  assert.equal(result.ok, true, JSON.stringify(result))
+  assert.ok(seen.length >= 5)
+  assert.ok(seen.every((argv) => argv[0] === 'git'))
+  assert.ok(seen.every((argv) => !['push', 'remove', 'prune'].some((word) => argv.includes(word))))
+}))
 
 test('armsManifestPath composes the factory convention and rejects invalid set ids', () => {
   assert.equal(armsManifestPath({ factoryRoot: '/tmp/factory', setId: 'set.a-1' }), '/tmp/factory/arms/set.a-1.jsonl')

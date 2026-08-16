@@ -150,8 +150,18 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   assert.equal(workflow.jobs[0].check_name, 'test (node 24)')
   assert.ok(profile.fields.conventions.value.files.includes('docs/conventions.md'))
   assert.ok(!profile.fields.conventions.value.files.includes('CLAUDE.md'))
-  assert.equal(profile.fields.default_branch.value, 'main')
-  assert.equal(profile.fields.default_branch.status, 'proposed')
+  // The default branch is read from refs/remotes/origin/HEAD, which a local
+  // clone has and a CI checkout does NOT (actions/checkout never sets it).
+  // Both outcomes are correct probe behaviour, so this pins the CONTRACT —
+  // propose 'main' when the ref exists, admit no_remote_head when it does not —
+  // rather than a fact about the machine the test happens to run on.
+  if (profile.fields.default_branch.status === 'proposed') {
+    assert.equal(profile.fields.default_branch.value, 'main')
+  } else {
+    assert.equal(profile.fields.default_branch.status, 'unknown')
+    assert.equal(profile.fields.default_branch.value, null)
+    assert.equal(profile.fields.default_branch.reason, 'no_remote_head')
+  }
   assert.equal(profile.meta.gh_consulted, false)
   assert.equal(profile.meta.body_digest, profileDigest(profile))
 })

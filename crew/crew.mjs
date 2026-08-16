@@ -15,7 +15,8 @@
 //                  [--checkout <dir>] [--model-<role> <id>] [--agent-<role> <name>]...
 //                  [--headless-all] [--memory-dir <dir>] [--memory-backend <name>]
 //                  [--memory-budget-bytes <n>]
-//   crew.mjs run   --task <slug> --brief-file <path>   # hand the task to the lead
+//   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] # hand the task to the lead
+//                  variant names come from crew/drive.mjs's VARIANTS
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
 //   crew.mjs teardown --task <slug>
@@ -30,7 +31,7 @@ import { execSync } from 'node:child_process'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
-import { driveTask } from './drive.mjs'
+import { driveTask, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
   realIo, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
@@ -118,6 +119,24 @@ function seatAgent(role, args) {
 // charter needs. Every seat has a non-empty deny list, so an adapter that
 // can't enforce it would boot a silently weaker seat. Returns undefined on
 // success.
+
+// The closed set lives in crew/drive.mjs and is IMPORTED, never restated:
+// a second list here is exactly how the CLI and the driver drift apart, and
+// a shape added to VARIANTS becomes selectable from the CLI with no edit.
+export function resolveVariant(args = {}) {
+  const raw = args.variant
+  if (raw === undefined) return DEFAULT_VARIANT
+  // parseArgs turns a valueless --variant into boolean true — that is a
+  // missing value, not a shape name.
+  if (raw === true) {
+    throw new Error(`--variant needs a shape name — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+  }
+  const name = String(raw)
+  if (!VARIANT_NAMES.includes(name)) {
+    throw new Error(`unknown variant ${JSON.stringify(name)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+  }
+  return name
+}
 
 export function transportFor(role, args = {}) {
   const headless = String(args.headless === true ? '' : (args.headless || ''))
@@ -637,7 +656,11 @@ function noteRunlessCellFailure({ taskSlug, role, kind, err, cell = null, member
 }
 
 
-function runCmd(args) {
+export function runCmd(args, deps = {}) {
+  // Refuse an unknown shape BEFORE any state is read, spawned or written —
+  // the same posture as boot's assertCellsClosed and mixed-transport guards.
+  const variant = resolveVariant(args)
+  const { drive = driveTask } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -666,7 +689,7 @@ function runCmd(args) {
   // crew/crew.test.mjs pins the three-way agreement.
   const ctx = {
     task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal,
-    roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000',
+    roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000', variant,
   }
   // Seats are TUI processes and the first assignment must not race their
   // boot: characters typed into a pty before the TUI grabs it are silently
@@ -700,7 +723,7 @@ function runCmd(args) {
   // concurrent `crew.mjs wait` spins its full timeout for nothing.
   let result
   try {
-    result = driveTask(ctx, io)
+    result = drive(ctx, io)
   } catch (err) {
     logLine(journal, { at: new Date().toISOString(), event: 'driver-crash', error: err.message })
     result = {

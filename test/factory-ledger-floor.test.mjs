@@ -189,14 +189,13 @@ test('AC-8(e): JSONL is still written below floor and is parseable', () => {
   }
 })
 
-test("AC-8(f): NODE_FLOOR's major equals the highest Node major in the CI matrix", () => {
+// ADR-031 superseded the two-leg matrix form with a single CI Node declaration.
+test("AC-8(f): NODE_FLOOR's major equals the single CI Node major", () => {
   const workflowYml = readFileSync(join(ROOT, '.github/workflows/test.yml'), 'utf8')
-  const m = workflowYml.match(/node-version:\s*\[([^\]]*)\]/)
-  assert.ok(m, 'matrix node-version list not found')
-  const majors = [...m[1].matchAll(/"(\d+)"/g)].map((x) => Number(x[1]))
-  assert.ok(majors.length > 0)
+  const matches = [...workflowYml.matchAll(/node-version:\s*"?(\d+)/g)]
+  assert.equal(matches.length, 1, 'expected exactly one concrete node-version declaration')
   const floorMajor = Number(NODE_FLOOR.split('.')[0])
-  assert.equal(floorMajor, Math.max(...majors))
+  assert.equal(Number(matches[0][1]), floorMajor)
 })
 
 // --- AC-12: never prune (source-text assertion, including comments) --------

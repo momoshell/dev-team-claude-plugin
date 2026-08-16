@@ -57,9 +57,9 @@
 // inline.
 
 import {
-  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync,
+  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync, statSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, parse, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -71,6 +71,34 @@ import { spawnSync } from 'node:child_process'
 const NONCE_PREFIX = 'devteam-done-'
 
 const require = createRequire(import.meta.url)
+
+// fs.mkdirSync with recursive directory creation is NOT bounded: on a filesystem
+// that answers ENOENT to mkdir for a path whose parent exists (Linux procfs
+// does exactly this), Node walks up to create the parent, sees EEXIST, walks
+// back down, gets ENOENT again — forever, spinning a CPU, on the main thread,
+// where no timer or --test-timeout can interrupt it. This walks DOWN once,
+// one non-recursive mkdir per segment, so it is bounded by the path's own
+// depth and always returns or throws.
+export function mkdirpBounded(dir, mode = 0o700) {
+  const resolved = resolve(dir)
+  const { root } = parse(resolved)
+  const segments = resolved.slice(root.length).split(sep).filter(Boolean)
+  let prefix = root
+  for (const [index, segment] of segments.entries()) {
+    prefix = join(prefix, segment)
+    try {
+      mkdirSync(prefix, { mode })
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      if (index === segments.length - 1) {
+        let isDirectory = false
+        try { isDirectory = statSync(prefix).isDirectory() } catch { /* rethrow EEXIST below */ }
+        if (!isDirectory) throw err
+      }
+    }
+  }
+  return resolved
+}
 
 // ---------------------------------------------------------------------------
 // Frozen constants (all exported — the interface contract)
@@ -644,7 +672,7 @@ export function openLedger({
   }
 
   function ensureDirAndPerms() {
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    mkdirpBounded(dir, 0o700)
     // mode is masked by the process umask, so an explicit chmod is what
     // actually guarantees 0700.
     chmodIfExists(dir, 0o700)

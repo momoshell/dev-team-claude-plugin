@@ -83,14 +83,14 @@
 // sidecar.
 
 import {
-  writeFileSync, unlinkSync, linkSync, renameSync, readFileSync, mkdirSync, chmodSync, statSync, existsSync,
+  writeFileSync, unlinkSync, linkSync, renameSync, readFileSync, chmodSync, statSync, existsSync,
   realpathSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import {
-  openLedger, isoMs, SESSION_STATUSES,
+  openLedger, isoMs, SESSION_STATUSES, mkdirpBounded,
 } from './ledger.mjs'
 
 // ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ function readFileStatus(path) {
 }
 
 function secureMkdirSync(dir) {
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  mkdirpBounded(dir, 0o700)
   // mode is masked by the process umask, so an explicit chmod is what
   // actually guarantees 0700 (mirrors ledger.mjs's ensureDirAndPerms).
   chmodIfExists(dir, 0o700)

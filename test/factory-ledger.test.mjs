@@ -9,7 +9,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync,
+  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,7 +20,7 @@ import { ROOT } from './helpers.mjs'
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
 import {
-  openLedger, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
+  openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
 } from '../scripts/factory/ledger.mjs'
 
@@ -79,6 +79,27 @@ function openTestLedger(extra = {}) {
   const dir = nextDir()
   return openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} }, ...extra })
 }
+
+test('mkdirpBounded creates a deep path, and refuses promptly under a regular file rather than looping', () => {
+  const dir = nextDir()
+  mkdirpBounded(join(dir, 'a', 'b', 'c'), 0o700)
+  assert.ok(existsSync(join(dir, 'a', 'b', 'c')))
+  const blocker = join(dir, 'blocker')
+  writeFileSync(blocker, 'not a directory')
+  assert.throws(() => mkdirpBounded(blocker, 0o700), (err) => err.code === 'EEXIST')
+  assert.equal(readFileSync(blocker, 'utf8'), 'not a directory')
+  assert.throws(() => mkdirpBounded(join(blocker, 'nested'), 0o700), (err) => err.code === 'ENOTDIR')
+})
+
+test('factory directory creation does not regress to recursive mkdirSync', () => {
+  for (const relative of ['scripts/factory/ledger.mjs', 'scripts/factory/emit.mjs']) {
+    const source = readFileSync(join(ROOT, relative), 'utf8')
+    const recursiveMkdirLine = source.split('\n').find((line) => (
+      /mkdirSync\s*\(/.test(line) && /recursive\s*:\s*true/.test(line)
+    ))
+    assert.equal(recursiveMkdirLine, undefined, `${relative} contains recursive mkdirSync`)
+  }
+})
 
 // ---------------------------------------------------------------------------
 // AC-1: schema exactness

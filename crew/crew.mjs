@@ -41,6 +41,7 @@ export {
   LIVENESS_MISSES_TO_DIE,
 } from './realio.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
+import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
 } from './memory.mjs'
@@ -420,7 +421,13 @@ export function parkOnOutcome(result, { crew, runId, dir, reason, actor = 'crew'
 }
 
 export async function bootCmd(args, deps = {}) {
-  const { cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab } = deps
+  const {
+    cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
+    openLedger: openLedgerDep = null, existsSync: existsSyncDep = null,
+  } = deps
+  // Capture the invocation environment before async adapter resolution so a
+  // caller's policy cannot be lost while boot is awaiting imports.
+  const breakerEnv = { ...process.env }
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   let roles, tierName = null, tierSeats = null, sources = null
@@ -459,6 +466,22 @@ export async function bootCmd(args, deps = {}) {
     throw err
   }
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters) : null
+  // #45 Tier B: opt-in cell breaker. With no policy configured this is a
+  // null and the ledger is never opened (acceptance #1). An open cell
+  // refuses here, before any state dir or seat exists, and is NOT recorded
+  // as a cell failure — a policy decision is not evidence against the cell.
+  // An injected opener IS the ledger source, so its dbPath precheck is
+  // meaningless; the precheck exists so a real boot never creates a ledger DB
+  // as a side effect of the breaker check. Callers can still pin the precheck
+  // explicitly through existsSync for a fake or custom ledger.
+  const breaker = cellHealth({
+    policy: breakerPolicy(breakerEnv), seats, dbPath: ledgerDbPath(),
+    ...(openLedgerDep ? {
+      openLedger: openLedgerDep,
+      existsSync: existsSyncDep ?? (() => true),
+    } : {}),
+  })
+  assertCellsClosed(breaker)
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
   const workerBin = roles.some((role) => adapters[role].transport === HEADLESS_TRANSPORT) ? resolveWorkerBin(args) : null
@@ -561,6 +584,7 @@ export async function bootCmd(args, deps = {}) {
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(allocation ? { allocation } : {}),
+    ...(breaker ? { breaker } : {}),
     ...(memory.record ? { memory: memory.record } : {}),
   })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)

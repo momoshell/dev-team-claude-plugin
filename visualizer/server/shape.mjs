@@ -1,6 +1,7 @@
 // Pure run shaping helpers. This module deliberately has no filesystem or database dependencies.
 const lanes = new Map()
 const PALETTE_SIZE = 8
+export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
 export function laneFor(role) {
   const key = String(role || 'unknown')
@@ -177,6 +178,149 @@ export function matchesFilters(run, filters = {}) {
   if (since != null && (started == null || started < since)) return false
   if (until != null && (started == null || started >= until)) return false
   return true
+}
+
+function cellPart(value) {
+  return value == null ? '—' : String(value)
+}
+
+function cellKey(provider, model_id, agent, effort) {
+  return `${cellPart(provider)}/${cellPart(model_id)}·${cellPart(agent)}·${cellPart(effort)}`
+}
+
+function countValue(value) {
+  const count = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(count) ? count : 0
+}
+
+function earlierTimestamp(current, candidate) {
+  if (candidate == null) return current
+  if (current == null) return candidate
+  const currentMs = dateValue(current), candidateMs = dateValue(candidate)
+  if (currentMs != null && candidateMs != null) return candidateMs < currentMs ? candidate : current
+  return String(candidate) < String(current) ? candidate : current
+}
+
+function laterTimestamp(current, candidate) {
+  if (candidate == null) return current
+  if (current == null) return candidate
+  const currentMs = dateValue(current), candidateMs = dateValue(candidate)
+  if (currentMs != null && candidateMs != null) return candidateMs > currentMs ? candidate : current
+  return String(candidate) > String(current) ? candidate : current
+}
+
+function sortedValues(values) {
+  return [...values].sort((a, b) => String(a).localeCompare(String(b)))
+}
+
+export function defaultCellWindow(now = Date.now()) {
+  return {
+    since: new Date(now - CELL_HEALTH_WINDOW_MS).toISOString(),
+    until: null,
+    label: 'last 7 days',
+  }
+}
+
+export function shapeCellHealth({ rows, absent, roster, since, until, label } = {}) {
+  const window = { since: since ?? null, until: until ?? null, label: label ?? null }
+  if (typeof absent === 'string' && absent.length > 0) {
+    return { window, absent, silent_unknown: absent, cells: [] }
+  }
+
+  const cells = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const provider = row?.provider ?? null
+    const model_id = row?.model_id ?? null
+    const agent = row?.agent ?? null
+    const effort = row?.effort ?? null
+    const key = cellKey(provider, model_id, agent, effort)
+    let cell = cells.get(key)
+    if (!cell) {
+      cell = {
+        key, provider, model_id, agent, effort,
+        roles: new Set(), tiers: new Set(), seated: false,
+        failures: 0, run_less: 0, first_at: null, last_at: null,
+        by_kind: new Map(),
+      }
+      cells.set(key, cell)
+    }
+    const failures = countValue(row?.failures)
+    const run_less = countValue(row?.run_less)
+    cell.failures += failures
+    cell.run_less += run_less
+    if (row?.role != null) cell.roles.add(row.role)
+    cell.first_at = earlierTimestamp(cell.first_at, row?.first_at ?? null)
+    cell.last_at = laterTimestamp(cell.last_at, row?.last_at ?? null)
+    const kind = row?.kind ?? '—'
+    const byKind = cell.by_kind.get(kind) || { kind, failures: 0, run_less: 0 }
+    byKind.failures += failures
+    byKind.run_less += run_less
+    cell.by_kind.set(kind, byKind)
+  }
+
+  let silent_unknown = null
+  const tiers = Array.isArray(roster?.tiers) ? roster.tiers : null
+  if (!tiers) {
+    silent_unknown = roster?.error || 'the roster could not be read — cells with no failures cannot be enumerated'
+  } else {
+    for (const tier of tiers) {
+      const tierName = tier?.tier ?? null
+      for (const seat of Array.isArray(tier?.seats) ? tier.seats : []) {
+        const provider = seat?.provider ?? null
+        const model_id = seat?.model_id ?? seat?.id ?? null
+        const agent = seat?.agent ?? null
+        const effort = seat?.effort ?? null
+        const key = cellKey(provider, model_id, agent, effort)
+        let cell = cells.get(key)
+        if (!cell) {
+          cell = {
+            key, provider, model_id, agent, effort,
+            roles: new Set(), tiers: new Set(), seated: true,
+            failures: 0, run_less: 0, first_at: null, last_at: null,
+            by_kind: new Map(),
+          }
+          cells.set(key, cell)
+        } else {
+          cell.seated = true
+        }
+        if (seat?.role != null) cell.roles.add(seat.role)
+        if (tierName != null) cell.tiers.add(tierName)
+      }
+    }
+  }
+
+  const shaped = [...cells.values()].map((cell) => {
+    const failures = cell.failures
+    const run_less = cell.run_less
+    const state = failures === 0 ? 'silent' : (failures > 0 && run_less === failures ? 'run-less-only' : 'recorded')
+    const by_kind = [...cell.by_kind.values()]
+      .sort((a, b) => b.failures - a.failures || String(a.kind).localeCompare(String(b.kind)))
+      .map((kind) => ({ ...kind }))
+    return {
+      key: cell.key,
+      provider: cell.provider,
+      model_id: cell.model_id,
+      agent: cell.agent,
+      effort: cell.effort,
+      roles: sortedValues(cell.roles),
+      tiers: sortedValues(cell.tiers),
+      seated: cell.seated,
+      state,
+      failures,
+      run_less,
+      in_run: failures - run_less,
+      first_at: cell.first_at,
+      last_at: cell.last_at,
+      by_kind,
+    }
+  })
+  shaped.sort((a, b) => {
+    const aSilent = a.state === 'silent', bSilent = b.state === 'silent'
+    if (aSilent !== bSilent) return aSilent ? 1 : -1
+    if (!aSilent && a.failures !== b.failures) return b.failures - a.failures
+    return a.key.localeCompare(b.key)
+  })
+  return { window, absent: null, silent_unknown, cells: shaped }
 }
 
 export { pendingFor }

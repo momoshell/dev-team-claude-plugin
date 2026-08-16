@@ -484,6 +484,27 @@ export async function bootCmd(args, deps = {}) {
   assertCellsClosed(breaker)
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
+  // #249 / ADR-033: transport follows the MODE, never the seat. A cmux workspace
+  // exists so a human can inspect every seat in it, so a piped seat inside one is
+  // a mode error, not a configuration. Refuse HERE: after resolveAdapters
+  // (transport is unknowable before it) and before pathsFor/mkdirSync or any cmux
+  // call, so a refusal leaves no state dir and no workspace behind. Deliberately
+  // outside the noteRunlessCellFailure wrapper above — operator misconfiguration
+  // is not evidence against a cell (ADR-032's posture).
+  if (!headlessOnly) {
+    const piped = roles.filter((role) => adapters[role].transport !== DEFAULT_TRANSPORT)
+    if (piped.length) {
+      const named = piped.map((role) => `${role} (${adapters[role].transport})`).join(', ')
+      const err = new Error(
+        `mixed transport: this boot would create a cmux workspace, but ${named} would be piped instead of seated in a pane. `
+        + 'A workspace exists so a human can inspect EVERY seat in it; a piped seat there is visible only by tailing '
+        + 'task/headless-rpc/<role>/stream.jsonl. Pick a mode: drop --headless/--headless-rpc so every seat gets a pane, '
+        + 'or pass --headless-all for the factory shape, which creates no workspace at all.'
+      )
+      err.code = 'mixed-transport'
+      throw err
+    }
+  }
   const workerBin = roles.some((role) => adapters[role].transport === HEADLESS_TRANSPORT) ? resolveWorkerBin(args) : null
 
   const paths = pathsFor(taskSlug, checkout)
@@ -558,6 +579,9 @@ export async function bootCmd(args, deps = {}) {
         members[role] = memberFor(role, panes[i], surface)
       })
     }
+    // Unreachable since #249: the mixed-transport guard above refuses any
+    // workspace boot with a non-pane seat. Kept as the symmetric partner of
+    // the headlessOnly offender check below.
     for (const role of roles.filter((r) => adapters[r].transport !== DEFAULT_TRANSPORT)) members[role] = memberFor(role)
     for (const role of paneRoles) renameTabFn(members[role].surface_id, role)
   }

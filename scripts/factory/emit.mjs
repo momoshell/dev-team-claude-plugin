@@ -540,6 +540,23 @@ export function recordCiCycle({ dbPath, stderr = process.stderr, _openLedger, ..
   }
 }
 
+// A repair dispatch is an observation of what the bounded loop attempted (or
+// refused), not load-bearing control flow. Mirror the cycle facade exactly:
+// one open, one row, close, and no instrumentation error escapes the caller.
+export function recordCiDispatch({ dbPath, stderr = process.stderr, _openLedger, ...fields } = {}) {
+  let handle = null
+  try {
+    handle = (_openLedger || openLedger)({ dbPath, stderr })
+    handle.recordCiDispatch(fields)
+    return true
+  } catch (err) {
+    try { stderr.write(`emit: CI dispatch not recorded (${err.message})\n`) } catch { /* best effort */ }
+    return false
+  } finally {
+    try { if (handle) handle.close() } catch { /* best effort */ }
+  }
+}
+
 function openRunInner({
   stateDir,
   repoSlug,

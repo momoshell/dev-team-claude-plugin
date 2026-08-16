@@ -255,6 +255,13 @@ function exerciseEveryWriter(ledger, adwId) {
     excerpt_source: 'check-log', local_lane: 'node --test', local_exit: 1,
     created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordCiDispatch({
+    adw_id: adwId, task_slug: 'task', repo_slug: 'repo', branch: 'main', head_sha: 'abc123',
+    check_name: 'test (node 24)', cycle: 1, variant: 'repair', outcome: 'done',
+    commit: 'repair-commit', brief_path: '/tmp/repair.md', scope_source: 'files_committed',
+    scope_count: 1, task_return: '/tmp/task.json', exit_code: 0,
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.recordModifierAttempt({
     adw_id: adwId, task_slug: 'task', phase_id: phaseId, role: 'builder', modifier: 'failure-upgrade',
     bounce: 'lane', outcome: 'applied', rung: 'mechanical→build', transport: 'pane',
@@ -339,6 +346,33 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
     () => ledger.recordCellFailure({ role: 'builder', kind: badCell }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badCell),
   )
+})
+
+test('ci_dispatches refuses missing required fields and out-of-enum outcomes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  assert.throws(
+    () => ledger.recordCiDispatch({ branch: 'main', head_sha: 'h', check_name: 'c', cycle: 1, variant: 'repair' }),
+    (err) => err instanceof LedgerUsageError && err.message.includes("missing required field 'outcome'"),
+  )
+  assert.throws(
+    () => ledger.recordCiDispatch({ branch: 'main', head_sha: 'h', check_name: 'c', cycle: 1, variant: 'full', outcome: 'not-real' }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes('not-real'),
+  )
+  assert.throws(
+    () => ledger.recordCiDispatch({ branch: 'main', head_sha: 'h', check_name: 'c', cycle: 1, variant: 'repair', outcome: 'refused' }),
+    (err) => err instanceof LedgerUsageError && err.message.includes("outcome 'refused' requires a reason"),
+  )
+})
+
+test('ciDispatches aggregates the dispatch outcome window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const base = { branch: 'main', head_sha: 'h', check_name: 'c', cycle: 1, variant: 'repair', outcome: 'done', created_at: '2024-01-01T00:00:00.000Z' }
+  ledger.recordCiDispatch(base)
+  ledger.recordCiDispatch({ ...base, branch: 'other', cycle: 2, created_at: '2024-01-01T00:00:01.000Z' })
+  assert.deepEqual(ledger.ciDispatches({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-01T00:00:02.000Z' }).map((row) => ({ ...row })), [
+    { variant: 'repair', outcome: 'done', cycle: 1, count: 1, first_at: '2024-01-01T00:00:00.000Z', last_at: '2024-01-01T00:00:00.000Z' },
+    { variant: 'repair', outcome: 'done', cycle: 2, count: 1, first_at: '2024-01-01T00:00:01.000Z', last_at: '2024-01-01T00:00:01.000Z' },
+  ])
 })
 
 test('ci_cycles refuses collapsed decisions and ignores a repeated identical cycle', { skip: SKIP }, () => {
@@ -905,6 +939,12 @@ function seedAllWritersWithMarker(ledger) {
     check_name: 'test (node 24)', cycle: 1, conclusion: 'failure', classification: 'unknown',
     decision: 'park', reason: MARKER_ADW, excerpt: MARKER_ADW, excerpt_source: 'check-log',
     local_lane: MARKER_ADW, local_exit: 1, created_at: '2024-01-01T00:00:02.000Z',
+  })
+  ledger.recordCiDispatch({
+    adw_id: ctx, task_slug: 't', repo_slug: MARKER_ADW, branch: 'main', head_sha: 'marker-head',
+    check_name: 'test (node 24)', cycle: 1, variant: 'repair', outcome: 'escalation', reason: MARKER_ADW,
+    commit: MARKER_ADW, brief_path: MARKER_ADW, scope_source: MARKER_ADW, scope_count: 1,
+    task_return: MARKER_ADW, park_path: MARKER_ADW, exit_code: 1, created_at: '2024-01-01T00:00:02.000Z',
   })
   ledger.recordModifierAttempt({
     adw_id: ctx, task_slug: 't', role: 'builder', modifier: 'failure-upgrade', bounce: 'lane', outcome: 'transport',

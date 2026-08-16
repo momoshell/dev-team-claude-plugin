@@ -128,6 +128,7 @@ export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 // own reason; it is never a green and never a repair.
 export const CI_CLASSIFICATIONS = Object.freeze(['green', 'reproduced', 'platform-divergent', 'unknown'])
 export const CI_DECISIONS = Object.freeze(['none', 'repair', 'park'])
+export const CI_DISPATCH_OUTCOMES = Object.freeze(['done', 'escalation', 'converge', 'refused', 'unreadable'])
 
 // The closed set of CELL availability failures — a cell that could not hold a
 // seat, died mid-assignment, or returned nothing usable. Deliberately NOT a
@@ -474,6 +475,31 @@ export const TABLES = Object.freeze({
     unique: [['branch', 'head_sha', 'check_name', 'cycle']],
     indexes: [{ name: 'ci_cycles_classification_idx', cols: ['check_name', 'classification', 'created_at'] }],
   },
+  ci_dispatches: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'task_slug', decl: 'TEXT' },
+      { name: 'repo_slug', decl: 'TEXT' },
+      { name: 'branch', decl: 'TEXT' },
+      { name: 'head_sha', decl: 'TEXT' },
+      { name: 'check_name', decl: 'TEXT' },
+      { name: 'cycle', decl: 'INTEGER' },
+      { name: 'variant', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'commit', decl: 'TEXT' },
+      { name: 'brief_path', decl: 'TEXT' },
+      { name: 'scope_source', decl: 'TEXT' },
+      { name: 'scope_count', decl: 'INTEGER' },
+      { name: 'task_return', decl: 'TEXT' },
+      { name: 'park_path', decl: 'TEXT' },
+      { name: 'exit_code', decl: 'INTEGER' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['branch', 'head_sha', 'check_name', 'cycle']],
+    indexes: [{ name: 'ci_dispatches_outcome_idx', cols: ['variant', 'outcome', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -481,7 +507,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -491,6 +517,10 @@ export const WRITERS = Object.freeze([
 
 function tableColumnNames(table) {
   return TABLES[table].columns.map((c) => c.name)
+}
+
+function quoteSqlIdentifier(name) {
+  return `"${String(name).replaceAll('"', '""')}"`
 }
 
 // Fallback ordering key for a table with no declared `unique` set: derived
@@ -506,14 +536,14 @@ function primaryKeyColumn(table) {
 function migrationsFor() {
   const stmts = []
   for (const [table, def] of Object.entries(TABLES)) {
-    const colSql = def.columns.map((c) => `${c.name} ${c.decl}`).join(', ')
-    stmts.push(`CREATE TABLE IF NOT EXISTS ${table} (${colSql})`)
+    const colSql = def.columns.map((c) => `${quoteSqlIdentifier(c.name)} ${c.decl}`).join(', ')
+    stmts.push(`CREATE TABLE IF NOT EXISTS ${quoteSqlIdentifier(table)} (${colSql})`)
     for (const cols of def.unique) {
       const idxName = `${table}_${cols.join('_')}_uq`
-      stmts.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${idxName} ON ${table} (${cols.join(', ')})`)
+      stmts.push(`CREATE UNIQUE INDEX IF NOT EXISTS ${quoteSqlIdentifier(idxName)} ON ${quoteSqlIdentifier(table)} (${cols.map(quoteSqlIdentifier).join(', ')})`)
     }
     for (const idx of def.indexes) {
-      stmts.push(`CREATE INDEX IF NOT EXISTS ${idx.name} ON ${table} (${idx.cols.join(', ')})`)
+      stmts.push(`CREATE INDEX IF NOT EXISTS ${quoteSqlIdentifier(idx.name)} ON ${quoteSqlIdentifier(table)} (${idx.cols.map(quoteSqlIdentifier).join(', ')})`)
     }
   }
   return stmts
@@ -546,7 +576,7 @@ export function applyMigrations(db, migrations = MIGRATIONS) {
       if (!existingCols.has(col.name)) {
         // Additive only: a column present in TABLES but absent on disk (an
         // older db file) is added; no column is ever dropped or altered.
-        db.exec(`ALTER TABLE ${table} ADD COLUMN ${col.name} ${col.decl}`)
+        db.exec(`ALTER TABLE ${quoteSqlIdentifier(table)} ADD COLUMN ${quoteSqlIdentifier(col.name)} ${col.decl}`)
       }
     }
   }
@@ -1318,6 +1348,53 @@ export function openLedger({
     return args
   }
 
+  function recordCiDispatch(input = {}) {
+    requireFields(input, ['branch', 'head_sha', 'check_name', 'cycle', 'variant', 'outcome'], 'recordCiDispatch')
+    requireEnum(input.variant, RUN_VARIANTS, 'recordCiDispatch', 'variant')
+    requireEnum(input.outcome, CI_DISPATCH_OUTCOMES, 'recordCiDispatch', 'outcome')
+    if (input.outcome === 'refused' && !input.reason) {
+      refuse("recordCiDispatch: outcome 'refused' requires a reason")
+    }
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      task_slug: input.task_slug ?? null,
+      repo_slug: input.repo_slug ?? null,
+      branch: input.branch ?? null,
+      head_sha: input.head_sha ?? null,
+      check_name: input.check_name ?? null,
+      cycle: input.cycle ?? null,
+      variant: input.variant,
+      outcome: input.outcome,
+      reason: input.reason == null ? null : String(input.reason),
+      commit: input.commit == null ? null : String(input.commit),
+      brief_path: input.brief_path == null ? null : String(input.brief_path),
+      scope_source: input.scope_source == null ? null : String(input.scope_source),
+      scope_count: input.scope_count ?? null,
+      task_return: input.task_return == null ? null : String(input.task_return),
+      park_path: input.park_path == null ? null : String(input.park_path),
+      exit_code: input.exit_code ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (input.outcome === 'refused' && input.reason != null && args.reason === undefined) {
+      args.reason = 'redacted'
+    }
+    if (args.reason != null) args.reason = args.reason.slice(0, 500)
+    if (args.commit != null) args.commit = args.commit.slice(0, 500)
+    if (args.brief_path != null) args.brief_path = args.brief_path.slice(0, 1000)
+    if (args.scope_source != null) args.scope_source = args.scope_source.slice(0, 120)
+    if (args.task_return != null) args.task_return = args.task_return.slice(0, 1000)
+    if (args.park_path != null) args.park_path = args.park_path.slice(0, 1000)
+    if (args.check_name != null) args.check_name = String(args.check_name).slice(0, 200)
+    appendJsonl('recordCiDispatch', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('ci_dispatches').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO ci_dispatches (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordModifierAttempt(input = {}) {
     requireFields(input, ['role', 'modifier', 'outcome'], 'recordModifierAttempt')
     requireEnum(input.modifier, MODIFIER_KINDS, 'recordModifierAttempt', 'modifier')
@@ -1725,6 +1802,17 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function ciDispatches({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT variant, outcome, cycle,
+        COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM ci_dispatches
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY variant, outcome, cycle
+      ORDER BY variant, outcome, cycle
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -1955,10 +2043,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -2421,6 +2509,7 @@ export function main(argv) {
       const until = hasUntil ? windowBound(flags.until, 'until', 'ci-cycles') : null
       if (until != null && since != null && until <= since) refuse('ci-cycles: --until must be later than --since')
       const rows = ledger.ciCycles({ since, until })
+      const dispatches = ledger.ciDispatches({ since, until })
       if (ledger.stats().degraded) refuse('ci-cycles: the ledger mirror is degraded — this window is unanswerable, not empty')
       const watched = rows.reduce((n, row) => n + Number(row.count ?? 0), 0)
       const caught = rows.reduce((n, row) => n + (row.classification === 'reproduced' ? Number(row.count ?? 0) : 0), 0)
@@ -2430,9 +2519,11 @@ export function main(argv) {
         since, until,
         classifications: CI_CLASSIFICATIONS,
         decisions: CI_DECISIONS,
+        dispatch_outcomes: CI_DISPATCH_OUTCOMES,
         watched,
         caught,
         rows,
+        dispatches,
       })}\n`)
       return 0
     }

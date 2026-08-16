@@ -22,7 +22,9 @@ const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
+  MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES,
 } from '../scripts/factory/ledger.mjs'
+import { MODIFIER_OUTCOMES } from '../crew/drive.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
 // AC-13 (both test files never reference the CLI-only default-db-path
@@ -244,6 +246,13 @@ function exerciseEveryWriter(ledger, adwId) {
     transport: 'pane', kind: 'seat-died', stage: 'seat-died', detail: 'pane gone',
     created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordModifierAttempt({
+    adw_id: adwId, task_slug: 'task', phase_id: phaseId, role: 'builder', modifier: 'failure-upgrade',
+    bounce: 'lane', outcome: 'applied', rung: 'mechanical→build', transport: 'pane',
+    from_provider: 'anthropic', from_model_id: 'claude-sonnet', from_model: 'sonnet', from_agent: 'claude', from_effort: 'high',
+    to_provider: 'anthropic', to_model_id: 'claude-opus', to_model: 'opus', to_agent: 'claude', to_effort: 'max',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.startProcess({ adw_id: adwId, dispatch_id: 'd1', pid: 4242, command: 'node x.mjs' })
   ledger.heartbeat({ adw_id: adwId, target: 'process', pid: 4242, started_at: ledger.dumpTable('processes')[0].started_at })
   ledger.endProcess({
@@ -346,6 +355,105 @@ test('cell_failures stores run-less and in-run rows with the complete cell shape
   assert.deepEqual({ adw_id: inRun.adw_id, phase_id: inRun.phase_id, dispatch_id: inRun.dispatch_id, detail: inRun.detail }, {
     adw_id: 'run-cell', phase_id: 4, dispatch_id: 'd1', detail: 'mid-run',
   })
+})
+
+test('modifier attempt writer stores applied and refused rows with the complete cell shapes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordModifierAttempt({
+    adw_id: 'modifier-rows', task_slug: 'measure', phase_id: 2, role: 'builder', modifier: 'failure-upgrade',
+    bounce: 'lane', outcome: 'applied', rung: 'mechanical→build', transport: 'pane',
+    from_provider: 'anthropic', from_model_id: 'old-id', from_model: 'old-model', from_agent: 'claude', from_effort: 'high',
+    to_provider: 'anthropic', to_model_id: 'new-id', to_model: 'new-model', to_agent: 'claude', to_effort: 'max',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.recordModifierAttempt({
+    adw_id: 'modifier-rows', task_slug: 'measure', phase_id: 2, role: 'builder', modifier: 'failure-upgrade',
+    bounce: 'gate', outcome: 'exhausted', why: 'top rung', transport: 'pane',
+    from_provider: 'anthropic', from_model_id: 'new-id', from_model: 'new-model', from_agent: 'claude', from_effort: 'max',
+    created_at: '2024-01-01T00:00:01.000Z',
+  })
+  const rows = ledger.dumpTable('modifier_attempts')
+  assert.equal(rows.length, 2)
+  const applied = rows.find((row) => row.outcome === 'applied')
+  assert.deepEqual({
+    role: applied.role, modifier: applied.modifier, bounce: applied.bounce, rung: applied.rung,
+    from_provider: applied.from_provider, from_model_id: applied.from_model_id, from_model: applied.from_model,
+    from_agent: applied.from_agent, from_effort: applied.from_effort,
+    to_provider: applied.to_provider, to_model_id: applied.to_model_id, to_model: applied.to_model,
+    to_agent: applied.to_agent, to_effort: applied.to_effort,
+  }, {
+    role: 'builder', modifier: 'failure-upgrade', bounce: 'lane', rung: 'mechanical→build',
+    from_provider: 'anthropic', from_model_id: 'old-id', from_model: 'old-model', from_agent: 'claude', from_effort: 'high',
+    to_provider: 'anthropic', to_model_id: 'new-id', to_model: 'new-model', to_agent: 'claude', to_effort: 'max',
+  })
+  const refused = rows.find((row) => row.outcome === 'exhausted')
+  assert.equal(refused.why, 'top rung')
+  for (const key of ['to_provider', 'to_model_id', 'to_model', 'to_agent', 'to_effort']) assert.equal(refused[key], null)
+})
+
+test('modifier attempt writer refuses unknown enums and missing required fields without writing rows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const base = { role: 'builder', modifier: 'failure-upgrade', outcome: 'transport' }
+  for (const input of [
+    { ...base, modifier: 'typo-modifier' },
+    { ...base, outcome: 'typo-outcome' },
+    { modifier: base.modifier, outcome: base.outcome },
+    { role: base.role, outcome: base.outcome },
+    { role: base.role, modifier: base.modifier },
+  ]) {
+    assert.throws(() => ledger.recordModifierAttempt(input), LedgerUsageError)
+  }
+  assert.deepEqual(ledger.dumpTable('modifier_attempts'), [])
+})
+
+test('modifierAttempts aggregates by outcome, role, transport, from cell, and honors bounds', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const common = {
+    adw_id: 'modifier-aggregate', task_slug: 'measure', role: 'builder', modifier: 'failure-upgrade',
+    transport: 'headless-rpc', from_provider: 'openai', from_model_id: 'luna', from_agent: 'pi', from_effort: 'max',
+  }
+  ledger.recordModifierAttempt({ ...common, bounce: 'lane', outcome: 'transport', created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordModifierAttempt({ ...common, bounce: 'gate', outcome: 'transport', created_at: '2024-01-02T00:00:00.000Z' })
+  ledger.recordModifierAttempt({ ...common, bounce: 'review', outcome: 'applied', created_at: '2024-01-03T00:00:00.000Z', to_model_id: 'terra' })
+  const rows = ledger.modifierAttempts()
+  assert.deepEqual(rows.map(({ modifier, outcome, role, transport, from_provider, from_model_id, from_agent, from_effort, attempts, applied }) => ({ modifier, outcome, role, transport, from_provider, from_model_id, from_agent, from_effort, attempts, applied })), [
+    { modifier: 'failure-upgrade', outcome: 'applied', role: 'builder', transport: 'headless-rpc', from_provider: 'openai', from_model_id: 'luna', from_agent: 'pi', from_effort: 'max', attempts: 1, applied: 1 },
+    { modifier: 'failure-upgrade', outcome: 'transport', role: 'builder', transport: 'headless-rpc', from_provider: 'openai', from_model_id: 'luna', from_agent: 'pi', from_effort: 'max', attempts: 2, applied: 0 },
+  ])
+  const bounded = ledger.modifierAttempts({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' })
+  assert.deepEqual(bounded.map(({ outcome, attempts, applied }) => ({ outcome, attempts, applied })), [
+    { outcome: 'transport', attempts: 1, applied: 0 },
+  ])
+  assert.deepEqual(openTestLedger().modifierAttempts(), [])
+})
+
+test('modifier-attempts CLI prints the schema-1 readout and refuses bad arguments', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordModifierAttempt({
+    adw_id: 'modifier-cli', role: 'builder', modifier: 'failure-upgrade', bounce: 'lane', outcome: 'transport',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const ok = run(['modifier-attempts'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(ok.status, 0, ok.stderr)
+  const payload = JSON.parse(ok.stdout.trim())
+  assert.deepEqual({ schema: payload.schema, since: payload.since, until: payload.until }, { schema: 1, since: null, until: null })
+  assert.deepEqual(payload.modifiers, [...MODIFIER_KINDS])
+  assert.deepEqual(payload.outcomes, [...MODIFIER_ATTEMPT_OUTCOMES])
+  assert.equal(payload.rows[0].attempts, 1)
+  const positional = run(['modifier-attempts', 'oops'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(positional.status, 2)
+  assert.match(positional.stderr, /modifier-attempts: takes no positional arguments/)
+  const inverted = run([
+    'modifier-attempts', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-01T00:00:00Z',
+  ], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(inverted.status, 2)
+  assert.match(inverted.stderr, /modifier-attempts: --until must be later than --since/)
+})
+
+test('modifier attempt outcome register stays equal to the driver enum', () => {
+  assert.deepEqual(MODIFIER_ATTEMPT_OUTCOMES, MODIFIER_OUTCOMES)
 })
 
 test('cellFailures aggregates by cell and kind, counts run-less rows, and honors bounds', { skip: SKIP }, () => {
@@ -697,6 +805,12 @@ function seedAllWritersWithMarker(ledger) {
   ledger.recordCellFailure({
     adw_id: ctx, task_slug: 't', role: 'builder', provider: 'anthropic', model_id: 'sonnet',
     kind: 'transport-error', detail: MARKER_ADW, created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.recordModifierAttempt({
+    adw_id: ctx, task_slug: 't', role: 'builder', modifier: 'failure-upgrade', bounce: 'lane', outcome: 'transport',
+    why: MARKER_ADW, rung: MARKER_ADW, transport: 'headless-rpc',
+    from_provider: 'anthropic', from_model_id: 'sonnet', from_model: MARKER_ADW, from_agent: 'claude', from_effort: 'high',
+    created_at: '2024-01-01T00:00:01.000Z',
   })
   ledger.endPhase({ adw_id: ctx, seq: 1, status: 'ok' })
   ledger.endSession({ adw_id: ctx, status: 'ok' })

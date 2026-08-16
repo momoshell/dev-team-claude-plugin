@@ -747,6 +747,11 @@ export function driveTask(ctx, io) {
     }
     const record = { modifier: FAILURE_UPGRADE, kind, role, ...entry }
     try { S.modifiers.push(record); io.log({ at: io.now(), modifier: record }) } catch { /* never load-bearing */ }
+    emit({
+      kind: 'modifier', modifier: record.modifier, bounce: kind, role,
+      outcome: record.outcome, why: record.why ?? null,
+      from: record.from ?? null, to: record.to ?? null, rung: record.rung ?? null,
+    })
   }
 
   // Every stage transition goes to the journal AND (when io provides it) to

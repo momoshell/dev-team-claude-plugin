@@ -226,6 +226,29 @@ export function emitAdapter(emitter, crew = null) {
         model: m?.model ?? null, effort: m?.effort ?? null, transport: m?.transport ?? null,
         kind: event.failure, stage: event.stage ?? null, detail: event.detail ?? null,
       }))
+    } else if (event.kind === 'modifier') {
+      // MEASUREMENT, not policy (#238): every ATTEMPT lands a row, applied or not.
+      // The transport is read from the booted crew because the driver only ever
+      // knows the role — the same reason cell-failure enriches above.
+      const m = (crew && crew.members && crew.members[event.role]) || null
+      const cell = (c) => ({
+        provider: c?.provider ?? null, model_id: c?.id ?? null, model: c?.model ?? null,
+        agent: c?.agent ?? null, effort: c?.effort ?? null,
+      })
+      const from = cell(event.from || m)   // a null `from` means the role was not seated
+      const to = cell(event.to)            // non-null iff the attempt APPLIED
+      try {
+        emitter.emit((handle) => handle.recordModifierAttempt({
+          adw_id: emitter.adwId, task_slug: (crew && crew.task) || null, phase_id: phaseId,
+          role: event.role ?? null, modifier: event.modifier, bounce: event.bounce ?? null,
+          outcome: event.outcome, why: event.why ?? null, rung: event.rung ?? null,
+          transport: m?.transport ?? null,
+          from_provider: from.provider, from_model_id: from.model_id, from_model: from.model,
+          from_agent: from.agent, from_effort: from.effort,
+          to_provider: to.provider, to_model_id: to.model_id, to_model: to.model,
+          to_agent: to.agent, to_effort: to.effort,
+        }))
+      } catch { /* modifier measurement is never load-bearing */ }
     } else if (event.kind === 'attention') {
       // ADR-029 §4: attention rides the existing closed log vocabulary.
       record('log', { level: 'warn', message: `attention:${event.moment} park_id=${event.park_id ?? 'null'} task=${event.task} ${event.why}` })

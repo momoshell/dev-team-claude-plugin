@@ -44,6 +44,7 @@
 // [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
 // `cell-failures [--since <iso>] [--until <iso>]` |
+// `modifier-attempts [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
 // (spellings are a contract with package.json; see do-40-02) — plus `doctor`
 // (capability + state readout) and `kill` (operator-invoked process
@@ -134,6 +135,18 @@ export const CELL_FAILURE_KINDS = Object.freeze([
   'unusable-envelope',  // a file arrived and failed the shape/anti-replay check
   'aborted',            // the worker's turn was aborted
   'transport-error',    // spawn/session/reservation/adapter failure
+])
+
+// The four modifiers ratified in #45. A modifier that is not in this set
+// refuses at the writer rather than being stored under a typo'd name.
+export const MODIFIER_KINDS = Object.freeze([
+  'failure-upgrade', 'sensitivity-floor', 'vendor-diversity', 'budget-ceiling',
+])
+// MUST equal crew/drive.mjs MODIFIER_OUTCOMES (drive.mjs:42) — the driver is
+// the producer, this is the register; the ledger never imports crew (the
+// subsystem direction is one-way, crew -> factory), so a test holds them equal.
+export const MODIFIER_ATTEMPT_OUTCOMES = Object.freeze([
+  'applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent',
 ])
 
 // Per-event-type closed payload key allowlist. gate_pass/gate_fail, decision
@@ -364,6 +377,34 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'dispatch_id', 'kind', 'created_at']],
     indexes: [{ name: 'cell_failures_cell_idx', cols: ['provider', 'model_id', 'created_at'] }],
   },
+  modifier_attempts: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'task_slug', decl: 'TEXT' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'modifier', decl: 'TEXT' },
+      { name: 'bounce', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'why', decl: 'TEXT' },
+      { name: 'rung', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' },
+      { name: 'from_provider', decl: 'TEXT' },
+      { name: 'from_model_id', decl: 'TEXT' },
+      { name: 'from_model', decl: 'TEXT' },
+      { name: 'from_agent', decl: 'TEXT' },
+      { name: 'from_effort', decl: 'TEXT' },
+      { name: 'to_provider', decl: 'TEXT' },
+      { name: 'to_model_id', decl: 'TEXT' },
+      { name: 'to_model', decl: 'TEXT' },
+      { name: 'to_agent', decl: 'TEXT' },
+      { name: 'to_effort', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role', 'modifier', 'bounce', 'created_at']],
+    indexes: [{ name: 'modifier_attempts_outcome_idx', cols: ['modifier', 'outcome', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -371,7 +412,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError',
 ])
 
@@ -1137,6 +1178,45 @@ export function openLedger({
     return args
   }
 
+  function recordModifierAttempt(input = {}) {
+    requireFields(input, ['role', 'modifier', 'outcome'], 'recordModifierAttempt')
+    requireEnum(input.modifier, MODIFIER_KINDS, 'recordModifierAttempt', 'modifier')
+    requireEnum(input.outcome, MODIFIER_ATTEMPT_OUTCOMES, 'recordModifierAttempt', 'outcome')
+    const args = redact({
+      adw_id: input.adw_id ?? null,
+      task_slug: input.task_slug ?? null,
+      phase_id: input.phase_id ?? null,
+      role: input.role,
+      modifier: input.modifier,
+      bounce: input.bounce == null ? null : String(input.bounce),
+      outcome: input.outcome,
+      why: input.why == null ? null : String(input.why),
+      rung: input.rung == null ? null : String(input.rung),
+      transport: input.transport ?? null,
+      from_provider: input.from_provider ?? null,
+      from_model_id: input.from_model_id ?? null,
+      from_model: input.from_model ?? null,
+      from_agent: input.from_agent ?? null,
+      from_effort: input.from_effort ?? null,
+      to_provider: input.to_provider ?? null,
+      to_model_id: input.to_model_id ?? null,
+      to_model: input.to_model ?? null,
+      to_agent: input.to_agent ?? null,
+      to_effort: input.to_effort ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (args.why != null) args.why = args.why.slice(0, 500)
+    if (args.bounce != null) args.bounce = args.bounce.slice(0, 120)
+    if (args.rung != null) args.rung = args.rung.slice(0, 120)
+    appendJsonl('recordModifierAttempt', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('modifier_attempts').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO modifier_attempts (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function startProcess(input = {}) {
     requireFields(input, ['adw_id', 'dispatch_id', 'pid', 'command'], 'startProcess')
     const args = redact({
@@ -1456,6 +1536,22 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function modifierAttempts({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT modifier, outcome, role, transport,
+        from_provider, from_model_id, from_agent, from_effort,
+        COUNT(*) AS attempts,
+        SUM(CASE WHEN outcome = 'applied' THEN 1 ELSE 0 END) AS applied,
+        MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM modifier_attempts
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY modifier, outcome, role, transport,
+        from_provider, from_model_id, from_agent, from_effort
+      ORDER BY modifier, outcome, role, transport,
+        from_provider, from_model_id, from_agent, from_effort
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -1661,10 +1757,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -1968,7 +2064,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | task | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | task | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -2099,6 +2195,19 @@ export function main(argv) {
       const rows = ledger.cellFailures({ since, until })
       if (ledger.stats().degraded) refuse('cell-failures: the ledger mirror is degraded — this window is unanswerable, not empty')
       stdout.write(`${JSON.stringify({ schema: 1, question: "Which cells are failing, how often, and in what way?", since, until, kinds: CELL_FAILURE_KINDS, rows })}\n`)
+      return 0
+    }
+
+    if (verb === 'modifier-attempts') {
+      if (positional.length > 0) refuse('modifier-attempts: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'modifier-attempts') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'modifier-attempts') : null
+      if (until != null && since != null && until <= since) refuse('modifier-attempts: --until must be later than --since')
+      const rows = ledger.modifierAttempts({ since, until })
+      if (ledger.stats().degraded) refuse('modifier-attempts: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({ schema: 1, question: "How often does a modifier fire, and how often does firing change anything?", since, until, modifiers: MODIFIER_KINDS, outcomes: MODIFIER_ATTEMPT_OUTCOMES, rows })}\n`)
       return 0
     }
 

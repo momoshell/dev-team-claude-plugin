@@ -667,34 +667,62 @@ test('a breaker refusal records no cell failure of its own', async () => {
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
 
-test('mixed boot still creates a workspace, seats panes, and leaves the headless seat unsurfaced', async () => {
+// This replaces the transitional pin introduced with --headless-all, which
+// recorded the mixed shape before the two modes were separated (#249 / ADR-033).
+test('a mixed boot refuses with mixed-transport before any workspace or state dir exists', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-mixed-home-'))
   const { root: checkoutRoot, checkout } = testCheckout('crew-mixed-checkout-')
   const task = 'mixed'
-  const cmuxCalls = []
-  const cmux = (verb, argv) => { cmuxCalls.push([verb, argv]); return { ok: true, stdout: '' } }
-  let treeCalls = 0
+  const cmux = callCounter()
   const paneRoles = ['lead', 'planner', 'reviewer']
-  const tree = () => {
+  let treeCalls = 0
+  const tree = (...args) => {
+    tree.calls.push(args)
     treeCalls += 1
     if (treeCalls === 1) return { windows: [] }
     return { windows: [{ id: 'window-1', workspaces: [{ id: 'workspace-1', name: `crew-${task}`, panes: paneRoles.map((role) => ({ id: `pane-${role}`, surfaces: [{ id: `surface-${role}`, name: role }] })) }] }] }
   }
+  tree.calls = []
   const renameTab = callCounter()
   try {
+    await withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, roles: 'lead,planner,builder,reviewer', headless: 'builder', 'claude-bin': process.execPath },
+        { cmux, tree, renameTab },
+      ),
+      (err) => {
+        assert.equal(err.code, 'mixed-transport')
+        assert.match(err.message, /builder/)
+        assert.match(err.message, /headless-json/)
+        assert.match(err.message, /--headless-all/)
+        assert.match(err.message, /\bpanes?\b/)
+        return true
+      },
+    ))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('--headless-all with a per-seat transport flag still boots — no workspace, nothing to be invisible inside', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-mode-factory-seat-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-mode-factory-seat-checkout-')
+  const task = 'mode-factory-seat'
+  const cmux = callCounter()
+  try {
     await withHome(home, () => bootCmd(
-      { task, checkout, roles: 'lead,planner,builder,reviewer', headless: 'builder', 'claude-bin': process.execPath },
-      { cmux, tree, renameTab },
+      { task, checkout, tier: 'build', 'headless-all': true, 'headless-rpc': 'builder', 'claude-bin': process.execPath },
+      { cmux, tree: callCounter(), renameTab: callCounter() },
     ))
     const crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
-    assert.equal(crew.workspace_id, 'workspace-1')
-    assert.equal(crew.window_id, 'window-1')
-    assert.ok(cmuxCalls.some(([verb]) => verb === 'new-workspace'))
-    assert.deepEqual(crew.members.lead, { pane_id: 'pane-lead', surface_id: 'surface-lead', transport: 'pane', model: 'opus', agent: 'claude', tools: SEAT_DEFAULTS.lead.tools, deny: SEAT_DEFAULTS.lead.deny })
-    assert.equal(crew.members.builder.transport, 'headless-json')
-    assert.equal(crew.members.builder.pane_id, null)
-    assert.equal(crew.members.builder.surface_id, null)
-    assert.equal(renameTab.calls.length, paneRoles.length)
+    assert.equal(crew.workspace_id, null)
+    assert.equal(crew.members.builder.transport, 'headless-rpc')
+    for (const member of Object.values(crew.members)) assert.notEqual(member.transport, 'pane')
+    assert.equal(cmux.calls.length, 0)
   } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })

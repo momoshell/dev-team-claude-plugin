@@ -376,6 +376,28 @@ test('the shared charter and validator agree on the findings contract', () => {
   assert.deepEqual(documented, [...FINDING_SEVERITIES])
 })
 
+test('the reviewer charter carries a defended "Do not flag" list', () => {
+  const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
+  const start = charter.search(/^## Do not flag$/m)
+  assert.ok(start >= 0, 'the reviewer charter must carry a "Do not flag" section')
+  const rest = charter.slice(start + '## Do not flag'.length)
+  const end = rest.indexOf('\n## ')
+  const section = end < 0 ? rest : rest.slice(0, end)
+  const entries = section.split('\n').reduce((acc, line) => {
+    if (/^[-*]\s+\*\*/.test(line)) acc.push([line])
+    else if (acc.length) acc[acc.length - 1].push(line)
+    return acc
+  }, []).map((block) => block.join('\n'))
+  assert.ok(entries.length >= 4, `expected at least 4 entries, found ${entries.length}`)
+  // Every entry names the defense that makes its class safe not to flag, and
+  // that defense points at something that exists — an ignore rule without one
+  // is how a real finding gets suppressed.
+  for (const entry of entries) {
+    assert.match(entry, /Defense:/)
+    assert.match(entry.slice(entry.indexOf('Defense:')), /crew\/[\w.-]+|files_in_scope|\.crew\/|#\d{2,}/)
+  }
+})
+
 test('the lead charter documents the typed exhaustion accept contract', () => {
   const charter = readFileSync(new URL('./roles/lead.md', import.meta.url), 'utf8')
   for (const token of ['residuals', 'refuted', ...RESIDUAL_TYPES]) assert.ok(charter.includes(token), token)

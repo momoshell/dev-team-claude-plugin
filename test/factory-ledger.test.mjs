@@ -248,6 +248,13 @@ function exerciseEveryWriter(ledger, adwId) {
     transport: 'pane', kind: 'seat-died', stage: 'seat-died', detail: 'pane gone',
     created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordCiCycle({
+    adw_id: adwId, task_slug: 'task', repo_slug: 'repo', branch: 'main', head_sha: 'abc123',
+    check_name: 'test (node 24)', cycle: 1, conclusion: 'failure', classification: 'reproduced',
+    decision: 'repair', reason: 'local-lane-reproduced', excerpt: 'not ok 1 - failure',
+    excerpt_source: 'check-log', local_lane: 'node --test', local_exit: 1,
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.recordModifierAttempt({
     adw_id: adwId, task_slug: 'task', phase_id: phaseId, role: 'builder', modifier: 'failure-upgrade',
     bounce: 'lane', outcome: 'applied', rung: 'mechanical→build', transport: 'pane',
@@ -332,6 +339,26 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
     () => ledger.recordCellFailure({ role: 'builder', kind: badCell }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badCell),
   )
+})
+
+test('ci_cycles refuses collapsed decisions and ignores a repeated identical cycle', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const base = {
+    branch: 'main', head_sha: 'ci-head', check_name: 'test (node 24)', cycle: 1,
+    conclusion: 'failure', reason: 'local-failures-disjoint', excerpt: null,
+  }
+  assert.throws(
+    () => ledger.recordCiCycle({ ...base, classification: 'platform-divergent', decision: 'repair' }),
+    (err) => err instanceof LedgerUsageError && err.message.includes("decision 'repair' requires classification 'reproduced'"),
+  )
+  assert.throws(
+    () => ledger.recordCiCycle({ ...base, classification: 'unknown', decision: 'park', reason: null }),
+    (err) => err instanceof LedgerUsageError && err.message.includes("classification 'unknown' requires a reason"),
+  )
+  const row = { ...base, classification: 'reproduced', decision: 'repair', reason: 'local-lane-reproduced' }
+  ledger.recordCiCycle(row)
+  ledger.recordCiCycle(row)
+  assert.equal(ledger.dumpTable('ci_cycles').length, 1)
 })
 
 test('cell_failures stores run-less and in-run rows with the complete cell shape', { skip: SKIP }, () => {
@@ -873,6 +900,12 @@ function seedAllWritersWithMarker(ledger) {
     adw_id: ctx, task_slug: 't', role: 'builder', provider: 'anthropic', model_id: 'sonnet',
     kind: 'transport-error', detail: MARKER_ADW, created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordCiCycle({
+    adw_id: ctx, task_slug: 't', repo_slug: MARKER_ADW, branch: 'main', head_sha: 'marker-head',
+    check_name: 'test (node 24)', cycle: 1, conclusion: 'failure', classification: 'unknown',
+    decision: 'park', reason: MARKER_ADW, excerpt: MARKER_ADW, excerpt_source: 'check-log',
+    local_lane: MARKER_ADW, local_exit: 1, created_at: '2024-01-01T00:00:02.000Z',
+  })
   ledger.recordModifierAttempt({
     adw_id: ctx, task_slug: 't', role: 'builder', modifier: 'failure-upgrade', bounce: 'lane', outcome: 'transport',
     why: MARKER_ADW, rung: MARKER_ADW, transport: 'headless-rpc',
@@ -896,6 +929,19 @@ test('AC-9: a nonce-prefix-bearing marker planted across every public writer nev
 
   const jsonlBytes = readFileSync(ledger._jsonlPath, 'utf8')
   assert.ok(!jsonlBytes.includes(MARKER_ADW), 'marker leaked into the JSONL raw record')
+
+  const cycleLine = jsonlBytes.split('\n').find((line) => {
+    try { return JSON.parse(line).kind === 'recordCiCycle' } catch { return false }
+  })
+  assert.ok(cycleLine, 'recordCiCycle JSONL line missing')
+  const cycleJsonlPath = join(nextDir(), 'cycle-only.jsonl')
+  writeFileSync(cycleJsonlPath, `${cycleLine}\n`)
+  const replayed = openTestLedger()
+  assert.doesNotThrow(() => replayJsonl(cycleJsonlPath, replayed))
+  const replayedCycles = replayed.dumpTable('ci_cycles')
+  assert.equal(replayedCycles.length, 1)
+  assert.equal(replayedCycles[0].reason, 'redacted')
+  replayed.close()
 
   assert.ok(!stderrLines.join('').includes(MARKER_ADW), 'marker leaked into the injected stderr sink')
 

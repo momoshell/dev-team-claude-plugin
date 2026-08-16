@@ -523,6 +523,23 @@ export function recordCellFailure({ dbPath, stderr = process.stderr, _openLedger
   }
 }
 
+// A watch that aborts because instrumentation refused is a watch that lost
+// the cycle it was there to record. Keep this one-shot write non-load-bearing:
+// open one ledger, attempt one row, close it, and never throw.
+export function recordCiCycle({ dbPath, stderr = process.stderr, _openLedger, ...fields } = {}) {
+  let handle = null
+  try {
+    handle = (_openLedger || openLedger)({ dbPath, stderr })
+    handle.recordCiCycle(fields)
+    return true
+  } catch (err) {
+    try { stderr.write(`emit: CI cycle not recorded (${err.message})\n`) } catch { /* best effort */ }
+    return false
+  } finally {
+    try { if (handle) handle.close() } catch { /* best effort */ }
+  }
+}
+
 function openRunInner({
   stateDir,
   repoSlug,

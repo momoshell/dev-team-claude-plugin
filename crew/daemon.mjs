@@ -24,6 +24,7 @@ import { pathToFileURL } from 'node:url'
 import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { slugOrNull } from './slug.mjs'
 import { regrantVerdict, continuationBrief } from './escalation-policy.mjs'
+import { VARIANT_NAMES } from './variants.mjs'
 
 const regranted = new Set()
 const MAX_FRAME_BYTES = 1024 * 1024
@@ -37,6 +38,14 @@ const SEND_INTERJECTION = 'boundary'
 const MAX_SEND_BYTES = 512
 
 function runError(code, message) { const err = new Error(message); err.code = code; return err }
+
+// The set is imported and never restated; this guard sits at the point of request (#184).
+function requestedVariant(spec) {
+  const raw = spec.variant
+  if (raw === undefined || raw === null) return null
+  if (typeof raw === 'string' && VARIANT_NAMES.includes(raw)) return raw
+  throw runError('invalid-spec', `unknown variant ${JSON.stringify(raw)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+}
 
 async function capabilityProfile(agent, transport) {
   const name = String(agent || 'claude')
@@ -274,8 +283,8 @@ function attemptPath(base, attempt) {
     : `${base}.a${attempt}.json`
 }
 
-// Deliberately duplicates realio.mjs:16: importing realio.mjs for one string is
-// the exact cost this change removes; daemon.test.mjs pins the two together.
+// Deliberately duplicates the default transport string: importing the io
+// implementation for one value is the exact cost this change removes; daemon.test.mjs pins the two together.
 export const PANE_TRANSPORT = 'pane'
 
 // Exported for the child entry, not part of the daemon protocol.
@@ -376,6 +385,7 @@ export function daemon(options = {}) {
       crew_dir: record.crew_dir,
       task: record.task,
       brief_file: record.brief_file,
+      variant: record.variant || null,
       lane: record.lane,
       suite: record.suite,
       checkout: record.checkout,
@@ -809,7 +819,7 @@ export function daemon(options = {}) {
   }
 
   // Boot a crew for a tier in a CHILD PROCESS: importing crew.mjs would pull
-  // drive.mjs back into the server (#174/PR #191, daemon.test.mjs firewall).
+  // the runner back into the server (#174/PR #191, daemon.test.mjs firewall).
   function bootTierCrew(spec) {
     const tier = String(spec.tier)
     if (typeof spec.task !== 'string' || !spec.task) throw runError('invalid-spec', 'a tier enqueue requires task')
@@ -865,6 +875,7 @@ export function daemon(options = {}) {
       crew_dir: run.crew_dir, task: run.task, brief_file: run.brief_file,
       run_id: run.run_id,
       lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
+      ...(run.variant ? { variant: run.variant } : {}),
       continuation: run.continuation === true,
       ledger_db: budgetLedgerDb, budget_enabled: budget !== null,
     }
@@ -968,6 +979,7 @@ export function daemon(options = {}) {
     if (!hasDir && !hasTier) throw runError('invalid-spec', 'enqueue requires crew_dir or tier')
     const runId = String(spec.run_id || uuid())
     if (!RUN_ID_OK.test(runId)) throw runError('invalid-spec', 'run_id must match /^[A-Za-z0-9._-]{1,64}$/')
+    const variant = requestedVariant(spec)
     assertBudget()
     if (hasTier) {
       const active = activeTierRun(spec)
@@ -1004,6 +1016,7 @@ export function daemon(options = {}) {
       kind: 'enqueued', run_id: runId, at: now(), crew_dir: crewDir,
       task: spec.task || crew.task || null, brief_file: spec.brief_file || spec.briefFile || null,
       lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: canonicalCheckout(spec.checkout || crew.checkout),
+      ...(variant ? { variant } : {}),
       ...(identity ? { tier_identity: identity } : {}),
       task_return: taskReturn, attempt: 1,
     }

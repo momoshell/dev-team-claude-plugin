@@ -11,6 +11,7 @@ import {
   ARM_SPAWN_DEFAULT_N, ARM_SPAWN_MAX_N, ARM_SPAWN_REASONS, ARM_SPAWN_STATUSES,
   armsManifestPath, appendArm, collectArms, factoryctlSpawner, readManifest, spawnArmSet,
 } from './arms.mjs'
+import { openLedger } from '../scripts/factory/ledger.mjs'
 
 const ID_A = '11111111-2222-3333-4444-555555555555'
 const ID_B = '22222222-3333-4444-5555-666666666666'
@@ -529,6 +530,7 @@ test('cost is absent without a ledger and measured when usage is supplied', () =
     taskReadout() {
       return {
         degraded: false,
+        adw_id: ID_A,
         usage: {
           agent_sessions: 3,
           billed_input_tokens: 11,
@@ -545,10 +547,46 @@ test('cost is absent without a ledger and measured when usage is supplied', () =
   const absent = collectArms({
     manifestPath: world.manifest,
     repo: world.host,
-    deps: { ledger: { taskReadout: () => ({ degraded: false, usage: null, absent: { usage: 'not recorded' } }) } },
+    deps: { ledger: { taskReadout: () => ({ degraded: false, adw_id: ID_A, usage: null, absent: { usage: 'not recorded' } }) } },
   })
   assert.equal(absent.arms[0].cost, 'absent')
   assert.equal(absent.arms[0].cost_absent, 'not recorded')
+}))
+
+test('collectArms resolves linked usage and refuses an unlinked task_slug guess', () => withWorld((world) => {
+  const linked = world.arm(ID_A)
+  const guessed = world.arm(ID_B)
+  assertAppendOk(add(world, linked))
+  assertAppendOk(add(world, guessed))
+
+  const dbPath = join(world.root, 'ledger', 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    if (ledger.degraded) return
+    ledger.startSession({ adw_id: ID_A, repo_slug: 'repo', task_slug: 'linked-arm' })
+    ledger.linkRun({ run_id: 'daemon-arm-A', adw_id: ID_A, crew_dir: linked.crewDir })
+    ledger.startAgentSession({
+      adw_id: ID_A, dispatch_id: 'dispatch-arm-A', role: 'builder', model: 'sonnet',
+      claude_session_id: 'session-arm-A', transcript_path: '/tmp/session-arm-A.jsonl',
+    })
+    ledger.endAgentSession({
+      adw_id: ID_A, claude_session_id: 'session-arm-A', context_tokens: 100, context_window: 200000,
+      raw_read_tokens: 10, raw_written_tokens: 20, billed_input_tokens: 11, billed_output_tokens: 22,
+      billed_cache_write_tokens: 33, billed_cache_read_tokens: 44,
+    })
+    ledger.startSession({ adw_id: 'session-for-slug-guess', repo_slug: 'repo', task_slug: ID_B })
+
+    const report = collectArms({ manifestPath: world.manifest, repo: world.host, deps: { ledger } })
+    assert.equal(report.ok, true, JSON.stringify(report))
+    const measured = report.arms.find((arm) => arm.adw_id === ID_A)
+    assert.deepEqual(measured.cost, {
+      agent_sessions: 1, billed_input_tokens: 11, billed_output_tokens: 22,
+      billed_cache_write_tokens: 33, billed_cache_read_tokens: 44,
+    })
+    const guessedArm = report.arms.find((arm) => arm.adw_id === ID_B)
+    assert.equal(guessedArm.cost, 'absent')
+    assert.match(guessedArm.cost_absent, /task_slug match is not a run identity/)
+  } finally { ledger.close() }
 }))
 
 test('all collection git commands use the injected spawnSync seam', () => withWorld((world) => {

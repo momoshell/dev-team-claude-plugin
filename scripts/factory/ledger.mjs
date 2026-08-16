@@ -432,6 +432,17 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'role', 'modifier', 'bounce', 'created_at']],
     indexes: [{ name: 'modifier_attempts_outcome_idx', cols: ['modifier', 'outcome', 'created_at'] }],
   },
+  run_links: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'run_id', decl: 'TEXT' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'crew_dir', decl: 'TEXT' },
+      { name: 'linked_at', decl: 'TEXT' },
+    ],
+    unique: [['run_id', 'adw_id']],
+    indexes: [{ name: 'run_links_run_id_idx', cols: ['run_id'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -440,7 +451,7 @@ export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'startProcess', 'endProcess', 'heartbeat',
-  'startAgentSession', 'endAgentSession', 'recordSourceError',
+  'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
 // ---------------------------------------------------------------------------
@@ -1174,6 +1185,23 @@ export function openLedger({
     return args
   }
 
+  function linkRun(input = {}) {
+    requireFields(input, ['run_id', 'adw_id'], 'linkRun')
+    const args = redact({
+      run_id: input.run_id,
+      adw_id: input.adw_id,
+      crew_dir: input.crew_dir ?? null,
+      linked_at: isoMs(input.linked_at ?? now()),
+    }, stats)
+    appendJsonl('linkRun', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('run_links').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO run_links (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordCellFailure(input = {}) {
     requireFields(input, ['role', 'kind'], 'recordCellFailure')
     requireEnum(input.kind, CELL_FAILURE_KINDS, 'recordCellFailure', 'kind')
@@ -1637,14 +1665,24 @@ export function openLedger({
   }
 
   function taskReadout(selector) {
-    // Resolve an adw_id before trying task_slug; a slug match is only usable
-    // when it names exactly one run, so an ambiguity can be refused upstream.
+    // Resolve an adw_id before a linked run_id, and a linked run_id before
+    // trying task_slug; a slug match is only usable when it names exactly one
+    // run, so an ambiguity can be refused upstream.
     const byId = queryRows('SELECT adw_id FROM sessions WHERE adw_id = ?', [selector])
-    const slugMatches = byId.length === 1
+    const runLinks = byId.length === 1
+      ? []
+      : queryRows(`
+        SELECT DISTINCT adw_id FROM run_links
+        WHERE run_id = ? AND adw_id IN (SELECT adw_id FROM sessions)
+        ORDER BY adw_id
+      `, [selector]).map((row) => row.adw_id)
+    const slugMatches = byId.length === 1 || runLinks.length > 0
       ? []
       : queryRows('SELECT adw_id FROM sessions WHERE task_slug = ? ORDER BY adw_id', [selector])
         .map((row) => row.adw_id)
-    const ambiguousCandidates = slugMatches.length > 1 ? slugMatches : []
+    const ambiguousCandidates = runLinks.length > 1
+      ? runLinks
+      : (slugMatches.length > 1 ? slugMatches : [])
     const unresolved = (candidates = []) => ({
       degraded,
       adw_id: null,
@@ -1657,15 +1695,18 @@ export function openLedger({
       accept_decisions: [],
       usage: null,
       variant: null,
+      run_ids: [],
       absent: {},
     })
 
-    if (byId.length !== 1 && slugMatches.length !== 1) {
+    if (byId.length !== 1 && runLinks.length !== 1 && slugMatches.length !== 1) {
       return unresolved(ambiguousCandidates)
     }
 
-    const adwId = byId.length === 1 ? byId[0].adw_id : slugMatches[0]
-    const resolvedBy = byId.length === 1 ? 'adw_id' : 'task_slug'
+    const adwId = byId.length === 1 ? byId[0].adw_id : (runLinks.length === 1 ? runLinks[0] : slugMatches[0])
+    const resolvedBy = byId.length === 1 ? 'adw_id' : (runLinks.length === 1 ? 'run_id' : 'task_slug')
+    const runIds = queryRows('SELECT DISTINCT run_id FROM run_links WHERE adw_id = ? ORDER BY run_id', [adwId])
+      .map((row) => row.run_id)
     const session = queryRows('SELECT * FROM sessions WHERE adw_id = ?', [adwId])[0] ?? null
     const phases = queryRows('SELECT * FROM phases WHERE adw_id = ? ORDER BY seq', [adwId])
     const variant = variantsFor([adwId]).get(adwId) ?? null
@@ -1762,6 +1803,9 @@ export function openLedger({
     if (variant === null) {
       absent.variant = "this run's first recorded event is not a shape marker — the run shape is unmeasured (#251), never a measured \"full\""
     }
+    if (resolvedBy === 'run_id' && runIds.length > 1) {
+      absent.run_scope = 'this ledger session is shared by more than one daemon run (an adopted sidecar) — its usage is the session total, not this run alone'
+    }
 
     return {
       degraded,
@@ -1769,6 +1813,7 @@ export function openLedger({
       resolved_by: resolvedBy,
       candidates: [],
       session,
+      run_ids: runIds,
       phases,
       gate_generations: gateGenerations,
       review_outcomes: reviewOutcomes,
@@ -1816,7 +1861,7 @@ export function openLedger({
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
-    recordSourceError,
+    recordSourceError, linkRun,
     listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,

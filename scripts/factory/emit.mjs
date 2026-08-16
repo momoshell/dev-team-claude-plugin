@@ -475,6 +475,7 @@ function buildDegradedEmitter(stderr, reason) {
     adwId: null,
     sidecar: drop(null),
     startRun: drop(undefined),
+    linkRun: drop(undefined),
     phaseTransition: drop({ phase_id: null }),
     reserveSeq: drop([]),
     updateSidecar: drop(false),
@@ -909,6 +910,18 @@ function openRunInner({
     }
   }
 
+  function linkRun(runId, { crewDir = null } = {}) {
+    try {
+      if (typeof runId !== 'string' || runId.length === 0) return
+      emit((handle) => {
+        handle.linkRun({ run_id: runId, adw_id: adwId, crew_dir: crewDir, linked_at: isoMs(now()) })
+      })
+    } catch (err) {
+      localStats.dropped += 1
+      noteStderrOnce(`emit: linkRun failed unexpectedly: ${err && err.message}`)
+    }
+  }
+
   // phaseTransition(name): a no-op when already in `name` (checked INSIDE
   // the lock, so two callers racing the same target name never both
   // reserve a seq or both emit a phase row); otherwise reserves a seq for
@@ -1117,6 +1130,7 @@ function openRunInner({
       return current === null ? null : deepFreeze(structuredClone(current))
     },
     startRun,
+    linkRun,
     phaseTransition,
     reserveSeq,
     updateSidecar,

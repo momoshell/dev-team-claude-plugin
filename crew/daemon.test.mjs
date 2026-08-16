@@ -205,6 +205,7 @@ test('enqueue forks the child entry module', async () => {
     assert.equal(f.forks[0][0].endsWith('child.mjs'), true, 'enqueue must fork crew/child.mjs')
     assert.equal(f.forks[0][1][0], '--run-child', 'child fork must retain the run-child argv flag')
     const spec = JSON.parse(f.forks[0][1][1])
+    assert.equal(spec.run_id, result.run_id, 'the child must receive the daemon run identity')
     assert.equal(spec.budget_enabled, false, 'a no-budget daemon must keep child instrumentation non-load-bearing')
     assert.equal(spec.task_return, returnFor(f, result.run_id), 'daemon runs must use a run-addressed return path')
     assert.equal(f.boots.length, 0, 'a crew_dir enqueue must not boot a tier')
@@ -1559,11 +1560,93 @@ test('runChild records to the explicit ledger and honors spec.ledger_db', () => 
     if (LEDGER_SQLITE_OK) {
       assert.equal(existsSync(specDb), true)
       const ledger = openLedger({ dbPath: specDb })
-      try { assert.ok(ledger.listSessions().length >= 1) } finally { ledger.close() }
+      try {
+        assert.ok(ledger.listSessions().length >= 1)
+        assert.deepEqual(ledger.dumpTable('run_links'), [])
+      } finally { ledger.close() }
     } else {
       assert.equal(existsSync(specDb), false, 'below-floor emitters write JSONL but no SQLite mirror')
       assert.equal(existsSync(join(dirname(specDb), 'ledger.jsonl')), true)
     }
+  } finally { f.cleanup() }
+})
+
+test('runChild carries run_id into the ledger association and keeps it distinct from adw_id', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const dbPath = join(f.dir, 'run-identity-ledger', 'ledger.db')
+  const runId = 'daemon-child-run-A'
+  try {
+    const result = runChild({
+      crew_dir: f.crewDir, task: 'child-linked', checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath, run_id: runId,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: 'linked' }),
+      realIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      assert.notEqual(sidecar.adw_id, runId)
+      assert.deepEqual(ledger.dumpTable('run_links').map(({ run_id, adw_id }) => ({ run_id, adw_id })), [
+        { run_id: runId, adw_id: sidecar.adw_id },
+      ])
+      assert.equal(ledger.taskReadout(runId).adw_id, sidecar.adw_id)
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('two runChild calls against one crew dir append links to the adopted sidecar session', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const dbPath = join(f.dir, 'run-identity-shared', 'ledger.db')
+  const first = 'daemon-child-run-one'
+  const second = 'daemon-child-run-two'
+  try {
+    for (const runId of [first, second]) {
+      runChild({
+        crew_dir: f.crewDir, task: `child-${runId}`, checkout: f.dir,
+        task_return: join(f.returnsDir, `${runId}.task.json`), ledger_db: dbPath, run_id: runId,
+      }, {
+        preflight: false,
+        driveTask: () => ({ status: 'done', summary: runId }),
+        realIo: () => ({}),
+      })
+    }
+    const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('run_links')
+      assert.equal(rows.length, 2)
+      assert.deepEqual(rows.map(({ run_id }) => run_id), [first, second])
+      assert.notEqual(sidecar.adw_id, first)
+      assert.notEqual(sidecar.adw_id, second)
+      for (const runId of [first, second]) {
+        const readout = ledger.taskReadout(runId)
+        assert.equal(readout.adw_id, sidecar.adw_id)
+        assert.deepEqual(readout.run_ids, [first, second])
+      }
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('runChild without run_id writes no run_links row', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const dbPath = join(f.dir, 'run-identity-absent', 'ledger.db')
+  try {
+    runChild({
+      crew_dir: f.crewDir, task: 'child-unlinked', checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done' }),
+      realIo: () => ({}),
+    })
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try { assert.deepEqual(ledger.dumpTable('run_links'), []) } finally { ledger.close() }
   } finally { f.cleanup() }
 })
 

@@ -125,9 +125,11 @@ test('AC-8(b): openLedger below floor returns a fully-shaped handle whose writer
     assert.equal(typeof ledger[r], 'function', `missing reader ${r}`)
   }
   assert.doesNotThrow(() => ledger.startSession({ adw_id: 'a2', repo_slug: 'r', task_slug: 't' }))
+  assert.doesNotThrow(() => ledger.linkRun({ run_id: 'daemon-a2', adw_id: 'a2' }))
   assert.deepEqual(ledger.listSessions(), [])
   assert.equal(ledger.getSession('a2'), null)
   assert.deepEqual(ledger.dumpTable('sessions'), [])
+  assert.deepEqual(ledger.dumpTable('run_links'), [])
   assert.deepEqual(ledger.listEvents({ adw_id: 'a2' }), [])
 })
 

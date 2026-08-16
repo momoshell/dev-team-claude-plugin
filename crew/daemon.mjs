@@ -863,6 +863,7 @@ export function daemon(options = {}) {
   function childSpecFor(run) {
     return {
       crew_dir: run.crew_dir, task: run.task, brief_file: run.brief_file,
+      run_id: run.run_id,
       lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
       continuation: run.continuation === true,
       ledger_db: budgetLedgerDb, budget_enabled: budget !== null,

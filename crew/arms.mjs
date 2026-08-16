@@ -356,6 +356,12 @@ function armCost(adwId, d) {
   }
 
   if (readout?.degraded) return { cost: COST_ABSENT, cost_absent: 'ledger mirror degraded' }
+  if (readout?.resolved_by === 'task_slug') {
+    return { cost: COST_ABSENT, cost_absent: `run ${adwId} has no recorded ledger association — a task_slug match is not a run identity (unmeasured)` }
+  }
+  if (readout?.adw_id == null) {
+    return { cost: COST_ABSENT, cost_absent: `run ${adwId} has no ledger run — unmeasured` }
+  }
   const absentReason = readout?.absent && readout.absent.usage
   if (readout?.usage == null || absentReason != null) {
     const reason = typeof absentReason === 'string' && absentReason.length > 0
@@ -369,7 +375,9 @@ function armCost(adwId, d) {
   }
   const cost = {}
   for (const key of COST_USAGE_KEYS) cost[key] = readout.usage[key]
-  return { cost }
+  const result = { cost }
+  if (Array.isArray(readout.run_ids) === false || readout.run_ids.length > 1) result.cost_shared_runs = readout.run_ids
+  return result
 }
 
 export function collectArms({ manifestPath, repo = null, deps = {} } = {}) {

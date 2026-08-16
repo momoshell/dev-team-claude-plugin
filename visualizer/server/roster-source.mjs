@@ -96,9 +96,17 @@ export function createRosterSource({ rosterPath } = {}) {
     }
   }
 
+  function readRaw() {
+    try {
+      return { path, text: readFileSync(path, 'utf8'), error: null }
+    } catch (err) {
+      return { path, text: null, error: `unable to read roster: ${err.message || 'unknown read error'}, at ${path}` }
+    }
+  }
+
   function health() {
     return { roster_path: path, readonly: true }
   }
 
-  return { readRoster, health }
+  return { readRoster, readRaw, health }
 }

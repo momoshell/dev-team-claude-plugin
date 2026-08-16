@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { acceptRows, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterPanel } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterEditForm, rosterPanel, rosterProposal } from '../visualizer/web/src/lib/panels.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -46,6 +46,41 @@ test('rosterPanel keeps healthy seats and never derives money', () => {
   assert.equal(result.pending, null)
   assert.equal(result.tiers[0].seats[0].effort, 'max')
   assert.doesNotMatch(JSON.stringify(result), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
+})
+
+test('rosterEditForm refuses a degraded payload instead of offering a blank form', () => {
+  const result = rosterEditForm({ tiers: null, models: null, error: 'unable to read roster at /tmp/roster.json' }, { tier: 'build', role: 'reviewer' })
+  assert.deepEqual(result.tiers, [])
+  assert.deepEqual(result.roles, [])
+  assert.equal(result.cell, null)
+  assert.equal(result.pending, 'unable to read roster at /tmp/roster.json')
+})
+
+test('rosterEditForm derives options and seeds the selected seat', () => {
+  const result = rosterEditForm({
+    tiers: [
+      { tier: 'build', seats: [{ role: 'reviewer', provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' }], unseated: ['tech-lead'] },
+      { tier: 'judge', seats: [], unseated: ['lead'] },
+    ],
+  }, { tier: 'build', role: 'reviewer' })
+  assert.deepEqual(result.tiers, ['build', 'judge'])
+  assert.deepEqual(result.roles, ['reviewer', 'tech-lead'])
+  assert.deepEqual(result.cell, { provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' })
+  assert.equal(result.pending, null)
+})
+
+test('rosterProposal exposes refusals as pending and preserves a successful diff', () => {
+  const refused = rosterProposal({ ok: false, diff: null, refusals: [{ code: 'cross_vendor', message: 'cross-vendor planner' }] })
+  assert.equal(refused.diff, null)
+  assert.equal(refused.refusals.length, 1)
+  assert.ok(refused.pending)
+  const success = rosterProposal({ ok: true, diff: '--- a/crew/roster.json', refusals: [] })
+  assert.equal(success.diff, '--- a/crew/roster.json')
+  assert.deepEqual(success.refusals, [])
+  assert.equal(success.pending, null)
+  for (const value of [rosterEditForm({ tiers: null, error: 'unavailable' }), rosterProposal({ ok: false, refusals: [] })]) {
+    assert.doesNotMatch(JSON.stringify(value), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
+  }
 })
 
 test('rosterPanel marks an uncatalogued seat instead of fabricating rates', () => {

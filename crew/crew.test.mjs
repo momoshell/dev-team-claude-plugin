@@ -12,11 +12,11 @@ import {
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, seatLiveness, awaitSeatsReady, teardownCore,
   MEMORY_ROLES, memoryConfig,
 } from './crew.mjs'
-import { driveTask } from './drive.mjs'
+import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
-import { realIo } from './realio.mjs'
+import { realIo, VARIANT_STAGE_PHASES } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
@@ -1221,12 +1221,25 @@ test('ROLE_ORDER is key-identical to SEAT_DEFAULTS — one truth for seating ord
 
 test('phaseForStage maps every driver stage and defaults unknown labels to build', () => {
   const table = {
-    'plan:r1': 'planning', 'check:r1': 'planning', 'gate-baseline': 'build', 'gate-repair:1': 'build',
+    'plan:r1': 'planning', 'check:r1': 'planning', 'scout:r1': 'planning', 'envelope-accept': 'finish',
+    'gate-baseline': 'build', 'gate-repair:1': 'build',
     'gate-reverify:1': 'build', 'scope-gate:r1': 'build', 'lane:r1': 'build', 'gate:r1': 'build',
     'review:pass': 'review', suite: 'finish', commit: 'finish', done: 'done', 'escalate:lane': 'escalation',
     'future:stage': 'build',
   }
   for (const [label, phase] of Object.entries(table)) assert.equal(phaseForStage(label), phase, label)
+})
+
+test('variant stage phase map stays aligned with the closed driver enum', () => {
+  assert.equal(Object.isFrozen(VARIANT_STAGE_PHASES), true)
+  const declaredHeads = new Set(Object.values(VARIANTS).flatMap((shape) => shape.stages))
+  for (const key of Object.keys(VARIANT_STAGE_PHASES)) {
+    assert.equal(VARIANT_NAMES.includes(key) || declaredHeads.has(key), true, key)
+  }
+  for (const name of VARIANT_NAMES) {
+    if (name !== DEFAULT_VARIANT) assert.equal(typeof VARIANT_STAGE_PHASES[name], 'string', name)
+  }
+  assert.equal(phaseForStage('toString:r1'), 'build')
 })
 
 function adapterEvents() {

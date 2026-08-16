@@ -17,6 +17,8 @@ import {
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
   MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines,
+  VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, EXECUTIONS, WRITE_SURFACES, ENVELOPE_FIELD_KINDS,
+  UNIVERSAL_STAGE_HEADS, stageEnabled, undeclaredStage, shapeDefect, outOfScopeFiles, envelopeDefect,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -110,6 +112,12 @@ const reviewEnv = (verdict, findings) => ({
     verdict, review_path: `${TD}/review.md`, must_fix: verdict === 'pass' ? 0 : 1,
     ...(findings === undefined ? {} : { findings }),
   },
+})
+const reconEnv = (over = {}) => ({
+  status: 'done', role: 'planner', summary: 'recon complete',
+  artifacts: [`${TD}/scout.md`],
+  details: { findings: [{ summary: 'the loop is code-owned', evidence: 'crew/drive.mjs:720' }] },
+  ...over,
 })
 const checkEnv = (verdict) => ({
   status: 'done', role: 'tech-lead', summary: 'checked',
@@ -3381,4 +3389,190 @@ test('a changes-needed reviewer without typed findings cannot be upgraded by an 
   assert.equal(outcome.verdict, 'changes-needed')
   assert.equal(outcome.must_fix, 1)
   assert.equal(outcome.findings[0].id, 'B1')
+})
+
+test('full is trace-identical and keeps the eleven legacy detail keys', () => {
+  const make = (variant) => fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const omittedIo = make()
+  const explicitIo = make()
+  const omitted = driveTask(CTX, omittedIo)
+  const explicit = driveTask({ ...CTX, variant: 'full' }, explicitIo)
+  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(omitted, explicit)
+  assert.deepEqual(omittedIo.calls, explicitIo.calls)
+})
+
+test('omitting the variant is equivalent to explicitly selecting full', () => {
+  const make = () => fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const a = make(); const b = make()
+  assert.deepEqual(driveTask(CTX, a), driveTask({ ...CTX, variant: DEFAULT_VARIANT }, b))
+  assert.deepEqual(a.calls, b.calls)
+})
+
+test('an unknown variant refuses before assignments or journal lines', () => {
+  const io = fakeIo()
+  assert.throws(() => driveTask({ ...CTX, variant: 'unknown-shape' }, io), (err) => {
+    assert.equal(err.stage, 'variant')
+    assert.match(err.message, /full/)
+    assert.match(err.message, /scout/)
+    return true
+  })
+  assert.equal(io.calls.assign.length, 0)
+  assert.equal(io.calls.logs.length, 0)
+})
+
+test('shapeDefect refuses declarations the driver cannot honour', () => {
+  assert.equal(shapeDefect(VARIANTS.full), null)
+  assert.equal(shapeDefect(VARIANTS.scout), null)
+  const subset = { ...VARIANTS.full, stages: ['build', 'review', 'suite', 'commit'] }
+  assert.match(shapeDefect(subset), /plan/)
+  assert.match(shapeDefect({ ...VARIANTS.scout, stages: ['scout', 'envelope-accept'] }), /scope-gate/)
+  assert.match(shapeDefect({ ...VARIANTS.full, required_seats: ['planner'] }), /required_seats/)
+  assert.match(shapeDefect({ ...VARIANTS.full, execution: 'unknown' }), /execution/)
+  assert.match(shapeDefect({ ...VARIANTS.full, writes: 'unknown' }), /writes/)
+  assert.match(shapeDefect({ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }), /kind/)
+})
+
+test('stageEnabled answers synthetic and shipped declarations from their stages', () => {
+  const subset = { stages: ['build', 'quality'] }
+  const envelope = { stages: ['prompt', 'envelope-accept'] }
+  assert.equal(stageEnabled(subset, 'build'), true)
+  assert.equal(stageEnabled(subset, 'plan'), false)
+  assert.equal(stageEnabled(envelope, 'prompt'), true)
+  assert.equal(stageEnabled(envelope, 'scope-gate'), false)
+  assert.equal(stageEnabled(VARIANTS.full, 'plan'), true)
+  assert.equal(stageEnabled(VARIANTS.scout, 'plan'), false)
+  assert.equal(stageEnabled(VARIANTS.scout, 'scout'), true)
+})
+
+test('undeclaredStage bounds declared heads while exempting universal terminals', () => {
+  for (const label of ['plan:r1', 'gate-baseline:green-bounce', 'gate-proof:1', 'converge:pr', 'review:panel-r2', 'escalate:lane', 'done']) {
+    assert.equal(undeclaredStage(VARIANTS.full, label), null, label)
+  }
+  assert.equal(undeclaredStage(VARIANTS.scout, 'escalate:scope'), null)
+  assert.equal(undeclaredStage(VARIANTS.scout, 'done'), null)
+  assert.match(undeclaredStage(VARIANTS.scout, 'commit'), /not declared/)
+})
+
+test('scout runs only recon, scope proof, envelope acceptance, and done', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, ['scout:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+  assert.deepEqual(io.calls.run, [])
+})
+
+test('scout seats its declared planner only and never commits', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), [VARIANTS.scout.required_seats[0]])
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(result.details.commit, null)
+  assert.deepEqual(result.details.files_committed, [])
+})
+
+test('scout dispatches a written brief containing its complete envelope contract', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  driveTask({ ...CTX, variant: 'scout' }, io)
+  const briefPath = `${TD}/scout-brief.md`
+  assert.equal(io.calls.assign[0].briefFile, briefPath)
+  const brief = io.calls.writes[briefPath]
+  assert.ok(brief.startsWith('# scout assignment\n'))
+  assert.doesNotMatch(brief, /\\n/)
+  for (const needle of [CTX.briefFile, CTX.taskDir, 'changed zero files', 'details.findings', 'summary', 'evidence', 'artifacts']) assert.ok(brief.includes(needle), needle)
+  assert.doesNotMatch(brief, /plan\.md/)
+  assert.doesNotMatch(brief, /review/i)
+})
+
+test('scout rejects envelopes that do not match its declared shape', () => {
+  const cases = [
+    { details: {} }, { details: { findings: [] } }, { details: { findings: [null] } },
+    { details: { findings: [{ summary: 's' }] } },
+    { details: { findings: [{ summary: '  ', evidence: 'e' }] } },
+    { summary: '' }, { artifacts: null }, { artifacts: [7] },
+    { artifacts: ['/etc/passwd'] }, { artifacts: [`${TD}/../escape.md`] }, { details: null },
+  ]
+  for (const over of cases) {
+    const io = fakeIo({ envelopes: { 'planner:1': reconEnv(over) }, changed: [] })
+    const result = driveTask({ ...CTX, variant: 'scout' }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'envelope')
+  }
+  assert.equal(envelopeDefect(reconEnv(), VARIANTS.scout, { taskDir: TD }), null)
+  assert.match(envelopeDefect(null, VARIANTS.scout, { taskDir: TD }), /no envelope/)
+})
+
+test('scout write proof escalates at scope, including a files_in_scope claim', () => {
+  for (const env of [reconEnv(), reconEnv({ details: { findings: [{ summary: 's', evidence: 'e' }], files_in_scope: ['a.mjs'] } })]) {
+    const io = fakeIo({ envelopes: { 'planner:1': env }, changed: ['a.mjs'] })
+    const result = driveTask({ ...CTX, variant: 'scout' }, io)
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.equal(result.details.stages.at(-1), 'escalate:scope')
+    assert.equal(io.calls.commits.length, 0)
+  }
+})
+
+test('scout still proves a clean tree after a dead or unusable seat', () => {
+  const dead = fakeIo({ envelopes: { 'planner:1': null }, changed: [] })
+  const deadResult = driveTask({ ...CTX, variant: 'scout' }, dead)
+  assert.deepEqual(deadResult.details.stages, ['scout:r1', 'scope-gate:r1', 'escalate:scout'])
+  assert.match(deadResult.details.escalation.why, /no valid envelope/)
+  const dirty = fakeIo({ envelopes: { 'planner:1': null }, changed: ['a.mjs'] })
+  const dirtyResult = driveTask({ ...CTX, variant: 'scout' }, dirty)
+  assert.equal(dirtyResult.details.escalation.where, 'scope')
+  const malformed = fakeIo({ envelopes: { 'planner:1': {} }, changed: [] })
+  const malformedResult = driveTask({ ...CTX, variant: 'scout' }, malformed)
+  assert.equal(malformedResult.details.escalation.where, 'scout')
+})
+
+test('scout reports a non-done but well-formed envelope as a seat escalation', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv({ status: 'insufficient', summary: 'need more checkout evidence' }) }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.details.escalation.where, 'scout')
+  assert.match(result.details.escalation.why, /need more checkout evidence/)
+})
+
+test('scout acceptance uses its own contract and journals envelope acceptance', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': reconEnv() }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.details.accepted_via, VARIANTS.scout.accepted_by)
+  assert.doesNotMatch(JSON.stringify(result), /review pass|review:pass|review_outcome/i)
+  assert.doesNotMatch(JSON.stringify(io.calls.logs), /review pass|review:pass|review_outcome/i)
+  assert.ok(io.calls.logs.some((line) => line.envelope_accepted))
+})
+
+test('read-only scout shapes do not fire the protected-path sensitivity floor', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': reconEnv({ details: { findings: [{ summary: 's', evidence: 'crew/drive.mjs:50' }], files_in_scope: ['crew/drive.mjs'] } }) },
+    changed: [], reseat: () => ({ applied: true }),
+  })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.reseat.length, 0)
+  assert.deepEqual(result.details.modifiers, [])
+})
+
+test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {
+  assert.equal(Object.isFrozen(VARIANTS), true)
+  assert.deepEqual(VARIANT_NAMES, ['full', 'scout'])
+  assert.equal(VARIANTS.full.required_seats, 'tier')
+  assert.match(VARIANTS.full.accepted_by, /review.*pass/)
+  assert.match(VARIANTS.full.accepted_by, /lead accept/)
+  for (const shape of Object.values(VARIANTS)) {
+    assert.ok(EXECUTIONS.includes(shape.execution))
+    assert.ok(WRITE_SURFACES.includes(shape.writes))
+    for (const field of shape.envelope_fields) assert.ok(ENVELOPE_FIELD_KINDS.includes(field.kind))
+  }
+  assert.deepEqual(UNIVERSAL_STAGE_HEADS, ['escalate', 'done'])
+  assert.deepEqual(outOfScopeFiles(['a.mjs', 'b.mjs'], scopeMatcher([])), ['a.mjs', 'b.mjs'])
+  assert.deepEqual(outOfScopeFiles('not-an-array', scopeMatcher(['a.mjs'])), [])
 })

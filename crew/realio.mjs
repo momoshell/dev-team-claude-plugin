@@ -141,9 +141,19 @@ function newSurfaceIds(before, after) {
   return fresh
 }
 
+// Blueprint variants (#251): an envelope shape's opening stage IS its own name
+// and its acceptance is a terminal settle, not a build. A DATA map, so a new
+// member is a data edit here too — not a new branch. Duplicated rather than
+// imported: realio must not import the driver (the MODIFIER_OUTCOMES convention
+// at :608); crew/crew.test.mjs pins this map against crew/drive.mjs's enum.
+export const VARIANT_STAGE_PHASES = Object.freeze({ scout: 'planning', 'envelope-accept': 'finish' })
+
 export function phaseForStage(label) {
   const head = String(label ?? '').split(':')[0]
   if (head === 'plan' || head === 'check') return 'planning'
+  const declared = Object.prototype.hasOwnProperty.call(VARIANT_STAGE_PHASES, head)
+    ? VARIANT_STAGE_PHASES[head] : null
+  if (declared) return declared
   if (['build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify'].includes(head)) return 'build'
   if (head === 'review') return 'review'
   if (head === 'suite' || head === 'commit') return 'finish'

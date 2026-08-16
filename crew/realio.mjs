@@ -510,26 +510,57 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           model: cell?.model ?? null,
         })
         from = snapshot(live)
+        const floorTier = typeof options.tier === 'string' && options.tier ? options.tier : null
+        let floorTarget = null
+        let roster
+        if (floorTier) {
+          try {
+            roster = readRoster()
+          } catch (err) {
+            const message = err?.message ?? String(err)
+            return { applied: false, reason: 'transport', why: `could not read the runtime roster: ${message}`, from, to: null }
+          }
+          floorTarget = roster?.tiers?.[floorTier]?.[role]
+          if (!floorTarget || typeof floorTarget !== 'object' || Array.isArray(floorTarget)) {
+            return { applied: false, reason: 'exhausted', why: `tier ${floorTier} seats no ${roleName}`, from, to: null }
+          }
+          const sameFloorCell = live.provider === floorTarget.provider
+            && live.id === floorTarget.id
+            && live.effort === floorTarget.effort
+            && (live.agent == null || floorTarget.agent == null || live.agent === floorTarget.agent)
+          if (sameFloorCell) {
+            return {
+              applied: true,
+              already: true,
+              from,
+              to: { ...floorTarget, model: live.model ?? null },
+              rung: `${crew.tier ?? 'unseated'}→${floorTier}`,
+            }
+          }
+        }
         if (m.transport !== HEADLESS_TRANSPORT && m.transport !== HEADLESS_RPC_TRANSPORT) {
           const why = m.transport === DEFAULT_TRANSPORT
             ? 'a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265); its reassign: true capability means give a settled seat NEW WORK, never change its cell'
             : `transport ${String(m.transport)} cannot change a seat cell in-session`
           return { applied: false, reason: 'transport', why, from, to: null }
         }
-        if (!crew.tier) return { applied: false, reason: 'no-tier', why: 'booted with --roles rather than --tier, so there is no ladder', from, to: null }
+        if (!crew.tier && !floorTier) return { applied: false, reason: 'no-tier', why: 'booted with --roles rather than --tier, so there is no ladder', from, to: null }
 
-        let roster
-        try {
-          roster = readRoster()
-        } catch (err) {
-          const message = err?.message ?? String(err)
-          return { applied: false, reason: 'transport', why: `could not read the runtime roster: ${message}`, from, to: null }
+        if (!roster) {
+          try {
+            roster = readRoster()
+          } catch (err) {
+            const message = err?.message ?? String(err)
+            return { applied: false, reason: 'transport', why: `could not read the runtime roster: ${message}`, from, to: null }
+          }
         }
         const currentCell = roster?.tiers?.[crew.tier]?.[role] || roster?.[crew.tier]?.[role]
         const currentCellOrLive = currentCell || live
         const modelFallbackWhy = 'model catalog has no costlier same-provider, non-override-only candidate'
-        let rung = nextRung(roster, crew.tier, role)
-        if (!rung) {
+        let rung = floorTier
+          ? { rung: `${crew.tier ?? 'unseated'}→${floorTier}`, cell: floorTarget }
+          : nextRung(roster, crew.tier, role)
+        if (!floorTier && !rung) {
           const index = RESEAT_LADDER.indexOf(crew.tier)
           const why = index < 0
             ? `tier ${String(crew.tier)} is unknown; the ladder is mechanical → build → judge`
@@ -543,7 +574,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           rung = nextModelRung(roster, currentCellOrLive)
           if (!rung) return { applied: false, reason: 'exhausted', why: `${why}; ${modelFallbackWhy}`, from, to: null }
         }
-        const sameCell = currentCell
+        const sameCell = !floorTier && currentCell
           && currentCell.provider === rung.cell.provider
           && currentCell.id === rung.cell.id
           && currentCell.effort === rung.cell.effort

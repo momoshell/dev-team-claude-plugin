@@ -489,6 +489,48 @@ test('pane reseat refuses with a transport-specific explanation', () => {
   assert.match(result.why, /new work|settled seat|reassign/i)
 })
 
+test('a pane reviewer already seated at the judge cell satisfies a targeted reseat', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: 'judge', transport: 'pane', agent: 'claude' })
+  const memberBefore = { ...f.crew.members.reviewer }
+  const seatBefore = { ...f.crew.seats.reviewer }
+  const result = f.io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })
+  assert.equal(result.applied, true)
+  assert.equal(result.already, true)
+  assert.deepEqual(f.crew.members.reviewer, memberBefore)
+  assert.deepEqual(f.crew.seats.reviewer, seatBefore)
+})
+
+test('a targeted headless-json reseat reaches the judge cell rather than the build cell', () => {
+  const mechanical = { ...ROSTER.tiers.mechanical.reviewer, agent: 'claude' }
+  const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'claude', cell: mechanical })
+  const result = f.io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })
+  assert.equal(result.applied, true)
+  assert.equal(result.to.id, ROSTER.tiers.judge.reviewer.id)
+  assert.equal(result.to.effort, ROSTER.tiers.judge.reviewer.effort)
+  assert.notEqual(result.to.id, ROSTER.tiers.build.reviewer.id)
+  assert.notEqual(result.to.effort, ROSTER.tiers.build.reviewer.effort)
+})
+
+test('a pane reviewer not at the judge cell refuses a targeted reseat with transport', () => {
+  const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'pane', agent: 'pi' })
+  const result = f.io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'transport')
+  assert.match(result.why, /pane/i)
+  assert.match(result.why, /new work|settled seat|reassign/i)
+})
+
+test('a targeted tier without a reviewer cell returns exhausted', () => {
+  const f = makeTierFixture({
+    role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi',
+    readRoster: () => ({ tiers: { mechanical: {}, judge: {} }, models: {} }),
+  })
+  const result = f.io.reseat('reviewer', { reason: 'sensitivity-floor', tier: 'judge' })
+  assert.equal(result.applied, false)
+  assert.equal(result.reason, 'exhausted')
+  assert.match(result.why, /tier judge seats no reviewer/)
+})
+
 test('headless-json reseat applies and reaches the next assignment command', () => {
   const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi' })
   const result = f.io.reseat('reviewer', { reason: 'lane' })

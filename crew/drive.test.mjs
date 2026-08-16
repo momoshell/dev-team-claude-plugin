@@ -9,8 +9,8 @@ import { regrantVerdict } from './escalation-policy.mjs'
 
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
-  FAILURE_UPGRADE, MODIFIER_OUTCOMES,
-  validateScopeEntries, scopeMatcher, composeCommitMessage,
+  FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, MODIFIER_OUTCOMES,
+  validateScopeEntries, scopeMatcher, protectedHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines,
@@ -458,6 +458,19 @@ test('scope helpers match directory prefixes and validate only supported entries
   }
 })
 
+test('protectedHits matches the ratified protected paths in both directions', () => {
+  assert.deepEqual([...PROTECTED_PATHS].sort(), [
+    '.github/workflows/', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/reclaim.mjs',
+    'crew/roster.json', 'crew/roster.schema.json', 'docs/adr/',
+  ].sort())
+  assert.equal(PROTECTED_PATHS.includes('crew/roles/'), false)
+  assert.deepEqual(protectedHits([
+    'docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/',
+    'crew/roles/planner.md', 'crew/crew.mjs', 'a.mjs', 'docs/adr/031.md',
+    'crew/drive.mjs.bak', 'crew/roster.json.tmp',
+  ]), ['docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/'])
+})
+
 test('directory-prefix scope commits concrete changed paths without a scope bounce', () => {
   const io = fakeIo({
     envelopes: {
@@ -482,6 +495,126 @@ test('unsupported scope entries escalate before assigning a builder', () => {
     assert.ok(res.details.escalation.why.includes(entry))
     assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 0)
   }
+})
+
+const protectedPlanEnv = (files = ['crew/drive.mjs']) => planEnv({
+  details: { ...planEnv().details, files_in_scope: files },
+})
+
+const protectedReseatRefusal = () => ({ applied: false, reason: 'transport', why: 'pane seat refuses a targeted reseat', from: null })
+
+test('protected scope plus a refusing reseat escalates before assigning a builder', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv() },
+    reseat: protectedReseatRefusal,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'sensitivity-floor')
+  assert.match(res.details.escalation.why, /crew\/drive\.mjs/)
+  assert.match(res.details.escalation.why, /sensitivity floor/i)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  assert.equal(res.details.stages.some((label) => label.startsWith('review')), false)
+})
+
+test('every refusing sensitivity floor firing records and emits one closed modifier attempt', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: { 'planner:1': protectedPlanEnv() },
+    reseat: protectedReseatRefusal,
+  })
+  const res = driveTask(CTX, io)
+  const rows = res.details.modifiers.filter(({ modifier }) => modifier === SENSITIVITY_FLOOR)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].role, 'reviewer')
+  assert.ok(MODIFIER_OUTCOMES.includes(rows[0].outcome))
+  assert.notEqual(rows[0].outcome, 'applied')
+  assert.deepEqual(io.calls.emits.filter(({ kind, modifier }) => kind === 'modifier' && modifier === SENSITIVITY_FLOOR).length, 1)
+})
+
+test('protected scope plus an applied sensitivity floor proceeds with one judge request', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/drive.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(io.calls.reseat, [{ role: 'reviewer', options: { reason: SENSITIVITY_FLOOR, tier: JUDGE_TIER } }])
+  assert.deepEqual(res.details.modifiers.filter(({ modifier }) => modifier === SENSITIVITY_FLOOR).map(({ outcome }) => outcome), ['applied'])
+})
+
+test('an already seated judge reviewer satisfies the sensitivity floor', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/drive.mjs'],
+    reseat: () => ({ applied: true, already: true, from: { id: 'judge' }, to: { id: 'judge' }, rung: 'judge→judge' }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const row = res.details.modifiers.find(({ modifier }) => modifier === SENSITIVITY_FLOOR)
+  assert.equal(row.outcome, 'applied')
+  assert.match(row.why, /already the judge tier cell/)
+})
+
+test('clean scope does not fire the sensitivity floor or alter the happy-path stages', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    reseat: () => ({ applied: true }),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.equal(io.calls.reseat.length, 0)
+  assert.deepEqual(res.details.modifiers, [])
+  assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'modifier'), [])
+  assert.equal(res.details.stages.some((label) => label.startsWith('escalate')), false)
+})
+
+test('sensitivity-floor recording remains non-load-bearing when modifier log and emit fail', () => {
+  const input = {
+    envelopes: { 'planner:1': protectedPlanEnv() },
+    reseat: protectedReseatRefusal,
+  }
+  const quietIo = fakeIo(input)
+  const noisyIo = fakeIo(input)
+  const quietLog = noisyIo.log
+  noisyIo.log = (entry) => {
+    if (entry.modifier) throw new Error('journal unavailable')
+    quietLog(entry)
+  }
+  noisyIo.emit = () => { throw new Error('ledger unavailable') }
+  const quiet = driveTask(CTX, quietIo)
+  const noisy = driveTask(CTX, noisyIo)
+  assert.deepEqual({ status: noisy.status, stages: noisy.details.stages, why: noisy.details.escalation.why }, {
+    status: quiet.status, stages: quiet.details.stages, why: quiet.details.escalation.why,
+  })
+})
+
+test('the sensitivity floor has its own budget and does not spend failure-upgrade', () => {
+  const outcomes = [
+    { applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' },
+    { applied: true, from: { id: 'old' }, to: { id: 'new' }, rung: 'mechanical→build' },
+  ]
+  const io = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd:1': { ok: false, output: 'FAIL lane' }, 'lane-cmd:2': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/drive.mjs'],
+    reseat: () => outcomes.shift(),
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.modifiers.map(({ modifier, outcome }) => ({ modifier, outcome })), [
+    { modifier: SENSITIVITY_FLOOR, outcome: 'applied' },
+    { modifier: FAILURE_UPGRADE, outcome: 'applied' },
+  ])
+  assert.equal(io.calls.reseat.length, 2)
+  assert.equal(io.calls.reseat[1].options.reason, 'lane-bounce')
 })
 
 test('composeCommitMessage uses the plan subject, builder body, and ordered issue refs', () => {

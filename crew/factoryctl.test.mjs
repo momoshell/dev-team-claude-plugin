@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
-import { attachVerb, connect, formatRows, main, parseArgs } from './factoryctl.mjs'
+import { attachVerb, connect, formatRows, main, parseArgs, runVerb } from './factoryctl.mjs'
 
 function mintCrew(root, name) {
   const crewDir = join(root, name)
@@ -93,6 +93,30 @@ async function enqueue(f, crewDir = f.crewDir) {
 }
 
 function returnFor(f, runId, crewDir = f.crewDir) { return join(crewDir, 'returns', `${runId}.task.json`) }
+
+test('run forwards --variant to enqueue and omits it when absent', async () => {
+  const f = fixture()
+  try {
+    const sent = []
+    const deps = { call: (cmd, params) => { sent.push({ cmd, params }); return { run_id: 'run-1' } }, stdout: () => {}, cwd: () => f.root }
+    await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--variant', 'repair']), deps)
+    assert.equal(sent.at(-1).params.variant, 'repair')
+    await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief]), deps)
+    assert.equal(Object.prototype.hasOwnProperty.call(sent.at(-1).params, 'variant'), false)
+  } finally { f.cleanup() }
+})
+
+test('run refuses a --variant with no value', async () => {
+  const f = fixture()
+  try {
+    let touched = false
+    const net = { connect: () => { touched = true; throw new Error('socket should not be touched') } }
+    const result = await invoke(f, ['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--variant'], { net })
+    assert.equal(result.code, 1)
+    assert.match(result.stderr, /--variant/)
+    assert.equal(touched, false)
+  } finally { f.cleanup() }
+})
 
 withDaemon('run enqueues against the daemon and prints the run id', async (f) => {
   // Pins run as a socket enqueue and not as a locally invented run record.

@@ -1,5 +1,6 @@
 import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
 import { adjudicatePanel, fuseFindings } from './escalation-policy.mjs'
+import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -47,7 +48,7 @@ export const JUDGE_TIER = 'judge'
 // Per-repo lists arrive with #252; this slice hardcodes the ratified one.
 export const PROTECTED_PATHS = Object.freeze([
   '.github/workflows/', 'crew/roster.json', 'crew/roster.schema.json',
-  'crew/reclaim.mjs', 'crew/escalation-policy.mjs', 'crew/drive.mjs', 'docs/adr/',
+  'crew/reclaim.mjs', 'crew/escalation-policy.mjs', 'crew/drive.mjs', 'crew/variants.mjs', 'docs/adr/',
 ])
 
 // #251 — blueprint variants: a CLOSED enum of run shapes over this one driver.
@@ -100,46 +101,10 @@ export function sourcesDefect(sources) {
   }
   return null
 }
-export const VARIANTS = Object.freeze({
-  full: Object.freeze({
-    execution: 'reviewed',
-    required_seats: 'tier', // the tier seats this shape; it has no single seat
-    stages: Object.freeze(['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
-      'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
-      'suite', 'commit', 'converge']),
-    writes: 'planned',
-    // All THREE terminals, not just the first: :1876, :1860, :1905.
-    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
-    envelope_fields: Object.freeze([]),
-    assignment: null,
-  }),
-  scout: Object.freeze({
-    execution: 'envelope',
-    required_seats: Object.freeze(['planner']),
-    stages: Object.freeze(['scout', 'scope-gate', 'envelope-accept']),
-    writes: 'none',
-    accepted_by: 'envelope shape',
-    envelope_fields: Object.freeze([
-      Object.freeze({ name: 'findings', kind: 'records', item_fields: Object.freeze(['summary', 'evidence']) }),
-    ]),
-    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
-  }),
-  repair: Object.freeze({
-    execution: 'reviewed',
-    required_seats: 'tier',
-    // No plan, no check: a bounded triage opens the run. No gate*, no converge:
-    // this shape declares gate source 'none', and undeclaredStage is what makes
-    // that mechanical rather than a promise.
-    stages: Object.freeze(['repair', 'build', 'scope-gate', 'lane', 'review', 'suite', 'commit']),
-    writes: 'planned',
-    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
-    envelope_fields: Object.freeze([]),
-    assignment: 'Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.',
-    sources: Object.freeze({ scope: 'inherited', lane: 'ctx', gate: 'none' }),
-  }),
-})
-export const VARIANT_NAMES = Object.freeze(Object.keys(VARIANTS))
-export const DEFAULT_VARIANT = 'full'
+// The closed set lives in the import-free leaf so the daemon can validate
+// without importing this module. It is re-exported because every consumer
+// already reaches for it by this name; a second list is the drift the leaf prevents.
+export { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
 
 // Does this shape run that stage? The one question the declaration answers.
 // A fixed `if (runs('x'))` site consults it; nothing iterates the list.

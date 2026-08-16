@@ -186,6 +186,7 @@ function requireRunArgs(args) {
   if (typeof args.brief !== 'string' || !args.brief) throw new Error('run requires --brief <file>')
   if (args.task !== undefined && (typeof args.task !== 'string' || !args.task)) throw new Error('run requires --task <slug> when --task is present')
   if (args.checkout !== undefined && (typeof args.checkout !== 'string' || !args.checkout)) throw new Error('run requires --checkout <dir> when --checkout is present')
+  if (args.variant !== undefined && (typeof args.variant !== 'string' || !args.variant)) throw new Error('run requires --variant <name> when --variant is present')
 }
 
 // The slug defaults to the brief's filename; crew.mjs slugs it and refuses a degenerate one.
@@ -203,6 +204,7 @@ export async function runVerb(args, deps = {}) {
     params.checkout = resolvePath(args.checkout || cwd)
     params.task = typeof args.task === 'string' && args.task ? args.task : briefTask(args.brief)
   }
+  if (typeof args.variant === 'string' && args.variant) params.variant = args.variant
   const result = await call('enqueue', params)
   const stdout = outputSink(deps.stdout, process.stdout)
   stdout(`${JSON.stringify({ run_id: result?.run_id, ...(params.tier && result?.crew_dir ? { crew_dir: result.crew_dir } : {}) })}\n`)

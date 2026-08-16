@@ -12,6 +12,8 @@ import { createRequire } from 'node:module'
 import {
   daemon, deriveState, normalizeEvent, usageWindow, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
 } from './daemon.mjs'
+import { driveTask } from './drive.mjs'
+import { VARIANT_NAMES } from './variants.mjs'
 import { runChild } from './child.mjs'
 import { DEFAULT_TRANSPORT } from './realio.mjs'
 import { splitFrames } from './headless-rpc.mjs'
@@ -174,9 +176,9 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   // assertion pins that — otherwise allowlisting it would be a hole in the
   // firewall rather than an exception to it.
   assert.equal(
-    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs'),
+    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs' || specifier === './variants.mjs'),
     true,
-    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, or the escalation policy leaf',
+    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, the escalation policy leaf, or the variants leaf',
   )
   // Mutation killed: someone adding an import to slug.mjs — which would pull
   // that dependency into the server process through the allowlisted edge.
@@ -184,6 +186,8 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   assert.doesNotMatch(slugCode, /^\s*import[\s(]/m, 'crew/slug.mjs must stay import-free: the daemon allowlists it as a LEAF')
   const policyCode = readFileSync(new URL('./escalation-policy.mjs', import.meta.url), 'utf8')
   assert.doesNotMatch(policyCode, /^\s*import[\s(]/m, 'crew/escalation-policy.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  const variantsCode = readFileSync(new URL('./variants.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(variantsCode, /^\s*import[\s(]/m, 'crew/variants.mjs must stay import-free: the daemon allowlists it as a LEAF')
   assert.equal(DAEMON_CODE.includes(DRIVE_MODULE), false, 'daemon must not name the driver module')
   assert.equal(DAEMON_CODE.includes(REALIO_MODULE), false, 'daemon must not name the real io module')
   const dynamicImports = DAEMON_CODE.match(/\bimport\s*\(/g) || []
@@ -228,6 +232,97 @@ test('a tier enqueue boots through the spawn seam and forks the run child', asyn
     assert.equal(options.cwd, f.dir)
     assert.equal(f.forks.length, 1)
     assert.equal(f.forks[0][0].endsWith('child.mjs'), true)
+  })
+})
+
+test('enqueue carries every shape in the closed set into the enqueue record and the child spec', async () => {
+  for (const name of VARIANT_NAMES) {
+    await each(async (f) => {
+      assert.doesNotThrow(() => f.d.enqueue({ crew_dir: f.crewDir, variant: name }))
+      const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+      const enqueued = records.find((record) => record.kind === 'enqueued')
+      assert.ok(enqueued)
+      assert.equal(Object.prototype.hasOwnProperty.call(enqueued, 'variant'), true)
+      assert.equal(enqueued.variant, name)
+      assert.equal(JSON.parse(f.forks[0][1][1]).variant, name)
+    })
+  }
+})
+
+test('enqueue refuses an unknown variant and names the closed set', async () => {
+  for (const name of VARIANT_NAMES) {
+    await each(async (f) => {
+      assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, variant: 'no-such-shape' }), (err) => {
+        assert.equal(err.code, 'invalid-spec')
+        assert.match(err.message, new RegExp(name))
+        return true
+      })
+    })
+  }
+})
+
+test('an unknown variant is refused before any tier boot, fork or registry record', async () => {
+  await each(async (f) => {
+    assert.throws(() => f.d.enqueue({ tier: 'build', task: 'tier-task', checkout: f.dir, brief_file: f.brief, variant: 'no-such-shape' }), (err) => err.code === 'invalid-spec')
+    assert.equal(f.boots.length, 0)
+    assert.equal(f.forks.length, 0)
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
+    assert.deepEqual(f.d.list(), [])
+  })
+})
+
+test('an absent variant leaves the enqueue record and the child spec untouched', async () => {
+  await each(async (f) => {
+    f.d.enqueue({ crew_dir: f.crewDir })
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    const enqueued = records.find((record) => record.kind === 'enqueued')
+    const spec = JSON.parse(f.forks[0][1][1])
+    assert.equal(Object.prototype.hasOwnProperty.call(enqueued, 'variant'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(spec, 'variant'), false)
+  })
+})
+
+test('a daemon-forked repair run makes the driver open the repair shape', async () => {
+  const stagesFor = (ctx) => {
+    const stages = []
+    const io = {
+      assign: ({ role }) => ({ id: role, returnPath: `${role}:1` }),
+      wait: () => null,
+      writeFile: () => {},
+      readFile: () => null,
+      run: () => ({ ok: true, output: '' }),
+      changedFiles: () => [],
+      commit: () => 'abc1234',
+      log: (entry) => { if (entry && typeof entry.stage === 'string') stages.push(entry.stage) },
+      now: () => 0,
+    }
+    try { driveTask(ctx, io) } catch { /* labels already recorded */ }
+    return stages
+  }
+  await each(async (f) => {
+    f.d.enqueue({ crew_dir: f.crewDir, task: 'daemon80', checkout: f.dir, brief_file: f.brief, lane: 'lane-cmd', variant: 'repair' })
+    const spec = JSON.parse(f.forks[0][1][1])
+    let seen
+    runChild(spec, {
+      preflight: false,
+      driveTask: (ctx) => { seen = ctx; return { status: 'done' } },
+      realIo: () => ({}),
+    })
+    const stages = stagesFor({ ...seen, files_in_scope: ['a.mjs', 'a.test.mjs'] })
+    assert.equal(stages[0], 'repair:r1')
+    assert.equal(stages.includes('plan:r1'), false)
+  })
+  await each(async (f) => {
+    f.d.enqueue({ crew_dir: f.crewDir, task: 'daemon80', checkout: f.dir, brief_file: f.brief, lane: 'lane-cmd' })
+    const spec = JSON.parse(f.forks[0][1][1])
+    let seen
+    runChild(spec, {
+      preflight: false,
+      driveTask: (ctx) => { seen = ctx; return { status: 'done' } },
+      realIo: () => ({}),
+    })
+    const stages = stagesFor(seen)
+    assert.equal(stages[0], 'plan:r1')
   })
 })
 

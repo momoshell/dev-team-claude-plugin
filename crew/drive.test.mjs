@@ -476,7 +476,7 @@ test('scope helpers match directory prefixes and validate only supported entries
 
 test('protectedHits matches the ratified protected paths in both directions', () => {
   assert.deepEqual([...PROTECTED_PATHS].sort(), [
-    '.github/workflows/', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/reclaim.mjs',
+    '.github/workflows/', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/reclaim.mjs', 'crew/variants.mjs',
     'crew/roster.json', 'crew/roster.schema.json', 'docs/adr/',
   ].sort())
   assert.equal(PROTECTED_PATHS.includes('crew/roles/'), false)
@@ -485,6 +485,15 @@ test('protectedHits matches the ratified protected paths in both directions', ()
     'crew/roles/planner.md', 'crew/crew.mjs', 'a.mjs', 'docs/adr/031.md',
     'crew/drive.mjs.bak', 'crew/roster.json.tmp',
   ]), ['docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/'])
+})
+
+test('the closed variant set lives in the import-free leaf and drive re-exports it', () => {
+  const driveSource = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const variantsSource = readFileSync(new URL('./variants.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(driveSource, /export const VARIANTS/)
+  assert.match(driveSource, /export \{ VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT \} from '\.\/variants\.mjs'/)
+  assert.doesNotMatch(variantsSource, /^\s*import[\s(]/m)
+  assert.deepEqual(Object.keys(VARIANTS), [...VARIANT_NAMES])
 })
 
 test('directory-prefix scope commits concrete changed paths without a scope bounce', () => {

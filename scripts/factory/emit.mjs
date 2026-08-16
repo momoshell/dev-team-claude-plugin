@@ -83,14 +83,14 @@
 // sidecar.
 
 import {
-  writeFileSync, unlinkSync, linkSync, renameSync, readFileSync, mkdirSync, chmodSync, statSync, existsSync,
+  writeFileSync, unlinkSync, linkSync, renameSync, readFileSync, chmodSync, statSync, existsSync,
   realpathSync,
 } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import {
-  openLedger, isoMs, SESSION_STATUSES,
+  openLedger, isoMs, SESSION_STATUSES, mkdirpBounded,
 } from './ledger.mjs'
 
 // ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ function readFileStatus(path) {
 }
 
 function secureMkdirSync(dir) {
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
+  mkdirpBounded(dir, 0o700)
   // mode is masked by the process umask, so an explicit chmod is what
   // actually guarantees 0700 (mirrors ledger.mjs's ensureDirAndPerms).
   chmodIfExists(dir, 0o700)
@@ -500,6 +500,25 @@ export function openRun(opts = {}) {
     return openRunInner(opts)
   } catch (err) {
     return buildDegradedEmitter(stderr, err)
+  }
+}
+
+// A cell failure that happens BEFORE any run exists — a boot refusal, a pane
+// seat that never came up — has no adw_id to key on, and bootCmd never opens
+// a run (crew/crew.mjs:449 refuses at resolveAdapters, openRun lives at :610).
+// One-shot open, one row, close. NEVER throws: instrumentation is never
+// load-bearing, exactly like openRun and emit().
+export function recordCellFailure({ dbPath, stderr = process.stderr, _openLedger, ...fields } = {}) {
+  let handle = null
+  try {
+    handle = (_openLedger || openLedger)({ dbPath, stderr })
+    handle.recordCellFailure({ adw_id: null, ...fields })
+    return true
+  } catch (err) {
+    try { stderr.write(`emit: run-less cell failure not recorded (${err.message})\n`) } catch { /* best effort */ }
+    return false
+  } finally {
+    try { if (handle) handle.close() } catch { /* best effort */ }
   }
 }
 

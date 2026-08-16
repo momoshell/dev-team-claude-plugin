@@ -40,7 +40,7 @@ export {
   DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, WAIT_POLL_MS, LIVENESS_PROBE_MS,
   LIVENESS_MISSES_TO_DIE,
 } from './realio.mjs'
-import { openRun } from '../scripts/factory/emit.mjs'
+import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
 } from './memory.mjs'
@@ -266,19 +266,24 @@ export async function resolveAdapters(roles, args, seats = null) {
     if (m && !roles.includes(m[1])) throw new Error(`--allow-shortfall-${m[1]} given but crew seats no ${m[1]}`)
   }
   for (const role of roles) {
-    const name = String(seats?.[role]?.agent || seatAgent(role, args))
-    if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
-    const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
-    if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
-    const adapter = await import(pathToFileURL(file).href)
-    if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
-    if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
-    const transport = seatTransport({ role, args, adapter, agentName: name })
-    assertCapabilities(role, name, adapter.capabilitiesFor({ transport }), seatShortfalls(role, args))
-    if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
-      throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
+    try {
+      const name = String(seats?.[role]?.agent || seatAgent(role, args))
+      if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
+      const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
+      if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
+      const adapter = await import(pathToFileURL(file).href)
+      if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
+      if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
+      const transport = seatTransport({ role, args, adapter, agentName: name })
+      assertCapabilities(role, name, adapter.capabilitiesFor({ transport }), seatShortfalls(role, args))
+      if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
+        throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
+      }
+      out[role] = { name, adapter, transport }
+    } catch (err) {
+      if (err.role === undefined) { err.role = role; err.cell = seats?.[role] ?? null }
+      throw err
     }
-    out[role] = { name, adapter, transport }
   }
   return out
 }
@@ -446,7 +451,13 @@ export async function bootCmd(args, deps = {}) {
   for (const role of roles) transportFor(role, args) // detects ambiguous lists before cmux boot
   // Resolve adapters before touching cmux — a bad --agent-<role> or a
   // capability shortfall must fail before a workspace gets created.
-  const adapters = await resolveAdapters(roles, args, tierSeats)
+  let adapters
+  try {
+    adapters = await resolveAdapters(roles, args, tierSeats)
+  } catch (err) {
+    noteRunlessCellFailure({ taskSlug, role: err.role ?? null, kind: 'boot-refusal', err, cell: err.cell ?? null })
+    throw err
+  }
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters) : null
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
@@ -560,6 +571,23 @@ function ledgerDbPath() {
     || join(process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory'), 'ledger.db')
 }
 
+// A boot refusal and a seat that never came up both happen BEFORE openRun
+// (:610) — there is no adw_id to key them on, and the ledger's cell_failures
+// table takes a NULL one for exactly this reason. Never load-bearing.
+function noteRunlessCellFailure({ taskSlug, role, kind, err, cell = null, member = null }) {
+  if (!role) return
+  recordCellFailure({
+    dbPath: ledgerDbPath(), task_slug: taskSlug, role, kind,
+    agent: member?.agent ?? cell?.agent ?? null,
+    provider: member?.provider ?? cell?.provider ?? null,
+    model_id: member?.id ?? cell?.id ?? null,
+    model: member?.model ?? cell?.model ?? null,
+    effort: member?.effort ?? cell?.effort ?? null,
+    transport: member?.transport ?? null,
+    stage: err?.stage ?? null, detail: err?.message ?? null,
+  })
+}
+
 
 function runCmd(args) {
   const taskSlug = slug(args.task)
@@ -597,7 +625,14 @@ function runCmd(args) {
   // swallowed (live-hit 2026-08-13 — the leading chunk of the first
   // assignment vanished on both crews). Gate on each seat actually replying
   // ready (or, as a fallback, rendering agent chrome) before driving.
-  awaitSeatsReady(crew, 120, journal)
+  try {
+    awaitSeatsReady(crew, 120, journal)
+  } catch (err) {
+    for (const role of err.roles || []) {
+      noteRunlessCellFailure({ taskSlug, role, kind: 'seat-not-ready', err, member: crew.members[role] })
+    }
+    throw err
+  }
 
   // The factory ledger mirror (#94). openRun() never throws and degrades
   // to an inert emitter; the extra try/catch covers a caller-side surprise
@@ -713,7 +748,9 @@ export function awaitSeatsReady(crew, timeoutS = 120, journal = null, deps = {})
     }
     if (pending.size === 0) break
     if (now() > deadline) {
-      throw new Error(`seats never became ready within ${timeoutS}s: ${[...pending].join(', ')}`)
+      const err = new Error(`seats never became ready within ${timeoutS}s: ${[...pending].join(', ')}`)
+      err.roles = [...pending]
+      throw err
     }
     sleep(2000)
   }

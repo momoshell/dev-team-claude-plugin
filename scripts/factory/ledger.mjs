@@ -43,6 +43,7 @@
 // CLI verbs: `sessions` | `phases <adw_id>` | `tail <adw_id> [--after n]
 // [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
+// `cell-failures [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
 // (spellings are a contract with package.json; see do-40-02) — plus `doctor`
 // (capability + state readout) and `kill` (operator-invoked process
@@ -56,9 +57,9 @@
 // inline.
 
 import {
-  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync,
+  appendFileSync, mkdirSync, chmodSync, existsSync, readFileSync, realpathSync, statSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve, parse, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
@@ -70,6 +71,34 @@ import { spawnSync } from 'node:child_process'
 const NONCE_PREFIX = 'devteam-done-'
 
 const require = createRequire(import.meta.url)
+
+// fs.mkdirSync with recursive directory creation is NOT bounded: on a filesystem
+// that answers ENOENT to mkdir for a path whose parent exists (Linux procfs
+// does exactly this), Node walks up to create the parent, sees EEXIST, walks
+// back down, gets ENOENT again — forever, spinning a CPU, on the main thread,
+// where no timer or --test-timeout can interrupt it. This walks DOWN once,
+// one non-recursive mkdir per segment, so it is bounded by the path's own
+// depth and always returns or throws.
+export function mkdirpBounded(dir, mode = 0o700) {
+  const resolved = resolve(dir)
+  const { root } = parse(resolved)
+  const segments = resolved.slice(root.length).split(sep).filter(Boolean)
+  let prefix = root
+  for (const [index, segment] of segments.entries()) {
+    prefix = join(prefix, segment)
+    try {
+      mkdirSync(prefix, { mode })
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err
+      if (index === segments.length - 1) {
+        let isDirectory = false
+        try { isDirectory = statSync(prefix).isDirectory() } catch { /* rethrow EEXIST below */ }
+        if (!isDirectory) throw err
+      }
+    }
+  }
+  return resolved
+}
 
 // ---------------------------------------------------------------------------
 // Frozen constants (all exported — the interface contract)
@@ -90,6 +119,22 @@ export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unk
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
+
+// The closed set of CELL availability failures — a cell that could not hold a
+// seat, died mid-assignment, or returned nothing usable. Deliberately NOT a
+// quality axis: review_outcomes (#169) and accept_decisions (#170) already
+// record whether a cell's WORK was good; this records whether the cell was
+// THERE. #178 settled the quality axis; the two never blend.
+export const CELL_FAILURE_KINDS = Object.freeze([
+  'boot-refusal',       // assertCapabilities refused the cell (no run exists)
+  'seat-not-ready',     // a pane seat never came up (no run exists)
+  'seat-died',          // liveness probes declared the pane gone mid-assignment
+  'timeout',            // the dispatch wait expired with nothing to read
+  'no-envelope',        // the worker settled/exited without writing one
+  'unusable-envelope',  // a file arrived and failed the shape/anti-replay check
+  'aborted',            // the worker's turn was aborted
+  'transport-error',    // spawn/session/reservation/adapter failure
+])
 
 // Per-event-type closed payload key allowlist. gate_pass/gate_fail, decision
 // and error are ratified (ADR-024); the remaining seven are backend-lead
@@ -297,6 +342,28 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'claude_session_id']],
     indexes: [],
   },
+  cell_failures: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },        // NULL when the failure predates the run
+      { name: 'task_slug', decl: 'TEXT' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'dispatch_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'agent', decl: 'TEXT' },
+      { name: 'provider', decl: 'TEXT' },
+      { name: 'model_id', decl: 'TEXT' },      // the roster cell's id
+      { name: 'model', decl: 'TEXT' },         // the translated CLI model string
+      { name: 'effort', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' },
+      { name: 'kind', decl: 'TEXT' },
+      { name: 'stage', decl: 'TEXT' },         // the transport's own err.stage, verbatim
+      { name: 'detail', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'dispatch_id', 'kind', 'created_at']],
+    indexes: [{ name: 'cell_failures_cell_idx', cols: ['provider', 'model_id', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -304,7 +371,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError',
 ])
 
@@ -605,7 +672,7 @@ export function openLedger({
   }
 
   function ensureDirAndPerms() {
-    mkdirSync(dir, { recursive: true, mode: 0o700 })
+    mkdirpBounded(dir, 0o700)
     // mode is masked by the process umask, so an explicit chmod is what
     // actually guarantees 0700.
     chmodIfExists(dir, 0o700)
@@ -1039,6 +1106,37 @@ export function openLedger({
     return args
   }
 
+  function recordCellFailure(input = {}) {
+    requireFields(input, ['role', 'kind'], 'recordCellFailure')
+    requireEnum(input.kind, CELL_FAILURE_KINDS, 'recordCellFailure', 'kind')
+    const args = redact({
+      adw_id: input.adw_id ?? null,          // NULL is a FACT here, not a gap:
+      task_slug: input.task_slug ?? null,    // bootCmd opens no run (crew.mjs:449)
+      phase_id: input.phase_id ?? null,
+      dispatch_id: input.dispatch_id ?? null,
+      role: input.role,
+      agent: input.agent ?? null,
+      provider: input.provider ?? null,
+      model_id: input.model_id ?? null,
+      model: input.model ?? null,
+      effort: input.effort ?? null,
+      transport: input.transport ?? null,
+      kind: input.kind,
+      stage: input.stage == null ? null : String(input.stage),
+      detail: input.detail == null ? null : String(input.detail),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (args.stage != null) args.stage = args.stage.slice(0, 120)
+    if (args.detail != null) args.detail = args.detail.slice(0, 500)
+    appendJsonl('recordCellFailure', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('cell_failures').filter((c) => c !== 'id')
+      conn.prepare(`INSERT OR IGNORE INTO cell_failures (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function startProcess(input = {}) {
     requireFields(input, ['adw_id', 'dispatch_id', 'pid', 'command'], 'startProcess')
     const args = redact({
@@ -1344,6 +1442,20 @@ export function openLedger({
     `)
   }
 
+  function cellFailures({ since = null, until = null } = {}) {
+    // Never joins `sessions`: a boot refusal has no run to join to, and joining
+    // would silently drop exactly the rows this table exists to hold.
+    return queryRows(`
+      SELECT provider, model_id, agent, effort, role, kind,
+        COUNT(*) AS failures, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
+        SUM(CASE WHEN adw_id IS NULL THEN 1 ELSE 0 END) AS run_less
+      FROM cell_failures
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY provider, model_id, agent, effort, role, kind
+      ORDER BY provider, model_id, agent, effort, role, kind
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -1549,10 +1661,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -1838,10 +1950,10 @@ function parseArgs(argv) {
 // isoMs() only accepts an already-ms-ISO string (:394); a human types
 // `--since 2026-08-15T00:00:00Z`. Parse first, then normalise, so a bad
 // timestamp is a refusal (exit 2) and not an internal stack trace (exit 1).
-function windowBound(value, flagName) {
+function windowBound(value, flagName, verb = 'run-set') {
   const ms = Date.parse(value)
   if (!Number.isFinite(ms)) {
-    refuse(`run-set: --${flagName} must be an ISO-8601 timestamp, e.g. 2026-08-15T00:00:00Z`)
+    refuse(`${verb}: --${flagName} must be an ISO-8601 timestamp, e.g. 2026-08-15T00:00:00Z`)
   }
   return isoMs(ms)
 }
@@ -1856,7 +1968,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | task | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | task | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -1974,6 +2086,19 @@ export function main(argv) {
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
       stderr.write(`ledger: ${rows.length} run(s) in [${since}, ${until ?? 'now'})\n`)
+      return 0
+    }
+
+    if (verb === 'cell-failures') {
+      if (positional.length > 0) refuse('cell-failures: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'cell-failures') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'cell-failures') : null
+      if (until != null && since != null && until <= since) refuse('cell-failures: --until must be later than --since')
+      const rows = ledger.cellFailures({ since, until })
+      if (ledger.stats().degraded) refuse('cell-failures: the ledger mirror is degraded — this window is unanswerable, not empty')
+      stdout.write(`${JSON.stringify({ schema: 1, question: "Which cells are failing, how often, and in what way?", since, until, kinds: CELL_FAILURE_KINDS, rows })}\n`)
       return 0
     }
 

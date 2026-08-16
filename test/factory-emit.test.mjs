@@ -6,7 +6,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, utimesSync, symlinkSync,
+  mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, utimesSync, symlinkSync, readdirSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
@@ -14,7 +14,7 @@ import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
-import { openRun, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
+import { openRun, recordCellFailure, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
 // A handful of this file's tests query the real SQLite mirror directly (via
@@ -62,9 +62,12 @@ function trackChild(child) {
   return child
 }
 after(() => {
-  for (const child of spawnedChildren) {
+  const survivors = [...spawnedChildren]
+  for (const child of survivors) {
     try { child.kill('SIGKILL') } catch { /* already gone */ }
   }
+  assert.equal(survivors.length, 0,
+    `${survivors.length} spawned child process(es) outlived the suite (pids ${survivors.map((c) => c.pid).join(', ')})`)
 })
 
 function runChild(program, { timeout = 15000 } = {}) {
@@ -111,6 +114,31 @@ test('SIDECAR CREATE IS EXCLUSIVE: a second in-process openRun against an existi
   const e1 = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't' })
   const e2 = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't' })
   assert.equal(e1.adwId, e2.adwId)
+})
+
+test('run-less recordCellFailure lands exactly one NULL-adw row and never throws on an unusable dbPath', { skip: SKIP }, () => {
+  const dir = freshDir('runless-cell-failure')
+  const dbPath = join(dir, 'ledger.db')
+  assert.equal(recordCellFailure({
+    dbPath, stderr: { write: () => {} }, task_slug: 'measure', role: 'reviewer',
+    agent: 'pi', provider: 'pi', model_id: 'terra', effort: 'max', kind: 'boot-refusal',
+  }), true)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('cell_failures')
+  ledger.close()
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].adw_id, null)
+  assert.equal(rows[0].role, 'reviewer')
+  // A path nested under a regular file is unusable by construction on every
+  // platform and for root too (ENOTDIR is not a permission bit). It never
+  // depends on a platform's virtual filesystem: a live virtual mount's mkdir
+  // semantics hung Linux CI for six hours because Node's recursive mkdir
+  // loops forever.
+  writeFileSync(join(dir, 'blocker'), 'not a directory')
+  assert.equal(recordCellFailure({
+    dbPath: join(dir, 'blocker', 'x.db'), stderr: { write: () => {} },
+    task_slug: 'measure', role: 'builder', kind: 'boot-refusal',
+  }), false)
 })
 
 // ---------------------------------------------------------------------------
@@ -1380,4 +1408,18 @@ test('AC-13-style hygiene: this file never references the CLI-only default-db-pa
   const needle = ['default', 'Db', 'Path'].join('')
   assert.ok(!SELF_SOURCE.includes(needle), 'this test file references the forbidden symbol')
   assert.ok(!EMIT_SOURCE.includes(needle), 'emit.mjs references the CLI-only default-db-path resolver — a library path must never call it')
+})
+
+test('no test file names a virtual filesystem as a real path', () => {
+  // A deliberately-failing path must fail by CONSTRUCTION, never because a
+  // platform happens to lack a virtual filesystem. On Linux a live virtual
+  // mount is present and its mkdir semantics hang Node's recursive mkdir.
+  const banned = /['"`]\/(proc|sys)\//
+  const offenders = []
+  for (const file of readdirSync(dirname(SELF)).filter((f) => f.endsWith('.test.mjs'))) {
+    readFileSync(join(dirname(SELF), file), 'utf8').split('\n').forEach((line, i) => {
+      if (banned.test(line)) offenders.push(`${file}:${i + 1}`)
+    })
+  }
+  assert.deepEqual(offenders, [], `a test file names a virtual filesystem as a real path: ${offenders.join(', ')}`)
 })

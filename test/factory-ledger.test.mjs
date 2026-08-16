@@ -9,7 +9,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync,
+  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -20,7 +20,7 @@ import { ROOT } from './helpers.mjs'
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
 import {
-  openLedger, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
+  openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
 } from '../scripts/factory/ledger.mjs'
 
@@ -79,6 +79,27 @@ function openTestLedger(extra = {}) {
   const dir = nextDir()
   return openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} }, ...extra })
 }
+
+test('mkdirpBounded creates a deep path, and refuses promptly under a regular file rather than looping', () => {
+  const dir = nextDir()
+  mkdirpBounded(join(dir, 'a', 'b', 'c'), 0o700)
+  assert.ok(existsSync(join(dir, 'a', 'b', 'c')))
+  const blocker = join(dir, 'blocker')
+  writeFileSync(blocker, 'not a directory')
+  assert.throws(() => mkdirpBounded(blocker, 0o700), (err) => err.code === 'EEXIST')
+  assert.equal(readFileSync(blocker, 'utf8'), 'not a directory')
+  assert.throws(() => mkdirpBounded(join(blocker, 'nested'), 0o700), (err) => err.code === 'ENOTDIR')
+})
+
+test('factory directory creation does not regress to recursive mkdirSync', () => {
+  for (const relative of ['scripts/factory/ledger.mjs', 'scripts/factory/emit.mjs']) {
+    const source = readFileSync(join(ROOT, relative), 'utf8')
+    const recursiveMkdirLine = source.split('\n').find((line) => (
+      /mkdirSync\s*\(/.test(line) && /recursive\s*:\s*true/.test(line)
+    ))
+    assert.equal(recursiveMkdirLine, undefined, `${relative} contains recursive mkdirSync`)
+  }
+})
 
 // ---------------------------------------------------------------------------
 // AC-1: schema exactness
@@ -217,6 +238,12 @@ function exerciseEveryWriter(ledger, adwId) {
     findings_total: 2, residual_count: 1, refuted_count: 1, cosmetic_count: 1,
     unverified_count: 0, invalid_reasons: null,
   })
+  ledger.recordCellFailure({
+    adw_id: adwId, task_slug: 'task', phase_id: phaseId, dispatch_id: 'd-failure', role: 'builder',
+    agent: 'claude', provider: 'anthropic', model_id: 'claude-sonnet', model: 'sonnet', effort: 'high',
+    transport: 'pane', kind: 'seat-died', stage: 'seat-died', detail: 'pane gone',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.startProcess({ adw_id: adwId, dispatch_id: 'd1', pid: 4242, command: 'node x.mjs' })
   ledger.heartbeat({ adw_id: adwId, target: 'process', pid: 4242, started_at: ledger.dumpTable('processes')[0].started_at })
   ledger.endProcess({
@@ -277,6 +304,7 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
   const badGate = 'gate-verdict-secret'
   const badReview = 'review-verdict-secret'
   const badAccept = 'accept-outcome-secret'
+  const badCell = 'cell-kind-secret'
   assert.throws(
     () => ledger.recordGateDiscrimination({ adw_id: 'enum-1', gate_generation: 1, verdict: badGate }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badGate),
@@ -289,6 +317,79 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
     () => ledger.recordAcceptDecision({ adw_id: 'enum-1', outcome: badAccept }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badAccept),
   )
+  assert.throws(
+    () => ledger.recordCellFailure({ role: 'builder', kind: badCell }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes(badCell),
+  )
+})
+
+test('cell_failures stores run-less and in-run rows with the complete cell shape', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordCellFailure({
+    task_slug: 'measure', role: 'reviewer', agent: 'pi', provider: 'pi', model_id: 'terra',
+    model: 'gpt', effort: 'max', transport: 'headless-rpc', kind: 'boot-refusal',
+    stage: 'capability-refused', detail: 'before run', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.recordCellFailure({
+    adw_id: 'run-cell', task_slug: 'measure', phase_id: 4, dispatch_id: 'd1', role: 'reviewer',
+    agent: 'pi', provider: 'pi', model_id: 'terra', model: 'gpt', effort: 'max', transport: 'headless-rpc',
+    kind: 'seat-died', stage: 'seat-died', detail: 'mid-run', created_at: '2024-01-01T00:00:01.000Z',
+  })
+  const rows = ledger.dumpTable('cell_failures')
+  assert.equal(rows.length, 2)
+  const runless = rows.find((row) => row.kind === 'boot-refusal')
+  assert.equal(runless.adw_id, null)
+  assert.deepEqual({ role: runless.role, provider: runless.provider, model_id: runless.model_id, transport: runless.transport }, {
+    role: 'reviewer', provider: 'pi', model_id: 'terra', transport: 'headless-rpc',
+  })
+  const inRun = rows.find((row) => row.kind === 'seat-died')
+  assert.deepEqual({ adw_id: inRun.adw_id, phase_id: inRun.phase_id, dispatch_id: inRun.dispatch_id, detail: inRun.detail }, {
+    adw_id: 'run-cell', phase_id: 4, dispatch_id: 'd1', detail: 'mid-run',
+  })
+})
+
+test('cellFailures aggregates by cell and kind, counts run-less rows, and honors bounds', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const common = { task_slug: 'measure', role: 'builder', agent: 'claude', provider: 'anthropic', model_id: 'sonnet', effort: 'high' }
+  ledger.recordCellFailure({ ...common, kind: 'boot-refusal', created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordCellFailure({ ...common, kind: 'boot-refusal', created_at: '2024-01-02T00:00:00.000Z' })
+  ledger.recordCellFailure({ ...common, adw_id: 'run-1', kind: 'boot-refusal', created_at: '2024-01-03T00:00:00.000Z' })
+  ledger.recordCellFailure({ ...common, adw_id: 'run-1', kind: 'timeout', created_at: '2024-01-04T00:00:00.000Z' })
+
+  const all = ledger.cellFailures()
+  const boots = all.find((row) => row.kind === 'boot-refusal')
+  assert.equal(boots.failures, 3)
+  assert.equal(boots.run_less, 2)
+  assert.equal(boots.first_at, '2024-01-01T00:00:00.000Z')
+  assert.equal(boots.last_at, '2024-01-03T00:00:00.000Z')
+
+  const bounded = ledger.cellFailures({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-04T00:00:00.000Z' })
+  assert.deepEqual(bounded.map(({ kind, failures, run_less }) => ({ kind, failures, run_less })), [
+    { kind: 'boot-refusal', failures: 2, run_less: 1 },
+  ])
+})
+
+test('cell-failures CLI prints rows and refuses an inverted optional window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordCellFailure({
+    task_slug: 'cli-failures', role: 'builder', provider: 'anthropic', model_id: 'sonnet', agent: 'claude', effort: 'high',
+    kind: 'boot-refusal', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const ok = run(['cell-failures'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(ok.status, 0, ok.stderr)
+  const payload = JSON.parse(ok.stdout.trim())
+  assert.deepEqual({ schema: payload.schema, since: payload.since, until: payload.until }, { schema: 1, since: null, until: null })
+  assert.equal(payload.rows[0].kind, 'boot-refusal')
+  assert.equal(payload.rows[0].run_less, 1)
+
+  const inverted = run([
+    'cell-failures', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-01T00:00:00Z',
+  ], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(inverted.status, 2)
+  assert.match(inverted.stderr, /cell-failures: --until must be later than --since/)
 })
 
 test('gateReviewGap counts only non-pristine green gate rows and must-fix reviews', { skip: SKIP }, () => {
@@ -592,6 +693,10 @@ function seedAllWritersWithMarker(ledger) {
     adw_id: ctx, phase_id: phaseId, where: MARKER_ADW, outcome: 'escalated',
     findings_total: 1, residual_count: 0, refuted_count: 0, cosmetic_count: 0,
     unverified_count: 0, invalid_reasons: MARKER_ADW,
+  })
+  ledger.recordCellFailure({
+    adw_id: ctx, task_slug: 't', role: 'builder', provider: 'anthropic', model_id: 'sonnet',
+    kind: 'transport-error', detail: MARKER_ADW, created_at: '2024-01-01T00:00:00.000Z',
   })
   ledger.endPhase({ adw_id: ctx, seq: 1, status: 'ok' })
   ledger.endSession({ adw_id: ctx, status: 'ok' })

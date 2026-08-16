@@ -1,8 +1,10 @@
-import { readFileSync } from 'node:fs'
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { existsSync, readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
+import { SEAT_DEFAULTS, assertCapabilities, DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS } from '../../crew/crew.mjs'
 
 export const SCHEMA_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'crew', 'roster.schema.json')
+export const ADAPTERS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'crew', 'adapters')
 
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -160,7 +162,71 @@ function clone(value) {
   return value === undefined ? undefined : structuredClone(value)
 }
 
-export function proposeEdit({ rosterText, rosterPath = 'crew/roster.json', readError = null, tier, role, cell, seatSchema } = {}) {
+function capabilityUnknown({ tier, role, agent, adapterPath, reason }) {
+  const path = adapterPath ? ` at ${adapterPath}` : ''
+  const detail = reason ? `: ${reason}` : ''
+  return {
+    code: 'capability_unknown',
+    message: `seat tiers.${tier}.${role} with agent "${agent}" refused because capability could not be determined${detail}${path}`,
+    transports: [],
+  }
+}
+
+export async function capabilityRefusals({ tier, role, cell, adaptersDir = ADAPTERS_DIR } = {}) {
+  if (cell === null) return []
+  if (!Object.prototype.hasOwnProperty.call(SEAT_DEFAULTS, role) || typeof cell?.agent !== 'string') return []
+
+  const agent = cell.agent
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(agent)) {
+    return [capabilityUnknown({ tier, role, agent, reason: 'invalid adapter name' })]
+  }
+
+  const adapterPath = join(adaptersDir, `adapter-${agent}.mjs`)
+  if (!existsSync(adapterPath)) {
+    return [capabilityUnknown({ tier, role, agent, adapterPath, reason: 'adapter file does not exist' })]
+  }
+
+  let adapter
+  try {
+    adapter = await import(pathToFileURL(adapterPath).href)
+  } catch (err) {
+    return [capabilityUnknown({ tier, role, agent, adapterPath, reason: `adapter import failed: ${err?.message || String(err)}` })]
+  }
+  if (typeof adapter.capabilitiesFor !== 'function') {
+    return [capabilityUnknown({ tier, role, agent, adapterPath, reason: 'adapter exports no capabilitiesFor function' })]
+  }
+
+  const refusals = []
+  let shipped = 0
+  for (const transport of [DEFAULT_TRANSPORT, ...HEADLESS_TRANSPORTS]) {
+    let capabilities
+    try {
+      capabilities = adapter.capabilitiesFor({ transport })
+    } catch {
+      continue
+    }
+    shipped += 1
+    try {
+      assertCapabilities(role, agent, capabilities)
+    } catch (err) {
+      refusals.push({ code: 'capability_refused', message: err?.message || String(err), transport })
+    }
+  }
+
+  if (!shipped) {
+    return [capabilityUnknown({ tier, role, agent, adapterPath, reason: 'adapter ships no capability profile for a supported transport' })]
+  }
+
+  const deduped = new Map()
+  for (const refusal of refusals) {
+    const existing = deduped.get(refusal.message)
+    if (existing) existing.transports.push(refusal.transport)
+    else deduped.set(refusal.message, { code: refusal.code, message: refusal.message, transports: [refusal.transport] })
+  }
+  return [...deduped.values()]
+}
+
+export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json', readError = null, tier, role, cell, seatSchema } = {}) {
   let roster
   if (typeof rosterText !== 'string') {
     const message = readError || `unable to read roster: unknown read error, at ${rosterPath}`
@@ -234,6 +300,9 @@ export function proposeEdit({ rosterText, rosterPath = 'crew/roster.json', readE
     if (!record(roster.models) || !Object.prototype.hasOwnProperty.call(roster.models, modelKey)) {
       refusals.push({ code: 'unknown_model', message: `model ${modelKey} is absent from roster.models; see crew/roster-refresh.test.mjs:143-151` })
     }
+  }
+  if (!shapeRefusals.length && cell !== null) {
+    refusals.push(...await capabilityRefusals({ tier, role, cell }))
   }
 
   let afterRoster

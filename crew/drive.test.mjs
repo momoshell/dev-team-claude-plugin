@@ -395,6 +395,16 @@ test('the planner charter documents how to discover files_in_scope', () => {
   assert.match(charter, /grep/i)
 })
 
+test('the planner charter tells the planner to grep the changed file’s own path', () => {
+  const charter = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  const discovery = charter.slice(charter.indexOf('Discover that list'), charter.indexOf('`gate_path` is required'))
+  assert.ok(discovery.length > 0)
+  assert.match(discovery, /own repo-relative path/)
+  assert.match(discovery, /\.github\/workflows\/test\.yml/)
+  assert.match(discovery, /test\/factory-ledger-floor\.test\.mjs/)
+  assert.doesNotMatch(discovery, /production/)
+})
+
 test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero consults', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },

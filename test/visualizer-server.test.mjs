@@ -73,6 +73,7 @@ function fixture(path, { filler = 0 } = {}) {
   const ledger = openLedger({ dbPath: path })
   const done = 'test-done-0000-0000-000000000001'
   const live = 'test-live-0000-0000-000000000002'
+  const pane = 'test-pane-0000-0000-000000000003'
   ledger.startSession({ adw_id: done, repo_slug: 'repo', task_slug: 'finished' })
   for (const [seq, name] of ['plan', 'build', 'review'].entries()) { ledger.startPhase({ adw_id: done, seq: seq + 1, name }); ledger.endPhase({ adw_id: done, seq: seq + 1, status: 'ok' }) }
   ledger.recordEvent({ adw_id: done, type: 'agent_start', phase_id: 1, payload: { role: 'planner', dispatch_id: 'd1' } })
@@ -102,8 +103,10 @@ function fixture(path, { filler = 0 } = {}) {
   ledger.startSession({ adw_id: live, repo_slug: 'repo', task_slug: 'live' })
   ledger.startPhase({ adw_id: live, seq: 1, name: 'plan' })
   ledger.recordEvent({ adw_id: live, type: 'agent_start', payload: { role: 'planner', dispatch_id: 'l1' } })
+  ledger.startSession({ adw_id: pane, repo_slug: 'repo', task_slug: 'pane', started_at: new Date(Date.now() - 2 * 3600e3).toISOString() })
+  ledger.endSession({ adw_id: pane, status: 'aborted', ended_at: new Date(Date.now() - 3600e3).toISOString() })
   ledger.close()
-  return { done, live }
+  return { done, live, pane }
 }
 
 test('visualizer server never writes to the ledger', { skip: SKIP }, async () => {
@@ -149,6 +152,7 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
     assert.equal((await json(base, `/api/events?adw_id=${live}&limit=50`)).json.events.length, 1)
     await json(base, '/api/health'); await json(base, '/api/health')
     await json(base, '/api/cell-health')
+    await json(base, '/api/run-set')
     assert.equal((await json(base, '/api/events?adw_id=x&after=bad')).status, 400)
     assert.equal((await json(base, '/api/events?adw_id=x&limit=wat')).status, 400)
     assert.equal((await json(base, '/api/nope')).status, 404)
@@ -257,6 +261,85 @@ test('cell health reports a stated window, run-less rows and kinds without a ver
     assert.equal((await json(base, '/api/cell-health?since=not-a-date')).status, 400)
   } finally {
     if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('run-set states its window and lists every run in it', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const since = new Date(0).toISOString()
+    const response = await json(base, `/api/run-set?since=${encodeURIComponent(since)}`)
+    assert.equal(response.status, 200)
+    assert.ok(Number.isFinite(Date.parse(response.json.window.since)))
+    assert.ok(response.json.window.label)
+    assert.equal(response.json.rows.length, response.json.runs)
+    const tally = { running: 0, ok: 0, fail: 0, aborted: 0 }
+    for (const row of response.json.rows) if (row.status in tally) tally[row.status] += 1
+    assert.deepEqual(response.json.settled, tally)
+    assert.equal(response.json.rows.find((row) => row.adw_id === done).billed_input_tokens, 15)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('run-set refuses a malformed or inverted window and rejects non-GET', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-window-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    assert.equal((await json(base, '/api/run-set?since=not-a-date')).status, 400)
+    const since = encodeURIComponent('2024-01-02T00:00:00.000Z'), until = encodeURIComponent('2024-01-01T00:00:00.000Z')
+    assert.equal((await json(base, `/api/run-set?since=${since}&until=${until}`)).status, 400)
+    assert.equal((await json(base, '/api/run-set', { method: 'POST' })).status, 405)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a mirror without agent_sessions still lists runs with usage unmeasured', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-partial-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE agent_sessions')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    let result
+    assert.doesNotThrow(() => { result = feed.runSet({ since: new Date(0).toISOString() }) })
+    assert.ok(result.rows.length > 0)
+    for (const row of result.rows) for (const field of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) assert.equal(row[field], null)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a mirror without sessions makes the window unanswerable, not empty', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-absent-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE sessions')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    let result
+    assert.doesNotThrow(() => { result = feed.runSet({ since: new Date(0).toISOString() }) })
+    assert.equal(result.rows, null)
+    assert.ok(result.absent)
+    assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
+  } finally {
+    feed.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })

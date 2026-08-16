@@ -2,6 +2,7 @@
 const lanes = new Map()
 const PALETTE_SIZE = 8
 export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 
 export function laneFor(role) {
   const key = String(role || 'unknown')
@@ -218,6 +219,96 @@ export function defaultCellWindow(now = Date.now()) {
     since: new Date(now - CELL_HEALTH_WINDOW_MS).toISOString(),
     until: null,
     label: 'last 7 days',
+  }
+}
+
+export function defaultRunSetWindow(now = Date.now()) {
+  return {
+    since: new Date(now - RUN_SET_WINDOW_MS).toISOString(),
+    until: null,
+    label: 'last 24 hours',
+  }
+}
+
+const RUN_SET_STATUSES = ['running', 'ok', 'fail', 'aborted']
+const RUN_SET_BILLED_KEYS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+const PARKED_NOTE = 'not measured here — a park is a per-crew-dir file in the reclaim store (crew/reclaim.mjs), which the ledger has no key to enumerate; this view reads the ledger only, so parks are unmeasured, never zero'
+
+export function shapeRunSet({ rows, absent, since, until, label } = {}) {
+  const window = { since: since ?? null, until: until ?? null, label: label ?? null }
+  if (typeof absent === 'string' && absent.length > 0) {
+    return {
+      window,
+      absent,
+      runs: null,
+      settled: null,
+      usage: null,
+      coverage: null,
+      unmeasured: { parked: PARKED_NOTE },
+      rows: [],
+    }
+  }
+
+  const source = Array.isArray(rows) ? rows : []
+  const settled = Object.fromEntries(RUN_SET_STATUSES.map((status) => [status, 0]))
+  const measuredRows = source.filter((row) => RUN_SET_BILLED_KEYS.some((key) => row?.[key] != null))
+  for (const row of source) {
+    if (Object.prototype.hasOwnProperty.call(settled, row?.status)) settled[row.status] += 1
+  }
+
+  let agentSessions = 0
+  for (const row of source) {
+    const value = row?.agent_sessions
+    if (value != null) agentSessions += Number(value)
+  }
+  let usage = null
+  if (agentSessions > 0) {
+    usage = {
+      agent_sessions: agentSessions,
+    }
+    for (const key of RUN_SET_BILLED_KEYS) {
+      const values = measuredRows.map((row) => row?.[key]).filter((value) => value != null)
+      usage[key] = values.length ? values.reduce((total, value) => total + Number(value), 0) : null
+    }
+  }
+
+  const unmeasured = { parked: PARKED_NOTE }
+  const hasUnmeasuredUsage = source.length > 0 && (agentSessions === 0 || source.some((row) => RUN_SET_BILLED_KEYS.some((key) => row?.[key] == null)))
+  if (hasUnmeasuredUsage) {
+    unmeasured.usage = agentSessions === 0
+      ? 'no agent_sessions rows for any run in this window — predates per-agent token measurement (#119), not a measured zero'
+      : 'one or more agent_sessions rows for runs in this window have no billed token totals — unmeasured, not a measured zero'
+  }
+
+  const shapedRows = source.map((row) => {
+    const started = dateValue(row?.started_at)
+    const ended = dateValue(row?.ended_at)
+    return {
+      adw_id: row?.adw_id ?? null,
+      task_slug: row?.task_slug ?? null,
+      repo_slug: row?.repo_slug ?? null,
+      status: row?.status ?? null,
+      started_at: row?.started_at ?? null,
+      ended_at: row?.ended_at ?? null,
+      duration_ms: started == null || ended == null ? null : ended - started,
+      agent_sessions: row?.agent_sessions ?? null,
+      billed_input_tokens: row?.billed_input_tokens ?? null,
+      billed_output_tokens: row?.billed_output_tokens ?? null,
+      billed_cache_write_tokens: row?.billed_cache_write_tokens ?? null,
+      billed_cache_read_tokens: row?.billed_cache_read_tokens ?? null,
+      usage_measured: RUN_SET_BILLED_KEYS.some((key) => row?.[key] != null),
+    }
+  })
+
+  return {
+    window,
+    absent: null,
+    runs: source.length,
+    settled,
+    usage,
+    coverage: { measured: measuredRows.length, total: source.length },
+    unmeasured,
+    rows: shapedRows,
   }
 }
 

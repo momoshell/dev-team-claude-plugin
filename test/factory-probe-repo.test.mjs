@@ -133,7 +133,10 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   assert.equal(profile.schema, PROFILE_VERSION)
   assert.equal(profile.profile_version, PROFILE_VERSION)
   assert.equal(profile.repo_key, 'momoshell__dev-team-claude-plugin')
-  assert.equal(profile.repo_slug, 'dev-team-wt252')
+  // repo_key is remote-derived and stable; repo_slug is the checkout DIRECTORY's
+  // name, which differs per worktree, on CI, and on main. Deriving it is the
+  // point — a hardcoded value passes only in the worktree it was written in.
+  assert.equal(profile.repo_slug, basename(ROOT))
   assert.deepEqual(profile.fields.test_command.value, 'npm test')
   assert.equal(profile.fields.test_command.status, 'proposed')
   assert.match(profile.fields.test_command.source, /package\.json/)

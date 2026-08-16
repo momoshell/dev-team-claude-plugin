@@ -4,7 +4,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync,
   statSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -34,6 +34,24 @@ function put(root, file, body) {
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, body)
   return target
+}
+
+function fakeGh(label, body) {
+  const target = join(fixtureRoot, `gh-${label}.mjs`)
+  writeFileSync(target, `#!/usr/bin/env node\n${body}\n`)
+  chmodSync(target, 0o755)
+  return target
+}
+
+function withGhBin(bin, fn) {
+  const previous = process.env.GH_BIN
+  process.env.GH_BIN = bin
+  try {
+    return fn()
+  } finally {
+    if (previous === undefined) delete process.env.GH_BIN
+    else process.env.GH_BIN = previous
+  }
 }
 
 function git(root, ...args) {
@@ -164,6 +182,123 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   }
   assert.equal(profile.meta.gh_consulted, false)
   assert.equal(profile.meta.body_digest, profileDigest(profile))
+})
+
+function fieldRejectingGh(label) {
+  return fakeGh(label, `
+const argv = process.argv.slice(2)
+const index = argv.indexOf('--json')
+const fields = String(argv[index + 1] || '').split(',').filter(Boolean)
+const known = {
+  nameWithOwner: 'owner/repo',
+  squashMergeAllowed: true,
+  mergeCommitAllowed: false,
+  rebaseMergeAllowed: false,
+  deleteBranchOnMerge: true,
+}
+const unknown = fields.find((field) => !Object.hasOwn(known, field))
+if (unknown) {
+  process.stderr.write('Unknown JSON field: "' + unknown + '"')
+  process.exit(1)
+}
+const output = {}
+for (const field of fields) output[field] = known[field]
+process.stdout.write(JSON.stringify(output))
+`)
+}
+
+test('a gh that rejects one field still proposes the fields it can answer', () => {
+  const root = coldFixture('gh-partial')
+  git(root, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+  const profile = withGhBin(fieldRejectingGh('partial'), () => probeRepo({ checkout: root, gh: true }))
+  const cell = profile.fields.pr_conventions
+  assert.equal(cell.status, 'proposed')
+  assert.deepEqual(Object.keys(cell.value).sort(), [
+    'nameWithOwner', 'squashMergeAllowed', 'mergeCommitAllowed',
+    'rebaseMergeAllowed', 'deleteBranchOnMerge',
+  ].sort())
+  assert.equal(cell.value.allowAutoMerge, undefined)
+  assert.deepEqual(cell.detail.unanswered, [
+    { field: 'allowAutoMerge', reason: 'gh_request_rejected' },
+  ])
+  assert.equal(profile.fields.default_branch.status, 'proposed')
+  assert.equal(profile.fields.default_branch.value, 'main')
+  assert.equal(profile.fields.default_branch.source, 'git symbolic-ref refs/remotes/origin/HEAD')
+})
+
+test('an absent gh is unavailable, not a rejected request', () => {
+  const root = coldFixture('gh-absent')
+  const missing = join(fixtureRoot, 'gh-does-not-exist')
+  const cell = withGhBin(missing, () => probeRepo({ checkout: root, gh: true })).fields.pr_conventions
+  assert.equal(cell.status, 'unknown')
+  assert.equal(cell.value, null)
+  assert.equal(cell.reason, 'gh_unavailable')
+})
+
+test('an unauthenticated gh is not a rejected request', () => {
+  const root = coldFixture('gh-unauthenticated')
+  const gh = fakeGh('unauthenticated', `
+process.stderr.write('gh auth login')
+process.exit(1)
+`)
+  const cell = withGhBin(gh, () => probeRepo({ checkout: root, gh: true })).fields.pr_conventions
+  assert.equal(cell.status, 'unknown')
+  assert.equal(cell.value, null)
+  assert.equal(cell.reason, 'gh_unauthenticated')
+})
+
+test('a missing token scope is its own reason', () => {
+  const root = coldFixture('gh-scope-missing')
+  const gh = fakeGh('scope-missing', `
+process.stderr.write("Your token has not been granted the required scopes ... ['read:project']")
+process.exit(1)
+`)
+  const cell = withGhBin(gh, () => probeRepo({ checkout: root, gh: true })).fields.pr_conventions
+  assert.equal(cell.status, 'unknown')
+  assert.equal(cell.value, null)
+  assert.equal(cell.reason, 'gh_scope_missing')
+})
+
+test('the gh failure classes are pairwise distinct', () => {
+  const absentRoot = coldFixture('gh-classes-absent')
+  const absent = withGhBin(join(fixtureRoot, 'gh-classes-does-not-exist'), () => (
+    probeRepo({ checkout: absentRoot, gh: true }).fields.pr_conventions
+  ))
+
+  const unauthenticatedRoot = coldFixture('gh-classes-unauthenticated')
+  const unauthenticatedGh = fakeGh('classes-unauthenticated', `
+process.stderr.write('gh auth login')
+process.exit(1)
+`)
+  const unauthenticated = withGhBin(unauthenticatedGh, () => (
+    probeRepo({ checkout: unauthenticatedRoot, gh: true }).fields.pr_conventions
+  ))
+
+  const scopeRoot = coldFixture('gh-classes-scope')
+  const scopeGh = fakeGh('classes-scope', `
+process.stderr.write("Your token has not been granted the required scopes ... ['read:project']")
+process.exit(1)
+`)
+  const scope = withGhBin(scopeGh, () => (
+    probeRepo({ checkout: scopeRoot, gh: true }).fields.pr_conventions
+  ))
+
+  const partialRoot = coldFixture('gh-classes-partial')
+  git(partialRoot, 'symbolic-ref', 'refs/remotes/origin/HEAD', 'refs/remotes/origin/main')
+  const partial = withGhBin(fieldRejectingGh('classes-partial'), () => (
+    probeRepo({ checkout: partialRoot, gh: true })
+  ))
+
+  const reasons = [absent.reason, unauthenticated.reason, scope.reason]
+  assert.equal(new Set(reasons).size, 3)
+  assert.ok(reasons.every((reason) => reason !== 'gh_request_rejected'))
+  assert.deepEqual(partial.fields.pr_conventions.detail.unanswered.map((entry) => entry.reason), [
+    'gh_request_rejected',
+  ])
+  assert.equal(partial.fields.default_branch.source, 'git symbolic-ref refs/remotes/origin/HEAD')
+  for (const reason of [...reasons, 'gh_request_rejected']) {
+    assert.ok(UNKNOWN_REASONS.includes(reason))
+  }
 })
 
 test('a cold checkout has only proposed or honest unknown cells', () => {

@@ -43,6 +43,15 @@ import { slug } from '../../crew/slug.mjs'
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
 export const STATUSES = Object.freeze(['ratified', 'proposed', 'unknown'])
+// gh failure reasons describe what the evidence actually showed:
+// - gh_unavailable: gh never ran or never answered (for example, ENOENT,
+//   EACCES, or timeout). Human action: install gh or fix PATH.
+// - gh_unauthenticated: gh ran and said we are not logged in. Human action:
+//   run `gh auth login`.
+// - gh_scope_missing: gh ran and rejected a token scope we do not hold.
+//   Human action: run `gh auth refresh -s <scope>`.
+// - gh_request_rejected: gh ran and rejected our request for any other reason,
+//   or answered with output we could not parse. Human action: fix our request.
 export const UNKNOWN_REASONS = Object.freeze([
   'no_test_command',
   'multiple_candidates',
@@ -54,6 +63,9 @@ export const UNKNOWN_REASONS = Object.freeze([
   'not_a_git_repo',
   'gh_not_consulted',
   'gh_unavailable',
+  'gh_request_rejected',
+  'gh_unauthenticated',
+  'gh_scope_missing',
   'none_found',
 ])
 
@@ -662,21 +674,52 @@ function gatherConventions(root) {
   }, files.length > 0 ? 'convention markers and git log' : 'git log')
 }
 
-function ghView(root, fields) {
-  const output = runProcess(process.env.GH_BIN || 'gh', ['repo', 'view', '--json', fields.join(',')], {
-    cwd: root,
-    timeout: 30_000,
-  })
-  if (!nonEmptyString(output)) return null
-  try {
-    const value = JSON.parse(output)
-    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
-  } catch {
-    return null
+function classifyGhFailure(stderr) {
+  if (/not been granted|required scopes?|missing (?:the )?scopes?/i.test(stderr)) return 'gh_scope_missing'
+  if (/gh auth login|not logged in|authentication token not found|requires authentication|HTTP 401/i.test(stderr)) {
+    return 'gh_unauthenticated'
   }
+  return 'gh_request_rejected'
+}
+
+function runGh(root, fields) {
+  let result
+  try {
+    result = spawnSync(process.env.GH_BIN || 'gh',
+      ['repo', 'view', '--json', fields.join(',')],
+      { cwd: root, encoding: 'utf8', timeout: 30_000 })
+  } catch {
+    return { ok: false, reason: 'gh_unavailable' }
+  }
+  // No exit status means the tool did not run to completion (missing binary,
+  // not executable, timed out) — that is absence, not a rejected request.
+  if (!result || result.error || typeof result.status !== 'number') {
+    return { ok: false, reason: 'gh_unavailable' }
+  }
+  if (result.status !== 0) {
+    return { ok: false, reason: classifyGhFailure(String(result.stderr || '')) }
+  }
+  let data
+  try {
+    data = JSON.parse(String(result.stdout || '').trim())
+  } catch {
+    return { ok: false, reason: 'gh_request_rejected' }
+  }
+  // A plain object is data; anything else is gh answering something we cannot use.
+  if (!data || typeof data !== 'object' || Array.isArray(data)) {
+    return { ok: false, reason: 'gh_request_rejected' }
+  }
+  return { ok: true, data }
+}
+
+function ghView(root, fields) {
+  const r = runGh(root, fields)
+  return r.ok ? r.data : null
 }
 
 function gatherDefaultBranch(root, isGit, consultGh) {
+  // gh is a best-effort shortcut here. If it cannot answer, this cell reports
+  // the git evidence below, so its unknown reasons describe git, not gh.
   if (consultGh) {
     const data = ghView(root, ['defaultBranchRef'])
     const name = data && data.defaultBranchRef && data.defaultBranchRef.name
@@ -701,9 +744,25 @@ function gatherPrConventions(root, consultGh) {
     'nameWithOwner', 'squashMergeAllowed', 'mergeCommitAllowed',
     'rebaseMergeAllowed', 'deleteBranchOnMerge', 'allowAutoMerge',
   ]
-  const data = ghView(root, fields)
-  if (!data) return unknownCell('gh_unavailable')
-  return proposedCell(data, `gh repo view --json ${fields.join(',')}`)
+  const bulk = runGh(root, fields)
+  if (bulk.ok) return proposedCell(bulk.data, `gh repo view --json ${fields.join(',')}`)
+  const answered = {}
+  const askedOk = []
+  const unanswered = []
+  for (const field of fields) {
+    const one = runGh(root, [field])
+    if (one.ok && Object.hasOwn(one.data, field)) {
+      answered[field] = one.data[field]
+      askedOk.push(field)
+    } else {
+      unanswered.push({ field, reason: one.ok ? 'gh_request_rejected' : one.reason })
+    }
+  }
+  if (askedOk.length === 0) {
+    const reasons = [...new Set(unanswered.map((entry) => entry.reason))]
+    return unknownCell(reasons.length === 1 ? reasons[0] : 'gh_request_rejected')
+  }
+  return proposedCell(answered, `gh repo view --json ${askedOk.join(',')}`, { detail: { unanswered } })
 }
 
 export function profileBody(profile) {

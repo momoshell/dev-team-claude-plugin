@@ -39,6 +39,16 @@ export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 // #45 Tier B slice 1. The failure upgrade is spent ONCE PER TASK, across all
 // roles and all bounce kinds — the ratified budget is per task, not per role.
 export const FAILURE_UPGRADE = 'failure-upgrade'
+export const SENSITIVITY_FLOOR = 'sensitivity-floor'
+export const JUDGE_TIER = 'judge'
+// Ratified for this repo on issue #250 (orchestrator, 2026-08-16). Directories
+// are trailing-slash prefixes, spelled as files_in_scope entries are spelled.
+// crew/roles/ is deliberately absent: charters are pinned by tests already.
+// Per-repo lists arrive with #252; this slice hardcodes the ratified one.
+export const PROTECTED_PATHS = Object.freeze([
+  '.github/workflows/', 'crew/roster.json', 'crew/roster.schema.json',
+  'crew/reclaim.mjs', 'crew/escalation-policy.mjs', 'crew/drive.mjs', 'docs/adr/',
+])
 export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhausted', 'no-tier', 'agent-change', 'spent'])
 
 // The compounding valve: on the FIRST round of a consult the lead may answer
@@ -654,6 +664,20 @@ export function scopeMatcher(entries) {
     : repoRelativePath === entry)
 }
 
+export function protectedHits(entries) {
+  const hits = []
+  for (const raw of Array.isArray(entries) ? entries : []) {
+    const entry = String(raw ?? '')
+    if (!entry) continue
+    // Both directions: a scope entry under a protected directory ('docs/adr/031.md'
+    // vs 'docs/adr/'), and a scope directory that contains a protected file.
+    if (PROTECTED_PATHS.some((p) => entry === p || (p.endsWith('/') && entry.startsWith(p)) || (entry.endsWith('/') && p.startsWith(entry)))) {
+      if (!hits.includes(entry)) hits.push(entry)
+    }
+  }
+  return hits
+}
+
 export function composeCommitMessage({ task, planEnv, builderEnv }) {
   const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
   const subjectLine = firstNonEmptyLine(planEnv?.details?.commit_subject)
@@ -752,6 +776,36 @@ export function driveTask(ctx, io) {
       outcome: record.outcome, why: record.why ?? null,
       from: record.from ?? null, to: record.to ?? null, rung: record.rung ?? null,
     })
+  }
+
+  // The sensitivity floor: a plan whose declared scope touches a protected path
+  // gets the JUDGE tier's reviewer cell or the run stops. Refuse-not-reroute
+  // (ADR-032 family): the escalation is load-bearing by design, the RECORD is
+  // not — every firing, honoured or inert, is a modifier_attempts row.
+  const sensitivityFloor = (hits) => {
+    let entry
+    try {
+      if (typeof io.reseat !== 'function') {
+        entry = { outcome: 'transport', why: 'this io provides no reseat, so the judge reviewer cell cannot be seated' }
+      } else {
+        const result = io.reseat('reviewer', { reason: SENSITIVITY_FLOOR, tier: JUDGE_TIER })
+        if (result?.applied === true) {
+          entry = { outcome: 'applied', from: result.from ?? null, to: result.to ?? null, rung: result.rung ?? null,
+            why: result.already === true ? 'the reviewer cell is already the judge tier cell' : null }
+        } else {
+          entry = { outcome: MODIFIER_OUTCOMES.includes(result?.reason) ? result.reason : 'transport',
+            why: result?.why ?? null, from: result?.from ?? null }
+        }
+      }
+    } catch (err) {
+      entry = { outcome: 'transport', why: `io.reseat threw: ${err?.message ?? err}` }
+    }
+    const why = [`protected paths: ${hits.join(', ')}`, entry.why].filter(Boolean).join(' — ')
+    const record = { modifier: SENSITIVITY_FLOOR, kind: 'plan-accept', role: 'reviewer', paths: hits, ...entry, why }
+    try { S.modifiers.push(record); io.log({ at: io.now(), modifier: record }) } catch { /* never load-bearing */ }
+    emit({ kind: 'modifier', modifier: record.modifier, bounce: 'plan-accept', role: 'reviewer',
+      outcome: record.outcome, why: record.why, from: record.from ?? null, to: record.to ?? null, rung: record.rung ?? null })
+    return record
   }
 
   // Every stage transition goes to the journal AND (when io provides it) to
@@ -1240,6 +1294,19 @@ export function driveTask(ctx, io) {
   const inScope = scopeMatcher(scopeFiles)
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
+
+  // #250: what the diff touches decides who reviews it. Protected scope demands
+  // the judge tier's reviewer cell; anything less stops the run here rather than
+  // reviewing under an under-graded seat.
+  const floorHits = protectedHits(scopeFiles)
+  if (floorHits.length > 0) {
+    const floor = sensitivityFloor(floorHits)
+    if (floor.outcome !== 'applied') {
+      return escalate('sensitivity-floor',
+        `the plan's files_in_scope touches protected paths (${floorHits.join(', ')}) and the sensitivity floor could not seat the judge tier's reviewer cell (${floor.outcome}${floor.why ? `: ${floor.why}` : ''}) — a protected change is never reviewed under an under-graded reviewer`,
+        planEnv.artifacts || [])
+    }
+  }
 
   // ---- 1c. ACCEPTANCE GATE, gate-first (fusion-harness pattern) ---------------
   // The planner may author an executable acceptance gate in the TASK DIR

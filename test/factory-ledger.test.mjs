@@ -1324,6 +1324,7 @@ test('taskReadout uses only the first log row and marks absent shape evidence', 
 test('variantFromFirstMessage recognizes only complete shape markers', { skip: SKIP }, () => {
   assert.equal(variantFromFirstMessage('plan:r1'), 'full')
   assert.equal(variantFromFirstMessage('scout:r1'), 'scout')
+  assert.equal(variantFromFirstMessage('repair:r1'), 'repair')
   for (const value of ['plan', '', null, undefined, 42, 'attention:gate plan:r1']) {
     assert.equal(variantFromFirstMessage(value), null, JSON.stringify(value))
   }

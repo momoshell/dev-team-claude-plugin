@@ -18,7 +18,8 @@ import {
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
   MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines,
   VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, EXECUTIONS, WRITE_SURFACES, ENVELOPE_FIELD_KINDS,
-  UNIVERSAL_STAGE_HEADS, stageEnabled, undeclaredStage, shapeDefect, outOfScopeFiles, envelopeDefect,
+  UNIVERSAL_STAGE_HEADS, SHAPE_SOURCES, REVIEWED_CORE_STAGES, TRIAGE_STAGE_HEAD, TRIAGE_SOURCES, TRIAGE_STAGES,
+  stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -95,6 +96,13 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   }
   return io
 }
+
+const CTX_REPAIR = Object.freeze({ ...CTX, variant: 'repair', lane: 'lane-cmd', files_in_scope: ['a.mjs', 'a.test.mjs'] })
+const TRIAGE_NOTE = `${TD}/triage.md`
+const TRIAGE_FILES = { [TRIAGE_NOTE]: '# Triage\n\nfix the off-by-one in a.mjs\n' }
+const triageEnv = (over = {}) => ({
+  status: 'done', role: 'planner', summary: 'triaged', artifacts: [TRIAGE_NOTE], details: { plan_path: TRIAGE_NOTE }, ...over,
+})
 
 const planEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'planned',
@@ -3407,6 +3415,221 @@ test('full is trace-identical and keeps the eleven legacy detail keys', () => {
   assert.deepEqual(omittedIo.calls, explicitIo.calls)
 })
 
+test('repair uses one bounded triage round and keeps the reviewed finish path', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': triageEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    changed: ['a.mjs', 'a.test.mjs'], files: TRIAGE_FILES,
+  })
+  const result = driveTask(CTX_REPAIR, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.equal(result.details.commit, 'abc1234')
+  assert.equal(result.details.gate, null)
+  assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.equal(io.calls.assign.find(({ role }) => role === 'builder').briefFile, TRIAGE_NOTE)
+  assert.match(io.calls.writes[`${TD}/repair-brief.md`], /Failure brief \(verbatim\)/)
+  assert.match(io.calls.writes[`${TD}/repair-brief.md`], /files_in_scope/)
+  assert.match(io.calls.writes[`${TD}/repair-brief.md`], /\n- a\.mjs\n/)
+  assert.doesNotMatch(JSON.stringify(io.calls.logs), /\"stage\":\"(?:plan|check|gate)/)
+})
+
+test('repair treats inherited scope as its scope gate', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': triageEnv(), 'builder:1': buildEnv() },
+    changed: ['a.mjs', 'other.mjs'], files: TRIAGE_FILES,
+  })
+  const result = driveTask(CTX_REPAIR, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('repair refuses absent declared sources before assigning a seat', () => {
+  const cases = [
+    { files_in_scope: undefined },
+    { files_in_scope: [] },
+    { lane: null },
+  ]
+  for (const over of cases) {
+    const io = fakeIo()
+    const result = driveTask({ ...CTX_REPAIR, ...over }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'triage')
+    assert.match(result.details.escalation.why, over.lane === null ? /lane/ : /files_in_scope/)
+    assert.equal(io.calls.assign.length, 0)
+    assert.deepEqual(result.details.stages, ['escalate:triage'])
+  }
+})
+
+test('repair refuses an unusable inherited scope before assigning a seat', () => {
+  const io = fakeIo()
+  const result = driveTask({ ...CTX_REPAIR, files_in_scope: ['../x', 'src/*'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'triage')
+  assert.match(result.details.escalation.why, /\.\.\/x/)
+  assert.match(result.details.escalation.why, /src\/\*/)
+  assert.equal(io.calls.assign.length, 0)
+})
+
+test('repair validates the triage product before assigning a builder', () => {
+  const cases = [
+    triageEnv({ details: {} }),
+    triageEnv({ artifacts: ['/tmp/elsewhere/triage.md'], details: { plan_path: '/tmp/elsewhere/triage.md' } }),
+    triageEnv({ artifacts: [], details: { plan_path: TRIAGE_NOTE } }),
+    triageEnv({ artifacts: [`${TD}/missing.md`], details: { plan_path: `${TD}/missing.md` } }),
+    triageEnv({ summary: '   ' }),
+    triageEnv({ artifacts: 'not-an-array' }),
+  ]
+  for (const planner of cases) {
+    const io = fakeIo({ envelopes: { 'planner:1': planner }, changed: ['a.mjs'], files: TRIAGE_FILES })
+    const result = driveTask(CTX_REPAIR, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'triage')
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  }
+})
+
+test('repair honors a narrowed triage scope and escalates a widened one', () => {
+  const narrowIo = fakeIo({
+    envelopes: {
+      'planner:1': triageEnv({ details: { plan_path: TRIAGE_NOTE, files_in_scope: ['a.mjs'] } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    }, changed: ['a.mjs'], files: TRIAGE_FILES,
+  })
+  const narrow = driveTask(CTX_REPAIR, narrowIo)
+  assert.equal(narrow.status, 'done')
+  assert.deepEqual(narrowIo.calls.commits[0].files, ['a.mjs'])
+
+  const narrowedChangedIo = fakeIo({
+    envelopes: { 'planner:1': triageEnv({ details: { plan_path: TRIAGE_NOTE, files_in_scope: ['a.mjs'] } }), 'builder:1': buildEnv() },
+    changed: ['a.mjs', 'a.test.mjs'], files: TRIAGE_FILES,
+  })
+  const narrowedChanged = driveTask(CTX_REPAIR, narrowedChangedIo)
+  assert.equal(narrowedChanged.status, 'escalation')
+  assert.equal(narrowedChanged.details.escalation.where, 'scope')
+  assert.equal(narrowedChangedIo.calls.commits.length, 0)
+
+  const wideIo = fakeIo({
+    envelopes: { 'planner:1': triageEnv({ details: { plan_path: TRIAGE_NOTE, files_in_scope: ['b.mjs'] } }) },
+    changed: ['a.mjs'], files: TRIAGE_FILES,
+  })
+  const wide = driveTask(CTX_REPAIR, wideIo)
+  assert.equal(wide.status, 'escalation')
+  assert.equal(wide.details.escalation.where, 'triage-scope')
+  assert.match(wide.details.escalation.why, /widen/)
+  assert.equal(wideIo.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('repair refuses a self-authored acceptance gate', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': triageEnv({ details: { plan_path: TRIAGE_NOTE, gate_cmd: 'node gate.mjs' } }) },
+    files: TRIAGE_FILES, changed: ['a.mjs'],
+  })
+  const result = driveTask(CTX_REPAIR, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'triage')
+  assert.match(result.details.escalation.why, /gate/)
+  assert.deepEqual(io.calls.run, [])
+  assert.equal(result.details.stages.some((label) => label.startsWith('gate')), false)
+})
+
+test('repair triage is bounded to one planner assignment', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': { status: 'insufficient', role: 'planner', summary: 'need more', artifacts: [], details: {} } }, files: TRIAGE_FILES })
+  const result = driveTask(CTX_REPAIR, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'triage')
+  assert.deepEqual(io.calls.assign.map(({ role }) => role), ['planner'])
+})
+
+test('repair never reaches gate or converge stages on review exhaustion', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': triageEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('changes-needed'),
+      'lead:1': leadEnv('escalate'),
+    },
+    changed: ['a.mjs'], files: TRIAGE_FILES, gh: true,
+  })
+  const result = driveTask({ ...CTX_REPAIR, limits: { build_rounds: 1, review_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.stages.some((label) => label.startsWith('gate') || label.startsWith('converge')), false)
+})
+
+test('repair protected scope still fires the sensitivity floor', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': triageEnv() }, files: { [TRIAGE_NOTE]: '# Triage\n' },
+    changed: [], reseat: () => ({ reason: 'no-tier' }),
+  })
+  const result = driveTask({ ...CTX_REPAIR, files_in_scope: ['crew/drive.mjs'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'sensitivity-floor')
+})
+
+test('shape sources and the repair declaration are pinned', () => {
+  assert.equal(shapeDefect(VARIANTS.repair, 'repair'), null)
+  assert.equal(sourcesDefect(undefined) !== null, true)
+  assert.match(sourcesDefect({ ...TRIAGE_SOURCES, scope: 'bad' }), /scope/)
+  assert.match(sourcesDefect({ ...TRIAGE_SOURCES, lane: 'bad' }), /lane/)
+  assert.match(sourcesDefect({ ...TRIAGE_SOURCES, gate: 'bad' }), /gate/)
+  assert.match(sourcesDefect({ ...TRIAGE_SOURCES, proof: 'self' }), /proof/)
+  assert.equal(sourcesDefect(VARIANTS.repair.sources), null)
+  assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited'])
+  assert.deepEqual(SHAPE_SOURCES.lane, ['plan', 'ctx'])
+  assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none'])
+  assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'suite', 'commit'])
+  assert.equal(TRIAGE_STAGE_HEAD, 'repair')
+  assert.deepEqual(TRIAGE_STAGES, ['repair', ...REVIEWED_CORE_STAGES])
+})
+
+test('shapeDefect admits only the implemented partial topology under repair', () => {
+  const withSources = (stages, sources) => ({ ...VARIANTS.full, stages, sources })
+  const planSources = { scope: 'plan', lane: 'plan', gate: 'plan' }
+  const cases = [
+    [VARIANTS.full.stages.filter((head) => head !== 'check'), planSources, 'full'],
+    [VARIANTS.full.stages.filter((head) => head !== 'gate-baseline'), planSources, 'full'],
+    [VARIANTS.full.stages.filter((head) => head !== 'converge'), planSources, 'full'],
+    [VARIANTS.repair.stages, VARIANTS.repair.sources, 'quality'],
+    [[...VARIANTS.repair.stages], { ...TRIAGE_SOURCES, proof: 'self' }, 'repair'],
+    [[...VARIANTS.repair.stages, 'gate'], TRIAGE_SOURCES, 'repair'],
+    [VARIANTS.repair.stages.filter((head) => head !== 'lane'), TRIAGE_SOURCES, 'repair'],
+    [['plan', ...VARIANTS.repair.stages], TRIAGE_SOURCES, 'repair'],
+  ]
+  for (const [stages, sources, name] of cases) assert.ok(shapeDefect(withSources(stages, sources), name))
+  assert.match(shapeDefect(VARIANTS.repair, 'quality'), /quality/)
+  assert.equal(shapeDefect(VARIANTS.repair, 'repair'), null)
+})
+
+test('undeclaredStage still bounds repair heads', () => {
+  for (const label of ['plan:r1', 'check:r1', 'gate:r1', 'gate-baseline', 'converge:suite']) {
+    assert.match(undeclaredStage(VARIANTS.repair, label), /not declared/)
+  }
+  for (const label of ['repair:r1', 'escalate:triage', 'done']) assert.equal(undeclaredStage(VARIANTS.repair, label), null)
+})
+
+test('full and scout declarations remain byte-identical snapshots', () => {
+  const FULL_SNAPSHOT = {
+    execution: 'reviewed', required_seats: 'tier',
+    stages: ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
+      'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
+      'suite', 'commit', 'converge'],
+    writes: 'planned',
+    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
+    envelope_fields: [], assignment: null,
+  }
+  const SCOUT_SNAPSHOT = {
+    execution: 'envelope', required_seats: ['planner'],
+    stages: ['scout', 'scope-gate', 'envelope-accept'], writes: 'none',
+    accepted_by: 'envelope shape',
+    envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary', 'evidence'] }],
+    assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
+  }
+  assert.deepEqual(VARIANTS.full, FULL_SNAPSHOT)
+  assert.deepEqual(VARIANTS.scout, SCOUT_SNAPSHOT)
+})
+
 test('omitting the variant is equivalent to explicitly selecting full', () => {
   const make = () => fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
@@ -3435,6 +3658,7 @@ test('shapeDefect refuses declarations the driver cannot honour', () => {
   assert.equal(shapeDefect(VARIANTS.scout), null)
   const subset = { ...VARIANTS.full, stages: ['build', 'review', 'suite', 'commit'] }
   assert.match(shapeDefect(subset), /plan/)
+  assert.match(shapeDefect(subset), /declared sources/)
   assert.match(shapeDefect({ ...VARIANTS.scout, stages: ['scout', 'envelope-accept'] }), /scope-gate/)
   assert.match(shapeDefect({ ...VARIANTS.full, required_seats: ['planner'] }), /required_seats/)
   assert.match(shapeDefect({ ...VARIANTS.full, execution: 'unknown' }), /execution/)
@@ -3563,7 +3787,7 @@ test('read-only scout shapes do not fire the protected-path sensitivity floor', 
 
 test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {
   assert.equal(Object.isFrozen(VARIANTS), true)
-  assert.deepEqual(VARIANT_NAMES, ['full', 'scout'])
+  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'repair'])
   assert.equal(VARIANTS.full.required_seats, 'tier')
   assert.match(VARIANTS.full.accepted_by, /review.*pass/)
   assert.match(VARIANTS.full.accepted_by, /lead accept/)
@@ -3573,6 +3797,7 @@ test('declarations remain frozen and observed behaviour stays within their close
     for (const field of shape.envelope_fields) assert.ok(ENVELOPE_FIELD_KINDS.includes(field.kind))
   }
   assert.deepEqual(UNIVERSAL_STAGE_HEADS, ['escalate', 'done'])
+  assert.equal(shapeDefect(VARIANTS.repair, 'repair'), null)
   assert.deepEqual(outOfScopeFiles(['a.mjs', 'b.mjs'], scopeMatcher([])), ['a.mjs', 'b.mjs'])
   assert.deepEqual(outOfScopeFiles('not-an-array', scopeMatcher(['a.mjs'])), [])
 })

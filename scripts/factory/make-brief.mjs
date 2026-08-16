@@ -29,6 +29,10 @@
 // literal UNFILLED SLOT marker so the orchestrator can fill it. The ask is the
 // one authored line that is checked at construction time and refused when it
 // is blank, too short, or merely repeats its task heading.
+//
+// The declared write surface comes from the fence register when --lane names
+// a lane in it, from the authored where otherwise, and never from the output
+// filename.
 
 import {
   existsSync, readFileSync, realpathSync, statSync, writeFileSync,
@@ -71,6 +75,7 @@ const OUT_DIR_MISSING = 'out-dir-missing'
 const OUT_EXISTS = 'out-exists'
 const BAD_FENCES = 'bad-fences'
 const BAD_PROTECTED = 'bad-protected'
+const UNKNOWN_LANE = 'unknown-lane'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -84,6 +89,7 @@ export const REFUSAL_REASONS = Object.freeze([
   OUT_EXISTS,
   BAD_FENCES,
   BAD_PROTECTED,
+  UNKNOWN_LANE,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -493,6 +499,21 @@ export function gatherFences({ fencesPath } = {}) {
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
 }
 
+export function resolveWriteSurface({ fences, lane, where = [] } = {}) {
+  if (lane == null) {
+    const files = [...new Set(where.map((entry) => normaliseRepoPath(entry.path)))].sort()
+    return { lane: null, basis: 'where', files }
+  }
+  if (!nonEmptyString(lane)) refuseUsage('--lane requires a value', MISSING_LINE)
+  if (fences == null) {
+    refuseUsage(`no fence register supplied for lane: ${lane}`, UNKNOWN_LANE)
+  }
+  const entry = fences.find((candidate) => candidate.lane === lane)
+  if (!entry) refuseUsage(`lane is not in the fence register: ${lane}`, UNKNOWN_LANE)
+  const files = [...new Set(entry.files.map((file) => normaliseRepoPath(file)))].sort()
+  return { lane, basis: 'fences', files }
+}
+
 function normaliseProtectedPaths(protectedPaths) {
   if (!Array.isArray(protectedPaths)) {
     refuseUsage('protectedPaths must be an array', BAD_PROTECTED)
@@ -711,6 +732,23 @@ function renderFences(fences) {
   return lines.length ? lines.join('\n') : '(fence register is empty)'
 }
 
+function renderWriteSurface(writeSurface, discovery) {
+  const files = Array.isArray(writeSurface?.files) ? writeSurface.files : []
+  const listedFiles = files.length ? files.join(', ') : '(none)'
+  const basis = writeSurface?.basis === 'fences'
+    ? `fence register, lane "${writeSurface.lane}"`
+    : 'authored where paths, no lane fence applied'
+  const writable = new Set(files)
+  const discovered = Array.isArray(discovery?.candidates)
+    ? [...new Set(discovery.candidates.map((file) => normaliseRepoPath(file)))].sort()
+    : []
+  const tripwireFiles = discovered.filter((file) => !writable.has(file))
+  return [
+    `files_in_scope (expected write surface; basis: ${basis}): ${listedFiles}`,
+    `read-and-keep-green (discovered tripwire surface — pinned by keys you touch; do not edit): ${tripwireFiles.length ? tripwireFiles.join(', ') : '(none)'}`,
+  ].join('\n')
+}
+
 function renderValidation(baseline, discovery) {
   const tests = discovery.tripwires.map((tripwire) => tripwire.file).sort()
   const narrow = tests.length ? `node --test ${tests.join(' ')}` : 'no tripwire tests discovered'
@@ -727,6 +765,9 @@ export function renderBrief(gathered) {
   const discovery = gathered.discovery || gathered.tripwires || { candidates: [], tripwires: [], broadKeys: [] }
   const baseline = gathered.baseline || { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
+  const writeSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
+    ? gathered.writeSurface
+    : resolveWriteSurface({ fences, lane: gathered.lane ?? null, where })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const lines = [
     `# Task: ${request.ask}`,
@@ -755,7 +796,7 @@ export function renderBrief(gathered) {
     '## Validation lane',
     renderValidation(baseline, discovery),
     '## Conventions',
-    `files_in_scope (expected write surface): ${discovery.candidates.length ? discovery.candidates.join(', ') : '(none)'}`,
+    renderWriteSurface(writeSurface, discovery),
     generatedGrep(discovery),
     standingBlocks().conventions,
     '',
@@ -766,7 +807,7 @@ export function renderBrief(gathered) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (!argument.startsWith('--')) {
@@ -835,11 +876,12 @@ function compile(flags) {
   const checkout = gitRoot(flags.checkout || process.cwd())
   const where = verifyWhere({ checkout, where: request.where })
   const discovery = discoverTripwires({ checkout, files: where })
+  const fences = gatherFences({ fencesPath: flags.fences })
+  const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
   const baseline = gatherBaseline({ checkout })
   const protectedPaths = gatherProtectedPaths({ protectedPathsFile: flags.protected })
   const proposal = proposeTier({ where, discovery, protectedPaths })
-  const fences = gatherFences({ fencesPath: flags.fences })
-  const content = renderBrief({ request, where, discovery, baseline, fences, proposal })
+  const content = renderBrief({ request, where, discovery, baseline, fences, lane: flags.lane ?? null, writeSurface, proposal })
   writeBrief(content, outPath, flags.force === true)
   return 0
 }

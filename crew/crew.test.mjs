@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, basename } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
@@ -9,7 +10,7 @@ import {
   composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, seatLiveness, awaitSeatsReady, teardownCore,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, seatLiveness, awaitSeatsReady, teardownCore,
   MEMORY_ROLES, memoryConfig,
 } from './crew.mjs'
 import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
@@ -503,6 +504,121 @@ test('boot refusal records a run-less boot-refusal row naming the rejected cell'
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+test('resolveVariant defaults to the driver default and round-trips every driver name', () => {
+  assert.equal(resolveVariant({}), DEFAULT_VARIANT)
+  for (const name of VARIANT_NAMES) assert.equal(resolveVariant({ variant: name }), name)
+})
+
+test('resolveVariant refuses unknown and valueless forms with the complete closed set', () => {
+  const assertClosedSet = (err) => {
+    assert.match(err.message, /variant/)
+    for (const name of VARIANT_NAMES) assert.match(err.message, new RegExp(name))
+    return true
+  }
+  assert.throws(() => resolveVariant({ variant: 'no-such-shape' }), assertClosedSet)
+  assert.throws(() => resolveVariant({ variant: true }), assertClosedSet)
+})
+
+test('run refuses an unknown variant before reading or writing crew state', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-variant-refusal-home-'))
+  let drove = 0
+  try {
+    await withHome(home, () => {
+      assert.throws(
+        () => runCmd(
+          { task: 'variant-never-booted', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), variant: 'no-such-shape' },
+          { drive: () => { drove += 1 } },
+        ),
+        (err) => {
+          assert.match(err.message, /unknown variant/)
+          for (const name of VARIANT_NAMES) assert.match(err.message, new RegExp(name))
+          return true
+        },
+      )
+      assert.equal(drove, 0)
+      assert.equal(existsSync(join(home, '.crew')), false)
+    })
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test('run passes a selected driver variant through ctx', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-variant-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-variant-home-'))
+  const task = 'variant-selected'
+  const variant = VARIANT_NAMES.find((name) => name !== DEFAULT_VARIANT)
+  assert.ok(variant)
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# variant brief\n')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = join(home, 'ledger.db')
+  let seen
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd(
+        { task, checkout, 'brief-file': brief, variant, keep: true },
+        { drive: (ctx) => { seen = ctx; return done } },
+      )
+    })
+    const crew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
+    assert.equal(seen.variant, variant)
+    assert.equal(seen.task, task)
+    assert.equal(seen.checkout, checkout)
+    assert.equal(seen.briefFile, brief)
+    assert.deepEqual(seen.roles, crew.roles)
+  } finally {
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run without a variant captures the same ctx as an explicit default', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-variant-default-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-variant-default-home-'))
+  const task = 'variant-default'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# variant brief\n')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = join(home, 'ledger.db')
+  const seen = []
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const capture = (ctx) => { seen.push(ctx); return done }
+      runCmd({ task, checkout, 'brief-file': brief, variant: DEFAULT_VARIANT, keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: capture })
+    })
+    assert.equal(seen.length, 2)
+    assert.equal(seen[1].variant, DEFAULT_VARIANT)
+    assert.deepEqual(seen[1], seen[0])
+  } finally {
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('crew CLI reads the closed variant set from drive.mjs without quoted shape literals', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  for (const name of VARIANT_NAMES) {
+    assert.doesNotMatch(source, new RegExp("(['\"`])" + name + "\\1"))
+  }
+  assert.match(source, /import\s*\{[^}]*VARIANT_NAMES[^}]*DEFAULT_VARIANT[^}]*\}\s*from '\.\/drive\.mjs'/)
 })
 
 test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {

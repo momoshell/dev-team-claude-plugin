@@ -20,6 +20,11 @@
 // profile lands; then each small gatherer can be swapped without rewriting
 // the compiler.
 //
+// A tier is proposed, never decided: #45 item 4's ratified rule lives here
+// because these mechanical signals exist before boot. Protected paths arrive
+// via a library parameter, --protected JSON, or the default owned by #250;
+// blueprint/shape proposal is deliberately absent pending #251.
+//
 // A blank decision slot is not authored by this module: it is emitted as the
 // literal UNFILLED SLOT marker so the orchestrator can fill it. The ask is the
 // one authored line that is checked at construction time and refused when it
@@ -44,6 +49,14 @@ const TEST_FILE = /(^|\/)[^/]*\.test\.mjs$/
 const BROAD_KEY_LIMIT = 30
 const BASELINE_TIMEOUT_MS = 30_000
 
+export const TIER_NAMES = Object.freeze(['mechanical', 'build', 'judge'])
+// Injected by the caller; #250 owns the real list. Wiring it later is a
+// one-line change to this default.
+export const DEFAULT_PROTECTED_PATHS = Object.freeze([])
+const MECHANICAL_MAX_SOURCES = 1
+const BUILD_MAX_SOURCES = 4
+const BROAD_TRIPWIRE_FLOOR = 6
+
 // These are the only refusal reasons this CLI publishes. Keeping the list
 // closed makes a caller able to enumerate every expected refusal without
 // depending on incidental filesystem or parser wording.
@@ -57,6 +70,7 @@ const NOT_A_GIT_REPO = 'not-a-git-repo'
 const OUT_DIR_MISSING = 'out-dir-missing'
 const OUT_EXISTS = 'out-exists'
 const BAD_FENCES = 'bad-fences'
+const BAD_PROTECTED = 'bad-protected'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -69,6 +83,7 @@ export const REFUSAL_REASONS = Object.freeze([
   OUT_DIR_MISSING,
   OUT_EXISTS,
   BAD_FENCES,
+  BAD_PROTECTED,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -478,6 +493,156 @@ export function gatherFences({ fencesPath } = {}) {
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
 }
 
+function normaliseProtectedPaths(protectedPaths) {
+  if (!Array.isArray(protectedPaths)) {
+    refuseUsage('protectedPaths must be an array', BAD_PROTECTED)
+  }
+  const paths = protectedPaths.map((entry, index) => {
+    if (typeof entry !== 'string' || !entry.trim()) {
+      refuseUsage(`protectedPaths[${index}] must be a non-blank string`, BAD_PROTECTED)
+    }
+    return normaliseRepoPath(entry)
+  })
+  return [...new Set(paths)].sort()
+}
+
+export function gatherProtectedPaths({ protectedPathsFile } = {}) {
+  if (protectedPathsFile == null) return DEFAULT_PROTECTED_PATHS
+  let data
+  try {
+    data = JSON.parse(readFileSync(resolve(protectedPathsFile), 'utf8'))
+  } catch {
+    refuseUsage(`cannot read or parse protected paths file: ${protectedPathsFile}`, BAD_PROTECTED)
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some((key) => key !== 'paths')) {
+    refuseUsage('protected paths must contain only a paths array', BAD_PROTECTED)
+  }
+  if (!Array.isArray(data.paths)) refuseUsage('protected paths must contain a paths array', BAD_PROTECTED)
+  return normaliseProtectedPaths(data.paths)
+}
+
+function proposalTierAfterRaise(tier) {
+  const index = TIER_NAMES.indexOf(tier)
+  return index === -1 || index === TIER_NAMES.length - 1 ? tier : TIER_NAMES[index + 1]
+}
+
+function proposalBand(sourceCount) {
+  if (sourceCount <= MECHANICAL_MAX_SOURCES) return { band: '1', tier: 'mechanical' }
+  if (sourceCount <= BUILD_MAX_SOURCES) return { band: '2-4', tier: 'build' }
+  return { band: '≥5', tier: 'judge' }
+}
+
+export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECTED_PATHS } = {}) {
+  const protectedEntries = normaliseProtectedPaths(protectedPaths)
+  const verifiedWhere = Array.isArray(where)
+    ? where.filter((entry) => entry && typeof entry === 'object'
+      && typeof entry.path === 'string'
+      && ['file', 'directory'].includes(entry.kind))
+    : []
+  if (verifiedWhere.length === 0) {
+    return {
+      tier: null,
+      reasons: ['no verified where entries — nothing to measure'],
+      signals: {
+        sourceCount: 0,
+        tripwireCount: 0,
+        directoryWhere: [],
+        protectedHits: [],
+        suppressedKeys: [],
+      },
+    }
+  }
+
+  const sourceDiscovery = discovery && typeof discovery === 'object' ? discovery : {}
+  const candidates = Array.isArray(sourceDiscovery.candidates)
+    ? [...new Set(sourceDiscovery.candidates
+      .filter((candidate) => typeof candidate === 'string')
+      .map((candidate) => normaliseRepoPath(candidate)))]
+      .sort()
+    : []
+  if (candidates.length === 0) {
+    return {
+      tier: null,
+      reasons: ['discovery produced no scope candidates'],
+      signals: {
+        sourceCount: 0,
+        tripwireCount: 0,
+        directoryWhere: [...new Set(verifiedWhere
+          .filter((entry) => entry.kind === 'directory')
+          .map((entry) => entry.path))].sort(),
+        protectedHits: [],
+        suppressedKeys: [],
+      },
+    }
+  }
+
+  const tripwires = Array.isArray(sourceDiscovery.tripwires) ? sourceDiscovery.tripwires : []
+  const broadKeys = Array.isArray(sourceDiscovery.broadKeys) ? sourceDiscovery.broadKeys : []
+  const tripwireFiles = new Set(tripwires
+    .filter((tripwire) => tripwire && typeof tripwire.file === 'string')
+    .map((tripwire) => normaliseRepoPath(tripwire.file)))
+  const sourceCount = candidates.filter((candidate) => !tripwireFiles.has(candidate)).length
+  const directoryWhere = [...new Set(verifiedWhere
+    .filter((entry) => entry.kind === 'directory')
+    .map((entry) => entry.path))].sort()
+  const suppressedKeys = [...new Set(broadKeys
+    .map((entry) => typeof entry === 'string' ? entry : entry && entry.key)
+    .filter((key) => typeof key === 'string'))].sort()
+  const signals = {
+    sourceCount,
+    tripwireCount: tripwires.length,
+    directoryWhere,
+    protectedHits: [],
+    suppressedKeys,
+  }
+
+  if (tripwires.length === 0 && broadKeys.length > 0) {
+    return {
+      tier: null,
+      reasons: [`breadth is unmeasured: 0 tripwire tests found while ${broadKeys.length} key(s) exceeded the broad-key limit — absent, not zero`],
+      signals,
+    }
+  }
+
+  const { band, tier: baseTier } = proposalBand(sourceCount)
+  let tier = baseTier
+  const reasons = [
+    `scope breadth: ${sourceCount} source file${sourceCount === 1 ? '' : 's'} named by where (${band} → ${baseTier})`,
+    `tripwire tests pinning that scope: ${tripwires.length}`,
+  ]
+
+  if (baseTier === 'mechanical' && directoryWhere.length > 0) {
+    tier = 'build'
+    reasons.push(`directory where: ${directoryWhere.join(', ')} — raised mechanical → build`)
+  }
+  if (baseTier === 'mechanical' && tripwires.length >= BROAD_TRIPWIRE_FLOOR) {
+    tier = 'build'
+    reasons.push(`broad pinning: ${tripwires.length} tripwire tests — raised mechanical → build`)
+  }
+
+  signals.protectedHits = candidates.filter((candidate) => protectedEntries.some((protectedPath) => (
+    protectedPath.endsWith('/')
+      ? candidate.startsWith(protectedPath)
+      : candidate === protectedPath
+  )))
+  if (signals.protectedHits.length === 0) {
+    reasons.push(`protected-path hits: none${protectedEntries.length === 0
+      ? ' (injected list is empty)'
+      : ` (injected list has ${protectedEntries.length} path${protectedEntries.length === 1 ? '' : 's'})`}`)
+  } else {
+    const before = tier
+    const raised = proposalTierAfterRaise(before)
+    if (raised === before) {
+      reasons.push(`protected path hit: ${signals.protectedHits.join(', ')} — tier ${before} unchanged (already highest)`)
+    } else {
+      tier = raised
+      reasons.push(`protected path hit: ${signals.protectedHits.join(', ')} — raised ${before} → ${raised}`)
+    }
+  }
+
+  return { tier, reasons, signals }
+}
+
 function formatBaseline(baseline) {
   const lane = baseline.lane || '(no test lane)'
   if (baseline.status === 'unknown') return `lane: ${lane} · unknown · reason: ${baseline.reason}`
@@ -523,6 +688,20 @@ function renderTripwires(discovery) {
   return lines.join('\n')
 }
 
+export function renderProposedTier(proposal) {
+  const tier = proposal && TIER_NAMES.includes(proposal.tier) ? proposal.tier : null
+  const reasons = proposal && Array.isArray(proposal.reasons)
+    ? proposal.reasons.filter((reason) => typeof reason === 'string' && reason.length > 0)
+    : []
+  return [
+    'PROPOSAL ONLY — compiled from mechanical signals. The orchestrator confirms',
+    'or overrides this at boot; the compiler never decides the tier.',
+    `proposed tier: ${tier || 'no proposal'}`,
+    'because:',
+    ...(reasons.length ? reasons.map((reason) => `- ${reason}`) : ['- no mechanical signals were available']),
+  ].join('\n')
+}
+
 function renderFences(fences) {
   if (fences == null) return 'no fence register supplied (`--fences` not given)'
   const lines = []
@@ -548,10 +727,13 @@ export function renderBrief(gathered) {
   const discovery = gathered.discovery || gathered.tripwires || { candidates: [], tripwires: [], broadKeys: [] }
   const baseline = gathered.baseline || { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
+  const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const lines = [
     `# Task: ${request.ask}`,
     '## The ask',
     request.ask,
+    '## Proposed tier',
+    renderProposedTier(proposal),
     '## Where',
     renderWhere(where),
     '## Done means',
@@ -584,7 +766,7 @@ export function renderBrief(gathered) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (!argument.startsWith('--')) {
@@ -654,8 +836,10 @@ function compile(flags) {
   const where = verifyWhere({ checkout, where: request.where })
   const discovery = discoverTripwires({ checkout, files: where })
   const baseline = gatherBaseline({ checkout })
+  const protectedPaths = gatherProtectedPaths({ protectedPathsFile: flags.protected })
+  const proposal = proposeTier({ where, discovery, protectedPaths })
   const fences = gatherFences({ fencesPath: flags.fences })
-  const content = renderBrief({ request, where, discovery, baseline, fences })
+  const content = renderBrief({ request, where, discovery, baseline, fences, proposal })
   writeBrief(content, outPath, flags.force === true)
   return 0
 }

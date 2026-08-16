@@ -13,7 +13,7 @@ import { ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK,
   REFUSAL_REASONS, SLOT_MARKER, discoverTripwires, extractKeys,
-  main, validateAsk, verifyWhere,
+  gatherProtectedPaths, main, proposeTier, validateAsk, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
@@ -124,6 +124,7 @@ test('the four authored lines are carried verbatim and compilation is idempotent
   const second = compile(root, {}, [], 'second.md').brief
   for (const line of [ASK, DONE, OUT]) assert.ok(first.includes(line))
   assert.ok(first.includes('lib/widget.mjs'))
+  assert.match(first, /## Proposed tier/)
   assert.equal(first, second)
 })
 
@@ -309,16 +310,149 @@ test('directory where entries expand for discovery while the authored directory 
   assert.match(brief, /computeWidget/)
 })
 
-test('slots stay unfilled and no later proposal wiring appears in source', () => {
+test('one-file scopes render a marked mechanical proposal with reasons', () => {
+  const root = fixture('one-file-proposal')
+  const { brief } = compile(root, { where: ['lib/widget.mjs'] })
+  const body = section(brief, '## Proposed tier')
+  assert.match(body, /PROPOSAL ONLY/)
+  assert.match(body, /proposed tier: mechanical/)
+  assert.match(body, /^- .+/m)
+  assert.ok(brief.indexOf('## The ask') < brief.indexOf('## Proposed tier'))
+  assert.ok(brief.indexOf('## Proposed tier') < brief.indexOf('## Where'))
+})
+
+test('directory breadth proposes a higher tier and explains its source count', () => {
+  const root = fixture('directory-proposal', { broad: true })
+  const { brief } = compile(root, { where: ['lib'] })
+  const body = section(brief, '## Proposed tier')
+  assert.match(body, /proposed tier: (build|judge)/)
+  assert.match(body, /scope breadth: 2 source files/)
+})
+
+test('proposeTier pins breadth bands, directory raises, and tripwire-floor raises', () => {
+  const proposal = (sourceCount, extra = {}) => proposeTier({
+    where: Array.from({ length: sourceCount }, (_, index) => ({
+      path: `lib/source-${index}.mjs`, kind: 'file',
+    })),
+    discovery: {
+      candidates: Array.from({ length: sourceCount }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    ...extra,
+  })
+  assert.equal(proposal(1).tier, 'mechanical')
+  assert.equal(proposal(2).tier, 'build')
+  assert.equal(proposal(4).tier, 'build')
+  assert.equal(proposal(5).tier, 'judge')
+
+  const directory = proposeTier({
+    where: [{ path: 'lib', kind: 'directory' }],
+    discovery: { candidates: ['lib/source.mjs'], tripwires: [], broadKeys: [] },
+  })
+  assert.equal(directory.tier, 'build')
+  assert.match(directory.reasons.join('\n'), /directory.*lib.*mechanical.*build/i)
+
+  const floor = proposal(1, {
+    discovery: {
+      candidates: ['lib/source-0.mjs', ...Array.from({ length: 6 }, (_, index) => `test/pin-${index}.test.mjs`)],
+      tripwires: Array.from({ length: 6 }, (_, index) => ({ file: `test/pin-${index}.test.mjs`, keys: [] })),
+      broadKeys: [],
+    },
+  })
+  assert.equal(floor.tier, 'build')
+  assert.match(floor.reasons.join('\n'), /6 tripwire tests.*mechanical.*build/i)
+})
+
+test('protected paths default empty, raise one step, match directory prefixes, and reject malformed input', () => {
+  const where = [{ path: 'lib/widget.mjs', kind: 'file' }]
+  const discovery = {
+    candidates: ['lib/widget.mjs', 'test/widget.test.mjs'],
+    tripwires: [{ file: 'test/widget.test.mjs', keys: ['computeWidget'] }],
+    broadKeys: [],
+  }
+  const omitted = proposeTier({ where, discovery })
+  const empty = proposeTier({ where, discovery, protectedPaths: [] })
+  assert.equal(omitted.tier, empty.tier)
+  const raised = proposeTier({ where, discovery, protectedPaths: ['lib/widget.mjs'] })
+  assert.equal(raised.tier, 'build')
+  assert.deepEqual(raised.signals.protectedHits, ['lib/widget.mjs'])
+  assert.match(raised.reasons.join('\n'), /protected path hit: lib\/widget\.mjs.*raised mechanical.*build/)
+
+  const prefix = proposeTier({
+    where,
+    discovery,
+    protectedPaths: ['test/'],
+  })
+  assert.equal(prefix.tier, 'build')
+  assert.deepEqual(prefix.signals.protectedHits, ['test/widget.test.mjs'])
+
+  const judge = proposeTier({
+    where: Array.from({ length: 5 }, (_, index) => ({ path: `lib/${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: 5 }, (_, index) => `lib/${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths: ['lib/0.mjs'],
+  })
+  assert.equal(judge.tier, 'judge')
+  assert.match(judge.reasons.join('\n'), /protected path hit: lib\/0\.mjs.*unchanged/i)
+  assert.throws(() => proposeTier({ where, discovery, protectedPaths: 'lib/widget.mjs' }), (error) => error.reason === 'bad-protected')
+  assert.throws(() => proposeTier({ where, discovery, protectedPaths: ['   '] }), (error) => error.reason === 'bad-protected')
+})
+
+test('protected file input is normalized, deduped, and wired through the CLI', () => {
+  const root = fixture('protected-file')
+  const protectedPath = put(root, 'protected.json', JSON.stringify({ paths: ['./lib/widget.mjs', 'lib\\widget.mjs', './lib/widget.mjs'] }) + '\n')
+  assert.deepEqual(gatherProtectedPaths({ protectedPathsFile: protectedPath }), ['lib/widget.mjs'])
+  const { brief } = compile(root, { where: ['lib/widget.mjs'] }, ['--protected', protectedPath])
+  assert.match(section(brief, '## Proposed tier'), /proposed tier: build/)
+  assert.match(section(brief, '## Proposed tier'), /lib\/widget\.mjs/)
+
+  const malformed = put(root, 'bad-protected.json', '{"paths":"lib/widget.mjs"}\n')
+  const result = run(root, [
+    '--request', request(root, { where: ['lib/widget.mjs'] }), '--checkout', root,
+    '--protected', malformed,
+  ])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /bad-protected/)
+})
+
+test('absence cases return no proposal with reasons and render no proposal', () => {
+  const emptyWhere = proposeTier({ where: [], discovery: { candidates: ['lib/a.mjs'], tripwires: [], broadKeys: [] } })
+  assert.equal(emptyWhere.tier, null)
+  assert.ok(emptyWhere.reasons.length)
+  const emptyCandidates = proposeTier({ where: [{ path: 'lib/a.mjs', kind: 'file' }], discovery: { candidates: [], tripwires: [], broadKeys: [] } })
+  assert.equal(emptyCandidates.tier, null)
+  assert.ok(emptyCandidates.reasons.length)
+  assert.deepEqual(emptyCandidates.signals.directoryWhere, [])
+  const suppressed = proposeTier({
+    where: [{ path: 'lib/a.mjs', kind: 'file' }],
+    discovery: { candidates: ['lib/a.mjs'], tripwires: [], broadKeys: [{ key: 'a', count: 99 }, { key: 'b', count: 99 }] },
+  })
+  assert.equal(suppressed.tier, null)
+  assert.match(suppressed.reasons[0], /2 key\(s\).*absent, not zero/)
+
+  const root = fixture('no-proposal-render', { broad: true })
+  const { brief } = compile(root, { where: ['lib/broad.mjs'] })
+  const body = section(brief, '## Proposed tier')
+  assert.match(body, /proposed tier: no proposal/)
+  assert.match(body, /^- .+/m)
+})
+
+test('shape proposal stays deferred while tier proposal wiring is present', () => {
   const source = readFileSync(SCRIPT, 'utf8')
-  assert.doesNotMatch(source, /--tier|proposeTier|blueprint/i)
-  assert.doesNotMatch(source, /^##+\s*(Tier|Shape|Blueprint)\b/im)
+  assert.match(source, /export function proposeTier/)
+  assert.doesNotMatch(source, /--blueprint|proposeBlueprint/i)
+  assert.doesNotMatch(source, /^##+\s*(Shape|Blueprint)\b/im)
 })
 
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 10)
+  assert.equal(REFUSAL_REASONS.length, 11)
+  assert.ok(REFUSAL_REASONS.includes('bad-protected'))
 })
 
 test('the compiler parses cleanly with node --check', () => {

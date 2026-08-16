@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterEditForm, rosterPanel, rosterProposal } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -191,6 +191,49 @@ test('cellHealthPanel passes an absent reason through without rows', () => {
   assert.equal(result.absent, 'cell_failures predates this ledger mirror')
   assert.deepEqual(result.rows, [])
   assert.doesNotMatch(JSON.stringify(result), /"(failures|run_less|in_run)":\s*0/)
+})
+
+test('runSetPanel renders an unmeasured window as unmeasured, never zero', () => {
+  const result = runSetPanel({
+    window: { since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' },
+    runs: 1,
+    settled: { running: 1, ok: 0, fail: 0, aborted: 0 },
+    usage: null,
+    coverage: { measured: 0, total: 1 },
+    unmeasured: { parked: 'parks are unmeasured', usage: 'usage is unmeasured, not zero' },
+    rows: [{ adw_id: 'p1', task_slug: 'pane', repo_slug: 'repo', status: 'running', usage_measured: false }],
+  })
+  assert.match(result.usage_label, /unmeasured/i)
+  assert.doesNotMatch(result.usage_label, /0/)
+  assert.notEqual(result.rows[0].usage_label, '0')
+})
+
+test('runSetPanel keeps an empty window distinct from an unmeasured one', () => {
+  const empty = runSetPanel({ runs: 0, settled: { running: 0, ok: 0, fail: 0, aborted: 0 }, usage: null, coverage: { measured: 0, total: 0 }, unmeasured: { parked: 'parks are unmeasured' }, rows: [] })
+  const unmeasured = runSetPanel({ runs: 1, settled: { running: 1, ok: 0, fail: 0, aborted: 0 }, usage: null, coverage: { measured: 0, total: 1 }, unmeasured: { parked: 'parks are unmeasured', usage: 'usage is unmeasured' }, rows: [{ adw_id: 'p1', usage_measured: false }] })
+  assert.equal(empty.empty, true)
+  assert.equal(unmeasured.empty, false)
+  assert.notEqual(empty.usage_label, unmeasured.usage_label)
+})
+
+test('runSetPanel carries the parks marker and the coverage count', () => {
+  const result = runSetPanel({
+    runs: 2,
+    settled: { running: 0, ok: 1, fail: 0, aborted: 1 },
+    usage: { agent_sessions: 1, billed_input_tokens: 15, billed_output_tokens: null, billed_cache_write_tokens: null, billed_cache_read_tokens: null },
+    coverage: { measured: 1, total: 2 },
+    unmeasured: { parked: 'parks are unmeasured here' },
+    rows: [],
+  })
+  assert.match(result.parked_note, /park/i)
+  assert.match(result.coverage_label, /1.*2/)
+})
+
+test('runSetPanel passes an absent reason through without rows', () => {
+  const result = runSetPanel({ absent: 'sessions predates this ledger mirror', rows: [] })
+  assert.equal(result.absent, 'sessions predates this ledger mirror')
+  assert.deepEqual(result.rows, [])
+  assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
 })
 
 test('findingRows distinguishes absent findings from an explicit empty measurement', () => {

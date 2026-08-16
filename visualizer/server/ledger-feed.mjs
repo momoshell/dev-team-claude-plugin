@@ -133,6 +133,46 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
       return { rows: null, absent: err?.message || String(err) }
     }
   }
+  function runSet({ since, until = null } = {}) {
+    probeColumns()
+    const handle = open()
+    if (!handle) return { rows: null, absent: degradedReason || 'the ledger could not be opened' }
+    const untilClause = until == null ? '' : ' AND s.started_at < ?'
+    const params = until == null ? [since] : [since, until]
+    const sql = probe.missing_tables.includes('agent_sessions')
+      ? `
+      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
+        0 AS agent_sessions,
+        NULL AS billed_input_tokens,
+        NULL AS billed_output_tokens,
+        NULL AS billed_cache_write_tokens,
+        NULL AS billed_cache_read_tokens
+      FROM sessions s
+      WHERE s.started_at >= ?${untilClause}
+      ORDER BY s.started_at, s.adw_id
+    `
+      : `
+      -- Keep this in lockstep with scripts/factory/ledger.mjs:1575-1585:
+      -- agent_sessions rows hold running totals, so usage is SUM over rows,
+      -- never MAX or a last-row read.
+      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
+        (SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions,
+        (SELECT SUM(a.billed_input_tokens)       FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens,
+        (SELECT SUM(a.billed_output_tokens)      FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens,
+        (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens,
+        (SELECT SUM(a.billed_cache_read_tokens)  FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens
+      FROM sessions s
+      WHERE s.started_at >= ?${untilClause}
+      ORDER BY s.started_at, s.adw_id
+    `
+    try {
+      const rows = handle.prepare(sql).all(...params)
+      return { rows, absent: null }
+    } catch (err) {
+      if (!probe.missing_tables.includes('sessions')) probe.missing_tables.push('sessions')
+      return { rows: null, absent: err?.message || String(err) }
+    }
+  }
   function health() {
     probeColumns()
     const triageHealth = triage.health()
@@ -142,6 +182,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     listRuns,
     listEvents,
     cellFailures,
+    runSet,
     setTriage: (input) => triage.setTriage(input),
     health,
     close: () => { closed = true; if (db) { try { db.close() } catch {} db = null }; triage.close() },

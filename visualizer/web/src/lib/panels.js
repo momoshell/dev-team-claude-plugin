@@ -1,4 +1,5 @@
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+const RUN_SET_STATUSES = ['running', 'ok', 'fail', 'aborted']
 const FINDINGS_PENDING = 'findings unavailable — this review predates structured findings (#170)'
 const UNPROVEN_TITLE = 'no evidence was obtainable — a direct DI caller without runClean, or a contained stash failure. Absence of evidence is not evidence of absence (ADR-030).'
 const ACCEPTED_TITLE = 'typed accept held — residuals were accepted'
@@ -224,6 +225,72 @@ export function cellHealthPanel(payload = {}) {
     }
   })
   return view
+}
+
+function runSetDisplayPart(value) {
+  return value == null ? '—' : String(value)
+}
+
+function runSetDurationLabel(value) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return '—'
+  return `${Math.round(value / 1000)}s`
+}
+
+function runSetAgentSessionsLabel(value) {
+  if (value == null) return '—'
+  return `${value} session${value === 1 ? '' : 's'}`
+}
+
+function runSetTone(status) {
+  return RUN_SET_STATUSES.includes(status) ? status : 'running'
+}
+
+function runSetUsageLabel(usage) {
+  return ['agent_sessions', ...TOKEN_FIELDS]
+    .map((key) => `${key} ${runSetDisplayPart(usage?.[key])}`)
+    .join(' · ')
+}
+
+export function runSetPanel(payload = {}) {
+  const absent = payload?.absent ?? null
+  const window = payload?.window
+  const window_label = window && typeof window === 'object'
+    ? `${window.label} · since ${window.since} · until ${window.until || 'now'}`
+    : 'window unavailable'
+  if (absent) return { absent, window_label, rows: [], empty: false, usage_label: 'unavailable' }
+
+  const runs = payload?.runs
+  const empty = runs === 0
+  const usage = payload?.usage ?? null
+  const unmeasured = payload?.unmeasured ?? {}
+  const settled = payload?.settled ?? {}
+  const coverage = payload?.coverage ?? null
+  return {
+    absent: null,
+    window_label,
+    empty,
+    runs_label: runs == null ? '— runs' : `${runs} run${runs === 1 ? '' : 's'}`,
+    settled_chips: RUN_SET_STATUSES.map((status) => ({ status, count: settled[status] ?? 0, tone: runSetTone(status) })),
+    usage_label: empty
+      ? 'no runs started in this window'
+      : usage == null
+        ? 'unmeasured — no billed totals for any run in this window'
+        : runSetUsageLabel(usage),
+    coverage_label: coverage == null ? null : `usage measured for ${coverage.measured} of ${coverage.total} runs`,
+    usage_note: unmeasured?.usage ?? null,
+    parked_note: unmeasured?.parked ?? null,
+    rows: (Array.isArray(payload?.rows) ? payload.rows : []).map((row) => ({
+      adw_id: row?.adw_id ?? null,
+      title: `${runSetDisplayPart(row?.task_slug)} · ${runSetDisplayPart(row?.repo_slug)}`,
+      status: row?.status ?? null,
+      tone: runSetTone(row?.status),
+      started_at: row?.started_at ?? null,
+      ended_at: row?.ended_at ?? null,
+      duration_label: runSetDurationLabel(row?.duration_ms),
+      agent_sessions_label: runSetAgentSessionsLabel(row?.agent_sessions),
+      usage_label: row?.usage_measured ? runSetUsageLabel(row) : '—',
+    })),
+  }
 }
 
 export function findingRows(returns = {}) {

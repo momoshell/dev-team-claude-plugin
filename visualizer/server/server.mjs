@@ -8,7 +8,7 @@ import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
-import { defaultCellWindow, shapeCellHealth } from './shape.mjs'
+import { defaultCellWindow, defaultRunSetWindow, shapeCellHealth, shapeRunSet } from './shape.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -115,6 +115,18 @@ export function startServer(options = {}) {
         if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
         const result = feed.cellFailures({ since, until })
         return json(res, 200, { schema, ...shapeCellHealth({ ...result, roster: roster.readRoster(), since, until, label: defaults.label }) })
+      }
+      if (url.pathname === '/api/run-set') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        const defaults = defaultRunSetWindow()
+        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
+        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
+        const sinceMs = Date.parse(since)
+        const untilMs = until == null ? null : Date.parse(until)
+        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
+        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const result = feed.runSet({ since, until })
+        return json(res, 200, { schema, ...shapeRunSet({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/roster/propose') {
         if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })

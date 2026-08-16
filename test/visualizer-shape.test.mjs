@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { defaultCellWindow, shapeCellHealth, shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
+import { defaultCellWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
@@ -227,6 +227,74 @@ test('shapeCellHealth refuses to render zeros for an absent table', () => {
   assert.deepEqual(result.cells, [])
   assert.equal(result.absent, 'cell_failures predates this ledger mirror')
   assert.doesNotMatch(JSON.stringify(result), /"(failures|run_less|in_run)":\s*0/)
+})
+
+test('shapeRunSet never fabricates a zero for an unmeasured window', () => {
+  const result = shapeRunSet({
+    rows: [
+      { ...base, agent_sessions: 0 },
+      { ...base, adw_id: 'y', status: 'aborted', agent_sessions: 0 },
+    ],
+    since: start, until: end, label: 'last 24 hours',
+  })
+  assert.equal(result.usage, null)
+  assert.ok(result.unmeasured.usage)
+  assert.equal(result.coverage.measured, 0)
+  assert.equal(result.coverage.total, 2)
+  assert.doesNotMatch(JSON.stringify(result), /"billed_[a-z_]+":\s*0/)
+})
+
+test('shapeRunSet distinguishes active agent sessions with no billed totals', () => {
+  const result = shapeRunSet({
+    rows: [{ ...base, agent_sessions: 1 }],
+    since: start, until: end, label: 'last 24 hours',
+  })
+  assert.deepEqual(result.usage, {
+    agent_sessions: 1,
+    billed_input_tokens: null,
+    billed_output_tokens: null,
+    billed_cache_write_tokens: null,
+    billed_cache_read_tokens: null,
+  })
+  assert.equal(result.coverage.measured, 0)
+  assert.match(result.unmeasured.usage, /one or more agent_sessions rows/)
+  assert.doesNotMatch(result.unmeasured.usage, /no agent_sessions rows/)
+})
+
+test('shapeRunSet sums only the measured runs and states its coverage', () => {
+  const result = shapeRunSet({
+    rows: [
+      { ...base, agent_sessions: 2, billed_input_tokens: 10, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 },
+      { ...base, adw_id: 'y', status: 'aborted', agent_sessions: 0 },
+    ],
+    since: start, until: end, label: 'last 24 hours',
+  })
+  assert.deepEqual(result.usage, { agent_sessions: 2, billed_input_tokens: 10, billed_output_tokens: 4, billed_cache_write_tokens: 2, billed_cache_read_tokens: 1 })
+  assert.deepEqual(result.coverage, { measured: 1, total: 2 })
+  assert.ok(result.unmeasured.usage)
+})
+
+test('shapeRunSet reports an empty window as a measured zero', () => {
+  const result = shapeRunSet({ rows: [], since: start, until: end, label: 'last 24 hours' })
+  assert.deepEqual(result.settled, { running: 0, ok: 0, fail: 0, aborted: 0 })
+  assert.equal(result.usage, null)
+  assert.equal(result.unmeasured.usage, undefined)
+  assert.ok(result.unmeasured.parked)
+})
+
+test('shapeRunSet reports an absent readout as unanswerable, not empty', () => {
+  const result = shapeRunSet({ rows: null, absent: 'sessions predates this ledger mirror', since: start, until: end, label: 'last 24 hours' })
+  assert.equal(result.runs, null)
+  assert.deepEqual(result.rows, [])
+  assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
+})
+
+test('defaultRunSetWindow states a 24-hour open-ended window', () => {
+  const now = Date.parse('2024-01-08T00:00:00.000Z')
+  const result = defaultRunSetWindow(now)
+  assert.equal(result.until, null)
+  assert.equal(Date.parse(result.since), now - RUN_SET_WINDOW_MS)
+  assert.ok(result.label)
 })
 
 test('shapeCellHealth cannot enumerate silent cells without a roster', () => {

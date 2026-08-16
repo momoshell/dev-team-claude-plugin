@@ -127,3 +127,22 @@ test('runClean preserves a non-zero command result and still restores the tree',
     restored(fixture)
   })
 })
+
+test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {
+  const saved = process.env.FORCE_COLOR
+  process.env.FORCE_COLOR = '3'
+  try {
+    withRepo({ dirty: false }, (fixture) => {
+      writeFileSync(join(fixture.repoDir, 'sample.test.mjs'), "import { test } from 'node:test'\nimport assert from 'node:assert/strict'\ntest('sample', () => { assert.equal(1, 1) })\n")
+      const io = makeIo(fixture)
+      const result = io.run(`env -u NODE_TEST_CONTEXT ${process.execPath} --test sample.test.mjs`)
+      assert.equal(result.output.includes('\x1b'), false)
+      const match = /^\s*(?:ℹ|#)?\s*pass (\d+)/m.exec(result.output)
+      assert.equal(match?.[1], '1')
+      assert.equal(result.ok, true)
+    })
+  } finally {
+    if (saved === undefined) delete process.env.FORCE_COLOR
+    else process.env.FORCE_COLOR = saved
+  }
+})

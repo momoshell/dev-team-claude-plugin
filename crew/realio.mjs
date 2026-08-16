@@ -13,6 +13,8 @@ import {
 } from './driver.mjs'
 import { headlessIo as defaultHeadlessIo } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo } from './headless-rpc.mjs'
+import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
+import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 
 export const DEFAULT_TRANSPORT = 'pane'
 export const HEADLESS_TRANSPORT = 'headless-json'
@@ -28,6 +30,22 @@ const HERE = dirname(fileURLToPath(import.meta.url))
 // target checkout's. No new roster field, no ctx plumbing, no boot change.
 export const RESEAT_LADDER = Object.freeze(['mechanical', 'build', 'judge'])
 export const RESEAT_REASONS = Object.freeze(['transport', 'exhausted', 'no-tier', 'agent-change'])
+
+// The shipped adapters' roster-cell translations, keyed by the seat's own
+// `agent` name — the same "injected wins, shipped default otherwise" shape
+// crew/headless.mjs:128 and crew/headless-rpc.mjs:122 already use for command
+// composition (#239). realIo is synchronous, so it cannot do crew.mjs's
+// dynamic import(): an agent whose adapter is not one of these two has nothing
+// here that can vouch for the translation, and reseat refuses rather than
+// writing a bare id.
+const SHIPPED_MODEL_STRINGS = Object.freeze({ claude: claudeModelString, pi: piModelString })
+
+export function modelStringFor(adapters, role, agent) {
+  const injected = adapters?.[role]?.adapter
+  if (typeof injected?.modelString === 'function') return injected.modelString.bind(injected)
+  const shipped = SHIPPED_MODEL_STRINGS[String(agent)]
+  return typeof shipped === 'function' ? shipped : null
+}
 
 export function nextRung(roster, tier, role) {
   const tiers = roster?.tiers || roster
@@ -314,6 +332,23 @@ export function paneAlive(surfaceId, deps = {}) {          // true | false | nul
   catch { return null }
 }
 
+// #240: FORCE_COLOR is commonly set in the environment a crew is launched
+// from, and Node's test runner honours it even into a pipe — so a gate that
+// parses `node --test`'s summary reads "\x1b[34mℹ pass 965\x1b[39m" and calls a
+// green suite red (2026-08-16, a whole build round lost). Neutralise colour
+// once, where the driver spawns, so every gate ever authored is covered and no
+// gate bytes change. The child env is EXTENDED, not sanitised: PATH, HOME and
+// every credential a lane needs survive. A command that genuinely wants colour
+// can still ask — it is a /bin/sh string, so `FORCE_COLOR=3 cmd` re-enables it
+// for that command alone.
+export function colorNeutralEnv(base = process.env) {
+  const env = { ...base }
+  delete env.FORCE_COLOR
+  delete env.CLICOLOR_FORCE
+  env.NO_COLOR = '1'
+  return env
+}
+
 export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
   const sendLine = deps.sendLine || defaultSendLine
   const assignmentLine = deps.assignmentLine || defaultAssignmentLine
@@ -434,7 +469,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     writeFile(path, content) { writeFileSync(path, content) },
     readFile(path) { return existsSync(path) ? readFileSync(path, 'utf8') : null },
     run(cmd) {
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000 })
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000, env: colorNeutralEnv(deps.env || process.env) })
       // A timeout kill or a spawn failure must be legible in the output a
       // bounce brief pastes verbatim — never an empty "Failures:" block.
       let output = `${res.stdout || ''}${res.stderr || ''}`
@@ -533,10 +568,45 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             to: null,
           }
         }
-        const adapter = adapters?.[role]?.adapter
-        const model = typeof adapter?.modelString === 'function'
-          ? adapter.modelString({ provider: rung.cell.provider, id: rung.cell.id })
-          : rung.cell.id
+        // #239: the run path passes no adapters (crew/crew.mjs:673), so the
+        // old `: rung.cell.id` fallback fired in production and persisted an
+        // un-namespaced pi id. Resolve the seat's own shipped adapter here, and
+        // refuse when nothing can vouch: reseat is optional and never
+        // load-bearing (ADR-024/026 clause 1), so no reseat beats a model
+        // string no adapter translated. `reason` stays 'transport' because
+        // crew/drive.mjs:42 MODIFIER_OUTCOMES is a closed set and the driver is
+        // not in scope; the specificity lives in `why`.
+        const translate = modelStringFor(adapters, role, rung.cell.agent ?? m.agent)
+        if (!translate) {
+          return {
+            applied: false,
+            reason: 'transport',
+            why: `no adapter can translate the ${rung.rung} cell for ${roleName}: agent "${String(rung.cell.agent ?? m.agent)}" has no modelString here, and reseating to an untranslated id is the guessed passthrough adapter-pi refuses (#147/#239)`,
+            from,
+            to: null,
+          }
+        }
+        let model
+        try {
+          model = translate({ provider: rung.cell.provider, id: rung.cell.id })
+        } catch (err) {
+          return {
+            applied: false,
+            reason: 'transport',
+            why: `the ${String(rung.cell.agent ?? m.agent)} adapter refused to translate the ${rung.rung} cell for ${roleName}: ${err?.message ?? err}`,
+            from,
+            to: null,
+          }
+        }
+        if (typeof model !== 'string' || model.trim() === '') {
+          return {
+            applied: false,
+            reason: 'transport',
+            why: `the ${String(rung.cell.agent ?? m.agent)} adapter returned no model string for the ${rung.rung} cell of ${roleName}`,
+            from,
+            to: null,
+          }
+        }
         const to = { ...rung.cell, model }
         if (m.transport === HEADLESS_RPC_TRANSPORT) {
           const refuse = (why) => ({ applied: false, reason: 'transport', why: String(why || `headless-rpc seat ${roleName} could not be retired`), from, to: null })

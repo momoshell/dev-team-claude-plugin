@@ -22,6 +22,15 @@ Cross-cutting conventions and decisions. Mark superseded entries `deprecated` (`
 > The former "orchestrator is the sole writer, leads propose deltas" rule was
 > the retired runtime's memory protocol and no longer applies.
 
+## Implementation files
+
+The still-binding entries below govern these files; the pre-v0.2.0 entries
+describe the retired scripts/cmux/* runtime, which is not on main.
+
+- `crew/crew.mjs`
+- `crew/drive.mjs`
+- `crew/daemon.mjs`
+
 ## Format
 
 - **YYYY-MM-DD** — decision/convention. *Why:* reason. [deprecated — supersedes: <prior entry>]
@@ -124,3 +133,4 @@ Cross-cutting conventions and decisions. Mark superseded entries `deprecated` (`
 - **2026-08-12** — **A cmux dispatcher verb must run from the PRIMARY checkout, never a worktree cwd — the repo slug is cwd-derived, so a verb run inside a coder's worktree resolves the wrong `~/.dev-team/state/<repo>/<task>/` path** (observed: an `await` run from a `dt/issue-78/be-78-02` worktree tried to open `state/be-78-02/issue-78/await.lock`). The worker is unaffected (it has its own record); only the orchestrator's own join/close/status misfire. *Why:* the same cwd-sensitivity family as the workspace-display and CLI-grammar fixes — dispatcher verbs assume orchestrator-context, and a `cd` into a worktree for an inline check silently changes what `--task` resolves against. Fold into the doc-context sweep of #88. Source: issue #78 execution, 2026-08-12.
 - **2026-08-15** — A proposed memory delta that restates a run outcome, QA verdict, gate result or cost is replaced by a pointer at the query that answers it (`docs/ledger-queries.md`); durable conventions, user preferences and decision rationale stay prose. *Why:* run facts drift the moment they are copied; the ledger is the register. This is a rule for the human and the orchestrator — an enforcing script is a later slice.
 - **2026-08-16** — Colour is neutralised in the child the driver spawns (`NO_COLOR=1`, `FORCE_COLOR`/`CLICOLOR_FORCE` deleted, everything else inherited), never in each gate's own parsing. *Why:* `FORCE_COLOR=3` in the environment a crew is launched from reaches `node --test` three levels down, which colours its summary even into a pipe, and an anchored `pass (\d+)` regex then reads a green 23/23 gate as red (#240, task 238-modifier, one build round lost). One fix at the spawn covers every gate ever authored and changes no gate bytes; a charter rule telling planners to strip ANSI depends on every future author remembering. A command that genuinely wants colour re-enables it for itself (`FORCE_COLOR=3 cmd`).
+- **2026-08-17** — In this repo a brief, plan or charter saying `agent` or `seat` means the runtime under `crew/` (a crew seat and its transport), not the model reading the brief. *Why:* the word means two things at once now that seats are vendor-agnostic, and the wrong reading sends a planner scoping model behaviour instead of runtime code.

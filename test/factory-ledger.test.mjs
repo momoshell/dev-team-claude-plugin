@@ -22,7 +22,7 @@ const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
-  MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES,
+  MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
@@ -1782,4 +1782,76 @@ test('run-set refuses a degraded mirror rather than printing an empty window', {
   const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
   assert.equal(res.status, 2)
   assert.match(res.stderr, /unanswerable/)
+})
+
+test('recordIntakeDispatch requires its fields, closed outcomes, and a PR number for promotion', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  assert.throws(
+    () => ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 1 }),
+    (err) => err instanceof LedgerUsageError && err.message.includes("missing required field 'outcome'"),
+  )
+  assert.throws(
+    () => ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 1, outcome: 'not-real' }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes('not-real'),
+  )
+  assert.throws(
+    () => ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 1, outcome: 'promoted' }),
+    (err) => err instanceof LedgerUsageError && err.message.includes('requires pr_number'),
+  )
+})
+
+test('a dispatch row round-trips through JSONL, sqlite, and replayJsonl', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const row = source.recordIntakeDispatch({
+    board_owner: 'owner', board_project: 7, issue: 2, sweep_at: '2024-01-01T00:00:00.000Z',
+    outcome: 'done', reason: null, tier: 'build', task_slug: 'intake-2', board_item_id: 'item-2',
+    branch: 'work/2', brief_path: '/tmp/brief.md', crew_dir: '/tmp/crew',
+    task_return: '/tmp/returns/task.json', exit_code: 0, board_from: 'Ready', board_to: 'In progress',
+    created_at: '2024-01-01T00:00:01.000Z',
+  })
+  const raw = readFileSync(source._jsonlPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+  assert.equal(raw.at(-1).kind, 'recordIntakeDispatch')
+  const target = openTestLedger()
+  const replayed = replayJsonl(source._jsonlPath, target)
+  assert.deepEqual(replayed, { applied: 1, skipped: 0 })
+  assert.deepEqual({ ...target.dumpTable('intake_dispatches')[0] }, { id: 1, ...row })
+})
+
+test('an older migration prefix upgrades additively and keeps existing intake sweeps', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dbPath = join(nextDir(), 'dispatch-prefix.db')
+  const dispatchIndex = MIGRATIONS.findIndex((statement) => /intake_dispatches/i.test(statement))
+  assert.ok(dispatchIndex > 0)
+  const db = new DatabaseSync(dbPath)
+  applyMigrations(db, MIGRATIONS.slice(0, dispatchIndex))
+  db.prepare('INSERT INTO intake_sweeps (board_owner, board_project, outcome, considered, pages, created_at) VALUES (?, ?, ?, ?, ?, ?)')
+    .run('owner', 7, 'none', 0, 1, '2024-01-01T00:00:00.000Z')
+  db.close()
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  assert.equal(ledger.dumpTable('intake_sweeps').length, 1)
+  assert.deepEqual(ledger.dumpTable('intake_dispatches'), [])
+})
+
+test('intakeDispatches groups outcome and reason within the requested window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 1, outcome: 'claimed', created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 2, outcome: 'claimed', created_at: '2024-01-01T00:00:01.000Z' })
+  ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 3, outcome: 'refused', reason: 'boot-failed', created_at: '2024-01-01T00:00:02.000Z' })
+  assert.deepEqual(ledger.intakeDispatches({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-01T00:00:02.000Z' }).map((row) => ({ ...row })), [
+    { outcome: 'claimed', reason: null, count: 2, first_at: '2024-01-01T00:00:00.000Z', last_at: '2024-01-01T00:00:01.000Z' },
+  ])
+})
+
+test('the intake-sweeps CLI prints dispatches beside sweeps and refusals', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 7, outcome: 'none', considered: 0, pages: 1, created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 4, outcome: 'claimed', created_at: '2024-01-01T00:00:01.000Z' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['intake-sweeps'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.ok(Array.isArray(payload.dispatches))
+  assert.deepEqual(payload.dispatch_outcomes, [...INTAKE_DISPATCH_OUTCOMES])
+  assert.equal(payload.dispatches[0].outcome, 'claimed')
 })

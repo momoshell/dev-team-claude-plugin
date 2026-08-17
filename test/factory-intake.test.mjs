@@ -3,7 +3,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, readFileSync, rmSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,8 +11,8 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
-  DEFAULT_INTAKE_CONFIG, extractIntakeBlock, fetchBoard, intakeSweep,
-  normalDeps, normaliseBoardPage, orderCandidates,
+  DEFAULT_INTAKE_CONFIG, compileIntakeBrief, dispatchPicked, extractIntakeBlock,
+  fetchBoard, intakeRun, intakeSweep, normalDeps, normaliseBoardPage, orderCandidates,
 } from '../scripts/factory/intake.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 
@@ -31,12 +31,14 @@ function field(name, value) {
 
 function issue({
   number, title = `Issue ${number}`, body = null, status = 'Ready', priority = 'P1',
+  id = `ITEM-${number}`,
   createdAt = `2025-12-${String(number).padStart(2, '0')}T00:00:00Z`,
 } = {}) {
   const nodes = []
   if (status !== undefined) nodes.push(field('Status', status))
   if (priority !== undefined) nodes.push(field('Priority', priority))
   return {
+    id,
     content: {
       number, title, url: `https://example.test/issues/${number}`, body, createdAt,
     },
@@ -100,6 +102,65 @@ function runSweep(nodes, options = {}) {
     deps: runner.deps,
   })
   return { result, calls: runner.calls }
+}
+
+function dispatchDeps(nodes, overrides = {}) {
+  const crewDir = mkdtempSync(join(fixture, 'crew-'))
+  const taskDir = join(crewDir, 'task')
+  const returnsDir = join(crewDir, 'returns')
+  mkdirSync(taskDir, { recursive: true })
+  mkdirSync(returnsDir, { recursive: true })
+  const taskReturn = join(returnsDir, 'task.json')
+  writeFileSync(taskReturn, JSON.stringify({ status: 'done', summary: 'fixture', artifacts: [], details: {} }))
+  const calls = { moves: [], boots: [], runs: [], prs: [], branches: [] }
+  const deps = {
+    now: () => NOW,
+    existsSync: (path) => String(path).endsWith('STOP') ? false : existsSync(path),
+    readFileSync,
+    writeFileSync,
+    mkdirSync,
+    runsInWindow: () => 0,
+    github: () => page(nodes),
+    branchFor: (request) => { calls.branches.push(request); return overrides.branch ?? 'test/branch' },
+    boardMove: (request) => {
+      calls.moves.push(request)
+      return overrides.boardMove ? overrides.boardMove(request) : { ok: true, status: request.to, reason: null }
+    },
+    crewBoot: (request) => {
+      calls.boots.push(request)
+      return overrides.crewBoot ? overrides.crewBoot(request) : {
+        exit: 0,
+        stdout: `${JSON.stringify({ task_dir: taskDir, workspace_id: 'ws', members: {}, crew_json: join(crewDir, 'crew.json') })}\n`,
+        stderr: '',
+      }
+    },
+    crewRun: (request) => {
+      calls.runs.push(request)
+      return overrides.crewRun ? overrides.crewRun(request) : {
+        exit: 0,
+        stdout: `${JSON.stringify({ status: 'done', task_return: taskReturn, commit: 'c' })}\n`,
+        stderr: '',
+      }
+    },
+    pullRequestFor: (request) => {
+      calls.prs.push(request)
+      return overrides.pullRequestFor ? overrides.pullRequestFor(request) : null
+    },
+    ...overrides.deps,
+  }
+  return { calls, crewDir, taskDir, taskReturn, deps }
+}
+
+function runIntake(nodes, options = {}) {
+  const harness = dispatchDeps(nodes, options.overrides)
+  const result = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    checkout: ROOT,
+    dbPath: options.dbPath ?? null,
+    config: { ...baseConfig, ...(options.config || {}) },
+    deps: harness.deps,
+  })
+  return { ...harness, result }
 }
 
 test('extractIntakeBlock returns the strict four-line request and never repairs prose', () => {
@@ -323,14 +384,181 @@ test('normalDeps keeps the injected seams and defaults the runner without spawni
   assert.equal(spawned, 0)
 })
 
-test('intake.mjs names exactly the two non-node static module imports and no dispatch surface', () => {
+test('a picked issue compiles one brief, boots once, runs once, and claims the work column', () => {
+  const path = dbPath()
+  const { result, calls, taskDir } = runIntake([
+    issue({ number: 70, body: intakeBody() }),
+  ], { dbPath: path })
+  assert.equal(result.sweep.picked.issue, 70)
+  assert.equal(result.dispatch.outcome, 'done')
+  assert.equal(calls.moves.filter((move) => move.to === baseConfig.workColumn).length, 1)
+  assert.equal(calls.boots.length, 1)
+  assert.equal(calls.runs.length, 1)
+  assert.equal(calls.runs[0].briefPath, result.dispatch.brief_path)
+  assert.equal(result.dispatch.brief_path.startsWith(taskDir), true)
+  assert.match(readFileSync(result.dispatch.brief_path, 'utf8'), /## The ask/)
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  assert.deepEqual(ledger.dumpTable('intake_dispatches').map(({ outcome }) => outcome), ['claimed', 'done'])
+  ledger.close()
+})
+
+test('a refused board write does not boot or claim, and the same Ready page can be picked again', () => {
+  const path = dbPath()
+  const nodes = [issue({ number: 71, body: intakeBody() })]
+  const first = runIntake(nodes, {
+    dbPath: path,
+    overrides: { boardMove: () => ({ ok: false, status: null }) },
+  })
+  assert.equal(first.result.dispatch.outcome, 'refused')
+  assert.equal(first.result.dispatch.reason, 'board-write-failed')
+  assert.equal(first.calls.boots.length, 0)
+  assert.equal(first.calls.runs.length, 0)
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  assert.deepEqual(ledger.dumpTable('intake_dispatches').map(({ outcome }) => outcome), ['refused'])
+  ledger.close()
+  const next = intakeSweep({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: first.deps,
+  })
+  assert.equal(next.picked.issue, 71)
+})
+
+test('a Ready read-back is board-write-unverified and never boots', () => {
+  const { result, calls } = runIntake([issue({ number: 72, body: intakeBody() })], {
+    dbPath: dbPath(),
+    overrides: { boardMove: () => ({ ok: true, status: 'Ready' }) },
+  })
+  assert.equal(result.dispatch.outcome, 'refused')
+  assert.equal(result.dispatch.reason, 'board-write-unverified')
+  assert.equal(calls.boots.length, 0)
+  assert.equal(calls.runs.length, 0)
+
+  const spawned = []
+  const defaults = normalDeps({
+    spawnSync: (command, args) => {
+      spawned.push({ command, args })
+      return {
+        status: 0,
+        stdout: JSON.stringify({
+          data: {
+            user: {
+              projectV2: {
+                id: 'PROJECT-1',
+                fields: {
+                  nodes: [{
+                    id: 'FIELD-STATUS', name: 'Status',
+                    options: [{ id: 'READY', name: 'Ready' }, { id: 'WORK', name: 'In progress' }],
+                  }],
+                },
+              },
+            },
+            node: {
+              fieldValues: {
+                nodes: [{ name: 'In review', field: { id: 'FIELD-STATUS' } }],
+              },
+            },
+          },
+        }),
+        stderr: '',
+      }
+    },
+  })
+  const stale = defaults.boardMove({
+    board: { owner: 'example-owner', projectNumber: 7 }, itemId: 'ITEM-72',
+    issue: 72, from: 'Ready', to: 'In progress', config: baseConfig,
+  })
+  assert.deepEqual(stale, { ok: true, status: 'In review', reason: 'board-write-unverified' })
+  assert.equal(spawned.length, 1)
+})
+
+test('preflight errors and done lines with non-zero exits are unreadable, never done', () => {
+  const preflight = runIntake([issue({ number: 73, body: intakeBody() })], {
+    dbPath: dbPath(),
+    overrides: { crewRun: () => ({ exit: 1, stdout: '{"error":"dirty"}\n', stderr: '' }) },
+  })
+  assert.equal(preflight.result.dispatch.outcome, 'unreadable')
+  const mismatch = runIntake([issue({ number: 74, body: intakeBody() })], {
+    dbPath: dbPath(),
+    overrides: { crewRun: () => ({ exit: 1, stdout: '{"status":"done","task_return":"old"}\n', stderr: '' }) },
+  })
+  assert.equal(mismatch.result.dispatch.outcome, 'unreadable')
+  assert.notEqual(mismatch.result.dispatch.outcome, 'done')
+})
+
+test('a null proposed tier refuses before any board write', () => {
+  const path = dbPath()
+  const harness = dispatchDeps([], {})
+  const result = dispatchPicked({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    picked: { issue: 75, title: 'Tierless issue', tier: null },
+    sweptAt: '2026-01-02T00:00:00.000Z',
+    boardItems: [{ issue: 75, item_id: 'ITEM-75', status: 'Ready' }],
+    checkout: ROOT, dbPath: path, config: baseConfig, deps: harness.deps,
+  })
+  assert.equal(result.outcome, 'refused')
+  assert.equal(result.reason, 'tier-unproposed')
+  assert.equal(harness.calls.moves.length, 0)
+  assert.equal(harness.calls.boots.length, 0)
+  assert.equal(harness.calls.runs.length, 0)
+})
+
+test('a discovered PR promotes the work item and records its number and URL', () => {
+  const path = dbPath()
+  runIntake([issue({ number: 76, body: intakeBody() })], { dbPath: path })
+  const second = runIntake([issue({ number: 76, body: intakeBody(), status: 'In progress' })], {
+    dbPath: path,
+    overrides: { pullRequestFor: () => ({ number: 901, url: 'https://example.test/pull/901' }) },
+  })
+  assert.equal(second.calls.boots.length, 0)
+  assert.equal(second.calls.runs.length, 0)
+  assert.equal(second.calls.moves.filter((move) => move.to === 'In review').length, 1)
+  assert.equal(second.result.promotions.length, 1)
+  assert.deepEqual(second.result.promotions[0].pr, { number: 901, url: 'https://example.test/pull/901' })
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const row = ledger.dumpTable('intake_dispatches').find(({ outcome }) => outcome === 'promoted')
+  assert.deepEqual({ pr_number: row.pr_number, pr_url: row.pr_url }, { pr_number: 901, pr_url: 'https://example.test/pull/901' })
+  ledger.close()
+})
+
+test('without a PR the work item is not moved and no promotion row is recorded', () => {
+  const path = dbPath()
+  runIntake([issue({ number: 77, body: intakeBody() })], { dbPath: path })
+  const second = runIntake([issue({ number: 77, body: intakeBody(), status: 'In progress' })], { dbPath: path })
+  assert.equal(second.calls.moves.filter((move) => move.to === 'In review').length, 0)
+  assert.deepEqual(second.result.promotions, [])
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  assert.equal(ledger.dumpTable('intake_dispatches').some(({ outcome }) => outcome === 'promoted'), false)
+  ledger.close()
+})
+
+test('dispatch rows carry swept_at, and an item already in the work column is not a candidate', () => {
+  const path = dbPath()
+  const first = runIntake([issue({ number: 78, body: intakeBody() })], { dbPath: path })
+  const second = runIntake([issue({ number: 78, body: intakeBody(), status: 'In progress' })], {
+    dbPath: path,
+    overrides: { pullRequestFor: () => null },
+  })
+  assert.equal(second.result.sweep.outcome, 'none')
+  assert.equal(second.result.sweep.picked, null)
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('intake_dispatches')
+  assert.ok(rows.length >= 2)
+  assert.ok(rows.every((row) => row.sweep_at === first.result.sweep.swept_at))
+  ledger.close()
+})
+
+test('intake.mjs names exactly the two non-node static module imports and no merge, approve or close surface', () => {
   const source = readFileSync(join(ROOT, 'scripts/factory/intake.mjs'), 'utf8')
   const uncommented = source.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
   assert.equal((uncommented.match(/import\s*\(/g) || []).length, 0)
   assert.equal((uncommented.match(/export\s+\*\s+from/g) || []).length, 0)
   const specifiers = [...uncommented.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((match) => match[1])
   assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './make-brief.mjs'])
-  for (const forbidden of ['drive.mjs', 'daemon.mjs', 'factoryctl', 'In progress', 'In review', 'pr create']) {
+  for (const forbidden of [
+    'drive.mjs', 'daemon.mjs', 'factoryctl', 'pr merge', 'pr close', 'pr review',
+    'pr create', '--approve', 'mergePullRequest', 'closeIssue',
+    'addPullRequestReview', 'git push',
+  ]) {
     assert.equal(uncommented.includes(forbidden), false, `found ${forbidden}`)
   }
 })

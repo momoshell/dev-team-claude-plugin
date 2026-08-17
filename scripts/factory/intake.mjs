@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 // scripts/factory/intake.mjs — host-side board selection for the factory intake loop.
 //
-// SELECTS AND RECORDS ONLY
-// Slice 1 names no dispatch surface, writes no board status, and opens no PR.
+// DISPATCHES, MOVES THE BOARD, AND NEVER MERGES, APPROVES, CLOSES OR PUSHES
+// Slice 2 claims a picked issue, runs one crew, and observes a PR without
+// creating or changing one.
 //
 // FAIL-CLOSED ELIGIBILITY
 // An issue is pickable only when its four-line intake block compiles through the
@@ -13,13 +14,17 @@
 // from the caller's checkout or process.cwd().
 
 import { spawnSync as cpSpawnSync } from 'node:child_process'
-import { existsSync as fsExistsSync } from 'node:fs'
-import { resolve } from 'node:path'
+import {
+  existsSync as fsExistsSync, readFileSync as fsReadFileSync,
+  writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync,
+} from 'node:fs'
+import { isAbsolute, join, resolve } from 'node:path'
 import {
   INTAKE_REFUSALS, INTAKE_OUTCOMES, openLedger,
 } from './ledger.mjs'
 import {
-  BriefUsageError, discoverTripwires, proposeTier, validateRequest, verifyWhere,
+  BriefUsageError, discoverTripwires, proposeTier, renderBrief, resolveWriteSurface,
+  validateRequest, verifyWhere,
 } from './make-brief.mjs'
 
 export const INTAKE_BLOCK_KEYS = Object.freeze(['ask', 'where', 'done-means', 'out-of-scope'])
@@ -32,6 +37,11 @@ export const DEFAULT_INTAKE_CONFIG = Object.freeze({
   maxPages: 10,
   concurrency: 1,
   stopSwitchPath: '.factory/STOP',
+  workColumn: 'In progress',
+  reviewColumn: 'In review',
+  taskPrefix: 'intake',
+  variant: 'full',
+  workCheckout: null,
   windowHours: 24,
   windowCap: 3,
   rateLimitFloor: 200,
@@ -48,10 +58,12 @@ const EMPTY_PAGE = Object.freeze({
 function defaultGithub(d, { owner, projectNumber, first, after }) {
   const query = `query($owner:String!,$number:Int!,$first:Int!,$after:String){
     user(login:$owner){projectV2(number:$number){items(first:$first,after:$after){nodes{
+      id
       content{... on Issue{number title url body createdAt}}
       fieldValues(first:100){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}}}}
     }pageInfo{hasNextPage endCursor}}}}
     organization(login:$owner){projectV2(number:$number){items(first:$first,after:$after){nodes{
+      id
       content{... on Issue{number title url body createdAt}}
       fieldValues(first:100){nodes{... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{name}}}}}
     }pageInfo{hasNextPage endCursor}}}}
@@ -98,14 +110,175 @@ function defaultRunsInWindow({ since, dbPath } = {}) {
   }
 }
 
+function runGhJson(d, args) {
+  let result
+  try {
+    result = d.spawnSync('gh', args, { encoding: 'utf8' })
+  } catch {
+    return { ok: false, value: null }
+  }
+  if (!result || result.error || result.status !== 0) return { ok: false, value: null }
+  try {
+    return { ok: true, value: JSON.parse(String(result.stdout || '')) }
+  } catch {
+    return { ok: false, value: null }
+  }
+}
+
+function projectFromResponse(response) {
+  const data = response?.data
+  if (!data || typeof data !== 'object') return null
+  for (const owner of [data.user, data.organization]) {
+    const project = owner?.projectV2
+    if (project && typeof project === 'object') return project
+  }
+  return null
+}
+
+function defaultBoardMove(d, { board, itemId, from, to, config = {} } = {}) {
+  const owner = board?.owner
+  const projectNumber = board?.projectNumber
+  if (typeof owner !== 'string' || !Number.isInteger(Number(projectNumber)) || itemId == null) {
+    return { ok: false, status: null, reason: 'board-write-failed' }
+  }
+  const schema = `query($owner:String!,$number:Int!,$itemId:ID!){
+    user(login:$owner){projectV2(number:$number){id fields(first:100){nodes{
+      ... on ProjectV2SingleSelectField{id name options{id name}}
+    }}}}
+    organization(login:$owner){projectV2(number:$number){id fields(first:100){nodes{
+      ... on ProjectV2SingleSelectField{id name options{id name}}
+    }}}}
+    node(id:$itemId){... on ProjectV2Item{fieldValues(first:100){nodes{
+      ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{id}}}
+    }}}}
+  }`
+  const schemaResult = runGhJson(d, [
+    'api', 'graphql', '-f', `query=${schema}`,
+    '-F', `owner=${owner}`, '-F', `number=${Number(projectNumber)}`,
+    '-f', `itemId=${itemId}`,
+  ])
+  const project = schemaResult.ok ? projectFromResponse(schemaResult.value) : null
+  const field = project?.fields?.nodes?.find((candidate) => candidate?.name === config.statusField)
+  const fromOption = field?.options?.find((option) => option?.name === from)
+  const toOption = field?.options?.find((option) => option?.name === to)
+  if (!project?.id || !field?.id || !fromOption?.id || !toOption?.id) {
+    return { ok: false, status: null, reason: 'board-write-failed' }
+  }
+  const currentValues = schemaResult.value?.data?.node?.fieldValues?.nodes
+  const currentValue = Array.isArray(currentValues)
+    ? currentValues.find((value) => value?.field?.id === field.id)
+    : null
+  const currentStatus = currentValue?.name ?? null
+  // The source option is checked before the write so a stale board envelope
+  // cannot turn a different transition into a claimed issue.
+  if (currentStatus !== from) return { ok: true, status: currentStatus, reason: 'board-write-unverified' }
+  const mutation = `mutation($projectId:ID!,$itemId:ID!,$fieldId:ID!,$optionId:String!){
+    updateProjectV2ItemFieldValue(input:{projectId:$projectId,itemId:$itemId,fieldId:$fieldId,value:{singleSelectOptionId:$optionId}}){projectV2Item{id}}
+  }`
+  const mutationResult = runGhJson(d, [
+    'api', 'graphql', '-f', `query=${mutation}`,
+    '-f', `projectId=${project.id}`, '-f', `itemId=${itemId}`,
+    '-f', `fieldId=${field.id}`, '-f', `optionId=${toOption.id}`,
+  ])
+  if (!mutationResult.ok) return { ok: false, status: null, reason: 'board-write-failed' }
+  const readback = `query($itemId:ID!){
+    node(id:$itemId){... on ProjectV2Item{fieldValues(first:100){nodes{
+      ... on ProjectV2ItemFieldSingleSelectValue{name field{... on ProjectV2SingleSelectField{id}}}
+    }}}}}
+  }`
+  const readbackResult = runGhJson(d, [
+    'api', 'graphql', '-f', `query=${readback}`, '-f', `itemId=${itemId}`,
+  ])
+  if (!readbackResult.ok) return { ok: false, status: null, reason: 'board-write-failed' }
+  const values = readbackResult.value?.data?.node?.fieldValues?.nodes
+  const statusValue = Array.isArray(values)
+    ? values.find((value) => value?.field?.id === field.id)
+    : null
+  const status = statusValue?.name ?? null
+  return { ok: true, status, reason: status === to ? null : 'board-write-unverified' }
+}
+
+function defaultBranchFor(d, { checkout } = {}) {
+  const root = typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd()
+  let result
+  try {
+    result = d.spawnSync('git', ['-C', root, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' })
+  } catch {
+    return null
+  }
+  if (!result || result.error || result.status !== 0) return null
+  const branch = String(result.stdout || '').trim()
+  return branch || null
+}
+
+function defaultCrewBoot(d, { task, checkout, tier } = {}) {
+  const root = resolve(typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd())
+  const argv = [join(root, 'crew', 'crew.mjs'), 'boot', '--task', task, '--checkout', root, '--tier', tier]
+  try {
+    const result = d.spawnSync(process.execPath, argv, { cwd: root, encoding: 'utf8' })
+    return {
+      exit: result?.status ?? null,
+      stdout: String(result?.stdout || ''),
+      stderr: String(result?.stderr || ''),
+    }
+  } catch (err) {
+    return { exit: null, stdout: '', stderr: String(err?.message || err) }
+  }
+}
+
+function defaultCrewRun(d, { task, checkout, briefPath, variant } = {}) {
+  const root = resolve(typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd())
+  const argv = [
+    join(root, 'crew', 'crew.mjs'), 'run', '--task', task, '--checkout', root,
+    '--brief-file', briefPath, '--variant', variant, '--keep',
+  ]
+  try {
+    const result = d.spawnSync(process.execPath, argv, { cwd: root, encoding: 'utf8' })
+    return {
+      exit: result?.status ?? null,
+      stdout: String(result?.stdout || ''),
+      stderr: String(result?.stderr || ''),
+    }
+  } catch (err) {
+    return { exit: null, stdout: '', stderr: String(err?.message || err) }
+  }
+}
+
+function defaultPullRequestFor(d, { checkout, branch } = {}) {
+  if (typeof branch !== 'string' || !branch) return null
+  const root = typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd()
+  let result
+  try {
+    result = d.spawnSync('gh', [
+      'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url', '--limit', '1',
+    ], { cwd: root, encoding: 'utf8' })
+  } catch {
+    return null
+  }
+  if (!result || result.error || result.status !== 0) return null
+  let rows
+  try { rows = JSON.parse(String(result.stdout || '')) } catch { return null }
+  const row = Array.isArray(rows) ? rows[0] : null
+  if (!row || row.number == null || typeof row.url !== 'string' || !row.url) return null
+  return { number: Number(row.number), url: row.url }
+}
+
 export function normalDeps(deps = {}) {
   const d = {
     spawnSync: deps.spawnSync || cpSpawnSync,
     existsSync: deps.existsSync || fsExistsSync,
+    readFileSync: deps.readFileSync || fsReadFileSync,
+    writeFileSync: deps.writeFileSync || fsWriteFileSync,
+    mkdirSync: deps.mkdirSync || fsMkdirSync,
     now: deps.now || (() => Date.now()),
   }
   d.github = deps.github || ((request) => defaultGithub(d, request))
   d.runsInWindow = deps.runsInWindow || defaultRunsInWindow
+  d.branchFor = deps.branchFor || ((request) => defaultBranchFor(d, request))
+  d.boardMove = deps.boardMove || ((request) => defaultBoardMove(d, request))
+  d.crewBoot = deps.crewBoot || ((request) => defaultCrewBoot(d, request))
+  d.crewRun = deps.crewRun || ((request) => defaultCrewRun(d, request))
+  d.pullRequestFor = deps.pullRequestFor || ((request) => defaultPullRequestFor(d, request))
   return d
 }
 
@@ -161,6 +334,7 @@ export function normaliseBoardPage(response, { statusField, priorityField } = {}
     }
     items.push({
       issue: content.number,
+      item_id: node.id ?? null,
       title: content.title ?? null,
       url: content.url ?? null,
       body: content.body ?? null,
@@ -356,7 +530,7 @@ function recordResult({ dbPath, board, result }) {
   })
 }
 
-function parkedResult({ sweptAt, board, reason, pages = 0, considered = 0, drafts = 0, rateLimit = null, degraded = false }) {
+function parkedResult({ sweptAt, board, reason, pages = 0, considered = 0, drafts = 0, rateLimit = null, degraded = false, boardItems = [] }) {
   return {
     ok: true,
     outcome: 'parked',
@@ -367,6 +541,7 @@ function parkedResult({ sweptAt, board, reason, pages = 0, considered = 0, draft
     considered,
     drafts,
     picked: null,
+    board_items: boardItems,
     refusals: [],
     rate_limit: emptyRateLimit(degraded, rateLimit),
   }
@@ -518,11 +693,339 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
     considered: candidates.length,
     drafts: fetched.drafts,
     picked,
+    board_items: fetched.items.map(({ issue, item_id, status, priority, created_at }) => ({
+      issue, item_id, status, priority, created_at,
+    })),
     refusals,
     rate_limit: emptyRateLimit(false, rateLimit),
   }
   recordResult({ dbPath, board: usableBoard, result })
   return result
+}
+
+function lastJsonLine(stdout) {
+  const lines = String(stdout || '').split(/\r?\n/)
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim()
+    if (!line) continue
+    try {
+      const value = JSON.parse(line)
+      if (value && typeof value === 'object' && !Array.isArray(value)) return value
+    } catch {
+      // Child-process logs may precede the one JSON result line.
+    }
+  }
+  return null
+}
+
+function outcomeForStatus(status) {
+  if (status === 'done') return 'done'
+  if (status === 'escalation') return 'escalation'
+  if (status === 'converge' || status === 'converged') return 'converge'
+  return null
+}
+
+function adjudicateCrewRun(result, { deps, crewDir, checkout }) {
+  const exit = result?.exit ?? result?.status ?? null
+  const line = lastJsonLine(result?.stdout)
+  const lineOutcome = outcomeForStatus(line?.status)
+  if (result?.error) {
+    return {
+      outcome: 'unreadable', exit, task_return: null,
+      why: `dispatch-unreadable: ${result.error.message || result.error}`,
+    }
+  }
+  // A preflight {error: ...} line must not fall through to an old envelope.
+  if (!lineOutcome) {
+    return { outcome: 'unreadable', exit, task_return: line?.task_return ?? null, why: 'dispatch-unreadable: invalid-dispatch-result' }
+  }
+  if (!Number.isInteger(exit) || (lineOutcome === 'done' ? exit !== 0 : exit === 0)) {
+    return { outcome: 'unreadable', exit, task_return: line?.task_return ?? null, why: 'dispatch-unreadable: status-exit-mismatch' }
+  }
+  if (typeof line.task_return !== 'string' || !line.task_return.trim()) {
+    return { outcome: 'unreadable', exit, task_return: null, why: 'dispatch-unreadable: task-return-unreadable' }
+  }
+  const taskReturn = isAbsolute(line.task_return)
+    ? line.task_return
+    : resolve(crewDir || checkout || process.cwd(), line.task_return)
+  let envelope
+  try {
+    envelope = JSON.parse(String(deps.readFileSync(taskReturn, 'utf8')))
+  } catch {
+    return { outcome: 'unreadable', exit, task_return: taskReturn, why: 'dispatch-unreadable: task-return-unreadable' }
+  }
+  if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope) || typeof envelope.status !== 'string') {
+    return { outcome: 'unreadable', exit, task_return: taskReturn, why: 'dispatch-unreadable: task-return-unreadable' }
+  }
+  const status = outcomeForStatus(envelope.status)
+  if (!status || status !== lineOutcome) {
+    return { outcome: 'unreadable', exit, task_return: taskReturn, why: 'dispatch-unreadable: status-envelope-mismatch' }
+  }
+  const escalation = status === 'escalation' && envelope.details?.escalation
+    && typeof envelope.details.escalation === 'object'
+    ? envelope.details.escalation
+    : null
+  return {
+    outcome: status,
+    exit,
+    task_return: taskReturn,
+    why: status === 'escalation' ? (escalation?.why || 'driver escalation') : null,
+  }
+}
+
+function dispatchBoard(board) {
+  return {
+    owner: board?.owner,
+    projectNumber: Number(board?.projectNumber ?? board?.project_number),
+  }
+}
+
+function taskSlugFor(picked, settings) {
+  const prefix = typeof settings.taskPrefix === 'string' && settings.taskPrefix.trim()
+    ? settings.taskPrefix.trim()
+    : DEFAULT_INTAKE_CONFIG.taskPrefix
+  return `${prefix}-${picked.issue}`
+}
+
+function recordDispatchStep({ dbPath, board, picked, sweptAt, deps, outcome, reason = null, ...fields }) {
+  const row = {
+    board_owner: board.owner,
+    board_project: board.projectNumber,
+    issue: picked.issue,
+    sweep_at: sweptAt,
+    outcome,
+    reason,
+    tier: picked.tier ?? null,
+    task_slug: fields.task_slug ?? null,
+    board_item_id: fields.board_item_id ?? null,
+    branch: fields.branch ?? null,
+    brief_path: fields.brief_path ?? null,
+    crew_dir: fields.crew_dir ?? null,
+    task_return: fields.task_return ?? null,
+    exit_code: fields.exit_code ?? null,
+    board_from: fields.board_from ?? null,
+    board_to: fields.board_to ?? null,
+    pr_number: fields.pr_number ?? null,
+    pr_url: fields.pr_url ?? null,
+  }
+  let recorded = { ...row, created_at: timestamp(nowValue(deps)) }
+  withLedger(dbPath, (ledger) => {
+    recorded = ledger.recordIntakeDispatch({ ...row, created_at: timestamp(nowValue(deps)) })
+  })
+  return recorded
+}
+
+export function compileIntakeBrief({ picked, checkout, taskDir, deps = {} } = {}) {
+  const d = normalDeps(deps)
+  try {
+    validateRequest(picked.request, { taskName: picked.title })
+    const where = picked.where
+    const discovery = discoverTripwires({ checkout, files: where })
+    const proposal = proposeTier({ where, discovery })
+    const writeSurface = resolveWriteSurface({ fences: null, lane: null, where })
+    const bytes = renderBrief({
+      request: picked.request,
+      where,
+      discovery,
+      writeSurface,
+      fences: null,
+      proposal,
+    })
+    d.mkdirSync(taskDir, { recursive: true })
+    const path = join(taskDir, `intake-${picked.issue}.md`)
+    d.writeFileSync(path, bytes)
+    return { ok: true, path, bytes, why: null }
+  } catch (err) {
+    if (err instanceof BriefUsageError || err?.name === 'BriefUsageError') {
+      return { ok: false, path: null, bytes: null, why: `brief-refused: ${err.reason || 'usage'}` }
+    }
+    return { ok: false, path: null, bytes: null, why: `brief-refused: ${err?.message || String(err)}` }
+  }
+}
+
+export function dispatchPicked({ board, picked, sweptAt, boardItems = [], checkout = process.cwd(), dbPath = null, config = {}, deps = {} } = {}) {
+  const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
+  const d = normalDeps(deps)
+  const selectedBoard = dispatchBoard(board)
+  const task = taskSlugFor(picked, settings)
+  const workCheckout = settings.workCheckout == null ? checkout : settings.workCheckout
+  const common = { task_slug: task }
+  if (picked.tier == null) {
+    return recordDispatchStep({
+      dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+      outcome: 'refused', reason: 'tier-unproposed', ...common,
+    })
+  }
+  const item = Array.isArray(boardItems)
+    ? boardItems.find((candidate) => String(candidate?.issue) === String(picked.issue))
+    : null
+  if (item?.item_id == null) {
+    return recordDispatchStep({
+      dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+      outcome: 'refused', reason: 'board-item-unknown', ...common,
+    })
+  }
+  let branch = null
+  try { branch = d.branchFor({ checkout: workCheckout }) } catch { branch = null }
+  let move
+  try {
+    move = d.boardMove({
+      board: selectedBoard,
+      itemId: item.item_id,
+      issue: picked.issue,
+      from: settings.readyColumn,
+      to: settings.workColumn,
+      config: settings,
+    })
+  } catch {
+    move = { ok: false, status: null }
+  }
+  if (!move?.ok || move.status !== settings.workColumn) {
+    // Claim-before-execute: a failed or unverified write never boots a crew,
+    // so this issue remains eligible and is safe to pick on the next sweep.
+    return recordDispatchStep({
+      dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+      outcome: 'refused',
+      reason: move?.ok ? 'board-write-unverified' : 'board-write-failed',
+      board_item_id: item.item_id, branch, ...common,
+    })
+  }
+  // The verified move is the first irreversible step. A claimed row lands
+  // before boot; if boot or run crashes, that stranded claim is visible and
+  // the issue is deliberately not dispatched again while out of Ready.
+  recordDispatchStep({
+    dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+    outcome: 'claimed', reason: null,
+    board_item_id: item.item_id, branch,
+    board_from: settings.readyColumn, board_to: settings.workColumn, ...common,
+  })
+
+  const boot = d.crewBoot({ task, checkout: workCheckout, tier: picked.tier })
+  const bootExit = boot?.exit ?? boot?.status ?? null
+  const bootLine = lastJsonLine(boot?.stdout)
+  const rawTaskDir = typeof bootLine?.task_dir === 'string' && bootLine.task_dir.trim()
+    ? bootLine.task_dir
+    : null
+  const crewDir = rawTaskDir == null
+    ? null
+    : (isAbsolute(rawTaskDir) ? rawTaskDir : resolve(workCheckout || process.cwd(), rawTaskDir))
+  if (!Number.isInteger(bootExit) || bootExit !== 0 || crewDir == null) {
+    return recordDispatchStep({
+      dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+      outcome: 'refused', reason: 'boot-failed',
+      board_item_id: item.item_id, branch, crew_dir: crewDir, exit_code: bootExit, ...common,
+    })
+  }
+  const brief = compileIntakeBrief({ picked, checkout: workCheckout, taskDir: crewDir, deps: d })
+  if (!brief.ok) {
+    return recordDispatchStep({
+      dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+      outcome: 'refused', reason: brief.why,
+      board_item_id: item.item_id, branch, crew_dir: crewDir, ...common,
+    })
+  }
+  const run = d.crewRun({
+    task, checkout: workCheckout, briefPath: brief.path, variant: settings.variant,
+  })
+  const settled = adjudicateCrewRun(run, { deps: d, crewDir, checkout: workCheckout })
+  return recordDispatchStep({
+    dbPath, board: selectedBoard, picked, sweptAt, deps: d,
+    outcome: settled.outcome, reason: settled.why,
+    board_item_id: item.item_id, branch, brief_path: brief.path,
+    crew_dir: crewDir, task_return: settled.task_return, exit_code: settled.exit,
+    ...common,
+  })
+}
+
+function laterThan(row, claim) {
+  if (row.created_at !== claim.created_at) return String(row.created_at || '') > String(claim.created_at || '')
+  return Number(row.id || 0) > Number(claim.id || 0)
+}
+
+export function observeDispatches({ board, boardItems = [], checkout = process.cwd(), dbPath = null, config = {}, deps = {} } = {}) {
+  if (dbPath == null) return []
+  const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
+  const d = normalDeps(deps)
+  const selectedBoard = dispatchBoard(board)
+  const workCheckout = settings.workCheckout == null ? checkout : settings.workCheckout
+  let rows = null
+  withLedger(dbPath, (ledger) => { rows = ledger.dumpTable('intake_dispatches') })
+  if (!Array.isArray(rows)) return []
+  const promotions = []
+  for (const item of boardItems) {
+    if (item?.status !== settings.workColumn || item?.item_id == null) continue
+    const same = (row) => row.board_owner === selectedBoard.owner
+      && Number(row.board_project) === selectedBoard.projectNumber
+      && String(row.issue) === String(item.issue)
+    const claims = rows.filter((row) => same(row) && row.outcome === 'claimed')
+      .sort((a, b) => String(a.created_at || '').localeCompare(String(b.created_at || '')) || Number(a.id || 0) - Number(b.id || 0))
+    const claim = claims.at(-1)
+    if (!claim || rows.some((row) => same(row) && row.outcome === 'promoted' && laterThan(row, claim))) continue
+    if (typeof claim.branch !== 'string' || !claim.branch) continue
+    let pr = null
+    try { pr = d.pullRequestFor({ checkout: workCheckout, branch: claim.branch, issue: item.issue }) } catch { pr = null }
+    const prNumber = Number(pr?.number)
+    if (!Number.isInteger(prNumber) || prNumber <= 0 || typeof pr?.url !== 'string' || !pr.url) continue
+    let move
+    try {
+      move = d.boardMove({
+        board: selectedBoard,
+        itemId: item.item_id,
+        issue: item.issue,
+        from: settings.workColumn,
+        to: settings.reviewColumn,
+        config: settings,
+      })
+    } catch { move = { ok: false, status: null } }
+    if (!move?.ok || move.status !== settings.reviewColumn) continue
+    // Promotion is observational: only a returned PR number and URL, followed
+    // by a verified read-back, can produce this row; no PR is ever created here.
+    const promoted = recordDispatchStep({
+      dbPath, board: selectedBoard,
+      picked: {
+        issue: item.issue,
+        tier: claim.tier,
+      },
+      sweptAt: claim.sweep_at,
+      deps: d,
+      outcome: 'promoted', reason: null,
+      task_slug: claim.task_slug, board_item_id: item.item_id,
+      branch: claim.branch, brief_path: claim.brief_path,
+      crew_dir: claim.crew_dir, task_return: claim.task_return,
+      exit_code: claim.exit_code, board_from: settings.workColumn,
+      board_to: settings.reviewColumn, pr_number: prNumber, pr_url: pr.url,
+    })
+    promotions.push({ ...promoted, pr: { number: prNumber, url: pr.url } })
+  }
+  return promotions
+}
+
+export function intakeRun({ board, checkout = process.cwd(), dbPath = null, config = {}, deps = {} } = {}) {
+  const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
+  const d = normalDeps(deps)
+  const sweep = intakeSweep({ board, checkout, dbPath, config: settings, deps: d })
+  const selectedBoard = boardUsable(board) || dispatchBoard(sweep.board)
+  const dispatch = sweep.outcome === 'picked'
+    ? dispatchPicked({
+        board: selectedBoard,
+        picked: sweep.picked,
+        sweptAt: sweep.swept_at,
+        boardItems: sweep.board_items,
+        checkout,
+        dbPath,
+        config: settings,
+        deps: d,
+      })
+    : null
+  const promotions = observeDispatches({
+    board: selectedBoard,
+    boardItems: sweep.board_items,
+    checkout,
+    dbPath,
+    config: settings,
+    deps: d,
+  })
+  return { sweep, dispatch, promotions }
 }
 
 export function extractIntakeBlock(body) {

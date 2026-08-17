@@ -140,6 +140,14 @@ export const INTAKE_REFUSALS = Object.freeze([
   'brief-uncompilable', 'protected-path', 'tier-judge', 'not-first-in-order',
 ])
 
+// One row per recorded STEP of one dispatch, appended never updated:
+// 'claimed' is written after the verified board move and before any boot, so a
+// crash between them is visible as a claim with no settled row. 'promoted' is
+// the In-review transition, which normally lands on a later sweep.
+export const INTAKE_DISPATCH_OUTCOMES = Object.freeze([
+  'claimed', 'done', 'escalation', 'converge', 'refused', 'unreadable', 'promoted',
+])
+
 // The closed set of CELL availability failures — a cell that could not hold a
 // seat, died mid-assignment, or returned nothing usable. Deliberately NOT a
 // quality axis: review_outcomes (#169) and accept_decisions (#170) already
@@ -542,6 +550,32 @@ export const TABLES = Object.freeze({
     unique: [['board_owner', 'board_project', 'issue', 'created_at']],
     indexes: [{ name: 'intake_refusals_reason_idx', cols: ['reason', 'created_at'] }],
   },
+  intake_dispatches: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'board_owner', decl: 'TEXT' },
+      { name: 'board_project', decl: 'INTEGER' },
+      { name: 'issue', decl: 'INTEGER' },
+      { name: 'sweep_at', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'tier', decl: 'TEXT' },
+      { name: 'task_slug', decl: 'TEXT' },
+      { name: 'board_item_id', decl: 'TEXT' },
+      { name: 'branch', decl: 'TEXT' },
+      { name: 'brief_path', decl: 'TEXT' },
+      { name: 'crew_dir', decl: 'TEXT' },
+      { name: 'task_return', decl: 'TEXT' },
+      { name: 'exit_code', decl: 'INTEGER' },
+      { name: 'board_from', decl: 'TEXT' },
+      { name: 'board_to', decl: 'TEXT' },
+      { name: 'pr_number', decl: 'INTEGER' },
+      { name: 'pr_url', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['board_owner', 'board_project', 'issue', 'outcome', 'created_at']],
+    indexes: [{ name: 'intake_dispatches_outcome_idx', cols: ['outcome', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -549,7 +583,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeDispatch', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1500,6 +1534,56 @@ export function openLedger({
     return args
   }
 
+  function recordIntakeDispatch(input = {}) {
+    requireFields(input, ['board_owner', 'board_project', 'issue', 'outcome'], 'recordIntakeDispatch')
+    requireEnum(input.outcome, INTAKE_DISPATCH_OUTCOMES, 'recordIntakeDispatch', 'outcome')
+    if (input.outcome === 'promoted' && input.pr_number == null) {
+      refuse("recordIntakeDispatch: outcome 'promoted' requires pr_number")
+    }
+    const args = redact({
+      board_owner: input.board_owner == null ? null : String(input.board_owner),
+      board_project: input.board_project,
+      issue: input.issue,
+      sweep_at: input.sweep_at ?? null,
+      outcome: input.outcome,
+      reason: input.reason == null ? null : String(input.reason),
+      tier: input.tier == null ? null : String(input.tier),
+      task_slug: input.task_slug == null ? null : String(input.task_slug),
+      board_item_id: input.board_item_id == null ? null : String(input.board_item_id),
+      branch: input.branch == null ? null : String(input.branch),
+      brief_path: input.brief_path == null ? null : String(input.brief_path),
+      crew_dir: input.crew_dir == null ? null : String(input.crew_dir),
+      task_return: input.task_return == null ? null : String(input.task_return),
+      exit_code: input.exit_code ?? null,
+      board_from: input.board_from == null ? null : String(input.board_from),
+      board_to: input.board_to == null ? null : String(input.board_to),
+      pr_number: input.pr_number ?? null,
+      pr_url: input.pr_url == null ? null : String(input.pr_url),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (args.board_owner != null) args.board_owner = args.board_owner.slice(0, 120)
+    if (args.sweep_at != null) args.sweep_at = String(args.sweep_at).slice(0, 40)
+    if (args.reason != null) args.reason = args.reason.slice(0, 500)
+    if (args.tier != null) args.tier = args.tier.slice(0, 40)
+    if (args.task_slug != null) args.task_slug = args.task_slug.slice(0, 200)
+    if (args.board_item_id != null) args.board_item_id = args.board_item_id.slice(0, 200)
+    if (args.branch != null) args.branch = args.branch.slice(0, 500)
+    if (args.brief_path != null) args.brief_path = args.brief_path.slice(0, 1000)
+    if (args.crew_dir != null) args.crew_dir = args.crew_dir.slice(0, 1000)
+    if (args.task_return != null) args.task_return = args.task_return.slice(0, 1000)
+    if (args.board_from != null) args.board_from = args.board_from.slice(0, 120)
+    if (args.board_to != null) args.board_to = args.board_to.slice(0, 120)
+    if (args.pr_url != null) args.pr_url = args.pr_url.slice(0, 1000)
+    appendJsonl('recordIntakeDispatch', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('intake_dispatches').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO intake_dispatches (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordModifierAttempt(input = {}) {
     requireFields(input, ['role', 'modifier', 'outcome'], 'recordModifierAttempt')
     requireEnum(input.modifier, MODIFIER_KINDS, 'recordModifierAttempt', 'modifier')
@@ -1940,6 +2024,17 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function intakeDispatches({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT outcome, reason,
+        COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM intake_dispatches
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY outcome, reason
+      ORDER BY outcome, reason
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -2170,10 +2265,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeDispatch,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeDispatches, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -2664,22 +2759,25 @@ export function main(argv) {
       if (until != null && since != null && until <= since) refuse('intake-sweeps: --until must be later than --since')
       const rows = ledger.intakeSweeps({ since, until })
       const refusalRows = ledger.intakeRefusals({ since, until })
+      const dispatches = ledger.intakeDispatches({ since, until })
       if (ledger.stats().degraded) refuse('intake-sweeps: the ledger mirror is degraded — this window is unanswerable, not empty')
       const swept = rows.reduce((n, row) => n + Number(row.count ?? 0), 0)
       const picked = rows.reduce((n, row) => n + (row.outcome === 'picked' ? Number(row.count ?? 0) : 0), 0)
       const parked = rows.reduce((n, row) => n + (row.outcome === 'parked' ? Number(row.count ?? 0) : 0), 0)
       stdout.write(`${JSON.stringify({
         schema: 1,
-        question: 'Why is the queue not moving?',
+        question: 'Why is the queue not moving — and what did the loop actually do?',
         since,
         until,
         outcomes: INTAKE_OUTCOMES,
         refusals: INTAKE_REFUSALS,
+        dispatch_outcomes: INTAKE_DISPATCH_OUTCOMES,
         swept,
         picked,
         parked,
         rows,
         refusal_rows: refusalRows,
+        dispatches,
       })}\n`)
       return 0
     }

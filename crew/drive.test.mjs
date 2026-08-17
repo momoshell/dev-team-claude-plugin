@@ -608,7 +608,8 @@ test('scope helpers match directory prefixes and validate only supported entries
 
 test('protectedHits matches the ratified protected paths in both directions', () => {
   assert.deepEqual([...PROTECTED_PATHS].sort(), [
-    '.github/workflows/', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/protected-paths.mjs', 'crew/reclaim.mjs', 'crew/variants.mjs',
+    '.github/workflows/', 'crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/model-ladder.json',
+    'crew/protected-paths.mjs', 'crew/reclaim.mjs', 'crew/variants.mjs',
     'crew/roster.json', 'crew/roster.schema.json', 'docs/adr/',
   ].sort())
   assert.equal(PROTECTED_PATHS.includes('crew/roles/'), false)
@@ -616,7 +617,10 @@ test('protectedHits matches the ratified protected paths in both directions', ()
     'docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/',
     'crew/roles/planner.md', 'crew/crew.mjs', 'a.mjs', 'docs/adr/031.md',
     'crew/drive.mjs.bak', 'crew/roster.json.tmp',
-  ]), ['docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/'])
+    'crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json',
+    'crew/model-ladder.json.bak',
+  ]), ['docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/',
+    'crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json'])
 })
 
 test('the closed variant set lives in the import-free leaf and drive re-exports it', () => {
@@ -667,6 +671,30 @@ test('ctx.protectedPaths extends the sensitivity floor without replacing it', ()
   const floor = driveTask({ ...CTX, protectedPaths: ['.github/workflows/', 'docs/adr/', 'package-lock.json'] }, floorIo)
   assert.equal(floor.status, 'done')
   assert.equal(floorIo.calls.reseat.length, 1)
+})
+
+test('the crew policy artifacts escalate at plan acceptance exactly like the roster', () => {
+  for (const path of ['crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json', 'crew/roster.json']) {
+    const refusingIo = fakeIo({
+      envelopes: { 'planner:1': protectedPlanEnv([path]) },
+      reseat: protectedReseatRefusal,
+    })
+    const refusal = driveTask(CTX, refusingIo)
+    assert.equal(refusal.status, 'escalation')
+    assert.equal(refusal.details.escalation.where, 'sensitivity-floor')
+    assert.ok(refusal.details.escalation.why.includes(path))
+    assert.equal(refusingIo.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+
+    const applyingIo = fakeIo({
+      envelopes: { 'planner:1': protectedPlanEnv([path]), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+      runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+      changed: [path],
+      reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
+    })
+    const applied = driveTask(CTX, applyingIo)
+    assert.equal(applied.status, 'done')
+    assert.equal(applyingIo.calls.reseat.length, 1)
+  }
 })
 
 test('directory-prefix scope commits concrete changed paths without a scope bounce', () => {

@@ -233,18 +233,89 @@ export function defaultRunSetWindow(now = Date.now()) {
 const RUN_SET_STATUSES = ['running', 'ok', 'fail', 'aborted']
 const RUN_SET_BILLED_KEYS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 const PARKED_NOTE = 'not measured here — a park is a per-crew-dir file in the reclaim store (crew/reclaim.mjs), which the ledger has no key to enumerate; this view reads the ledger only, so parks are unmeasured, never zero'
+const PER_RUN_UNMEASURED_NOTE = 'no `agent_sessions` rows for this run: a pane-transport seat reports no usage by design (crew/daemon.mjs:81-83), and a pre-#119 or below-NODE_FLOOR headless run records none either; the ledger persists no per-run transport, so this view cannot tell them apart — unmeasured, never a measured zero.'
+const BUDGET_PROVENANCE = 'the ceiling is declared to this view; the daemon holds its own ceiling in memory only (crew/daemon.mjs:301-328), so nothing pins these two values equal.'
 
-export function shapeRunSet({ rows, absent, since, until, label } = {}) {
+function finiteBudgetNumber(value) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : null
+}
+
+function budgetBlock({ ceiling = null, burn = null, since = null, until = null, absent = null } = {}) {
+  const budget = {
+    ceiling_tokens: null,
+    window_ms: null,
+    source: null,
+    provenance: BUDGET_PROVENANCE,
+    burn_tokens: null,
+    agent_sessions: null,
+    comparable: false,
+    headroom_tokens: null,
+    fraction: null,
+    pending: null,
+  }
+  if (absent) {
+    budget.pending = absent
+    return budget
+  }
+  if (ceiling == null) {
+    budget.pending = 'no budget ceiling is declared to this view'
+    return budget
+  }
+  budget.source = ceiling?.source ?? null
+  if (ceiling?.error) {
+    budget.pending = `budget ceiling refused: ${ceiling.error}`
+    return budget
+  }
+  const ceilingTokens = finiteBudgetNumber(ceiling?.max_tokens)
+  const ceilingWindow = finiteBudgetNumber(ceiling?.window_ms)
+  if (ceilingTokens == null || ceilingTokens < 1 || ceilingWindow == null || ceilingWindow < 1) {
+    budget.pending = 'budget ceiling is malformed — comparison refused without a valid token ceiling and window'
+    return budget
+  }
+  budget.ceiling_tokens = ceilingTokens
+  budget.window_ms = ceilingWindow
+
+  if (burn?.measured !== true) {
+    budget.pending = burn?.absent || burn?.why || 'budget burn is unmeasured — comparison refused'
+    return budget
+  }
+  const burnTokens = finiteBudgetNumber(burn?.total)
+  const sessions = finiteBudgetNumber(burn?.sessions)
+  if (burnTokens == null || sessions == null || burnTokens < 0 || sessions < 0) {
+    budget.pending = burn?.absent || 'budget burn returned no measured token total or session count'
+    return budget
+  }
+  budget.burn_tokens = burnTokens
+  budget.agent_sessions = sessions
+
+  const sinceMs = dateValue(since)
+  const endMs = until == null ? Date.now() : dateValue(until)
+  const queriedWindow = sinceMs == null || endMs == null ? null : endMs - sinceMs
+  if (queriedWindow == null || Math.abs(queriedWindow - ceilingWindow) > 1000) {
+    budget.pending = `budget windows differ — declared ${ceilingWindow}ms, queried ${queriedWindow == null ? 'unavailable' : `${queriedWindow}ms`}`
+    return budget
+  }
+  budget.comparable = true
+  budget.headroom_tokens = Math.max(0, ceilingTokens - burnTokens)
+  budget.fraction = burnTokens / ceilingTokens
+  return budget
+}
+
+export function shapeRunSet({ rows, absent, since, until, label, ceiling = null, burn = null } = {}) {
   const window = { since: since ?? null, until: until ?? null, label: label ?? null }
-  if (typeof absent === 'string' && absent.length > 0) {
+  const absentReason = typeof absent === 'string' && absent.length > 0 ? absent : null
+  if (absentReason) {
     return {
       window,
-      absent,
+      absent: absentReason,
       runs: null,
       settled: null,
       usage: null,
       coverage: null,
-      unmeasured: { parked: PARKED_NOTE },
+      usage_mean_tokens_per_measured_run: null,
+      budget: budgetBlock({ absent: absentReason }),
+      unmeasured: { parked: PARKED_NOTE, per_run: PER_RUN_UNMEASURED_NOTE },
       rows: [],
     }
   }
@@ -258,8 +329,8 @@ export function shapeRunSet({ rows, absent, since, until, label } = {}) {
 
   let agentSessions = 0
   for (const row of source) {
-    const value = row?.agent_sessions
-    if (value != null) agentSessions += Number(value)
+    const value = finiteBudgetNumber(row?.agent_sessions)
+    if (value != null) agentSessions += value
   }
   let usage = null
   if (agentSessions > 0) {
@@ -272,7 +343,16 @@ export function shapeRunSet({ rows, absent, since, until, label } = {}) {
     }
   }
 
-  const unmeasured = { parked: PARKED_NOTE }
+  let measuredTokenTotal = 0
+  for (const row of measuredRows) {
+    for (const key of RUN_SET_BILLED_KEYS) {
+      const value = finiteBudgetNumber(row?.[key])
+      if (value != null) measuredTokenTotal += value
+    }
+  }
+  const usageMean = measuredRows.length ? measuredTokenTotal / measuredRows.length : null
+
+  const unmeasured = { parked: PARKED_NOTE, per_run: PER_RUN_UNMEASURED_NOTE }
   const hasUnmeasuredUsage = source.length > 0 && (agentSessions === 0 || source.some((row) => RUN_SET_BILLED_KEYS.some((key) => row?.[key] == null)))
   if (hasUnmeasuredUsage) {
     unmeasured.usage = agentSessions === 0
@@ -283,6 +363,7 @@ export function shapeRunSet({ rows, absent, since, until, label } = {}) {
   const shapedRows = source.map((row) => {
     const started = dateValue(row?.started_at)
     const ended = dateValue(row?.ended_at)
+    const usageMeasured = RUN_SET_BILLED_KEYS.some((key) => row?.[key] != null)
     return {
       adw_id: row?.adw_id ?? null,
       task_slug: row?.task_slug ?? null,
@@ -296,7 +377,8 @@ export function shapeRunSet({ rows, absent, since, until, label } = {}) {
       billed_output_tokens: row?.billed_output_tokens ?? null,
       billed_cache_write_tokens: row?.billed_cache_write_tokens ?? null,
       billed_cache_read_tokens: row?.billed_cache_read_tokens ?? null,
-      usage_measured: RUN_SET_BILLED_KEYS.some((key) => row?.[key] != null),
+      usage_measured: usageMeasured,
+      usage_state: usageMeasured ? 'measured' : 'unmeasured',
     }
   })
 
@@ -307,6 +389,8 @@ export function shapeRunSet({ rows, absent, since, until, label } = {}) {
     settled,
     usage,
     coverage: { measured: measuredRows.length, total: source.length },
+    usage_mean_tokens_per_measured_run: usageMean,
+    budget: budgetBlock({ ceiling, burn, since, until }),
     unmeasured,
     rows: shapedRows,
   }
@@ -314,77 +398,100 @@ export function shapeRunSet({ rows, absent, since, until, label } = {}) {
 
 export function shapeCellHealth({ rows, absent, roster, since, until, label } = {}) {
   const window = { since: since ?? null, until: until ?? null, label: label ?? null }
-  if (typeof absent === 'string' && absent.length > 0) {
-    return { window, absent, silent_unknown: absent, cells: [] }
-  }
-
+  const absentReason = typeof absent === 'string' && absent.length > 0 ? absent : null
   const cells = new Map()
-  for (const row of Array.isArray(rows) ? rows : []) {
-    const provider = row?.provider ?? null
-    const model_id = row?.model_id ?? null
-    const agent = row?.agent ?? null
-    const effort = row?.effort ?? null
+  const ensureCell = ({ provider, model_id, agent, effort, seated = false } = {}) => {
     const key = cellKey(provider, model_id, agent, effort)
     let cell = cells.get(key)
     if (!cell) {
       cell = {
         key, provider, model_id, agent, effort,
-        roles: new Set(), tiers: new Set(), seated: false,
+        roles: new Set(), tiers: new Set(), seated,
         failures: 0, run_less: 0, first_at: null, last_at: null,
         by_kind: new Map(),
       }
       cells.set(key, cell)
+    } else if (seated) {
+      cell.seated = true
     }
-    const failures = countValue(row?.failures)
-    const run_less = countValue(row?.run_less)
-    cell.failures += failures
-    cell.run_less += run_less
-    if (row?.role != null) cell.roles.add(row.role)
-    cell.first_at = earlierTimestamp(cell.first_at, row?.first_at ?? null)
-    cell.last_at = laterTimestamp(cell.last_at, row?.last_at ?? null)
-    const kind = row?.kind ?? '—'
-    const byKind = cell.by_kind.get(kind) || { kind, failures: 0, run_less: 0 }
-    byKind.failures += failures
-    byKind.run_less += run_less
-    cell.by_kind.set(kind, byKind)
+    return cell
   }
 
-  let silent_unknown = null
+  // An absent readout is not an empty measurement. The roster may still
+  // enumerate seats, but their evidence remains undetermined.
+  if (!absentReason) {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const cell = ensureCell({
+        provider: row?.provider ?? null,
+        model_id: row?.model_id ?? null,
+        agent: row?.agent ?? null,
+        effort: row?.effort ?? null,
+      })
+      const failures = countValue(row?.failures)
+      const run_less = countValue(row?.run_less)
+      cell.failures += failures
+      cell.run_less += run_less
+      if (row?.role != null) cell.roles.add(row.role)
+      cell.first_at = earlierTimestamp(cell.first_at, row?.first_at ?? null)
+      cell.last_at = laterTimestamp(cell.last_at, row?.last_at ?? null)
+      const kind = row?.kind ?? '—'
+      const byKind = cell.by_kind.get(kind) || { kind, failures: 0, run_less: 0 }
+      byKind.failures += failures
+      byKind.run_less += run_less
+      cell.by_kind.set(kind, byKind)
+    }
+  }
+
+  let silent_unknown = absentReason
   const tiers = Array.isArray(roster?.tiers) ? roster.tiers : null
   if (!tiers) {
-    silent_unknown = roster?.error || 'the roster could not be read — cells with no failures cannot be enumerated'
+    silent_unknown = roster?.error || silent_unknown || 'the roster could not be read — cells with no failures cannot be enumerated'
   } else {
     for (const tier of tiers) {
       const tierName = tier?.tier ?? null
       for (const seat of Array.isArray(tier?.seats) ? tier.seats : []) {
-        const provider = seat?.provider ?? null
-        const model_id = seat?.model_id ?? seat?.id ?? null
-        const agent = seat?.agent ?? null
-        const effort = seat?.effort ?? null
-        const key = cellKey(provider, model_id, agent, effort)
-        let cell = cells.get(key)
-        if (!cell) {
-          cell = {
-            key, provider, model_id, agent, effort,
-            roles: new Set(), tiers: new Set(), seated: true,
-            failures: 0, run_less: 0, first_at: null, last_at: null,
-            by_kind: new Map(),
-          }
-          cells.set(key, cell)
-        } else {
-          cell.seated = true
-        }
+        const cell = ensureCell({
+          provider: seat?.provider ?? null,
+          model_id: seat?.model_id ?? seat?.id ?? null,
+          agent: seat?.agent ?? null,
+          effort: seat?.effort ?? null,
+          seated: true,
+        })
         if (seat?.role != null) cell.roles.add(seat.role)
         if (tierName != null) cell.tiers.add(tierName)
       }
     }
   }
 
+  const models = new Map()
+  for (const model of Array.isArray(roster?.models) ? roster.models : []) {
+    const key = model?.key ?? (model?.provider != null && model?.id != null ? `${model.provider}/${model.id}` : null)
+    if (key != null) models.set(String(key), model)
+  }
+  const priceFor = (cell) => {
+    const key = cell.provider == null || cell.model_id == null ? null : `${cell.provider}/${cell.model_id}`
+    const model = key == null ? null : models.get(key)
+    if (!model) return { price: null, price_pending: 'not in the roster model catalog' }
+    return {
+      price: {
+        cost_in_per_mtok: model.cost_in_per_mtok ?? null,
+        cost_out_per_mtok: model.cost_out_per_mtok ?? null,
+        context: model.context ?? null,
+        source: model.source ?? null,
+        last_verified: model.last_verified ?? null,
+      },
+      price_pending: null,
+    }
+  }
+
   const shaped = [...cells.values()].map((cell) => {
-    const failures = cell.failures
-    const run_less = cell.run_less
-    const state = failures === 0 ? 'silent' : (failures > 0 && run_less === failures ? 'run-less-only' : 'recorded')
-    const by_kind = [...cell.by_kind.values()]
+    const undetermined = Boolean(absentReason)
+    const failures = undetermined ? null : cell.failures
+    const run_less = undetermined ? null : cell.run_less
+    const state = undetermined
+      ? 'undetermined'
+      : failures === 0 ? 'silent' : (failures > 0 && run_less === failures ? 'run-less-only' : 'recorded')
+    const by_kind = undetermined ? [] : [...cell.by_kind.values()]
       .sort((a, b) => b.failures - a.failures || String(a.kind).localeCompare(String(b.kind)))
       .map((kind) => ({ ...kind }))
     return {
@@ -397,21 +504,25 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
       tiers: sortedValues(cell.tiers),
       seated: cell.seated,
       state,
+      ...priceFor(cell),
       failures,
       run_less,
-      in_run: failures - run_less,
-      first_at: cell.first_at,
-      last_at: cell.last_at,
+      in_run: undetermined ? null : failures - run_less,
+      first_at: undetermined ? null : cell.first_at,
+      last_at: undetermined ? null : cell.last_at,
       by_kind,
+      ...(undetermined ? { undetermined_why: absentReason } : {}),
     }
   })
   shaped.sort((a, b) => {
+    const aUndetermined = a.state === 'undetermined', bUndetermined = b.state === 'undetermined'
+    if (aUndetermined !== bUndetermined) return aUndetermined ? 1 : -1
     const aSilent = a.state === 'silent', bSilent = b.state === 'silent'
     if (aSilent !== bSilent) return aSilent ? 1 : -1
-    if (!aSilent && a.failures !== b.failures) return b.failures - a.failures
+    if (!aUndetermined && a.failures !== b.failures) return b.failures - a.failures
     return a.key.localeCompare(b.key)
   })
-  return { window, absent: null, silent_unknown, cells: shaped }
+  return { window, absent: absentReason, silent_unknown, cells: shaped }
 }
 
 export { pendingFor }

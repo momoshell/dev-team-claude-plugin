@@ -236,6 +236,61 @@ test('runSetPanel passes an absent reason through without rows', () => {
   assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
 })
 
+test('runSetPanel labels unmeasured rows and exposes the mean note', () => {
+  const result = runSetPanel({
+    runs: 2,
+    usage: { agent_sessions: 2, billed_input_tokens: 100, billed_output_tokens: 20, billed_cache_write_tokens: 5, billed_cache_read_tokens: 5 },
+    coverage: { measured: 1, total: 2 },
+    usage_mean_tokens_per_measured_run: 130,
+    unmeasured: { per_run: 'no agent_sessions rows for this run — unmeasured, not zero' },
+    rows: [
+      { adw_id: 'measured', usage_measured: true, billed_input_tokens: 100, billed_output_tokens: 20, billed_cache_write_tokens: 5, billed_cache_read_tokens: 5 },
+      { adw_id: 'unmeasured', usage_measured: false },
+    ],
+  })
+  const unmeasured = result.rows.find((row) => row.adw_id === 'unmeasured')
+  const measured = result.rows.find((row) => row.adw_id === 'measured')
+  assert.match(unmeasured.usage_label, /unmeasured.*not zero/i)
+  assert.doesNotMatch(unmeasured.usage_label, /(^|\D)0(\D|$)/)
+  assert.notEqual(unmeasured.usage_tone, measured.usage_tone)
+  assert.ok(result.unmeasured_note)
+  assert.ok(result.mean_label)
+})
+
+test('runSetPanel states an undeclared ceiling without a percentage', () => {
+  const result = runSetPanel({ runs: 1, budget: { ceiling_tokens: null, pending: 'no ceiling declared' }, rows: [] })
+  assert.ok(result.budget_pending)
+  assert.doesNotMatch(result.budget_label, /%/)
+  assert.doesNotMatch(result.budget_label, /\bof\b/i)
+})
+
+test('runSetPanel formats a declared ceiling and its provenance', () => {
+  const result = runSetPanel({
+    runs: 1,
+    budget: { ceiling_tokens: 1000, burn_tokens: 130, headroom_tokens: 870, fraction: 0.13, comparable: true, provenance: 'the daemon holds its own ceiling in memory only' },
+    rows: [],
+  })
+  assert.match(result.budget_label, /1,?000/)
+  assert.match(result.budget_label, /870/)
+  assert.match(result.budget_label, /13%/)
+  assert.match(result.budget_note, /daemon/i)
+})
+
+test('cellHealthPanel distinguishes undetermined cards and carries model prices', () => {
+  const result = cellHealthPanel({ cells: [
+    { key: 'silent', provider: 'openai', model_id: 'quiet', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: null, price_pending: 'not in the roster model catalog' },
+    { key: 'unknown', provider: 'openai', model_id: 'unknown', state: 'undetermined', undetermined_why: 'cell readout absent', roles: [], tiers: [], failures: null, run_less: null, in_run: null, by_kind: [], price: null, price_pending: 'not in the roster model catalog' },
+    { key: 'priced', provider: 'openai', model_id: 'gpt-5', state: 'silent', roles: [], tiers: [], failures: 0, run_less: 0, in_run: 0, by_kind: [], price: { cost_in_per_mtok: 2, cost_out_per_mtok: 12 }, price_pending: null },
+  ] })
+  const undetermined = result.rows.find((row) => row.state === 'undetermined')
+  const priced = result.rows.find((row) => row.model_label === 'openai/gpt-5')
+  assert.notEqual(undetermined.tone, 'silent')
+  assert.match(undetermined.label, /health cannot be determined/i)
+  assert.equal(priced.model_label, 'openai/gpt-5')
+  assert.match(priced.price_label, /in \$2\/Mtok.*out \$12\/Mtok/)
+  assert.doesNotMatch(JSON.stringify(result), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
+})
+
 test('findingRows distinguishes absent findings from an explicit empty measurement', () => {
   const measured = findingRows({ envelopes: [
     { role: 'reviewer', dispatch_seq: 3, details: { findings: [{ id: 'f1', severity: 'must-fix', location: 'src/a.js:1', summary: 'fix it' }] } },

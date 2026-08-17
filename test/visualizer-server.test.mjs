@@ -48,11 +48,11 @@ function announce(child) {
     child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
   })
 }
-function startServer(ledgerDb, triageDb, crewRoot, rosterPath) {
+function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = null) {
   const args = ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
   if (crewRoot) args.push('--crew-root', crewRoot)
   if (rosterPath) args.push('--roster', rosterPath)
-  const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: environment ? { ...process.env, ...environment } : process.env })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
 }
@@ -481,6 +481,79 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     if (child) await stopServer(child)
     assert.equal(digest(rosterPath), rosterBefore)
     assert.equal(treeDigest(crewRoot), crewBefore)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('budgetWindow sums all running-total agent session rows', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-budget-window-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.budgetWindow({ since: new Date(0).toISOString(), until: null })
+    assert.equal(result.measured, true)
+    assert.equal(result.total, 38)
+    assert.equal(result.sessions, 2)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('budgetWindow refuses a mirror without agent_sessions', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-budget-window-absent-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE agent_sessions')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.budgetWindow({ since: new Date(0).toISOString(), until: null })
+    assert.equal(result.measured, false)
+    assert.ok(result.absent)
+    assert.equal(result.total, null)
+    assert.notEqual(result.total, 0)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('run-set exposes a declared budget only when the view environment opts in', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-budget-server-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, null, { DEVTEAM_BUDGET_MAX_TOKENS: '', DEVTEAM_BUDGET_WINDOW_MS: '' }))
+    const undeclared = (await json(base, '/api/run-set')).json.budget
+    assert.equal(undeclared.ceiling_tokens, null)
+    assert.equal(undeclared.headroom_tokens, null)
+    await stopServer(child); child = null;
+
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, null, { DEVTEAM_BUDGET_MAX_TOKENS: '1000' }))
+    const declared = (await json(base, '/api/run-set')).json.budget
+    assert.equal(declared.ceiling_tokens, 1000)
+    assert.match(declared.provenance, /daemon/i)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('run-set and cell-health reject every non-GET method', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-readonly-views-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    assert.equal((await json(base, '/api/run-set', { method: 'POST' })).status, 405)
+    assert.equal((await json(base, '/api/cell-health', { method: 'POST' })).status, 405)
+  } finally {
+    if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
 })

@@ -1,7 +1,7 @@
 <script>
   import { getRunSet } from './api.js'
   import { runSetPanel } from './panels.js'
-  let payload = $state({ absent: null, window: null, runs: null, settled: null, usage: null, coverage: null, unmeasured: {}, rows: [] })
+  let payload = $state({ absent: null, window: null, runs: null, settled: null, usage: null, coverage: null, usage_mean_tokens_per_measured_run: null, budget: null, unmeasured: {}, rows: [] })
   let error = $state('')
   let panel = $derived(runSetPanel(error ? { ...payload, absent: error } : payload))
 
@@ -28,6 +28,10 @@
     <div class="chips">{#each panel.settled_chips as chip (chip.status)}<span class={`chip ${chip.tone}`}>{chip.status} {chip.count}</span>{/each}</div>
     <div class="usage">
       <p>{panel.usage_label}</p>
+      {#if panel.budget_label}<p>{panel.budget_label}</p>{/if}
+      {#if panel.budget_pending}<p class="muted">{panel.budget_pending}</p>{/if}
+      {#if panel.budget_note}<p class="meta">{panel.budget_note}</p>{/if}
+      {#if panel.mean_label}<p class="meta">{panel.mean_label}</p>{/if}
       {#if panel.coverage_label}<p class="meta">{panel.coverage_label}</p>{/if}
       {#if panel.usage_note}<p class="muted">{panel.usage_note}</p>{/if}
     </div>
@@ -38,11 +42,12 @@
           <article class={`row ${row.tone}`}>
             <h3>{row.title}</h3>
             <p class="meta">{row.status || '—'} · {row.started_at || '—'} → {row.ended_at || 'now'} · {row.duration_label}</p>
-            <p class="meta">{row.agent_sessions_label} · {row.usage_label}</p>
+            <p class={`usage ${row.usage_tone}`}>{row.agent_sessions_label} · {row.usage_label}</p>
           </article>
         {/each}
       </div>
     {/if}
+    {#if panel.unmeasured_note}<p class="muted">{panel.unmeasured_note}</p>{/if}
   {/if}
 </section>
-<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.runs { font-weight:600; }.chips { display:flex; flex-wrap:wrap; gap:.45rem; margin:.5rem 0; }.chip { border:1px solid var(--line); border-radius:999px; padding:.2rem .5rem; font-size:.9rem; }.chip.ok { color:#176b3a; }.chip.fail, .chip.aborted { color:#9b1c1c; }.rows { display:grid; gap:.65rem; }.row { border-top:1px solid var(--line); padding-top:.6rem; }.row h3 { margin:.1rem 0 .35rem; }.usage p { margin:.35rem 0; }</style>
+<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.runs { font-weight:600; }.chips { display:flex; flex-wrap:wrap; gap:.45rem; margin:.5rem 0; }.chip { border:1px solid var(--line); border-radius:999px; padding:.2rem .5rem; font-size:.9rem; }.chip.ok { color:#176b3a; }.chip.fail, .chip.aborted { color:#9b1c1c; }.rows { display:grid; gap:.65rem; }.row { border-top:1px solid var(--line); padding-top:.6rem; }.row h3 { margin:.1rem 0 .35rem; }.usage p { margin:.35rem 0; }.usage.unmeasured { color:#7a3e9d; }.usage.measured { color:inherit; }</style>

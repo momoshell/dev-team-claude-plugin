@@ -174,6 +174,12 @@ function cellDisplayPart(value) {
   return value == null ? '—' : String(value)
 }
 
+function panelNumber(value) {
+  if (value == null || value === '') return null
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number.toLocaleString('en-US', { maximumFractionDigits: 6 }) : null
+}
+
 export function cellHealthPanel(payload = {}) {
   const absent = payload?.absent ?? null
   const window = payload?.window
@@ -187,24 +193,33 @@ export function cellHealthPanel(payload = {}) {
     note: CELL_HEALTH_NOTE,
     rows: [],
   }
-  if (absent) return view
 
   view.rows = (Array.isArray(payload?.cells) ? payload.cells : []).map((row) => {
     const state = row?.state
-    const tone = state === 'silent' ? 'silent' : state === 'run-less-only' ? 'run-less' : 'recorded'
+    const tone = state === 'undetermined' ? 'undetermined' : state === 'silent' ? 'silent' : state === 'run-less-only' ? 'run-less' : 'recorded'
     const failures = row?.failures ?? null
     const run_less = row?.run_less ?? null
     const in_run = row?.in_run ?? null
-    const label = state === 'silent'
-      ? 'no failures recorded in this window'
-      : state === 'run-less-only'
-        ? `${failures} failure${failures === 1 ? '' : 's'}, all run-less — refused before any run existed`
-        : `${in_run} in run · ${run_less} run-less`
+    const label = state === 'undetermined'
+      ? `health cannot be determined — ${row?.undetermined_why || 'the failure readout is unavailable'}`
+      : state === 'silent'
+        ? 'no failures recorded in this window'
+        : state === 'run-less-only'
+          ? `${failures} failure${failures === 1 ? '' : 's'}, all run-less — refused before any run existed`
+          : `${in_run} in run · ${run_less} run-less`
     const roles = Array.isArray(row?.roles) ? row.roles : []
     const tiers = Array.isArray(row?.tiers) ? row.tiers : []
+    const priceParts = []
+    const inputPrice = panelNumber(row?.price?.cost_in_per_mtok)
+    const outputPrice = panelNumber(row?.price?.cost_out_per_mtok)
+    if (inputPrice != null) priceParts.push(`in $${inputPrice}/Mtok`)
+    if (outputPrice != null) priceParts.push(`out $${outputPrice}/Mtok`)
     return {
       key: row?.key ?? null,
       title: `${cellDisplayPart(row?.provider)}/${cellDisplayPart(row?.model_id)} · ${cellDisplayPart(row?.agent)} · ${cellDisplayPart(row?.effort)}`,
+      model_label: `${cellDisplayPart(row?.provider)}/${cellDisplayPart(row?.model_id)}`,
+      price_label: priceParts.length ? priceParts.join(' · ') : null,
+      price_pending: row?.price_pending ?? (row?.price == null ? 'not in the roster model catalog' : null),
       roles_label: roles.length ? roles.join(', ') : '—',
       tiers_label: tiers.length ? tiers.join(', ') : '—',
       state,
@@ -251,18 +266,57 @@ function runSetUsageLabel(usage) {
     .join(' · ')
 }
 
+function budgetPanelFields(budget = null) {
+  const ceiling = panelNumber(budget?.ceiling_tokens)
+  const declared = ceiling != null
+  const pending = typeof budget?.pending === 'string' && budget.pending.length ? budget.pending : null
+  if (!declared) {
+    return {
+      budget_label: 'budget ceiling not declared to this view — burn comparison unavailable',
+      budget_note: null,
+      budget_pending: pending || 'budget ceiling not declared to this view',
+    }
+  }
+  const burn = panelNumber(budget?.burn_tokens)
+  const headroom = panelNumber(budget?.headroom_tokens)
+  const fraction = typeof budget?.fraction === 'number' && Number.isFinite(budget.fraction) ? panelNumber(budget.fraction * 100) : null
+  if (budget?.comparable === true && burn != null && headroom != null && fraction != null) {
+    return {
+      budget_label: `budget: ${ceiling} token ceiling · ${burn} burned · ${headroom} headroom · ${fraction}%`,
+      budget_note: budget?.provenance ?? null,
+      budget_pending: null,
+    }
+  }
+  return {
+    budget_label: `budget: ${ceiling} token ceiling — comparison pending`,
+    budget_note: budget?.provenance ?? null,
+    budget_pending: pending || 'budget burn cannot be compared with this ceiling',
+  }
+}
+
 export function runSetPanel(payload = {}) {
   const absent = payload?.absent ?? null
   const window = payload?.window
   const window_label = window && typeof window === 'object'
     ? `${window.label} · since ${window.since} · until ${window.until || 'now'}`
     : 'window unavailable'
-  if (absent) return { absent, window_label, rows: [], empty: false, usage_label: 'unavailable' }
+  const budgetFields = budgetPanelFields(payload?.budget)
+  const unmeasured = payload?.unmeasured ?? {}
+  const unmeasuredNote = unmeasured?.per_run || 'per-run usage is unmeasured — no agent_sessions evidence can distinguish the possible causes'
+  if (absent) return {
+    absent,
+    window_label,
+    rows: [],
+    empty: false,
+    usage_label: 'unavailable',
+    ...budgetFields,
+    mean_label: 'mean tokens per measured run: unavailable — no measured runs',
+    unmeasured_note: unmeasuredNote,
+  }
 
   const runs = payload?.runs
   const empty = runs === 0
   const usage = payload?.usage ?? null
-  const unmeasured = payload?.unmeasured ?? {}
   const settled = payload?.settled ?? {}
   const coverage = payload?.coverage ?? null
   return {
@@ -279,17 +333,26 @@ export function runSetPanel(payload = {}) {
     coverage_label: coverage == null ? null : `usage measured for ${coverage.measured} of ${coverage.total} runs`,
     usage_note: unmeasured?.usage ?? null,
     parked_note: unmeasured?.parked ?? null,
-    rows: (Array.isArray(payload?.rows) ? payload.rows : []).map((row) => ({
-      adw_id: row?.adw_id ?? null,
-      title: `${runSetDisplayPart(row?.task_slug)} · ${runSetDisplayPart(row?.repo_slug)}`,
-      status: row?.status ?? null,
-      tone: runSetTone(row?.status),
-      started_at: row?.started_at ?? null,
-      ended_at: row?.ended_at ?? null,
-      duration_label: runSetDurationLabel(row?.duration_ms),
-      agent_sessions_label: runSetAgentSessionsLabel(row?.agent_sessions),
-      usage_label: row?.usage_measured ? runSetUsageLabel(row) : '—',
-    })),
+    ...budgetFields,
+    mean_label: panelNumber(payload?.usage_mean_tokens_per_measured_run) == null
+      ? 'mean tokens per measured run: unavailable — no measured runs'
+      : `mean tokens per measured run: ${panelNumber(payload.usage_mean_tokens_per_measured_run)}`,
+    unmeasured_note: unmeasuredNote,
+    rows: (Array.isArray(payload?.rows) ? payload.rows : []).map((row) => {
+      const measured = row?.usage_measured === true || row?.usage_state === 'measured'
+      return {
+        adw_id: row?.adw_id ?? null,
+        title: `${runSetDisplayPart(row?.task_slug)} · ${runSetDisplayPart(row?.repo_slug)}`,
+        status: row?.status ?? null,
+        tone: runSetTone(row?.status),
+        started_at: row?.started_at ?? null,
+        ended_at: row?.ended_at ?? null,
+        duration_label: runSetDurationLabel(row?.duration_ms),
+        agent_sessions_label: runSetAgentSessionsLabel(row?.agent_sessions),
+        usage_tone: measured ? 'measured' : 'unmeasured',
+        usage_label: measured ? runSetUsageLabel(row) : 'N/A — unmeasured, not zero',
+      }
+    }),
   }
 }
 

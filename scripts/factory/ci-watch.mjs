@@ -8,6 +8,10 @@
 // WATCHES AND RECORDS ONLY
 // Slice 1 dispatches nothing. No driver, dispatch, repair-brief or re-dispatch
 // surface is named here; the repair dispatch is slice 2 (#253).
+//
+// REQUIRES A RATIFIED PROFILE
+// Every watched check and local lane comes from ciShape. Missing, unreadable,
+// unratified, malformed, and empty profile cells refuse through PROFILE_REFUSALS.
 
 import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { existsSync as fsExistsSync, realpathSync as fsRealpathSync } from 'node:fs'
@@ -17,11 +21,6 @@ import { CI_CLASSIFICATIONS, CI_DECISIONS } from './ledger.mjs'
 import { recordCiCycle as emitRecordCiCycle } from './emit.mjs'
 import { readProfile, defaultProfilePath, requireField, probeRepo, ProfileRefusal } from './probe-repo.mjs'
 
-// These constants are this repository's ratified CI shape. They remain
-// exported only for the fenced repair half; the watch path reads the profile
-// and never falls back to them.
-export const CI_CHECKS = Object.freeze(['test (node 24)'])
-export const LOCAL_LANE = Object.freeze(['node', '--test', '--test-timeout=30000'])
 export const UNKNOWN_REASONS = Object.freeze([
   'ci-failures-unparseable', 'local-lane-unrunnable',
   'local-failures-disjoint', 'conclusion-not-adjudicable',
@@ -472,6 +471,16 @@ function watchNow(d) {
   try { return d.now() } catch { return Date.now() }
 }
 
+function resultProfilePath(shape, profilePath) {
+  if (shape && typeof shape === 'object' && Object.hasOwn(shape, 'profilePath')) {
+    return shape.profilePath ?? null
+  }
+  if (typeof profilePath === 'string' && profilePath.length > 0) {
+    try { return resolve(profilePath) } catch {}
+  }
+  return null
+}
+
 export function ciWatchRun({
   checkout,
   branch,
@@ -484,16 +493,26 @@ export function ciWatchRun({
   profilePath,
   repoKey,
   factoryRoot,
+  shape: suppliedShape,
   deps = {},
 } = {}) {
   const d = normalDeps(deps)
+  let shape = suppliedShape && typeof suppliedShape === 'object' && suppliedShape.ok === true
+    ? suppliedShape
+    : null
   try {
     const pushed = pushBranch({ checkout, branch, crewRoot, deps: d })
     if (!pushed.ok) {
-      return { ok: false, pushed: false, reason: pushed.reason, cycles: [] }
+      return {
+        ok: false,
+        pushed: false,
+        reason: pushed.reason,
+        cycles: [],
+        profilePath: resultProfilePath(shape, profilePath),
+      }
     }
 
-    const shape = ciShape({ checkout, profilePath, repoKey, factoryRoot, deps: d })
+    if (!shape) shape = ciShape({ checkout, profilePath, repoKey, factoryRoot, deps: d })
     if (!shape.ok) {
       return {
         ok: false,
@@ -501,12 +520,19 @@ export function ciWatchRun({
         reason: shape.reason,
         detail: shape.detail ?? null,
         cycles: [],
+        profilePath: shape.profilePath ?? null,
       }
     }
 
     const headSha = resolveHeadSha(checkout, pushed.branch, d)
     if (!headSha) {
-      return { ok: false, pushed: true, reason: 'branch-unresolved', cycles: [] }
+      return {
+        ok: false,
+        pushed: true,
+        reason: 'branch-unresolved',
+        cycles: [],
+        profilePath: shape.profilePath ?? null,
+      }
     }
     const checks = fetchCheckRuns({ branch: pushed.branch, headSha, checks: shape.checks, deps: d })
     const cycles = []
@@ -554,8 +580,14 @@ export function ciWatchRun({
       }
       cycles.push(row)
     }
-    return { ok: true, pushed: true, cycles }
+    return { ok: true, pushed: true, cycles, profilePath: shape.profilePath ?? null }
   } catch {
-    return { ok: false, pushed: false, reason: 'push-failed', cycles: [] }
+    return {
+      ok: false,
+      pushed: false,
+      reason: 'push-failed',
+      cycles: [],
+      profilePath: resultProfilePath(shape, profilePath),
+    }
   }
 }

@@ -10,7 +10,7 @@ import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
 import {
-  CI_CHECKS, UNKNOWN_REASONS,
+  UNKNOWN_REASONS,
 } from '../scripts/factory/ci-watch.mjs'
 import {
   ciRepairRun, compileRepairBrief, dispatchAllowed, dispatchRepair, inheritScope,
@@ -23,6 +23,7 @@ function sqliteAvailable() {
 }
 const SQLITE_OK = sqliteAvailable()
 const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
+const FIXTURE_CHECK = 'test (node 24)'
 
 const fixture = mkdtempSync(join(tmpdir(), 'factory-ci-repair-'))
 let worldNumber = 0
@@ -55,7 +56,46 @@ function git(repoDir, ...args) {
   ], { encoding: 'utf8' })
 }
 
-function makeWorld() {
+function ratifiedCell(value) {
+  return {
+    status: 'ratified',
+    value,
+    source: 'test fixture',
+    ratified_by: 'test',
+    ratified_at: '2026-08-17T00:00:00.000Z',
+  }
+}
+
+function ciValue(checks, triggers = ['push', 'pull_request']) {
+  return {
+    workflows: [{
+      file: '.github/workflows/test.yml',
+      name: 'test',
+      triggers,
+      jobs: checks.map((name) => ({
+        id: name, name, check_name: name, runs_on: 'ubuntu-latest', steps_run: [],
+      })),
+    }],
+  }
+}
+
+function profileFixture(root, { checks = [FIXTURE_CHECK], lane = 'npm test', triggers, fields } = {}) {
+  const path = join(root, 'profile.json')
+  writeFileSync(path, `${JSON.stringify({
+    schema: 1,
+    profile_version: 1,
+    repo_key: 'test__fixture',
+    repo_slug: 'fixture',
+    fields: fields || {
+      ci: ratifiedCell(ciValue(checks, triggers)),
+      test_command: ratifiedCell(lane),
+    },
+    meta: { probed_at: '2026-08-17T00:00:00.000Z' },
+  }, null, 2)}\n`)
+  return path
+}
+
+function makeWorld(profile = {}) {
   worldNumber += 1
   const root = join(fixture, `world-${worldNumber}`)
   mkdirSync(root)
@@ -65,7 +105,7 @@ function makeWorld() {
   writeFileSync(join(host, 'seed.txt'), 'seed\n')
   assert.equal(git(host, 'add', 'seed.txt').status, 0)
   assert.equal(git(host, 'commit', '-q', '-m', 'base').status, 0)
-  return { root, host, crew: makeCrew(root, host) }
+  return { root, host, crew: makeCrew(root, host), profilePath: profileFixture(root, profile) }
 }
 
 function makeCrew(root, checkout, details = { files_committed: ['seed.txt'] }) {
@@ -87,6 +127,8 @@ function seam(world, {
   dispatchExit = 0,
   escalation = null,
   log = 'not ok 1 - first failure\n  ---\n  error: first\n  ...',
+  checkNames = [FIXTURE_CHECK],
+  onRuns = null,
 } = {}) {
   const calls = []
   let runNumber = 0
@@ -105,8 +147,8 @@ function seam(world, {
         stderr: '',
       }
     }
-    if (command === 'node') {
-      if (local === 'unrunnable') return { status: 1, stdout: '', stderr: '', error: new Error('node unavailable') }
+    if (command === 'node' || command === '/bin/sh') {
+      if (local === 'unrunnable') return { status: 1, stdout: '', stderr: '', error: new Error('lane unavailable') }
       const output = local === 'disjoint' ? 'not ok 1 - another failure\n' : 'not ok 1 - first failure\n'
       return { status: local === 'green' ? 0 : 1, stdout: output, stderr: '' }
     }
@@ -118,7 +160,8 @@ function seam(world, {
       if (request.action === 'runs') {
         const conclusion = conclusions[Math.min(runNumber, conclusions.length - 1)] ?? 'failure'
         runNumber += 1
-        return [{ check_name: CI_CHECKS[0], conclusion, log_ref: 'log-1' }]
+        if (typeof onRuns === 'function') onRuns({ runNumber, world })
+        return checkNames.map((check_name) => ({ check_name, conclusion, log_ref: 'log-1' }))
       }
       return log
     },
@@ -172,7 +215,7 @@ test('compileRepairBrief surfaces a BriefUsageError refusal instead of rewriting
   try {
     const result = compileRepairBrief({
       cycle: 1,
-      row: { check_name: CI_CHECKS[0], branch: 'main', head_sha: 'h', excerpt: failureLog, excerpt_source: 'check-log' },
+      row: { check_name: FIXTURE_CHECK, branch: 'main', head_sha: 'h', excerpt: failureLog, excerpt_source: 'check-log' },
       scope: { files: ['not-present.js'], source: 'files_committed' },
       crew: { task: 'repair-task' }, checkout: world.host, crewDir: world.crew,
     })
@@ -187,7 +230,7 @@ test('a reproduced red produces exactly one repair dispatch', { skip: SKIP }, ()
   try {
     const { calls, deps } = seam(world, { conclusions: ['failure', 'success'] })
     const dbPath = join(world.root, 'ledger.db')
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, profilePath: world.profilePath, deps })
     const crewCalls = calls.filter((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs')))
     assert.equal(crewCalls.length, 1)
     assert.ok(crewCalls[0].includes('--variant') && crewCalls[0].includes('repair'))
@@ -207,9 +250,9 @@ test('a second red parks and no third dispatch exists by any call sequence', { s
   try {
     const { calls, deps } = seam(world, { conclusions: ['failure', 'failure'] })
     const dbPath = join(world.root, 'ledger.db')
-    const first = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, deps })
+    const first = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, profilePath: world.profilePath, deps })
     const firstCrewCalls = calls.filter((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))).length
-    const second = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, deps })
+    const second = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, profilePath: world.profilePath, deps })
     const secondCrewCalls = calls.filter((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))).length
     assert.equal(firstCrewCalls, 1)
     assert.equal(secondCrewCalls, 1)
@@ -223,7 +266,7 @@ test('a platform-divergent red parks at cycle one without dispatching', { skip: 
   const world = makeWorld()
   try {
     const { calls, deps } = seam(world, { conclusions: ['failure'], local: 'green' })
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
     assert.equal(result.cycles[0].classification, 'platform-divergent')
     assert.equal(result.cycles[0].cycle, 1)
     assert.equal(calls.some((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))), false)
@@ -243,7 +286,7 @@ test('every unknown classification parks rather than dispatching', { skip: SKIP 
             ? { local: 'disjoint' }
             : { conclusions: ['cancelled'] }
       const { calls, deps } = seam(world, options)
-      const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), deps })
+      const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
       assert.equal(result.cycles[0].classification, 'unknown')
       assert.equal(result.cycles[0].reason, reason)
       assert.equal(result.parked.record.cycle, 1)
@@ -258,7 +301,7 @@ test('a worker checkout never pushes and never builds a dispatch argv', { skip: 
   assert.equal(git(world.host, 'worktree', 'add', '-q', linked, '-b', 'worker-branch').status, 0)
   try {
     const { calls, deps } = seam({ ...world, host: linked }, { conclusions: ['failure'] })
-    const result = ciRepairRun({ checkout: linked, branch: 'worker-branch', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), deps })
+    const result = ciRepairRun({ checkout: linked, branch: 'worker-branch', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
     assert.equal(result.reason, 'worker-path')
     assert.equal(calls.some((argv) => argv.includes('push')), false)
     assert.equal(calls.some((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))), false)
@@ -272,7 +315,7 @@ test('an inherited scope naming .github/workflows is refused, never widened', { 
     writeFileSync(join(world.host, '.github', 'workflows', 'test.yml'), 'name: test\n')
     writeFileSync(join(world.crew, 'returns', 'task.json'), JSON.stringify({ status: 'done', details: { files_committed: ['.github/workflows/'] } }))
     const { calls, deps } = seam(world, { conclusions: ['failure'] })
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
     assert.equal(result.dispatches[0].reason, 'scope-forbidden')
     assert.equal(calls.some((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))), false)
     assert.equal(readFileSync(join(world.host, '.github', 'workflows', 'test.yml'), 'utf8'), 'name: test\n')
@@ -283,7 +326,7 @@ test('the park artifact names its cycle and carries the verbatim log', { skip: S
   const world = makeWorld()
   try {
     const { deps } = seam(world, { conclusions: ['failure'], local: 'green', log: failureLog })
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
     const artifact = JSON.parse(readFileSync(result.parked.path, 'utf8'))
     assert.equal(artifact.cycle, 1)
     assert.equal(artifact.excerpt, failureLog.slice(failureLog.indexOf('not ok')).trimEnd())
@@ -297,7 +340,7 @@ test('the dispatch outcome is recorded in ci_dispatches for the cycle that produ
     const escalation = { where: 'triage', why: 'inherited scope is unavailable' }
     const { calls, deps } = seam(world, { conclusions: ['failure'], dispatchStatus: 'escalation', dispatchExit: 1, escalation })
     const dbPath = join(world.root, 'ledger.db')
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, profilePath: world.profilePath, deps })
     assert.equal(calls.filter((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))).length, 1)
     const ledger = openLedger({ dbPath, stderr: { write() {} } })
     const row = ledger.dumpTable('ci_dispatches')[0]
@@ -317,7 +360,7 @@ test('a degraded or unreadable ledger refuses to dispatch rather than assuming t
       deps.openLedger = () => unreadable
         ? { stats: () => ({ degraded: false }), dumpTable() { throw new Error('unreadable') }, close() {} }
         : { stats: () => ({ degraded: true }), dumpTable: () => [], close() {} }
-      const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), deps })
+      const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
       assert.equal(result.dispatches[0].outcome, 'refused')
       assert.equal(result.dispatches[0].reason, 'bound-unverifiable')
       assert.equal(calls.some((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs'))), false)
@@ -332,7 +375,7 @@ test('a driver escalation at triage is recorded as escalation and parked, never 
     const escalation = { where: 'triage', why }
     const { calls, deps } = seam(world, { conclusions: ['failure'], dispatchStatus: 'escalation', dispatchExit: 1, escalation })
     const dbPath = join(world.root, 'ledger.db')
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath, profilePath: world.profilePath, deps })
     const crewCalls = calls.filter((argv) => argv.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs')))
     assert.equal(crewCalls.length, 1)
     assert.equal(result.dispatches[0].outcome, 'escalation')
@@ -353,7 +396,7 @@ test('a missing crew dir records a refusal and parks without building an argv', 
     mkdirSync(missingCrew)
     const { calls, deps } = seam(world, { conclusions: ['failure'] })
     const dbPath = join(world.root, 'ledger.db')
-    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: missingCrew, dbPath, deps })
+    const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: missingCrew, dbPath, profilePath: world.profilePath, deps })
     assert.equal(result.cycles.length, 1)
     assert.equal(result.dispatches[0].outcome, 'refused')
     assert.equal(result.dispatches[0].reason, 'crew-dir-missing')
@@ -424,5 +467,100 @@ test('a preflight failure cannot reuse a settled envelope from the prior run', (
     })
     assert.equal(result.outcome, 'unreadable')
     assert.equal(readFileSync(taskReturn, 'utf8'), before)
+  } finally { cleanup(world) }
+})
+
+test('the repair loop refuses an absent profile before it pushes anything', () => {
+  const world = makeWorld()
+  try {
+    const missing = join(world.root, 'missing-profile.json')
+    const { calls, deps } = seam(world)
+    const result = ciRepairRun({
+      checkout: world.host, branch: 'main', crewDir: world.crew, crewRoot: world.crew,
+      dbPath: join(world.root, 'missing-profile.db'), profilePath: missing, deps,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'profile-missing')
+    assert.deepEqual(result.cycles, [])
+    assert.deepEqual(result.dispatches, [])
+    assert.equal(result.profilePath, missing)
+    assert.equal(calls.some((argv) => argv.includes('push')), false)
+  } finally { cleanup(world) }
+})
+
+test('the repair loop tells an unratified field apart from a missing profile', () => {
+  const world = makeWorld()
+  try {
+    const proposed = profileFixture(world.root, {
+      fields: {
+        ci: { status: 'proposed', value: ciValue(['ci/verify']), source: 'test fixture' },
+        test_command: ratifiedCell('npm test'),
+      },
+    })
+    const { calls, deps } = seam(world)
+    const result = ciRepairRun({
+      checkout: world.host, branch: 'main', crewDir: world.crew, crewRoot: world.crew,
+      dbPath: join(world.root, 'proposed.db'), profilePath: proposed, deps,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.reason, 'profile-unratified')
+    assert.notEqual(result.reason, 'profile-missing')
+    assert.equal(calls.some((argv) => argv.includes('push')), false)
+  } finally { cleanup(world) }
+})
+
+test('the repair loop watches the checks the fixture profile declares', () => {
+  const world = makeWorld({ checks: ['ci/verify', 'ci/lint'], lane: 'go test ./...' })
+  try {
+    const { deps } = seam(world, {
+      checkNames: ['ci/verify', 'ci/lint'],
+      conclusions: ['success'],
+    })
+    const result = ciRepairRun({
+      checkout: world.host, branch: 'main', crewDir: world.crew, crewRoot: world.crew,
+      dbPath: join(world.root, 'foreign.db'), profilePath: world.profilePath, deps,
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.cycles.map((row) => row.check_name), ['ci/verify', 'ci/lint'])
+    assert.equal(result.profilePath, world.profilePath)
+  } finally { cleanup(world) }
+})
+
+test('the profile is resolved once, so a mid-run edit cannot change the watched check', () => {
+  const world = makeWorld({ checks: ['original/check'], lane: 'original suite' })
+  try {
+    const { deps } = seam(world, {
+      checkNames: ['original/check'],
+      conclusions: ['failure', 'success'],
+      onRuns: ({ runNumber }) => {
+        if (runNumber === 1) profileFixture(world.root, { checks: ['changed/check'], lane: 'changed suite' })
+      },
+    })
+    const result = ciRepairRun({
+      checkout: world.host, branch: 'main', crewDir: world.crew, crewRoot: world.crew,
+      dbPath: join(world.root, 'stable-shape.db'), profilePath: world.profilePath, deps,
+    })
+    assert.deepEqual(result.cycles.map((row) => row.check_name), ['original/check', 'original/check'])
+  } finally { cleanup(world) }
+})
+
+test('a dispatched brief carries the profile lane when the local lane never ran', () => {
+  const world = makeWorld({ lane: 'profile suite' })
+  try {
+    const { calls, deps } = seam(world)
+    const result = dispatchRepair({
+      cycle: 1,
+      briefPath: join(world.crew, 'task', 'brief.md'),
+      crew: { task: 'repair-task', checkout: world.host },
+      crewDir: world.crew,
+      checkout: world.host,
+      row: {},
+      lane: 'profile suite',
+      deps,
+    })
+    assert.equal(result.outcome, 'done')
+    const argv = calls.find((candidate) => candidate.some((arg) => typeof arg === 'string' && arg.endsWith('/crew/crew.mjs')))
+    assert.ok(argv)
+    assert.equal(argv[argv.indexOf('--lane') + 1], 'profile suite')
   } finally { cleanup(world) }
 })

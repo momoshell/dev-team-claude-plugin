@@ -10,9 +10,9 @@ import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
 import {
-  CI_CHECKS, LOCAL_LANE, PROFILE_REFUSALS, ciShape, ciWatchRun, classifyRed,
-  decisionFor, extractFailure, fetchCheckLog, fetchCheckRuns, isWorkerPath,
-  pushBranch, runLocalLane,
+  PROFILE_REFUSALS, ciShape, ciWatchRun, classifyRed, decisionFor,
+  extractFailure, fetchCheckLog, fetchCheckRuns, isWorkerPath, pushBranch,
+  runLocalLane,
 } from '../scripts/factory/ci-watch.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { recordCiCycle as emitRecordCiCycle } from '../scripts/factory/emit.mjs'
@@ -29,6 +29,8 @@ function sqliteAvailable() {
 }
 const SQLITE_OK = sqliteAvailable()
 const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
+const FIXTURE_CHECK = 'test (node 24)'
+const FIXTURE_LANE = Object.freeze(['node', '--test', '--test-timeout=30000'])
 
 const fixture = mkdtempSync(join(tmpdir(), 'factory-ci-watch-'))
 let worldNumber = 0
@@ -87,7 +89,7 @@ function ciValue(checks, triggers = ['push', 'pull_request']) {
   }
 }
 
-function profileFixture({ checks = ['test (node 24)'], lane = 'npm test', triggers, fields } = {}) {
+function profileFixture({ checks = [FIXTURE_CHECK], lane = 'npm test', triggers, fields } = {}) {
   profileNumber += 1
   const path = join(fixture, `profile-${profileNumber}.json`)
   writeFileSync(path, `${JSON.stringify({
@@ -177,7 +179,7 @@ test('every subprocess in a watch uses the injected seam', () => {
     const { calls, deps } = seam(world, {
       local: { status: 1, stdout: 'not ok 1 - first failure\n', stderr: '' },
       deps: { checks: ({ action }) => action === 'runs'
-        ? [{ check_name: CI_CHECKS[0], conclusion: 'failure', log_ref: 'log-1' }]
+        ? [{ check_name: FIXTURE_CHECK, conclusion: 'failure', log_ref: 'log-1' }]
         : failureLog },
     })
     const result = ciWatchRun({
@@ -249,13 +251,13 @@ test('an unparseable log uses the named tail window and parks', () => {
 })
 
 test('fetchCheckRuns carries a missing watched check as unknown', () => {
-  const rows = fetchCheckRuns({ branch: 'main', headSha: 'head', checks: CI_CHECKS, deps: { checks: () => [] } })
-  assert.deepEqual(rows, [{ check_name: CI_CHECKS[0], conclusion: 'unknown', log_ref: null }])
+  const rows = fetchCheckRuns({ branch: 'main', headSha: 'head', checks: [FIXTURE_CHECK], deps: { checks: () => [] } })
+  assert.deepEqual(rows, [{ check_name: FIXTURE_CHECK, conclusion: 'unknown', log_ref: null }])
 })
 
 test('runLocalLane reports a spawn failure without throwing', () => {
-  const result = runLocalLane({ checkout: '/missing', lane: LOCAL_LANE, deps: { spawnSync: () => { throw new Error('no node') } } })
-  assert.deepEqual(result, { ran: false, exit: null, failures: [], lane: [...LOCAL_LANE] })
+  const result = runLocalLane({ checkout: '/missing', lane: FIXTURE_LANE, deps: { spawnSync: () => { throw new Error('no node') } } })
+  assert.deepEqual(result, { ran: false, exit: null, failures: [], lane: [...FIXTURE_LANE] })
 })
 
 test("ciShape reads the watched check names from this repo's ratified ci cell", () => {
@@ -395,6 +397,33 @@ test("a watch against a foreign profile watches that repo's checks and runs that
   })
 })
 
+test('ciWatchRun accepts a pre-resolved shape and never re-reads the profile', { skip: SKIP }, () => {
+  withWorld((world) => {
+    const profilePath = join(world.root, 'profile-that-does-not-exist.json')
+    const shape = {
+      ok: true,
+      checks: ['pre-resolved/check'],
+      lane: ['/bin/sh', '-c', 'foreign suite'],
+      laneLabel: 'foreign suite',
+      profilePath,
+    }
+    const { deps } = seam(world, {
+      local: { status: 1, stdout: 'not ok 1 - first failure\n', stderr: '' },
+      deps: { checks: ({ action }) => action === 'runs'
+        ? [{ check_name: 'pre-resolved/check', conclusion: 'failure', log_ref: 'log-1' }]
+        : failureLog },
+    })
+    const result = ciWatchRun({
+      checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'),
+      profilePath, shape, dbPath: join(world.root, 'pre-resolved.db'), deps,
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.cycles.map((row) => row.check_name), ['pre-resolved/check'])
+    assert.equal(result.cycles[0].local_lane, 'foreign suite')
+    assert.equal(result.profilePath, profilePath)
+  })
+})
+
 test('a watch refuses with a named reason when the profile is absent, and records no cycle', () => {
   withWorld((world) => {
     const profilePath = join(world.root, 'missing-profile.json')
@@ -410,13 +439,6 @@ test('a watch refuses with a named reason when the profile is absent, and record
     assert.equal(Object.isFrozen(PROFILE_REFUSALS), true)
     assert.ok(PROFILE_REFUSALS.includes(result.reason))
   })
-})
-
-test('CI_CHECKS matches the workflow job check name', () => {
-  const workflow = readFileSync(join(ROOT, '.github/workflows/test.yml'), 'utf8')
-  const job = workflow.match(/jobs:\s*\n\s+test:\s*\n\s+name:\s*([^\n]+)/)
-  assert.ok(job)
-  assert.deepEqual(CI_CHECKS, [job[1].trim().replace(/^['"]|['"]$/g, '')])
 })
 
 test('the emit facade never throws when the ledger refuses its input', () => {
@@ -438,7 +460,7 @@ test('seeded red watch records one reproduced cycle with its complete excerpt', 
     const { deps } = seam(world, {
       local: { status: 1, stdout: 'not ok 1 - first failure\n', stderr: '' },
       deps: { checks: ({ action }) => action === 'runs'
-        ? [{ check_name: CI_CHECKS[0], conclusion: 'failure', log_ref: 'log-1' }]
+        ? [{ check_name: FIXTURE_CHECK, conclusion: 'failure', log_ref: 'log-1' }]
         : failureLog, now: () => '2024-01-01T00:00:00.000Z' },
     })
     const dbPath = join(world.root, 'ledger.db')
@@ -450,7 +472,7 @@ test('seeded red watch records one reproduced cycle with its complete excerpt', 
     const rows = ledger.dumpTable('ci_cycles')
     assert.equal(rows.length, 1)
     assert.deepEqual({ classification: rows[0].classification, decision: rows[0].decision, cycle: rows[0].cycle, check_name: rows[0].check_name }, {
-      classification: 'reproduced', decision: 'repair', cycle: 1, check_name: CI_CHECKS[0],
+      classification: 'reproduced', decision: 'repair', cycle: 1, check_name: FIXTURE_CHECK,
     })
     assert.equal(rows[0].excerpt, failureLog.slice(failureLog.indexOf('not ok 1')))
     ledger.close()
@@ -463,7 +485,7 @@ test('seeded platform-divergent red parks on cycle one', { skip: SKIP }, () => {
     const { deps } = seam(world, {
       local: { status: 0, stdout: '', stderr: '' },
       deps: { checks: ({ action }) => action === 'runs'
-        ? [{ check_name: CI_CHECKS[0], conclusion: 'failure', log_ref: 'log-1' }]
+        ? [{ check_name: FIXTURE_CHECK, conclusion: 'failure', log_ref: 'log-1' }]
         : failureLog },
     })
     const dbPath = join(world.root, 'platform.db')

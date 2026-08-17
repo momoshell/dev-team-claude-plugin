@@ -2,6 +2,10 @@
 // scripts/factory/ci-repair.mjs — the bounded repair half of the CI loop.
 // The watch remains dispatch-free; this module is the only host-side surface
 // that may hand a recorded, reproduced failure to the warm repair crew.
+//
+// REQUIRES A RATIFIED PROFILE
+// Every repair cycle uses one ciShape resolved before the loop. Profile
+// refusals are named by PROFILE_REFUSALS and never fall back to guessed lanes.
 
 import {
   existsSync as fsExistsSync,
@@ -12,7 +16,7 @@ import {
 } from 'node:fs'
 import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { isAbsolute, join, relative, resolve, sep } from 'node:path'
-import { ciWatchRun, LOCAL_LANE } from './ci-watch.mjs'
+import { ciShape, ciWatchRun } from './ci-watch.mjs'
 import { openLedger } from './ledger.mjs'
 import { recordCiDispatch as emitRecordCiDispatch } from './emit.mjs'
 import { BriefUsageError, renderBrief, validateRequest, verifyWhere } from './make-brief.mjs'
@@ -245,10 +249,16 @@ function returnCandidates({ line, crew, crewDir, checkout }) {
   })
 }
 
-export function dispatchRepair({ cycle, briefPath, crew, crewDir, checkout = null, row, deps = {} } = {}) {
+export function dispatchRepair({ cycle, briefPath, crew, crewDir, checkout = null, row, lane, deps = {} } = {}) {
   const d = { spawnSync: deps.spawnSync || cpSpawnSync, ...fsDeps(deps) }
   const root = resolve(checkout || crew?.checkout || process.cwd())
-  const lane = row?.local_lane || LOCAL_LANE.join(' ')
+  const laneValue = row?.local_lane || lane
+  if (typeof laneValue !== 'string' || laneValue.trim().length === 0) {
+    return {
+      outcome: 'unreadable', exit: null, commit: null, escalation: null, task_return: null,
+      why: 'dispatch-unreadable: lane unresolved',
+    }
+  }
   const argv = [
     process.execPath,
     join(root, 'crew', 'crew.mjs'),
@@ -257,7 +267,7 @@ export function dispatchRepair({ cycle, briefPath, crew, crewDir, checkout = nul
     '--checkout', root,
     '--brief-file', briefPath,
     '--variant', 'repair',
-    '--lane', lane,
+    '--lane', laneValue,
     '--keep',
   ]
   let result
@@ -492,7 +502,7 @@ function resultBase(cycles, dispatches, parked, reason, ok = false) {
   return { ok, cycles, dispatches, parked, reason }
 }
 
-export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = null, crewRoot, deps = {} } = {}) {
+export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = null, crewRoot, profilePath, repoKey, factoryRoot, deps = {} } = {}) {
   const d = fsDeps(deps)
   const rawDeps = { ...deps, ...d }
   const resolvedCrewDir = typeof crewDir === 'string' && crewDir.trim() ? resolve(crewDir) : null
@@ -500,6 +510,17 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
   // decision, but it must never prevent the watch from recording its cycle.
   const crew = crewIdentity(resolvedCrewDir, d)
   const root = resolve(checkout || crew?.checkout || process.cwd())
+  const shape = ciShape({ checkout: root, profilePath, repoKey, factoryRoot, deps: rawDeps })
+  if (!shape.ok) {
+    return {
+      ...resultBase([], [], null, shape.reason, false),
+      profilePath: shape.profilePath ?? null,
+    }
+  }
+  const finish = (cycles, dispatches, parked, reason, ok = false) => ({
+    ...resultBase(cycles, dispatches, parked, reason, ok),
+    profilePath: shape.profilePath ?? null,
+  })
   const taskSlug = crew?.task ?? null
   const repoSlug = crew?.repo_slug ?? null
   const cycles = []
@@ -514,23 +535,24 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
       crewRoot,
       taskSlug,
       repoSlug,
+      shape,
       deps: rawDeps,
     })
     if (!watched.ok) {
-      return resultBase(cycles, dispatches, null, watched.reason, false)
+      return finish(cycles, dispatches, null, watched.reason, false)
     }
     cycles.push(...watched.cycles)
-    if (watched.cycles.length === 0) return resultBase(cycles, dispatches, null, watched.reason || 'watch-empty', false)
+    if (watched.cycles.length === 0) return finish(cycles, dispatches, null, watched.reason || 'watch-empty', false)
     if (watched.cycles.every((row) => row.decision === 'none')) {
-      return resultBase(cycles, dispatches, null, null, true)
+      return finish(cycles, dispatches, null, null, true)
     }
     const parkingRow = watched.cycles.find((row) => row.decision === 'park')
     if (parkingRow) {
       const parked = parkRecord({ crew, crewDir: resolvedCrewDir, row: parkingRow, cycle, deps: rawDeps })
-      return resultBase(cycles, dispatches, parked, parked.why || parkingRow.reason, false)
+      return finish(cycles, dispatches, parked, parked.why || parkingRow.reason, false)
     }
     const row = watched.cycles.find((candidate) => candidate.decision === 'repair')
-    if (!row) return resultBase(cycles, dispatches, null, 'watch-unadjudicable', false)
+    if (!row) return finish(cycles, dispatches, null, 'watch-unadjudicable', false)
 
     if (!crew) {
       const refusal = { outcome: 'refused', exit: null, commit: null, escalation: null, task_return: null, why: 'crew-dir-missing' }
@@ -540,7 +562,7 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
         briefPath: null, scope: null, parkPath: parked.path, dbPath, deps,
       })
       dispatches.push(event)
-      return resultBase(cycles, dispatches, parked, refusal.why, false)
+      return finish(cycles, dispatches, parked, refusal.why, false)
     }
 
     const ledger = ledgerState({ dbPath, branch: row.branch, task: crew.task, deps })
@@ -558,7 +580,7 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
         briefPath: null, scope: null, parkPath: parked.path, dbPath, deps,
       })
       dispatches.push(event)
-      return resultBase(cycles, dispatches, parked, parkWhy, false)
+      return finish(cycles, dispatches, parked, parkWhy, false)
     }
 
     const scope = inheritScope({ crewDir: resolvedCrewDir, checkout: root, deps: rawDeps })
@@ -570,7 +592,7 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
         briefPath: null, scope, parkPath: parked.path, dbPath, deps,
       })
       dispatches.push(event)
-      return resultBase(cycles, dispatches, parked, scope.why, false)
+      return finish(cycles, dispatches, parked, scope.why, false)
     }
 
     const brief = compileRepairBrief({
@@ -584,11 +606,12 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
         briefPath: null, scope, parkPath: parked.path, dbPath, deps,
       })
       dispatches.push(event)
-      return resultBase(cycles, dispatches, parked, brief.why, false)
+      return finish(cycles, dispatches, parked, brief.why, false)
     }
 
     const dispatch = dispatchRepair({
-      cycle, briefPath: brief.path, crew, crewDir: resolvedCrewDir, checkout: root, row, deps: rawDeps,
+      cycle, briefPath: brief.path, crew, crewDir: resolvedCrewDir, checkout: root, row,
+      lane: shape.laneLabel, deps: rawDeps,
     })
     if (dispatch.outcome === 'escalation' || dispatch.outcome === 'unreadable') {
       const parked = parkRecord({
@@ -600,7 +623,7 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
         briefPath: brief.path, scope, parkPath: parked.path, dbPath, deps,
       })
       dispatches.push(event)
-      return resultBase(cycles, dispatches, parked, dispatch.why, false)
+      return finish(cycles, dispatches, parked, dispatch.why, false)
     }
     const event = dispatchLedgerRow({
       row, crew, repoSlug, dispatch, outcome: dispatch.outcome, reason: dispatch.why,
@@ -612,7 +635,7 @@ export function ciRepairRun({ checkout = null, branch, crewDir = null, dbPath = 
   const row = cycles[cycles.length - 1] || null
   if (row) {
     const parked = parkRecord({ crew, crewDir: resolvedCrewDir, row, cycle: MAX_CYCLES, why: 'cycle-bound-reached', deps: rawDeps })
-    return resultBase(cycles, dispatches, parked, 'cycle-bound-reached', false)
+    return finish(cycles, dispatches, parked, 'cycle-bound-reached', false)
   }
-  return resultBase(cycles, dispatches, null, 'cycle-bound-reached', false)
+  return finish(cycles, dispatches, null, 'cycle-bound-reached', false)
 }

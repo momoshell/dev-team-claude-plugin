@@ -15,9 +15,12 @@ import {
   REFUSAL_REASONS, SLOT_MARKER, discoverTripwires, extractKeys,
   gatherProtectedPaths, main, proposeTier, validateAsk, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
+import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-make-brief-'))
+const EMPTY_FACTORY = join(fixtureRoot, 'empty-factory')
+mkdirSync(EMPTY_FACTORY)
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }))
 
 let fixtureNumber = 0
@@ -97,7 +100,7 @@ function run(root, args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     cwd: ROOT,
     encoding: 'utf8',
-    env: { ...process.env, ...env },
+    env: { ...process.env, DEVTEAM_FACTORY_DIR: EMPTY_FACTORY, ...env },
   })
 }
 
@@ -116,6 +119,38 @@ function section(brief, heading) {
   const rest = lines.slice(start + 1)
   const end = rest.findIndex((line) => /^## /.test(line))
   return (end === -1 ? rest : rest.slice(0, end)).join('\n')
+}
+
+function ratified(value) {
+  return {
+    status: 'ratified',
+    value,
+    source: 'test fixture',
+    ratified_by: 'factory test',
+    ratified_at: '2026-08-17T00:00:00.000Z',
+  }
+}
+
+function proposed(value) {
+  return { status: 'proposed', value, source: 'test fixture' }
+}
+
+function unknown(reason = 'no_test_command') {
+  return { status: 'unknown', value: null, reason }
+}
+
+function profile(label, fields) {
+  const path = join(fixtureRoot, 'profiles', `${label}.json`)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, `${JSON.stringify({
+    schema: 1,
+    profile_version: 1,
+    repo_key: `fixture__${label}`,
+    repo_slug: label,
+    fields,
+    meta: { probed_at: '2026-08-17T00:00:00.000Z', probed_from: fixtureRoot },
+  }, null, 2)}\n`)
+  return path
 }
 
 test('the four authored lines are carried verbatim and compilation is idempotent', () => {
@@ -232,6 +267,146 @@ test('baseline is measured, colour-neutral, and absent test scripts are unknown'
   const deadBody = section(deadBrief, '## Baseline')
   assert.match(deadBody, /unknown/)
   assert.doesNotMatch(deadBody, /\b0\b/)
+})
+
+test('a ratified profile test_command becomes the measured lane and states its basis', () => {
+  const root = fixture('profile-ratified-lane')
+  const lane = 'node --test test/widget.test.mjs'
+  const profilePath = profile('ratified-lane', { test_command: ratified(lane) })
+  const { brief } = compile(root, {}, ['--profile', profilePath])
+  const body = section(brief, '## Baseline')
+  assert.match(body, /lane: node --test test\/widget\.test\.mjs · pass 1/)
+  assert.match(body, /lane basis: ratified profile field test_command/)
+})
+
+test('a proposed profile test_command is not consumed and names the package fallback', () => {
+  const root = fixture('profile-proposed-lane')
+  const proposedLane = 'node --test test/widget.test.mjs --proposed-lane'
+  const profilePath = profile('proposed-lane', { test_command: proposed(proposedLane) })
+  const { brief } = compile(root, {}, ['--profile', profilePath])
+  const body = section(brief, '## Baseline')
+  assert.match(body, /lane: node --test · pass 2/)
+  assert.doesNotMatch(body, /--proposed-lane/)
+  assert.match(body, /lane basis: package\.json scripts\.test — profile field test_command is proposed, not ratified/)
+})
+
+test('an unknown profile test_command is not consumed because only ratified cells count', () => {
+  const root = fixture('profile-unknown-lane')
+  const profilePath = profile('unknown-lane', { test_command: unknown() })
+  const { brief } = compile(root, {}, ['--profile', profilePath])
+  const body = section(brief, '## Baseline')
+  assert.match(body, /lane: node --test · pass 2/)
+  assert.match(body, /profile field test_command is unknown, not ratified/)
+})
+
+test('an absent profile compiles with its path and unreadable reason stated', () => {
+  const root = fixture('profile-absent')
+  const profilePath = join(fixtureRoot, 'profiles', 'missing-profile.json')
+  const { brief } = compile(root, {}, ['--profile', profilePath])
+  const body = section(brief, '## Baseline')
+  assert.match(body, /no profile at .*missing-profile\.json \(profile-unreadable\)/)
+  assert.match(body, /lane basis: package\.json scripts\.test — no profile at/)
+})
+
+test('--require-profile refuses unreadable and unratified profiles by distinct reasons', () => {
+  const root = fixture('profile-required')
+  const missingPath = join(fixtureRoot, 'profiles', 'required-missing.json')
+  const missing = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--require-profile', '--profile', missingPath,
+  ])
+  assert.equal(missing.status, 2)
+  assert.match(missing.stderr, /profile-unreadable/)
+
+  const proposedPath = profile('required-proposed', { test_command: proposed('node --test --proposed') })
+  const proposedResult = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--require-profile', '--profile', proposedPath,
+  ])
+  assert.equal(proposedResult.status, 2)
+  assert.match(proposedResult.stderr, /profile-unratified/)
+})
+
+test('a recorded baseline count is named unused while the compile measures fresh counts', () => {
+  const root = fixture('profile-stale-baseline')
+  const lane = 'node --test test/widget.test.mjs'
+  const profilePath = profile('stale-baseline', {
+    test_command: ratified(lane),
+    baseline: ratified({ tests: 4242, passed: 4242, failed: 0 }),
+  })
+  const { brief } = compile(root, {}, ['--profile', profilePath])
+  const baseline = section(brief, '## Baseline')
+  const validation = section(brief, '## Validation lane')
+  assert.match(baseline, /pass 1/)
+  assert.match(baseline, /profile records passed 4242, not used/)
+  assert.doesNotMatch(`${baseline}\n${validation}`, /pass 4242/)
+})
+
+test('the default profile path is used when no --profile flag is supplied', () => {
+  const root = fixture('profile-default-path')
+  const factoryRoot = join(fixtureRoot, 'default-profile-factory')
+  mkdirSync(join(factoryRoot, 'profiles'), { recursive: true })
+  const repoKey = probeRepo({ checkout: root }).repo_key
+  const target = defaultProfilePath({ repoKey, factoryRoot })
+  writeFileSync(target, `${JSON.stringify({
+    schema: 1,
+    profile_version: 1,
+    repo_key: repoKey,
+    repo_slug: 'default-path',
+    fields: { test_command: ratified('node --test test/widget.test.mjs') },
+    meta: { probed_at: '2026-08-17T00:00:00.000Z' },
+  }, null, 2)}\n`)
+  const { brief } = compile(root, {}, [], 'default-path.md', { DEVTEAM_FACTORY_DIR: factoryRoot })
+  const body = section(brief, '## Baseline')
+  assert.match(body, /lane basis: ratified profile field test_command/)
+  assert.match(body, new RegExp(target.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+})
+
+test('--profile overrides the default profile path and names the override', () => {
+  const root = fixture('profile-override')
+  const factoryRoot = join(fixtureRoot, 'override-profile-factory')
+  mkdirSync(join(factoryRoot, 'profiles'), { recursive: true })
+  const repoKey = probeRepo({ checkout: root }).repo_key
+  const defaultPath = defaultProfilePath({ repoKey, factoryRoot })
+  writeFileSync(defaultPath, `${JSON.stringify({
+    schema: 1,
+    profile_version: 1,
+    repo_key: repoKey,
+    repo_slug: 'override-default',
+    fields: { test_command: ratified('node --test') },
+    meta: { probed_at: '2026-08-17T00:00:00.000Z' },
+  }, null, 2)}\n`)
+  const explicitPath = profile('override-explicit', {
+    test_command: ratified('node --test test/widget.test.mjs'),
+  })
+  const { brief } = compile(root, {}, ['--profile', explicitPath], 'override.md', {
+    DEVTEAM_FACTORY_DIR: factoryRoot,
+  })
+  const body = section(brief, '## Baseline')
+  assert.match(body, /lane: node --test test\/widget\.test\.mjs · pass 1/)
+  assert.doesNotMatch(body, /lane: node --test · pass 2/)
+  assert.match(body, new RegExp(explicitPath.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+})
+
+test('ratified convention files render with their basis and malformed files are unavailable', () => {
+  const root = fixture('profile-conventions')
+  const conventionPath = profile('conventions', {
+    test_command: ratified('node --test'),
+    conventions: ratified({ files: ['.claude/', 'README.md', 'docs/adr/', 'docs/conventions.md'] }),
+  })
+  const { brief } = compile(root, {}, ['--profile', conventionPath], 'conventions.md')
+  const conventions = section(brief, '## Conventions')
+  assert.match(conventions, /conventions of record \(basis: ratified profile field conventions/)
+  assert.match(conventions, /\.claude\/, README\.md, docs\/adr\/, docs\/conventions\.md/)
+
+  const malformedPath = profile('conventions-malformed', {
+    test_command: ratified('node --test'),
+    conventions: ratified({ files: 'README.md' }),
+  })
+  const malformed = compile(root, {}, ['--profile', malformedPath], 'conventions-malformed.md').brief
+  const malformedConventions = section(malformed, '## Conventions')
+  assert.match(malformedConventions, /conventions of record: \(not available\)/)
+  assert.match(malformedConventions, /value\.files must be an array of strings/)
 })
 
 test('fences are sorted and no fence register is explicit when omitted', () => {
@@ -361,7 +536,11 @@ test('a nested git checkout resolves to the repository root', () => {
   const outPath = join(root, 'nested-brief.md')
   const result = spawnSync(process.execPath, [
     SCRIPT, '--request', requestPath, '--out', outPath,
-  ], { cwd: nested, encoding: 'utf8' })
+  ], {
+    cwd: nested,
+    encoding: 'utf8',
+    env: { ...process.env, DEVTEAM_FACTORY_DIR: EMPTY_FACTORY },
+  })
   assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
   const brief = readFileSync(outPath, 'utf8')
   assert.match(section(brief, '## Baseline'), /pass 2/)
@@ -516,7 +695,9 @@ test('shape proposal stays deferred while tier proposal wiring is present', () =
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 12)
+  assert.equal(REFUSAL_REASONS.length, 14)
+  assert.ok(REFUSAL_REASONS.includes('profile-unreadable'))
+  assert.ok(REFUSAL_REASONS.includes('profile-unratified'))
   assert.ok(REFUSAL_REASONS.includes('bad-protected'))
 })
 

@@ -10,9 +10,10 @@
 <section class="panel"><h2>Envelopes</h2>
   {#if returns.error}<p class="error">{returns.error}</p>
   {:else}
-    {#each Object.entries(groups) as [role, entries] (role)}<article class="role"><h3>{role}</h3><div class="chips">{#each entries as entry (entry.dispatch_seq)}<button class:active={current(role, entries) === entry} onclick={() => selected[role] = entry.dispatch_seq}>d{entry.dispatch_seq}</button>{/each}</div>
+    {#each Object.entries(groups) as [role, entries] (role)}
       {@const entry = current(role, entries)}
       {@const entryIndex = entries.indexOf(entry)}
+      <article class="role"><h3>{role}</h3><div class="chips">{#each entries as inner (inner.dispatch_seq)}<button class:active={entry === inner} onclick={() => selected[role] = inner.dispatch_seq}>d{inner.dispatch_seq}</button>{/each}</div>
       {#if !entry.valid}<p class="error">{entry.invalid_reason}</p>
       {:else}<p><strong>{entry.status || '—'}</strong></p><p>{entry.summary || '—'}</p><h4>artifacts</h4><pre>{json(entry.artifacts)}</pre><h4>details</h4><pre>{json(entry.details)}</pre>
         {#if entryIndex > 0}<label><input type="checkbox" checked={showDiff[role] || false} onchange={(event) => showDiff[role] = event.currentTarget.checked} /> diff vs previous attempt</label>{/if}

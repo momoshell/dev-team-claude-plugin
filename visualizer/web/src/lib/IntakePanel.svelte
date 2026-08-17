@@ -38,7 +38,11 @@
         <p class="meta">{group.title}</p>
         <p class="asserts">{group.asserts}</p>
         <div class="reasons">
-          {#each group.rows as row (row.reason)}<p class={`reason ${row.tone}`}><span>{row.label}</span> <span class="meta">{row.count_label}</span></p>{/each}
+          <!-- Unkeyed deliberately. A reason is NOT unique within a group: a parked
+               sweep and a refusal can carry the same reason, and the rows must stay
+               unmerged, so keying on it throws a duplicate-key error at render. The
+               unrecognised-rows loop below is unkeyed for the same reason. -->
+          {#each group.rows as row}<p class={`reason ${row.tone}`}><span>{row.label}</span> <span class="meta">{row.count_label}</span></p>{/each}
         </div>
       </section>
     {/each}

@@ -8,7 +8,7 @@ import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
-import { defaultCellWindow, defaultRunSetWindow, shapeCellHealth, shapeRunSet } from './shape.mjs'
+import { defaultCellWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet } from './shape.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -41,6 +41,27 @@ function integer(value, fallback) {
   if (!/^\d+$/.test(value)) return null
   return Number(value)
 }
+
+export function budgetCeiling(env = process.env) {
+  const source = 'DEVTEAM_BUDGET_MAX_TOKENS'
+  const values = env ?? process.env
+  const rawMax = values?.DEVTEAM_BUDGET_MAX_TOKENS
+  if (rawMax == null || rawMax === '') return null
+  const parsePositiveInteger = (value) => {
+    const text = typeof value === 'number' ? String(value) : String(value)
+    if (!/^\d+$/.test(text)) return null
+    const number = Number(text)
+    return Number.isSafeInteger(number) && number >= 1 ? number : null
+  }
+  const refuse = (message) => ({ max_tokens: null, window_ms: null, source, error: message })
+  const max_tokens = parsePositiveInteger(rawMax)
+  if (max_tokens == null) return refuse('DEVTEAM_BUDGET_MAX_TOKENS must be an integer >= 1')
+  const rawWindow = values?.DEVTEAM_BUDGET_WINDOW_MS
+  const window_ms = rawWindow == null || rawWindow === '' ? RUN_SET_WINDOW_MS : parsePositiveInteger(rawWindow)
+  if (window_ms == null) return refuse('DEVTEAM_BUDGET_WINDOW_MS must be an integer >= 1')
+  return { max_tokens, window_ms, source, error: null }
+}
+
 async function body(req) {
   let text = ''
   for await (const chunk of req) {
@@ -71,6 +92,7 @@ function staticResponse(req, res) {
 
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
+  const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
@@ -126,7 +148,10 @@ export function startServer(options = {}) {
         if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
         if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
         const result = feed.runSet({ since, until })
-        return json(res, 200, { schema, ...shapeRunSet({ ...result, since, until, label: defaults.label }) })
+        const burn = typeof feed.budgetWindow === 'function'
+          ? feed.budgetWindow({ since, until })
+          : { measured: false, total: null, sessions: null, absent: 'budget burn is unavailable from this feed' }
+        return json(res, 200, { schema, ...shapeRunSet({ ...result, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
       }
       if (url.pathname === '/api/roster/propose') {
         if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })

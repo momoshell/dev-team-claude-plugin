@@ -396,6 +396,87 @@ test('timeline empty run is safe', () => {
   assert.deepEqual(out.marks, [])
 })
 
+test('shapeRunSet averages measured rows only and states per-run usage', () => {
+  const result = shapeRunSet({
+    rows: [
+      { adw_id: 'measured', status: 'ok', agent_sessions: 2, billed_input_tokens: 100, billed_output_tokens: 20, billed_cache_write_tokens: 5, billed_cache_read_tokens: 5 },
+      { adw_id: 'unmeasured', status: 'ok', agent_sessions: 0, billed_input_tokens: null, billed_output_tokens: null, billed_cache_write_tokens: null, billed_cache_read_tokens: null },
+    ],
+    since: start, until: end, label: 'last 24 hours',
+  })
+  assert.equal(result.usage_mean_tokens_per_measured_run, 130)
+  assert.deepEqual(result.rows.map((row) => row.usage_state), ['measured', 'unmeasured'])
+  assert.match(result.unmeasured.per_run, /agent_sessions/)
+})
+
+test('shapeRunSet leaves budget numbers null when no ceiling is declared', () => {
+  const result = shapeRunSet({ rows: [], since: start, until: end, label: 'last 24 hours' })
+  assert.equal(result.budget.ceiling_tokens, null)
+  assert.equal(result.budget.headroom_tokens, null)
+  assert.equal(result.budget.fraction, null)
+  assert.ok(result.budget.pending)
+})
+
+test('shapeRunSet compares a declared ceiling over an equal window', () => {
+  const result = shapeRunSet({
+    rows: [], since: start, until: end, label: 'last 24 hours',
+    ceiling: { max_tokens: 1000, window_ms: 2000, source: 'test', error: null },
+    burn: { measured: true, total: 130, sessions: 2, absent: null },
+  })
+  assert.equal(result.budget.comparable, true)
+  assert.equal(result.budget.headroom_tokens, 870)
+  assert.equal(result.budget.fraction, 0.13)
+})
+
+test('shapeRunSet refuses a declared ceiling over a different window', () => {
+  const result = shapeRunSet({
+    rows: [], since: start, until: end, label: 'last 24 hours',
+    ceiling: { max_tokens: 1000, window_ms: 14000, source: 'test', error: null },
+    burn: { measured: true, total: 130, sessions: 2, absent: null },
+  })
+  assert.equal(result.budget.comparable, false)
+  assert.equal(result.budget.headroom_tokens, null)
+  assert.equal(result.budget.fraction, null)
+  assert.match(result.budget.pending, /14000.*2000/)
+})
+
+test('shapeCellHealth marks seated cells undetermined when its readout is absent', () => {
+  const result = shapeCellHealth({
+    rows: null, absent: 'cell_failures predates this ledger mirror',
+    roster: { tiers: [{ tier: 'build', seats: [{ role: 'builder', provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' }] }] },
+    since: start, until: null, label: 'last 7 days',
+  })
+  assert.equal(result.cells.length, 1)
+  assert.equal(result.cells[0].state, 'undetermined')
+  assert.equal(result.cells[0].failures, null)
+  assert.equal(result.cells[0].run_less, null)
+  assert.equal(result.cells[0].in_run, null)
+  assert.equal(result.cells[0].undetermined_why, 'cell_failures predates this ledger mirror')
+  assert.doesNotMatch(JSON.stringify(result), /"(verdict|open|closed|healthy|threshold)"/i)
+})
+
+test('shapeCellHealth carries catalog prices and leaves absent prices pending', () => {
+  const result = shapeCellHealth({
+    rows: [],
+    roster: {
+      tiers: [{ tier: 'build', seats: [
+        { role: 'builder', provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' },
+        { role: 'planner', provider: 'anthropic', id: 'ghost', agent: 'claude', effort: 'medium' },
+      ] }],
+      models: [{ key: 'openai/gpt-5', cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 400000, source: 'vendor', last_verified: '2026-08-13' }],
+    },
+    since: start, until: null, label: 'last 7 days',
+  })
+  const known = result.cells.find((cell) => cell.model_id === 'gpt-5')
+  const unknown = result.cells.find((cell) => cell.model_id === 'ghost')
+  assert.equal(known.price.cost_in_per_mtok, 2)
+  assert.equal(known.price.cost_out_per_mtok, 12)
+  assert.equal(known.price_pending, null)
+  assert.equal(unknown.price, null)
+  assert.ok(unknown.price_pending)
+  assert.doesNotMatch(JSON.stringify(result), /"(?:[a-z_]*(?:usd|spend|total_cost|cost_total)[a-z_]*)"/i)
+})
+
 test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the boundaries', () => {
   const files = allFiles(join(process.cwd(), 'visualizer'))
   const allowed = new Set(['visualizer/server/ledger-feed.mjs', 'visualizer/server/triage.mjs'])

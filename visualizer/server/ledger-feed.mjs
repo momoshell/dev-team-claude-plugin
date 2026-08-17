@@ -173,6 +173,34 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
       return { rows: null, absent: err?.message || String(err) }
     }
   }
+  function budgetWindow({ since, until = null } = {}) {
+    probeColumns()
+    const handle = open()
+    if (!handle) return { measured: false, total: null, sessions: null, absent: degradedReason || 'the ledger could not be opened' }
+    if (probe.missing_tables.includes('agent_sessions')) {
+      return { measured: false, total: null, sessions: null, absent: 'agent_sessions predates this ledger mirror' }
+    }
+    const untilClause = until == null ? '' : ' AND started_at < ?'
+    const params = until == null ? [since] : [since, until]
+    try {
+      // Keep this in lockstep with crew/daemon.mjs:234-243: the daemon's
+      // rolling burn query sums all four running token totals per session.
+      const row = handle.prepare(`
+        SELECT COUNT(*) AS sessions,
+               COALESCE(SUM(billed_input_tokens),0)       AS input,
+               COALESCE(SUM(billed_output_tokens),0)      AS output,
+               COALESCE(SUM(billed_cache_write_tokens),0) AS cache_write,
+               COALESCE(SUM(billed_cache_read_tokens),0)  AS cache_read
+        FROM agent_sessions WHERE started_at >= ?${untilClause}
+      `).get(...params)
+      const total = ['input', 'output', 'cache_write', 'cache_read']
+        .reduce((sum, key) => sum + Number(row?.[key] ?? 0), 0)
+      return { measured: true, total, sessions: Number(row?.sessions ?? 0), absent: null }
+    } catch (err) {
+      if (!probe.missing_tables.includes('agent_sessions')) probe.missing_tables.push('agent_sessions')
+      return { measured: false, total: null, sessions: null, absent: err?.message || String(err) }
+    }
+  }
   function health() {
     probeColumns()
     const triageHealth = triage.health()
@@ -183,6 +211,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     listEvents,
     cellFailures,
     runSet,
+    budgetWindow,
     setTriage: (input) => triage.setTriage(input),
     health,
     close: () => { closed = true; if (db) { try { db.close() } catch {} db = null }; triage.close() },

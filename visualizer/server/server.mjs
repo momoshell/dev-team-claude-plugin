@@ -8,6 +8,8 @@ import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
+import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
+import { breakerPolicy } from '../../crew/breaker.mjs'
 import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake } from './shape.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -16,7 +18,7 @@ const schema = 1
 
 function defaults() {
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined }
+  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
 }
 function args(argv) {
   const out = defaults()
@@ -28,6 +30,8 @@ function args(argv) {
     else if (arg === '--triage-db') out.triageDb = argv[++i]
     else if (arg === '--crew-root') out.crewRoot = argv[++i]
     else if (arg === '--roster') out.rosterPath = argv[++i]
+    else if (arg === '--ladder') out.ladderPath = argv[++i]
+    else if (arg === '--model-reference') out.referencePath = argv[++i]
   }
   return out
 }
@@ -175,6 +179,45 @@ export function startServer(options = {}) {
         if (input.cell !== null && (typeof input.cell !== 'object' || Array.isArray(input.cell))) return json(res, 400, { schema, error: 'cell must be an object or null' })
         const raw = roster.readRaw()
         const result = await proposeEdit({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, tier: input.tier, role: input.role, cell: input.cell })
+        return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
+      }
+      if (url.pathname === '/api/roster/ladder') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        const window = defaultCellWindow()
+        const ladder = readLadder({ ladderPath: config.ladderPath })
+        const reference = readReference({ referencePath: config.referencePath })
+        const failures = feed.cellFailures(window)
+        const view = ladderView({ roster: roster.readRoster(), ladder, reference, cells: { ...failures, measured_window: window } })
+        return json(res, 200, { schema, ...view })
+      }
+      if (url.pathname === '/api/roster/ladder/stage') {
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves)) return json(res, 400, { schema, error: 'moves must be an array' })
+        for (let index = 0; index < input.moves.length; index += 1) {
+          const move = input.moves[index]
+          if (!move || typeof move !== 'object' || Array.isArray(move) || typeof move.tier !== 'string' || typeof move.role !== 'string') return json(res, 400, { schema, error: `moves[${index}].tier and moves[${index}].role are required` })
+          if (move.cell !== null && (typeof move.cell !== 'object' || Array.isArray(move.cell))) return json(res, 400, { schema, error: `moves[${index}].cell must be an object or null` })
+        }
+        const raw = roster.readRaw()
+        const ladder = readLadder({ ladderPath: config.ladderPath })
+        const result = await stageMoves({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, moves: input.moves, ladder, breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb } })
+        return json(res, 200, { schema, roster_path: raw.path, ...result })
+      }
+      if (url.pathname === '/api/roster/ladder/compose') {
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves)) return json(res, 400, { schema, error: 'moves must be an array' })
+        for (let index = 0; index < input.moves.length; index += 1) {
+          const move = input.moves[index]
+          if (!move || typeof move !== 'object' || Array.isArray(move) || typeof move.tier !== 'string' || typeof move.role !== 'string') return json(res, 400, { schema, error: `moves[${index}].tier and moves[${index}].role are required` })
+          if (move.cell !== null && (typeof move.cell !== 'object' || Array.isArray(move.cell))) return json(res, 400, { schema, error: `moves[${index}].cell must be an object or null` })
+        }
+        const raw = roster.readRaw()
+        const ladder = readLadder({ ladderPath: config.ladderPath })
+        const result = await composeMoves({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, moves: input.moves, ladder, breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb } })
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/health') {

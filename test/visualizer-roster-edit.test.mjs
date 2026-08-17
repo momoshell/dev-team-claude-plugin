@@ -7,11 +7,30 @@ import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
 import { DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS, ROLE_ORDER, assertCapabilities } from '../crew/crew.mjs'
 import { capabilityRefusals, loadSeatSchema, proposeEdit } from '../visualizer/server/roster-edit.mjs'
+import { composeMoves, ladderView, readLadder, readReference, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 
 const rosterPath = join(process.cwd(), 'crew', 'roster.json')
 const schemaPath = join(process.cwd(), 'crew', 'roster.schema.json')
 const rosterText = readFileSync(rosterPath, 'utf8')
 const roster = JSON.parse(rosterText)
+const ladderPath = join(process.cwd(), 'crew', 'model-ladder.json')
+const ratifiedLadder = readLadder({ ladderPath })
+
+function ladderRosterView() {
+  return {
+    path: rosterPath,
+    degraded: false,
+    error: null,
+    updated_at: roster.updated_at,
+    schema_version: roster.schema_version,
+    tiers: Object.entries(roster.tiers).map(([tier, tierRoster]) => ({
+      tier,
+      seats: Object.entries(tierRoster).filter(([, cell]) => cell !== null).map(([role, cell]) => ({ role, ...cell, model_key: `${cell.provider}/${cell.id}` })),
+      unseated: Object.entries(tierRoster).filter(([, cell]) => cell === null).map(([role]) => role),
+    })),
+    models: Object.entries(roster.models).map(([key, model]) => ({ key, ...model })),
+  }
+}
 
 async function edit(input = {}) {
   return await proposeEdit({
@@ -227,4 +246,102 @@ test('an invalid agent name is refused without touching the filesystem', async (
   assert.equal(refusals.length, 1)
   assert.equal(refusals[0].code, 'capability_unknown')
   assert.match(refusals[0].message, /\.\.\/evil/)
+})
+
+test('readLadder and readReference degrade without inventing data', () => {
+  assert.equal(ratifiedLadder.degraded, false)
+  assert.deepEqual(ratifiedLadder.bands.map((band) => band.rank), [...ratifiedLadder.bands].map((band) => band.rank).sort((a, b) => b - a))
+  const dir = mkdtempSync(join(tmpdir(), 'roster-ladder-read-'))
+  try {
+    const missing = readLadder({ ladderPath: join(dir, 'missing.json') })
+    assert.equal(missing.degraded, true); assert.equal(missing.bands, null); assert.match(missing.error, /missing\.json/)
+    const invalidPath = join(dir, 'invalid.json'); writeFileSync(invalidPath, '{ nope')
+    const invalid = readLadder({ ladderPath: invalidPath })
+    assert.equal(invalid.degraded, true); assert.equal(invalid.bands, null); assert.match(invalid.error, /invalid\.json/)
+    const referenceMissing = readReference({ referencePath: join(dir, 'reference.json') })
+    assert.equal(referenceMissing.present, false); assert.equal(referenceMissing.scores, null)
+    const referencePath = join(dir, 'reference-valid.json')
+    writeFileSync(referencePath, JSON.stringify({ fetched_at: '2026-08-17', source: 'test', models: { 'openai/gpt-5.6-terra': { score: 95 }, 'anthropic/claude-opus-5': { score: 'unknown' } } }))
+    const reference = readReference({ referencePath })
+    assert.equal(reference.present, true); assert.equal(reference.scores['openai/gpt-5.6-terra'], 95)
+    const view = ladderView({ roster: ladderRosterView(), ladder: ratifiedLadder, reference, cells: { rows: [], absent: null } })
+    const scored = view.chips.find((chip) => chip.key === 'openai/gpt-5.6-terra')
+    const nonNumeric = view.chips.find((chip) => chip.key === 'anthropic/claude-opus-5')
+    assert.equal(scored.reference, 95); assert.ok(nonNumeric.reference_pending); assert.equal(nonNumeric.reference, null)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('ladderView keeps ratified drift, measured records and tier rail separate', () => {
+  const reference = { path: '/tmp/reference.json', present: true, fetched_at: '2026-08-17', source: 'test', scores: { 'openai/gpt-5.6-terra': 95 } }
+  const cells = { rows: [{ provider: 'openai', model_id: 'gpt-5.6-terra', agent: 'pi', effort: 'max', kind: 'timeout', failures: 3, run_less: 1, first_at: 'a', last_at: 'b' }], absent: null }
+  const view = ladderView({ roster: ladderRosterView(), ladder: ratifiedLadder, reference, cells })
+  const terra = view.chips.find((chip) => chip.key === 'openai/gpt-5.6-terra')
+  assert.equal(terra.band, 'workhorse'); assert.equal(terra.proposed_band, 'frontier'); assert.match(terra.drift.why, /workhorse/); assert.match(terra.drift.why, /frontier/)
+  assert.deepEqual({ failures: terra.measured.failures, run_less: terra.measured.run_less, in_run: terra.measured.in_run, cells: terra.measured.cells }, { failures: 3, run_less: 1, in_run: 2, cells: 1 })
+  assert.deepEqual(view.rail.map((rail) => rail.tier), Object.keys(roster.tiers))
+  const absent = ladderView({ roster: ladderRosterView(), ladder: ratifiedLadder, reference: { path: '/tmp/reference', present: false, scores: null }, cells: { rows: null, absent: 'cell_failures predates this ledger mirror' } }).chips.find((chip) => chip.key === terra.key)
+  assert.equal(absent.measured, null); assert.ok(absent.measured_pending)
+  const broken = ladderView({ roster: ladderRosterView(), ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder.json' }), reference, cells })
+  assert.equal(broken.bands, null); assert.equal(broken.chips, null); assert.equal(broken.rail, null)
+})
+
+async function stageLadder(moves, extra = {}) {
+  return await stageMoves({ rosterText, rosterPath: 'crew/roster.json', readError: null, moves, ladder: ratifiedLadder, readBreaker: () => null, ...extra })
+}
+
+test('stageMoves validates all four checks and produces an applyable multi-move diff', async () => {
+  const moves = [
+    { tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } },
+    { tier: 'mechanical', role: 'reviewer', cell: { ...roster.tiers.mechanical.reviewer, effort: 'high' } },
+  ]
+  const result = await stageLadder(moves)
+  assert.equal(result.ok, true); assert.deepEqual(result.checks.map((entry) => entry.check), ['band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']); assert.ok(result.checks.every((entry) => entry.ok && entry.message))
+  const dir = mkdtempSync(join(tmpdir(), 'roster-ladder-patch-'))
+  try {
+    mkdirSync(join(dir, 'crew')); copyFileSync(rosterPath, join(dir, 'crew', 'roster.json')); const patchPath = join(dir, 'roster.patch'); writeFileSync(patchPath, result.diff)
+    execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
+    const after = JSON.parse(readFileSync(join(dir, 'crew', 'roster.json'), 'utf8'))
+    assert.equal(after.tiers.build.reviewer.effort, 'high'); assert.equal(after.tiers.mechanical.reviewer.effort, 'high')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('stageMoves names floor, cost and vendor refusals and keeps the diff null', async () => {
+  const floor = await stageLadder([{ tier: 'build', role: 'builder', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'claude', effort: 'medium' } }])
+  assert.equal(floor.ok, false); assert.equal(floor.diff, null); assert.equal(floor.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.match(floor.checks.find((entry) => entry.check === 'band_floor').message, /utility.*build.*builder.*claude-haiku-4-5/)
+  const cost = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-fable-5', agent: 'claude', effort: 'high' } }])
+  assert.equal(cost.checks.find((entry) => entry.check === 'cost_ceiling').ok, false); assert.match(cost.checks.find((entry) => entry.check === 'cost_ceiling').message, /25.*build.*reviewer.*claude-fable-5/)
+  const vendor = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }])
+  assert.equal(vendor.checks.find((entry) => entry.check === 'vendor_diversity').ok, false); assert.match(vendor.checks.find((entry) => entry.check === 'vendor_diversity').message, /cross-vendor/)
+})
+
+test('stageMoves breaker and shape refusals still return every named check', async () => {
+  const move = { tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }
+  const open = await stageLadder([move], { readBreaker: () => ({ verdict: 'open', cells: [{ provider: 'openai', model_id: 'gpt-5.6-terra', agent: 'pi', effort: 'high', verdict: 'open' }] }) })
+  assert.equal(open.checks.find((entry) => entry.check === 'breaker_state').ok, false); assert.match(open.checks.find((entry) => entry.check === 'breaker_state').message, /open.*gpt-5.6-terra/)
+  const cell = { ...move.cell }; delete cell.effort
+  const shape = await stageLadder([{ ...move, cell }])
+  assert.ok(shape.refusals.some((refusal) => refusal.code === 'cell_shape')); assert.deepEqual(shape.checks.map((entry) => entry.check), ['band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling'])
+  const degraded = await stageMoves({ rosterText, rosterPath: 'crew/roster.json', moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder.json' }), readBreaker: () => null })
+  assert.equal(degraded.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.equal(degraded.checks.find((entry) => entry.check === 'cost_ceiling').ok, false)
+})
+
+test('stageMoves can compose an optional cell:null move without model checks', async () => {
+  const move = { tier: 'judge', role: 'lead', cell: null }
+  const result = await stageLadder([move])
+  assert.equal(result.ok, true)
+  assert.equal(result.checks.find((entry) => entry.check === 'band_floor').ok, true)
+  assert.equal(result.checks.find((entry) => entry.check === 'cost_ceiling').ok, true)
+  assert.match(result.diff, /judge/)
+  const degraded = await stageMoves({ rosterText, rosterPath: 'crew/roster.json', moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder-null.json' }), readBreaker: () => null })
+  assert.equal(degraded.ok, false)
+  assert.equal(degraded.diff, null)
+  assert.equal(degraded.checks.find((entry) => entry.check === 'band_floor').ok, false)
+  assert.equal(degraded.checks.find((entry) => entry.check === 'cost_ceiling').ok, false)
+})
+
+test('composeMoves returns a deterministic PR-ready bundle and never writes the roster', async () => {
+  const before = readFileSync(rosterPath, 'utf8')
+  const moves = [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }]
+  const result = await composeMoves({ rosterText, rosterPath: 'crew/roster.json', moves, ladder: ratifiedLadder, branchSeed: 'unit-test', readBreaker: () => null })
+  assert.equal(result.ok, true); assert.equal(result.branch, 'roster/ladder-unit-test'); assert.match(result.commit_subject, /^chore\(roster\): reseat/); assert.match(result.patch, /^--- a\/crew\/roster\.json/); assert.equal(readFileSync(rosterPath, 'utf8'), before)
 })

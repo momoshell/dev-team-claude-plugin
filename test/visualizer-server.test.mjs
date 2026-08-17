@@ -49,10 +49,12 @@ function announce(child) {
     child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
   })
 }
-function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = null) {
+function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = null, ladderPath = null, referencePath = null) {
   const args = ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
   if (crewRoot) args.push('--crew-root', crewRoot)
   if (rosterPath) args.push('--roster', rosterPath)
+  if (ladderPath) args.push('--ladder', ladderPath)
+  if (referencePath) args.push('--model-reference', referencePath)
   const child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'], env: environment ? { ...process.env, ...environment } : process.env })
   children.add(child)
   return announce(child).then((base) => ({ child, base }))
@@ -696,4 +698,57 @@ test('/api/intake serves the loop read-only', { skip: SKIP }, async () => {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('roster ladder routes stage and compose read-only bundles', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-roster-ladder-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const rosterPath = join(process.cwd(), 'crew', 'roster.json')
+  const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
+  const before = digest(rosterPath)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const view = await json(base, '/api/roster/ladder')
+    assert.equal(view.status, 200); assert.equal(view.json.degraded, false); assert.ok(view.json.bands.length); assert.ok(view.json.rail.length)
+    for (const method of ['POST', 'PUT']) assert.equal((await json(base, '/api/roster/ladder', { method })).status, 405)
+    assert.equal((await json(base, '/api/roster/ladder/stage')).status, 405)
+    assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', body: '{ not json' })).status, 400)
+    assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
+    const legal = await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }] }) })
+    assert.equal(legal.status, 200); assert.equal(legal.json.ok, true); assert.match(legal.json.diff, /^--- a\/crew\/roster\.json/m); assert.equal(legal.json.checks.length, 4)
+    const illegal = await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'builder', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'claude', effort: 'medium' } }] }) })
+    assert.equal(illegal.status, 200); assert.equal(illegal.json.ok, false); assert.equal(illegal.json.diff, null); assert.equal(illegal.json.checks.find((check) => check.check === 'band_floor').ok, false)
+    const composed = await json(base, '/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }] }) })
+    assert.equal(composed.status, 200); assert.equal(composed.json.ok, true); assert.ok(composed.json.branch); assert.ok(composed.json.commit_subject); assert.match(composed.json.patch, /^--- a\/crew\/roster\.json/m); assert.equal(composed.json.applyable_with, 'git apply / patch -p1')
+    await stopServer(child); child = null
+    assert.equal(digest(rosterPath), before)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('ladder HTTP requests degrade honestly for missing ladder and reference files', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-roster-ladder-degraded-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db'), missingLadder = join(dir, 'missing-ladder.json'), missingReference = join(dir, 'missing-reference.json')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, null, null, missingLadder, missingReference))
+    const response = await json(base, '/api/roster/ladder')
+    assert.equal(response.status, 200); assert.equal(response.json.degraded, true); assert.equal(response.json.bands, null); assert.equal(response.json.chips, null); assert.match(response.json.error, /missing-ladder/)
+    await stopServer(child); child = null
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('ladder source and API calls carry the required drag surface', () => {
+  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
+  for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
+  assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
 })

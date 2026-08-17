@@ -1,0 +1,52 @@
+{
+  "schema_version": 1,
+  "ratified_at": "2026-08-14",
+  "ratified_by": "dev-team",
+  "bands": [
+    {
+      "band": "frontier",
+      "rank": 3,
+      "floor_reference_score": 80,
+      "members": [
+        "anthropic/claude-opus-5",
+        "openai/gpt-5.6-sol",
+        "anthropic/claude-fable-5"
+      ]
+    },
+    {
+      "band": "workhorse",
+      "rank": 2,
+      "floor_reference_score": 50,
+      "members": [
+        "openai/gpt-5.6-terra",
+        "anthropic/claude-sonnet-5"
+      ]
+    },
+    {
+      "band": "utility",
+      "rank": 1,
+      "floor_reference_score": 0,
+      "members": [
+        "openai/gpt-5.6-luna"
+      ]
+    },
+    {
+      "band": "basement",
+      "rank": 0,
+      "floor_reference_score": -10,
+      "members": [
+        "anthropic/claude-haiku-4-5"
+      ]
+    }
+  ],
+  "tier_floors": {
+    "mechanical": "utility",
+    "build": "utility",
+    "judge": "utility"
+  },
+  "cost_ceilings": {
+    "mechanical": 25,
+    "build": 25,
+    "judge": 30
+  }
+}

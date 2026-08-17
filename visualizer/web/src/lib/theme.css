@@ -1,42 +1,134 @@
 :root {
+  --ink-ground: #17171a;
+  --ink-panel: #1e1e22;
+  --ink-hairline: #26262b;
+  --ink-text: #eae8ee;
+  --ink-muted: #9b99a3;
+  --paper-ground: #efece5;
+  --paper-panel: #e7e3da;
+  --paper-hairline: #e2ded4;
+  --paper-text: #15140f;
+  --paper-muted: #55534a;
+  --spot-light: #8839ef;
+  --spot-dark: #cba6f7;
+  --role-planner-dark: #3987e5;
+  --role-builder-dark: #d95926;
+  --role-reviewer-dark: #199e70;
+  --role-tech-lead-dark: #c98500;
+  --role-lead-dark: #d55181;
+  --role-driver-dark: #9085e9;
+  --role-planner-light: #2a78d6;
+  --role-builder-light: #eb6834;
+  --role-reviewer-light: #1baf7a;
+  --role-tech-lead-light: #eda100;
+  --role-lead-light: #e87ba4;
+  --role-driver-light: #4a3aa7;
+  --serious: #ec835a;
+  /* These status steps are operational tokens, not part of the ratified role palette. */
+  --status-ok-raw: #2f9e62;
+  --status-fail-raw: #c94f58;
+  --status-running-raw: #c38b18;
+  --status-skipped-raw: #77747d;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-family: system-ui, sans-serif;
-  color: #17202a;
-  background: #f5f7fa;
-  --bg: #f5f7fa;
-  --panel: #fff;
-  --line: #dce3eb;
-  --muted: #667085;
-  --accent: #2463eb;
-  --lane-0: #2563eb;
-  --lane-1: #d97706;
-  --lane-2: #0d9488;
-  --lane-3: #9333ea;
-  --lane-4: #dc2626;
-  --lane-5: #0891b2;
-  --lane-6: #65a30d;
-  --lane-7: #db2777;
-  --status-ok: #16a34a;
-  --status-fail: #dc2626;
-  --status-running: #d97706;
-  --status-skipped: #64748b;
-  --neutral: #94a3b8;
 }
+
+:root,
+:root[data-theme='paper'] {
+  color: var(--paper-text);
+  background: var(--paper-ground);
+  --bg: var(--paper-ground);
+  --panel: var(--paper-panel);
+  --line: var(--paper-hairline);
+  --muted: var(--paper-muted);
+  --accent: var(--spot-light);
+  --neutral: var(--paper-muted);
+  --status-ok: var(--status-ok-raw);
+  --status-fail: var(--status-fail-raw);
+  --status-running: var(--status-running-raw);
+  --status-skipped: var(--status-skipped-raw);
+  --status-escalated: var(--serious);
+  --role-planner: var(--role-planner-light);
+  --role-builder: var(--role-builder-light);
+  --role-reviewer: var(--role-reviewer-light);
+  --role-tech-lead: var(--role-tech-lead-light);
+  --role-lead: var(--role-lead-light);
+  --role-driver: var(--role-driver-light);
+  --lane-0: var(--role-planner);
+  --lane-1: var(--role-builder);
+  --lane-2: var(--role-reviewer);
+  --lane-3: var(--role-tech-lead);
+  --lane-4: var(--role-lead);
+  --lane-5: var(--role-driver);
+  --lane-6: var(--neutral);
+  --lane-7: var(--muted);
+}
+
+:root[data-theme='ink'] {
+  color: var(--ink-text);
+  background: var(--ink-ground);
+  --bg: var(--ink-ground);
+  --panel: var(--ink-panel);
+  --line: var(--ink-hairline);
+  --muted: var(--ink-muted);
+  --accent: var(--spot-dark);
+  --neutral: var(--ink-muted);
+  --status-ok: var(--status-ok-raw);
+  --status-fail: var(--status-fail-raw);
+  --status-running: var(--status-running-raw);
+  --status-skipped: var(--status-skipped-raw);
+  --status-escalated: var(--serious);
+  --role-planner: var(--role-planner-dark);
+  --role-builder: var(--role-builder-dark);
+  --role-reviewer: var(--role-reviewer-dark);
+  --role-tech-lead: var(--role-tech-lead-dark);
+  --role-lead: var(--role-lead-dark);
+  --role-driver: var(--role-driver-dark);
+  --lane-0: var(--role-planner);
+  --lane-1: var(--role-builder);
+  --lane-2: var(--role-reviewer);
+  --lane-3: var(--role-tech-lead);
+  --lane-4: var(--role-lead);
+  --lane-5: var(--role-driver);
+  --lane-6: var(--neutral);
+  --lane-7: var(--muted);
+}
+
 @media (prefers-color-scheme: dark) {
-  :root {
-    color: #edf2f7;
-    background: #121821;
-    --bg: #121821;
-    --panel: #1c2530;
-    --line: #354252;
-    --muted: #aab5c4;
-    --status-ok: #4ade80;
-    --status-fail: #f87171;
-    --status-running: #fbbf24;
-    --status-skipped: #94a3b8;
-    --neutral: #64748b;
+  :root:not([data-theme='paper']) {
+    color: var(--ink-text);
+    background: var(--ink-ground);
+    --bg: var(--ink-ground);
+    --panel: var(--ink-panel);
+    --line: var(--ink-hairline);
+    --muted: var(--ink-muted);
+    --accent: var(--spot-dark);
+    --neutral: var(--ink-muted);
+    --status-ok: var(--status-ok-raw);
+    --status-fail: var(--status-fail-raw);
+    --status-running: var(--status-running-raw);
+    --status-skipped: var(--status-skipped-raw);
+    --status-escalated: var(--serious);
+    --role-planner: var(--role-planner-dark);
+    --role-builder: var(--role-builder-dark);
+    --role-reviewer: var(--role-reviewer-dark);
+    --role-tech-lead: var(--role-tech-lead-dark);
+    --role-lead: var(--role-lead-dark);
+    --role-driver: var(--role-driver-dark);
+    --lane-0: var(--role-planner);
+    --lane-1: var(--role-builder);
+    --lane-2: var(--role-reviewer);
+    --lane-3: var(--role-tech-lead);
+    --lane-4: var(--role-lead);
+    --lane-5: var(--role-driver);
+    --lane-6: var(--neutral);
+    --lane-7: var(--muted);
   }
 }
-* { box-sizing: border-box; }
+
+*, *::before, *::after { box-sizing: border-box; border-radius:0; }
 body { margin: 0; background: var(--bg); color: inherit; overflow-x: hidden; }
-button, input, select { font: inherit; }
+button, input, select, textarea { font: inherit; border-radius:0; }
 .wide { overflow-x: auto; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.micro { text-transform: uppercase; letter-spacing: .12em; font-size: .7rem; }

@@ -1,6 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
+import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
+import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -352,4 +356,126 @@ test('intakePanel states its window and offers no write path', () => {
   assert.match(result.window_label, /until now/)
   assert.equal(Object.keys(result).some((key) => /^(on|post|submit|mutate)/i.test(key)), false)
   assert.equal(result.readonly_note, 'this view reads the ledger; the intake module owns every decision shown here')
+})
+
+test('hash routes parse and format all five canonical views', () => {
+  for (const hash of ['#/', '#/ops', '#/roster', '#/adw-123', '#/adw-123/plan']) {
+    assert.equal(formatHash(parseHash(hash)), hash)
+  }
+  assert.deepEqual(parseHash(''), { view: 'fleet', adw_id: null, phase: null })
+  assert.deepEqual(parseHash('#'), { view: 'fleet', adw_id: null, phase: null })
+  assert.deepEqual(parseHash('#/adw-123/'), { view: 'run', adw_id: 'adw-123', phase: null })
+  assert.deepEqual(parseHash('#/ops/ignored/extra'), { view: 'ops', adw_id: null, phase: null })
+  assert.deepEqual(parseHash('#/adw-123/plan/ignored'), { view: 'phase', adw_id: 'adw-123', phase: 'plan' })
+  assert.equal(parseHash('#/ops').adw_id, null)
+  assert.equal(parseHash('#/roster').adw_id, null)
+})
+
+test('fleet cells preserve honest absence and discriminate status evidence', () => {
+  const now = Date.parse('2024-01-01T00:02:00.000Z')
+  assert.equal(absenceMark(null).text, 'not measured')
+  assert.equal(tokenCell({ metrics: { billed_input_tokens: null }, pending: { billed_input_tokens: 'predates this measurement' } }).value, null)
+  assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).value, 20)
+  assert.equal(costCell({ transport: 'pane' }).text, 'not measured · pane')
+  assert.equal(heartbeatCell({ last_heartbeat_at: new Date(now - 4000).toISOString() }, now).text, '4s ago')
+  assert.equal(heartbeatCell({ last_heartbeat_at: new Date(now - 91000).toISOString() }, now).text, 'silent 91s')
+  assert.equal(heartbeatCell({ pending: { last_heartbeat_at: 'not measured' } }, now).dashed, true)
+  assert.equal(deriveStatus({ status: 'aborted' }, null).key, 'fail')
+  const why = 'escalation evidence'
+  const status = deriveStatus({ status: 'aborted' }, { status: 'escalation', details: { escalation: { where: 'gate', why } } })
+  assert.equal(status.key, 'escalated')
+  assert.equal(status.why, why)
+  assert.equal(new Set(['proven', 'failed', 'unproven'].map((verdict) => gateCell({ gate_generations: [{ verdict }] }).text)).size, 3)
+  assert.equal(reviewCell({ reviews: [{ verdict: 'changes-needed' }, { verdict: 'pass' }] }).bounces, 1)
+})
+
+test('fleet view pins escalations and silent runs and probes only non-green slugged runs', () => {
+  const now = Date.parse('2024-01-01T00:05:00.000Z')
+  const base = { repo_slug: 'repo', status: 'ok', running: false, phases: [{ seq: 1 }], started_at: '2024-01-01T00:00:00.000Z', duration_ms: 1000, metrics: {}, pending: {}, reviews: null, gate_generations: null, triage: { reviewed_at: null } }
+  const runs = [
+    { ...base, adw_id: 'ok', goal: 'ok' },
+    { ...base, adw_id: 'esc', goal: 'esc', status: 'aborted' },
+    { ...base, adw_id: 'silent', goal: 'silent', status: 'running', running: true, last_heartbeat_at: new Date(now - 91000).toISOString() },
+    { ...base, adw_id: 'slugless', goal: null },
+    { ...base, adw_id: 'archived', goal: 'archived', triage: { reviewed_at: '2024-01-01T00:01:00.000Z' } },
+  ]
+  const why = 'needs human attention'
+  const view = fleetView(runs, { now, envelopes: new Map([['esc', { status: 'escalation', details: { escalation: { where: 'gate', why } } }]]) })
+  assert.equal(view.rail[0].adw_id, 'esc')
+  assert.equal(view.rail[0].why, why)
+  assert.ok(view.rail.some((row) => row.adw_id === 'silent'))
+  assert.equal(view.hidden.count, 2)
+  assert.equal(view.rows.length, 3)
+  assert.deepEqual(escalationProbeTargets(runs), ['esc', 'silent'])
+  assert.equal(fleetView(runs, { now, filters: { hide_slugless: false, hide_archived: false } }).hidden.count, 0)
+})
+
+test('fleet surfaces pin honest cost, heartbeat, and escalated status tone', () => {
+  const now = Date.parse('2024-01-01T00:05:00.000Z')
+  const base = {
+    repo_slug: 'repo', status: 'ok', running: false, phases: [{ seq: 1 }], metrics: {},
+    triage: { reviewed_at: null }, pending: {},
+  }
+  const pane = {
+    ...base,
+    adw_id: 'pane',
+    goal: 'pane run',
+    pending: { billed_cost_usd: 'money deferred — a subscription seat is not billed per token (#185)' },
+  }
+  const unmeasured = { ...base, adw_id: 'unmeasured', goal: 'unmeasured run' }
+  const rows = fleetView([pane, unmeasured], { now }).rows
+  assert.equal(rows[0].cost.text, 'not measured · pane')
+  assert.equal(rows[0].cost.value, null)
+  assert.equal(rows[0].cost.dashed, true)
+  assert.equal(rows[1].cost.value, null)
+  assert.equal(rows[1].cost.dashed, true)
+  assert.notEqual(rows[1].cost.text, '0')
+
+  const root = join(process.cwd(), 'visualizer/web/src/lib')
+  const table = readFileSync(join(root, 'FleetTable.svelte'), 'utf8')
+  assert.match(table, /duration<\/th><th class="micro">tokens<\/th><th class="micro">cost<\/th><th class="micro">heartbeat<\/th>/)
+  assert.match(table, /\{@render mark\(row\.cost\)\}/)
+  assert.match(table, /row\.heartbeat/)
+  assert.match(table, /class:stale=\{row\.heartbeat\.stale\}/)
+  assert.match(table, /\.stale \{ color:var\(--status-escalated\); \}/)
+  assert.doesNotMatch(table, /\.status\.ok,\s*\.status\.serious\s*\{\s*color:var\(--status-ok\)/)
+  assert.match(table, /\.status\.serious\s*\{\s*color:var\(--status-escalated\)/)
+  const card = readFileSync(join(root, 'RunCard.svelte'), 'utf8')
+  assert.match(card, /status-dot[\s\S]*status\.word/)
+})
+
+test('return probing shares one six-request semaphore across refresh generations', async () => {
+  const semaphore = createSemaphore(2)
+  let active = 0
+  let maximum = 0
+  const releases = []
+  const tasks = Array.from({ length: 4 }, () => semaphore.run(async () => {
+    active += 1
+    maximum = Math.max(maximum, active)
+    await new Promise((resolve) => releases.push(resolve))
+    active -= 1
+  }))
+  const tick = () => new Promise((resolve) => setImmediate(resolve))
+  await tick()
+  assert.equal(active, 2)
+  while (releases.length) {
+    releases.shift()()
+    await tick()
+  }
+  await Promise.all(tasks)
+  assert.equal(maximum, 2)
+})
+
+test('role colour stays isolated to RoleTag and escalations render their why in the rail', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  for (const file of ['App.svelte', 'lib/FleetTable.svelte', 'lib/RunCard.svelte', 'lib/Filters.svelte']) {
+    assert.doesNotMatch(readFileSync(join(root, file), 'utf8'), /--role-|--lane-\d/)
+  }
+  const tag = readFileSync(join(root, 'lib/RoleTag.svelte'), 'utf8')
+  assert.match(tag, /--role-|--lane-/)
+  assert.match(tag, /\{\s*role\s*\}/)
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  assert.match(app, /row\.status\.key === 'escalated'[\s\S]*?class="rail-why">\{row\.why\}/)
+  assert.match(app, /returnRequestSemaphore = createSemaphore\(6\)/)
+  assert.match(app, /returnRequestSemaphore\.run\(\(\) => getReturns/)
 })

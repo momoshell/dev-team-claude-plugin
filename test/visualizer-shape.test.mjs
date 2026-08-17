@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
+import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER } from '../visualizer/server/shape.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
@@ -170,9 +170,37 @@ test('foldAgents gap-fills starts and closes lanes on end', () => {
   assert.equal(closed.ended_at, end)
 })
 
-test('laneFor is stable for a role across calls', () => {
-  assert.equal(laneFor('planner'), laneFor('planner'))
-  assert.equal(laneFor('reviewer'), laneFor('reviewer'))
+test('laneFor follows the ratified role order and folds unknown roles into stable spare lanes', () => {
+  assert.deepEqual([...ROLE_ORDER], ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
+  ROLE_ORDER.forEach((role, index) => assert.equal(laneFor(role), index))
+  const unknown = laneFor('nobody')
+  assert.ok(unknown >= 6)
+  assert.equal(unknown, laneFor('nobody'))
+})
+
+test('shapeRun keeps tier and heartbeat absent until their sources measure them', () => {
+  const now = Date.parse('2024-01-01T00:02:00.000Z')
+  const absent = shapeRun(base, [], [], null, missingProbe, now)
+  assert.equal(absent.tier, null)
+  assert.ok(absent.pending.tier)
+  assert.equal(absent.last_heartbeat_at, null)
+  assert.equal(absent.heartbeat_age_ms, null)
+  assert.ok(absent.pending.last_heartbeat_at)
+  const latest = '2024-01-01T00:01:56.000Z'
+  const measured = shapeRun(base, [], [], null, missingProbe, now, {
+    agentSessions: [{ last_heartbeat_at: '2024-01-01T00:01:00.000Z' }, { last_heartbeat_at: latest }],
+  })
+  assert.equal(measured.last_heartbeat_at, latest)
+  assert.equal(measured.heartbeat_age_ms, 4000)
+  assert.equal(measured.pending.last_heartbeat_at, undefined)
+})
+
+test('theme role and lane aliases follow the ratified role order', () => {
+  const css = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/theme.css'), 'utf8')
+  for (const [index, role] of ROLE_ORDER.entries()) {
+    assert.match(css, new RegExp(`--role-${role}\\s*:`))
+    assert.match(css, new RegExp(`--lane-${index}\\s*:\\s*var\\(\\s*--role-${role}\\s*\\)`))
+  }
 })
 
 test('matchesFilters covers mode, status, since, until and pending mode', () => {

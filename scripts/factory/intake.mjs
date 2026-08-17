@@ -18,7 +18,7 @@ import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync,
   writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync,
 } from 'node:fs'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import {
   INTAKE_REFUSALS, INTAKE_OUTCOMES, openLedger,
 } from './ledger.mjs'
@@ -512,6 +512,26 @@ function emptyRateLimit(degraded = false, rateLimit = null) {
   }
 }
 
+function sessionAdwId(d, { crewJson, checkout } = {}) {
+  if (typeof crewJson !== 'string' || !crewJson.trim()) return null
+  try {
+    // crew/crew.mjs:634 prints crew_json in paths.dir; crew/crew.mjs:722
+    // passes that same dir as emit's stateDir; scripts/factory/emit.mjs:
+    // 573-574 writes the adw_id sidecar at <stateDir>/ledger/run.json.
+    const resolvedCrewJson = isAbsolute(crewJson)
+      ? crewJson
+      : resolve(checkout || process.cwd(), crewJson)
+    const sidecar = join(dirname(resolvedCrewJson), 'ledger', 'run.json')
+    const parsed = JSON.parse(String(d.readFileSync(sidecar, 'utf8')))
+    const adwId = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed.adw_id
+      : null
+    return typeof adwId === 'string' && adwId.trim() ? adwId.trim() : null
+  } catch {
+    return null
+  }
+}
+
 function withLedger(dbPath, fn) {
   if (dbPath == null) return
   let ledger = null
@@ -932,6 +952,9 @@ export function dispatchPicked({ board, picked, sweptAt, boardItems = [], checko
   const rawTaskDir = typeof bootLine?.task_dir === 'string' && bootLine.task_dir.trim()
     ? bootLine.task_dir
     : null
+  const rawCrewJson = typeof bootLine?.crew_json === 'string' && bootLine.crew_json.trim()
+    ? bootLine.crew_json
+    : null
   const crewDir = rawTaskDir == null
     ? null
     : (isAbsolute(rawTaskDir) ? rawTaskDir : resolve(workCheckout || process.cwd(), rawTaskDir))
@@ -954,6 +977,18 @@ export function dispatchPicked({ board, picked, sweptAt, boardItems = [], checko
     task, checkout: workCheckout, briefPath: brief.path, variant: settings.variant,
   })
   const settled = adjudicateCrewRun(run, { deps: d, crewDir, checkout: workCheckout })
+  // The crew mints its sessions row mid-run and crewRun is a blocking
+  // spawnSync, so this settle step is the earliest reachable point. A
+  // request is therefore honestly absent during the live run, and a sidecar
+  // failure never changes the dispatch outcome.
+  if (typeof picked.request?.ask === 'string' && picked.request.ask.trim()) {
+    const adwId = sessionAdwId(d, { crewJson: rawCrewJson, checkout: workCheckout })
+    if (adwId) {
+      withLedger(dbPath, (ledger) => ledger.recordSessionRequest({
+        adw_id: adwId, request: picked.request.ask, source: 'dispatch',
+      }))
+    }
+  }
   return recordDispatchStep({
     dbPath, board: selectedBoard, picked, sweptAt, deps: d,
     outcome: settled.outcome, reason: settled.why,

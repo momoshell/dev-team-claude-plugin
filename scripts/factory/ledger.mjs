@@ -118,6 +118,11 @@ export const EVENT_TYPES = Object.freeze([
 ])
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
+export const REQUEST_SOURCES = Object.freeze(['dispatch', 'brief-file'])
+export const REQUEST_MAX_CHARS = 2000
+export const RETIRED_TABLES = Object.freeze({
+  envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/realio.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
+})
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
@@ -258,6 +263,12 @@ export const TABLES = Object.freeze({
       { name: 'billed_cache_read_tokens', decl: 'INTEGER' },
       { name: 'billed_cost_usd', decl: 'REAL' },
       { name: 'ledger_version', decl: 'INTEGER' },
+      // Append-only: upgraded databases receive these via ADD COLUMN, so
+      // AC-1 requires new columns at the end; NULL means not measured then,
+      // never an empty ask. `request` is the run's compiled ask line (the
+      // headline), not the whole request object.
+      { name: 'request', decl: 'TEXT' },
+      { name: 'request_source', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -608,7 +619,7 @@ export const TABLES = Object.freeze({
 // JSONL line `kind` values. replayJsonl refuses any `kind` outside this set.
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeDispatch', 'recordSeatTeardown', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -702,6 +713,16 @@ export class LedgerUsageError extends Error {
 
 function refuse(message, reason = 'usage') {
   throw new LedgerUsageError(`ledger: ${message}`, reason)
+}
+
+function normaliseRequestText(value, ctx) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    refuse(`${ctx}: request must be a non-blank string`)
+  }
+  const text = value.trim()
+  const marker = '…[truncated]'
+  if (text.length <= REQUEST_MAX_CHARS) return text
+  return `${text.slice(0, REQUEST_MAX_CHARS - marker.length)}${marker}`
 }
 
 // isoMs(t) -> millisecond-precision ISO string. Every *_at column and every
@@ -1072,12 +1093,62 @@ export function openLedger({
       billed_cache_read_tokens: null,
       billed_cost_usd: null,
       ledger_version: LEDGER_VERSION,
+      // emit.mjs:936 mints this sessions row inside the crew run, before the
+      // dispatcher can reach it; the request arrives later via
+      // recordSessionRequest. Keep explicit nulls rather than omitting facts.
+      request: null,
+      request_source: null,
     }, stats)
     sessionStatusByAdwId.set(args.adw_id, args.status)
     appendJsonl('startSession', args)
     mirror((conn) => {
       conn.prepare(`INSERT OR IGNORE INTO sessions (${tableColumnNames('sessions').join(', ')}) VALUES (${tableColumnNames('sessions').map(() => '?').join(', ')})`)
         .run(...tableColumnNames('sessions').map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
+  function recordSessionRequest(input = {}) {
+    // A request value redacted before JSONL append must remain replayable:
+    // encode it as an explicit no-op, never as a malformed writer line or a
+    // source-without-request fact. This shape is produced only after field
+    // hygiene and is accepted again when replayJsonl dispatches it.
+    const redactedNoop = input.redacted === true
+    let args
+    if (redactedNoop) {
+      if (input.request !== null || input.source !== null) {
+        refuse('recordSessionRequest: redacted replay must carry null request and source')
+      }
+      args = redact({
+        adw_id: input.adw_id ?? null, request: null, source: null, redacted: true,
+      }, stats)
+      // redact() drops a marker-bearing adw_id; retain the fixed no-op shape
+      // without restoring those caller-controlled bytes.
+      if (args.adw_id === undefined) args.adw_id = null
+    } else {
+      requireFields(input, ['adw_id', 'request', 'source'], 'recordSessionRequest')
+      requireEnum(input.source, REQUEST_SOURCES, 'recordSessionRequest', 'source')
+      args = redact({
+        adw_id: input.adw_id,
+        request: normaliseRequestText(input.request, 'recordSessionRequest'),
+        source: input.source,
+      }, stats)
+      if (args.adw_id === undefined || args.request === undefined || args.source === undefined) {
+        args = { adw_id: args.adw_id ?? null, request: null, source: null, redacted: true }
+      }
+    }
+    appendJsonl('recordSessionRequest', args)
+    if (args.redacted) return args
+    mirror((conn) => {
+      // First write wins: a re-dispatch or JSONL replay must not rewrite the
+      // request measured for this run. UPDATE never invents a sessions row.
+      conn.prepare(`
+        UPDATE sessions
+           SET request = COALESCE(request, ?), request_source = COALESCE(request_source, ?)
+         WHERE adw_id = ?
+      `).run(
+        toBindable(args.request), toBindable(args.source), toBindable(args.adw_id),
+      )
     })
     return args
   }
@@ -2224,6 +2295,7 @@ export function openLedger({
     // Each row holds a running total, not a delta (`endAgentSession` overwrites, :1129) — a MAX or a last-row read silently misreports.
     const usageRow = queryRows(`
       SELECT COUNT(*) AS agent_sessions,
+        SUM(context_tokens IS NOT NULL) AS measured_context_tokens,
         SUM(billed_input_tokens) AS billed_input_tokens,
         SUM(billed_output_tokens) AS billed_output_tokens,
         SUM(billed_cache_write_tokens) AS billed_cache_write_tokens,
@@ -2236,6 +2308,7 @@ export function openLedger({
       'billed_cache_write_tokens', 'billed_cache_read_tokens',
     ]
     const everyBilledSumNull = usageRow == null || billedKeys.every((key) => usageRow[key] == null)
+    const measuredContextOccupancy = usageRow != null && Number(usageRow.measured_context_tokens ?? 0) > 0
     const usage = agentSessions === 0 ? null : {
       agent_sessions: agentSessions,
       billed_input_tokens: usageRow.billed_input_tokens,
@@ -2253,6 +2326,12 @@ export function openLedger({
       'SELECT COUNT(*) AS count FROM accept_decisions WHERE adw_id = ?', [adwId],
     )[0]?.count ?? 0
     const absent = {}
+    if (session?.request == null) {
+      absent.request = 'this run predates request recording (#b19) / was not dispatched by the intake loop; the request was never measured, and NULL is never an empty ask'
+    }
+    if (!measuredContextOccupancy) {
+      absent.context_occupancy = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
+    }
     if (agentSessions === 0 || everyBilledSumNull) {
       absent.usage = 'predates per-agent token measurement (#119) — not a measured zero'
     }
@@ -2329,7 +2408,7 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordSessionRequest, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeDispatch, recordSeatTeardown,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
@@ -2627,6 +2706,39 @@ function windowBound(value, flagName, verb = 'run-set') {
   return isoMs(ms)
 }
 
+function requestFromBrief(path) {
+  if (typeof path !== 'string' || !path.trim()) {
+    refuse('request: --from-brief <path> is required')
+  }
+  let source
+  try {
+    source = readFileSync(path, 'utf8')
+  } catch {
+    refuse('request: --from-brief brief file is missing or unreadable')
+  }
+  const lines = String(source).split(/\r?\n/)
+  const heading = lines.findIndex((line) => line.trim() === '## The ask')
+  if (heading < 0) {
+    refuse('request: brief has no ## The ask section')
+  }
+  const paragraph = []
+  let started = false
+  for (const line of lines.slice(heading + 1)) {
+    const trimmed = line.trim()
+    if (/^#{1,6}\s/.test(trimmed)) break
+    if (!trimmed) {
+      if (started) break
+      continue
+    }
+    started = true
+    paragraph.push(trimmed)
+  }
+  if (paragraph.length === 0) {
+    refuse('request: ## The ask section is blank')
+  }
+  return paragraph.join('\n').trim()
+}
+
 // The unaudited fields this ledger records but never verifies against any
 // external source — mirrors task-cost-log.mjs's frozen `unverified` array.
 const UNVERIFIED_FIELDS = Object.freeze(['task_slug', 'repo_slug'])
@@ -2637,7 +2749,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -2876,6 +2988,16 @@ export function main(argv) {
       return 0
     }
 
+    if (verb === 'request') {
+      const adwId = positional[0]
+      if (!adwId) refuse('request: requires an adw_id argument')
+      if (positional.length > 1) refuse('request: takes exactly one positional argument')
+      const request = requestFromBrief(flags['from-brief'])
+      const args = ledger.recordSessionRequest({ adw_id: adwId, request, source: 'brief-file' })
+      stdout.write(`${JSON.stringify({ schema: 1, ...args })}\n`)
+      return 0
+    }
+
     if (verb === 'task') {
       const selector = positional[0]
       if (!selector) refuse('task: requires an adw_id or task_slug argument')
@@ -2959,6 +3081,7 @@ export function main(argv) {
         degraded_reason: s.degraded_reason,
         db_path: dbPath,
         row_counts: rowCounts,
+        retired_tables: RETIRED_TABLES,
         pragmas,
         fts5,
       }

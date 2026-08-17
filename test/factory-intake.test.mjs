@@ -13,7 +13,7 @@ import { ROOT } from './helpers.mjs'
 import {
   DEFAULT_INTAKE_CONFIG, REQUIRED_INTAKE_CONFIG_KEYS, compileIntakeBrief, dispatchPicked,
   extractIntakeBlock, fetchBoard, intakeConfigUsable, intakeRun, intakeSweep, normalDeps,
-  normaliseBoardPage, orderCandidates,
+  normaliseBoardPage, observeDispatches, orderCandidates,
 } from '../scripts/factory/intake.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 
@@ -109,8 +109,13 @@ function dispatchDeps(nodes, overrides = {}) {
   const crewDir = mkdtempSync(join(fixture, 'crew-'))
   const taskDir = join(crewDir, 'task')
   const returnsDir = join(crewDir, 'returns')
+  const ledgerDir = join(crewDir, 'ledger')
+  const adwId = 'fixture-adw-id'
   mkdirSync(taskDir, { recursive: true })
   mkdirSync(returnsDir, { recursive: true })
+  mkdirSync(ledgerDir, { recursive: true })
+  const runSidecar = join(ledgerDir, 'run.json')
+  writeFileSync(runSidecar, JSON.stringify({ adw_id: adwId }))
   const taskReturn = join(returnsDir, 'task.json')
   writeFileSync(taskReturn, JSON.stringify({ status: 'done', summary: 'fixture', artifacts: [], details: {} }))
   const calls = { moves: [], boots: [], runs: [], prs: [], branches: [] }
@@ -149,7 +154,7 @@ function dispatchDeps(nodes, overrides = {}) {
     },
     ...overrides.deps,
   }
-  return { calls, crewDir, taskDir, taskReturn, deps }
+  return { calls, crewDir, taskDir, taskReturn, ledgerDir, runSidecar, adwId, deps }
 }
 
 function runIntake(nodes, options = {}) {
@@ -401,6 +406,80 @@ test('a picked issue compiles one brief, boots once, runs once, and claims the w
   const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
   assert.deepEqual(ledger.dumpTable('intake_dispatches').map(({ outcome }) => outcome), ['claimed', 'done'])
   ledger.close()
+})
+
+test('dispatchPicked records the compiled ask on the sessions row minted by crewRun', () => {
+  const path = dbPath()
+  const harness = dispatchDeps([issue({ number: 80, body: intakeBody() })])
+  harness.deps.crewRun = () => {
+    const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+    try {
+      ledger.startSession({ adw_id: harness.adwId, repo_slug: 'repo', task_slug: 'intake-80' })
+    } finally {
+      ledger.close()
+    }
+    return { exit: 0, stdout: `${JSON.stringify({ status: 'done', task_return: harness.taskReturn })}\n`, stderr: '' }
+  }
+  const result = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT, dbPath: path,
+    config: baseConfig, deps: harness.deps,
+  })
+  assert.equal(result.dispatch.outcome, 'done')
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const row = ledger.getSession(harness.adwId)
+  assert.deepEqual({ request: row.request, request_source: row.request_source }, {
+    request: 'Implement measured queue selection', request_source: 'dispatch',
+  })
+  ledger.close()
+})
+
+test('dispatchPicked leaves honest request absence when the sidecar is missing or has no adw_id', () => {
+  for (const invalid of ['missing', 'no-adw-id']) {
+    const path = dbPath()
+    const harness = dispatchDeps([issue({ number: invalid === 'missing' ? 81 : 82, body: intakeBody() })])
+    if (invalid === 'missing') {
+      rmSync(harness.runSidecar, { force: true })
+    } else {
+      writeFileSync(harness.runSidecar, JSON.stringify({ task_slug: 'without-an-id' }))
+    }
+    harness.deps.crewRun = () => {
+      const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+      try {
+        ledger.startSession({ adw_id: harness.adwId, repo_slug: 'repo', task_slug: `intake-${invalid}` })
+      } finally {
+        ledger.close()
+      }
+      return { exit: 0, stdout: `${JSON.stringify({ status: 'done', task_return: harness.taskReturn })}\n`, stderr: '' }
+    }
+    const result = intakeRun({
+      board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT, dbPath: path,
+      config: baseConfig, deps: harness.deps,
+    })
+    assert.equal(result.dispatch.outcome, 'done')
+    const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+    assert.equal(ledger.getSession(harness.adwId).request, null)
+    ledger.close()
+  }
+})
+
+test('observeDispatches promotion uses a synthetic picked without recording a request', () => {
+  const path = dbPath()
+  const harness = dispatchDeps([], { pullRequestFor: () => ({ number: 902, url: 'https://example.test/pull/902' }) })
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  ledger.recordIntakeDispatch({
+    board_owner: 'example-owner', board_project: 7, issue: 83, outcome: 'claimed',
+    tier: 'build', task_slug: 'intake-83', branch: 'test/branch', sweep_at: '2026-01-02T00:00:00.000Z',
+  })
+  ledger.close()
+  assert.doesNotThrow(() => observeDispatches({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    boardItems: [{ issue: 83, item_id: 'ITEM-83', status: baseConfig.workColumn }],
+    checkout: ROOT, dbPath: path, config: baseConfig, deps: harness.deps,
+  }))
+  const check = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  assert.equal(check.dumpTable('sessions').length, 0)
+  assert.equal(readFileSync(check._jsonlPath, 'utf8').includes('recordSessionRequest'), false)
+  check.close()
 })
 
 test('a refused board write does not boot or claim, and the same Ready page can be picked again', () => {

@@ -91,6 +91,249 @@ export const MEMORY_ROLES = Object.freeze(['lead', 'planner'])
 // Must stay key-identical to SEAT_DEFAULTS (pinned by a test).
 export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 
+export const CAPABILITY_REFUSALS = Object.freeze([
+  'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
+  'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
+  'local-endpoint-dead',
+])
+const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
+const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
+const REGISTER_ROOT = resolvePath(join(HERE, '..'))
+
+function deepFreeze(value) {
+  if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value
+  for (const child of Object.values(value)) deepFreeze(child)
+  return Object.freeze(value)
+}
+
+export function refuse(reason, message) {
+  if (!CAPABILITY_REFUSALS.includes(reason)) throw new Error(`unknown capability refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+export function validateCapabilities(schema, value) {
+  const errors = []
+  walk(schema, value, '$')
+  return errors
+
+  function resolve(node) {
+    if (!node || typeof node !== 'object' || !node.$ref) return node
+    return resolve(byPath(node.$ref))
+  }
+
+  function byPath(ref) {
+    let node = schema
+    const parts = String(ref).replace(/^#\/?/, '').split('/').filter(Boolean)
+    for (const part of parts) node = node?.[part.replace(/~1/g, '/').replace(/~0/g, '~')]
+    return node
+  }
+
+  function matchedTypes(current) {
+    const matched = new Set()
+    if (current === null) matched.add('null')
+    else if (Array.isArray(current)) matched.add('array')
+    else if (typeof current === 'number') {
+      matched.add('number')
+      if (Number.isInteger(current)) matched.add('integer')
+    } else if (typeof current === 'string') matched.add('string')
+    else if (typeof current === 'boolean') matched.add('boolean')
+    else if (typeof current === 'object') matched.add('object')
+    return matched
+  }
+
+  function walk(schemaNode, current, path) {
+    const s = resolve(schemaNode)
+    if (!s || typeof s !== 'object') {
+      errors.push(`${path}: invalid schema reference`)
+      return
+    }
+    if (Object.hasOwn(s, 'const')) {
+      if (current !== s.const) errors.push(`${path}: expected const ${JSON.stringify(s.const)}, got ${JSON.stringify(current)}`)
+      return
+    }
+    if (s.enum && !s.enum.includes(current)) {
+      errors.push(`${path}: ${JSON.stringify(current)} not in enum ${JSON.stringify(s.enum)}`)
+      return
+    }
+
+    const matched = matchedTypes(current)
+    if (s.type) {
+      const types = Array.isArray(s.type) ? s.type : [s.type]
+      if (!types.some((type) => matched.has(type))) {
+        errors.push(`${path}: expected type ${types.join('|')}, got ${[...matched].join('|') || typeof current}`)
+        return
+      }
+    }
+    if (current === null) return
+    if (typeof current === 'string' && s.pattern) {
+      let valid = false
+      try { valid = new RegExp(s.pattern).test(current) } catch { valid = false }
+      if (!valid) errors.push(`${path}: ${JSON.stringify(current)} does not match pattern ${s.pattern}`)
+    }
+    if (Array.isArray(current) && s.items) {
+      current.forEach((item, index) => walk(s.items, item, `${path}[${index}]`))
+    }
+    if (current && typeof current === 'object' && !Array.isArray(current)) {
+      for (const key of s.required || []) {
+        if (!Object.hasOwn(current, key)) errors.push(`${path}: missing required property ${JSON.stringify(key)}`)
+      }
+      const patterns = Object.entries(s.patternProperties || {}).map(([pattern, child]) => [new RegExp(pattern), child])
+      for (const [key, childValue] of Object.entries(current)) {
+        const matchedSchemas = []
+        if (s.properties && Object.hasOwn(s.properties, key)) matchedSchemas.push(s.properties[key])
+        for (const [pattern, child] of patterns) if (pattern.test(key)) matchedSchemas.push(child)
+        if (!matchedSchemas.length && s.additionalProperties === false) {
+          errors.push(`${path}: additional property ${JSON.stringify(key)} not allowed`)
+          continue
+        }
+        for (const child of matchedSchemas) walk(child, childValue, `${path}.${key}`)
+      }
+    }
+  }
+}
+
+function cloneJson(value) {
+  return JSON.parse(JSON.stringify(value))
+}
+
+// The register is runtime policy: grant paths resolve against this checkout,
+// not the target checkout. The shipped file intentionally grants no content
+// until later slices commit checkout-pinned pi assets; advisor is reserved and
+// has no runtime behavior in this slice.
+export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABILITIES_SCHEMA_PATH, register = null } = {}) {
+  let schema
+  try {
+    schema = JSON.parse(readFileSync(schemaPath, 'utf8'))
+  } catch (err) {
+    throw refuse('register-invalid', `runtime capability policy schema ${schemaPath} is unreadable or unparseable under the runtime-policy rule: ${err.message}`)
+  }
+
+  let value
+  if (register === null) {
+    try {
+      value = JSON.parse(readFileSync(path, 'utf8'))
+    } catch (err) {
+      throw refuse('register-invalid', `runtime capability register ${path} is unreadable or unparseable under the runtime-policy rule: ${err.message}`)
+    }
+  } else {
+    try {
+      value = cloneJson(register)
+    } catch (err) {
+      throw refuse('register-invalid', `injected runtime capability register for ${path} is unparseable under the runtime-policy rule: ${err.message}`)
+    }
+  }
+
+  const errors = validateCapabilities(schema, value)
+  if (errors.length) {
+    throw refuse('register-invalid', `runtime capability register ${path} failed schema validation under the runtime-policy rule: ${errors.slice(0, 3).join('; ')}`)
+  }
+  return deepFreeze(value)
+}
+
+function resolvedGrantPath(root, relativePath) {
+  return resolvePath(join(resolvePath(root), relativePath))
+}
+
+function pathExists(exists, path) {
+  try { return !!exists(path) } catch { return false }
+}
+
+function pathMessage(reason, seat, kind, expected, found, path) {
+  return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
+}
+
+export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
+  const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
+  if (!spec) throw refuse('register-invalid', `runtime capability register has no grant for unknown role ${JSON.stringify(role)} under the runtime-policy rule`)
+
+  const extensions = spec.extensions.map((relativePath) => {
+    const path = resolvedGrantPath(root, relativePath)
+    if (!pathExists(exists, path)) throw pathMessage('extension-missing', role, 'extension grant', 'an existing checkout-relative path', 'missing', path)
+    return path
+  })
+  const skills = spec.skills.map((relativePath) => {
+    const path = resolvedGrantPath(root, relativePath)
+    if (!pathExists(exists, path)) throw pathMessage('unknown-skill', role, 'skill grant', 'an existing checkout-relative path', 'missing', path)
+    return path
+  })
+  const agents = spec.agents.map((grant) => {
+    const path = resolvedGrantPath(root, grant.def)
+    let raw
+    try {
+      raw = readFile(path, 'utf8')
+    } catch (err) {
+      throw pathMessage('agent-def-invalid', role, `agent definition ${grant.name}`, 'a readable JSON definition', `unreadable (${err.message})`, path)
+    }
+    let definition
+    try {
+      definition = JSON.parse(String(raw))
+    } catch (err) {
+      throw pathMessage('agent-def-invalid', role, `agent definition ${grant.name}`, 'parseable JSON', `unparseable (${err.message})`, path)
+    }
+    if (!definition || typeof definition !== 'object' || Array.isArray(definition)
+      || typeof definition.name !== 'string' || definition.name.trim() === '' || definition.name !== grant.name) {
+      const found = definition && typeof definition === 'object' ? JSON.stringify(definition.name) : JSON.stringify(definition)
+      throw pathMessage('agent-def-invalid', role, `agent definition ${grant.name}`, `name ${JSON.stringify(grant.name)}`, `name ${found}`, path)
+    }
+    if (typeof definition.prompt !== 'string' || definition.prompt.trim() === '') {
+      const found = definition && Object.hasOwn(definition, 'prompt') ? JSON.stringify(definition.prompt) : 'missing prompt'
+      throw pathMessage('agent-def-invalid', role, `agent definition ${grant.name}`, 'a non-empty prompt', found, path)
+    }
+    return { name: grant.name, def: path }
+  })
+
+  return deepFreeze({
+    tools: [...spec.tools], extensions, agents, skills,
+    advisor: spec.advisor, requires: [...spec.requires],
+  })
+}
+
+function relativeGrantMatches(declared, resolved) {
+  const declaration = String(declared).replaceAll('\\', '/')
+  const candidate = String(resolved).replaceAll('\\', '/')
+  return candidate === declaration || candidate.endsWith(`/${declaration}`)
+}
+
+export function assertGrantsBacked(role, grants, register) {
+  const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
+  if (!spec) throw refuse('unknown-grant', `seat ${role} has grants but no matching register role`)
+  for (const tool of grants?.tools || []) {
+    if (!spec.tools.includes(tool)) throw refuse('unknown-grant', `seat ${role} has unregistered tool grant ${JSON.stringify(tool)}`)
+  }
+  for (const extension of grants?.extensions || []) {
+    if (!spec.extensions.some((declared) => relativeGrantMatches(declared, extension))) {
+      throw refuse('unknown-grant', `seat ${role} has unregistered extension grant ${JSON.stringify(extension)}`)
+    }
+  }
+  for (const skill of grants?.skills || []) {
+    if (!spec.skills.some((declared) => relativeGrantMatches(declared, skill))) {
+      throw refuse('unknown-grant', `seat ${role} has unregistered skill grant ${JSON.stringify(skill)}`)
+    }
+  }
+  for (const agent of grants?.agents || []) {
+    if (!spec.agents.some((declared) => declared.name === agent.name && relativeGrantMatches(declared.def, agent.def))) {
+      throw refuse('unknown-grant', `seat ${role} has unregistered agent grant ${JSON.stringify(agent)}`)
+    }
+  }
+  if (grants?.advisor === true && spec.advisor !== true) {
+    throw refuse('unknown-grant', `seat ${role} has unregistered advisor grant`)
+  }
+  return grants
+}
+
+export const EMPTY_GRANTS = deepFreeze({
+  tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [],
+})
+
+export async function probeLocalEndpoint(url, { fetchFn = fetch, timeoutMs = 2000 } = {}) {
+  try {
+    const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) })
+    return response?.status < 500
+  } catch {
+    return false
+  }
+}
+
 // The rule itself lives in the leaf module `slug.mjs`, so daemon.mjs can share
 // it without importing this file (which pulls in drive.mjs). Re-exported here
 // because this module's own consumers already reach for it by this name.
@@ -171,14 +414,18 @@ export function seatTransport({ role, args = {}, adapter, agentName } = {}) {
   throw new Error(`seat ${role}: agent "${agentName}" ships no headless transport — tried ${HEADLESS_TRANSPORTS.join(', ')} (last refusal: ${last})`)
 }
 
-export function assertCapabilities(role, agentName, capabilities, allowed = []) {
+export function assertCapabilities(role, agentName, capabilities, allowed = [], requires = SEAT_DEFAULTS[role].requires) {
   if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
-    throw new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
+    const err = new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
+    err.reason = 'capability-shortfall'
+    throw err
   }
-  for (const cap of SEAT_DEFAULTS[role].requires || []) {
+  for (const cap of requires || []) {
     if (capabilities?.[cap] === true) continue
     if (allowed.includes(cap)) continue
-    throw new Error(`seat ${role} requires capability "${cap}" but agent adapter "${agentName}" declares ${cap}: ${JSON.stringify(capabilities?.[cap])} — refusing to boot a weaker seat (pass --allow-shortfall-${role} ${cap} to boot it degraded on purpose)`)
+    const err = new Error(`seat ${role} requires capability "${cap}" but agent adapter "${agentName}" declares ${cap}: ${JSON.stringify(capabilities?.[cap])} — refusing to boot a weaker seat (pass --allow-shortfall-${role} ${cap} to boot it degraded on purpose)`)
+    err.reason = 'capability-shortfall'
+    throw err
   }
 }
 
@@ -255,7 +502,7 @@ export function resolveTier(roster, tier, args = {}) {
 // cell is translated by the adapter that will run it; a --model-<role>
 // override is already the operator's own CLI namespace and passes through
 // raw. `adapters` is the {role: {name, adapter}} map resolveAdapters returns.
-export function resolveSeatModels(seats, adapters) {
+export function resolveSeatModels(seats, adapters, localProviders = null) {
   const out = {}
   for (const [role, seat] of Object.entries(seats)) {
     // A raw --model-<role> override is the operator's own CLI namespace: it is
@@ -268,7 +515,7 @@ export function resolveSeatModels(seats, adapters) {
     // The typeof fallback keeps a third-party adapter without modelString
     // bootable.
     const model = typeof adapter?.modelString === 'function'
-      ? adapter.modelString({ provider: seat.provider, id: seat.id })
+      ? adapter.modelString({ provider: seat.provider, id: seat.id, localProviders })
       : seat.id
     out[role] = { ...seat, model }
   }
@@ -280,32 +527,58 @@ export function resolveSeatModels(seats, adapters) {
 // editing crew.mjs. Dynamic import() is inherently async. `seats` (optional)
 // is a tier's resolved seat map — when present, its agent choice wins over
 // the --agent-<role>/SEAT_DEFAULTS flags-or-default path.
-export async function resolveAdapters(roles, args, seats = null) {
+export async function resolveAdapters(roles, args, seats = null, deps = {}) {
   const out = {}
-  for (const key of Object.keys(args)) {
+  const sourceArgs = args || {}
+  for (const key of Object.keys(sourceArgs)) {
     const m = /^allow-shortfall-(.+)$/.exec(key)
     if (m && !roles.includes(m[1])) throw new Error(`--allow-shortfall-${m[1]} given but crew seats no ${m[1]}`)
   }
+  const registry = deps.register ? loadCapabilities({ register: deps.register }) : loadCapabilities()
+  const root = deps.root ?? REGISTER_ROOT
+  const exists = deps.exists || existsSync
+  const probeEndpoint = deps.probeEndpoint || probeLocalEndpoint
   for (const role of roles) {
     try {
-      const name = String(seats?.[role]?.agent || seatAgent(role, args))
+      const name = String(seats?.[role]?.agent || seatAgent(role, sourceArgs))
       if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`invalid agent adapter name "${name}" for seat ${role}`)
       const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
       if (!existsSync(file)) throw new Error(`unknown agent adapter "${name}" for seat ${role}: no such adapter file ${file}`)
       const adapter = await import(pathToFileURL(file).href)
       if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
       if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
-      const transport = seatTransport({ role, args, adapter, agentName: name })
-      assertCapabilities(role, name, adapter.capabilitiesFor({ transport }), seatShortfalls(role, args))
+      const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name })
+      const grants = grantsFor(registry, role, { root, exists })
+      assertGrantsBacked(role, grants, registry)
+
+      let configDir = null
+      const provider = seats?.[role]?.provider
+      const localProvider = provider && Object.hasOwn(registry.local_providers, provider) ? registry.local_providers[provider] : null
+      if (localProvider) {
+        const settingsPath = resolvedGrantPath(root, localProvider.settings)
+        if (!pathExists(exists, settingsPath)) {
+          throw pathMessage('local-settings-missing', role, `local provider ${provider} settings`, 'an existing checkout-relative path', 'missing', settingsPath)
+        }
+        let live = false
+        try { live = await probeEndpoint(localProvider.base_url) } catch { live = false }
+        if (!live) {
+          throw refuse('local-endpoint-dead', `seat ${role} local provider ${provider} endpoint ${localProvider.base_url} is unavailable — refusing to boot a dead local-provider cell`)
+        }
+        configDir = dirname(settingsPath)
+      }
+
+      const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...grants.requires])]
+      assertCapabilities(role, name, adapter.capabilitiesFor({ transport, grants }), seatShortfalls(role, sourceArgs), requires)
       if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
         throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
       }
-      out[role] = { name, adapter, transport }
+      out[role] = { name, adapter, transport, grants, configDir }
     } catch (err) {
       if (err.role === undefined) { err.role = role; err.cell = seats?.[role] ?? null }
       throw err
     }
   }
+  Object.defineProperty(out, 'registry', { value: registry, enumerable: false })
   return out
 }
 
@@ -375,7 +648,7 @@ function writeRolePrompt(role, taskDir, section = '') {
   return merged
 }
 
-function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
+function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, configDir = null }) {
   const seat = SEAT_DEFAULTS[role]
   const merged = join(taskDir, `role-${role}.md`)
   // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — or, when a
@@ -387,6 +660,7 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat }) {
     role, model: tierSeat?.model || seatModel(role, args), promptFile: merged,
     tools: seat.tools, deny: seat.deny, taskDir, bootBrief,
     effort: tierSeat?.effort || args[`effort-${role}`] || undefined,
+    grants, configDir,
   })
 }
 
@@ -485,7 +759,8 @@ export async function bootCmd(args, deps = {}) {
     noteRunlessCellFailure({ taskSlug, role: err.role ?? null, kind: 'boot-refusal', err, cell: err.cell ?? null })
     throw err
   }
-  const seats = tierSeats ? resolveSeatModels(tierSeats, adapters) : null
+  const registry = adapters.registry || loadCapabilities()
+  const seats = tierSeats ? resolveSeatModels(tierSeats, adapters, registry.local_providers) : null
   // #45 Tier B: opt-in cell breaker. With no policy configured this is a
   // null and the ledger is never opened (acceptance #1). An open cell
   // refuses here, before any state dir or seat exists, and is NOT recorded
@@ -554,7 +829,10 @@ export async function bootCmd(args, deps = {}) {
   if (headlessOnly) {
     for (const role of roles) members[role] = memberFor(role)
   } else {
-    const mk = (role) => paneCommand(role, args, { taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role] })
+    const mk = (role) => paneCommand(role, args, {
+      taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
+      grants: adapters[role].grants, configDir: adapters[role].configDir,
+    })
     const layout = composeLayout(paneRoles, mk)
 
     const before = treeFn()
@@ -629,6 +907,7 @@ export async function bootCmd(args, deps = {}) {
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
+    capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },
     ...(memory.record ? { memory: memory.record } : {}),
   })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)

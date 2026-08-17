@@ -161,3 +161,45 @@ test('--exclude-tools is the pi seat\'s only tool boundary, and unmapped deny na
     else assert.doesNotMatch(command, /--exclude-tools/, label)
   }
 })
+
+test('ungranted pi seats disable extension and skill discovery across the full seat matrix', () => {
+  for (const shape of seatShapes()) {
+    const command = seatCommand(shape)
+    const label = `role=${shape.role} model=${shape.model} effort=${shape.effort ?? 'none'}`
+    assert.match(command, /(^|\s)--no-extensions(\s|$)/, label)
+    assert.match(command, /(^|\s)--no-skills(\s|$)/, label)
+    assert.doesNotMatch(command, /(^|\s)-e\s/, label)
+    assert.doesNotMatch(command, /(^|\s)--skill\s/, label)
+    assert.equal(command.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], PI_BUILTIN_TOOLS.join(','), label)
+  }
+})
+
+test('granted pi seats append deduped activators and checkout-pinned extension, skill, and config paths', () => {
+  const command = seatCommand({
+    ...[...seatShapes()][0],
+    grants: {
+      tools: ['read', 'task', 'task'], extensions: ['/checkout/crew/pi/fanout.js'],
+      skills: ['/checkout/crew/pi/skills/scout.md'], agents: [], advisor: false,
+    },
+    configDir: '/checkout/crew/pi',
+  })
+  assert.equal(command.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], `${PI_BUILTIN_TOOLS.join(',')},task`)
+  assert.match(command, /--no-extensions/)
+  assert.match(command, /-e "\/checkout\/crew\/pi\/fanout\.js"/)
+  assert.match(command, /--skill "\/checkout\/crew\/pi\/skills\/scout\.md"/)
+  assert.doesNotMatch(command, /--no-skills/)
+  assert.match(command, /PI_CODING_AGENT_DIR="\/checkout\/crew\/pi"/)
+  assert.doesNotMatch(command, /--provider/)
+})
+
+test('a granted pi tool cannot widen the deny boundary', () => {
+  const shape = [...seatShapes()].find((candidate) => candidate.role === 'planner')
+  const command = seatCommand({ ...shape, deny: 'Edit,NotebookEdit', grants: { tools: ['edit'], extensions: [], skills: [], agents: [], advisor: false } })
+  assert.match(command, /--tools "[^"]*,edit[^"]*"/)
+  assert.match(command, /--exclude-tools "edit"/)
+})
+
+test('modelString maps a local provider only when the register supplies its pi namespace', () => {
+  assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders: { 'local-pi': { pi_provider: 'local-pi' } } }), 'local-pi/qwen3-coder')
+  assert.throws(() => modelString({ provider: 'local-pi', id: 'qwen3-coder' }), /local-pi/)
+})

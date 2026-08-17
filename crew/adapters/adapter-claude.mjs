@@ -47,10 +47,25 @@ const PROFILES = Object.freeze({
   }),
 })
 
-export function capabilitiesFor({ transport } = {}) {
+export function capabilitiesFor({ transport, grants } = {}) {
   const p = PROFILES[transport]
   if (!p) throw new Error(`adapter-claude: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
   return Object.freeze({ ...INVARIANT, ...p })
+}
+
+const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
+
+function allowedTools(tools, grants = NO_GRANTS) {
+  return [...new Set([...String(tools || '').split(','), ...(grants?.tools || [])].filter(Boolean))].join(',')
+}
+
+function assertSupportedGrants(grants = NO_GRANTS) {
+  if ((grants?.extensions?.length ?? 0) > 0 || (grants?.skills?.length ?? 0) > 0) {
+    throw Object.assign(
+      new Error(`adapter-claude cannot express extension/skill grants ${JSON.stringify({ extensions: grants.extensions, skills: grants.skills })} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      { reason: 'grant-unsupported' },
+    )
+  }
 }
 
 // The claude CLI accepts full model ids, so the roster's {provider,id} pair
@@ -63,7 +78,8 @@ export function modelString({ provider, id }) { return id }
 // resume=false CREATES the session (--session-id); resume=true CONTINUES it
 // (--resume).
 export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
-                                  prompt, sessionId, resume = false, bin, effort }) {
+                                  prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS }) {
+  assertSupportedGrants(grants)
   if (!bin || !bin.startsWith('/')) throw new Error(`adapter-claude.headlessCommand: bin must be an ABSOLUTE frozen worker binary path, got ${JSON.stringify(bin)} — refusing to inherit whatever PATH resolves`)
   if (!sessionId) throw new Error('adapter-claude.headlessCommand: sessionId is required (one session per seat)')
   return {
@@ -75,7 +91,7 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
       '--model', model,
       '--permission-mode', 'bypassPermissions',
       ...(effort ? ['--effort', effort] : []),
-      '--allowedTools', tools,
+      '--allowedTools', allowedTools(tools, grants),
       '--disallowedTools', deny,
       '--append-system-prompt-file', promptFile,
       ...(resume ? ['--resume', sessionId] : ['--session-id', sessionId]),
@@ -84,7 +100,8 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
   }
 }
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS }) {
+  assertSupportedGrants(grants)
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
   // quiet inside the pane (defensive; a no-op when the plugin is absent).
@@ -99,7 +116,7 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
     ...(effort ? ['--effort', `"${effort}"`] : []),
-    '--allowedTools', `"${tools}"`,
+    '--allowedTools', `"${allowedTools(tools, grants)}"`,
     '--disallowedTools', `"${deny}"`,
     '--append-system-prompt-file', `"${promptFile}"`,
     `"${bootBrief}"`,

@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-17",
+  "roles": {
+    "lead": {
+      "tools": [],
+      "extensions": [],
+      "agents": [],
+      "skills": [],
+      "advisor": false,
+      "requires": []
+    },
+    "planner": {
+      "tools": [],
+      "extensions": [],
+      "agents": [],
+      "skills": [],
+      "advisor": false,
+      "requires": ["subagents"]
+    },
+    "builder": {
+      "tools": [],
+      "extensions": [],
+      "agents": [],
+      "skills": [],
+      "advisor": false,
+      "requires": []
+    },
+    "reviewer": {
+      "tools": [],
+      "extensions": [],
+      "agents": [],
+      "skills": [],
+      "advisor": false,
+      "requires": []
+    },
+    "tech-lead": {
+      "tools": [],
+      "extensions": [],
+      "agents": [],
+      "skills": [],
+      "advisor": false,
+      "requires": []
+    }
+  },
+  "local_providers": {}
+}

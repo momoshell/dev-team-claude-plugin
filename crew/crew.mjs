@@ -564,6 +564,10 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
         if (!live) {
           throw refuse('local-endpoint-dead', `seat ${role} local provider ${provider} endpoint ${localProvider.base_url} is unavailable — refusing to boot a dead local-provider cell`)
         }
+        const capabilities = adapter.capabilitiesFor({ transport })
+        if (capabilities.local_provider !== true) {
+          throw refuse('grant-unsupported', `seat ${role} local provider ${provider} is not supported by adapter ${name} — refusing to boot a silently weaker seat`)
+        }
         configDir = dirname(settingsPath)
       }
 

@@ -16,7 +16,7 @@ import {
 } from './crew.mjs'
 import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
-import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 import { realIo, VARIANT_STAGE_PHASES } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -216,19 +216,19 @@ test('every shipped capability profile is exact, complete, and frozen', async ()
 
   const claudePane = capabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(claudePane))
   const claudeHeadless = capabilitiesFor({ transport: 'headless-json' })
-  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
+  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
   assert.ok(Object.isFrozen(claudeHeadless))
   const piPane = piCapabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, local_provider: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(piPane))
   const piHeadless = piCapabilitiesFor({ transport: 'headless-rpc' })
   // #148: reassign captured live (captures/pi-b11-reassign.jsonl) — a settled
   // session takes a further assignment same-process and cross-process.
-  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
+  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, local_provider: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
   assert.ok(Object.isFrozen(piHeadless))
 })
 
@@ -1875,7 +1875,7 @@ test('a register-backed pi fan-out grant resolves to absolute definitions and en
 
 test('capabilitiesFor remains pinned without grants and derives pi subagents only from agent grants', async () => {
   const piPane = piCapabilitiesFor({ transport: 'pane' })
-  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, local_provider: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.equal(Object.isFrozen(piPane), true)
   assert.equal(piCapabilitiesFor({ transport: 'pane', grants: { agents: [{ name: 'Explore', def: '/tmp/explore.json' }] } }).subagents, true)
 })
@@ -1972,6 +1972,79 @@ test('checkout-pinned local providers require live endpoints and expose their se
       () => resolveAdapters(['builder'], {}, seats, { register: missing, root, probeEndpoint: async () => true }),
       (err) => err.reason === 'local-settings-missing' && /no-settings/.test(err.message),
     )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('resolveAdapters refuses a claude-seated local-provider cell before any seat spawns', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    writeFileSync(settings, '{}')
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'claude', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'grant-unsupported'
+        && /builder/.test(err.message) && /local-pi/.test(err.message) && /claude/.test(err.message),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('adapter-claude refuses local-provider model and config seams while preserving normal cells', () => {
+  const localProviders = { 'local-pi': { pi_provider: 'local-pi' } }
+  assert.throws(
+    () => claudeModelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders }),
+    (err) => err.reason === 'grant-unsupported' && /local-pi/.test(err.message),
+  )
+  assert.equal(claudeModelString({ provider: 'anthropic', id: 'claude-opus-5', localProviders }), 'claude-opus-5')
+
+  const seat = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const refusal = (err) => err.reason === 'grant-unsupported' && /\/checkout\/crew\/pi/.test(err.message)
+  assert.throws(() => seatCommand({ ...seat, configDir: '/checkout/crew/pi' }), refusal)
+  assert.throws(() => claudeHeadlessCommand({
+    ...seat, prompt: 'go', sessionId: 's1', bin: '/usr/local/bin/claude', configDir: '/checkout/crew/pi',
+  }), refusal)
+})
+
+test('adapter-claude grant tools merge into allowedTools without widening disallowedTools', () => {
+  const grants = { tools: ['mcp__search'], extensions: [], agents: [], skills: [], advisor: false }
+  const seat = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', bootBrief: 'boot', grants,
+  }
+  const pane = seatCommand(seat)
+  assert.match(pane, /--allowedTools "Read,mcp__search"/)
+  assert.match(pane, /--disallowedTools "Task,Agent"/)
+  assert.doesNotMatch(pane, /--disallowedTools "[^"]*mcp__search/)
+
+  const headless = claudeHeadlessCommand({
+    ...seat, prompt: 'go', sessionId: 's1', bin: '/usr/local/bin/claude',
+  })
+  const args = headless.args.join(' ')
+  assert.match(args, /--allowedTools Read,mcp__search/)
+  assert.match(args, /--disallowedTools Task,Agent/)
+  assert.doesNotMatch(args, /--disallowedTools [^ ]*mcp__search/)
+})
+
+test('register-backed grants flow into one emitted pi command', () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const register = capabilityRegister({ roles: {
+      builder: { ...capabilityRegister().roles.builder,
+        tools: ['task'], extensions: ['crew/pi/fanout.js'], skills: ['crew/pi/skills/scout.md'],
+      },
+    } })
+    const grants = grantsFor(register, 'builder', { root })
+    const command = piSeatCommand({ ...PI_SAMPLE, grants })
+    assert.match(command, /--tools "[^"]*,task"/)
+    assert.ok(command.includes(`-e "${join(root, 'crew/pi/fanout.js')}"`))
+    assert.ok(command.includes(`--skill "${join(root, 'crew/pi/skills/scout.md')}"`))
+    assert.doesNotMatch(command, /--no-skills/)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

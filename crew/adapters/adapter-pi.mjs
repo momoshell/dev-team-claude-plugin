@@ -29,6 +29,9 @@ const INVARIANT = Object.freeze({
   // ':<level>' model-string shorthand) — live-verified 2026-08-13: a
   // luna:high seat showed "gpt-5.6-luna • high" in its status bar.
   effort: true,
+  // PI_CODING_AGENT_DIR (below) and the pi_provider namespace lookup
+  // (modelString) are the checkout-pinned local-provider seams.
+  local_provider: true,
 })
 
 const PROFILES = Object.freeze({

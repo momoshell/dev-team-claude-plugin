@@ -18,6 +18,9 @@ const INVARIANT = Object.freeze({
   // claude --effort <low|medium|high|xhigh|max> (verified against the
   // installed CLI 2026-08-13) — the roster's effort dimension is enforceable.
   effort: true,
+  // The claude CLI takes a full model id and has no checkout-pinned
+  // provider-config seam, so a local-provider cell cannot be honoured here.
+  local_provider: false,
 })
 
 const PROFILES = Object.freeze({
@@ -68,9 +71,26 @@ function assertSupportedGrants(grants = NO_GRANTS) {
   }
 }
 
+function assertNoLocalProvider(configDir) {
+  if (configDir !== null && configDir !== undefined) {
+    throw Object.assign(
+      new Error(`adapter-claude cannot express local-provider configDir ${JSON.stringify(configDir)} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      { reason: 'grant-unsupported' },
+    )
+  }
+}
+
 // The claude CLI accepts full model ids, so the roster's {provider,id} pair
 // needs no namespace prefix — the id IS the CLI's namespace.
-export function modelString({ provider, id }) { return id }
+export function modelString({ provider, id, localProviders }) {
+  if (localProviders && typeof localProviders === 'object' && Object.hasOwn(localProviders, provider)) {
+    throw Object.assign(
+      new Error(`adapter-claude cannot express local provider ${JSON.stringify(provider)} — refusing to boot a silently weaker seat [grant-unsupported]`),
+      { reason: 'grant-unsupported' },
+    )
+  }
+  return id
+}
 
 // The headless-json invocation shape. Returns ARGV (never a shell string):
 // crew never assembles agent flags, and argv sidesteps quoting entirely.
@@ -78,8 +98,9 @@ export function modelString({ provider, id }) { return id }
 // resume=false CREATES the session (--session-id); resume=true CONTINUES it
 // (--resume).
 export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
-                                  prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS }) {
+                                  prompt, sessionId, resume = false, bin, effort, grants = NO_GRANTS, configDir = null }) {
   assertSupportedGrants(grants)
+  assertNoLocalProvider(configDir)
   if (!bin || !bin.startsWith('/')) throw new Error(`adapter-claude.headlessCommand: bin must be an ABSOLUTE frozen worker binary path, got ${JSON.stringify(bin)} — refusing to inherit whatever PATH resolves`)
   if (!sessionId) throw new Error('adapter-claude.headlessCommand: sessionId is required (one session per seat)')
   return {
@@ -100,8 +121,9 @@ export function headlessCommand({ role, model, promptFile, tools, deny, taskDir,
   }
 }
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS }) {
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null }) {
   assertSupportedGrants(grants)
+  assertNoLocalProvider(configDir)
   // `env` (a real binary) sets the vars regardless of how cmux runs the
   // command. DEVTEAM_WORKER=1 keeps any installed dev-team plugin hooks
   // quiet inside the pane (defensive; a no-op when the plugin is absent).

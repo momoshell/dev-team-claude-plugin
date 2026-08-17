@@ -81,6 +81,8 @@ const OUT_EXISTS = 'out-exists'
 const BAD_FENCES = 'bad-fences'
 const BAD_PROTECTED = 'bad-protected'
 const UNKNOWN_LANE = 'unknown-lane'
+const COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'
+const STALE_READ_ACK = 'stale-read-ack'
 const PROFILE_UNREADABLE = 'profile-unreadable'
 const PROFILE_UNRATIFIED = 'profile-unratified'
 
@@ -97,6 +99,8 @@ export const REFUSAL_REASONS = Object.freeze([
   BAD_FENCES,
   BAD_PROTECTED,
   UNKNOWN_LANE,
+  COUPLED_SOURCE_UNFENCED,
+  STALE_READ_ACK,
   PROFILE_UNREADABLE,
   PROFILE_UNRATIFIED,
 ])
@@ -314,27 +318,48 @@ function addQuotedKeys(source, keys) {
   }
 }
 
-export function extractKeys(source, filePath = '') {
+function normaliseSourceInput(source, filePath = '') {
   if (source && typeof source === 'object' && !Array.isArray(source)) {
     filePath = source.file || source.path || ''
     source = source.source || ''
   }
   if (filePath && typeof filePath === 'object') filePath = filePath.file || filePath.path || ''
+  return { source, filePath }
+}
+
+function exportedSymbols(source) {
+  const symbols = new Set()
+  for (const match of source.matchAll(EXPORTED_DECLARATION)) symbols.add(match[1])
+  for (const match of source.matchAll(EXPORTED_LIST)) {
+    for (const part of match[1].split(',')) {
+      const item = part.trim()
+      if (!item) continue
+      const alias = item.match(/\bas\s+([A-Za-z_$][\w$]*)/) || item.match(/^([A-Za-z_$][\w$]*)/)
+      if (alias) symbols.add(alias[1])
+    }
+  }
+  return symbols
+}
+
+function isCodeFile(filePath) {
+  return !nonEmptyString(filePath)
+    || CODE_EXTENSIONS.includes(extname(String(filePath)).toLowerCase())
+}
+
+export function extractSymbols(source, filePath = '') {
+  ({ source, filePath } = normaliseSourceInput(source, filePath))
+  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
+  if (!isCodeFile(filePath)) return []
+  return [...exportedSymbols(source)].filter((key) => key.length >= 4).sort()
+}
+
+export function extractKeys(source, filePath = '') {
+  ({ source, filePath } = normaliseSourceInput(source, filePath))
   if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
   const keys = new Set()
   if (nonEmptyString(filePath)) keys.add(normaliseRepoPath(filePath))
-  const isCode = !nonEmptyString(filePath)
-    || CODE_EXTENSIONS.includes(extname(String(filePath)).toLowerCase())
-  if (isCode) {
-    for (const match of source.matchAll(EXPORTED_DECLARATION)) keys.add(match[1])
-    for (const match of source.matchAll(EXPORTED_LIST)) {
-      for (const part of match[1].split(',')) {
-        const item = part.trim()
-        if (!item) continue
-        const alias = item.match(/\bas\s+([A-Za-z_$][\w$]*)/) || item.match(/^([A-Za-z_$][\w$]*)/)
-        if (alias) keys.add(alias[1])
-      }
-    }
+  if (isCodeFile(filePath)) {
+    for (const symbol of exportedSymbols(source)) keys.add(symbol)
     addQuotedKeys(source, keys)
   }
   return [...keys].filter((key) => key.length >= 4).sort()
@@ -373,6 +398,8 @@ export function discoverTripwires({ checkout, files }) {
   })
   const sourceFiles = expandFiles({ checkout: repoRoot, entries, repoRoot })
   const keyOwners = new Map()
+  const symbolOwners = new Map()
+  const ownerFiles = new Set()
   const allKeys = new Set()
   for (const sourceFile of sourceFiles) {
     let source
@@ -382,14 +409,33 @@ export function discoverTripwires({ checkout, files }) {
       refuseUsage(`where path cannot be read: ${sourceFile.file}`, MISSING_PATH)
     }
     const keys = extractKeys(source, sourceFile.file)
+    const symbols = extractSymbols(source, sourceFile.file)
+    ownerFiles.add(sourceFile.file)
     for (const key of keys) {
       allKeys.add(key)
       if (!keyOwners.has(key)) keyOwners.set(key, new Set())
       keyOwners.get(key).add(sourceFile.file)
     }
+    for (const symbol of symbols) {
+      if (!symbolOwners.has(symbol)) symbolOwners.set(symbol, new Set())
+      symbolOwners.get(symbol).add(sourceFile.file)
+    }
+  }
+
+  // The owner-path mention is intentionally unbounded: it only narrows the
+  // exported-symbol coupling set, never the existing broad-key tripwire set.
+  const mentionsByOwner = new Map()
+  for (const owner of [...ownerFiles].sort()) {
+    const mentions = new Set([
+      ...grepHits(checkout, owner),
+      ...grepHits(checkout, basename(owner)),
+    ])
+    mentions.delete(owner)
+    mentionsByOwner.set(owner, mentions)
   }
 
   const tripwireMap = new Map()
+  const coupledMap = new Map()
   const broadKeys = []
   for (const key of [...allKeys].sort()) {
     const hits = grepHits(checkout, key)
@@ -398,22 +444,40 @@ export function discoverTripwires({ checkout, files }) {
       continue
     }
     for (const hit of hits) {
-      if (!isTripwireFile(hit)) continue
-      if (keyOwners.get(key)?.has(hit)) continue
-      if (!tripwireMap.has(hit)) tripwireMap.set(hit, new Set())
-      tripwireMap.get(hit).add(key)
+      if (isTripwireFile(hit)) {
+        if (keyOwners.get(key)?.has(hit)) continue
+        if (!tripwireMap.has(hit)) tripwireMap.set(hit, new Set())
+        tripwireMap.get(hit).add(key)
+        continue
+      }
+      if (!CODE_EXTENSIONS.includes(extname(hit).toLowerCase())) continue
+      if (ownerFiles.has(hit)) continue
+      const owners = symbolOwners.get(key)
+      if (!owners) continue
+      const namedOwner = [...owners].find((owner) => mentionsByOwner.get(owner)?.has(hit))
+      if (!namedOwner) continue
+      if (!coupledMap.has(hit)) coupledMap.set(hit, new Set())
+      coupledMap.get(hit).add(key)
     }
   }
 
   const tripwires = [...tripwireMap.entries()]
     .map(([file, keys]) => ({ file, keys: [...keys].sort() }))
     .sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+  const coupled = [...coupledMap.entries()]
+    .map(([file, keys]) => ({ file, keys: [...keys].sort() }))
+    .sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   const candidateSet = new Set(sourceFiles.map(({ file }) => file))
   for (const tripwire of tripwires) candidateSet.add(tripwire.file)
+  // candidates feeds proposeTier, where sourceCount = candidates −
+  // tripwireFiles drives the ratified tier bands; adding coupled sources would
+  // silently raise tiers, and this lane may not change that ratified rule.
+  // Coupling therefore gets its own rendered section.
   const result = {
     candidates: [...candidateSet].sort(),
     tripwires,
     broadKeys: broadKeys.sort((a, b) => a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+    coupled,
   }
   // Keep the complete key register available to the pure renderer without
   // changing the documented enumerable return fields.
@@ -595,9 +659,35 @@ export function gatherFences({ fencesPath } = {}) {
     if (entry.files.some((file) => typeof file !== 'string' || !file.trim())) {
       refuseUsage(`fences.lanes[${index}].files must contain non-blank strings`, BAD_FENCES)
     }
-    const unknown = Object.keys(entry).filter((key) => key !== 'lane' && key !== 'files')
+    const unknown = Object.keys(entry).filter((key) => !['lane', 'files', 'reads'].includes(key))
     if (unknown.length > 0) refuseUsage(`fences.lanes[${index}] has unknown keys`, BAD_FENCES)
-    return { lane: entry.lane, files: [...new Set(entry.files)].sort() }
+    let reads = []
+    if (Object.prototype.hasOwnProperty.call(entry, 'reads')) {
+      if (!Array.isArray(entry.reads)) refuseUsage(`fences.lanes[${index}].reads must be an array`, BAD_FENCES)
+      const seen = new Set()
+      reads = entry.reads.map((read, readIndex) => {
+        if (!read || typeof read !== 'object' || Array.isArray(read)) {
+          refuseUsage(`fences.lanes[${index}].reads[${readIndex}] must be an object`, BAD_FENCES)
+        }
+        const readUnknown = Object.keys(read).filter((key) => key !== 'file' && key !== 'why')
+        if (readUnknown.length > 0) {
+          refuseUsage(`fences.lanes[${index}].reads[${readIndex}] has unknown keys`, BAD_FENCES)
+        }
+        if (!nonEmptyString(read.file)) {
+          refuseUsage(`fences.lanes[${index}].reads[${readIndex}].file must be a non-blank string`, BAD_FENCES)
+        }
+        if (!nonEmptyString(read.why)) {
+          refuseUsage(`fences.lanes[${index}].reads[${readIndex}].why must be a non-blank string`, BAD_FENCES)
+        }
+        const file = normaliseRepoPath(read.file)
+        if (seen.has(file)) {
+          refuseUsage(`fences.lanes[${index}].reads contains duplicate file: ${file}`, BAD_FENCES)
+        }
+        seen.add(file)
+        return { file, why: read.why }
+      }).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+    }
+    return { lane: entry.lane, files: [...new Set(entry.files)].sort(), reads }
   })
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
 }
@@ -605,7 +695,7 @@ export function gatherFences({ fencesPath } = {}) {
 export function resolveWriteSurface({ fences, lane, where = [] } = {}) {
   if (lane == null) {
     const files = [...new Set(where.map((entry) => normaliseRepoPath(entry.path)))].sort()
-    return { lane: null, basis: 'where', files }
+    return { lane: null, basis: 'where', files, reads: [] }
   }
   if (!nonEmptyString(lane)) refuseUsage('--lane requires a value', MISSING_LINE)
   if (fences == null) {
@@ -614,7 +704,99 @@ export function resolveWriteSurface({ fences, lane, where = [] } = {}) {
   const entry = fences.find((candidate) => candidate.lane === lane)
   if (!entry) refuseUsage(`lane is not in the fence register: ${lane}`, UNKNOWN_LANE)
   const files = [...new Set(entry.files.map((file) => normaliseRepoPath(file)))].sort()
-  return { lane, basis: 'fences', files }
+  return { lane, basis: 'fences', files, reads: entry.reads || [] }
+}
+
+function normaliseCoupledEntries(discovery) {
+  if (!Array.isArray(discovery?.coupled)) return null
+  const entries = new Map()
+  for (const entry of discovery.coupled) {
+    if (!entry || typeof entry !== 'object' || !nonEmptyString(entry.file)) continue
+    const file = normaliseRepoPath(entry.file)
+    const keys = Array.isArray(entry.keys)
+      ? [...new Set(entry.keys.filter((key) => typeof key === 'string' && key.length > 0))].sort()
+      : []
+    if (!entries.has(file)) entries.set(file, { file, keys })
+    else entries.get(file).keys = [...new Set([...entries.get(file).keys, ...keys])].sort()
+  }
+  return [...entries.values()].sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+}
+
+export function crossCheckCoupling({ discovery, writeSurface, enforce = true } = {}) {
+  const coupled = normaliseCoupledEntries(discovery)
+  const records = coupled == null
+    ? null
+    : coupled.map((entry) => ({ ...entry, status: 'no-fence' }))
+  if (writeSurface?.basis !== 'fences') {
+    // compileIntakeBrief supplies `fences: null, lane: null`: its write
+    // surface is authored `where`, so no fence exists for coupling to
+    // contradict. Rendering is informative; refusing would break #52's
+    // shipped intake loop.
+    return {
+      enforced: false,
+      coupled: records,
+      in_fence: [],
+      acknowledged: [],
+      unfenced: [],
+      stale: [],
+    }
+  }
+
+  const fenceFiles = new Set(Array.isArray(writeSurface.files)
+    ? writeSurface.files.map((file) => normaliseRepoPath(file))
+    : [])
+  const reads = Array.isArray(writeSurface.reads) ? writeSurface.reads : []
+  const readsByFile = new Map()
+  for (const read of reads) {
+    if (!read || typeof read !== 'object' || !nonEmptyString(read.file)) continue
+    readsByFile.set(normaliseRepoPath(read.file), read)
+  }
+  const inFence = []
+  const acknowledged = []
+  const unfenced = []
+  for (const entry of records || []) {
+    const record = { ...entry }
+    if (fenceFiles.has(entry.file)) {
+      record.status = 'in-fence'
+      inFence.push(record)
+    } else if (readsByFile.has(entry.file)) {
+      record.status = 'acknowledged'
+      record.why = readsByFile.get(entry.file).why
+      acknowledged.push(record)
+    } else {
+      record.status = 'unfenced'
+      unfenced.push(record)
+    }
+  }
+  const coupledOutsideFence = new Set([...acknowledged, ...unfenced].map(({ file }) => file))
+  const stale = reads
+    .filter((read) => read && typeof read === 'object' && nonEmptyString(read.file))
+    .map((read) => ({ file: normaliseRepoPath(read.file), why: read.why }))
+    .filter((read) => !coupledOutsideFence.has(read.file))
+    .sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
+
+  const result = {
+    enforced: enforce !== false,
+    coupled: records == null ? null : [
+      ...inFence,
+      ...acknowledged,
+      ...unfenced,
+    ].sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0),
+    in_fence: inFence.map(({ file }) => file),
+    acknowledged: acknowledged.map(({ file, why }) => ({ file, why })),
+    unfenced: unfenced.map(({ file }) => file),
+    stale,
+  }
+  if (enforce !== false && stale.length > 0) {
+    refuseUsage(`stale read acknowledgement(s): ${stale.map((read) => read.file).join(', ')}`, STALE_READ_ACK)
+  }
+  if (enforce !== false && unfenced.length > 0) {
+    const details = unfenced
+      .map((entry) => `${entry.file} · ${entry.keys.join(', ')}`)
+      .join('; ')
+    refuseUsage(`coupled source(s) outside lane fence: ${details}`, COUPLED_SOURCE_UNFENCED)
+  }
+  return result
 }
 
 function normaliseProtectedPaths(protectedPaths) {
@@ -840,6 +1022,36 @@ function renderTripwires(discovery) {
   return lines.join('\n')
 }
 
+// The coupling bound is a floor, not a proof: grep cannot see dynamic,
+// string-built, or renamed couplings.
+function renderCoupled(coupling) {
+  const lines = [
+    'coupling rule: a coupled source is a non-test .js/.mjs file that names an exported symbol of a where file and names that file; a key-based grep sees a coupling only when both sides share a named symbol, so this is a floor, not a proof (dynamic, string-built, or renamed couplings are invisible).',
+  ]
+  if (!coupling || coupling.coupled == null) {
+    lines.push('- (not discovered — this caller supplied no coupling discovery)')
+    return lines.join('\n')
+  }
+  if (coupling.coupled.length === 0) {
+    lines.push('- (none discovered)')
+    return lines.join('\n')
+  }
+  const acknowledgements = new Map((coupling.acknowledged || [])
+    .filter((entry) => entry && typeof entry.file === 'string')
+    .map((entry) => [normaliseRepoPath(entry.file), entry.why]))
+  for (const entry of coupling.coupled) {
+    const keys = Array.isArray(entry.keys) && entry.keys.length ? entry.keys.join(', ') : '(none)'
+    let status = 'no fence in play'
+    if (entry.status === 'in-fence') status = 'inside this lane\'s fence'
+    if (entry.status === 'acknowledged') {
+      status = `acknowledged read-only: ${acknowledgements.get(normaliseRepoPath(entry.file)) ?? entry.why ?? ''}`
+    }
+    if (entry.status === 'unfenced') status = 'not in any fence (refused)'
+    lines.push(`- ${entry.file} · ${keys} · ${status}`)
+  }
+  return lines.join('\n')
+}
+
 export function renderProposedTier(proposal) {
   const tier = proposal && TIER_NAMES.includes(proposal.tier) ? proposal.tier : null
   const reasons = proposal && Array.isArray(proposal.reasons)
@@ -914,6 +1126,7 @@ export function renderBrief(gathered) {
   const writeSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
     ? gathered.writeSurface
     : resolveWriteSurface({ fences, lane: gathered.lane ?? null, where })
+  const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const lines = [
     `# Task: ${request.ask}`,
@@ -927,6 +1140,8 @@ export function renderBrief(gathered) {
     request.done_means,
     '## Tripwires',
     renderTripwires(discovery),
+    '## Coupled sources',
+    renderCoupled(coupling),
     '## Baseline',
     formatBaseline(baseline, profile),
     '## Out of scope',
@@ -1049,6 +1264,7 @@ function compile(flags) {
       : `package.json scripts.test — ${testCommand.basis}`
   const fences = gatherFences({ fencesPath: flags.fences })
   const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
+  const coupling = crossCheckCoupling({ discovery, writeSurface })
   const baseline = gatherBaseline({ checkout, lane, laneBasis })
   let fromProfile
   try {
@@ -1063,6 +1279,7 @@ function compile(flags) {
     request,
     where,
     discovery,
+    coupling,
     baseline,
     fences,
     lane: flags.lane ?? null,

@@ -11,8 +11,9 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
-  DEFAULT_INTAKE_CONFIG, compileIntakeBrief, dispatchPicked, extractIntakeBlock,
-  fetchBoard, intakeRun, intakeSweep, normalDeps, normaliseBoardPage, orderCandidates,
+  DEFAULT_INTAKE_CONFIG, REQUIRED_INTAKE_CONFIG_KEYS, compileIntakeBrief, dispatchPicked,
+  extractIntakeBlock, fetchBoard, intakeConfigUsable, intakeRun, intakeSweep, normalDeps,
+  normaliseBoardPage, orderCandidates,
 } from '../scripts/factory/intake.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 
@@ -595,4 +596,76 @@ test('an unusable board is rejected before the stop switch or runner', () => {
   assert.deepEqual(result, { ok: false, reason: 'board-config-unusable' })
   assert.equal(checked, 0)
   assert.equal(called, 0)
+})
+
+test('an empty required column is refused before the stop switch or the runner', () => {
+  let checked = 0
+  let called = 0
+  const result = intakeSweep({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: { readyColumn: '' },
+    deps: {
+      existsSync: () => { checked += 1; return false },
+      github: () => { called += 1; return page([]) },
+    },
+  })
+  assert.deepEqual(result, {
+    ok: false, reason: 'intake-config-unusable', detail: 'readyColumn',
+  })
+  assert.equal(checked, 0)
+  assert.equal(called, 0)
+})
+
+test('colliding write-back columns are refused', () => {
+  const result = intakeSweep({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: { readyColumn: 'Same', workColumn: 'Same' },
+    deps: { existsSync: () => { throw new Error('must not check stop') } },
+  })
+  assert.deepEqual(result, {
+    ok: false, reason: 'intake-config-unusable', detail: 'workColumn',
+  })
+})
+
+test('intakeRun refuses before observing when its configuration gate fails', () => {
+  const path = dbPath()
+  let checked = 0
+  let fetched = 0
+  const result = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    dbPath: path,
+    config: { readyColumn: '' },
+    deps: {
+      existsSync: () => { checked += 1; return false },
+      github: () => { fetched += 1; return page([]) },
+    },
+  })
+  assert.deepEqual(result, {
+    sweep: { ok: false, reason: 'intake-config-unusable', detail: 'readyColumn' },
+    dispatch: null,
+    promotions: [],
+  })
+  assert.equal(checked, 0)
+  assert.equal(fetched, 0)
+  assert.equal(existsSync(path), false)
+})
+
+test('the default configuration satisfies its own requirements', () => {
+  for (const key of REQUIRED_INTAKE_CONFIG_KEYS) {
+    assert.equal(typeof DEFAULT_INTAKE_CONFIG[key], 'string')
+    assert.ok(DEFAULT_INTAKE_CONFIG[key].trim())
+  }
+  assert.equal(intakeConfigUsable(DEFAULT_INTAKE_CONFIG), null)
+  assert.equal(new Set([
+    DEFAULT_INTAKE_CONFIG.readyColumn,
+    DEFAULT_INTAKE_CONFIG.workColumn,
+    DEFAULT_INTAKE_CONFIG.reviewColumn,
+  ]).size, 3)
+  const result = intakeSweep({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: {},
+    deps: { existsSync: () => false, github: () => page([]), runsInWindow: () => 0 },
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.outcome, 'none')
 })

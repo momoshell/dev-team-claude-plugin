@@ -12,10 +12,12 @@ import { basename, dirname, join, relative } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
-  FIELD_KIND_NAMES, FIELD_KINDS, LOAD_BEARING, PROFILE_VERSION,
+  FIELD_KIND_NAMES, FIELD_KINDS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
+  INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
-  checkoutProtectedPaths, defaultProfilePath, fieldKind, isRatifiable, main, probeRepo, profileBody,
-  profileDigest, profileProtectedPaths, readProfile, requireField, writeProfile,
+  checkoutIntakeBoard, checkoutProtectedPaths, defaultProfilePath, fieldKind, isRatifiable, main,
+  probeRepo, profileBody, profileDigest, profileIntakeBoard, profileProtectedPaths, readProfile,
+  requireField, writeProfile,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -137,7 +139,7 @@ function captureMain(args) {
 
 function everyCell(profile) {
   assert.deepEqual(Object.keys(profile.fields).sort(), [
-    'baseline', 'ci', 'conventions', 'default_branch', 'pr_conventions',
+    'baseline', 'ci', 'conventions', 'default_branch', 'intake_board', 'pr_conventions',
     'protected_paths_candidates', 'test_command', 'toolchain',
   ].sort())
   for (const cell of Object.values(profile.fields)) {
@@ -205,6 +207,45 @@ if (unknown) {
 const output = {}
 for (const field of fields) output[field] = known[field]
 process.stdout.write(JSON.stringify(output))
+`)
+}
+
+function boardGh(label, { nodes, fields = [], title = 'Board' }) {
+  return fakeGh(label, `
+const argv = process.argv.slice(2)
+const projects = ${JSON.stringify({ Nodes: nodes })}
+const boardFields = ${JSON.stringify(fields)}
+const projectTitle = ${JSON.stringify(title)}
+if (argv[0] === 'repo' && argv.includes('--json')) {
+  const requested = String(argv[argv.indexOf('--json') + 1] || '').split(',').filter(Boolean)
+  const known = {
+    projectsV2: projects,
+    defaultBranchRef: { name: 'main' },
+    nameWithOwner: 'owner/repo',
+    squashMergeAllowed: true,
+    mergeCommitAllowed: false,
+    rebaseMergeAllowed: false,
+    deleteBranchOnMerge: true,
+    allowAutoMerge: false,
+  }
+  const unknown = requested.find((field) => !Object.hasOwn(known, field))
+  if (unknown) { process.stderr.write('Unknown JSON field: "' + unknown + '"'); process.exit(1) }
+  const output = {}
+  for (const field of requested) output[field] = known[field]
+  process.stdout.write(JSON.stringify(output))
+  process.exit(0)
+}
+if (argv[0] === 'api' && argv[1] === 'graphql') {
+  const queryArg = argv.find((arg) => arg.startsWith('query=')) || ''
+  const query = queryArg.slice('query='.length)
+  const roots = [query.includes('user(login:'), query.includes('organization(login:')].filter(Boolean).length
+  if (roots !== 1) { process.stderr.write('query must select one owner root'); process.exit(1) }
+  const root = query.includes('organization(login:') ? 'organization' : 'user'
+  process.stdout.write(JSON.stringify({ data: { [root]: { projectV2: { title: projectTitle, fields: { nodes: boardFields } } } } }))
+  process.exit(0)
+}
+process.stderr.write('unexpected gh invocation')
+process.exit(1)
 `)
 }
 
@@ -300,6 +341,207 @@ process.exit(1)
   for (const reason of [...reasons, 'gh_request_rejected']) {
     assert.ok(UNKNOWN_REASONS.includes(reason))
   }
+})
+
+test('the board is not consulted without --gh', () => {
+  const root = coldFixture('board-offline')
+  const marker = join(fixtureRoot, 'board-offline-gh-called')
+  const gh = fakeGh('board-offline-no-spawn', `
+import { writeFileSync } from 'node:fs'
+writeFileSync(${JSON.stringify(marker)}, 'called')
+`)
+  const cell = withGhBin(gh, () => probeRepo({ checkout: root }).fields.intake_board)
+  assert.deepEqual(cell, { status: 'unknown', value: null, reason: 'gh_not_consulted' })
+  assert.equal(existsSync(marker), false)
+})
+
+test('a missing project scope names the scope rather than reporting no board', () => {
+  const root = coldFixture('board-scope')
+  const gh = fakeGh('board-scope-missing', `
+process.stderr.write("Your token has not been granted the required scopes ... ['read:project']")
+process.exit(1)
+`)
+  const cell = withGhBin(gh, () => probeRepo({ checkout: root, gh: true }).fields.intake_board)
+  assert.equal(cell.status, 'unknown')
+  assert.equal(cell.value, null)
+  assert.equal(cell.reason, 'gh_scope_missing')
+})
+
+test('a repository with no linked project is an honest none_found', () => {
+  const root = coldFixture('board-none')
+  const gh = boardGh('board-none', { nodes: [] })
+  const cell = withGhBin(gh, () => probeRepo({ checkout: root, gh: true }).fields.intake_board)
+  assert.equal(cell.status, 'unknown')
+  assert.equal(cell.value, null)
+  assert.equal(cell.reason, 'none_found')
+})
+
+test('two linked projects refuse with the candidates named', () => {
+  const root = coldFixture('board-multiple')
+  const nodes = [
+    { number: 3, title: 'First', closed: false, resourcePath: '/users/acme/projects/3', url: 'https://example.test/projects/3' },
+    { number: 4, title: 'Second', closed: false, resourcePath: '/users/acme/projects/4', url: 'https://example.test/projects/4' },
+  ]
+  const cell = withGhBin(boardGh('board-multiple', { nodes }), () => (
+    probeRepo({ checkout: root, gh: true }).fields.intake_board
+  ))
+  assert.equal(cell.reason, 'multiple_candidates')
+  assert.deepEqual(cell.candidates, nodes.map(({ number, title, url }) => ({ number, title, url })))
+})
+
+test('a closed linked project is not a candidate', () => {
+  const root = coldFixture('board-closed')
+  const cell = withGhBin(boardGh('board-closed', {
+    nodes: [{ number: 3, title: 'Closed', closed: true, resourcePath: '/users/acme/projects/3', url: 'https://example.test/projects/3' }],
+  }), () => probeRepo({ checkout: root, gh: true }).fields.intake_board)
+  assert.equal(cell.reason, 'none_found')
+})
+
+test('one linked project proposes the board, its ready column and its write-back columns', () => {
+  const root = coldFixture('board-one')
+  const node = { number: 3, title: 'Intake', closed: false, resourcePath: '/users/acme/projects/3', url: 'https://example.test/projects/3' }
+  const fields = [
+    { name: 'Status', options: [
+      { name: 'Backlog' }, { name: ' Ready ' }, { name: 'In progress' }, { name: 'In review' }, { name: 'Done' },
+    ] },
+    { name: 'Priority', options: [{ name: 'P0' }, { name: 'P1' }] },
+  ]
+  const cell = withGhBin(boardGh('board-one', { nodes: [node], fields, title: 'Intake' }), () => (
+    probeRepo({ checkout: root, gh: true }).fields.intake_board
+  ))
+  assert.equal(cell.status, 'proposed')
+  assert.notEqual(cell.status, 'ratified')
+  assert.deepEqual(cell.value, {
+    owner: 'acme', project_number: 3, status_field: 'Status',
+    ready_column: ' Ready ', work_column: 'In progress', review_column: 'In review',
+  })
+  assert.deepEqual(cell.detail.status_options, fields[0].options.map(({ name }) => name))
+  assert.equal(cell.detail.columns_validated_at, 'probe')
+  assert.deepEqual(cell.candidates, [{ number: 3, title: 'Intake', url: node.url }])
+  assert.equal(cell.detail.owner_type, 'user')
+})
+
+test('a board with no ready/work/review triple is none_found, not a partial board', () => {
+  const root = coldFixture('board-partial')
+  const fields = [{ name: 'Status', options: [{ name: 'Todo' }, { name: 'Done' }] }]
+  const cell = withGhBin(boardGh('board-partial', {
+    nodes: [{ number: 3, title: 'Partial', closed: false, resourcePath: '/users/acme/projects/3', url: 'https://example.test/projects/3' }],
+    fields,
+  }), () => probeRepo({ checkout: root, gh: true }).fields.intake_board)
+  assert.equal(cell.reason, 'none_found')
+  assert.deepEqual(cell.candidates, ['Status'])
+})
+
+test('probing the same board twice proposes the same body', () => {
+  const root = coldFixture('board-idempotent')
+  const gh = boardGh('board-idempotent', {
+    nodes: [{ number: 3, title: 'Stable', closed: false, resourcePath: '/users/acme/projects/3', url: 'https://example.test/projects/3' }],
+    fields: [{ name: 'Status', options: [{ name: 'Ready' }, { name: 'In progress' }, { name: 'In review' }] }],
+  })
+  const first = withGhBin(gh, () => probeRepo({ checkout: root, gh: true }))
+  const second = withGhBin(gh, () => probeRepo({ checkout: root, gh: true }))
+  assert.equal(first.fields.intake_board.status, 'proposed')
+  assert.equal(first.meta.body_digest, second.meta.body_digest)
+  assert.equal(profileDigest(first), profileDigest(second))
+})
+
+test('the resolver refuses an absent field, an unratified field and a missing profile by distinct reasons', () => {
+  const path = '/tmp/intake-board-profile.json'
+  const absent = { schema: 1, repo_key: 'acme__repo', fields: {} }
+  assert.throws(() => profileIntakeBoard(absent, { path }), (error) => (
+    error instanceof ProfileRefusal && error.reason === 'profile-field-unknown'
+  ))
+  const proposed = {
+    ...absent,
+    fields: { [INTAKE_BOARD_FIELD]: { status: 'proposed', value: {} } },
+  }
+  assert.throws(() => profileIntakeBoard(proposed, { path }), (error) => (
+    error instanceof ProfileRefusal && error.reason === 'profile-unratified'
+  ))
+  const factoryRoot = join(fixtureRoot, 'empty-intake-factory')
+  mkdirSync(factoryRoot, { recursive: true })
+  assert.throws(() => checkoutIntakeBoard({ checkout: ROOT, factoryRoot }), (error) => (
+    error instanceof ProfileRefusal && error.reason === 'profile-unreadable'
+  ))
+  const reasons = ['profile-field-unknown', 'profile-unratified', 'profile-unreadable']
+  assert.equal(new Set(reasons).size, reasons.length)
+  for (const reason of reasons) assert.ok(INTAKE_BOARD_REFUSALS.includes(reason))
+})
+
+test('a ratified board resolves to intake\'s board and config', () => {
+  const value = {
+    owner: 'acme', project_number: 7, status_field: 'Status',
+    ready_column: 'Ready', work_column: 'In progress', review_column: 'In review',
+  }
+  const profile = {
+    schema: 1, repo_key: 'acme__repo', fields: {
+      [INTAKE_BOARD_FIELD]: {
+        status: 'ratified', value, source: 'human', ratified_by: 'test',
+        ratified_at: '2026-08-17T00:00:00.000Z',
+      },
+    },
+  }
+  const resolved = profileIntakeBoard(profile, { path: '/tmp/profile.json' })
+  assert.deepEqual(resolved.board, { owner: 'acme', projectNumber: 7 })
+  assert.deepEqual(resolved.config, {
+    statusField: 'Status', readyColumn: 'Ready', workColumn: 'In progress', reviewColumn: 'In review',
+  })
+  assert.deepEqual(Object.keys(resolved.config).sort(), [
+    'statusField', 'readyColumn', 'workColumn', 'reviewColumn',
+  ].sort())
+  assert.equal(resolved.basis, 'ratified profile field intake_board · /tmp/profile.json')
+})
+
+test('a ratified board that cannot drive the loop is refused', () => {
+  const base = {
+    owner: 'acme', project_number: 7, status_field: 'Status',
+    ready_column: 'Ready', work_column: 'In progress', review_column: 'In review',
+  }
+  const cases = [
+    ['missing review_column', (value) => { delete value.review_column }],
+    ['project_number: 0', (value) => { value.project_number = 0 }],
+    ['owner: empty', (value) => { value.owner = '' }],
+    ['ready/work collision', (value) => { value.work_column = value.ready_column }],
+    ['value not object', () => null],
+  ]
+  for (const [label, mutate] of cases) {
+    const value = { ...base }
+    const mutated = mutate(value)
+    const profile = {
+      schema: 1, repo_key: 'acme__repo', fields: {
+        [INTAKE_BOARD_FIELD]: {
+          status: 'ratified', value: mutated === null ? null : value,
+          source: 'human', ratified_by: 'test', ratified_at: '2026-08-17T00:00:00.000Z',
+        },
+      },
+    }
+    assert.throws(() => profileIntakeBoard(profile, { path: `/tmp/${label}.json` }), (error) => (
+      error instanceof ProfileRefusal && error.reason === 'intake-board-invalid'
+    ), label)
+  }
+})
+
+test('self-hosting: the board is proposed from this repository or honestly refused', () => {
+  const cell = probeRepo({ checkout: ROOT, gh: true }).fields.intake_board
+  const unknownReasons = [
+    'gh_unavailable', 'gh_unauthenticated', 'gh_scope_missing', 'gh_request_rejected',
+    'none_found', 'multiple_candidates',
+  ]
+  if (cell.status === 'unknown') {
+    assert.ok(unknownReasons.includes(cell.reason), cell.reason)
+    return
+  }
+  assert.equal(cell.status, 'proposed')
+  assert.equal(typeof cell.value.owner, 'string')
+  assert.ok(Number.isInteger(cell.value.project_number) && cell.value.project_number > 0)
+  for (const key of ['ready_column', 'work_column', 'review_column']) {
+    assert.equal(typeof cell.value[key], 'string')
+    assert.ok(cell.value[key].trim())
+    assert.ok(cell.detail.status_options.includes(cell.value[key]))
+  }
+  assert.equal(new Set([
+    cell.value.ready_column, cell.value.work_column, cell.value.review_column,
+  ]).size, 3)
 })
 
 test('a cold checkout has only proposed or honest unknown cells', () => {
@@ -630,8 +872,9 @@ test('field kinds are declared in one place and cover every profile field', () =
   assert.equal(FIELD_KINDS.baseline, 'commit_scoped')
   assert.equal(FIELD_KINDS.protected_paths_candidates, 'authored_superset')
   for (const name of [
-    'toolchain', 'test_command', 'ci', 'conventions', 'default_branch', 'pr_conventions',
+    'toolchain', 'test_command', 'ci', 'conventions', 'default_branch', 'pr_conventions', 'intake_board',
   ]) assert.equal(FIELD_KINDS[name], 'stable')
+  assert.equal(LOAD_BEARING.includes('intake_board'), false)
   assert.equal(fieldKind('a_field_that_does_not_exist'), 'stable')
   assert.equal(isRatifiable('baseline'), false)
 })

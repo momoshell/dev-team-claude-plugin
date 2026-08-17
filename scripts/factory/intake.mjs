@@ -28,6 +28,10 @@ import {
 } from './make-brief.mjs'
 
 export const INTAKE_BLOCK_KEYS = Object.freeze(['ask', 'where', 'done-means', 'out-of-scope'])
+// These values are defaults for callers that have no board configuration. A
+// ratified board is resolved outside this module by probe-repo's
+// checkoutIntakeBoard; importing that resolver here would breach the intake
+// firewall and turn this host-side loop into an identity-bearing consumer.
 export const DEFAULT_INTAKE_CONFIG = Object.freeze({
   statusField: 'Status',
   readyColumn: 'Ready',
@@ -47,6 +51,10 @@ export const DEFAULT_INTAKE_CONFIG = Object.freeze({
   rateLimitFloor: 200,
   protectedPaths: Object.freeze([]),
 })
+
+export const REQUIRED_INTAKE_CONFIG_KEYS = Object.freeze([
+  'statusField', 'readyColumn', 'workColumn', 'reviewColumn',
+])
 
 const EMPTY_PAGE = Object.freeze({
   items: Object.freeze([]),
@@ -480,6 +488,22 @@ function boardUsable(board) {
   return { owner: board.owner.trim(), projectNumber }
 }
 
+export function intakeConfigUsable(settings) {
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    return { key: REQUIRED_INTAKE_CONFIG_KEYS[0] }
+  }
+  for (const key of REQUIRED_INTAKE_CONFIG_KEYS) {
+    if (typeof settings[key] !== 'string' || settings[key].trim().length === 0) return { key }
+  }
+  const columns = ['readyColumn', 'workColumn', 'reviewColumn']
+  for (let index = 1; index < columns.length; index += 1) {
+    if (columns.slice(0, index).some((key) => settings[key] === settings[columns[index]])) {
+      return { key: columns[index] }
+    }
+  }
+  return null
+}
+
 function emptyRateLimit(degraded = false, rateLimit = null) {
   return {
     remaining: rateLimit?.remaining ?? null,
@@ -562,6 +586,8 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
   if (!usableBoard) return { ok: false, reason: 'board-config-unusable' }
 
   const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
+  const unusable = intakeConfigUsable(settings)
+  if (unusable) return { ok: false, reason: 'intake-config-unusable', detail: unusable.key }
   const d = normalDeps(deps)
   const rawNow = nowValue(d)
   const sweptAt = timestamp(rawNow)
@@ -1004,6 +1030,7 @@ export function intakeRun({ board, checkout = process.cwd(), dbPath = null, conf
   const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
   const d = normalDeps(deps)
   const sweep = intakeSweep({ board, checkout, dbPath, config: settings, deps: d })
+  if (sweep.ok === false) return { sweep, dispatch: null, promotions: [] }
   const selectedBoard = boardUsable(board) || dispatchBoard(sweep.board)
   const dispatch = sweep.outcome === 'picked'
     ? dispatchPicked({

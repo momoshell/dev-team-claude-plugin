@@ -1,6 +1,7 @@
 // Pure run shaping helpers. This module deliberately has no filesystem or database dependencies.
 const lanes = new Map()
 const PALETTE_SIZE = 8
+export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
 export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -32,10 +33,12 @@ export const INTAKE_REFUSAL_GROUPS = Object.freeze([
 
 export function laneFor(role) {
   const key = String(role || 'unknown')
+  const ordered = ROLE_ORDER.indexOf(key)
+  if (ordered >= 0) return ordered
   if (!lanes.has(key)) {
     let n = 0
     for (const ch of key) n = (n * 31 + ch.codePointAt(0)) >>> 0
-    lanes.set(key, n % PALETTE_SIZE)
+    lanes.set(key, 6 + (n % (PALETTE_SIZE - ROLE_ORDER.length)))
   }
   return lanes.get(key)
 }
@@ -81,6 +84,8 @@ function sumBilled(rows, column, fallback) {
 
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
+  if (field === 'tier') return "not measured — the ledger's sessions table records no tier (scripts/factory/ledger.mjs:246-263); intake_dispatches records tier by issue, not by run"
+  if (field === 'last_heartbeat_at') return 'not measured here — agent_sessions.last_heartbeat_at is not selected by this feed (visualizer/server/ledger-feed.mjs:76)'
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
   const missing = probe?.missing || []
@@ -115,6 +120,13 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     read_tokens: null,
     written_tokens: null,
   }
+  let last_heartbeat_at = null
+  for (const row of Array.isArray(agentSessions) ? agentSessions : []) {
+    last_heartbeat_at = laterTimestamp(last_heartbeat_at, row?.last_heartbeat_at ?? null)
+  }
+  const heartbeatMs = dateValue(last_heartbeat_at)
+  const heartbeat_age_ms = heartbeatMs == null || !Number.isFinite(now) ? null : now - heartbeatMs
+  const tier = null
   const gateRows = [...gateDiscriminations].sort((a, b) => (a.gate_generation ?? 0) - (b.gate_generation ?? 0))
   const gateGenerations = gateRows.length ? gateRows.map((row) => ({
     gate_generation: row.gate_generation ?? null,
@@ -145,8 +157,8 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     created_at: row.created_at ?? null,
   })) : null
   const pending = {}
-  for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
-    const value = field === 'mode' ? mode : field === 'engineer' ? engineer : metrics[field]
+  for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens', 'tier', 'last_heartbeat_at']) {
+    const value = field === 'mode' ? mode : field === 'engineer' ? engineer : field === 'tier' ? tier : field === 'last_heartbeat_at' ? last_heartbeat_at : metrics[field]
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
@@ -180,6 +192,9 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     engineer,
     status: session.status ?? null,
     running: session.status === 'running',
+    tier,
+    last_heartbeat_at,
+    heartbeat_age_ms,
     started_at: session.started_at ?? null,
     ended_at: ended,
     duration_ms: duration,

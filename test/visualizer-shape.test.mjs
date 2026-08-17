@@ -428,6 +428,30 @@ test('shapeRunSet compares a declared ceiling over an equal window', () => {
   assert.equal(result.budget.fraction, 0.13)
 })
 
+// Orchestrator close-out pin (mutation-found gap): the measured path was pinned
+// but the unmeasured one was not. Letting an unmeasured burn fall through as
+// burn_tokens: 0 / agent_sessions: 0 passed the entire suite — and against a real
+// ceiling that renders as "0% of budget used" when the truth is "we do not know".
+test('shapeRunSet refuses to compare an unmeasured burn, and never reads it as zero', () => {
+  for (const burn of [
+    { measured: false, total: null, sessions: null, absent: 'no agent_sessions rows in this window' },
+    { measured: false, total: 0, sessions: 0, absent: null },
+    undefined,
+  ]) {
+    const result = shapeRunSet({
+      rows: [], since: start, until: end, label: 'last 24 hours',
+      ceiling: { max_tokens: 1000, window_ms: 2000, source: 'test', error: null },
+      burn,
+    })
+    assert.equal(result.budget.comparable, false, 'an unmeasured burn is never comparable')
+    assert.equal(result.budget.burn_tokens, null, 'an unmeasured burn is never a measured zero')
+    assert.equal(result.budget.agent_sessions, null, 'unmeasured sessions are never a measured zero')
+    assert.equal(result.budget.fraction, null)
+    assert.equal(result.budget.headroom_tokens, null)
+    assert.ok(result.budget.pending, 'an unmeasured burn always says why it refused')
+  }
+})
+
 test('shapeRunSet refuses a declared ceiling over a different window', () => {
   const result = shapeRunSet({
     rows: [], since: start, until: end, label: 'last 24 hours',

@@ -15,10 +15,11 @@ import { homedir } from 'node:os'
 import { join, relative, resolve, sep } from 'node:path'
 import { CI_CLASSIFICATIONS, CI_DECISIONS } from './ledger.mjs'
 import { recordCiCycle as emitRecordCiCycle } from './emit.mjs'
+import { readProfile, defaultProfilePath, requireField, probeRepo, ProfileRefusal } from './probe-repo.mjs'
 
-// This repository's one real check is `.github/workflows/test.yml:9`; #252's
-// repo profile is the generaliser. Slice 1 deliberately ratifies this local
-// CI shape instead of pretending to have a cross-repository profile.
+// These constants are this repository's ratified CI shape. They remain
+// exported only for the fenced repair half; the watch path reads the profile
+// and never falls back to them.
 export const CI_CHECKS = Object.freeze(['test (node 24)'])
 export const LOCAL_LANE = Object.freeze(['node', '--test', '--test-timeout=30000'])
 export const UNKNOWN_REASONS = Object.freeze([
@@ -26,6 +27,150 @@ export const UNKNOWN_REASONS = Object.freeze([
   'local-failures-disjoint', 'conclusion-not-adjudicable',
 ])
 export const PUSH_REFUSALS = Object.freeze(['worker-path', 'checkout-missing', 'branch-unresolved', 'push-failed'])
+export const PROFILE_REFUSALS = Object.freeze([
+  'profile-missing', 'profile-unreadable', 'profile-unratified',
+  'profile-ratification-invalid', 'profile-field-unknown',
+  'ci-shape-unusable', 'ci-no-checks', 'test-command-unusable',
+  'repo-key-unresolved',
+])
+
+function profileFailure({ reason, field = null, detail = null, message, profilePath = null }) {
+  return { ok: false, reason, field, detail, message, profilePath }
+}
+
+function builtProfileMessage(reason, field, profilePath) {
+  const where = profilePath ? ` ${profilePath}` : ''
+  const namedField = field ? ` field "${field}"` : ''
+  return `ci-watch: refusing profile${where}${namedField} (reason: ${reason})`
+}
+
+function fieldProfileFailure(err, field, profilePath) {
+  const originalReason = err instanceof ProfileRefusal ? err.reason : null
+  const reason = PROFILE_REFUSALS.includes(originalReason)
+    ? originalReason
+    : 'profile-field-unknown'
+  const detail = reason === 'profile-field-unknown' && originalReason !== reason
+    ? originalReason
+    : null
+  const message = err instanceof ProfileRefusal && err.message
+    ? err.message
+    : builtProfileMessage(reason, field, profilePath)
+  return profileFailure({ reason, field, detail, message, profilePath })
+}
+
+export function resolveProfilePath({ checkout, profilePath, repoKey, factoryRoot } = {}) {
+  if (typeof profilePath === 'string' && profilePath.length > 0) {
+    try { return { ok: true, path: resolve(profilePath) } } catch {}
+  }
+  if (typeof repoKey === 'string' && repoKey.trim().length > 0) {
+    try {
+      return { ok: true, path: resolve(defaultProfilePath({ repoKey, factoryRoot })) }
+    } catch {}
+  }
+  try {
+    const probed = probeRepo({ checkout })
+    if (!probed || typeof probed.repo_key !== 'string' || probed.repo_key.trim().length === 0) {
+      return { ok: false, reason: 'repo-key-unresolved' }
+    }
+    return { ok: true, path: resolve(defaultProfilePath({ repoKey: probed.repo_key, factoryRoot })) }
+  } catch {
+    return { ok: false, reason: 'repo-key-unresolved' }
+  }
+}
+
+export function ciShape({ checkout, profilePath, repoKey, factoryRoot, deps = {} } = {}) {
+  const d = normalDeps(deps)
+  const resolved = resolveProfilePath({ checkout, profilePath, repoKey, factoryRoot })
+  if (!resolved.ok) {
+    return profileFailure({
+      reason: resolved.reason,
+      message: builtProfileMessage(resolved.reason, null, null),
+    })
+  }
+  const path = resolved.path
+  let present = false
+  try { present = d.existsSync(path) } catch {}
+  if (!present) {
+    return profileFailure({
+      reason: 'profile-missing',
+      message: builtProfileMessage('profile-missing', null, path),
+      profilePath: path,
+    })
+  }
+
+  let profile
+  try {
+    profile = readProfile(path)
+  } catch (err) {
+    return profileFailure({
+      reason: 'profile-unreadable',
+      detail: err?.reason || null,
+      message: builtProfileMessage('profile-unreadable', null, path),
+      profilePath: path,
+    })
+  }
+
+  let ci
+  try {
+    ci = requireField(profile, 'ci')
+  } catch (err) {
+    return fieldProfileFailure(err, 'ci', path)
+  }
+  let testCommand
+  try {
+    testCommand = requireField(profile, 'test_command')
+  } catch (err) {
+    return fieldProfileFailure(err, 'test_command', path)
+  }
+  if (!ci || typeof ci !== 'object' || Array.isArray(ci) || !Array.isArray(ci.workflows)) {
+    return profileFailure({
+      reason: 'ci-shape-unusable',
+      field: 'ci',
+      message: builtProfileMessage('ci-shape-unusable', 'ci', path),
+      profilePath: path,
+    })
+  }
+  if (typeof testCommand !== 'string' || testCommand.trim().length === 0) {
+    return profileFailure({
+      reason: 'test-command-unusable',
+      field: 'test_command',
+      message: builtProfileMessage('test-command-unusable', 'test_command', path),
+      profilePath: path,
+    })
+  }
+
+  const checks = []
+  const seen = new Set()
+  for (const workflow of ci.workflows) {
+    if (!workflow || typeof workflow !== 'object' || Array.isArray(workflow)) continue
+    const triggers = workflow.triggers
+    if (!Array.isArray(triggers)) continue
+    if (triggers.length > 0 && !triggers.includes('push') && !triggers.includes('pull_request')) continue
+    if (!Array.isArray(workflow.jobs)) continue
+    for (const job of workflow.jobs) {
+      if (!job || typeof job !== 'object' || Array.isArray(job)) continue
+      const checkName = job.check_name
+      if (typeof checkName !== 'string' || checkName.trim().length === 0 || seen.has(checkName)) continue
+      seen.add(checkName)
+      checks.push(checkName)
+    }
+  }
+  if (checks.length === 0) {
+    return profileFailure({
+      reason: 'ci-no-checks',
+      field: 'ci',
+      message: builtProfileMessage('ci-no-checks', 'ci', path),
+      profilePath: path,
+    })
+  }
+  return {
+    ok: true,
+    checks,
+    lane: ['/bin/sh', '-c', testCommand],
+    laneLabel: testCommand,
+    profilePath: path,
+  }
+}
 
 function defaultChecks(d, request) {
   const args = request.action === 'runs'
@@ -181,7 +326,7 @@ function checkRows(value) {
   return []
 }
 
-export function fetchCheckRuns({ branch, headSha, deps = {} } = {}) {
+export function fetchCheckRuns({ branch, headSha, checks = [], deps = {} } = {}) {
   const d = normalDeps(deps)
   const response = invokeChecks(d, { action: 'runs', kind: 'runs', branch, headSha })
   const rows = checkRows(response)
@@ -189,14 +334,14 @@ export function fetchCheckRuns({ branch, headSha, deps = {} } = {}) {
   for (const row of rows) {
     if (!row || typeof row !== 'object') continue
     const name = row.check_name ?? row.name
-    if (typeof name !== 'string' || !CI_CHECKS.includes(name) || byName.has(name)) continue
+    if (typeof name !== 'string' || !checks.includes(name) || byName.has(name)) continue
     byName.set(name, {
       check_name: name,
       conclusion: row.conclusion ?? 'unknown',
       log_ref: row.log_ref ?? row.logRef ?? row.details_url ?? row.url ?? null,
     })
   }
-  return CI_CHECKS.map((checkName) => byName.get(checkName) || {
+  return checks.map((checkName) => byName.get(checkName) || {
     check_name: checkName,
     conclusion: 'unknown',
     log_ref: null,
@@ -265,21 +410,23 @@ export function extractFailure(logText) {
   }
 }
 
-export function runLocalLane({ checkout, deps = {} } = {}) {
+export function runLocalLane({ checkout, lane, deps = {} } = {}) {
   const d = normalDeps(deps)
+  const selectedLane = Array.isArray(lane) ? [...lane] : []
+  if (selectedLane.length === 0) return { ran: false, exit: null, failures: [], lane: [] }
   let result
   try {
-    result = d.spawnSync(LOCAL_LANE[0], LOCAL_LANE.slice(1), { cwd: checkout, encoding: 'utf8' })
+    result = d.spawnSync(selectedLane[0], selectedLane.slice(1), { cwd: checkout, encoding: 'utf8' })
   } catch {
-    return { ran: false, exit: null, failures: [], lane: [...LOCAL_LANE] }
+    return { ran: false, exit: null, failures: [], lane: selectedLane }
   }
-  if (result?.error) return { ran: false, exit: null, failures: [], lane: [...LOCAL_LANE] }
+  if (result?.error) return { ran: false, exit: null, failures: [], lane: selectedLane }
   const extracted = extractFailure(result?.stdout ?? '')
   return {
     ran: true,
     exit: result?.status ?? null,
     failures: extracted.failures,
-    lane: [...LOCAL_LANE],
+    lane: selectedLane,
   }
 }
 
@@ -334,6 +481,9 @@ export function ciWatchRun({
   repoSlug = null,
   dbPath = null,
   crewRoot,
+  profilePath,
+  repoKey,
+  factoryRoot,
   deps = {},
 } = {}) {
   const d = normalDeps(deps)
@@ -343,22 +493,33 @@ export function ciWatchRun({
       return { ok: false, pushed: false, reason: pushed.reason, cycles: [] }
     }
 
+    const shape = ciShape({ checkout, profilePath, repoKey, factoryRoot, deps: d })
+    if (!shape.ok) {
+      return {
+        ok: false,
+        pushed: true,
+        reason: shape.reason,
+        detail: shape.detail ?? null,
+        cycles: [],
+      }
+    }
+
     const headSha = resolveHeadSha(checkout, pushed.branch, d)
     if (!headSha) {
       return { ok: false, pushed: true, reason: 'branch-unresolved', cycles: [] }
     }
-    const checks = fetchCheckRuns({ branch: pushed.branch, headSha, deps: d })
+    const checks = fetchCheckRuns({ branch: pushed.branch, headSha, checks: shape.checks, deps: d })
     const cycles = []
 
     for (const check of checks) {
       let extracted = { excerpt: null, failures: [], source: null }
-      let local = { ran: false, exit: null, failures: [], lane: [...LOCAL_LANE] }
+      let local = { ran: false, exit: null, failures: [], lane: [...shape.lane] }
       let localAttempted = false
       if (check.conclusion !== 'success') {
         extracted = extractFailure(fetchCheckLog({ logRef: check.log_ref, deps: d }))
         if (check.conclusion === 'failure' && extracted.failures.length > 0) {
           localAttempted = true
-          local = runLocalLane({ checkout, deps: d })
+          local = runLocalLane({ checkout, lane: shape.lane, deps: d })
         }
       }
       const adjudication = classifyRed({
@@ -381,7 +542,7 @@ export function ciWatchRun({
         reason: adjudication.reason,
         excerpt: extracted.excerpt,
         excerpt_source: extracted.source,
-        local_lane: localAttempted ? LOCAL_LANE.join(' ') : null,
+        local_lane: localAttempted ? shape.laneLabel : null,
         local_exit: localAttempted ? local.exit : null,
         created_at: watchNow(d),
       }

@@ -10,9 +10,11 @@ import { spawnSync as cpSpawnSync } from 'node:child_process'
 import { createRequire } from 'node:module'
 import { ROOT } from './helpers.mjs'
 import {
-  CI_CHECKS, LOCAL_LANE, ciWatchRun, classifyRed, decisionFor, extractFailure,
-  fetchCheckLog, fetchCheckRuns, isWorkerPath, pushBranch, runLocalLane,
+  CI_CHECKS, LOCAL_LANE, PROFILE_REFUSALS, ciShape, ciWatchRun, classifyRed,
+  decisionFor, extractFailure, fetchCheckLog, fetchCheckRuns, isWorkerPath,
+  pushBranch, runLocalLane,
 } from '../scripts/factory/ci-watch.mjs'
+import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { recordCiCycle as emitRecordCiCycle } from '../scripts/factory/emit.mjs'
 import { openLedger, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
@@ -30,6 +32,7 @@ const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NO
 
 const fixture = mkdtempSync(join(tmpdir(), 'factory-ci-watch-'))
 let worldNumber = 0
+let profileNumber = 0
 after(() => rmSync(fixture, { recursive: true, force: true }))
 
 function git(repoDir, ...args) {
@@ -61,6 +64,46 @@ function withWorld(fn) {
   try { return fn(world) } finally { rmSync(world.root, { recursive: true, force: true }) }
 }
 
+function ratifiedCell(value) {
+  return {
+    status: 'ratified',
+    value,
+    source: 'test fixture',
+    ratified_by: 'test',
+    ratified_at: '2026-08-17T00:00:00.000Z',
+  }
+}
+
+function ciValue(checks, triggers = ['push', 'pull_request']) {
+  return {
+    workflows: [{
+      file: '.github/workflows/test.yml',
+      name: 'test',
+      triggers,
+      jobs: checks.map((name) => ({
+        id: name, name, check_name: name, runs_on: 'ubuntu-latest', steps_run: [],
+      })),
+    }],
+  }
+}
+
+function profileFixture({ checks = ['test (node 24)'], lane = 'npm test', triggers, fields } = {}) {
+  profileNumber += 1
+  const path = join(fixture, `profile-${profileNumber}.json`)
+  writeFileSync(path, `${JSON.stringify({
+    schema: 1,
+    profile_version: 1,
+    repo_key: 'test__fixture',
+    repo_slug: 'fixture',
+    fields: fields || {
+      ci: ratifiedCell(ciValue(checks, triggers)),
+      test_command: ratifiedCell(lane),
+    },
+    meta: { probed_at: '2026-08-17T00:00:00.000Z' },
+  }, null, 2)}\n`)
+  return path
+}
+
 function seam(world, extra = {}) {
   const calls = []
   const spawnSync = (command, args, options) => {
@@ -68,7 +111,9 @@ function seam(world, extra = {}) {
     if (command === 'git' && args[0] === '-C' && args.includes('push')) {
       return { status: 0, stdout: '', stderr: '' }
     }
-    if (command === 'node' && extra.local) return extra.local
+    if (extra.local && (extra.localCommand
+      ? command === extra.localCommand
+      : command === 'node' || command === '/bin/sh')) return extra.local
     return cpSpawnSync(command, args, options)
   }
   return { calls, deps: { spawnSync, ...extra.deps } }
@@ -128,6 +173,7 @@ test('a primary checkout outside the crew root reaches the push seam', () => {
 
 test('every subprocess in a watch uses the injected seam', () => {
   withWorld((world) => {
+    const profilePath = profileFixture()
     const { calls, deps } = seam(world, {
       local: { status: 1, stdout: 'not ok 1 - first failure\n', stderr: '' },
       deps: { checks: ({ action }) => action === 'runs'
@@ -136,11 +182,13 @@ test('every subprocess in a watch uses the injected seam', () => {
     })
     const result = ciWatchRun({
       checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'),
-      deps, dbPath: join(world.root, 'ledger.db'),
+      profilePath, deps, dbPath: join(world.root, 'ledger.db'),
     })
     assert.equal(result.ok, true)
     assert.ok(calls.length > 0)
-    assert.ok(calls.every((argv) => argv[0] === 'git' || argv[0] === 'node'))
+    const shape = ciShape({ checkout: world.host, profilePath })
+    assert.equal(shape.ok, true)
+    assert.ok(calls.every((argv) => argv[0] === 'git' || argv[0] === shape.lane[0]))
   })
 })
 
@@ -152,7 +200,7 @@ test('ci-watch import firewall has only the three allowed static import surfaces
   assert.equal((uncommented.match(/\bimport\s*\(/g) || []).length, 0)
   assert.equal((uncommented.match(/export\s+\*\s+from/g) || []).length, 0)
   const specifiers = [...uncommented.matchAll(/from\s+['"]([^'"]+)['"]/g)].map((match) => match[1])
-  assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs'])
+  assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs', './probe-repo.mjs'])
 })
 
 test('decisionFor is total over the closed classifications and never collapses unknown into repair', () => {
@@ -201,13 +249,167 @@ test('an unparseable log uses the named tail window and parks', () => {
 })
 
 test('fetchCheckRuns carries a missing watched check as unknown', () => {
-  const rows = fetchCheckRuns({ branch: 'main', headSha: 'head', deps: { checks: () => [] } })
+  const rows = fetchCheckRuns({ branch: 'main', headSha: 'head', checks: CI_CHECKS, deps: { checks: () => [] } })
   assert.deepEqual(rows, [{ check_name: CI_CHECKS[0], conclusion: 'unknown', log_ref: null }])
 })
 
 test('runLocalLane reports a spawn failure without throwing', () => {
-  const result = runLocalLane({ checkout: '/missing', deps: { spawnSync: () => { throw new Error('no node') } } })
+  const result = runLocalLane({ checkout: '/missing', lane: LOCAL_LANE, deps: { spawnSync: () => { throw new Error('no node') } } })
   assert.deepEqual(result, { ran: false, exit: null, failures: [], lane: [...LOCAL_LANE] })
+})
+
+test("ciShape reads the watched check names from this repo's ratified ci cell", () => {
+  const probed = probeRepo({ checkout: ROOT })
+  const profilePath = profileFixture({
+    fields: {
+      ci: ratifiedCell(probed.fields.ci.value),
+      test_command: ratifiedCell('npm test'),
+    },
+  })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, true)
+  assert.deepEqual(shape.checks, ['test (node 24)'])
+})
+
+test('ciShape flattens every job across workflows and dedupes by check name', () => {
+  const profilePath = profileFixture({
+    fields: {
+      ci: ratifiedCell({
+        workflows: [
+          { triggers: ['push'], jobs: [{ check_name: 'lint' }, { check_name: 'build' }] },
+          { triggers: ['pull_request'], jobs: [{ check_name: 'build' }, { check_name: 'test' }] },
+        ],
+      }),
+      test_command: ratifiedCell('npm test'),
+    },
+  })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, true)
+  assert.deepEqual(shape.checks, ['lint', 'build', 'test'])
+})
+
+test('ciShape skips a workflow no branch push triggers and keeps an untriggered-unparsed one', () => {
+  const profilePath = profileFixture({
+    fields: {
+      ci: ratifiedCell({
+        workflows: [
+          { triggers: ['schedule'], jobs: [{ check_name: 'scheduled-only' }] },
+          { triggers: [], jobs: [{ check_name: 'unparsed-trigger' }] },
+          { triggers: ['pull_request'], jobs: [{ check_name: 'pull-request' }] },
+        ],
+      }),
+      test_command: ratifiedCell('npm test'),
+    },
+  })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, true)
+  assert.deepEqual(shape.checks, ['unparsed-trigger', 'pull-request'])
+})
+
+test('ciShape refuses a proposed ci cell', () => {
+  const profilePath = profileFixture({
+    fields: {
+      ci: { status: 'proposed', value: ciValue(['unratified']), source: 'test fixture' },
+      test_command: ratifiedCell('npm test'),
+    },
+  })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, false)
+  assert.equal(shape.reason, 'profile-unratified')
+  assert.equal(shape.field, 'ci')
+})
+
+test('ciShape refuses an unknown ci cell', () => {
+  const profilePath = profileFixture({
+    fields: {
+      ci: { status: 'unknown', value: null, reason: 'no_ci' },
+      test_command: ratifiedCell('npm test'),
+    },
+  })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, false)
+  assert.equal(shape.reason, 'profile-field-unknown')
+  assert.equal(shape.detail, 'no_ci')
+})
+
+test('ciShape refuses a profile that declares no CI checks', () => {
+  const profilePath = profileFixture({
+    fields: {
+      ci: ratifiedCell(ciValue([])),
+      test_command: ratifiedCell('npm test'),
+    },
+  })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, false)
+  assert.equal(shape.reason, 'ci-no-checks')
+})
+
+test('ciShape names an absent profile and an unreadable profile with distinct reasons', () => {
+  const absentPath = join(fixture, 'profile-absent.json')
+  const unreadablePath = join(fixture, 'profile-unreadable.json')
+  writeFileSync(unreadablePath, '{ not json\n')
+  const absent = ciShape({ checkout: ROOT, profilePath: absentPath })
+  const unreadable = ciShape({ checkout: ROOT, profilePath: unreadablePath })
+  assert.equal(absent.reason, 'profile-missing')
+  assert.equal(unreadable.reason, 'profile-unreadable')
+  assert.notEqual(absent.reason, unreadable.reason)
+})
+
+test('ciShape takes the local lane from the ratified test_command and refuses a proposed one', () => {
+  const profilePath = profileFixture({ checks: ['foreign'], lane: 'make check' })
+  const shape = ciShape({ checkout: ROOT, profilePath })
+  assert.equal(shape.ok, true)
+  assert.deepEqual(shape.lane, ['/bin/sh', '-c', 'make check'])
+  assert.equal(shape.laneLabel, 'make check')
+  const proposedPath = profileFixture({
+    fields: {
+      ci: ratifiedCell(ciValue(['foreign'])),
+      test_command: { status: 'proposed', value: 'make check', source: 'test fixture' },
+    },
+  })
+  const proposed = ciShape({ checkout: ROOT, profilePath: proposedPath })
+  assert.equal(proposed.ok, false)
+  assert.equal(proposed.reason, 'profile-unratified')
+  assert.equal(proposed.field, 'test_command')
+})
+
+test("a watch against a foreign profile watches that repo's checks and runs that repo's lane", { skip: SKIP }, () => {
+  withWorld((world) => {
+    const checks = ['foreign/lint', 'foreign/test']
+    const profilePath = profileFixture({ checks, lane: 'foreign suite' })
+    const { calls, deps } = seam(world, {
+      local: { status: 1, stdout: 'not ok 1 - first failure\n', stderr: '' },
+      localCommand: '/bin/sh',
+      deps: { checks: ({ action }) => action === 'runs'
+        ? checks.map((check_name) => ({ check_name, conclusion: 'failure', log_ref: 'log-1' }))
+        : failureLog },
+    })
+    const result = ciWatchRun({
+      checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'),
+      profilePath, dbPath: join(world.root, 'foreign.db'), deps,
+    })
+    assert.equal(result.ok, true)
+    assert.deepEqual(result.cycles.map((row) => row.check_name), checks)
+    assert.deepEqual([...new Set(result.cycles.map((row) => row.local_lane))], ['foreign suite'])
+    assert.equal(calls.some((argv) => argv.includes('--test-timeout=30000')), false)
+  })
+})
+
+test('a watch refuses with a named reason when the profile is absent, and records no cycle', () => {
+  withWorld((world) => {
+    const profilePath = join(world.root, 'missing-profile.json')
+    const { deps } = seam(world)
+    const result = ciWatchRun({
+      checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'),
+      profilePath, dbPath: join(world.root, 'missing.db'), deps,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.pushed, true)
+    assert.equal(result.reason, 'profile-missing')
+    assert.deepEqual(result.cycles, [])
+    assert.equal(Object.isFrozen(PROFILE_REFUSALS), true)
+    assert.ok(PROFILE_REFUSALS.includes(result.reason))
+  })
 })
 
 test('CI_CHECKS matches the workflow job check name', () => {
@@ -232,6 +434,7 @@ test('the emit facade never throws when the ledger refuses its input', () => {
 
 test('seeded red watch records one reproduced cycle with its complete excerpt', { skip: SKIP }, () => {
   withWorld((world) => {
+    const profilePath = profileFixture()
     const { deps } = seam(world, {
       local: { status: 1, stdout: 'not ok 1 - first failure\n', stderr: '' },
       deps: { checks: ({ action }) => action === 'runs'
@@ -239,7 +442,7 @@ test('seeded red watch records one reproduced cycle with its complete excerpt', 
         : failureLog, now: () => '2024-01-01T00:00:00.000Z' },
     })
     const dbPath = join(world.root, 'ledger.db')
-    const result = ciWatchRun({ checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'), dbPath, deps })
+    const result = ciWatchRun({ checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'), profilePath, dbPath, deps })
     assert.equal(result.cycles.length, 1)
     assert.equal(result.cycles[0].classification, 'reproduced')
     assert.equal(result.cycles[0].decision, 'repair')
@@ -256,6 +459,7 @@ test('seeded red watch records one reproduced cycle with its complete excerpt', 
 
 test('seeded platform-divergent red parks on cycle one', { skip: SKIP }, () => {
   withWorld((world) => {
+    const profilePath = profileFixture()
     const { deps } = seam(world, {
       local: { status: 0, stdout: '', stderr: '' },
       deps: { checks: ({ action }) => action === 'runs'
@@ -263,7 +467,7 @@ test('seeded platform-divergent red parks on cycle one', { skip: SKIP }, () => {
         : failureLog },
     })
     const dbPath = join(world.root, 'platform.db')
-    const result = ciWatchRun({ checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'), dbPath, deps })
+    const result = ciWatchRun({ checkout: world.host, branch: 'main', crewRoot: join(world.root, 'crew'), profilePath, dbPath, deps })
     assert.equal(result.cycles[0].classification, 'platform-divergent')
     assert.equal(result.cycles[0].decision, 'park')
     assert.equal(result.cycles[0].cycle, 1)

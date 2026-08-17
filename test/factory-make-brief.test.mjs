@@ -12,8 +12,9 @@ import { spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
-  REFUSAL_REASONS, SLOT_MARKER, discoverTripwires, extractKeys,
-  gatherProtectedPaths, main, profileField, proposeTier, validateAsk, verifyWhere,
+  REFUSAL_REASONS, SLOT_MARKER, crossCheckCoupling, discoverTripwires, extractKeys,
+  extractSymbols, gatherFences, gatherProtectedPaths, main, profileField, proposeTier,
+  renderBrief, resolveWriteSurface, validateAsk, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
@@ -45,7 +46,9 @@ function git(root, args) {
   return result
 }
 
-function fixture(label, { scripts = 'node --test', broad = false } = {}) {
+function fixture(label, {
+  scripts = 'node --test', broad = false, coupledCaller = false, broadSources = false,
+} = {}) {
   const root = nextRoot(label)
   const packageData = { name: `brief-${label}`, private: true, type: 'module' }
   if (scripts !== null) packageData.scripts = { test: scripts }
@@ -59,6 +62,13 @@ function fixture(label, { scripts = 'node --test', broad = false } = {}) {
     '',
   ].join('\n'))
   put(root, 'config/thing.yml', 'ttl_seconds: 30\n')
+  if (coupledCaller) {
+    put(root, 'lib/caller.mjs', [
+      "import { computeWidget } from './widget.mjs'",
+      'export function callWidget(n) { return computeWidget(n) }',
+      '',
+    ].join('\n'))
+  }
   put(root, 'test/widget.test.mjs', [
     "import { test } from 'node:test'",
     "import assert from 'node:assert/strict'",
@@ -72,13 +82,24 @@ function fixture(label, { scripts = 'node --test', broad = false } = {}) {
     "test('config path is pinned', () => { readFileSync('config/thing.yml', 'utf8') })",
     '',
   ].join('\n'))
-  if (broad) {
+  if (broad || broadSources) {
     put(root, 'lib/broad.mjs', "export const BROAD_PIN = 'out/broad.json'\n")
+  }
+  if (broad) {
     for (let index = 0; index < BROAD_KEY_HIT_LIMIT + 2; index += 1) {
       put(root, `test/broad-${String(index).padStart(2, '0')}.test.mjs`, [
         "import { test } from 'node:test'",
         "import { BROAD_PIN } from '../lib/broad.mjs'",
         `test('broad pin ${index}', () => { void BROAD_PIN })`,
+        '',
+      ].join('\n'))
+    }
+  }
+  if (broadSources) {
+    for (let index = 0; index < BROAD_KEY_HIT_LIMIT + 2; index += 1) {
+      put(root, `lib/broad-${String(index).padStart(2, '0')}.mjs`, [
+        "import { BROAD_PIN } from './broad.mjs'",
+        `export const BROAD_SOURCE_${index} = BROAD_PIN`,
         '',
       ].join('\n'))
     }
@@ -748,7 +769,9 @@ test('shape proposal stays deferred while tier proposal wiring is present', () =
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 14)
+  assert.equal(REFUSAL_REASONS.length, 16)
+  assert.ok(REFUSAL_REASONS.includes('coupled-source-unfenced'))
+  assert.ok(REFUSAL_REASONS.includes('stale-read-ack'))
   assert.ok(REFUSAL_REASONS.includes('profile-unreadable'))
   assert.ok(REFUSAL_REASONS.includes('profile-unratified'))
   assert.ok(REFUSAL_REASONS.includes('bad-protected'))
@@ -770,4 +793,196 @@ test('direct gatherers refuse a non-git checkout and preserve verified entries',
   const found = discoverTripwires({ checkout: root, files: verified })
   assert.ok(Array.isArray(found.candidates))
   assert.ok(Array.isArray(found.tripwires))
+})
+
+test('extractSymbols is the exported-symbol half and tolerates object input', () => {
+  const source = { file: './lib/example.mjs', source: [
+    'export const PublicValue = 1',
+    'export async function runThing() {}',
+    'export { hidden as PublicAlias, plain }',
+    "const code = 'cache:miss'",
+  ].join('\n') }
+  assert.deepEqual(extractSymbols(source), ['PublicAlias', 'PublicValue', 'plain', 'runThing'])
+  assert.deepEqual(extractSymbols("export const PublicValue = 1", 'docs/example.txt'), [])
+})
+
+test('real ci-watch discovery names its non-test callers without widening tripwires', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['scripts/factory/ci-watch.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const caller = discovery.coupled.find((entry) => entry.file === 'scripts/factory/ci-repair.mjs')
+  assert.ok(caller)
+  assert.ok(caller.keys.includes('ciWatchRun'))
+  assert.equal(discovery.coupled.some((entry) => entry.file === 'crew/arms.mjs'), false)
+})
+
+test('real crew-drive discovery retains crew-child as an exported-symbol caller', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/drive.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  const caller = discovery.coupled.find((entry) => entry.file === 'crew/child.mjs')
+  assert.ok(caller)
+  assert.ok(caller.keys.includes('driveTask'))
+})
+
+test('coupling refuses an unfenced caller and quiets when every caller is covered', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['scripts/factory/ci-watch.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  assert.throws(() => crossCheckCoupling({
+    discovery,
+    writeSurface: { basis: 'fences', files: ['scripts/factory/ci-watch.mjs'], reads: [] },
+  }), (error) => error.reason === 'coupled-source-unfenced' && /ci-repair\.mjs/.test(error.message))
+  const quiet = crossCheckCoupling({
+    discovery,
+    writeSurface: { basis: 'fences', files: [
+      'scripts/factory/ci-watch.mjs',
+      ...discovery.coupled.map((entry) => entry.file),
+    ], reads: [] },
+  })
+  assert.deepEqual(quiet.unfenced, [])
+})
+
+test('a coupled fixture refuses a fence that omits its caller', () => {
+  const root = fixture('coupled-firing', { coupledCaller: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
+  }, null, 2)}\n`)
+  const result = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
+  ])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /coupled-source-unfenced/)
+  assert.match(result.stderr, /lib\/caller\.mjs/)
+})
+
+test('a valid acknowledgement does not clear another unfenced coupled source', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['scripts/factory/ci-watch.mjs'] })
+  const discovery = discoverTripwires({ checkout: ROOT, files: where })
+  assert.throws(() => crossCheckCoupling({
+    discovery,
+    writeSurface: {
+      basis: 'fences',
+      files: ['scripts/factory/ci-watch.mjs'],
+      reads: [{ file: 'scripts/factory/ci-repair.mjs', why: 'read only here' }],
+    },
+  }), (error) => error.reason === 'coupled-source-unfenced' && /ledger\.mjs/.test(error.message))
+})
+
+test('a coupled fixture renders an in-fence caller', () => {
+  const root = fixture('coupled-quiet', { coupledCaller: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/caller.mjs'] }],
+  }, null, 2)}\n`)
+  const { brief } = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'])
+  const body = section(brief, '## Coupled sources')
+  assert.match(body, /lib\/caller\.mjs · .*computeWidget.*inside this lane's fence/)
+  assert.match(brief, /floor, not a proof/)
+})
+
+test('a coupled fixture can acknowledge a read-only caller verbatim', () => {
+  const root = fixture('coupled-ack', { coupledCaller: true })
+  const why = 'caller is owned by the adjacent lane; do not edit it'
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads: [{ file: './lib/caller.mjs', why }] }],
+  }, null, 2)}\n`)
+  assert.deepEqual(gatherFences({ fencesPath })[0].reads, [{ file: 'lib/caller.mjs', why }])
+  const { brief } = compile(root, {}, ['--fences', fencesPath, '--lane', 'own'])
+  assert.match(section(brief, '## Coupled sources'), new RegExp(`acknowledged read-only: ${why}`))
+})
+
+test('stale and malformed coupling acknowledgements refuse by input reason', () => {
+  const root = fixture('coupled-bad-reads', { coupledCaller: true })
+  const stalePath = put(root, 'stale-fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads: [{ file: 'config/thing.yml', why: 'not a caller' }] }],
+  }, null, 2)}\n`)
+  const stale = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--fences', stalePath, '--lane', 'own', '--out', join(root, 'stale.md'),
+  ])
+  assert.equal(stale.status, 2)
+  assert.match(stale.stderr, /stale-read-ack/)
+  for (const [label, reads] of [
+    ['blank', [{ file: 'lib/caller.mjs', why: '   ' }]],
+    ['not-object', ['lib/caller.mjs']],
+    ['duplicate', [
+      { file: 'lib/caller.mjs', why: 'one' },
+      { file: './lib/caller.mjs', why: 'two' },
+    ]],
+  ]) {
+    const path = put(root, `${label}-fences.json`, `${JSON.stringify({
+      lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads }],
+    }, null, 2)}\n`)
+    const result = run(root, [
+      '--request', request(root), '--checkout', root,
+      '--fences', path, '--lane', 'own', '--out', join(root, `${label}.md`),
+    ])
+    assert.equal(result.status, 2, label)
+    assert.match(result.stderr, /bad-fences/, label)
+  }
+  const notesPath = put(root, 'notes-fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'], notes: 'mute' }],
+  }, null, 2)}\n`)
+  const notes = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--fences', notesPath, '--lane', 'own', '--out', join(root, 'notes.md'),
+  ])
+  assert.equal(notes.status, 2)
+  assert.match(notes.stderr, /bad-fences/)
+})
+
+test('no fence reports coupling without enforcing it', () => {
+  const root = fixture('coupled-no-fence', { coupledCaller: true })
+  const { brief } = compile(root)
+  assert.match(section(brief, '## Coupled sources'), /lib\/caller\.mjs.*no fence in play/)
+  const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs'] })
+  const discovery = discoverTripwires({ checkout: root, files: where })
+  const report = crossCheckCoupling({
+    discovery,
+    writeSurface: resolveWriteSurface({ fences: null, lane: null, where }),
+  })
+  assert.equal(report.enforced, false)
+  assert.ok(report.coupled.length > 0)
+  assert.ok(report.coupled.every((entry) => entry.status === 'no-fence'))
+})
+
+test('broad exported keys never become coupled sources', () => {
+  const root = fixture('broad-sources', { broadSources: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/broad.mjs'] }],
+  }, null, 2)}\n`)
+  const { brief } = compile(root, { where: ['lib/broad.mjs'] }, [
+    '--fences', fencesPath, '--lane', 'own',
+  ], 'broad-sources.md')
+  const tripwires = section(brief, '## Tripwires')
+  const coupled = section(brief, '## Coupled sources')
+  assert.match(tripwires, /BROAD_PIN · .* hits/)
+  assert.doesNotMatch(coupled, /BROAD_PIN/)
+})
+
+test('rendering absent coupling discovery states that it was not checked', () => {
+  const root = fixture('render-absent-coupling')
+  const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs'] })
+  const brief = renderBrief({
+    request: JSON.parse(readFileSync(request(root), 'utf8')),
+    where,
+    discovery: { candidates: ['lib/widget.mjs'], tripwires: [], broadKeys: [] },
+    baseline: { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' },
+    writeSurface: { basis: 'fences', lane: 'own', files: ['lib/widget.mjs'], reads: [] },
+  })
+  const body = section(brief, '## Coupled sources')
+  assert.match(body, /not discovered — this caller supplied no coupling discovery/)
+  assert.doesNotMatch(body, /none discovered/)
+})
+
+test('stale acknowledgements refuse before unfenced coupled sources', () => {
+  const root = fixture('coupled-ordering', { coupledCaller: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'], reads: [{ file: 'config/thing.yml', why: 'stale' }] }],
+  }, null, 2)}\n`)
+  const result = run(root, [
+    '--request', request(root), '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'ordering.md'),
+  ])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /stale-read-ack/)
+  assert.doesNotMatch(result.stderr, /coupled-source-unfenced/)
 })

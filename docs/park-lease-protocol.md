@@ -5,6 +5,10 @@ reconciliation shipped in `crew/reclaim.mjs`. A park is durable intent; a lease
 is the per-seat reservation that protects the intent while its successor is
 launched.
 
+## Implementation files
+
+- `crew/reclaim.mjs`
+
 ## Records and layout
 
 The store creates these sibling directories:

@@ -70,7 +70,8 @@ code or not; a config file, a CI workflow, a fixture, or documentation a test
 asserts on all count — grep the repo for that file's own repo-relative path,
 and, when it is a code module, also for its exported symbols, its error codes,
 and the paths and filenames it writes; every test file that hits belongs in
-scope too. The path key is the one that works on a file that exports nothing:
+scope too. A doc carrying an `## Implementation files` header is a coupled artifact of the files it names, so a change to one of those files puts that doc in scope.
+The path key is the one that works on a file that exports nothing:
 any test that reads a file by path pins that file. A slice changing
 `.github/workflows/test.yml` went to `escalate:scope` for want of it — grepping
 that literal path finds `test/factory-ledger-floor.test.mjs`, which reads the

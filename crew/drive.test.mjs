@@ -4,7 +4,11 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { regrantVerdict } from './escalation-policy.mjs'
 
 import {
@@ -100,6 +104,8 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
 const CTX_REPAIR = Object.freeze({ ...CTX, variant: 'repair', lane: 'lane-cmd', files_in_scope: ['a.mjs', 'a.test.mjs'] })
 const TRIAGE_NOTE = `${TD}/triage.md`
 const TRIAGE_FILES = { [TRIAGE_NOTE]: '# Triage\n\nfix the off-by-one in a.mjs\n' }
+const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))
+const SKILL_NAMES = ['review-procedure', 'ast-grep-codemod']
 const triageEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'triaged', artifacts: [TRIAGE_NOTE], details: { plan_path: TRIAGE_NOTE }, ...over,
 })
@@ -394,11 +400,12 @@ test('the shared charter and validator agree on the findings contract', () => {
   assert.deepEqual(documented, [...FINDING_SEVERITIES])
 })
 
-test('the reviewer charter carries a defended "Do not flag" list', () => {
+test("the reviewer guidelines carry a defended 'Do not flag' list", () => {
+  const guidelines = readFileSync(new URL('./guidelines/review-do-not-flag.md', import.meta.url), 'utf8')
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
-  const start = charter.search(/^## Do not flag$/m)
+  const start = guidelines.search(/^## Do not flag$/m)
   assert.ok(start >= 0, 'the reviewer charter must carry a "Do not flag" section')
-  const rest = charter.slice(start + '## Do not flag'.length)
+  const rest = guidelines.slice(start + '## Do not flag'.length)
   const end = rest.indexOf('\n## ')
   const section = end < 0 ? rest : rest.slice(0, end)
   const entries = section.split('\n').reduce((acc, line) => {
@@ -414,6 +421,8 @@ test('the reviewer charter carries a defended "Do not flag" list', () => {
     assert.match(entry, /Defense:/)
     assert.match(entry.slice(entry.indexOf('Defense:')), /crew\/[\w.-]+|files_in_scope|\.crew\/|#\d{2,}/)
   }
+  assert.doesNotMatch(charter, /^## Do not flag$/m)
+  assert.ok(charter.includes('crew/guidelines/review-do-not-flag.md'))
 })
 
 test('the lead charter documents the typed exhaustion accept contract', () => {
@@ -443,6 +452,127 @@ test('the planner charter tells the planner to grep the changed file’s own pat
   assert.match(discovery, /\.github\/workflows\/test\.yml/)
   assert.match(discovery, /test\/factory-ledger-floor\.test\.mjs/)
   assert.doesNotMatch(discovery, /production/)
+})
+
+test('skills are self-contained and verifiable on both vendors', () => {
+  for (const name of SKILL_NAMES) {
+    const dir = join(REPO_ROOT, '.agents', 'skills', name)
+    const text = readFileSync(join(dir, 'SKILL.md'), 'utf8')
+    const frontmatter = text.match(/^---\n([\s\S]*?)\n---\n/)
+    assert.ok(frontmatter, `${name} must have parseable frontmatter`)
+    const fields = frontmatter[1]
+    assert.equal(fields.match(/^name:\s*(\S+)\s*$/m)?.[1], name)
+    const description = fields.match(/^description:\s*(.+)$/m)?.[1]?.trim()
+    assert.ok(description)
+    assert.doesNotMatch(description, /\n/)
+    const body = text.slice(frontmatter[0].length)
+    const scripts = [...body.matchAll(/`[^`]*?([\w./-]*scripts\/[\w.-]+\.mjs)[^`]*`/g)].map((match) => match[1])
+    assert.ok(scripts.length, `${name} must name a shipped scripts/*.mjs file`)
+    for (const script of scripts) {
+      const candidate = script.startsWith('.agents/') ? script : `.agents/skills/${name}/${script.replace(/^\.\//, '')}`
+      assert.ok(existsSync(join(REPO_ROOT, candidate)), `missing ${candidate}`)
+    }
+    assert.ok(existsSync(join(dir, 'scripts')))
+    const seat = body.slice(body.indexOf('## Verifying on a seat'))
+    assert.match(seat, /\bpi\b/)
+    assert.match(seat, /\bclaude\b/)
+  }
+})
+
+test('the codemod stages before it applies and fails loudly without ast-grep', () => {
+  const script = join(REPO_ROOT, '.agents/skills/ast-grep-codemod/scripts/codemod.mjs')
+  const fake = join(REPO_ROOT, '.agents/skills/ast-grep-codemod/test-fixtures/fake-ast-grep.mjs')
+  const log = join(mkdtempSync(join(tmpdir(), 'b19-drive-')), 'invocations.log')
+  const stage = join(mkdtempSync(join(tmpdir(), 'b19-stage-')), 'proposal.json')
+  const run = (args, env) => spawnSync(process.execPath, [script, ...args], {
+    cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, ...env },
+  })
+  const invocations = () => existsSync(log) ? readFileSync(log, 'utf8').split('\n').filter(Boolean).length : 0
+  const refused = run(['apply'], { AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage })
+  assert.notEqual(refused.status, 0)
+  assert.match(`${refused.stdout || ''}${refused.stderr || ''}`, /--resolve/)
+  assert.equal(invocations(), 0)
+  const proposed = run([
+    'propose', '--pattern', 'driveProbe($A)', '--rewrite', 'driveProbed($A)', '--lang', 'js', 'crew/roles/planner.md',
+  ], {
+    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage,
+    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n',
+  })
+  assert.equal(proposed.status, 0)
+  assert.ok(invocations() >= 1)
+  const failedProbeStage = join(mkdtempSync(join(tmpdir(), 'b19-probe-failure-')), 'proposal.json')
+  const failedProbe = run([
+    'propose', '--pattern', 'probeFailure($A)', '--rewrite', 'probeFailed($A)', '--lang', 'js', 'crew/roles/planner.md',
+  ], {
+    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: failedProbeStage,
+    FAKE_AST_GREP_VERSION_EXIT: '7',
+  })
+  assert.equal(failedProbe.status, 3)
+  assert.equal(existsSync(failedProbeStage), false)
+  const failedProposeStage = join(mkdtempSync(join(tmpdir(), 'b19-propose-failure-')), 'proposal.json')
+  const failedPropose = run([
+    'propose', '--pattern', 'runFailure($A)', '--rewrite', 'runFailed($A)', '--lang', 'js', 'crew/roles/planner.md',
+  ], {
+    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: failedProposeStage,
+    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n', FAKE_AST_GREP_RUN_EXIT: '7',
+  })
+  assert.equal(failedPropose.status, 3)
+  assert.equal(existsSync(failedProposeStage), false)
+  const applyLog = `${stage}.log`
+  const failedCheck = run(['apply', '--resolve', 'the check must still match'], {
+    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage,
+    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n', FAKE_AST_GREP_RUN_EXIT: '7',
+  })
+  assert.equal(failedCheck.status, 3)
+  assert.equal(existsSync(applyLog), false)
+  const failedUpdate = run(['apply', '--resolve', 'the update is approved'], {
+    AST_GREP_BIN: fake, FAKE_AST_GREP_LOG: log, CODEMOD_STAGE: stage,
+    FAKE_AST_GREP_DIFF: '@@ -1 +1 @@\n-old\n+new\n', FAKE_AST_GREP_UPDATE_EXIT: '7',
+  })
+  assert.equal(failedUpdate.status, 3)
+  assert.equal(existsSync(applyLog), false)
+  const missing = run([
+    'propose', '--pattern', 'a($A)', '--rewrite', 'b($A)', '--lang', 'js', 'crew/roles/planner.md',
+  ], { AST_GREP_BIN: '/nonexistent', CODEMOD_STAGE: join(mkdtempSync(join(tmpdir(), 'b19-missing-')), 'proposal.json') })
+  assert.equal(missing.status, 3)
+  const missingOutput = `${missing.stdout || ''}${missing.stderr || ''}`
+  assert.match(missingOutput, /ast-grep/)
+  assert.match(missingOutput, /install/i)
+})
+
+test('the review-procedure loader prints repo guidelines without inlining judgment', () => {
+  const loader = join(REPO_ROOT, '.agents/skills/review-procedure/scripts/load-guidelines.mjs')
+  const guidelines = join(REPO_ROOT, 'crew/guidelines/review-do-not-flag.md')
+  const result = spawnSync(process.execPath, [loader], { cwd: REPO_ROOT, encoding: 'utf8' })
+  assert.equal(result.status, 0)
+  assert.equal(result.stdout, readFileSync(guidelines, 'utf8'))
+  const skill = readFileSync(join(REPO_ROOT, '.agents/skills/review-procedure/SKILL.md'), 'utf8')
+  for (const smell of ['Defense:', 'Task-dir drift', 'Seeded from 49 archived runs']) assert.doesNotMatch(skill, new RegExp(smell.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+})
+
+test('implementation-file sections name existing files in both docs', () => {
+  const docs = [
+    ['docs/park-lease-protocol.md', ['crew/reclaim.mjs']],
+    ['docs/conventions.md', ['crew/crew.mjs', 'crew/drive.mjs', 'crew/daemon.mjs']],
+  ]
+  for (const [rel, required] of docs) {
+    const text = readFileSync(join(REPO_ROOT, rel), 'utf8')
+    const start = text.indexOf('## Implementation files')
+    assert.ok(start >= 0, `${rel} must have an Implementation files section`)
+    const rest = text.slice(start + '## Implementation files'.length)
+    const end = rest.indexOf('\n## ')
+    const section = end < 0 ? rest : rest.slice(0, end)
+    const paths = [...section.matchAll(/`([\w./-]+\.(?:mjs|js|json|md|yml))`/g)].map((match) => match[1])
+    assert.ok(paths.length)
+    for (const path of paths) assert.ok(existsSync(join(REPO_ROOT, path)), `${path} must exist`)
+    for (const path of required) assert.ok(paths.includes(path), `${rel} must name ${path}`)
+  }
+})
+
+test('conventions disambiguates agent and seat as runtime under crew, not the model', () => {
+  const text = readFileSync(join(REPO_ROOT, 'docs/conventions.md'), 'utf8')
+  const line = text.split('\n').find((entry) => /\bagent\b/.test(entry) && /\bseat\b/.test(entry) && /crew\//.test(entry) && /not the model/i.test(entry))
+  assert.ok(line)
 })
 
 test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero consults', () => {

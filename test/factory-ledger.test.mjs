@@ -262,6 +262,16 @@ function exerciseEveryWriter(ledger, adwId) {
     scope_count: 1, task_return: '/tmp/task.json', exit_code: 0,
     created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordIntakeSweep({
+    board_owner: 'owner', board_project: 7, outcome: 'picked', reason: null,
+    considered: 2, pages: 1, picked_issue: 42, rate_limit_remaining: 900,
+    rate_limit_reset_at: '2024-01-01T01:00:00.000Z', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.recordIntakeRefusal({
+    board_owner: 'owner', board_project: 7, issue: 43, reason: 'not-first-in-order',
+    detail: 'concurrency=1', priority: 'P1', issue_created_at: '2023-12-31T00:00:00.000Z',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.recordModifierAttempt({
     adw_id: adwId, task_slug: 'task', phase_id: phaseId, role: 'builder', modifier: 'failure-upgrade',
     bounce: 'lane', outcome: 'applied', rung: 'mechanical→build', transport: 'pane',
@@ -345,6 +355,20 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
   assert.throws(
     () => ledger.recordCellFailure({ role: 'builder', kind: badCell }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badCell),
+  )
+})
+
+test('intake writers refuse out-of-enum values without echoing the offending value', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const badOutcome = 'intake-outcome-secret'
+  const badReason = 'intake-reason-secret'
+  assert.throws(
+    () => ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 7, outcome: badOutcome, considered: 0, pages: 0 }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes(badOutcome),
+  )
+  assert.throws(
+    () => ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 7, issue: 1, reason: badReason }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes(badReason),
   )
 })
 
@@ -1231,7 +1255,28 @@ test('AC-11: on SIGTERM the finalizer lands the session as fail, closes running 
     setInterval(() => {}, 1000);
   `
   const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  // Wait for the child to have COMMITTED its work rather than sleeping a fixed
+  // 400 ms and hoping. Under a loaded runner the child had not reached
+  // startSession before the SIGTERM, so no row existed, getSession returned
+  // null, and reading `.status` off it threw — a flake that surfaced only when
+  // three PRs' CI ran concurrently, reproduced here by shortening the sleep.
+  // ONE reader is opened and reused: reopening per poll starves the sibling
+  // SIGTERM test of the database lock.
+  {
+    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
+    let committed = false
+    try {
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        try { committed = probe.getSession('sig-1') != null } catch { committed = false }
+        if (committed) break
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    } finally {
+      try { probe.close?.() } catch { /* a probe that cannot close is not a test failure */ }
+    }
+    assert.equal(committed, true, 'the child must commit sig-1 before the finalizer is exercised')
+  }
   const exitInfo = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
   child.kill('SIGTERM')
   const { code, signal } = await exitInfo
@@ -1273,7 +1318,28 @@ test('S6: the finalizer never overwrites an already-completed session or clobber
     setInterval(() => {}, 1000);
   `
   const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  // Wait for the child to have COMMITTED its work rather than sleeping a fixed
+  // 400 ms and hoping. Under a loaded runner the child had not reached
+  // startSession before the SIGTERM, so no row existed, getSession returned
+  // null, and reading `.status` off it threw — a flake that surfaced only when
+  // three PRs' CI ran concurrently, reproduced here by shortening the sleep.
+  // ONE reader is opened and reused: reopening per poll starves the sibling
+  // SIGTERM test of the database lock.
+  {
+    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
+    let committed = false
+    try {
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        try { committed = probe.getSession('sig-2')?.status === 'ok' } catch { committed = false }
+        if (committed) break
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    } finally {
+      try { probe.close?.() } catch { /* a probe that cannot close is not a test failure */ }
+    }
+    assert.equal(committed, true, 'the child must commit sig-2 before the finalizer is exercised')
+  }
   const exitInfo = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
   child.kill('SIGTERM')
   await exitInfo

@@ -3,6 +3,9 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import { foldRpcUsage, headlessRpcIo, rpcCommand, seatCommandPath, splitFrames, steerFrame, teardownOutcome } from './headless-rpc.mjs'
 
 function fixture(options = {}) {
@@ -507,4 +510,54 @@ test('wait timeout retains an unproven reservation and clears one proved by the 
     assert.throws(() => cleared.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-timeout')
     assert.equal(existsSync(join(cleared.paths.taskDir, 'headless-rpc', '.builder.active.json')), false)
   } finally { cleared.cleanup() }
+})
+
+// Added by the orchestrator at close-out (batch eighteen, #278). Every other
+// teardown test injects `kill`, and crew/reclaim.test.mjs never spawns a
+// process, so the outcome mapping was pinned entirely against a fake while the
+// real wiring — reclaim's pgid probe issuing kill(-pgid, 0) and reading
+// ESRCH/EPERM — was pinned nowhere. That is the two-suites-fabricating-each-
+// other's-artifact gap: one test has to boot the real thing and ask the
+// consumer's own predicate. This is that test.
+//
+// Kills two mutations: mapping ALIVE to a clean outcome, and treating a
+// delivered signal as proof of death (the process is signalled and the probe
+// must still say ALIVE until it has actually exited).
+test('a real process resolves through the real pgid probe: alive is failed, exited is proven', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'headless-rpc-realproc-'))
+  const store = reclaimStore({ dir, actor: 'teardown-proof' })
+  // detached: true makes the child its own process-group leader, so the group
+  // id is the child pid — the same shape a seat's recorded pgid marker has.
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'],
+    { detached: true, stdio: 'ignore' })
+  const file = join(dir, 'pgid')
+  writeFileSync(file, String(child.pid))
+  const evidence = { kind: EVIDENCE_KINDS.PGID, file }
+  try {
+    assert.equal(store.probeEvidence(evidence), LIVENESS.ALIVE,
+      'a running process group must probe ALIVE through the real kill(-pgid, 0)')
+    assert.equal(teardownOutcome(store.probeEvidence(evidence)), 'failed',
+      'a seat whose worker is measurably alive is a FAILED teardown, never a clean one')
+
+    const exited = once(child, 'exit')
+    process.kill(-child.pid, 'SIGKILL')
+    await exited
+
+    // Poll rather than assert once: the group is gone only after the child is
+    // reaped, and that is not synchronous with the exit event. A bound, so a
+    // group that never dies fails the test instead of hanging it.
+    const deadline = Date.now() + 5000
+    let liveness = store.probeEvidence(evidence)
+    while (liveness !== LIVENESS.DEAD && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      liveness = store.probeEvidence(evidence)
+    }
+    assert.equal(liveness, LIVENESS.DEAD,
+      'an exited process group must probe DEAD through the real ESRCH path')
+    assert.equal(teardownOutcome(liveness), 'proven',
+      'only measured death is a proven teardown')
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

@@ -356,6 +356,114 @@ export function runSetPanel(payload = {}) {
   }
 }
 
+const INTAKE_PANEL_TONES = {
+  unmeasured: 'unmeasured',
+  'never-swept': 'stopped',
+  'not-swept-in-window': 'stale',
+  parked: 'parked',
+  picking: 'working',
+  'swept-idle': 'idle',
+}
+const INTAKE_PANEL_HEADLINES = {
+  unmeasured: 'Intake loop is unmeasured',
+  'never-swept': 'Intake loop has not run',
+  'not-swept-in-window': 'Intake loop has not swept in this window',
+  parked: 'Intake loop is parked',
+  picking: 'Intake loop is picking work',
+  'swept-idle': 'Intake loop swept and found nothing eligible',
+}
+const INTAKE_READONLY_NOTE = 'this view reads the ledger; the intake module owns every decision shown here'
+const INTAKE_WINDOW_NOTE = 'the window is a view, not the whole history — it cannot say whether the loop swept outside the selected window'
+
+function intakeCountLabel(count) {
+  if (count == null) return '—'
+  const number = typeof count === 'number' ? count : Number(count)
+  if (!Number.isFinite(number)) return '—'
+  if (number === 0) return 'not refused in this window'
+  return `${number} refused`
+}
+
+function intakeBoardLabel(board) {
+  if (board == null) return 'board —'
+  if (typeof board === 'string') return board
+  const owner = board?.owner ?? board?.board_owner ?? null
+  const project = board?.project ?? board?.board_project ?? null
+  if (owner == null && project == null) return 'board —'
+  return `${owner ?? '—'}/${project ?? '—'}`
+}
+
+export function intakePanel(payload = {}) {
+  const absent = payload?.absent ?? null
+  const window = payload?.window
+  const window_label = window && typeof window === 'object'
+    ? `${window.label} · since ${window.since} · until ${window.until || 'now'}`
+    : 'window unavailable'
+  const state = payload?.loop?.state || (absent ? 'unmeasured' : 'unmeasured')
+  const tone = INTAKE_PANEL_TONES[state] || 'unmeasured'
+  const headline = INTAKE_PANEL_HEADLINES[state] || INTAKE_PANEL_HEADLINES.unmeasured
+  const loop = payload?.loop ?? {}
+  const displayCount = (value) => value == null ? '—' : String(value)
+  const counts_label = `swept ${displayCount(loop.swept)} · picked ${displayCount(loop.picked)} · parked ${displayCount(loop.parked)} · none ${displayCount(loop.none)}`
+  const last_sweep_label = loop.last_sweep_at == null ? 'last sweep: never recorded' : `last sweep: ${loop.last_sweep_at}`
+  const groups = (Array.isArray(payload?.refusals?.groups) ? payload.refusals.groups : []).map((group) => {
+    const rows = (Array.isArray(group?.reasons) ? group.reasons : []).map((row) => {
+      const rowState = row?.state || (row?.count == null ? 'unmeasured' : row.count === 0 ? 'not-in-window' : 'refused')
+      return {
+        reason: row?.reason ?? null,
+        label: row?.reason ?? 'unrecognised reason',
+        count_label: intakeCountLabel(row?.count),
+        tone: rowState === 'unmeasured' ? 'unmeasured' : rowState === 'not-in-window' ? 'quiet' : 'refused',
+        state: rowState,
+      }
+    })
+    const groupTone = rows.some((row) => row.state === 'refused')
+      ? 'refused'
+      : rows.some((row) => row.state === 'unmeasured') ? 'unmeasured' : 'quiet'
+    return {
+      group: group?.group ?? null,
+      title: group?.title ?? null,
+      asserts: group?.asserts ?? null,
+      tone: groupTone,
+      rows,
+    }
+  })
+  const unrecognised_rows = (Array.isArray(payload?.refusals?.unrecognised) ? payload.refusals.unrecognised : []).map((row) => {
+    const state = row?.count == null ? 'unmeasured' : row.count === 0 ? 'not-in-window' : 'refused'
+    return {
+      reason: row?.reason ?? null,
+      label: row?.reason ?? 'unrecognised reason',
+      count_label: intakeCountLabel(row?.count),
+      tone: state === 'unmeasured' ? 'unmeasured' : state === 'not-in-window' ? 'quiet' : 'refused',
+      state,
+    }
+  })
+  const picks = (Array.isArray(payload?.picks) ? payload.picks : []).map((row) => {
+    const issue = row?.issue ?? null
+    const board = row?.board ?? null
+    return {
+      issue,
+      board,
+      at: row?.at ?? null,
+      label: `${issue == null ? 'issue —' : `issue #${issue}`} · ${intakeBoardLabel(board)} · ${row?.at ?? 'time unavailable'}`,
+    }
+  })
+  return {
+    absent,
+    window_label,
+    state,
+    tone,
+    headline,
+    why: loop.why || 'the intake loop has not reported why it is in this state',
+    counts_label,
+    last_sweep_label,
+    picks,
+    groups,
+    unrecognised_rows,
+    window_note: payload?.unmeasured?.window || INTAKE_WINDOW_NOTE,
+    readonly_note: INTAKE_READONLY_NOTE,
+  }
+}
+
 export function findingRows(returns = {}) {
   const envelopes = Array.isArray(returns?.envelopes) ? returns.envelopes : []
   const groups = []

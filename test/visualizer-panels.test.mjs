@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -303,4 +303,53 @@ test('findingRows distinguishes absent findings from an explicit empty measureme
   const empty = findingRows({ envelopes: [{ role: 'reviewer', dispatch_seq: 5, details: { findings: [] } }] })
   assert.equal(empty.pending, null)
   assert.equal(empty.groups[0].findings.length, 0)
+})
+
+test('intakePanel gives never-swept and swept-idle different headlines and tones', () => {
+  const states = ['unmeasured', 'never-swept', 'not-swept-in-window', 'parked', 'picking', 'swept-idle']
+  const panels = states.map((state) => intakePanel({ loop: { state, why: `why ${state}`, swept: null, picked: null, parked: null, none: null } }))
+  assert.equal(new Set(panels.map((panel) => panel.headline)).size, states.length)
+  assert.equal(new Set(panels.map((panel) => panel.tone)).size, states.length)
+  assert.match(panels[1].headline, /loop has not run/i)
+})
+
+test('intakePanel lists all ten refusal reasons with the human-actionable group first', () => {
+  const authoring = ['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown']
+  const guardrail = ['stop-switch', 'window-cap', 'rate-limit-floor', 'protected-path', 'tier-judge']
+  const ordering = ['not-first-in-order']
+  const groups = [
+    { group: 'authoring', title: 'an issue needs a human to author or fix it', asserts: 'a human editing the issue unblocks this', reasons: authoring.map((reason) => ({ reason, count: reason === authoring[0] ? 0 : 1 })) },
+    { group: 'guardrail', title: 'the loop refused on purpose; lifting it is a human decision', asserts: 'nothing is broken', reasons: guardrail.map((reason) => ({ reason, count: 1 })) },
+    { group: 'ordering', title: 'nothing is wrong; this candidate was simply not first', asserts: 'no action', reasons: ordering.map((reason) => ({ reason, count: 1 })) },
+  ]
+  const result = intakePanel({ refusals: { groups } })
+  assert.match(result.groups[0].title, /human.*author|fix/i)
+  assert.match(result.groups[0].asserts, /human/i)
+  assert.deepEqual(result.groups.flatMap((group) => group.rows.map((row) => row.label)), [...authoring, ...guardrail, ...ordering])
+  assert.equal(result.groups[0].rows[0].count_label, 'not refused in this window')
+})
+
+test('an absent payload renders as pending, not as an empty loop', () => {
+  const result = intakePanel({
+    absent: 'intake_sweeps predates this ledger mirror',
+    loop: { state: 'unmeasured', swept: null, picked: null, parked: null, none: null },
+    refusals: { groups: [{ group: 'authoring', reasons: [{ reason: 'intake-block-missing', count: null, state: 'unmeasured' }] }] },
+  })
+  assert.equal(result.absent, 'intake_sweeps predates this ledger mirror')
+  assert.match(result.counts_label, /—/)
+  assert.equal(result.groups[0].rows[0].count_label, '—')
+  assert.doesNotMatch(JSON.stringify(result), /not refused in this window/)
+})
+
+test('intakePanel states its window and offers no write path', () => {
+  const result = intakePanel({
+    window: { since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' },
+    loop: { state: 'picking', why: 'picking', swept: 1, picked: 1, parked: 0, none: 0 },
+    picks: [{ issue: 52, board: { owner: 'owner', project: 1 }, at: '2024-01-01T01:00:00.000Z' }],
+  })
+  assert.match(result.window_label, /last 24 hours/)
+  assert.match(result.window_label, /since 2024-01-01T00:00:00.000Z/)
+  assert.match(result.window_label, /until now/)
+  assert.equal(Object.keys(result).some((key) => /^(on|post|submit|mutate)/i.test(key)), false)
+  assert.equal(result.readonly_note, 'this view reads the ledger; the intake module owns every decision shown here')
 })

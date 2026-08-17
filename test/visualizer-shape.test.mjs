@@ -2,10 +2,11 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { defaultCellWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
+import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters } from '../visualizer/server/shape.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
+import { INTAKE_REFUSALS } from '../scripts/factory/ledger.mjs'
 
 const start = '2024-01-01T00:00:00.000Z'
 const end = '2024-01-01T00:00:02.000Z'
@@ -513,4 +514,64 @@ test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the b
       assert.doesNotMatch(source, /^\s*\$:\s/m, relative)
     }
   }
+})
+
+test('shapeIntake tells a loop that never swept from a loop that swept and found nothing', () => {
+  const base = { refusals: [], picks: [], absent: null, since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' }
+  const views = [
+    shapeIntake({ ...base, sweeps: null, ever: null, absent: 'intake_sweeps predates this ledger mirror' }),
+    shapeIntake({ ...base, sweeps: [], ever: { sweeps: 0, first_at: null, last_at: null } }),
+    shapeIntake({ ...base, sweeps: [], ever: { sweeps: 2, first_at: '2023-12-30T00:00:00.000Z', last_at: '2023-12-31T00:00:00.000Z' } }),
+    shapeIntake({ ...base, sweeps: [{ outcome: 'none', reason: null, count: 3, first_at: '2024-01-01T01:00:00.000Z', last_at: '2024-01-01T02:00:00.000Z' }], ever: { sweeps: 3, first_at: '2024-01-01T01:00:00.000Z', last_at: '2024-01-01T02:00:00.000Z' } }),
+  ]
+  assert.equal(new Set(views.map((view) => view.loop.state)).size, 4)
+  assert.equal(new Set(views.map((view) => view.loop.why)).size, 4)
+  assert.match(views[2].loop.why, /last swept.*last 24 hours.*window/i)
+  assert.equal(views[3].loop.state, 'swept-idle')
+})
+
+test('an absent intake table is unmeasured, never a measured zero', () => {
+  const result = shapeIntake({ sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake_sweeps predates this ledger mirror', since: start, until: null, label: 'last 24 hours' })
+  assert.equal(result.loop.swept, null)
+  assert.equal(result.loop.picked, null)
+  assert.equal(result.loop.parked, null)
+  assert.equal(result.loop.none, null)
+  for (const group of result.refusals.groups) for (const row of group.reasons) {
+    assert.equal(row.count, null)
+    assert.equal(row.state, 'unmeasured')
+  }
+  assert.doesNotMatch(JSON.stringify(result), /"(swept|picked|parked)":\s*0/)
+})
+
+test('every closed refusal reason survives to the view in exactly one group', () => {
+  assert.deepEqual([...INTAKE_REFUSAL_REASONS].sort(), [...INTAKE_REFUSALS].sort())
+  const result = shapeIntake({
+    sweeps: [
+      { outcome: 'parked', reason: 'stop-switch', count: 1, first_at: start, last_at: start },
+      { outcome: 'parked', reason: 'redacted', count: 1, first_at: end, last_at: end },
+    ],
+    refusals: [{ reason: 'redacted', count: 1, first_at: start, last_at: end }], picks: [],
+    ever: { sweeps: 2, first_at: start, last_at: end }, absent: null, since: start, until: null, label: 'last 24 hours',
+  })
+  const groups = result.refusals.groups
+  const reasons = groups.flatMap((group) => group.reasons.map((row) => row.reason))
+  assert.equal(new Set(reasons).size, INTAKE_REFUSAL_REASONS.length)
+  assert.deepEqual(reasons, ['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown', 'stop-switch', 'window-cap', 'rate-limit-floor', 'protected-path', 'tier-judge', 'not-first-in-order'])
+  assert.equal(groups[0].group, 'authoring')
+  assert.equal(groups.at(-1).group, 'ordering')
+  assert.equal(groups[1].reasons.find((row) => row.reason === 'stop-switch').count, 1)
+  assert.ok(result.refusals.unrecognised.some((row) => row.reason === 'redacted'))
+})
+
+test('the intake window is stated and bounded', () => {
+  const now = Date.parse('2024-01-08T00:00:00.000Z')
+  const window = defaultIntakeWindow(now)
+  assert.equal(Date.parse(window.since), now - INTAKE_WINDOW_MS)
+  assert.equal(window.until, null)
+  assert.equal(window.label, 'last 24 hours')
+  const result = shapeIntake({ sweeps: [], refusals: [], picks: [], ever: { sweeps: 2, first_at: start, last_at: end }, absent: null, ...window })
+  assert.equal(result.window.label, window.label)
+  assert.ok(result.unmeasured.window)
+  assert.equal(result.loop.first_sweep_at, start)
+  assert.equal(result.loop.last_sweep_at, end)
 })

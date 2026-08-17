@@ -6,7 +6,7 @@ import { shapeRun, matchesFilters } from './shape.mjs'
 
 const require = createRequire(import.meta.url)
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
-const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'review_outcomes', 'accept_decisions', 'cell_failures']
+const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals']
 // Which shape fields a missing table makes unknowable. Feeding these into the
 // probe reuses #48's NULL-probe path (shape.mjs) instead of inventing a second
 // mechanism for the same idea.
@@ -133,6 +133,59 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
       return { rows: null, absent: err?.message || String(err) }
     }
   }
+  function intake({ since = null, until = null } = {}) {
+    probeColumns()
+    const handle = open()
+    if (!handle) return { sweeps: null, refusals: null, picks: null, ever: null, absent: degradedReason || 'the ledger could not be opened' }
+    if (probe.missing_tables.includes('intake_sweeps')) return { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake_sweeps predates this ledger mirror' }
+
+    let sweeps, picks, ever
+    try {
+      sweeps = handle.prepare(`
+        SELECT outcome, reason,
+          COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+        FROM intake_sweeps
+        WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+        GROUP BY outcome, reason
+        ORDER BY outcome, reason
+      `).all(since, since, until, until)
+      picks = handle.prepare(`
+        SELECT picked_issue, board_owner, board_project, created_at
+        FROM intake_sweeps
+        WHERE outcome = 'picked'
+          AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+        ORDER BY created_at DESC
+        LIMIT 20
+      `).all(since, since, until, until)
+      ever = handle.prepare(`
+        SELECT COUNT(*) AS sweeps, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+        FROM intake_sweeps
+      `).get()
+    } catch (err) {
+      if (!probe.missing_tables.includes('intake_sweeps')) probe.missing_tables.push('intake_sweeps')
+      return { sweeps: null, refusals: null, picks: null, ever: null, absent: err?.message || String(err) }
+    }
+
+    let refusals = null, refusals_absent = null
+    if (probe.missing_tables.includes('intake_refusals')) {
+      refusals_absent = 'intake_refusals predates this ledger mirror'
+    } else {
+      try {
+        refusals = handle.prepare(`
+          SELECT reason,
+            COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+          FROM intake_refusals
+          WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+          GROUP BY reason
+          ORDER BY reason
+        `).all(since, since, until, until)
+      } catch (err) {
+        if (!probe.missing_tables.includes('intake_refusals')) probe.missing_tables.push('intake_refusals')
+        refusals_absent = err?.message || String(err)
+      }
+    }
+    return { sweeps, refusals, refusals_absent, picks, ever, absent: null }
+  }
   function runSet({ since, until = null } = {}) {
     probeColumns()
     const handle = open()
@@ -210,6 +263,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     listRuns,
     listEvents,
     cellFailures,
+    intake,
     runSet,
     budgetWindow,
     setTriage: (input) => triage.setTriage(input),

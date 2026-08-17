@@ -8,7 +8,7 @@ import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
-import { defaultCellWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet } from './shape.mjs'
+import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake } from './shape.mjs'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -152,6 +152,20 @@ export function startServer(options = {}) {
           ? feed.budgetWindow({ since, until })
           : { measured: false, total: null, sessions: null, absent: 'budget burn is unavailable from this feed' }
         return json(res, 200, { schema, ...shapeRunSet({ ...result, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
+      }
+      if (url.pathname === '/api/intake') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        const defaults = defaultIntakeWindow()
+        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
+        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
+        const sinceMs = Date.parse(since)
+        const untilMs = until == null ? null : Date.parse(until)
+        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
+        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const result = typeof feed.intake === 'function'
+          ? feed.intake({ since, until })
+          : { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake is unavailable from this feed' }
+        return json(res, 200, { schema, ...shapeIntake({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/roster/propose') {
         if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })

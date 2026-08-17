@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER } from '../visualizer/server/shape.mjs'
+import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeGateChecks, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER, withCells } from '../visualizer/server/shape.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
@@ -602,4 +602,31 @@ test('the intake window is stated and bounded', () => {
   assert.ok(result.unmeasured.window)
   assert.equal(result.loop.first_sweep_at, start)
   assert.equal(result.loop.last_sweep_at, end)
+})
+
+test('shapeRun carries model cells while effort and context stay explicitly pending', () => {
+  const events = [{ type: 'agent_start', payload_json: JSON.stringify({ role: 'builder', dispatch_id: 'd1' }), started_at: start }]
+  const run = shapeRun(base, [], events, null, { missing: [] }, Date.parse(end), { agentSessions: [{ dispatch_id: 'd1', model: 'model/live' }] })
+  const agent = run.agents[0]
+  assert.equal(agent.model, 'model/live')
+  assert.equal(agent.model_pending, null)
+  assert.equal(agent.effort, null)
+  assert.equal(agent.context_tokens, null)
+  assert.equal(agent.context_window, null)
+  assert.ok(agent.effort_pending)
+  assert.ok(agent.context_pending)
+  assert.deepEqual(Object.keys(foldAgents(events)[0]).sort(), ['dispatch_id', 'ended_at', 'lane', 'outcome', 'role', 'started_at'].sort())
+  assert.deepEqual(withCells([], []), [])
+})
+
+test('shapeGateChecks normalises recorded items and degrades malformed JSON', () => {
+  const rows = shapeGateChecks([
+    { gate_generation: 1, checks_json: JSON.stringify([{ name: 'named', note: 'kept note', ok: true }, 'summary']) },
+    { gate_generation: 2, checks_json: '{not-json' },
+  ])
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows[0].checks, [{ label: 'named', note: 'kept note', ok: true }, { label: 'summary', note: null, ok: null }])
+  assert.deepEqual(rows[1].checks, [])
+  assert.equal(rows[1].checks_raw, '{not-json')
+  assert.ok(rows[1].checks_pending)
 })

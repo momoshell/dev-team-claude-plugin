@@ -11,11 +11,12 @@ import {
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, seatLiveness, awaitSeatsReady, teardownCore,
-  MEMORY_ROLES, memoryConfig,
+  MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
+  grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
 } from './crew.mjs'
 import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
-import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 import { realIo, VARIANT_STAGE_PHASES } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -215,19 +216,19 @@ test('every shipped capability profile is exact, complete, and frozen', async ()
 
   const claudePane = capabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...claudePane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(claudePane))
   const claudeHeadless = capabilitiesFor({ transport: 'headless-json' })
-  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
+  assert.deepEqual({ ...claudeHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: true, effort: true, local_provider: false, interjection: 'turn', abort: 'signal', session_resume: true, durable_cursor: 'none', reassign: false })
   assert.ok(Object.isFrozen(claudeHeadless))
   const piPane = piCapabilitiesFor({ transport: 'pane' })
   // #131: drive.mjs bounce paths reassign a settled pane seat.
-  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, local_provider: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
   assert.ok(Object.isFrozen(piPane))
   const piHeadless = piCapabilitiesFor({ transport: 'headless-rpc' })
   // #148: reassign captured live (captures/pi-b11-reassign.jsonl) — a settled
   // session takes a further assignment same-process and cross-process.
-  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
+  assert.deepEqual({ ...piHeadless }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, local_provider: true, interjection: 'boundary', abort: 'command', session_resume: true, durable_cursor: 'entry_id', reassign: true })
   assert.ok(Object.isFrozen(piHeadless))
 })
 
@@ -1793,4 +1794,280 @@ test('package, crew, child, and CI test lanes stay identical and bounded', () =>
   const timeout = packageLane?.match(/--test-timeout=(\d+)/)
   assert.ok(timeout, `expected --test-timeout in package.json scripts.test at ${packagePath}`)
   assert.ok(Number(timeout[1]) >= 30000, `expected package.json scripts.test timeout >= 30000ms at ${packagePath}`)
+})
+
+// --- capability register ----------------------------------------------------
+
+function capabilityRegister(overrides = {}) {
+  const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], ...extra })
+  const base = {
+    schema_version: 1,
+    updated_at: '2026-08-17',
+    roles: {
+      lead: grant(), planner: grant({ requires: ['subagents'] }), builder: grant(),
+      reviewer: grant(), 'tech-lead': grant(),
+    },
+    local_providers: {},
+  }
+  return { ...base, ...overrides, roles: { ...base.roles, ...(overrides.roles || {}) } }
+}
+
+function capabilityFixtureRoot() {
+  const root = mkdtempSync(join(tmpdir(), 'crew-capability-'))
+  mkdirSync(join(root, 'crew', 'pi', 'skills'), { recursive: true })
+  writeFileSync(join(root, 'crew', 'pi', 'fanout.js'), '// extension\n')
+  writeFileSync(join(root, 'crew', 'pi', 'skills', 'scout.md'), '# skill\n')
+  writeFileSync(join(root, 'crew', 'pi', 'explore.json'), JSON.stringify({ name: 'Explore', prompt: 'scout' }))
+  return root
+}
+
+test('a charter requirement unmet by adapter and register refuses to boot from the closed reason set', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    await assert.rejects(
+      () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register: capabilityRegister(), root }),
+      (err) => {
+        assert.equal(err.reason, 'capability-shortfall')
+        assert.match(err.message, /planner/)
+        assert.match(err.message, /subagents/)
+        assert.match(err.message, /pi/)
+        return true
+      },
+    )
+    const builderRequires = capabilityRegister({ roles: { builder: { ...capabilityRegister().roles.builder, requires: ['subagents'] } } })
+    await assert.rejects(
+      () => resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: builderRequires, root }),
+      (err) => err.reason === 'capability-shortfall' && /builder/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a grant not present in the register refuses to reach an adapter', () => {
+  assert.match(readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8'), /assertGrantsBacked\(role, grants, registry\)/)
+  const register = capabilityRegister()
+  const smuggled = {
+    tools: ['task'], extensions: [], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }],
+    skills: [], advisor: false, requires: [],
+  }
+  assert.throws(
+    () => assertGrantsBacked('planner', smuggled, register),
+    (err) => err.reason === 'unknown-grant' && /planner/.test(err.message) && /task/.test(err.message),
+  )
+  const backed = capabilityRegister({ roles: {
+    planner: { ...register.roles.planner, tools: ['task'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
+  } })
+  assert.doesNotThrow(() => assertGrantsBacked('planner', smuggled, backed))
+})
+
+test('a register-backed pi fan-out grant resolves to absolute definitions and enables subagents', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const register = capabilityRegister({ roles: {
+      planner: { ...capabilityRegister().roles.planner, agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
+    } })
+    const resolved = await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register, root })
+    assert.equal(resolved.planner.name, 'pi')
+    assert.equal(resolved.planner.grants.agents[0].def, join(root, 'crew/pi/explore.json'))
+    assert.equal(resolved.planner.grants.agents[0].name, 'Explore')
+    assert.equal(resolved.planner.adapter.capabilitiesFor({ transport: 'pane', grants: resolved.planner.grants }).subagents, true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('capabilitiesFor remains pinned without grants and derives pi subagents only from agent grants', async () => {
+  const piPane = piCapabilitiesFor({ transport: 'pane' })
+  assert.deepEqual({ ...piPane }, { prompt_file: true, tool_deny: true, unattended: true, subagents: false, effort: true, local_provider: true, interjection: 'none', abort: 'none', session_resume: false, durable_cursor: 'none', reassign: true })
+  assert.equal(Object.isFrozen(piPane), true)
+  assert.equal(piCapabilitiesFor({ transport: 'pane', grants: { agents: [{ name: 'Explore', def: '/tmp/explore.json' }] } }).subagents, true)
+})
+
+test('capability register validation is closed, non-vacuous, and enforced at load', () => {
+  const schema = JSON.parse(readFileSync(new URL('./capabilities.schema.json', import.meta.url), 'utf8'))
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  assert.deepEqual(validateCapabilities(schema, shipped), [])
+  const negative = JSON.parse(JSON.stringify(shipped))
+  delete negative.roles.builder
+  assert.ok(validateCapabilities(schema, negative).length > 0)
+  for (const mutate of [
+    (value) => { value.roles.planner.sneaky = true },
+    (value) => { value.sneaky = true },
+    (value) => { value.schema_version = 99 },
+    (value) => { delete value.roles.builder },
+  ]) {
+    const bad = JSON.parse(JSON.stringify(shipped))
+    mutate(bad)
+    assert.throws(() => loadCapabilities({ register: bad }), (err) => err.reason === 'register-invalid' && /register-invalid/.test(err.message))
+  }
+  const loaded = loadCapabilities()
+  assert.equal(Object.isFrozen(loaded), true)
+  assert.equal(Object.isFrozen(loaded.roles.planner), true)
+})
+
+test('grantsFor fails closed for missing paths and invalid definitions, and resolves valid grants', () => {
+  const root = capabilityFixtureRoot()
+  try {
+    writeFileSync(join(root, 'crew', 'pi', 'bad-json.json'), '{not-json')
+    writeFileSync(join(root, 'crew', 'pi', 'wrong-name.json'), JSON.stringify({ name: 'Other', prompt: 'x' }))
+    writeFileSync(join(root, 'crew', 'pi', 'no-prompt.json'), JSON.stringify({ name: 'Explore' }))
+    const cases = [
+      ['extension-missing', (register) => { register.roles.builder.extensions = ['crew/pi/nope.js'] }],
+      ['unknown-skill', (register) => { register.roles.builder.skills = ['crew/pi/skills/nope.md'] }],
+      ['agent-def-invalid', (register) => { register.roles.builder.agents = [{ name: 'Explore', def: 'crew/pi/nope.json' }] }],
+      ['agent-def-invalid', (register) => { register.roles.builder.agents = [{ name: 'Explore', def: 'crew/pi/bad-json.json' }] }],
+      ['agent-def-invalid', (register) => { register.roles.builder.agents = [{ name: 'Explore', def: 'crew/pi/wrong-name.json' }] }],
+      ['agent-def-invalid', (register) => { register.roles.builder.agents = [{ name: 'Explore', def: 'crew/pi/no-prompt.json' }] }],
+    ]
+    for (const [reason, mutate] of cases) {
+      const register = capabilityRegister()
+      mutate(register)
+      assert.throws(() => grantsFor(register, 'builder', { root }), (err) => err.reason === reason && /at /.test(err.message))
+    }
+    const valid = capabilityRegister({ roles: {
+      builder: { ...capabilityRegister().roles.builder,
+        extensions: ['crew/pi/fanout.js'], skills: ['crew/pi/skills/scout.md'],
+        agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }],
+      },
+    } })
+    const grants = grantsFor(valid, 'builder', { root })
+    assert.deepEqual(grants.extensions, [join(root, 'crew/pi/fanout.js')])
+    assert.deepEqual(grants.skills, [join(root, 'crew/pi/skills/scout.md')])
+    assert.deepEqual(grants.agents, [{ name: 'Explore', def: join(root, 'crew/pi/explore.json') }])
+    assert.equal(Object.isFrozen(grants), true)
+    assert.equal(Object.isFrozen(grants.extensions), true)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
+  assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
+  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead'])
+  assert.throws(() => refuse('not-a-capability-reason', 'bad'))
+  assert.throws(
+    () => seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
+    (err) => err.reason === 'grant-unsupported' && /grant-unsupported/.test(err.message),
+  )
+  assert.deepEqual(EMPTY_GRANTS, { tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [] })
+  assert.equal(Object.isFrozen(EMPTY_GRANTS), true)
+})
+
+test('checkout-pinned local providers require live endpoints and expose their settings directory', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    writeFileSync(settings, '{}')
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'pi', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => false }),
+      (err) => err.reason === 'local-endpoint-dead' && /local-pi/.test(err.message),
+    )
+    const adapters = await resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true })
+    assert.equal(adapters.builder.configDir, dirname(settings))
+    assert.equal(resolveSeatModels(seats, adapters, register.local_providers).builder.model, 'local-pi/qwen3-coder')
+
+    const missing = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/no-settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register: missing, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'local-settings-missing' && /no-settings/.test(err.message),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('resolveAdapters refuses a claude-seated local-provider cell before any seat spawns', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const settings = join(root, 'crew/pi/settings.json')
+    writeFileSync(settings, '{}')
+    const register = capabilityRegister({ local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    } })
+    const seats = { builder: { agent: 'claude', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    await assert.rejects(
+      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      (err) => err.reason === 'grant-unsupported'
+        && /builder/.test(err.message) && /local-pi/.test(err.message) && /claude/.test(err.message),
+    )
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('adapter-claude refuses local-provider model and config seams while preserving normal cells', () => {
+  const localProviders = { 'local-pi': { pi_provider: 'local-pi' } }
+  assert.throws(
+    () => claudeModelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders }),
+    (err) => err.reason === 'grant-unsupported' && /local-pi/.test(err.message),
+  )
+  assert.equal(claudeModelString({ provider: 'anthropic', id: 'claude-opus-5', localProviders }), 'claude-opus-5')
+
+  const seat = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', bootBrief: 'boot',
+  }
+  const refusal = (err) => err.reason === 'grant-unsupported' && /\/checkout\/crew\/pi/.test(err.message)
+  assert.throws(() => seatCommand({ ...seat, configDir: '/checkout/crew/pi' }), refusal)
+  assert.throws(() => claudeHeadlessCommand({
+    ...seat, prompt: 'go', sessionId: 's1', bin: '/usr/local/bin/claude', configDir: '/checkout/crew/pi',
+  }), refusal)
+})
+
+test('adapter-claude grant tools merge into allowedTools without widening disallowedTools', () => {
+  const grants = { tools: ['mcp__search'], extensions: [], agents: [], skills: [], advisor: false }
+  const seat = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/role-builder.md', tools: 'Read', deny: 'Task,Agent',
+    taskDir: '/tmp/task', bootBrief: 'boot', grants,
+  }
+  const pane = seatCommand(seat)
+  assert.match(pane, /--allowedTools "Read,mcp__search"/)
+  assert.match(pane, /--disallowedTools "Task,Agent"/)
+  assert.doesNotMatch(pane, /--disallowedTools "[^"]*mcp__search/)
+
+  const headless = claudeHeadlessCommand({
+    ...seat, prompt: 'go', sessionId: 's1', bin: '/usr/local/bin/claude',
+  })
+  const args = headless.args.join(' ')
+  assert.match(args, /--allowedTools Read,mcp__search/)
+  assert.match(args, /--disallowedTools Task,Agent/)
+  assert.doesNotMatch(args, /--disallowedTools [^ ]*mcp__search/)
+})
+
+test('register-backed grants flow into one emitted pi command', () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const register = capabilityRegister({ roles: {
+      builder: { ...capabilityRegister().roles.builder,
+        tools: ['task'], extensions: ['crew/pi/fanout.js'], skills: ['crew/pi/skills/scout.md'],
+      },
+    } })
+    const grants = grantsFor(register, 'builder', { root })
+    const command = piSeatCommand({ ...PI_SAMPLE, grants })
+    assert.match(command, /--tools "[^"]*,task"/)
+    assert.ok(command.includes(`-e "${join(root, 'crew/pi/fanout.js')}"`))
+    assert.ok(command.includes(`--skill "${join(root, 'crew/pi/skills/scout.md')}"`))
+    assert.doesNotMatch(command, /--no-skills/)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('probeLocalEndpoint never throws and rejects only failures and 5xx responses', async () => {
+  assert.equal(await probeLocalEndpoint('http://injected/ok', { fetchFn: async () => ({ status: 200 }) }), true)
+  assert.equal(await probeLocalEndpoint('http://injected/client-error', { fetchFn: async () => ({ status: 404 }) }), true)
+  assert.equal(await probeLocalEndpoint('http://injected/server-error', { fetchFn: async () => ({ status: 503 }) }), false)
+  assert.equal(await probeLocalEndpoint('http://injected/throw', { fetchFn: async () => { throw new Error('offline') } }), false)
+})
+
+test('shipped capability register mirrors role requirements and ships no grant content', async () => {
+  const register = loadCapabilities()
+  assert.deepEqual(Object.keys(register.roles), ROLE_ORDER)
+  for (const role of ROLE_ORDER) {
+    assert.deepEqual(register.roles[role].requires, SEAT_DEFAULTS[role].requires)
+    assert.deepEqual(register.roles[role].tools, [])
+    assert.deepEqual(register.roles[role].extensions, [])
+    assert.deepEqual(register.roles[role].agents, [])
+    assert.deepEqual(register.roles[role].skills, [])
+    assert.equal(register.roles[role].advisor, false)
+  }
+  for (const tier of Object.keys(roster.tiers)) {
+    const { roles, seats } = resolveTier(roster, tier, {})
+    await assert.doesNotReject(() => resolveAdapters(roles, {}, seats), `tier ${tier} must boot with shipped capabilities`)
+  }
 })

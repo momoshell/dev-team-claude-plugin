@@ -21,14 +21,17 @@ const INVARIANT = Object.freeze({
   // (--approve/-a only governs trusting project-local config files, not
   // tool calls — deliberately not passed here.)
   unattended: true,
-  // pi ships NO subagent tool at all (see PI_TOOL_NAMES: Task/Agent -> null),
-  // on every transport. Declared false, not worked around: this is the honest
-  // claim that makes a charter-side `requires: ['subagents']` meaningful.
+  // pi ships no subagent tool, so fan-out is a GRANT: an extension plus an
+  // agent definition named in the checkout-pinned capability register, never
+  // an assumption about the binary.
   subagents: false,
   // --thinking <off|minimal|low|medium|high|xhigh|max> (also the
   // ':<level>' model-string shorthand) — live-verified 2026-08-13: a
   // luna:high seat showed "gpt-5.6-luna • high" in its status bar.
   effort: true,
+  // PI_CODING_AGENT_DIR (below) and the pi_provider namespace lookup
+  // (modelString) are the checkout-pinned local-provider seams.
+  local_provider: true,
 })
 
 const PROFILES = Object.freeze({
@@ -63,10 +66,13 @@ const PROFILES = Object.freeze({
   }),
 })
 
-export function capabilitiesFor({ transport } = {}) {
+export function capabilitiesFor({ transport, grants } = {}) {
   const p = PROFILES[transport]
   if (!p) throw new Error(`adapter-pi: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
-  return Object.freeze({ ...INVARIANT, ...p })
+  return Object.freeze({
+    ...INVARIANT, ...p,
+    subagents: (grants?.agents?.length ?? 0) > 0,
+  })
 }
 
 // pi namespaces models as <pi-provider>/<id>. openai -> openai-codex is
@@ -74,9 +80,12 @@ export function capabilitiesFor({ transport } = {}) {
 // (verified `pi auth check --provider openai-codex`).
 export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic' })
 
-export function modelString({ provider, id }) {
-  const p = PI_PROVIDERS[provider]
-  if (!p) throw new Error(`adapter-pi: no pi provider for roster provider "${provider}" (known: ${Object.keys(PI_PROVIDERS).join(', ')}) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`)
+export function modelString({ provider, id, localProviders }) {
+  const p = PI_PROVIDERS[provider] ?? localProviders?.[provider]?.pi_provider
+  if (!p) {
+    const known = Object.keys({ ...PI_PROVIDERS, ...(localProviders || {}) })
+    throw new Error(`adapter-pi: no pi provider for roster provider "${provider}" (known: ${known.join(', ')}) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`)
+  }
   return `${p}/${id}`
 }
 
@@ -109,7 +118,9 @@ export function translateDeny(deny) {
   return out
 }
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort }) {
+const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
+
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null }) {
   // Same env-var contract as the claude adapter (`env`, DEVTEAM_WORKER=1,
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
   // work regardless of which binary fills the seat.
@@ -132,11 +143,13 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // (dist/core/sdk.js:137 and dist/core/agent-session.js:1945), so activation
   // cannot widen a seat's deny boundary; denial remains the only real
   // boundary, exactly as before.
-  // Passing an activator also narrows extension-registered tools from
-  // ~/.pi/agent/extensions. That is a tightening, and supersedes the old
-  // "--no-extensions is the instrument if that ever needs closing" note.
-  // This posture is ENFORCED, not merely explained: crew/adapter-pi.test.mjs
-  // fails if `tools` ever influences a composed seat command.
+  // Activation is append-only over pi's built-in set: register tools can add
+  // names, but never remove or replace a built-in. --exclude-tools still beats
+  // --tools, so no grant can widen the deny boundary.
+  // --no-extensions disables discovery while explicit -e paths remain usable;
+  // --no-skills is the matching closed posture when no skill is granted. These
+  // flags make a seat a function of this checkout rather than user-global pi
+  // state, and are enforced by crew/adapter-pi.test.mjs.
   //
   // `deny` (the claude-named disallowedTools list, e.g. "Edit,NotebookEdit")
   // is translated via translateDeny() into pi's own tool namespace before it
@@ -166,13 +179,20 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // roster model id passes through untouched and effort stays a separate,
   // auditable dimension).
   const piDeny = translateDeny(deny)
+  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || [])])]
+  const extensions = grants?.extensions || []
+  const skills = grants?.skills || []
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
+    ...(configDir !== null && configDir !== undefined ? [`PI_CODING_AGENT_DIR="${configDir}"`] : []),
     'pi',
     '--model', model,
     ...(effort ? ['--thinking', effort] : []),
-    '--tools', `"${PI_BUILTIN_TOOLS.join(',')}"`,
+    '--tools', `"${activatedTools.join(',')}"`,
     ...(piDeny.length ? ['--exclude-tools', `"${piDeny.join(',')}"`] : []),
+    '--no-extensions',
+    ...extensions.flatMap((extension) => ['-e', `"${extension}"`]),
+    ...(skills.length ? skills.flatMap((skill) => ['--skill', `"${skill}"`]) : ['--no-skills']),
     '--append-system-prompt', `"${promptFile}"`,
     `"${bootBrief}"`,
   ].join(' ')

@@ -1,0 +1,158 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.internal/crew/capabilities.schema.json",
+  "title": "checkout-pinned crew capability register",
+  "description": "Closed, runtime-owned grants. The shipped register is intentionally empty until checkout-pinned pi extensions, skills, and agent definitions arrive; advisor is reserved for a later runtime slice.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "updated_at",
+    "roles",
+    "local_providers"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "updated_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$"
+    },
+    "roles": {
+      "type": "object",
+      "required": [
+        "lead",
+        "planner",
+        "builder",
+        "reviewer",
+        "tech-lead"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "lead": {
+          "$ref": "#/$defs/grant"
+        },
+        "planner": {
+          "$ref": "#/$defs/grant"
+        },
+        "builder": {
+          "$ref": "#/$defs/grant"
+        },
+        "reviewer": {
+          "$ref": "#/$defs/grant"
+        },
+        "tech-lead": {
+          "$ref": "#/$defs/grant"
+        }
+      }
+    },
+    "local_providers": {
+      "type": "object",
+      "patternProperties": {
+        "^[a-z0-9-]+$": {
+          "type": "object",
+          "required": [
+            "settings",
+            "pi_provider",
+            "base_url"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "settings": {
+              "$ref": "#/$defs/relpath"
+            },
+            "pi_provider": {
+              "type": "string",
+              "pattern": "^[a-z0-9-]+$"
+            },
+            "base_url": {
+              "type": "string",
+              "pattern": "^https?://"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "relpath": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$"
+    },
+    "grant": {
+      "type": "object",
+      "required": [
+        "tools",
+        "extensions",
+        "agents",
+        "skills",
+        "advisor",
+        "requires"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^[A-Za-z0-9_-]+$"
+          }
+        },
+        "extensions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relpath"
+          }
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/agentgrant"
+          }
+        },
+        "skills": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/relpath"
+          }
+        },
+        "advisor": {
+          "type": "boolean"
+        },
+        "requires": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "prompt_file",
+              "tool_deny",
+              "unattended",
+              "subagents",
+              "effort",
+              "session_resume",
+              "reassign"
+            ]
+          }
+        }
+      }
+    },
+    "agentgrant": {
+      "type": "object",
+      "required": [
+        "name",
+        "def"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9_-]*$"
+        },
+        "def": {
+          "$ref": "#/$defs/relpath"
+        }
+      }
+    }
+  }
+}

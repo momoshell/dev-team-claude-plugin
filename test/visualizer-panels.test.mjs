@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -478,4 +479,190 @@ test('role colour stays isolated to RoleTag and escalations render their why in 
   assert.match(app, /row\.status\.key === 'escalated'[\s\S]*?class="rail-why">\{row\.why\}/)
   assert.match(app, /returnRequestSemaphore = createSemaphore\(6\)/)
   assert.match(app, /returnRequestSemaphore\.run\(\(\) => getReturns/)
+})
+
+test('laneRows names lanes by event role and collapses an empty seat', () => {
+  const run = {
+    phase_lanes: 'agent',
+    phases: [{ id: 1, lane: 1, name: 'build:r1' }],
+    agents: [{ dispatch_id: 'd1', role: 'builder', lane: 1 }, { dispatch_id: 'd2', role: 'lead', lane: 4 }],
+  }
+  const events = [{ type: 'agent_start', phase_id: 1, payload_json: '{"role":"builder"}' }]
+  const result = laneRows(run, events)
+  assert.equal(result.lanes[0].role, 'builder')
+  assert.deepEqual(result.collapsed, [{ lane: 4, role: 'lead' }])
+})
+
+test('laneRows keeps effort and context dashed without a fabricated zero', () => {
+  const result = laneRows({ phase_lanes: 'agent', phases: [{ id: 1, lane: 1 }], agents: [{ role: 'builder', lane: 1 }] })
+  const header = result.lanes[0].header
+  assert.equal(header.effort_mark.dashed, true)
+  assert.equal(header.context_mark.dashed, true)
+  assert.equal(/(?:^|[^0-9.])0(?:[^0-9%]|$)/.test(JSON.stringify({ effort: header.effort_mark, context: header.context_mark })), false)
+})
+
+test('laneRows shows a measured model beside an unmeasured effort mark', () => {
+  const result = laneRows({ phase_lanes: 'agent', phases: [{ id: 1, lane: 1 }], agents: [{ role: 'builder', lane: 1, model: 'model/live' }] })
+  assert.equal(result.lanes[0].header.model, 'model/live')
+  assert.equal(result.lanes[0].header.model_mark, null)
+  assert.equal(result.lanes[0].header.effort_mark.dashed, true)
+})
+
+test('bounceArrows pairs changes-needed reviews and distinguishes null from zero', () => {
+  const result = bounceArrows({ phases: [{ id: 1, seq: 1, name: 'review:r1' }, { id: 2, seq: 2, name: 'build:r2' }, { id: 3, seq: 3, name: 'review:r2' }, { id: 4, seq: 4, name: 'build:r3' }], reviews: [{ verdict: 'changes-needed', must_fix: null }, { verdict: 'changes-needed', must_fix: 0 }] })
+  assert.equal(result.arrows[0].must_fix, null)
+  assert.equal(result.arrows[0].label, 'must-fix —')
+  assert.equal(result.arrows[1].must_fix, 0)
+  assert.notEqual(result.arrows[0].label, result.arrows[1].label)
+})
+
+test('bounceArrows reports pending reviews instead of empty measured output', () => {
+  const result = bounceArrows({ reviews: null, pending: { reviews: 'predates this measurement' } })
+  assert.deepEqual(result.arrows, [])
+  assert.equal(result.pending, 'predates this measurement')
+})
+
+test('gateMarkers keeps proven failed and unproven tones distinct', () => {
+  const result = gateMarkers({ gate_generations: [{ gate_generation: 1, verdict: 'failed' }, { gate_generation: 2, verdict: 'unproven' }, { gate_generation: 3, verdict: 'proven' }], gate_checks: [] })
+  assert.equal(new Set(result.markers.map((marker) => marker.tone)).size, 3)
+  assert.doesNotMatch(result.markers.find((marker) => marker.verdict === 'unproven').label, /fail/i)
+})
+
+test('phasePanel resolves names, rejects unknown routes, and scopes events', () => {
+  const run = { phases: [{ id: 1, name: 'build:r1', lane: 1, duration_ms: 10 }], gate_checks: [{ phase_id: 1, gate_generation: 1, checks: [{ label: 'check', note: 'note' }] }], gate_generations: [{ gate_generation: 1, verdict: 'proven' }], accept_decisions: [] }
+  const events = [{ id: 1, phase_id: 1 }, { id: 2, phase_id: 9 }]
+  assert.equal(phasePanel(run, { phase: 'build:r1', events }).found, true)
+  assert.deepEqual(phasePanel(run, { phase: 'build:r1', events }).events.map((event) => event.phase_id), [1])
+  assert.equal(phasePanel(run, { phase: 'missing', events }).found, false)
+})
+
+test('acceptEvidence joins lead evidence and reports missing evidence separately', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', refuted_count: 2, residual_count: 0 }] }
+  const returns = { envelopes: [{ role: 'lead', dispatch_seq: 1, details: { refuted: [{ id: 'f1', why: 'closed' }], residuals: [] } }] }
+  const joined = acceptEvidence(run, returns)
+  assert.deepEqual(joined.rows[0].evidence.map((item) => item.id), ['f1'])
+  const pending = acceptEvidence(run, { envelopes: [] }).rows[0].evidence_pending
+  assert.match(pending, /counts are recorded.*evidence is not/i)
+  assert.doesNotMatch(pending, /no refutations/i)
+})
+
+test('renderMarkdown returns typed safe blocks and keeps markup literal', () => {
+  const blocks = renderMarkdown('# Title\n\n<script>alert(1)</script>\n\n- <img onerror=...>')
+  assert.ok(blocks.some((block) => block.kind === 'heading'))
+  assert.ok(blocks.some((block) => block.kind === 'list'))
+  assert.match(JSON.stringify(blocks), /alert\(1\)/)
+  assert.match(JSON.stringify(blocks), /onerror/)
+  assert.equal(typeof blocks, 'object')
+})
+
+test('trace source tripwires keep route, role order, and server read-only', () => {
+  const root = join(process.cwd(), 'visualizer')
+  const shape = readFileSync(join(root, 'server/shape.mjs'), 'utf8')
+  const runDetail = readFileSync(join(root, 'web/src/lib/RunDetail.svelte'), 'utf8')
+  assert.ok(runDetail.includes('phase = null') && runDetail.includes('$props()'))
+  assert.ok(runDetail.includes("import PhasePanel from './PhasePanel.svelte'"))
+  for (const file of ['AcceptPanel.svelte', 'EnvelopeInspector.svelte', 'PhaseGantt.svelte', 'PhasePanel.svelte', 'ReviewPanel.svelte', 'RunDetail.svelte']) {
+    assert.equal(readFileSync(join(root, 'web/src/lib', file), 'utf8').includes('{@html'), false)
+  }
+  assert.deepEqual([...ROLE_ORDER], ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
+  assert.ok(shape.includes("Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])"))
+  for (const file of ['visualizer/server/shape.mjs', 'visualizer/server/ledger-feed.mjs']) {
+    const source = readFileSync(join(process.cwd(), file), 'utf8')
+    assert.equal(/INSERT INTO|UPDATE \\w+ SET|DELETE FROM/i.test(source), false)
+  }
+})
+
+test('PhaseGantt resolves identity by lane key rather than timeline row position', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.ok(source.includes('identityFor(lane)'))
+  assert.equal(source.includes('identities.lanes[laneIndex]'), false)
+})
+
+test('PhaseGantt renders every gate marker attached to a block', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.ok(source.includes('markersFor(block.phase_id)'))
+  assert.match(source, /#each markers as marker/)
+})
+
+test('phasePanel retains checks from every gate retry on one phase', () => {
+  const run = {
+    phases: [{ id: 1, name: 'build:r1' }],
+    gate_checks: [
+      { phase_id: 1, gate_generation: 1, attempt: 1, checks: [{ label: 'first', note: 'first note' }] },
+      { phase_id: 1, gate_generation: 2, attempt: 1, checks: [{ label: 'second', note: 'second note' }] },
+    ],
+    gate_generations: [{ gate_generation: 1, verdict: 'failed' }, { gate_generation: 2, verdict: 'proven' }],
+  }
+  const checks = phasePanel(run, { phase: 'build:r1' }).gate.checks
+  assert.deepEqual(checks.map((check) => check.label), ['first', 'second'])
+})
+
+test('acceptEvidence joins lead evidence to measured reviewer finding ids', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', refuted_count: 1 }] }
+  const returns = { envelopes: [
+    { role: 'reviewer', details: { findings: [{ id: 'f1', summary: 'real' }] } },
+    { role: 'lead', dispatch_seq: 2, details: { refuted: [{ id: 'f1', why: 'closed' }, { id: 'stale', why: 'foreign' }] } },
+  ] }
+  const evidence = acceptEvidence(run, returns).rows[0].evidence
+  assert.deepEqual(evidence.map((item) => item.id), ['f1'])
+})
+
+// RV3-1: a residual recorded as a bare string carries its text in the item
+// itself, not in a .why property. Reading only object properties emptied it,
+// and the finding-id join then dropped it outright — recorded evidence lost.
+test('acceptEvidence renders a bare-string residual and never drops it for lacking an id', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', residual_count: 1 }] }
+  const returns = { envelopes: [
+    { role: 'reviewer', details: { findings: [{ id: 'f1', summary: 'real' }] } },
+    { role: 'lead', dispatch_seq: 2, details: { residuals: ['a plain string residual'] } },
+  ] }
+  const row = acceptEvidence(run, returns).rows[0]
+  const strings = row.evidence.filter((item) => item.kind === 'residual')
+  assert.equal(strings.length, 1, 'the id-less residual was dropped by the finding-id join')
+  assert.equal(strings[0].why, 'a plain string residual')
+  assert.ok(
+    JSON.stringify(strings[0].blocks).includes('a plain string residual'),
+    'the residual rendered as empty markdown, hiding recorded evidence',
+  )
+})
+
+// RV3-1b: a foreign id is still dropped. The fix above must not turn the join
+// off — only items that cannot be matched at all are exempt from it.
+test('acceptEvidence still drops evidence whose id the findings array does not know', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', refuted_count: 1 }] }
+  const returns = { envelopes: [
+    { role: 'reviewer', details: { findings: [{ id: 'f1', summary: 'real' }] } },
+    { role: 'lead', dispatch_seq: 2, details: { refuted: [{ id: 'stale', why: 'foreign' }] } },
+  ] }
+  assert.deepEqual(acceptEvidence(run, returns).rows[0].evidence.map((item) => item.id), [])
+})
+
+// RV3-2: a recorded nonzero cosmetic count with no evidence items must explain
+// itself, not render an unexplained empty area.
+test('acceptEvidence explains a pending cosmetic count', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', cosmetic_count: 2 }] }
+  const pending = acceptEvidence(run, { envelopes: [] }).rows[0].evidence_pending
+  assert.match(pending, /counts are recorded.*evidence is not/i)
+})
+
+test('PhaseGantt draws named bounce connectors inside the timeline layer', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.match(source, /class="bounce-layer"/)
+  assert.ok(source.includes('connectorPath(from, to)'))
+  assert.ok(source.includes('connectorLabel(from, to, arrow)'))
+})
+
+test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.ok(source.includes('--identity-column:15rem'))
+  assert.ok(source.includes('--lane-gap:.6rem'))
+  assert.ok(source.includes('left:calc(var(--identity-column) + var(--lane-gap))'))
+  assert.ok(source.includes('right:0'))
+})
+
+test('PhasePanel shows pending gate retries alongside valid checks', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  assert.ok(source.includes('{#if panel.gate.checks_pending}'))
+  assert.ok(source.includes('class="checks-pending muted"'))
+  assert.equal(source.includes('{:else if panel.gate.checks_pending}'), false)
 })

@@ -6,13 +6,14 @@ import { shapeRun, matchesFilters } from './shape.mjs'
 
 const require = createRequire(import.meta.url)
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
-const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals']
+const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals']
 // Which shape fields a missing table makes unknowable. Feeding these into the
 // probe reuses #48's NULL-probe path (shape.mjs) instead of inventing a second
 // mechanism for the same idea.
 const TABLE_FIELDS = {
   agent_sessions: ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens'],
   gate_discriminations: ['gate_discrimination', 'gate_generations'],
+  gate_results: ['gate_checks'],
   review_outcomes: ['reviews'],
   accept_decisions: ['accept_decisions'],
 }
@@ -73,25 +74,27 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
         return []
       }
     }
-    const agentSessions = optional('agent_sessions', `SELECT adw_id, billed_input_tokens, billed_output_tokens, billed_cache_write_tokens, billed_cache_read_tokens FROM agent_sessions WHERE adw_id IN (${marks})`)
+    const agentSessions = optional('agent_sessions', `SELECT adw_id, dispatch_id, role, model, billed_input_tokens, billed_output_tokens, billed_cache_write_tokens, billed_cache_read_tokens FROM agent_sessions WHERE adw_id IN (${marks})`)
     const gateRows = optional('gate_discriminations', `SELECT adw_id, gate_generation, verdict, checks_total, checks_failed, checks_errored, note, created_at FROM gate_discriminations WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation`)
+    const gateResults = optional('gate_results', `SELECT adw_id, phase_id, gate_name, attempt, ok, checks_json, gate_generation, pristine, created_at FROM gate_results WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation, attempt`)
     const reviewRows = optional('review_outcomes', `SELECT adw_id, dispatch_id, role, verdict, must_fix, should_fix, consider, created_at FROM review_outcomes WHERE adw_id IN (${marks}) ORDER BY adw_id, created_at, id`)
     const acceptRows = optional('accept_decisions', `SELECT adw_id, phase_id, where_at, outcome, findings_total, residual_count, refuted_count, cosmetic_count, unverified_count, invalid_reasons, created_at FROM accept_decisions WHERE adw_id IN (${marks}) ORDER BY adw_id, created_at, id`)
-    const phaseMap = new Map(), eventMap = new Map(), agentSessionMap = new Map(), gateMap = new Map(), reviewMap = new Map(), acceptMap = new Map()
+    const phaseMap = new Map(), eventMap = new Map(), agentSessionMap = new Map(), gateMap = new Map(), gateResultsMap = new Map(), reviewMap = new Map(), acceptMap = new Map()
     for (const id of ids) {
-      phaseMap.set(id, []); eventMap.set(id, []); agentSessionMap.set(id, []); gateMap.set(id, []); reviewMap.set(id, []); acceptMap.set(id, [])
+      phaseMap.set(id, []); eventMap.set(id, []); agentSessionMap.set(id, []); gateMap.set(id, []); gateResultsMap.set(id, []); reviewMap.set(id, []); acceptMap.set(id, [])
     }
     for (const row of phases) phaseMap.get(row.adw_id)?.push(row)
     for (const row of agents) eventMap.get(row.adw_id)?.push(row)
     for (const row of agentSessions) agentSessionMap.get(row.adw_id)?.push(row)
     for (const row of gateRows) gateMap.get(row.adw_id)?.push(row)
+    for (const row of gateResults) gateResultsMap.get(row.adw_id)?.push(row)
     for (const row of reviewRows) reviewMap.get(row.adw_id)?.push(row)
     for (const row of acceptRows) acceptMap.get(row.adw_id)?.push(row)
     const triageRows = triage.readTriage(ids)
     const shapeProbe = { ...probe, missing: [...probe.missing, ...probe.missing_tables.flatMap((table) => TABLE_FIELDS[table] ?? [])] }
     const now = Date.now()
     const runs = sessions.map((session) => shapeRun(session, phaseMap.get(session.adw_id), eventMap.get(session.adw_id), triageRows.get(session.adw_id), shapeProbe, now,
-      { agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) })).filter((run) => matchesFilters(run, filters))
+      { agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) })).filter((run) => matchesFilters(run, filters))
     return { runs, degraded: degraded || triage.health().degraded, probe: { ...probe } }
   }
   function listEvents({ adw_id, after = 0, limit = 200, type, role, phase_id } = {}) {

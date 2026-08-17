@@ -3,6 +3,10 @@ const lanes = new Map()
 const PALETTE_SIZE = 8
 export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
 export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
+
+const EFFORT_PENDING = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/realio.mjs:264-265, 285-288)'
+const CONTEXT_PENDING = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
+const MODEL_PENDING = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/realio.mjs:399-410)'
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_REFUSAL_REASONS = Object.freeze([
@@ -71,6 +75,30 @@ export function foldAgents(events = []) {
   return [...agents.values()]
 }
 
+export function withCells(agents = [], agentSessions = []) {
+  const byDispatch = new Map()
+  for (const row of Array.isArray(agentSessions) ? agentSessions : []) {
+    if (row?.dispatch_id == null) continue
+    const key = String(row.dispatch_id)
+    if (!byDispatch.has(key)) byDispatch.set(key, row)
+  }
+  return (Array.isArray(agents) ? agents : []).map((agent) => {
+    const session = byDispatch.get(String(agent?.dispatch_id))
+    const model = session?.model ?? null
+    const modelPresent = model != null && (typeof model !== 'string' || model.length > 0)
+    return {
+      ...agent,
+      model,
+      model_pending: modelPresent ? null : MODEL_PENDING,
+      effort: null,
+      effort_pending: EFFORT_PENDING,
+      context_tokens: null,
+      context_window: null,
+      context_pending: CONTEXT_PENDING,
+    }
+  })
+}
+
 function sumBilled(rows, column, fallback) {
   let total = null
   for (const row of rows) {
@@ -96,6 +124,48 @@ function pendingFor(field, probe, value) {
   return 'not measured yet'
 }
 
+function normalizeGateCheck(item) {
+  if (typeof item === 'string') return { label: item, note: null, ok: null }
+  if (item && typeof item === 'object') {
+    return {
+      label: item.name ?? item.label ?? JSON.stringify(item),
+      note: item.note ?? item.detail ?? null,
+      ok: item.ok ?? null,
+    }
+  }
+  return { label: String(item), note: null, ok: null }
+}
+
+export function shapeGateChecks(gateResults = []) {
+  if (!Array.isArray(gateResults) || gateResults.length === 0) return null
+  return gateResults.map((row) => {
+    const raw = row?.checks_json
+    let parsed
+    let parseError = null
+    try {
+      if (typeof raw === 'string') parsed = JSON.parse(raw)
+      else if (Array.isArray(raw)) parsed = raw
+      else if (raw && typeof raw === 'object') parsed = raw
+      else throw new Error('checks_json is absent')
+    } catch (error) {
+      parseError = error?.message || 'checks_json could not be parsed'
+    }
+    const base = {
+      gate_generation: row?.gate_generation ?? null,
+      gate_name: row?.gate_name ?? null,
+      attempt: row?.attempt ?? null,
+      phase_id: row?.phase_id ?? null,
+      ok: row?.ok ?? null,
+      pristine: row?.pristine ?? null,
+      created_at: row?.created_at ?? null,
+      checks: parseError ? [] : (Array.isArray(parsed) ? parsed : [parsed]).map(normalizeGateCheck),
+      checks_pending: parseError ? `checks_json could not be parsed — recorded raw checks retained (${parseError})` : null,
+    }
+    if (parseError) base.checks_raw = raw == null ? '' : String(raw)
+    return base
+  })
+}
+
 function dateValue(v) {
   if (v == null) return null
   const n = Date.parse(v)
@@ -104,7 +174,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [] } = extras || {}
+  const { agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [] } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -138,6 +208,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     created_at: row.created_at ?? null,
   })) : null
   const gateDiscrimination = gateGenerations ? (gateGenerations.at(-1).verdict ?? null) : null
+  const gateChecks = shapeGateChecks(gateResults)
   const reviews = reviewOutcomes.length ? reviewOutcomes.map((row) => ({
     dispatch_id: row.dispatch_id ?? null, role: row.role ?? null, verdict: row.verdict ?? null,
     must_fix: row.must_fix ?? null, should_fix: row.should_fix ?? null,
@@ -162,8 +233,8 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
-  for (const field of ['gate_discrimination', 'gate_generations', 'reviews', 'accept_decisions']) {
-    const value = field === 'gate_discrimination' ? gateDiscrimination : field === 'gate_generations' ? gateGenerations : field === 'reviews' ? reviews : accepts
+  for (const field of ['gate_discrimination', 'gate_generations', 'gate_checks', 'reviews', 'accept_decisions']) {
+    const value = field === 'gate_discrimination' ? gateDiscrimination : field === 'gate_generations' ? gateGenerations : field === 'gate_checks' ? gateChecks : field === 'reviews' ? reviews : accepts
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
@@ -200,10 +271,11 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     duration_ms: duration,
     phases: phaseCards,
     phase_lanes: phaseLaneSource,
-    agents: foldAgents(agentEvents),
+    agents: withCells(foldAgents(agentEvents), agentSessions),
     metrics,
     gate_discrimination: gateDiscrimination,
     gate_generations: gateGenerations,
+    gate_checks: gateChecks,
     reviews,
     accept_decisions: accepts,
     triage: { reviewed_at: triageRow?.reviewed_at ?? null },

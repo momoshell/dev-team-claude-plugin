@@ -1,13 +1,16 @@
 <script>
+  import { bounceArrows } from './trace.js'
   import { findingRows, reviewRows } from './panels.js'
   let { run, returns = {} } = $props()
   let reviews = $derived(reviewRows(run))
   let findings = $derived(findingRows(returns))
+  let bounces = $derived(bounceArrows(run))
+  function bounceFor(round) { return bounces.arrows.find((arrow) => arrow.round === round) }
 </script>
 <section class="panel">
   <h2>Reviews</h2>
   {#if reviews.rows.length}
-    <div class="review-rows">{#each reviews.rows as row (row.dispatch_id ?? row.round)}<div>{row.round} · {row.role ?? '—'} · {row.verdict ?? '—'} · must-fix <span title={row.must_fix == null ? 'predates this measurement' : undefined}>{row.must_fix == null ? '—' : row.must_fix}</span></div>{/each}</div>
+    <div class="review-rows">{#each reviews.rows as row (row.dispatch_id ?? row.round)}{@const bounce = row.verdict === 'changes-needed' ? bounceFor(row.round) : null}<div>{row.round} · {row.role ?? '—'} · {row.verdict ?? '—'} · must-fix <span title={row.must_fix == null ? 'predates this measurement' : undefined}>{row.must_fix == null ? '—' : row.must_fix}</span>{#if bounce} · bounced into {bounce.to_phase}<span class="muted" title={bounce.title}> ({bounce.label})</span>{/if}</div>{/each}</div>
   {:else if reviews.pending}<p class="muted">review outcomes unavailable — {reviews.pending}</p>
   {:else}<p class="muted">No review outcomes recorded.</p>{/if}
   <h2>Findings</h2>

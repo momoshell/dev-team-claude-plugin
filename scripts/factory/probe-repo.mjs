@@ -125,6 +125,24 @@ export const FIELD_KINDS = Object.freeze({
   conventions: 'stable',
   default_branch: 'stable',
   pr_conventions: 'stable',
+  // intake_board is stable: the board a repository is worked from is a fact
+  // about the REPOSITORY, not about one commit (nothing here is measured from
+  // a working tree, so commit_scoped would refuse a value that still applies),
+  // and not a human-authored superset a heuristic under-discovers (the probe
+  // enumerates the linked projects exhaustively — there is no hidden remainder
+  // for a human to add). Stable is therefore the honest kind: a byte-identical
+  // re-probe keeps the human ratification, a changed board supersedes it and
+  // drops back to proposed.
+  // LOAD_BEARING is intentionally unchanged: repositories that never use
+  // intake must not become unrunnable merely because no board is ratified.
+  intake_board: 'stable',
+})
+
+export const INTAKE_BOARD_FIELD = 'intake_board'
+export const INTAKE_COLUMN_ROLES = Object.freeze({
+  ready: Object.freeze(['ready']),
+  work: Object.freeze(['in progress', 'in-progress', 'inprogress', 'doing', 'wip']),
+  review: Object.freeze(['in review', 'in-review', 'review', 'reviewing']),
 })
 export function fieldKind(name) {
   return Object.hasOwn(FIELD_KINDS, name) ? FIELD_KINDS[name] : 'stable'
@@ -715,11 +733,10 @@ function classifyGhFailure(stderr) {
   return 'gh_request_rejected'
 }
 
-function runGh(root, fields) {
+function runGhArgs(root, args) {
   let result
   try {
-    result = spawnSync(process.env.GH_BIN || 'gh',
-      ['repo', 'view', '--json', fields.join(',')],
+    result = spawnSync(process.env.GH_BIN || 'gh', args,
       { cwd: root, encoding: 'utf8', timeout: 30_000 })
   } catch {
     return { ok: false, reason: 'gh_unavailable' }
@@ -743,6 +760,10 @@ function runGh(root, fields) {
     return { ok: false, reason: 'gh_request_rejected' }
   }
   return { ok: true, data }
+}
+
+function runGh(root, fields) {
+  return runGhArgs(root, ['repo', 'view', '--json', fields.join(',')])
 }
 
 function ghView(root, fields) {
@@ -798,6 +819,117 @@ function gatherPrConventions(root, consultGh) {
   return proposedCell(answered, `gh repo view --json ${askedOk.join(',')}`, { detail: { unanswered } })
 }
 
+function normaliseIntakeColumn(value) {
+  return String(value ?? '').trim().toLowerCase().replace(/\s+/g, ' ')
+}
+
+function intakeProjectCandidate(node) {
+  return {
+    number: node?.number ?? null,
+    title: node?.title ?? null,
+    url: node?.url ?? null,
+  }
+}
+
+function intakeProjectReference(node) {
+  const resourcePath = typeof node?.resourcePath === 'string' ? node.resourcePath.trim() : ''
+  const match = resourcePath.match(/^\/(users|orgs)\/([^/]+)\/projects\/(\d+)\/?$/)
+  const nodeNumber = Number(node?.number)
+  const pathNumber = match ? Number(match[3]) : NaN
+  if (!match || !Number.isInteger(nodeNumber) || nodeNumber <= 0
+    || !Number.isInteger(pathNumber) || pathNumber <= 0 || nodeNumber !== pathNumber) {
+    return null
+  }
+  return {
+    owner: match[2],
+    ownerType: match[1] === 'users' ? 'user' : 'organization',
+    number: pathNumber,
+  }
+}
+
+function intakeFieldsQuery(ownerType) {
+  const root = ownerType === 'organization' ? 'organization' : 'user'
+  return `query($owner:String!,$number:Int!){
+    ${root}(login:$owner){projectV2(number:$number){title fields(first:100){nodes{
+      ... on ProjectV2SingleSelectField{name options{name}}
+    }}}}
+  }`
+}
+
+function gatherIntakeBoard(root, consultGh) {
+  if (!consultGh) return unknownCell('gh_not_consulted')
+
+  const projectsResult = runGh(root, ['projectsV2'])
+  if (!projectsResult.ok) return unknownCell(projectsResult.reason)
+  const projects = projectsResult.data.projectsV2
+  const nodes = Array.isArray(projects?.Nodes)
+    ? projects.Nodes
+    : Array.isArray(projects?.nodes) ? projects.nodes : null
+  if (!nodes) return unknownCell('gh_request_rejected')
+
+  const open = nodes.filter((node) => node && typeof node === 'object' && node.closed !== true)
+  const candidates = open.map(intakeProjectCandidate)
+  if (open.length === 0) return unknownCell('none_found')
+  if (open.length > 1) return unknownCell('multiple_candidates', candidates)
+
+  const node = open[0]
+  const reference = intakeProjectReference(node)
+  if (!reference) return unknownCell('gh_request_rejected')
+
+  const graphql = runGhArgs(root, [
+    'api', 'graphql', '-f', `query=${intakeFieldsQuery(reference.ownerType)}`,
+    '-F', `owner=${reference.owner}`, '-F', `number=${reference.number}`,
+  ])
+  if (!graphql.ok) return unknownCell(graphql.reason)
+  const data = graphql.data.data
+  const project = data && typeof data === 'object' && !Array.isArray(data)
+    ? data[reference.ownerType]?.projectV2
+    : null
+  const fieldNodes = project?.fields?.nodes
+  if (!project || typeof project !== 'object' || Array.isArray(project)
+    || !Array.isArray(fieldNodes)) return unknownCell('gh_request_rejected')
+
+  const singleSelectFields = fieldNodes.filter((field) => (
+    field && typeof field === 'object' && !Array.isArray(field)
+      && nonEmptyString(field.name) && Array.isArray(field.options)
+  ))
+  const singleSelectFieldNames = singleSelectFields.map((field) => field.name)
+  const matchingFields = singleSelectFields.filter((field) => {
+    const options = field.options
+    return Object.values(INTAKE_COLUMN_ROLES).every((role) => options.some((option) => (
+      option && nonEmptyString(option.name) && role.includes(normaliseIntakeColumn(option.name))
+    )))
+  })
+  if (matchingFields.length === 0) return unknownCell('none_found', singleSelectFieldNames)
+  if (matchingFields.length > 1) return unknownCell('multiple_candidates', matchingFields.map((field) => field.name))
+
+  const statusField = matchingFields[0]
+  const optionNames = statusField.options
+    .map((option) => option && option.name)
+    .filter((name) => typeof name === 'string')
+  const optionFor = (role) => statusField.options.find((option) => (
+    option && nonEmptyString(option.name) && role.includes(normaliseIntakeColumn(option.name))
+  ))?.name
+  const projectTitle = typeof project.title === 'string' ? project.title : node.title ?? null
+  return proposedCell({
+    owner: reference.owner,
+    project_number: reference.number,
+    status_field: statusField.name,
+    ready_column: optionFor(INTAKE_COLUMN_ROLES.ready),
+    work_column: optionFor(INTAKE_COLUMN_ROLES.work),
+    review_column: optionFor(INTAKE_COLUMN_ROLES.review),
+  }, 'gh repo view --json projectsV2 + gh api graphql projectV2 fields', {
+    candidates: [intakeProjectCandidate(node)],
+    detail: {
+      project_title: projectTitle,
+      project_url: node.url ?? null,
+      owner_type: reference.ownerType,
+      status_options: optionNames,
+      columns_validated_at: 'probe',
+    },
+  })
+}
+
 export function profileBody(profile) {
   if (!profile || typeof profile !== 'object' || Array.isArray(profile)) return profile
   const body = clone(profile)
@@ -832,6 +964,7 @@ export function probeRepo({ checkout, baseline = false, gh = false, now = () => 
       conventions: gatherConventions(root),
       default_branch: gatherDefaultBranch(root, isGit, gh === true),
       pr_conventions: gatherPrConventions(root, gh === true),
+      intake_board: gatherIntakeBoard(root, gh === true),
     },
     meta: {
       probed_at: probedAt,
@@ -998,6 +1131,115 @@ export function checkoutProtectedPaths({ checkout, profilePath = null, factoryRo
     if (!(err instanceof ProbeUsageError)) throw err
   }
   return profileProtectedPaths(profile, { path })
+}
+
+export const INTAKE_BOARD_REFUSALS = Object.freeze([
+  'profile-unreadable',
+  'profile-field-unknown',
+  'profile-unratified',
+  'intake-board-invalid',
+])
+
+function intakeBoardPathLabel(path) {
+  return nonEmptyString(path) ? path : 'no profile path resolved'
+}
+
+function plainObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+function intakeBoardRefusal(profile, path, reason, detail) {
+  const repoKey = profile && nonEmptyString(profile.repo_key) ? profile.repo_key : '<unknown repo>'
+  return new ProfileRefusal(
+    `probe-repo: field "${INTAKE_BOARD_FIELD}" ${detail} (reason: ${reason}) — refusing to use the intake board for ${repoKey} (fix the field in ${intakeBoardPathLabel(path)})`,
+    reason,
+  )
+}
+
+function intakeBoardInvalid(profile, path, key, detail) {
+  throw intakeBoardRefusal(
+    profile,
+    path,
+    'intake-board-invalid',
+    `has an invalid ${key}${detail ? ` (${detail})` : ''}`,
+  )
+}
+
+export function profileIntakeBoard(profile, { path = null } = {}) {
+  const profilePath = intakeBoardPathLabel(path)
+  if (!plainObject(profile)) {
+    throw intakeBoardRefusal(profile, path, 'profile-unreadable', 'is not a readable profile object')
+  }
+  const fields = profile.fields
+  if (!plainObject(fields) || !Object.hasOwn(fields, INTAKE_BOARD_FIELD)) {
+    throw intakeBoardRefusal(profile, path, 'profile-field-unknown', 'has no known intake_board field')
+  }
+  const field = fields[INTAKE_BOARD_FIELD]
+  if (!plainObject(field) || field.status === 'unknown' || !nonEmptyString(field.status)) {
+    throw intakeBoardRefusal(profile, path, 'profile-field-unknown', 'has an unknown intake_board field')
+  }
+  if (field.status !== 'ratified') {
+    throw intakeBoardRefusal(profile, path, 'profile-unratified', `has an intake_board field that is ${field.status}`)
+  }
+
+  let value
+  try {
+    value = requireField(profile, INTAKE_BOARD_FIELD)
+  } catch (err) {
+    if (!(err instanceof ProfileRefusal)) throw err
+    throw intakeBoardRefusal(profile, path, 'intake-board-invalid', `cannot be used (${err.reason})`)
+  }
+  if (!plainObject(value)) intakeBoardInvalid(profile, path, 'value', 'expected a plain object')
+
+  const requiredStrings = [
+    ['owner', value.owner],
+    ['status_field', value.status_field],
+    ['ready_column', value.ready_column],
+    ['work_column', value.work_column],
+    ['review_column', value.review_column],
+  ]
+  for (const [key, candidate] of requiredStrings) {
+    if (!nonEmptyString(candidate)) intakeBoardInvalid(profile, path, key, 'expected a non-empty string')
+  }
+  if (!Number.isInteger(value.project_number) || value.project_number <= 0) {
+    intakeBoardInvalid(profile, path, 'project_number', 'expected a positive integer')
+  }
+  const columns = [
+    ['ready_column', value.ready_column],
+    ['work_column', value.work_column],
+    ['review_column', value.review_column],
+  ]
+  for (let index = 1; index < columns.length; index += 1) {
+    if (columns.slice(0, index).some(([, column]) => column === columns[index][1])) {
+      intakeBoardInvalid(profile, path, columns[index][0], 'column names must be distinct')
+    }
+  }
+
+  return {
+    board: { owner: value.owner.trim(), projectNumber: value.project_number },
+    config: {
+      statusField: value.status_field,
+      readyColumn: value.ready_column,
+      workColumn: value.work_column,
+      reviewColumn: value.review_column,
+    },
+    basis: `ratified profile field ${INTAKE_BOARD_FIELD} · ${profilePath}`,
+  }
+}
+
+export function checkoutIntakeBoard({ checkout, profilePath = null, factoryRoot } = {}) {
+  const path = profilePath != null
+    ? resolve(profilePath)
+    : defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
+  let profile = null
+  try {
+    profile = readProfile(path)
+  } catch (err) {
+    if (!(err instanceof ProbeUsageError)) throw err
+  }
+  return profileIntakeBoard(profile, { path })
 }
 
 export function defaultProfilePath({ repoKey, factoryRoot } = {}) {

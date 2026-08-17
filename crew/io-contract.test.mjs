@@ -13,7 +13,7 @@ import { WAIT_POLL_MS } from './realio.mjs'
 import { assignmentLine } from './driver.mjs'
 
 const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'commit', 'log', 'now']
-const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit', 'reseat']
+const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
 const FAULT = process.env.CREW_IO_CONTRACT_FAULT || ''
 
 function dirs() {
@@ -476,8 +476,10 @@ test('realIo passes a guarded transport emitter that routes through io.emit', ()
   assert.doesNotThrow(() => received.deps.emit({ kind: 'usage', usage: null }))
 })
 
-test('realIo exposes reseat as an optional function', () => {
-  assert.equal(typeof makeRealIo().io.reseat, 'function')
+test('realIo exposes reseat and teardown as optional functions', () => {
+  const io = makeRealIo().io
+  assert.equal(typeof io.reseat, 'function')
+  assert.equal(typeof io.teardown, 'function')
 })
 
 test('pane reseat refuses with a transport-specific explanation', () => {

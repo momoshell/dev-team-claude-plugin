@@ -1,9 +1,9 @@
-import { test } from 'node:test'
+import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
-  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync, symlinkSync,
+  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync, symlinkSync, chmodSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -37,6 +37,23 @@ function sqliteAvailable() {
   } catch { return false }
 }
 const LEDGER_SQLITE_OK = Number.parseInt(process.versions.node, 10) >= Number.parseInt(NODE_FLOOR, 10) && sqliteAvailable()
+
+// The rpc wrapper is spawned detached and unrefed, so this test cannot retain
+// its ChildProcess object. Keep the cleanup scope to the recorded process
+// group, never a process name.
+const teardownPgidPaths = new Set()
+function recordedPgid(path) {
+  try {
+    const value = Number(readFileSync(path, 'utf8').trim())
+    return Number.isSafeInteger(value) && value > 0 ? value : null
+  } catch { return null }
+}
+function killRecordedGroup(path) {
+  const pgid = recordedPgid(path)
+  if (pgid == null) return
+  try { process.kill(-pgid, 'SIGKILL') } catch (err) { if (err?.code !== 'ESRCH') return }
+}
+after(() => { for (const path of teardownPgidPaths) killRecordedGroup(path) })
 
 function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'headless-json', agent, feedRetention, bootCrewDir, spawnSync: spawnImpl, concurrency, budget, usageWindow: usageWindowImpl, now: nowImpl, nodeVersion: nodeVersionImpl } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'daemon80-'))
@@ -2322,4 +2339,59 @@ test('send with no role picks the single steerable seat and refuses when there a
       return true
     })
   }, { roles: ['planner', 'builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('run-end teardown kills a real piped seat and its recorded pgid is gone', { timeout: 20_000 }, async () => {
+  const f = fixture({ roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+  const binDir = join(f.dir, 'worker-bin')
+  const pgidPath = join(f.taskDir, 'headless-rpc', 'builder', 'pgid')
+  const savedPath = process.env.PATH
+  teardownPgidPaths.add(pgidPath)
+  mkdirSync(binDir)
+  writeFileSync(join(binDir, 'pi'), '#!/usr/bin/env node\nprocess.stdin.resume()\nsetInterval(() => {}, 1000)\n')
+  chmodSync(join(binDir, 'pi'), 0o755)
+  process.env.PATH = `${binDir}:${savedPath || ''}`
+  try {
+    const result = runChild({
+      crew_dir: f.crewDir, task: 'real-teardown', checkout: f.dir,
+      task_return: f.taskReturn, brief_file: f.brief, ledger_db: join(f.dir, 'ledger.db'),
+    }, {
+      preflight: false,
+      driveTask: (ctx, io) => {
+        io.assign({ role: 'builder', briefFile: ctx.briefFile })
+        return { status: 'done', summary: 'real teardown', artifacts: [], details: {} }
+      },
+    })
+    assert.equal(result.status, 'done')
+    const pgid = recordedPgid(pgidPath)
+    assert.ok(pgid)
+    let gone = false
+    const deadline = Date.now() + 5_000
+    while (Date.now() < deadline) {
+      try { process.kill(-pgid, 0) } catch (err) {
+        if (err?.code === 'ESRCH') { gone = true; break }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50))
+    }
+    assert.equal(gone, true, `recorded process group ${pgid} remained live`)
+
+    const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
+    const ledger = openLedger({ dbPath: sidecar.db_path, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('seat_teardowns').filter((row) => row.role === 'builder')
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].adw_id, sidecar.adw_id)
+      assert.equal(rows[0].pgid, pgid)
+      assert.equal(rows[0].outcome, 'proven')
+      assert.equal(rows[0].forced, 1)
+    } finally { ledger.close() }
+    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
+    const journal = readFileSync(join(f.crewDir, 'journal.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    assert.ok(journal.some((entry) => entry.event === 'seat-teardown' && entry.role === 'builder' && entry.outcome === 'proven'))
+  } finally {
+    if (savedPath === undefined) delete process.env.PATH
+    else process.env.PATH = savedPath
+    killRecordedGroup(pgidPath)
+    f.cleanup()
+  }
 })

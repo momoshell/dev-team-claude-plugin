@@ -23,6 +23,7 @@ import {
   openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
+  SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
@@ -270,6 +271,12 @@ function exerciseEveryWriter(ledger, adwId) {
   ledger.recordIntakeRefusal({
     board_owner: 'owner', board_project: 7, issue: 43, reason: 'not-first-in-order',
     detail: 'concurrency=1', priority: 'P1', issue_created_at: '2023-12-31T00:00:00.000Z',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.recordSeatTeardown({
+    adw_id: adwId, phase_id: phaseId, role: 'builder', transport: 'headless-rpc',
+    session_id: 'session-1', pgid: 4242, reservation_id: 'reservation-1', outcome: 'proven',
+    reason: 'exit-marker', forced: true, evidence_kind: 'pgid',
     created_at: '2024-01-01T00:00:00.000Z',
   })
   ledger.recordModifierAttempt({
@@ -976,6 +983,11 @@ function seedAllWritersWithMarker(ledger) {
     from_provider: 'anthropic', from_model_id: 'sonnet', from_model: MARKER_ADW, from_agent: 'claude', from_effort: 'high',
     created_at: '2024-01-01T00:00:01.000Z',
   })
+  ledger.recordSeatTeardown({
+    adw_id: ctx, role: 'builder', transport: 'headless-rpc', session_id: MARKER_ADW,
+    pgid: 555, reservation_id: MARKER_ADW, outcome: 'unproven', reason: MARKER_ADW,
+    forced: true, evidence_kind: 'pgid', created_at: '2024-01-01T00:00:01.000Z',
+  })
   ledger.endPhase({ adw_id: ctx, seq: 1, status: 'ok' })
   ledger.endSession({ adw_id: ctx, status: 'ok' })
 }
@@ -1246,32 +1258,58 @@ test('installFinalizer is idempotent: a second call installs nothing and returns
 test('AC-11: on SIGTERM the finalizer lands the session as fail, closes running processes rows, and does not swallow the signal', { skip: SKIP, timeout: 15000 }, async () => {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
+  const readyPath = join(dir, 'finalizer-installed')
   const program = `
     const { openLedger, isoMs } = await import(${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)});
+    const { writeFileSync, renameSync } = await import('node:fs');
     const ledger = openLedger({ dbPath: ${JSON.stringify(dbPath)} });
     ledger.startSession({ adw_id: 'sig-1', repo_slug: 'r', task_slug: 't' });
     ledger.startProcess({ adw_id: 'sig-1', dispatch_id: 'd', pid: process.pid, command: 'child' });
     ledger.installFinalizer({ adw_id: 'sig-1' });
+    // Published only AFTER the handler is installed, and atomically, so the
+    // reader can never observe a half-written marker as readiness.
+    writeFileSync(${JSON.stringify(readyPath)} + '.tmp', 'ok');
+    renameSync(${JSON.stringify(readyPath)} + '.tmp', ${JSON.stringify(readyPath)});
     setInterval(() => {}, 1000);
   `
   const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  // Wait for the child to have COMMITTED its work rather than sleeping a fixed
-  // 400 ms and hoping. Under a loaded runner the child had not reached
-  // startSession before the SIGTERM, so no row existed, getSession returned
-  // null, and reading `.status` off it threw — a flake that surfaced only when
-  // three PRs' CI ran concurrently, reproduced here by shortening the sleep.
+  // Gate on the FINALIZER being installed, not on the session row existing.
+  //
+  // The row is committed by startSession, two statements before
+  // installFinalizer. Waiting on the row therefore only proves the child got
+  // as far as startSession — so on a slow runner SIGTERM could still land in
+  // the gap before the handler existed, the child would die on the DEFAULT
+  // SIGTERM disposition (which still satisfies the `signal === 'SIGTERM'`
+  // assertion below, so the failure surfaced two asserts later), and the
+  // session would stay 'running'. That is the CI failure this closes:
+  // 'running' !== 'fail'.
+  //
+  // An earlier fix replaced a fixed 400 ms sleep with a poll for the row; that
+  // closed the case where NO row existed and getSession returned null, but it
+  // moved the race one statement later rather than removing it. Gating on the
+  // precondition the test actually needs — a handler that can answer the
+  // signal — is what removes it. Verified by widening the
+  // startSession→installFinalizer window, which reproduces the exact CI
+  // failure before this change and cannot after it.
+  //
   // ONE reader is opened and reused: reopening per poll starves the sibling
   // SIGTERM test of the database lock.
   {
-    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
     let committed = false
     try {
       const deadline = Date.now() + 10000
       while (Date.now() < deadline) {
-        try { committed = probe.getSession('sig-1') != null } catch { committed = false }
-        if (committed) break
+        if (existsSync(readyPath)) { committed = true; break }
         await new Promise((resolve) => setTimeout(resolve, 25))
       }
+    } finally { /* the marker is a plain file; there is nothing to close */ }
+    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      // The marker is written after startSession, so the row must be present
+      // by now; assert it rather than assume it.
+      committed = committed && (() => {
+        try { return probe.getSession('sig-1') != null } catch { return false }
+      })()
     } finally {
       try { probe.close?.() } catch { /* a probe that cannot close is not a test failure */ }
     }
@@ -1854,4 +1892,75 @@ test('the intake-sweeps CLI prints dispatches beside sweeps and refusals', { ski
   assert.ok(Array.isArray(payload.dispatches))
   assert.deepEqual(payload.dispatch_outcomes, [...INTAKE_DISPATCH_OUTCOMES])
   assert.equal(payload.dispatches[0].outcome, 'claimed')
+})
+
+test('seat teardown outcomes mirror gate discrimination and duplicate emissions are idempotent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  assert.deepEqual(SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS)
+  const row = {
+    adw_id: 'seat-run', role: 'builder', transport: 'headless-rpc', session_id: 's1', pgid: 4242,
+    reservation_id: 'r1', outcome: 'proven', reason: 'exit-marker', forced: true,
+    evidence_kind: 'pgid', created_at: '2024-01-01T00:00:00.000Z',
+  }
+  ledger.recordSeatTeardown(row)
+  ledger.recordSeatTeardown({ ...row, outcome: 'failed', reason: 'probe-alive', created_at: '2024-01-01T00:00:01.000Z' })
+  const rows = ledger.dumpTable('seat_teardowns')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].outcome, 'proven')
+  const bad = openTestLedger()
+  assert.throws(
+    () => bad.recordSeatTeardown({ adw_id: 'seat-bad', role: 'builder', outcome: 'retired' }),
+    (err) => err instanceof LedgerUsageError && !err.message.includes('retired'),
+  )
+  assert.deepEqual(bad.dumpTable('seat_teardowns'), [])
+  const below = openLedger({ dbPath: join(nextDir(), 'seat-floor.db'), nodeVersion: '20.11.0', stderr: { write: () => {} } })
+  assert.doesNotThrow(() => below.recordSeatTeardown({ adw_id: 'seat-floor', outcome: 'unproven' }))
+})
+
+test('seatTeardowns aggregates outcome and reason within a window and the CLI reports its tally', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordSeatTeardown({ adw_id: 'seat-a', role: 'builder', outcome: 'proven', reason: 'exit-marker', created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordSeatTeardown({ adw_id: 'seat-b', role: 'builder', outcome: 'proven', reason: 'exit-marker', created_at: '2024-01-01T00:00:01.000Z' })
+  ledger.recordSeatTeardown({ adw_id: 'seat-c', role: 'reviewer', outcome: 'unproven', reason: 'probe-unknown', created_at: '2024-01-01T00:00:02.000Z' })
+  assert.deepEqual(ledger.seatTeardowns({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-01T00:00:02.000Z' }).map((row) => ({ ...row })), [
+    { outcome: 'proven', reason: 'exit-marker', count: 2, first_at: '2024-01-01T00:00:00.000Z', last_at: '2024-01-01T00:00:01.000Z' },
+  ])
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['seat-teardowns', '--since', '2024-01-01T00:00:00Z', '--until', '2024-01-01T00:00:03Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.deepEqual(payload.outcomes, [...SEAT_TEARDOWN_OUTCOMES])
+  assert.equal(payload.measured, true)
+  assert.equal(payload.torn_down, 3)
+  assert.equal(payload.proven, 2)
+  assert.equal(payload.leaked, 0)
+  assert.equal(payload.unproven, 1)
+})
+
+test('seat-teardowns CLI marks an empty window as not measured', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['seat-teardowns', '--since', '2030-01-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.measured, false)
+  assert.ok(payload.absent?.seat_teardowns)
+  for (const key of ['torn_down', 'proven', 'leaked', 'unproven']) assert.equal(payload[key], null)
+})
+
+test('an older migration prefix upgrades additively with seat_teardowns', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dbPath = join(nextDir(), 'seat-prefix.db')
+  const seatIndex = MIGRATIONS.findIndex((statement) => /seat_teardowns/i.test(statement))
+  assert.ok(seatIndex > 0)
+  const db = new DatabaseSync(dbPath)
+  applyMigrations(db, MIGRATIONS.slice(0, seatIndex))
+  db.close()
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  assert.deepEqual(ledger.dumpTable('seat_teardowns'), [])
+  assert.deepEqual(ledger.dumpTable('seat_teardowns').map((row) => Object.keys(row)), [])
+  ledger.recordSeatTeardown({ adw_id: 'seat-prefix', role: 'builder', outcome: 'proven' })
+  assert.equal(ledger.dumpTable('seat_teardowns').length, 1)
 })

@@ -3,7 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { foldRpcUsage, headlessRpcIo, rpcCommand, seatCommandPath, splitFrames, steerFrame } from './headless-rpc.mjs'
+import { spawn } from 'node:child_process'
+import { once } from 'node:events'
+import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
+import { foldRpcUsage, headlessRpcIo, rpcCommand, seatCommandPath, splitFrames, steerFrame, teardownOutcome } from './headless-rpc.mjs'
 
 function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
@@ -17,10 +20,10 @@ function fixture(options = {}) {
   }
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
-    spawn: () => { commands.push({ kind: 'spawn' }); return { pid: options.spawnPid ?? 701, unref() {} } }, openSync: () => 10,
+    spawn: () => { commands.push({ kind: 'spawn' }); return { pid: options.spawnPid ?? 701, unref() {} } }, openSync: options.openSync || (() => 10),
     writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
     existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
-    writeFileSync, readFileSync, mkdirSync, log: () => {}, sleep: options.sleep || (() => {}),
+    writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: () => {}, sleep: options.sleep || (() => {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
   }
@@ -349,6 +352,58 @@ test('rpc usage accumulates across polls and emits null when unmeasured', () => 
   } finally { empty.cleanup() }
 })
 
+test('teardownOutcome maps only positive death evidence to proven', () => {
+  assert.equal(teardownOutcome('dead'), 'proven')
+  assert.equal(teardownOutcome('alive'), 'failed')
+  for (const value of ['unknown', undefined, 'signalled']) assert.equal(teardownOutcome(value), 'unproven')
+})
+
+test('run-end teardown records unproven when a signal is not evidence of death', () => {
+  let clock = 0
+  const f = fixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => {
+      if (signal === 0) { const err = new Error('probe unavailable'); err.code = 'EAGAIN'; throw err }
+      return true
+    },
+  })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'pgid'), '701')
+    const rows = f.io.teardown()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].role, 'builder')
+    assert.equal(rows[0].outcome, 'unproven')
+    assert.equal(rows[0].reason, 'probe-unknown')
+    assert.equal(rows[0].forced, true)
+    assert.notEqual(rows[0].outcome, 'proven')
+  } finally { f.cleanup() }
+})
+
+test('run-end teardown records failed for a measured live worker', () => {
+  let clock = 0
+  const f = fixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => {
+      if (signal === 0) { const err = new Error('worker still alive'); err.code = 'EPERM'; throw err }
+      return true
+    },
+  })
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'pgid'), '701')
+    const rows = f.io.teardown()
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].role, 'builder')
+    assert.equal(rows[0].outcome, 'failed')
+    assert.equal(rows[0].reason, 'probe-alive')
+    assert.equal(rows[0].forced, true)
+    assert.notEqual(rows[0].outcome, 'unproven')
+  } finally { f.cleanup() }
+})
+
 test('rpc crashed and settled turns emit partial usage without changing stage or outcome', () => {
   const make = (emit, settled) => {
     const f = fixture({ emit })
@@ -369,4 +424,140 @@ test('rpc crashed and settled turns emit partial usage without changing stage or
   try {
     assert.throws(() => settled.f.io.wait(settled.run.returnPath, 1), (err) => err.stage === 'rpc-no-envelope')
   } finally { settled.f.cleanup() }
+})
+
+test('teardown forces an in-flight turn but does not mark a settled seat forced', () => {
+  const inFlight = fixture()
+  try {
+    inFlight.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const rows = inFlight.io.teardown()
+    assert.equal(rows[0].forced, true)
+  } finally { inFlight.cleanup() }
+
+  const settled = fixture()
+  try {
+    const run = settled.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(settled, run)
+    assert.equal(settled.io.wait(run.returnPath, 1).status, 'done')
+    const rows = settled.io.teardown()
+    assert.equal(rows[0].forced, false)
+  } finally { settled.cleanup() }
+})
+
+test('run-end teardown signals a marker-only worker left by FIFO acquisition failure', () => {
+  const f = fixture({
+    openSync: () => { throw new Error('fifo unavailable') },
+    kill: (_pid, signal) => {
+      if (signal === 'SIGKILL') { const err = new Error('gone'); err.code = 'ESRCH'; throw err }
+      return true
+    },
+  })
+  try {
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (err) => err.stage === 'rpc-spawn-failed')
+    const rows = f.io.teardown()
+    assert.ok(f.signals.some(([pid, signal]) => pid === -701 && signal === 'SIGTERM'))
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].role, 'builder')
+    assert.equal(rows[0].outcome, 'proven')
+  } finally { f.cleanup() }
+})
+
+test('an adopted BUSY marker keeps its reservation handle for force retirement', () => {
+  const first = fixture({ kill: () => {} })
+  try {
+    first.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const adopted = fixture({ dir: first.dir, pid: 800, spawnPid: 801 })
+    try {
+      adopted.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      const rows = adopted.io.teardown()
+      assert.equal(rows.length, 1)
+      assert.equal(rows[0].outcome, 'proven')
+      assert.equal(existsSync(join(adopted.paths.taskDir, 'headless-rpc', '.builder.active.json')), false)
+    } finally { adopted.cleanup() }
+  } finally { first.cleanup() }
+})
+
+test('unreadable reservation records become an explicit unproven teardown row', () => {
+  const f = fixture()
+  const markerPath = join(f.paths.taskDir, 'headless-rpc', '.builder.active.json')
+  mkdirSync(join(f.paths.taskDir, 'headless-rpc'), { recursive: true })
+  writeFileSync(markerPath, '{not-json')
+  try {
+    const rows = f.io.teardown()
+    assert.deepEqual({ role: rows[0].role, outcome: rows[0].outcome, reason: rows[0].reason }, {
+      role: 'builder', outcome: 'unproven', reason: 'unreadable-reservation',
+    })
+  } finally { f.cleanup() }
+})
+
+test('a role with no seat and no reservation produces no teardown row', () => {
+  const f = fixture()
+  try { assert.deepEqual(f.io.teardown(), []) } finally { f.cleanup() }
+})
+
+test('wait timeout retains an unproven reservation and clears one proved by the exit marker', () => {
+  let clock = 0
+  const retained = fixture({ now: () => clock, sleep: (ms) => { clock += ms }, kill: () => true })
+  try {
+    const run = retained.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => retained.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-timeout')
+    assert.equal(existsSync(join(retained.paths.taskDir, 'headless-rpc', '.builder.active.json')), true)
+  } finally { retained.cleanup() }
+
+  const cleared = fixture()
+  try {
+    const run = cleared.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => cleared.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-timeout')
+    assert.equal(existsSync(join(cleared.paths.taskDir, 'headless-rpc', '.builder.active.json')), false)
+  } finally { cleared.cleanup() }
+})
+
+// Added by the orchestrator at close-out (batch eighteen, #278). Every other
+// teardown test injects `kill`, and crew/reclaim.test.mjs never spawns a
+// process, so the outcome mapping was pinned entirely against a fake while the
+// real wiring — reclaim's pgid probe issuing kill(-pgid, 0) and reading
+// ESRCH/EPERM — was pinned nowhere. That is the two-suites-fabricating-each-
+// other's-artifact gap: one test has to boot the real thing and ask the
+// consumer's own predicate. This is that test.
+//
+// Kills two mutations: mapping ALIVE to a clean outcome, and treating a
+// delivered signal as proof of death (the process is signalled and the probe
+// must still say ALIVE until it has actually exited).
+test('a real process resolves through the real pgid probe: alive is failed, exited is proven', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'headless-rpc-realproc-'))
+  const store = reclaimStore({ dir, actor: 'teardown-proof' })
+  // detached: true makes the child its own process-group leader, so the group
+  // id is the child pid — the same shape a seat's recorded pgid marker has.
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 60000)'],
+    { detached: true, stdio: 'ignore' })
+  const file = join(dir, 'pgid')
+  writeFileSync(file, String(child.pid))
+  const evidence = { kind: EVIDENCE_KINDS.PGID, file }
+  try {
+    assert.equal(store.probeEvidence(evidence), LIVENESS.ALIVE,
+      'a running process group must probe ALIVE through the real kill(-pgid, 0)')
+    assert.equal(teardownOutcome(store.probeEvidence(evidence)), 'failed',
+      'a seat whose worker is measurably alive is a FAILED teardown, never a clean one')
+
+    const exited = once(child, 'exit')
+    process.kill(-child.pid, 'SIGKILL')
+    await exited
+
+    // Poll rather than assert once: the group is gone only after the child is
+    // reaped, and that is not synchronous with the exit event. A bound, so a
+    // group that never dies fails the test instead of hanging it.
+    const deadline = Date.now() + 5000
+    let liveness = store.probeEvidence(evidence)
+    while (liveness !== LIVENESS.DEAD && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25))
+      liveness = store.probeEvidence(evidence)
+    }
+    assert.equal(liveness, LIVENESS.DEAD,
+      'an exited process group must probe DEAD through the real ESRCH path')
+    assert.equal(teardownOutcome(liveness), 'proven',
+      'only measured death is a proven teardown')
+  } finally {
+    try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
+    rmSync(dir, { recursive: true, force: true })
+  }
 })

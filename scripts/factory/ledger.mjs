@@ -45,6 +45,7 @@
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
 // `cell-failures [--since <iso>] [--until <iso>]` |
 // `modifier-attempts [--since <iso>] [--until <iso>]` |
+// `seat-teardowns [--since <iso>] [--until <iso>]` |
 // `ci-cycles [--since <iso>] [--until <iso>]` |
 // `intake-sweeps [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
@@ -120,6 +121,12 @@ export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
+// One run end, one piped seat. Mirrors GATE_DISCRIMINATION_VERDICTS on
+// purpose (a test holds them equal): `proven` requires positive evidence the
+// worker is gone; `failed` is a MEASURED live worker after teardown; and
+// `unproven` is an honest non-answer — LIVENESS.UNKNOWN — never quietly
+// counted as clean.
+export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 
@@ -576,6 +583,25 @@ export const TABLES = Object.freeze({
     unique: [['board_owner', 'board_project', 'issue', 'outcome', 'created_at']],
     indexes: [{ name: 'intake_dispatches_outcome_idx', cols: ['outcome', 'created_at'] }],
   },
+  seat_teardowns: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' },
+      { name: 'session_id', decl: 'TEXT' },
+      { name: 'pgid', decl: 'INTEGER' },
+      { name: 'reservation_id', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'forced', decl: 'INTEGER' },
+      { name: 'evidence_kind', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role']],
+    indexes: [{ name: 'seat_teardowns_outcome_idx', cols: ['outcome', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -583,7 +609,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeDispatch', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeDispatch', 'recordSeatTeardown', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1584,6 +1610,34 @@ export function openLedger({
     return args
   }
 
+  function recordSeatTeardown(input = {}) {
+    requireFields(input, ['adw_id', 'outcome'], 'recordSeatTeardown')
+    requireEnum(input.outcome, SEAT_TEARDOWN_OUTCOMES, 'recordSeatTeardown', 'outcome')
+    const args = redact({
+      adw_id: input.adw_id,
+      phase_id: input.phase_id ?? null,
+      role: input.role ?? null,
+      transport: input.transport ?? null,
+      session_id: input.session_id ?? null,
+      pgid: input.pgid ?? null,
+      reservation_id: input.reservation_id ?? null,
+      outcome: input.outcome,
+      reason: (input.reason ?? input.why) == null ? null : String(input.reason ?? input.why),
+      forced: input.forced ? 1 : 0,
+      evidence_kind: input.evidence_kind ?? null,
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (args.reason != null) args.reason = args.reason.slice(0, 500)
+    appendJsonl('recordSeatTeardown', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('seat_teardowns').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO seat_teardowns (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordModifierAttempt(input = {}) {
     requireFields(input, ['role', 'modifier', 'outcome'], 'recordModifierAttempt')
     requireEnum(input.modifier, MODIFIER_KINDS, 'recordModifierAttempt', 'modifier')
@@ -2035,6 +2089,17 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function seatTeardowns({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT outcome, reason,
+        COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM seat_teardowns
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY outcome, reason
+      ORDER BY outcome, reason
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -2265,10 +2330,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeDispatch,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeDispatch, recordSeatTeardown,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeDispatches, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeDispatches, seatTeardowns, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -2572,7 +2637,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -2720,6 +2785,35 @@ export function main(argv) {
       const rows = ledger.modifierAttempts({ since, until })
       if (ledger.stats().degraded) refuse('modifier-attempts: the ledger mirror is degraded — this window is unanswerable, not empty')
       stdout.write(`${JSON.stringify({ schema: 1, question: "How often does a modifier fire, and how often does firing change anything?", since, until, modifiers: MODIFIER_KINDS, outcomes: MODIFIER_ATTEMPT_OUTCOMES, rows })}\n`)
+      return 0
+    }
+
+    if (verb === 'seat-teardowns') {
+      if (positional.length > 0) refuse('seat-teardowns: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'seat-teardowns') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'seat-teardowns') : null
+      if (until != null && since != null && until <= since) refuse('seat-teardowns: --until must be later than --since')
+      const rows = ledger.seatTeardowns({ since, until })
+      if (ledger.stats().degraded) refuse('seat-teardowns: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const measured = rows.length > 0
+      const tally = (name) => measured ? rows.reduce((n, r) => n + (r.outcome === name ? Number(r.count ?? 0) : 0), 0) : null
+      stdout.write(`${JSON.stringify({
+        schema: 1, question: 'Are we leaking workers?',
+        definition: {
+          unit: 'one piped seat at one run end',
+          proven: 'positive evidence the worker is gone — the wrapper exit marker, ESRCH, or probeEvidence === LIVENESS.DEAD; a delivered signal is never evidence',
+          failed: 'a MEASURED live worker after teardown; an unreaped child of the run reads this way too, so this over-reports a leak rather than under-reporting one',
+          unproven: 'LIVENESS.UNKNOWN or an unusable reservation — an honest non-answer carrying its reason, never counted as clean',
+          absent: 'null with an `absent` marker means the window was never measured — never a measured zero',
+        },
+        since, until, outcomes: SEAT_TEARDOWN_OUTCOMES, measured,
+        torn_down: measured ? rows.reduce((n, r) => n + Number(r.count ?? 0), 0) : null,
+        proven: tally('proven'), leaked: tally('failed'), unproven: tally('unproven'),
+        rows,
+        absent: measured ? null : { seat_teardowns: 'no rows in this window — not measured, never a measured zero' },
+      })}\n`)
       return 0
     }
 

@@ -9,7 +9,7 @@ import { regrantVerdict } from './escalation-policy.mjs'
 
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
-  FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, MODIFIER_OUTCOMES,
+  FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, protectedHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
@@ -476,7 +476,7 @@ test('scope helpers match directory prefixes and validate only supported entries
 
 test('protectedHits matches the ratified protected paths in both directions', () => {
   assert.deepEqual([...PROTECTED_PATHS].sort(), [
-    '.github/workflows/', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/reclaim.mjs', 'crew/variants.mjs',
+    '.github/workflows/', 'crew/drive.mjs', 'crew/escalation-policy.mjs', 'crew/protected-paths.mjs', 'crew/reclaim.mjs', 'crew/variants.mjs',
     'crew/roster.json', 'crew/roster.schema.json', 'docs/adr/',
   ].sort())
   assert.equal(PROTECTED_PATHS.includes('crew/roles/'), false)
@@ -494,6 +494,47 @@ test('the closed variant set lives in the import-free leaf and drive re-exports 
   assert.match(driveSource, /export \{ VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT \} from '\.\/variants\.mjs'/)
   assert.doesNotMatch(variantsSource, /^\s*import[\s(]/m)
   assert.deepEqual(Object.keys(VARIANTS), [...VARIANT_NAMES])
+})
+
+test('the protected-path floor lives in the import-free leaf and drive re-exports it', async () => {
+  const driveSource = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const leafSource = readFileSync(new URL('./protected-paths.mjs', import.meta.url), 'utf8')
+  const leaf = await import('./protected-paths.mjs')
+  assert.doesNotMatch(leafSource, /^\s*import[\s(]/m)
+  assert.doesNotMatch(driveSource, /export const PROTECTED_PATHS/)
+  assert.match(driveSource, /export \{ PROTECTED_PATHS, resolveProtectedPaths \} from '\.\/protected-paths\.mjs'/)
+  assert.equal(PROTECTED_PATHS, leaf.PROTECTED_PATHS)
+})
+
+test('a per-repo protected-path list adds to the floor and can never shrink it', () => {
+  const additions = resolveProtectedPaths(['./db\\migrations\\', 'db/migrations/'])
+  assert.ok(additions.includes('db/migrations/'))
+  for (const path of PROTECTED_PATHS) assert.ok(additions.includes(path), `${path} was removed`)
+  assert.equal(resolveProtectedPaths(), PROTECTED_PATHS)
+  assert.throws(() => resolveProtectedPaths('db/migrations/'))
+  assert.throws(() => resolveProtectedPaths(['  ']))
+})
+
+test('ctx.protectedPaths extends the sensitivity floor without replacing it', () => {
+  const extraIo = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(['db/migrations/']), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['db/migrations/001.sql'],
+    reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
+  })
+  const extra = driveTask({ ...CTX, protectedPaths: ['db/migrations/'] }, extraIo)
+  assert.equal(extra.status, 'done')
+  assert.equal(extraIo.calls.reseat.length, 1)
+
+  const floorIo = fakeIo({
+    envelopes: { 'planner:1': protectedPlanEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['crew/drive.mjs'],
+    reseat: () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' }),
+  })
+  const floor = driveTask({ ...CTX, protectedPaths: ['.github/workflows/', 'docs/adr/', 'package-lock.json'] }, floorIo)
+  assert.equal(floor.status, 'done')
+  assert.equal(floorIo.calls.reseat.length, 1)
 })
 
 test('directory-prefix scope commits concrete changed paths without a scope bounce', () => {

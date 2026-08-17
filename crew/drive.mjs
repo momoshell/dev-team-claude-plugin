@@ -1,6 +1,7 @@
 import { draftPrBody, draftPrTitle, followUpIssueBody, followUpIssueTitle, gateSummaryLine, residualList } from './converge.mjs'
 import { adjudicatePanel, fuseFindings } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './variants.mjs'
+import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
 
 // crew/drive.mjs — the deterministic task-loop driver (crew v3).
 //
@@ -42,14 +43,11 @@ export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 export const FAILURE_UPGRADE = 'failure-upgrade'
 export const SENSITIVITY_FLOOR = 'sensitivity-floor'
 export const JUDGE_TIER = 'judge'
-// Ratified for this repo on issue #250 (orchestrator, 2026-08-16). Directories
-// are trailing-slash prefixes, spelled as files_in_scope entries are spelled.
-// crew/roles/ is deliberately absent: charters are pinned by tests already.
-// Per-repo lists arrive with #252; this slice hardcodes the ratified one.
-export const PROTECTED_PATHS = Object.freeze([
-  '.github/workflows/', 'crew/roster.json', 'crew/roster.schema.json',
-  'crew/reclaim.mjs', 'crew/escalation-policy.mjs', 'crew/drive.mjs', 'crew/variants.mjs', 'docs/adr/',
-])
+// Ratified for this repo on issue #250 (orchestrator, 2026-08-16). The
+// import-free leaf owns the floor; per-repo additions are unioned with it and
+// can never replace or shrink it. crew/roles/ is deliberately absent because
+// charters are pinned by tests already.
+export { PROTECTED_PATHS, resolveProtectedPaths } from './protected-paths.mjs'
 
 // #251 — blueprint variants: a CLOSED enum of run shapes over this one driver.
 // A variant is DATA this code consults at fixed sites — never a composition
@@ -830,18 +828,9 @@ export function outOfScopeFiles(changed, inScope) {
   return (Array.isArray(changed) ? changed : []).filter((f) => !inScope(f))
 }
 
-export function protectedHits(entries) {
-  const hits = []
-  for (const raw of Array.isArray(entries) ? entries : []) {
-    const entry = String(raw ?? '')
-    if (!entry) continue
-    // Both directions: a scope entry under a protected directory ('docs/adr/031.md'
-    // vs 'docs/adr/'), and a scope directory that contains a protected file.
-    if (PROTECTED_PATHS.some((p) => entry === p || (p.endsWith('/') && entry.startsWith(p)) || (entry.endsWith('/') && p.startsWith(entry)))) {
-      if (!hits.includes(entry)) hits.push(entry)
-    }
-  }
-  return hits
+// `extra` adds to the authored floor and can never replace it.
+export function protectedHits(entries, extra) {
+  return protectedHitsIn(entries, resolveProtectedPaths(extra))
 }
 
 export function composeCommitMessage({ task, planEnv, builderEnv }) {
@@ -863,6 +852,8 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 // --- the driver ----------------------------------------------------------------
 // ctx: { task, briefFile, taskDir, checkout, roles: [..seated roles..],
 //        lane: <fallback validation command|null>, suite: <full-suite command>,
+//        protectedPaths: <resolved per-checkout paths>,
+//        protectedPathsBasis: <why those paths are in force>,
 //        journal: <real journal.jsonl path (lives in the CREW dir)>,
 //        limits?, waits? }
 // io:  { assign({role, briefFile, note}) -> {id, returnPath},
@@ -1666,7 +1657,7 @@ export function driveTask(ctx, io) {
   // #250: what the diff touches decides who reviews it. Protected scope demands
   // the judge tier's reviewer cell; anything less stops the run here rather than
   // reviewing under an under-graded seat.
-  const floorHits = protectedHits(scopeFiles)
+  const floorHits = protectedHits(scopeFiles, ctx.protectedPaths)
   if (floorHits.length > 0) {
     const floor = sensitivityFloor(floorHits)
     if (floor.outcome !== 'applied') {

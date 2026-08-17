@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join, basename } from 'node:path'
+import { join, basename, dirname } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
@@ -13,12 +13,13 @@ import {
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, seatLiveness, awaitSeatsReady, teardownCore,
   MEMORY_ROLES, memoryConfig,
 } from './crew.mjs'
-import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
+import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
 import { realIo, VARIANT_STAGE_PHASES } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
+import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 // Hoisted: tests both above and below this point branch on it. Below the
@@ -423,6 +424,16 @@ async function withBreakerEnv(values, fn) {
 
 function testCrewDir(home, checkout, task) { return join(home, '.crew', basename(checkout), task) }
 
+function protectedProfile(factoryRoot, checkout, cell) {
+  const repoKey = probeRepo({ checkout }).repo_key
+  const path = join(factoryRoot, 'profiles', `${repoKey}.json`)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify({
+    schema: 1, profile_version: 1, repo_key: repoKey, fields: { protected_paths_candidates: cell }, meta: {},
+  }))
+  return path
+}
+
 function memoryFixture() {
   const dir = mkdtempSync(join(tmpdir(), 'crew-boot-memory-'))
   writeFileSync(join(dir, 'MEMORY.md'), '- [Alpha](alpha.md) — first hook\n- [Beta](beta.md) — second hook\n')
@@ -608,6 +619,78 @@ test('run without a variant captures the same ctx as an explicit default', async
   } finally {
     if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
     else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run resolves the repo protected paths and journals the basis', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-protected-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-protected-home-'))
+  const factoryRoot = join(home, 'factory')
+  const task = 'protected-run'
+  const cell = {
+    status: 'ratified', value: ['db/migrations/'], source: 'human',
+    ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+  }
+  execSync('git init -q', { cwd: checkout })
+  protectedProfile(factoryRoot, checkout, cell)
+  const previousFactory = process.env.DEVTEAM_FACTORY_DIR
+  process.env.DEVTEAM_FACTORY_DIR = factoryRoot
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# brief\n')
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  let seen
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: (ctx) => { seen = ctx; return done } })
+    })
+    assert.ok(seen.protectedPaths.includes('db/migrations/'))
+    for (const path of PROTECTED_PATHS) assert.ok(seen.protectedPaths.includes(path), `${path} missing from ctx`)
+    const rows = readFileSync(seen.journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((row) => row.event === 'protected-paths')
+    assert.equal(rows.length, 1)
+    assert.match(rows[0].basis, /protected_paths_candidates/)
+    assert.equal(rows[0].count, seen.protectedPaths.length)
+  } finally {
+    if (previousFactory === undefined) delete process.env.DEVTEAM_FACTORY_DIR
+    else process.env.DEVTEAM_FACTORY_DIR = previousFactory
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run refuses an unusable ratified protected-path cell before driving', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-protected-refusal-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-protected-refusal-home-'))
+  const factoryRoot = join(home, 'factory')
+  const task = 'protected-refusal'
+  execSync('git init -q', { cwd: checkout })
+  protectedProfile(factoryRoot, checkout, { status: 'ratified', value: ['db/migrations/'], source: 'human' })
+  const previousFactory = process.env.DEVTEAM_FACTORY_DIR
+  process.env.DEVTEAM_FACTORY_DIR = factoryRoot
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# brief\n')
+  let drove = 0
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      assert.throws(
+        () => runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => { drove += 1 } }),
+        (err) => err.reason === 'protected-paths-invalid' && err.message.includes('protected-paths-invalid'),
+      )
+    })
+    assert.equal(drove, 0)
+  } finally {
+    if (previousFactory === undefined) delete process.env.DEVTEAM_FACTORY_DIR
+    else process.env.DEVTEAM_FACTORY_DIR = previousFactory
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }

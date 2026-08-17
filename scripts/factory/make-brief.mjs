@@ -24,9 +24,9 @@
 // facts are absent.
 //
 // A tier is proposed, never decided: #45 item 4's ratified rule lives here
-// because these mechanical signals exist before boot. Protected paths arrive
-// via a library parameter, --protected JSON, or the default owned by #250;
-// blueprint/shape proposal is deliberately absent pending #251.
+// because these mechanical signals exist before boot. Protected paths are the
+// authored floor plus additions from the profile, --protected JSON, or a
+// library parameter; blueprint/shape proposal is deliberately absent pending #251.
 //
 // A blank decision slot is not authored by this module: it is emitted as the
 // literal UNFILLED SLOT marker so the orchestrator can fill it. The ask is the
@@ -44,8 +44,9 @@ import { basename, dirname, extname, join, relative, resolve, sep } from 'node:p
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import {
-  ProbeUsageError, ProfileRefusal, defaultProfilePath, probeRepo, readProfile, requireField,
+  ProbeUsageError, ProfileRefusal, defaultProfilePath, profileProtectedPaths, readProfile, repoKeyFor, requireField,
 } from './probe-repo.mjs'
+import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
 const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
@@ -60,9 +61,7 @@ const BROAD_KEY_LIMIT = 30
 const BASELINE_TIMEOUT_MS = 300_000
 
 export const TIER_NAMES = Object.freeze(['mechanical', 'build', 'judge'])
-// Injected by the caller; #250 owns the real list. Wiring it later is a
-// one-line change to this default.
-export const DEFAULT_PROTECTED_PATHS = Object.freeze([])
+export const DEFAULT_PROTECTED_PATHS = resolveProtectedPaths()
 const MECHANICAL_MAX_SOURCES = 1
 const BUILD_MAX_SOURCES = 4
 const BROAD_TRIPWIRE_FLOOR = 6
@@ -445,8 +444,7 @@ export function gatherProfile({ checkout, profilePath, factoryRoot, requireProfi
     located = 'flag'
   } else {
     try {
-      const repo = probeRepo({ checkout })
-      path = resolve(defaultProfilePath({ repoKey: repo.repo_key, factoryRoot }))
+      path = resolve(defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot }))
       located = 'default-path'
     } catch (err) {
       if (!(err instanceof ProbeUsageError)) throw err
@@ -493,6 +491,23 @@ export function profileField(profileResult, name) {
   } catch (err) {
     if (!(err instanceof ProfileRefusal)) throw err
     const status = profile?.fields?.[name]?.status ?? 'absent'
+    if (err.reason === 'profile-ratification-refused') {
+      return {
+        used: false,
+        value: null,
+        recorded: profile?.fields?.[name]?.value,
+        basis: `profile field ${name} is ratified but commit-scoped, so a direct read refuses it · ${path}`,
+        reason: err.reason,
+      }
+    }
+    if (err.reason === 'profile-ratification-invalid') {
+      return {
+        used: false,
+        value: null,
+        basis: `profile field ${name} is ratified but invalid · ${path}`,
+        reason: err.reason,
+      }
+    }
     return {
       used: false,
       value: null,
@@ -615,19 +630,22 @@ function normaliseProtectedPaths(protectedPaths) {
   return [...new Set(paths)].sort()
 }
 
-export function gatherProtectedPaths({ protectedPathsFile } = {}) {
-  if (protectedPathsFile == null) return DEFAULT_PROTECTED_PATHS
-  let data
-  try {
-    data = JSON.parse(readFileSync(resolve(protectedPathsFile), 'utf8'))
-  } catch {
-    refuseUsage(`cannot read or parse protected paths file: ${protectedPathsFile}`, BAD_PROTECTED)
+export function gatherProtectedPaths({ protectedPathsFile, extra = [] } = {}) {
+  let fileEntries = []
+  if (protectedPathsFile != null) {
+    let data
+    try {
+      data = JSON.parse(readFileSync(resolve(protectedPathsFile), 'utf8'))
+    } catch {
+      refuseUsage(`cannot read or parse protected paths file: ${protectedPathsFile}`, BAD_PROTECTED)
+    }
+    if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some((key) => key !== 'paths')) {
+      refuseUsage('protected paths must contain only a paths array', BAD_PROTECTED)
+    }
+    if (!Array.isArray(data.paths)) refuseUsage('protected paths must contain a paths array', BAD_PROTECTED)
+    fileEntries = normaliseProtectedPaths(data.paths)
   }
-  if (!data || typeof data !== 'object' || Array.isArray(data) || Object.keys(data).some((key) => key !== 'paths')) {
-    refuseUsage('protected paths must contain only a paths array', BAD_PROTECTED)
-  }
-  if (!Array.isArray(data.paths)) refuseUsage('protected paths must contain a paths array', BAD_PROTECTED)
-  return normaliseProtectedPaths(data.paths)
+  return resolveProtectedPaths([...fileEntries, ...extra])
 }
 
 function proposalTierAfterRaise(tier) {
@@ -641,8 +659,10 @@ function proposalBand(sourceCount) {
   return { band: '≥5', tier: 'judge' }
 }
 
-export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECTED_PATHS } = {}) {
-  const protectedEntries = normaliseProtectedPaths(protectedPaths)
+export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECTED_PATHS, protectedBasis = null } = {}) {
+  const normalised = normaliseProtectedPaths(protectedPaths)
+  const protectedEntries = resolveProtectedPaths(normalised)
+  const basisReason = `protected paths in force: ${protectedEntries.length}${protectedBasis ? ` · ${protectedBasis}` : ' · authored floor (no profile basis supplied)'}`
   const verifiedWhere = Array.isArray(where)
     ? where.filter((entry) => entry && typeof entry === 'object'
       && typeof entry.path === 'string'
@@ -651,7 +671,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   if (verifiedWhere.length === 0) {
     return {
       tier: null,
-      reasons: ['no verified where entries — nothing to measure'],
+      reasons: [basisReason, 'no verified where entries — nothing to measure'],
       signals: {
         sourceCount: 0,
         tripwireCount: 0,
@@ -672,7 +692,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   if (candidates.length === 0) {
     return {
       tier: null,
-      reasons: ['discovery produced no scope candidates'],
+      reasons: [basisReason, 'discovery produced no scope candidates'],
       signals: {
         sourceCount: 0,
         tripwireCount: 0,
@@ -708,7 +728,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   if (tripwires.length === 0 && broadKeys.length > 0) {
     return {
       tier: null,
-      reasons: [`breadth is unmeasured: 0 tripwire tests found while ${broadKeys.length} key(s) exceeded the broad-key limit — absent, not zero`],
+      reasons: [basisReason, `breadth is unmeasured: 0 tripwire tests found while ${broadKeys.length} key(s) exceeded the broad-key limit — absent, not zero`],
       signals,
     }
   }
@@ -716,6 +736,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   const { band, tier: baseTier } = proposalBand(sourceCount)
   let tier = baseTier
   const reasons = [
+    basisReason,
     `scope breadth: ${sourceCount} source file${sourceCount === 1 ? '' : 's'} named by where (${band} → ${baseTier})`,
     `tripwire tests pinning that scope: ${tripwires.length}`,
   ]
@@ -735,9 +756,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
       : candidate === protectedPath
   )))
   if (signals.protectedHits.length === 0) {
-    reasons.push(`protected-path hits: none${protectedEntries.length === 0
-      ? ' (injected list is empty)'
-      : ` (injected list has ${protectedEntries.length} path${protectedEntries.length === 1 ? '' : 's'})`}`)
+    reasons.push('protected-path hits: none')
   } else {
     const before = tier
     const raised = proposalTierAfterRaise(before)
@@ -754,6 +773,14 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
 
 function formatCountBasis(profileBaseline) {
   const basis = 'count basis: measured this compile — a recorded baseline is a fact about a commit and is never consumed'
+  if (profileBaseline?.recorded !== undefined) {
+    const value = profileBaseline.recorded
+    if (value && typeof value === 'object' && !Array.isArray(value)
+      && (typeof value.passed === 'number' || typeof value.passed === 'string')) {
+      return `${basis} (profile records passed ${value.passed} in a ratified cell, refused at the read boundary as commit-scoped and not used)`
+    }
+    return `${basis} (profile records a ratified baseline, refused at the read boundary as commit-scoped and not used)`
+  }
   if (!profileBaseline?.used) return basis
   const value = profileBaseline.value
   if (value && typeof value === 'object' && !Array.isArray(value)
@@ -1012,9 +1039,6 @@ function compile(flags) {
   const recordedBaseline = profileField(profileResult, 'baseline')
   // default_branch and ci have no consumer in this module (ci belongs to the
   // sibling profile-ci-shape lane), so they deliberately stay out of wiring.
-  // protected_paths_candidates is #252 migration 2 and remains out of scope;
-  // DEFAULT_PROTECTED_PATHS and --protected stay untouched. toolchain and
-  // pr_conventions likewise have no consumer here.
   const lane = testCommand.used && nonEmptyString(testCommand.value)
     ? testCommand.value
     : null
@@ -1026,8 +1050,15 @@ function compile(flags) {
   const fences = gatherFences({ fencesPath: flags.fences })
   const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
   const baseline = gatherBaseline({ checkout, lane, laneBasis })
-  const protectedPaths = gatherProtectedPaths({ protectedPathsFile: flags.protected })
-  const proposal = proposeTier({ where, discovery, protectedPaths })
+  let fromProfile
+  try {
+    fromProfile = profileProtectedPaths(profileResult.profile, { path: profileResult.path })
+  } catch (err) {
+    if (!(err instanceof ProfileRefusal)) throw err
+    refuseUsage(err.message, BAD_PROTECTED)
+  }
+  const protectedPaths = gatherProtectedPaths({ protectedPathsFile: flags.protected, extra: fromProfile.paths })
+  const proposal = proposeTier({ where, discovery, protectedPaths, protectedBasis: fromProfile.basis })
   const content = renderBrief({
     request,
     where,

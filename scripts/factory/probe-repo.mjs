@@ -23,8 +23,8 @@
 // Exit codes are 0 for a profile, 1 for an unexpected throw, and 2 for usage
 // or refusal, matching the other scripts/factory modules.
 //
-// NO CONSUMER IS WIRED IN THIS SLICE: this module proposes the profile only;
-// no crew, visualizer, or factory consumer reads it yet (#252).
+// The protected-path read boundary is consumed by the crew run entry points and
+// brief compiler through the shared rule below; probing itself remains read-only.
 
 import {
   createHash,
@@ -39,6 +39,7 @@ import {
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { slug } from '../../crew/slug.mjs'
+import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 
 export const PROFILE_VERSION = 1
 export const LOAD_BEARING = Object.freeze(['test_command', 'default_branch'])
@@ -71,7 +72,7 @@ export const UNKNOWN_REASONS = Object.freeze([
 
 // This is an exported register rather than a hidden blacklist: a future
 // consumer can show exactly which heuristic produced a protected-path
-// candidate. crew/drive.mjs:44-52 remains hardcoded until a later slice.
+// candidate. The shared floor and union rule live in crew/protected-paths.mjs.
 export const PROTECTED_PATH_PATTERNS = Object.freeze([
   '.github/workflows/',
   '**/migrations/',
@@ -105,8 +106,9 @@ export const PROTECTED_PATH_PATTERNS = Object.freeze([
 //   values retain a human ratification and changed values are superseded.
 // - commit_scoped is a fact about one commit; profile metadata carries no
 //   commit sha, so a recorded value cannot prove it still applies. Ratification
-//   is refused outright and never carried forward; the human value is kept
-//   under refused_ratification for review.
+//   is refused outright at BOTH read boundaries (requireField and the semantic
+//   consumer) and never carried forward; the human value is kept under
+//   refused_ratification for review.
 // - authored_superset is a human-authored list a heuristic can only partly
 //   discover. The ratified list is authoritative, fewer probe entries are not
 //   drift, and probe-only additions are surfaced under probe_additions.
@@ -855,7 +857,9 @@ function refusalMessage(profile, name, status, reason) {
   const suffix = reason ? ` (reason: ${reason})` : ''
   const state = status === 'ratified' && reason === 'profile-ratification-invalid'
     ? `is ${status} but invalid${suffix}`
-    : `is ${status}, not ratified${suffix}`
+    : status === 'ratified' && reason === 'profile-ratification-refused'
+      ? `is ${status} but its ${fieldKind(name)} value is evidence only and cannot be used${suffix}`
+      : `is ${status}, not ratified${suffix}`
   return `probe-repo: field "${name}" ${state} — refusing to use the repo profile for ${repoKey}, whose lane cannot be trusted unreviewed (ratify the field in ${profilePathLabel(profile)}, or pass the value explicitly).`
 }
 
@@ -881,6 +885,10 @@ export function requireField(profile, name) {
   }
   const field = fields[name]
   if (field && field.status === 'ratified') {
+    if (!isRatifiable(name)) {
+      const reason = 'profile-ratification-refused'
+      throw new ProfileRefusal(refusalMessage(profile, name, 'ratified', reason), reason)
+    }
     if (validRatifiedCell(field)) return field.value
     const reason = 'profile-ratification-invalid'
     throw new ProfileRefusal(refusalMessage(profile, name, 'ratified', reason), reason)
@@ -897,6 +905,99 @@ export function assertRunnable(profile) {
   const values = {}
   for (const name of LOAD_BEARING) values[name] = requireField(profile, name)
   return values
+}
+
+export const PROTECTED_PATHS_FIELD = 'protected_paths_candidates'
+const PROTECTED_PATHS_INVALID = 'protected-paths-invalid'
+
+function protectedProfilePathLabel(path) {
+  return nonEmptyString(path) ? path : 'no profile path resolved'
+}
+
+function protectedPathsRefusal(profile, path, detail) {
+  const repoKey = profile && nonEmptyString(profile.repo_key) ? profile.repo_key : '<unknown repo>'
+  return new ProfileRefusal(
+    `probe-repo: field "${PROTECTED_PATHS_FIELD}" is ratified but ${detail} (reason: ${PROTECTED_PATHS_INVALID}) — refusing to guess the protected list for ${repoKey} (fix the field in ${protectedProfilePathLabel(path)})`,
+    PROTECTED_PATHS_INVALID,
+  )
+}
+
+function protectedPathsFloor(reason, basis) {
+  return { paths: resolveProtectedPaths(), used: false, reason, basis }
+}
+
+export function profileProtectedPaths(profile, { path = null } = {}) {
+  const profilePath = protectedProfilePathLabel(path)
+  if (!profile || typeof profile !== 'object' || Array.isArray(profile)) {
+    return protectedPathsFloor(
+      'profile-unreadable',
+      `authored floor · no readable profile at ${profilePath}`,
+    )
+  }
+  const fields = profile.fields && typeof profile.fields === 'object' && !Array.isArray(profile.fields)
+    ? profile.fields
+    : null
+  if (!fields || !Object.hasOwn(fields, PROTECTED_PATHS_FIELD)) {
+    return protectedPathsFloor(
+      'profile-field-unknown',
+      `authored floor · profile field ${PROTECTED_PATHS_FIELD} is absent · ${profilePath}`,
+    )
+  }
+  const field = fields[PROTECTED_PATHS_FIELD]
+  if (!field || field.status !== 'ratified') {
+    const status = field && nonEmptyString(field.status) ? field.status : 'unknown'
+    const reason = status === 'unknown'
+      ? (field && field.reason) || 'profile-field-unknown'
+      : 'profile-unratified'
+    return protectedPathsFloor(
+      reason,
+      `authored floor · profile field ${PROTECTED_PATHS_FIELD} is ${status} · ${profilePath}`,
+    )
+  }
+
+  let value
+  try {
+    value = requireField(profile, PROTECTED_PATHS_FIELD)
+  } catch (err) {
+    if (!(err instanceof ProfileRefusal)) throw err
+    throw protectedPathsRefusal(profile, path, `its cell is invalid — ${err.reason}`)
+  }
+  if (!Array.isArray(value)) {
+    const kind = value === null ? 'null' : typeof value
+    throw protectedPathsRefusal(profile, path, `its value is not a list of paths (got ${kind})`)
+  }
+  const badIndex = value.findIndex((entry) => typeof entry !== 'string' || !entry.trim())
+  if (badIndex !== -1) {
+    const entry = value[badIndex]
+    throw protectedPathsRefusal(profile, path, `its value is not a list of paths (entry ${badIndex}: ${String(entry)})`)
+  }
+  return {
+    paths: resolveProtectedPaths(value),
+    used: true,
+    reason: null,
+    basis: `ratified profile field ${PROTECTED_PATHS_FIELD} (${value.length} entries) added to the authored floor · ${profilePath}`,
+  }
+}
+
+// Run entry points need the profile key but not the expensive whole-tree probe.
+// Keep this read-only identity lookup separate so a run never pays for probing.
+export function repoKeyFor({ checkout } = {}) {
+  const root = checkoutDirectory(checkout)
+  const gitRootPath = gitRoot(root)
+  return remoteRepoKey(root, gitRootPath !== null)
+}
+
+export function checkoutProtectedPaths({ checkout, profilePath = null, factoryRoot } = {}) {
+  const path = profilePath != null
+    ? resolve(profilePath)
+    : defaultProfilePath({ repoKey: repoKeyFor({ checkout }), factoryRoot })
+  let profile = null
+  try {
+    profile = readProfile(path)
+  } catch (err) {
+    if (!(err instanceof ProbeUsageError)) throw err
+  }
+  return profileProtectedPaths(profile, { path })
 }
 
 export function defaultProfilePath({ repoKey, factoryRoot } = {}) {

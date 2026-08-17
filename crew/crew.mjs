@@ -15,7 +15,7 @@
 //                  [--checkout <dir>] [--model-<role> <id>] [--agent-<role> <name>]...
 //                  [--headless-all] [--memory-dir <dir>] [--memory-backend <name>]
 //                  [--memory-budget-bytes <n>]
-//   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] # hand the task to the lead
+//   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] [--files-in-scope <a,b>] # hand the task to the lead
 //                  variant names come from crew/drive.mjs's VARIANTS
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
@@ -31,7 +31,7 @@ import { execSync } from 'node:child_process'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
-import { driveTask, VARIANT_NAMES, DEFAULT_VARIANT } from './drive.mjs'
+import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
   realIo, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
@@ -380,6 +380,44 @@ export function resolveVariant(args = {}) {
     throw new Error(`unknown variant ${JSON.stringify(name)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
   }
   return name
+}
+
+export function resolveFilesInScope(args = {}, variant, taskReturn, deps = {}) {
+  const raw = args['files-in-scope']
+  const exists = deps.existsSync || existsSync
+  const read = deps.readFileSync || readFileSync
+  const defectsMessage = (defects) => defects.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join(', ')
+  if (raw === true) throw new Error('--files-in-scope needs a comma-separated list of repo-relative paths')
+  if (raw !== undefined) {
+    if (typeof raw !== 'string') throw new Error('--files-in-scope needs a comma-separated list of repo-relative paths')
+    const files = raw.split(',').map((entry) => entry.trim()).filter(Boolean)
+    if (files.length === 0) throw new Error(`--files-in-scope supplied an empty list ${JSON.stringify(raw)} — an empty scope is never a scope`)
+    const defects = validateScopeEntries(files)
+    if (defects.length) throw new Error(`--files-in-scope contains unsupported entries: ${defectsMessage(defects)}`)
+    return files
+  }
+  if (VARIANTS[variant]?.sources?.scope !== 'inherited') return null
+
+  const envelopePath = taskReturn || '<missing task return path>'
+  if (!taskReturn || !exists(taskReturn)) {
+    throw new Error(`cannot inherit files_in_scope for ${variant} run: failing-run envelope ${envelopePath} is missing or unreadable`)
+  }
+  let envelope
+  try { envelope = JSON.parse(String(read(taskReturn, 'utf8'))) }
+  catch (err) { throw new Error(`cannot read failing-run envelope ${envelopePath} for ${variant} scope inheritance: ${err?.message || String(err)}`) }
+  const details = envelope && typeof envelope === 'object' && !Array.isArray(envelope) && envelope.details && typeof envelope.details === 'object' && !Array.isArray(envelope.details)
+    ? envelope.details : null
+  if (!details) throw new Error(`failing-run envelope ${envelopePath} for ${variant} scope inheritance has no details object declaring a non-empty scope`)
+  // Mirror scripts/factory/ci-repair.mjs:108-110: prefer files_in_scope
+  // whenever the key is present, otherwise inherit files_committed.
+  const hasForwardScope = Object.prototype.hasOwnProperty.call(details, 'files_in_scope')
+  const files = hasForwardScope ? details.files_in_scope : details.files_committed
+  if (!Array.isArray(files) || files.length === 0) {
+    throw new Error(`failing-run envelope ${envelopePath} for ${variant} scope inheritance declares no non-empty files_in_scope/files_committed list`)
+  }
+  const defects = validateScopeEntries(files)
+  if (defects.length) throw new Error(`inherited scope from ${envelopePath} contains unsupported entries: ${defectsMessage(defects)}`)
+  return [...files]
 }
 
 export function transportFor(role, args = {}) {
@@ -956,6 +994,9 @@ export function runCmd(args, deps = {}) {
   // The driver assigns planner/builder/reviewer unconditionally — discover a
   // missing seat NOW, not mid-loop after a plan and a build are spent.
   assertSeats(crew)
+  const filesInScope = resolveFilesInScope(
+    args, variant, crew.task_return ? resolvePath(paths.dir, crew.task_return) : join(paths.returnsDir, 'task.json'),
+  )
   // The scope gate reads `git status` as ground truth — a dirty checkout at
   // start would be attributed to the builder and poison every scope verdict.
   const dirty = execSync('git status --porcelain', { cwd: checkout, encoding: 'utf8' }).trim()
@@ -979,6 +1020,7 @@ export function runCmd(args, deps = {}) {
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000', variant,
+    ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
   // Seats are TUI processes and the first assignment must not race their
   // boot: characters typed into a pty before the TUI grabs it are silently

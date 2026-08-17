@@ -10,11 +10,11 @@ import {
   composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, seatLiveness, awaitSeatsReady, teardownCore,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, seatLiveness, awaitSeatsReady, teardownCore,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
   grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
 } from './crew.mjs'
-import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS } from './drive.mjs'
+import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
@@ -531,6 +531,142 @@ test('resolveVariant refuses unknown and valueless forms with the complete close
   }
   assert.throws(() => resolveVariant({ variant: 'no-such-shape' }), assertClosedSet)
   assert.throws(() => resolveVariant({ variant: true }), assertClosedSet)
+})
+
+test('resolveFilesInScope parses a comma list, handles neutral shapes, and refuses a valueless flag', () => {
+  const inherited = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope === 'inherited')
+  const plain = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope !== 'inherited')
+  assert.deepEqual(resolveFilesInScope({ 'files-in-scope': ' a.mjs, , b.mjs ' }, inherited, '/missing/task.json'), ['a.mjs', 'b.mjs'])
+  assert.equal(resolveFilesInScope({}, plain, '/missing/task.json'), null)
+  assert.throws(() => resolveFilesInScope({ 'files-in-scope': true }, plain, '/missing/task.json'), /needs a comma-separated list/)
+})
+
+test('resolveFilesInScope inherits the preferred or fallback list and names every unreadable envelope', () => {
+  const inherited = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope === 'inherited')
+  const dir = mkdtempSync(join(tmpdir(), 'crew-scope-envelope-'))
+  const preferred = join(dir, 'preferred.json')
+  const fallback = join(dir, 'fallback.json')
+  const malformed = join(dir, 'malformed.json')
+  try {
+    writeFileSync(preferred, JSON.stringify({ details: { files_in_scope: ['lib/a.mjs'], files_committed: ['lib/b.mjs'] } }))
+    writeFileSync(fallback, JSON.stringify({ details: { files_committed: ['lib/b.mjs'] } }))
+    writeFileSync(malformed, '{not-json')
+    assert.deepEqual(resolveFilesInScope({}, inherited, preferred), ['lib/a.mjs'])
+    assert.deepEqual(resolveFilesInScope({}, inherited, fallback), ['lib/b.mjs'])
+    for (const [path, deps] of [
+      [join(dir, 'missing.json'), {}],
+      [preferred, { existsSync: () => true, readFileSync: () => { throw new Error('denied') } }],
+      [malformed, {}],
+    ]) {
+      assert.throws(() => resolveFilesInScope({}, inherited, path, deps), (err) => err.message.includes(path))
+    }
+    for (const [index, details] of [{ files_in_scope: 'lib/a.mjs' }, { files_in_scope: [] }, {}].entries()) {
+      const path = join(dir, `bad-${index}.json`)
+      writeFileSync(path, JSON.stringify({ details }))
+      assert.throws(() => resolveFilesInScope({}, inherited, path), (err) => err.message.includes(path))
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('resolveFilesInScope refuses every entry the gate rejects', () => {
+  const plain = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope !== 'inherited')
+  for (const entry of ['lib/*.mjs', '/abs/path.mjs', '../up.mjs', 'crew/', '']) {
+    const defects = validateScopeEntries([entry])
+    assert.equal(defects.length, 1)
+    assert.throws(() => resolveFilesInScope({ 'files-in-scope': entry }, plain, '/missing/task.json'), (err) => err.message.includes(JSON.stringify(entry)))
+  }
+})
+
+test('run refuses an inherited shape with no declared scope before driving', async () => {
+  const inherited = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope === 'inherited')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-scope-refusal-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-scope-refusal-home-'))
+  const task = 'scope-refusal'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# scope brief\n')
+  let drove = 0
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      assert.throws(() => runCmd({ task, checkout, 'brief-file': brief, variant: inherited, keep: true }, { drive: () => { drove += 1 } }), (err) => err.message.includes('task.json'))
+    })
+    assert.equal(drove, 0)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run places explicit scope on ctx and omits it for a neutral shape', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-scope-ctx-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-scope-ctx-home-'))
+  const task = 'scope-ctx'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# scope brief\n')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = join(home, 'ledger.db')
+  const seen = []
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  const inherited = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope === 'inherited')
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const capture = (ctx) => { seen.push(ctx); return done }
+      runCmd({ task, checkout, 'brief-file': brief, variant: inherited, 'files-in-scope': 'a.mjs, a.test.mjs', keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: capture })
+    })
+    assert.deepEqual(seen[0].files_in_scope, ['a.mjs', 'a.test.mjs'])
+    assert.equal(Object.prototype.hasOwnProperty.call(seen[1], 'files_in_scope'), false)
+  } finally {
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run inheritance reaches the repair stage and planner assignment', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-scope-e2e-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-scope-e2e-home-'))
+  const task = 'scope-e2e'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# scope brief\n')
+  const inherited = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope === 'inherited')
+  const filesInScope = ['a.mjs', 'a.test.mjs']
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const crewDir = testCrewDir(home, checkout, task)
+      writeFileSync(join(crewDir, 'returns', 'task.json'), JSON.stringify({ status: 'escalation', details: { files_in_scope: filesInScope } }))
+      let seen
+      runCmd({ task, checkout, 'brief-file': brief, variant: inherited, lane: 'lane-cmd', keep: true }, {
+        drive: (ctx) => { seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
+      })
+      const assigned = []
+      const stages = []
+      const io = {
+        assign: ({ role }) => { assigned.push(role); return { id: role, returnPath: `${role}:1` } },
+        wait: () => null, writeFile: () => {}, readFile: () => null,
+        run: () => ({ ok: true, output: '' }), changedFiles: () => [], commit: () => 'abc1234',
+        log: (entry) => { if (entry && typeof entry.stage === 'string') stages.push(entry.stage) }, now: () => 0,
+      }
+      try { driveTask(seen, io) } catch { /* stage and assignment labels are the evidence */ }
+      assert.equal(stages[0], `${inherited}:r1`)
+      assert.equal(assigned[0], 'planner')
+    })
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })
 
 test('run refuses an unknown variant before reading or writing crew state', async () => {

@@ -10,10 +10,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import {
-  daemon, deriveState, normalizeEvent, usageWindow, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
+  daemon, deriveState, normalizeEvent, usageWindow, scopeEntryDefects, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
 } from './daemon.mjs'
-import { driveTask, PROTECTED_PATHS } from './drive.mjs'
-import { VARIANT_NAMES } from './variants.mjs'
+import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
+import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { runChild } from './child.mjs'
 import { DEFAULT_TRANSPORT } from './realio.mjs'
 import { splitFrames } from './headless-rpc.mjs'
@@ -263,16 +263,47 @@ test('a tier enqueue boots through the spawn seam and forks the run child', asyn
   })
 })
 
+test('scopeEntryDefects agrees with drive.mjs over good and bad entries', () => {
+  const entries = ['crew/crew.mjs', 'tasks/x/captures/', 'lib/*.mjs', '/abs/path.mjs', '../up.mjs', 'crew/', '', 42, 'a{b}.mjs']
+  for (const entry of entries) assert.deepEqual(scopeEntryDefects([entry]), validateScopeEntries([entry]), entry)
+})
+
 test('enqueue carries every shape in the closed set into the enqueue record and the child spec', async () => {
   for (const name of VARIANT_NAMES) {
     await each(async (f) => {
-      assert.doesNotThrow(() => f.d.enqueue({ crew_dir: f.crewDir, variant: name }))
+      const filesInScope = VARIANTS[name]?.sources?.scope === 'inherited' ? ['a.mjs'] : undefined
+      const spec = { crew_dir: f.crewDir, variant: name, ...(filesInScope ? { files_in_scope: filesInScope } : {}) }
+      assert.doesNotThrow(() => f.d.enqueue(spec))
       const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
       const enqueued = records.find((record) => record.kind === 'enqueued')
       assert.ok(enqueued)
       assert.equal(Object.prototype.hasOwnProperty.call(enqueued, 'variant'), true)
       assert.equal(enqueued.variant, name)
-      assert.equal(JSON.parse(f.forks[0][1][1]).variant, name)
+      const childSpec = JSON.parse(f.forks[0][1][1])
+      assert.equal(childSpec.variant, name)
+      if (filesInScope) {
+        assert.deepEqual(enqueued.files_in_scope, filesInScope)
+        assert.deepEqual(childSpec.files_in_scope, filesInScope)
+      } else {
+        assert.equal(Object.prototype.hasOwnProperty.call(enqueued, 'files_in_scope'), false)
+        assert.equal(Object.prototype.hasOwnProperty.call(childSpec, 'files_in_scope'), false)
+      }
+    })
+  }
+})
+
+test('enqueue refuses an inherited scope that is absent, empty, or unusable before admission', async () => {
+  for (const files_in_scope of [undefined, [], ['lib/*.mjs']]) {
+    await each(async (f) => {
+      const spec = { crew_dir: f.crewDir, variant: 'repair', ...(files_in_scope === undefined ? {} : { files_in_scope }) }
+      assert.throws(() => f.d.enqueue(spec), (err) => {
+        assert.equal(err.code, 'invalid-spec')
+        if (files_in_scope?.length === 1) assert.match(err.message, /lib\/\*\.mjs/)
+        return true
+      })
+      assert.equal(f.boots.length, 0)
+      assert.equal(f.forks.length, 0)
+      assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
     })
   }
 })
@@ -328,7 +359,7 @@ test('a daemon-forked repair run makes the driver open the repair shape', async 
     return stages
   }
   await each(async (f) => {
-    f.d.enqueue({ crew_dir: f.crewDir, task: 'daemon80', checkout: f.dir, brief_file: f.brief, lane: 'lane-cmd', variant: 'repair' })
+    f.d.enqueue({ crew_dir: f.crewDir, task: 'daemon80', checkout: f.dir, brief_file: f.brief, lane: 'lane-cmd', variant: 'repair', files_in_scope: ['a.mjs', 'a.test.mjs'] })
     const spec = JSON.parse(f.forks[0][1][1])
     let seen
     runChild(spec, {
@@ -336,9 +367,10 @@ test('a daemon-forked repair run makes the driver open the repair shape', async 
       driveTask: (ctx) => { seen = ctx; return { status: 'done' } },
       realIo: () => ({}),
     })
-    const stages = stagesFor({ ...seen, files_in_scope: ['a.mjs', 'a.test.mjs'] })
+    const stages = stagesFor(seen)
     assert.equal(stages[0], 'repair:r1')
     assert.equal(stages.includes('plan:r1'), false)
+    assert.deepEqual(seen.files_in_scope, ['a.mjs', 'a.test.mjs'])
   })
   await each(async (f) => {
     f.d.enqueue({ crew_dir: f.crewDir, task: 'daemon80', checkout: f.dir, brief_file: f.brief, lane: 'lane-cmd' })
@@ -1469,6 +1501,23 @@ test('runChild refuses pane seats and omits lead from the mechanical ctx', () =>
     runChild({ crew_dir: lead.crewDir, task: 'x' }, { driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, realIo: () => ({}), preflight: false })
     assert.ok(seen); assert.equal(seen.roles.includes('lead'), false)
   } finally { lead.cleanup() }
+})
+
+test('runChild copies a declared scope and refuses an inherited spec without one', () => {
+  const f = fixture()
+  try {
+    let seen
+    runChild({ crew_dir: f.crewDir, task: 'x', variant: 'repair', files_in_scope: ['a.mjs'], lane: 'lane-cmd' }, {
+      driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, realIo: () => ({}), preflight: false,
+    })
+    assert.deepEqual(seen.files_in_scope, ['a.mjs'])
+    assert.throws(
+      () => runChild({ crew_dir: f.crewDir, task: 'x', variant: 'repair', lane: 'lane-cmd' }, {
+        driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false,
+      }),
+      /files_in_scope/,
+    )
+  } finally { f.cleanup() }
 })
 
 test('runChild threads continuation and the unfiltered seated role list into ctx', () => {

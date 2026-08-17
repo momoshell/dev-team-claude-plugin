@@ -2,12 +2,14 @@
 // rule. This leaf stays import-free so crew/drive.mjs and
 // scripts/factory/probe-repo.mjs share one owner without a dependency cycle.
 // The floor may only grow: every supplied list is additions to this floor.
+// Capability register, schema, and model-ladder changes alter what a seat may do and carry the roster's review posture (#292/#299/#304).
 // crew/roles/ is deliberately absent: charters are pinned by tests already.
 
 export const PROTECTED_PATHS = Object.freeze([
   '.github/workflows/', 'crew/roster.json', 'crew/roster.schema.json',
   'crew/reclaim.mjs', 'crew/escalation-policy.mjs', 'crew/drive.mjs',
   'crew/variants.mjs', 'docs/adr/', 'crew/protected-paths.mjs',
+  'crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json',
 ])
 
 function normaliseProtectedPath(value) {

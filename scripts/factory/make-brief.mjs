@@ -16,9 +16,12 @@
 // runtime: crew/ is a separate lane and coupling a compiler to prose would
 // make an unrelated charter edit change a compilation. #240 is why the
 // baseline child gets a colour-neutral environment before its output is
-// parsed. The standing blocks remain inline constants only until #252's repo
-// profile lands; then each small gatherer can be swapped without rewriting
-// the compiler.
+// parsed. Repo-specific test_command and conventions now come from a ratified
+// repo profile. A recorded baseline is never consumed: it describes a commit,
+// while the profile records no commit sha, so every compile measures the
+// checkout. --require-profile is the explicit autonomous-caller posture;
+// hand-driven callers state and use the package.json fallback when profile
+// facts are absent.
 //
 // A tier is proposed, never decided: #45 item 4's ratified rule lives here
 // because these mechanical signals exist before boot. Protected paths arrive
@@ -40,6 +43,9 @@ import {
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
+import {
+  ProbeUsageError, ProfileRefusal, defaultProfilePath, probeRepo, readProfile, requireField,
+} from './probe-repo.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
 const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
@@ -51,7 +57,7 @@ const EXPORTED_DECLARATION = /^export\s+(?:async\s+)?(?:function|const|let|class
 const EXPORTED_LIST = /^export\s*\{([^}]*)\}/gm
 const TEST_FILE = /(^|\/)[^/]*\.test\.mjs$/
 const BROAD_KEY_LIMIT = 30
-const BASELINE_TIMEOUT_MS = 30_000
+const BASELINE_TIMEOUT_MS = 300_000
 
 export const TIER_NAMES = Object.freeze(['mechanical', 'build', 'judge'])
 // Injected by the caller; #250 owns the real list. Wiring it later is a
@@ -76,6 +82,8 @@ const OUT_EXISTS = 'out-exists'
 const BAD_FENCES = 'bad-fences'
 const BAD_PROTECTED = 'bad-protected'
 const UNKNOWN_LANE = 'unknown-lane'
+const PROFILE_UNREADABLE = 'profile-unreadable'
+const PROFILE_UNRATIFIED = 'profile-unratified'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -90,6 +98,8 @@ export const REFUSAL_REASONS = Object.freeze([
   BAD_FENCES,
   BAD_PROTECTED,
   UNKNOWN_LANE,
+  PROFILE_UNREADABLE,
+  PROFILE_UNRATIFIED,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -427,47 +437,125 @@ function colourNeutralEnv(base = process.env) {
   return env
 }
 
-function unknownBaseline(lane, reason) {
-  return { lane: lane || null, pass: null, fail: null, status: 'unknown', reason }
+export function gatherProfile({ checkout, profilePath, factoryRoot, requireProfile = false } = {}) {
+  let path = null
+  let located = 'none'
+  if (profilePath != null) {
+    path = resolve(profilePath)
+    located = 'flag'
+  } else {
+    try {
+      const repo = probeRepo({ checkout })
+      path = resolve(defaultProfilePath({ repoKey: repo.repo_key, factoryRoot }))
+      located = 'default-path'
+    } catch (err) {
+      if (!(err instanceof ProbeUsageError)) throw err
+      if (requireProfile) {
+        refuseUsage(`cannot resolve the default profile path for checkout ${resolve(checkout || process.cwd())}`, PROFILE_UNREADABLE)
+      }
+      return { path: null, profile: null, reason: PROFILE_UNREADABLE, located: 'none' }
+    }
+  }
+
+  try {
+    const profile = readProfile(path)
+    if (profile == null) {
+      if (requireProfile) refuseUsage(`profile is unreadable at ${path}`, PROFILE_UNREADABLE)
+      return { path, profile: null, reason: PROFILE_UNREADABLE, located }
+    }
+    return { path, profile, reason: null, located }
+  } catch (err) {
+    if (!(err instanceof ProbeUsageError)) throw err
+    if (requireProfile) refuseUsage(`profile is unreadable at ${path}`, PROFILE_UNREADABLE)
+    return { path, profile: null, reason: PROFILE_UNREADABLE, located }
+  }
 }
 
-export function gatherBaseline({ checkout }) {
-  const root = resolve(checkout || process.cwd())
-  let packageData
-  try {
-    packageData = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
-  } catch {
-    return unknownBaseline(null, 'bad-package-json')
+export function profileField(profileResult, name) {
+  const result = profileResult || {}
+  const path = result.path || null
+  const profile = result.profile || null
+  if (!profile) {
+    const reason = result.reason || PROFILE_UNREADABLE
+    const basis = path
+      ? `no profile at ${path} (${reason})`
+      : 'no profile path could be resolved'
+    return { used: false, value: null, basis, reason }
   }
-  const lane = packageData && packageData.scripts && packageData.scripts.test
-  if (typeof lane !== 'string' || !lane.trim()) return unknownBaseline(null, 'no-test-script')
+  try {
+    const value = requireField(profile, name)
+    return {
+      used: true,
+      value,
+      basis: `ratified profile field ${name} · ${path}`,
+      reason: null,
+    }
+  } catch (err) {
+    if (!(err instanceof ProfileRefusal)) throw err
+    const status = profile?.fields?.[name]?.status ?? 'absent'
+    return {
+      used: false,
+      value: null,
+      basis: `profile field ${name} is ${status}, not ratified · ${path}`,
+      reason: err.reason,
+    }
+  }
+}
+
+function unknownBaseline(lane, reason, laneBasis = 'package.json scripts.test') {
+  return {
+    lane: lane || null,
+    pass: null,
+    fail: null,
+    status: 'unknown',
+    reason,
+    laneBasis,
+  }
+}
+
+export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {}) {
+  const root = resolve(checkout || process.cwd())
+  const basis = nonEmptyString(laneBasis) ? laneBasis : 'package.json scripts.test'
+  let selectedLane = nonEmptyString(lane) ? lane : null
+  if (!selectedLane) {
+    let packageData
+    try {
+      packageData = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
+    } catch {
+      return unknownBaseline(null, 'bad-package-json', basis)
+    }
+    selectedLane = packageData && packageData.scripts && packageData.scripts.test
+    if (typeof selectedLane !== 'string' || !selectedLane.trim()) {
+      return unknownBaseline(null, 'no-test-script', basis)
+    }
+  }
 
   let result
   try {
-    result = spawnSync('/bin/sh', ['-c', lane], {
+    result = spawnSync('/bin/sh', ['-c', selectedLane], {
       cwd: root,
       encoding: 'utf8',
       env: colourNeutralEnv(),
       timeout: BASELINE_TIMEOUT_MS,
     })
   } catch {
-    return unknownBaseline(lane, 'spawn-error')
+    return unknownBaseline(selectedLane, 'spawn-error', basis)
   }
   if (!result || result.error) {
     const timeout = result && (result.signal === 'SIGTERM' || result.error?.code === 'ETIMEDOUT')
-    return unknownBaseline(lane, timeout ? 'timeout' : 'spawn-error')
+    return unknownBaseline(selectedLane, timeout ? 'timeout' : 'spawn-error', basis)
   }
-  if (result.signal) return unknownBaseline(lane, 'timeout')
+  if (result.signal) return unknownBaseline(selectedLane, 'timeout', basis)
 
   const output = `${result.stdout || ''}\n${result.stderr || ''}`.replace(ANSI_CSI, '')
   const passMatch = output.match(/^\s*(?:ℹ\s*)?pass\s+(\d+)\s*$/m)
   const failMatch = output.match(/^\s*(?:ℹ\s*)?fail\s+(\d+)\s*$/m)
-  if (!passMatch || !failMatch) return unknownBaseline(lane, 'missing-summary')
+  if (!passMatch || !failMatch) return unknownBaseline(selectedLane, 'missing-summary', basis)
   const pass = Number(passMatch[1])
   const fail = Number(failMatch[1])
-  if (fail > 0) return { lane, pass, fail, status: 'red', reason: null }
-  if (result.status !== 0) return { lane, pass, fail, status: 'unknown', reason: 'nonzero-exit' }
-  return { lane, pass, fail, status: 'green', reason: null }
+  if (fail > 0) return { lane: selectedLane, pass, fail, status: 'red', reason: null, laneBasis: basis }
+  if (result.status !== 0) return { lane: selectedLane, pass, fail, status: 'unknown', reason: 'nonzero-exit', laneBasis: basis }
+  return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis }
 }
 
 export function gatherFences({ fencesPath } = {}) {
@@ -664,10 +752,26 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   return { tier, reasons, signals }
 }
 
-function formatBaseline(baseline) {
+function formatCountBasis(profileBaseline) {
+  const basis = 'count basis: measured this compile — a recorded baseline is a fact about a commit and is never consumed'
+  if (!profileBaseline?.used) return basis
+  const value = profileBaseline.value
+  if (value && typeof value === 'object' && !Array.isArray(value)
+    && (typeof value.passed === 'number' || typeof value.passed === 'string')) {
+    return `${basis} (profile records passed ${value.passed}, not used)`
+  }
+  return `${basis} (profile records a ratified baseline, not used)`
+}
+
+function formatBaseline(baseline, profile = null) {
   const lane = baseline.lane || '(no test lane)'
-  if (baseline.status === 'unknown') return `lane: ${lane} · unknown · reason: ${baseline.reason}`
-  return `lane: ${lane} · pass ${baseline.pass} · fail ${baseline.fail} · status: ${baseline.status}`
+  const line = baseline.status === 'unknown'
+    ? `lane: ${lane} · unknown · reason: ${baseline.reason}`
+    : `lane: ${lane} · pass ${baseline.pass} · fail ${baseline.fail} · status: ${baseline.status}`
+  const laneBasis = baseline.laneBasis
+    || profile?.testCommand?.basis
+    || 'package.json scripts.test — no profile consulted'
+  return `${line}\nlane basis: ${laneBasis}\n${formatCountBasis(profile?.baseline)}`
 }
 
 function keyList(discovery) {
@@ -749,6 +853,20 @@ function renderWriteSurface(writeSurface, discovery) {
   ].join('\n')
 }
 
+function renderConventions(profileConventions) {
+  if (!profileConventions) {
+    return 'conventions of record: (not available) — basis: no profile consulted'
+  }
+  if (!profileConventions.used) {
+    return `conventions of record: (not available) — basis: ${profileConventions.basis}`
+  }
+  const files = profileConventions.value?.files
+  if (!Array.isArray(files) || files.some((file) => typeof file !== 'string')) {
+    return `conventions of record: (not available) — basis: ${profileConventions.basis} (value.files must be an array of strings)`
+  }
+  return `conventions of record (basis: ${profileConventions.basis}): ${files.length ? files.join(', ') : '(none)'}`
+}
+
 function renderValidation(baseline, discovery) {
   const tests = discovery.tripwires.map((tripwire) => tripwire.file).sort()
   const narrow = tests.length ? `node --test ${tests.join(' ')}` : 'no tripwire tests discovered'
@@ -764,6 +882,7 @@ export function renderBrief(gathered) {
   const where = gathered.where || []
   const discovery = gathered.discovery || gathered.tripwires || { candidates: [], tripwires: [], broadKeys: [] }
   const baseline = gathered.baseline || { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }
+  const profile = gathered.profile || null
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
   const writeSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
     ? gathered.writeSurface
@@ -782,7 +901,7 @@ export function renderBrief(gathered) {
     '## Tripwires',
     renderTripwires(discovery),
     '## Baseline',
-    formatBaseline(baseline),
+    formatBaseline(baseline, profile),
     '## Out of scope',
     request.out_of_scope,
     '## Fences',
@@ -797,6 +916,7 @@ export function renderBrief(gathered) {
     renderValidation(baseline, discovery),
     '## Conventions',
     renderWriteSurface(writeSurface, discovery),
+    renderConventions(profile?.conventions),
     generatedGrep(discovery),
     standingBlocks().conventions,
     '',
@@ -807,7 +927,8 @@ export function renderBrief(gathered) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile'])
+  const booleanFlags = new Set(['force', 'require-profile'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (!argument.startsWith('--')) {
@@ -815,8 +936,8 @@ function parseCliArgs(argv) {
       continue
     }
     const name = argument.slice(2)
-    if (name === 'force') {
-      if (Object.prototype.hasOwnProperty.call(flags, name)) refuseUsage('duplicate --force', MISSING_LINE)
+    if (booleanFlags.has(name)) {
+      if (Object.prototype.hasOwnProperty.call(flags, name)) refuseUsage(`duplicate --${name}`, MISSING_LINE)
       flags[name] = true
       continue
     }
@@ -876,12 +997,48 @@ function compile(flags) {
   const checkout = gitRoot(flags.checkout || process.cwd())
   const where = verifyWhere({ checkout, where: request.where })
   const discovery = discoverTripwires({ checkout, files: where })
+  const profileResult = gatherProfile({
+    checkout,
+    profilePath: flags.profile,
+    requireProfile: flags['require-profile'] === true,
+  })
+  const testCommand = profileField(profileResult, 'test_command')
+  if (flags['require-profile'] === true && !testCommand.used) {
+    refuseUsage(`test_command is not ratified: ${testCommand.basis}`, PROFILE_UNRATIFIED)
+  }
+  const conventions = profileField(profileResult, 'conventions')
+  // A baseline is a fact about a commit; profile metadata has no commit sha,
+  // so this value is evidence only and is never used to replace measurement.
+  const recordedBaseline = profileField(profileResult, 'baseline')
+  // default_branch and ci have no consumer in this module (ci belongs to the
+  // sibling profile-ci-shape lane), so they deliberately stay out of wiring.
+  // protected_paths_candidates is #252 migration 2 and remains out of scope;
+  // DEFAULT_PROTECTED_PATHS and --protected stay untouched. toolchain and
+  // pr_conventions likewise have no consumer here.
+  const lane = testCommand.used && nonEmptyString(testCommand.value)
+    ? testCommand.value
+    : null
+  const laneBasis = testCommand.used && lane == null
+    ? `package.json scripts.test — ${testCommand.basis} (value is not a non-blank string)`
+    : testCommand.used
+      ? testCommand.basis
+      : `package.json scripts.test — ${testCommand.basis}`
   const fences = gatherFences({ fencesPath: flags.fences })
   const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
-  const baseline = gatherBaseline({ checkout })
+  const baseline = gatherBaseline({ checkout, lane, laneBasis })
   const protectedPaths = gatherProtectedPaths({ protectedPathsFile: flags.protected })
   const proposal = proposeTier({ where, discovery, protectedPaths })
-  const content = renderBrief({ request, where, discovery, baseline, fences, lane: flags.lane ?? null, writeSurface, proposal })
+  const content = renderBrief({
+    request,
+    where,
+    discovery,
+    baseline,
+    fences,
+    lane: flags.lane ?? null,
+    writeSurface,
+    proposal,
+    profile: { testCommand, conventions, baseline: recordedBaseline },
+  })
   writeBrief(content, outPath, flags.force === true)
   return 0
 }

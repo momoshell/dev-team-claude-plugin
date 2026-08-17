@@ -189,7 +189,12 @@ function latestLeadEnvelope(returns) {
 }
 
 function evidenceItem(item, kind) {
-  const why = item?.why ?? item?.evidence ?? item?.detail ?? null
+  // A residual may be recorded as a bare string rather than an object. Reading
+  // only object properties silently emptied it, and hiding recorded evidence is
+  // the one thing this surface exists to prevent.
+  const why = typeof item === 'string'
+    ? item
+    : (item?.why ?? item?.evidence ?? item?.detail ?? null)
   const text = why == null ? '' : (typeof why === 'string' ? why : JSON.stringify(why))
   return {
     id: item?.id ?? null,
@@ -223,11 +228,18 @@ export function acceptEvidence(run = {}, returns = {}) {
   const findingEvidence = findingIds(returns)
   // A findings array is a measured join side. Once it exists, an evidence item
   // without a matching id is stale/foreign evidence, not an accept finding.
+  // An item carrying an id that the findings array does not know is foreign and
+  // is dropped. An item with NO id cannot be matched either way, so dropping it
+  // would discard real recorded evidence to enforce a join it can never satisfy
+  // — a bare-string residual is exactly that case. Keep it.
   const evidence = findingEvidence.measured
-    ? rawEvidence.filter((item) => item.id != null && findingEvidence.ids.has(String(item.id)))
+    ? rawEvidence.filter((item) => item.id == null || findingEvidence.ids.has(String(item.id)))
     : rawEvidence
   const rows = panel.rows.map((row) => {
-    const counted = [row.refuted_count, row.residual_count]
+    // cosmetic_count belongs here: a recorded nonzero cosmetic count with no
+    // evidence items is exactly the case the pending note explains, and leaving
+    // it out rendered an unexplained empty evidence area.
+    const counted = [row.refuted_count, row.residual_count, row.cosmetic_count]
       .map((value) => typeof value === 'number' ? value : Number(value))
       .filter((value) => Number.isFinite(value) && value > 0)
       .reduce((total, value) => total + value, 0)

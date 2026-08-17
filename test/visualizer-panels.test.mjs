@@ -607,6 +607,44 @@ test('acceptEvidence joins lead evidence to measured reviewer finding ids', () =
   assert.deepEqual(evidence.map((item) => item.id), ['f1'])
 })
 
+// RV3-1: a residual recorded as a bare string carries its text in the item
+// itself, not in a .why property. Reading only object properties emptied it,
+// and the finding-id join then dropped it outright — recorded evidence lost.
+test('acceptEvidence renders a bare-string residual and never drops it for lacking an id', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', residual_count: 1 }] }
+  const returns = { envelopes: [
+    { role: 'reviewer', details: { findings: [{ id: 'f1', summary: 'real' }] } },
+    { role: 'lead', dispatch_seq: 2, details: { residuals: ['a plain string residual'] } },
+  ] }
+  const row = acceptEvidence(run, returns).rows[0]
+  const strings = row.evidence.filter((item) => item.kind === 'residual')
+  assert.equal(strings.length, 1, 'the id-less residual was dropped by the finding-id join')
+  assert.equal(strings[0].why, 'a plain string residual')
+  assert.ok(
+    JSON.stringify(strings[0].blocks).includes('a plain string residual'),
+    'the residual rendered as empty markdown, hiding recorded evidence',
+  )
+})
+
+// RV3-1b: a foreign id is still dropped. The fix above must not turn the join
+// off — only items that cannot be matched at all are exempt from it.
+test('acceptEvidence still drops evidence whose id the findings array does not know', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', refuted_count: 1 }] }
+  const returns = { envelopes: [
+    { role: 'reviewer', details: { findings: [{ id: 'f1', summary: 'real' }] } },
+    { role: 'lead', dispatch_seq: 2, details: { refuted: [{ id: 'stale', why: 'foreign' }] } },
+  ] }
+  assert.deepEqual(acceptEvidence(run, returns).rows[0].evidence.map((item) => item.id), [])
+})
+
+// RV3-2: a recorded nonzero cosmetic count with no evidence items must explain
+// itself, not render an unexplained empty area.
+test('acceptEvidence explains a pending cosmetic count', () => {
+  const run = { accept_decisions: [{ outcome: 'accepted', cosmetic_count: 2 }] }
+  const pending = acceptEvidence(run, { envelopes: [] }).rows[0].evidence_pending
+  assert.match(pending, /counts are recorded.*evidence is not/i)
+})
+
 test('PhaseGantt draws named bounce connectors inside the timeline layer', () => {
   const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
   assert.match(source, /class="bounce-layer"/)

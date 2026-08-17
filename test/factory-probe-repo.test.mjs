@@ -12,9 +12,10 @@ import { basename, dirname, join, relative } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
-  LOAD_BEARING, PROFILE_VERSION, PROTECTED_PATH_PATTERNS, ProfileRefusal,
-  UNKNOWN_REASONS, assertRunnable, defaultProfilePath, main, probeRepo,
-  profileBody, profileDigest, readProfile, requireField, writeProfile,
+  FIELD_KIND_NAMES, FIELD_KINDS, LOAD_BEARING, PROFILE_VERSION,
+  PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
+  defaultProfilePath, fieldKind, isRatifiable, main, probeRepo, profileBody,
+  profileDigest, readProfile, requireField, writeProfile,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -618,4 +619,145 @@ test('CLI --out and --save write outside the checkout only', () => {
   }
 
   assert.equal(captureMain(['--checkout', root, '--out', out, '--save']).code, 2)
+})
+
+test('field kinds are declared in one place and cover every profile field', () => {
+  const root = coldFixture('field-kinds')
+  const fields = probeRepo({ checkout: root }).fields
+  assert.ok(Object.isFrozen(FIELD_KINDS))
+  assert.deepEqual(Object.keys(FIELD_KINDS).sort(), Object.keys(fields).sort())
+  assert.ok(Object.values(FIELD_KINDS).every((kind) => FIELD_KIND_NAMES.includes(kind)))
+  assert.equal(FIELD_KINDS.baseline, 'commit_scoped')
+  assert.equal(FIELD_KINDS.protected_paths_candidates, 'authored_superset')
+  for (const name of [
+    'toolchain', 'test_command', 'ci', 'conventions', 'default_branch', 'pr_conventions',
+  ]) assert.equal(FIELD_KINDS[name], 'stable')
+  assert.equal(fieldKind('a_field_that_does_not_exist'), 'stable')
+  assert.equal(isRatifiable('baseline'), false)
+})
+
+test('a commit-scoped baseline ratification is refused and never carried forward', () => {
+  const root = nextRoot('commit-scoped-baseline')
+  put(root, '.github/workflows/test.yml', [
+    'name: test',
+    'on: push',
+    'jobs:',
+    '  test:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: node --test',
+    '',
+  ].join('\n'))
+  put(root, 'test/one.test.mjs', [
+    "import { test } from 'node:test'",
+    "test('one', () => {})",
+    '',
+  ].join('\n'))
+  initGit(root)
+  const first = probeRepo({ checkout: root, baseline: true })
+  assert.equal(first.fields.test_command.value, 'node --test')
+  assert.equal(first.fields.baseline.status, 'proposed')
+  const handValue = first.fields.baseline.value
+  const out = join(fixtureRoot, 'profiles', 'commit-scoped-baseline.json')
+  writeProfile({ profile: first, out, checkout: root })
+  const handEdited = readProfile(out)
+  handEdited.fields.baseline = {
+    ...handEdited.fields.baseline,
+    status: 'ratified',
+    source: 'human',
+    ratified_by: 'human',
+    ratified_at: '2026-08-16T00:00:00.000Z',
+  }
+  writeFileSync(out, `${JSON.stringify(handEdited, null, 2)}\n`)
+  assert.deepEqual(requireField(handEdited, 'baseline'), handValue)
+
+  writeProfile({ profile: probeRepo({ checkout: root, baseline: true }), out, checkout: root })
+  const merged = readProfile(out).fields.baseline
+  assert.notEqual(merged.status, 'ratified')
+  assert.deepEqual(merged.refused_ratification, handValue)
+})
+
+test('an authored-superset ratification survives a narrower probe and surfaces additions', () => {
+  const root = nextRoot('authored-superset')
+  nodePackage(root)
+  put(root, '.github/workflows/test.yml', 'name: test\n')
+  put(root, 'package-lock.json', '{}\n')
+  put(root, 'src/auth/session-token.js', 'export {}\n')
+  put(root, 'crew/drive.mjs', 'export {}\n')
+  put(root, 'crew/breaker.mjs', 'export {}\n')
+  initGit(root)
+
+  const first = probeRepo({ checkout: root })
+  const probeValue = first.fields.protected_paths_candidates.value
+  const authored = [...probeValue, 'crew/drive.mjs', 'crew/breaker.mjs'].sort()
+  assert.ok(authored.length > probeValue.length)
+  const out = join(fixtureRoot, 'profiles', 'authored-superset.json')
+  writeProfile({ profile: first, out, checkout: root })
+  const handEdited = readProfile(out)
+  handEdited.fields.protected_paths_candidates = {
+    ...handEdited.fields.protected_paths_candidates,
+    status: 'ratified',
+    value: authored,
+    source: 'human',
+    ratified_by: 'human',
+    ratified_at: '2026-08-16T00:00:00.000Z',
+  }
+  writeFileSync(out, `${JSON.stringify(handEdited, null, 2)}\n`)
+
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const preserved = readProfile(out).fields.protected_paths_candidates
+  assert.equal(preserved.status, 'ratified')
+  assert.deepEqual(preserved.value, authored)
+  assert.equal(preserved.superseded_ratification, undefined)
+  assert.equal(preserved.probe_additions, undefined)
+
+  const omittedEntry = probeValue[probeValue.length - 1]
+  const narrowed = [...probeValue.slice(0, -1), 'crew/drive.mjs', 'crew/breaker.mjs'].sort()
+  const narrowedProfile = readProfile(out)
+  narrowedProfile.fields.protected_paths_candidates = {
+    ...narrowedProfile.fields.protected_paths_candidates,
+    status: 'ratified',
+    value: narrowed,
+    source: 'human',
+    ratified_by: 'human',
+    ratified_at: '2026-08-16T00:00:00.000Z',
+  }
+  writeFileSync(out, `${JSON.stringify(narrowedProfile, null, 2)}\n`)
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const additions = readProfile(out).fields.protected_paths_candidates
+  assert.equal(additions.status, 'ratified')
+  assert.deepEqual(additions.value, narrowed)
+  assert.deepEqual(additions.probe_additions, [omittedEntry])
+})
+
+test('stable fields keep today\'s merge behaviour', () => {
+  const root = nodeFixture('stable-merge')
+  const first = probeRepo({ checkout: root })
+  const out = join(fixtureRoot, 'profiles', 'stable-merge.json')
+  writeProfile({ profile: first, out, checkout: root })
+  const handEdited = readProfile(out)
+  handEdited.fields.toolchain = {
+    ...handEdited.fields.toolchain,
+    status: 'ratified',
+    source: 'human',
+    ratified_by: 'human',
+    ratified_at: '2026-08-16T00:00:00.000Z',
+  }
+  writeFileSync(out, `${JSON.stringify(handEdited, null, 2)}\n`)
+
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const preserved = readProfile(out).fields.toolchain
+  assert.equal(preserved.status, 'ratified')
+  assert.equal(preserved.ratified_by, 'human')
+  assert.equal(preserved.ratified_at, '2026-08-16T00:00:00.000Z')
+
+  rmSync(join(root, 'package.json'))
+  put(root, 'Cargo.toml', '[package]\nname = "changed"\n')
+  writeProfile({ profile: probeRepo({ checkout: root }), out, checkout: root })
+  const changed = readProfile(out).fields.toolchain
+  assert.equal(changed.status, 'proposed')
+  assert.equal(changed.value, 'rust')
+  assert.equal(changed.superseded_ratification, 'node')
+  assert.equal(changed.probe_additions, undefined)
+  assert.equal(changed.refused_ratification, undefined)
 })

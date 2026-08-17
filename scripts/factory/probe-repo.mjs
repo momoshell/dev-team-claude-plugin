@@ -100,6 +100,37 @@ export const PROTECTED_PATH_PATTERNS = Object.freeze([
   'Package.resolved',
 ])
 
+// Field kinds name the merge rule as well as the evidence boundary:
+// - stable is a fact about the repo (today's rule), so byte-identical probe
+//   values retain a human ratification and changed values are superseded.
+// - commit_scoped is a fact about one commit; profile metadata carries no
+//   commit sha, so a recorded value cannot prove it still applies. Ratification
+//   is refused outright and never carried forward; the human value is kept
+//   under refused_ratification for review.
+// - authored_superset is a human-authored list a heuristic can only partly
+//   discover. The ratified list is authoritative, fewer probe entries are not
+//   drift, and probe-only additions are surfaced under probe_additions.
+// Kinds are declared, never inferred. A field absent from this table is stable:
+// the default is today's behaviour, so a new field cannot quietly get a looser
+// merge rule. Kinds are properties of fields, not probe-run profile data.
+export const FIELD_KIND_NAMES = Object.freeze(['stable', 'commit_scoped', 'authored_superset'])
+export const FIELD_KINDS = Object.freeze({
+  toolchain: 'stable',
+  test_command: 'stable',
+  baseline: 'commit_scoped',
+  ci: 'stable',
+  protected_paths_candidates: 'authored_superset',
+  conventions: 'stable',
+  default_branch: 'stable',
+  pr_conventions: 'stable',
+})
+export function fieldKind(name) {
+  return Object.hasOwn(FIELD_KINDS, name) ? FIELD_KINDS[name] : 'stable'
+}
+export function isRatifiable(name) {
+  return fieldKind(name) !== 'commit_scoped'
+}
+
 export class ProfileRefusal extends Error {
   constructor(message, reason = 'profile-unratified') {
     super(message)
@@ -892,22 +923,47 @@ function pathInside(path, directory) {
   return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel))
 }
 
+function mergedRatified(fresh, oldCell, value) {
+  const out = {
+    ...fresh,
+    status: 'ratified',
+    value: clone(value),
+    source: oldCell.source || fresh.source,
+    ratified_by: oldCell.ratified_by,
+    ratified_at: oldCell.ratified_at,
+  }
+  delete out.reason
+  delete out.superseded_ratification
+  delete out.refused_ratification
+  delete out.probe_additions
+  return out
+}
+
 function mergeRatifications(profile, existing) {
   const merged = clone(profile)
   if (!existing || !existing.fields || typeof existing.fields !== 'object') return merged
   for (const [name, oldCell] of Object.entries(existing.fields)) {
     const fresh = merged.fields && merged.fields[name]
     if (!fresh || !validRatifiedCell(oldCell)) continue
+    const kind = fieldKind(name)
+    if (kind === 'commit_scoped') {
+      merged.fields[name] = { ...fresh, refused_ratification: clone(oldCell.value) }
+      continue
+    }
+    // A malformed ratified authored-superset value is not a set; let it fall
+    // through to the stable merge behaviour instead of treating it as one.
+    if (kind === 'authored_superset' && Array.isArray(oldCell.value)) {
+      const known = new Set(oldCell.value.map(canonicalJson))
+      const additions = Array.isArray(fresh.value)
+        ? fresh.value.filter((entry) => !known.has(canonicalJson(entry)))
+        : []
+      const out = mergedRatified(fresh, oldCell, oldCell.value)
+      if (additions.length > 0) out.probe_additions = clone(additions)
+      merged.fields[name] = out
+      continue
+    }
     if (deepEqual(oldCell.value, fresh.value)) {
-      merged.fields[name] = {
-        ...fresh,
-        status: 'ratified',
-        value: clone(oldCell.value),
-        source: oldCell.source || fresh.source,
-        ratified_by: oldCell.ratified_by,
-        ratified_at: oldCell.ratified_at,
-      }
-      delete merged.fields[name].superseded_ratification
+      merged.fields[name] = mergedRatified(fresh, oldCell, oldCell.value)
     } else if (fresh.status === 'unknown') {
       // A changed probe cannot become a proposed null: preserve the cell
       // invariant and retain the superseded human value for review.

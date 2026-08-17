@@ -11,11 +11,12 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
-  ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK,
+  ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   REFUSAL_REASONS, SLOT_MARKER, discoverTripwires, extractKeys,
-  gatherProtectedPaths, main, proposeTier, validateAsk, verifyWhere,
+  gatherProtectedPaths, main, profileField, proposeTier, validateAsk, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
+import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-make-brief-'))
@@ -338,8 +339,16 @@ test('a recorded baseline count is named unused while the compile measures fresh
   const baseline = section(brief, '## Baseline')
   const validation = section(brief, '## Validation lane')
   assert.match(baseline, /pass 1/)
-  assert.match(baseline, /profile records passed 4242, not used/)
+  assert.match(baseline, /4242/)
+  assert.match(baseline, /not used/)
   assert.doesNotMatch(`${baseline}\n${validation}`, /pass 4242/)
+
+  const malformedPath = profile('malformed-stable', { test_command: { status: 'ratified', value: lane, source: 'human' } })
+  const malformed = profileField({ path: malformedPath, profile: JSON.parse(readFileSync(malformedPath, 'utf8')) }, 'test_command')
+  assert.equal(malformed.used, false)
+  assert.equal(malformed.recorded, undefined)
+  assert.equal(malformed.reason, 'profile-ratification-invalid')
+  assert.equal(malformed.basis, `profile field test_command is ratified but invalid · ${malformedPath}`)
 })
 
 test('the default profile path is used when no --profile flag is supplied', () => {
@@ -608,7 +617,7 @@ test('proposeTier pins breadth bands, directory raises, and tripwire-floor raise
   assert.match(floor.reasons.join('\n'), /6 tripwire tests.*mechanical.*build/i)
 })
 
-test('protected paths default empty, raise one step, match directory prefixes, and reject malformed input', () => {
+test('protected paths default to the floor, raise one step, match directory prefixes, and reject malformed input', () => {
   const where = [{ path: 'lib/widget.mjs', kind: 'file' }]
   const discovery = {
     candidates: ['lib/widget.mjs', 'test/widget.test.mjs'],
@@ -617,11 +626,21 @@ test('protected paths default empty, raise one step, match directory prefixes, a
   }
   const omitted = proposeTier({ where, discovery })
   const empty = proposeTier({ where, discovery, protectedPaths: [] })
+  for (const path of PROTECTED_PATHS) assert.ok(DEFAULT_PROTECTED_PATHS.includes(path), `${path} missing from the floor`)
   assert.equal(omitted.tier, empty.tier)
+  assert.ok(omitted.signals.protectedHits.length === 0)
+  assert.match(omitted.reasons.join('\n'), /protected paths in force: \d+/)
+  const floorWhere = [{ path: 'crew/drive.mjs', kind: 'file' }]
+  const floorDiscovery = { candidates: ['crew/drive.mjs', 'crew/drive.test.mjs'], tripwires: [{ file: 'crew/drive.test.mjs', keys: [] }], broadKeys: [] }
+  for (const protectedPaths of [[], ['.github/workflows/', 'docs/adr/', 'package-lock.json']]) {
+    const floorProposal = proposeTier({ where: floorWhere, discovery: floorDiscovery, protectedPaths })
+    assert.ok(floorProposal.signals.protectedHits.includes('crew/drive.mjs'))
+  }
   const raised = proposeTier({ where, discovery, protectedPaths: ['lib/widget.mjs'] })
   assert.equal(raised.tier, 'build')
   assert.deepEqual(raised.signals.protectedHits, ['lib/widget.mjs'])
   assert.match(raised.reasons.join('\n'), /protected path hit: lib\/widget\.mjs.*raised mechanical.*build/)
+  assert.match(raised.reasons.join('\n'), /protected paths in force: \d+/)
 
   const prefix = proposeTier({
     where,
@@ -642,6 +661,7 @@ test('protected paths default empty, raise one step, match directory prefixes, a
   })
   assert.equal(judge.tier, 'judge')
   assert.match(judge.reasons.join('\n'), /protected path hit: lib\/0\.mjs.*unchanged/i)
+  assert.match(judge.reasons.join('\n'), /protected paths in force: \d+/)
   assert.throws(() => proposeTier({ where, discovery, protectedPaths: 'lib/widget.mjs' }), (error) => error.reason === 'bad-protected')
   assert.throws(() => proposeTier({ where, discovery, protectedPaths: ['   '] }), (error) => error.reason === 'bad-protected')
 })
@@ -649,7 +669,9 @@ test('protected paths default empty, raise one step, match directory prefixes, a
 test('protected file input is normalized, deduped, and wired through the CLI', () => {
   const root = fixture('protected-file')
   const protectedPath = put(root, 'protected.json', JSON.stringify({ paths: ['./lib/widget.mjs', 'lib\\widget.mjs', './lib/widget.mjs'] }) + '\n')
-  assert.deepEqual(gatherProtectedPaths({ protectedPathsFile: protectedPath }), ['lib/widget.mjs'])
+  const gathered = gatherProtectedPaths({ protectedPathsFile: protectedPath })
+  assert.ok(gathered.includes('lib/widget.mjs'))
+  for (const path of PROTECTED_PATHS) assert.ok(gathered.includes(path), `${path} missing from gathered paths`)
   const { brief } = compile(root, { where: ['lib/widget.mjs'] }, ['--protected', protectedPath])
   assert.match(section(brief, '## Proposed tier'), /proposed tier: build/)
   assert.match(section(brief, '## Proposed tier'), /lib\/widget\.mjs/)
@@ -661,6 +683,37 @@ test('protected file input is normalized, deduped, and wired through the CLI', (
   ])
   assert.equal(result.status, 2)
   assert.match(result.stderr, /bad-protected/)
+})
+
+test('a ratified protected-path list adds to the floor and names its basis in the compiled brief', () => {
+  const root = fixture('profile-protected-list')
+  const profilePath = profile('protected-list', { protected_paths_candidates: ratified(['lib/']) })
+  const { brief } = compile(root, {}, ['--profile', profilePath])
+  const proposedSection = section(brief, '## Proposed tier')
+  assert.match(proposedSection, /lib\/widget\.mjs/)
+  assert.match(proposedSection, /protected_paths_candidates/)
+  assert.match(proposedSection, new RegExp(profilePath.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+})
+
+test('a brief compiled without a ratified list names the authored floor', () => {
+  const root = fixture('profile-protected-floor')
+  const { brief } = compile(root)
+  const proposedSection = section(brief, '## Proposed tier')
+  assert.match(proposedSection, /protected paths in force: \d+/)
+  assert.match(proposedSection, /authored floor/)
+})
+
+test('a ratified protected-path list that is not a list refuses the compile', () => {
+  const root = fixture('profile-protected-invalid')
+  const profilePath = profile('protected-invalid', { protected_paths_candidates: ratified('lib/') })
+  const outPath = join(root, 'invalid.md')
+  const result = run(root, [
+    '--request', request(root), '--checkout', root, '--out', outPath, '--profile', profilePath,
+  ])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /bad-protected/)
+  assert.match(result.stderr, /protected-paths-invalid/)
+  assert.equal(existsSync(outPath), false)
 })
 
 test('absence cases return no proposal with reasons and render no proposal', () => {
@@ -676,7 +729,7 @@ test('absence cases return no proposal with reasons and render no proposal', () 
     discovery: { candidates: ['lib/a.mjs'], tripwires: [], broadKeys: [{ key: 'a', count: 99 }, { key: 'b', count: 99 }] },
   })
   assert.equal(suppressed.tier, null)
-  assert.match(suppressed.reasons[0], /2 key\(s\).*absent, not zero/)
+  assert.match(suppressed.reasons.find((reason) => /2 key\(s\).*absent, not zero/.test(reason)), /2 key\(s\).*absent, not zero/)
 
   const root = fixture('no-proposal-render', { broad: true })
   const { brief } = compile(root, { where: ['lib/broad.mjs'] })

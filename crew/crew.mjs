@@ -42,6 +42,7 @@ export {
   LIVENESS_MISSES_TO_DIE,
 } from './realio.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
+import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
@@ -678,6 +679,9 @@ export function runCmd(args, deps = {}) {
   if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
 
   const journal = join(paths.dir, 'journal.jsonl')
+  const protectedFloor = checkoutProtectedPaths({ checkout })
+  logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
+    basis: protectedFloor.basis, count: protectedFloor.paths.length })
   // Keep the test lane at 30 s per test: the slowest real test is ~25 ms,
   // giving ~1200× headroom even when the machine is saturated by three crews.
   // This is well below realIo.run's 900 s kill, so a hung test is reported by
@@ -689,6 +693,8 @@ export function runCmd(args, deps = {}) {
   // crew/crew.test.mjs pins the three-way agreement.
   const ctx = {
     task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal,
+    protectedPaths: protectedFloor.paths,
+    protectedPathsBasis: protectedFloor.basis,
     roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000', variant,
   }
   // Seats are TUI processes and the first assignment must not race their

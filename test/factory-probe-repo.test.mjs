@@ -14,8 +14,8 @@ import { ROOT } from './helpers.mjs'
 import {
   FIELD_KIND_NAMES, FIELD_KINDS, LOAD_BEARING, PROFILE_VERSION,
   PROTECTED_PATH_PATTERNS, ProfileRefusal, UNKNOWN_REASONS, assertRunnable,
-  defaultProfilePath, fieldKind, isRatifiable, main, probeRepo, profileBody,
-  profileDigest, readProfile, requireField, writeProfile,
+  checkoutProtectedPaths, defaultProfilePath, fieldKind, isRatifiable, main, probeRepo, profileBody,
+  profileDigest, profileProtectedPaths, readProfile, requireField, writeProfile,
 } from '../scripts/factory/probe-repo.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'probe-repo.mjs')
@@ -669,12 +669,101 @@ test('a commit-scoped baseline ratification is refused and never carried forward
     ratified_at: '2026-08-16T00:00:00.000Z',
   }
   writeFileSync(out, `${JSON.stringify(handEdited, null, 2)}\n`)
-  assert.deepEqual(requireField(handEdited, 'baseline'), handValue)
+  assert.throws(() => requireField(handEdited, 'baseline'), (err) => (
+    err instanceof ProfileRefusal && err.reason === 'profile-ratification-refused'
+  ))
 
   writeProfile({ profile: probeRepo({ checkout: root, baseline: true }), out, checkout: root })
   const merged = readProfile(out).fields.baseline
   assert.notEqual(merged.status, 'ratified')
   assert.deepEqual(merged.refused_ratification, handValue)
+})
+
+test('the read boundary refuses a ratified commit-scoped cell and still serves stable ones', () => {
+  const profile = {
+    schema: 1,
+    profile_version: 1,
+    repo_key: 'owner__repo',
+    fields: {
+      baseline: {
+        status: 'ratified', value: { passed: 1173 }, source: 'human',
+        ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+      },
+      test_command: {
+        status: 'ratified', value: 'node --test', source: 'human',
+        ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+      },
+    },
+    meta: {},
+  }
+  assert.throws(() => requireField(profile, 'baseline'), (err) => (
+    err instanceof ProfileRefusal
+      && err.reason === 'profile-ratification-refused'
+      && err.message.includes('commit_scoped')
+      && err.message.includes('evidence only')
+  ))
+  assert.equal(requireField(profile, 'test_command'), 'node --test')
+  assert.deepEqual(assertRunnable({ ...profile, fields: {
+    ...profile.fields,
+    default_branch: {
+      status: 'ratified', value: 'main', source: 'human',
+      ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+    },
+  } }), { test_command: 'node --test', default_branch: 'main' })
+})
+
+test('the shared protected-path rule adds, falls back, and refuses every broken ratified cell by name', () => {
+  const makeRatified = (value) => ({
+    status: 'ratified', value, source: 'human',
+    ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+  })
+  const floor = profileProtectedPaths(null, { path: '/tmp/missing-profile.json' })
+  assert.equal(floor.used, false)
+  assert.ok(floor.paths.length > 0)
+  assert.match(floor.basis, /authored floor.*missing-profile/)
+
+  const used = profileProtectedPaths({
+    repo_key: 'owner__repo',
+    fields: {
+      protected_paths_candidates: {
+        status: 'ratified', value: ['db/migrations/'], source: 'human',
+        ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+      },
+    },
+  }, { path: '/tmp/profile.json' })
+  assert.equal(used.used, true)
+  assert.ok(used.paths.includes('db/migrations/'))
+  assert.match(used.basis, /protected_paths_candidates.*profile\.json/)
+
+  for (const profile of [
+    { fields: {} },
+    { fields: { protected_paths_candidates: { status: 'proposed', value: ['db/migrations/'], source: 'heuristic' } } },
+  ]) {
+    const result = profileProtectedPaths(profile, { path: '/tmp/profile.json' })
+    assert.equal(result.used, false)
+    assert.equal(result.paths.includes('db/migrations/'), false)
+  }
+  for (const value of ['db/migrations/', ['db/migrations/', '  '], ['db/migrations/', 7]]) {
+    assert.throws(() => profileProtectedPaths({
+      repo_key: 'owner__repo',
+      fields: { protected_paths_candidates: makeRatified(value) },
+    }, { path: '/tmp/profile.json' }), (err) => (
+      err instanceof ProfileRefusal
+        && err.reason === 'protected-paths-invalid'
+        && err.message.includes('protected-paths-invalid')
+    ))
+  }
+  const brokenMetadata = makeRatified(['db/migrations/'])
+  delete brokenMetadata.ratified_by
+  assert.throws(() => profileProtectedPaths({ repo_key: 'owner__repo', fields: { protected_paths_candidates: brokenMetadata } }, { path: '/tmp/profile.json' }), (err) => err.reason === 'protected-paths-invalid')
+
+  const checkout = coldFixture('protected-paths-wrapper')
+  const path = join(fixtureRoot, 'profiles', 'protected-paths-wrapper.json')
+  writeFileSync(path, `${JSON.stringify({ repo_key: 'owner__repo', fields: { protected_paths_candidates: makeRatified(['db/migrations/']) } }, null, 2)}\n`)
+  const viaWrapper = checkoutProtectedPaths({ checkout, profilePath: path })
+  const viaRule = profileProtectedPaths(readProfile(path), { path })
+  assert.deepEqual(viaWrapper.paths, viaRule.paths)
+  assert.equal(viaWrapper.used, viaRule.used)
 })
 
 test('an authored-superset ratification survives a narrower probe and surfaces additions', () => {

@@ -12,13 +12,14 @@ import { createRequire } from 'node:module'
 import {
   daemon, deriveState, normalizeEvent, usageWindow, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
 } from './daemon.mjs'
-import { driveTask } from './drive.mjs'
+import { driveTask, PROTECTED_PATHS } from './drive.mjs'
 import { VARIANT_NAMES } from './variants.mjs'
 import { runChild } from './child.mjs'
 import { DEFAULT_TRANSPORT } from './realio.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
+import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON_SOURCE = readFileSync(join(HERE, 'daemon.mjs'), 'utf8')
@@ -93,6 +94,16 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
 const returnFor = (f, runId, attempt = 1) => attempt <= 1
   ? join(f.returnsDir, `${runId}.task.json`)
   : join(f.returnsDir, `${runId}.task.a${attempt}.json`)
+
+function protectedProfile(factoryRoot, checkout, cell) {
+  const repoKey = repoKeyFor({ checkout })
+  const path = join(factoryRoot, 'profiles', `${repoKey}.json`)
+  mkdirSync(dirname(path), { recursive: true })
+  writeFileSync(path, JSON.stringify({
+    schema: 1, profile_version: 1, repo_key: repoKey, fields: { protected_paths_candidates: cell }, meta: {},
+  }))
+  return path
+}
 
 function mintCrew(f, { name = 'crew-2', checkout = f.dir, task = 'daemon80' } = {}) {
   const crewDir = join(f.dir, name)
@@ -1455,6 +1466,60 @@ test('runChild threads continuation and the unfiltered seated role list into ctx
     assert.deepEqual(seen[0].seatedRoles, ['lead', 'planner', 'builder', 'reviewer'])
     assert.equal(seen[0].roles.includes('lead'), false)
   } finally { f.cleanup() }
+})
+
+test('the child entry resolves the repo protected paths and records them', () => {
+  const f = fixture()
+  const home = mkdtempSync(join(tmpdir(), 'daemon-protected-home-'))
+  const factoryRoot = join(home, 'factory')
+  const cell = {
+    status: 'ratified', value: ['db/migrations/'], source: 'human',
+    ratified_by: 'human', ratified_at: '2026-08-16T00:00:00.000Z',
+  }
+  protectedProfile(factoryRoot, f.dir, cell)
+  const previousFactory = process.env.DEVTEAM_FACTORY_DIR
+  process.env.DEVTEAM_FACTORY_DIR = factoryRoot
+  const logged = []
+  let seen
+  try {
+    runChild({ crew_dir: f.crewDir, task: 'protected-child', checkout: f.dir, ledger_db: join(home, 'ledger.db') }, {
+      driveTask: (ctx) => { seen = ctx; return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } } },
+      realIo: () => ({ log: (row) => logged.push(row) }),
+      preflight: false,
+    })
+    assert.ok(seen.protectedPaths.includes('db/migrations/'))
+    for (const path of PROTECTED_PATHS) assert.ok(seen.protectedPaths.includes(path), `${path} missing from ctx`)
+    const row = logged.find((entry) => entry.event === 'protected-paths')
+    assert.ok(row)
+    assert.match(row.basis, /protected_paths_candidates/)
+    assert.equal(row.count, seen.protectedPaths.length)
+  } finally {
+    if (previousFactory === undefined) delete process.env.DEVTEAM_FACTORY_DIR
+    else process.env.DEVTEAM_FACTORY_DIR = previousFactory
+    rmSync(home, { recursive: true, force: true })
+    f.cleanup()
+  }
+})
+
+test('the child entry escalates by name on an unusable ratified cell', { timeout: 20_000 }, () => {
+  const f = fixture()
+  const home = mkdtempSync(join(tmpdir(), 'daemon-protected-refusal-home-'))
+  const factoryRoot = join(home, 'factory')
+  protectedProfile(factoryRoot, f.dir, { status: 'ratified', value: ['db/migrations/'], source: 'human' })
+  const previousFactory = process.env.DEVTEAM_FACTORY_DIR
+  process.env.DEVTEAM_FACTORY_DIR = factoryRoot
+  try {
+    const result = runChild({ crew_dir: f.crewDir, task: 'protected-child-refusal', checkout: f.dir, ledger_db: join(home, 'ledger.db') }, { preflight: false })
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.stages, null)
+    assert.match(result.details.escalation.why, /protected-paths-invalid/)
+    assert.match(readFileSync(f.taskReturn, 'utf8'), /protected-paths-invalid/)
+  } finally {
+    if (previousFactory === undefined) delete process.env.DEVTEAM_FACTORY_DIR
+    else process.env.DEVTEAM_FACTORY_DIR = previousFactory
+    rmSync(home, { recursive: true, force: true })
+    f.cleanup()
+  }
 })
 
 // ChildProcess errors are asynchronous and must remain inside the daemon.

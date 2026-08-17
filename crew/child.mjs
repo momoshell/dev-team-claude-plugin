@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url'
 import { driveTask as defaultDriveTask } from './drive.mjs'
 import { realIo as defaultRealIo } from './realio.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
+import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
 import { slugOrNull } from './slug.mjs'
 
@@ -145,6 +146,13 @@ export function runChild(argv, injected = {}) {
       result = failure(err)
     } else {
       const io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
+      const protectedFloor = checkoutProtectedPaths({ checkout })
+      ctx.protectedPaths = protectedFloor.paths
+      ctx.protectedPathsBasis = protectedFloor.basis
+      try {
+        io.log?.({ at: new Date().toISOString(), event: 'protected-paths',
+          basis: protectedFloor.basis, count: protectedFloor.paths.length })
+      } catch { /* instrumentation is never load-bearing */ }
       try { result = driveTask(ctx, io) } catch (err) { result = failure(err) }
     }
   } catch (err) {

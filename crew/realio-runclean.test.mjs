@@ -128,6 +128,12 @@ test('runClean preserves a non-zero command result and still restores the tree',
   })
 })
 
+test('realIo teardown is a measured zero when no transport was instantiated', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    assert.deepEqual(makeIo(fixture).teardown(), [])
+  })
+})
+
 test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {
   const saved = process.env.FORCE_COLOR
   process.env.FORCE_COLOR = '3'

@@ -89,6 +89,7 @@ export function runChild(argv, injected = {}) {
   })
   let result
   let emitter = null
+  let io = null
   try {
     const pane = paneSeat(crew)
     if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
@@ -145,7 +146,7 @@ export function runChild(argv, injected = {}) {
       err.stage = 'ledger-sidecar'
       result = failure(err)
     } else {
-      const io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
+      io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
       const protectedFloor = checkoutProtectedPaths({ checkout })
       ctx.protectedPaths = protectedFloor.paths
       ctx.protectedPathsBasis = protectedFloor.basis
@@ -159,12 +160,30 @@ export function runChild(argv, injected = {}) {
     if (harness) throw err
     result = failure(err)
   }
-  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
   write(taskReturn, JSON.stringify(result, null, 2))
   const mirror = join(returnsDir, 'task.json')
   if (taskReturn !== mirror) {
     try { write(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
   }
+  // Teardown runs AFTER the envelope and the mirror on purpose: a worker that
+  // refuses to die must never change the run's recorded outcome. Same
+  // best-effort spirit as endRun — except the outcome is RECORDED rather than
+  // swallowed, because a teardown that fails silently leaves exactly the leak
+  // this closes with no trace that it happened.
+  let torndown = []
+  try { torndown = (typeof io?.teardown === 'function' ? io.teardown() : []) || [] }
+  catch (err) { torndown = [{ role: null, outcome: 'unproven', reason: 'teardown-threw', why: err.message }] }
+  const tally = { proven: 0, failed: 0, unproven: 0 }
+  for (const seat of torndown) {
+    tally[seat.outcome] = (tally[seat.outcome] ?? 0) + 1
+    try { io.log?.({ at: new Date().toISOString(), event: 'seat-teardown', ...seat }) } catch { /* journal is diagnostics */ }
+    try { io.emit?.({ kind: 'seat-teardown', ...seat }) } catch { /* ADR-026: instrumentation is never load-bearing */ }
+  }
+  // Written even when it is zero: the journal is the archive and always says
+  // teardown ran, while the ledger is the query surface and carries one row per
+  // seat. A run whose ledger was unavailable still has this line.
+  try { io.log?.({ at: new Date().toISOString(), event: 'seat-teardown-sweep', seats: torndown.length, ...tally }) } catch {}
+  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
   return result
 }
 

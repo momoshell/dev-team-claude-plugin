@@ -243,6 +243,16 @@ export function emitAdapter(emitter, crew = null) {
         unverified_count: unverified.length,
         invalid_reasons: errors.map(({ id, why }) => `${id ?? ''}: ${why}`).join('; '),
       }))
+    } else if (event.kind === 'seat-teardown') {
+      const m = (crew && crew.members && crew.members[event.role]) || null
+      emitter.emit((handle) => handle.recordSeatTeardown({
+        adw_id: emitter.adwId, phase_id: phaseId, role: event.role ?? null,
+        transport: event.transport ?? m?.transport ?? null,
+        session_id: event.session_id ?? null, pgid: event.pgid ?? null,
+        reservation_id: event.reservation_id ?? null, outcome: event.outcome,
+        reason: event.reason ?? null, forced: event.forced ? 1 : 0,
+        evidence_kind: event.evidence_kind ?? null,
+      }))
     } else if (event.kind === 'cell-failure') {
       // AVAILABILITY, not quality: the cell could not hold its seat or produce
       // anything usable. The cell itself is read from the booted crew, because
@@ -504,6 +514,21 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         const pop = spawnSync('git', ['stash', 'pop'], { cwd: checkout, encoding: 'utf8' })
         if (pop.status !== 0) throw new Error(`runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash (git stash list):\n${pop.stderr || pop.stdout || ''}`)
       }
+    },
+    // Only a transport this run actually instantiated can be holding a worker, so
+    // an empty instance map is a MEASURED ZERO (a pane-only crew has nothing to
+    // retire), never an unproven. headless-json is deliberately not covered: it
+    // spawns one process per assignment which exits on its own and ships no
+    // teardown operation — its absence from this record is honest, not a clean
+    // bill of health.
+    teardown() {
+      const rows = []
+      for (const transport of transportInstances.values()) {
+        if (typeof transport.teardown !== 'function') continue
+        try { rows.push(...transport.teardown()) }
+        catch (err) { rows.push({ role: null, outcome: 'unproven', reason: 'teardown-threw', why: String(err?.message ?? err) }) }
+      }
+      return rows
     },
     reseat(role, options = {}) {
       let from = null

@@ -21,6 +21,16 @@ const ABORT_SETTLE_MS = 2000
 const FIFO_RETRIES = 20
 const FIFO_RETRY_MS = 100
 
+// The closed run-end outcome set, mirroring ADR-030's gate discrimination
+// vocabulary on purpose: `proven` is the ONLY answer that says a worker is
+// gone. Anything that is not positive evidence of death — including "we sent
+// the signal and kill() did not throw" — is unproven, never clean.
+export function teardownOutcome(liveness) {
+  if (liveness === LIVENESS.DEAD) return 'proven'
+  if (liveness === LIVENESS.ALIVE) return 'failed'
+  return 'unproven'
+}
+
 export const SEAT_COMMAND_FILE = 'cmd.fifo'
 export function seatCommandPath(taskDir, role) {
   return join(taskDir, 'headless-rpc', role, SEAT_COMMAND_FILE)
@@ -288,7 +298,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
       fd = open(fifo, 'r+')
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null }
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, handle: marker.handle }
       seats.set(role, seat)
       return seat
     }
@@ -303,7 +313,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
     })
     const args = command.args || []
-    const shell = `rm -f ${shq(exit)}; mkfifo ${shq(fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin || bin || 'pi')} ${args.map(shq).join(' ')} <${shq(fifo)} >>${shq(stream)} 2>>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
+    const shell = `trap ':' TERM INT; rm -f ${shq(exit)}; mkfifo ${shq(fifo)} 2>/dev/null; printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin || bin || 'pi')} ${args.map(shq).join(' ')} <${shq(fifo)} >>${shq(stream)} 2>>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
     const reservation = store.reserve(role, {
       phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid },
       role, id: assignmentId, dir, returnPath: '', exit, startedAt: now(),
@@ -366,25 +376,56 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     return { id, returnPath }
   }
   function finishTurn(seat) { seat.turn = null; seat.responses.clear() }
-  function killAfterTimeout(seat) {
-    try { kill(-seat.pid, 'SIGTERM') } catch {}
-    const deadline = now() + ABORT_SETTLE_MS
-    while (now() < deadline && parseExit(seat.exit, read, exists) === null) sleep(WAIT_POLL_MS)
-    if (parseExit(seat.exit, read, exists) === null) {
-      let proven = false
-      try { kill(-seat.pid, 'SIGKILL'); proven = true } catch (err) { proven = err?.code === 'ESRCH' }
-      if (!proven) {
-        const current = store.reconcile(seat.role)
-        if (current.marker?.reservation_id === seat.handle?.reservation_id) proven = store.probeEvidence(current.marker.evidence) === LIVENESS.DEAD
+  function killAfterTimeout(target) {
+    const clearIfDead = (liveness) => {
+      if (liveness === LIVENESS.DEAD && target.handle) {
+        try { store.clear(target.handle) } catch { /* proof remains useful even if release is unavailable */ }
       }
-      if (proven && seat.handle) store.clear(seat.handle)
     }
+    const finish = (liveness, reason) => {
+      clearIfDead(liveness)
+      return { liveness, reason }
+    }
+    const exitProof = () => parseExit(target.exit, read, exists) !== null
+
+    // A reaped worker's pgid may have since been reused. Never signal a target
+    // that already left its own exit marker behind.
+    if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
+
+    try { kill(-target.pid, 'SIGTERM') } catch {}
+    const deadline = now() + ABORT_SETTLE_MS
+    while (now() < deadline && !exitProof()) {
+      sleep(Math.min(WAIT_POLL_MS, Math.max(1, deadline - now())))
+    }
+    if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
+
+    try {
+      kill(-target.pid, 'SIGKILL')
+    } catch (err) {
+      if (err?.code === 'ESRCH') return finish(LIVENESS.DEAD, 'signal-esrch')
+    }
+    // A successful kill() only says that a signal was delivered to at least
+    // one member of the group. It is not evidence that the worker is gone.
+    if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
+
+    const current = store.reconcile(target.role)
+    if (!target.handle || typeof target.handle.reservation_id !== 'string'
+      || typeof current.marker?.reservation_id !== 'string'
+      || current.marker.reservation_id !== target.handle.reservation_id) {
+      return finish(LIVENESS.UNKNOWN, 'reservation-mismatch')
+    }
+    const liveness = store.probeEvidence(current.marker.evidence)
+    if (liveness === LIVENESS.DEAD) return finish(LIVENESS.DEAD, 'probe-dead')
+    if (liveness === LIVENESS.ALIVE) return finish(LIVENESS.ALIVE, 'probe-alive')
+    return finish(LIVENESS.UNKNOWN, 'probe-unknown')
   }
   // Retire only at a settled boundary: kill the worker and release its seat,
   // while deliberately preserving the session id for the next assignment.
-  function retire(role) {
+  function retire(role, options = {}) {
     const seat = seats.get(role)
-    if (seat?.turn && !seat.turn.state.settled) {
+    const inFlight = !!(seat?.turn && !seat.turn.state.settled)
+    const forced = options?.force === true && inFlight
+    if (inFlight && options?.force !== true) {
       return {
         retired: false,
         reason: 'in-flight',
@@ -399,12 +440,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
     }
     try { closeFd(seat.fd) } catch {}
-    killAfterTimeout(seat)
-    if (seat.handle) { try { store.clear(seat.handle) } catch {} }
+    const proof = killAfterTimeout(seat)
+    // Do not clear here: killAfterTimeout retains an unproven reservation so a
+    // later reader can still find the worker whose death we could not prove.
     // The session id survives a retire on purpose: ensureProcess will resume it
     // while reading the newly selected model and effort from the crew member.
     seats.delete(role)
-    return { retired: true, sessionId: seat.sessionId }
+    return { retired: true, sessionId: seat.sessionId, forced, liveness: proof.liveness, reason: proof.reason }
   }
   function abort(role, options = {}) {
     const seat = seats.get(role)
@@ -491,6 +533,90 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     saveSession(role, { cursor, entries: cursor })
     return response
   }
+  function pgidFor(role, marker) {
+    const candidate = Number(marker?.pid)
+    if (Number.isSafeInteger(candidate) && candidate > 0) return candidate
+    const path = seatFile(role, 'pgid')
+    if (!exists(path)) return null
+    try {
+      const value = Number(String(read(path, 'utf8')).trim())
+      return Number.isSafeInteger(value) && value > 0 ? value : null
+    } catch { return null }
+  }
+  // Run end: every piped seat this supervisor can identify, killed and PROVEN
+  // dead. The candidates are the live seats plus the crew's roles — ensureProcess
+  // refuses an unseated role, so this supervisor can have created nothing else.
+  // A role with no seat can still hold a LIVE worker: spawn succeeds and
+  // advances the marker to RUNNING, then FIFO acquisition fails and throws
+  // before the seat is inserted. That worker is the leak this closes, so a
+  // marker-only role is SIGNALLED, never merely probed.
+  function teardown() {
+    const rows = []
+    const roles = new Set([...seats.keys(), ...Object.keys(crew.members || {})])
+    const row = (role, values = {}) => ({
+      role, transport: 'headless-rpc', session_id: null, pgid: null,
+      reservation_id: null, outcome: 'unproven', reason: 'teardown-threw', forced: false,
+      evidence_kind: EVIDENCE_KINDS.PGID, ...values,
+    })
+    for (const role of roles) {
+      const seat = seats.get(role)
+      try {
+        if (seat) {
+          const retired = retire(role, { force: true })
+          rows.push(row(role, {
+            session_id: retired.sessionId ?? seat.sessionId ?? null,
+            pgid: seat.pid ?? null,
+            reservation_id: seat.handle?.reservation_id ?? null,
+            outcome: teardownOutcome(retired.liveness),
+            reason: retired.reason,
+            forced: retired.forced === true,
+          }))
+          continue
+        }
+
+        const current = store.reconcile(role)
+        if (current.verdict === VERDICTS.FREE) continue
+        if (current.marker === null && current.handle !== null) {
+          rows.push(row(role, {
+            reservation_id: current.handle.reservation_id ?? null,
+            reason: 'unreadable-reservation',
+            forced: false,
+          }))
+          continue
+        }
+        const marker = current.marker
+        const targetPid = pgidFor(role, marker)
+        const common = {
+          session_id: marker?.sessionId ?? marker?.session_id ?? null,
+          pgid: targetPid,
+          reservation_id: current.handle?.reservation_id ?? marker?.reservation_id ?? null,
+        }
+        if (marker && targetPid != null) {
+          const proof = killAfterTimeout({
+            role, pid: targetPid, exit: seatFile(role, 'exit'), handle: current.handle,
+          })
+          rows.push(row(role, {
+            ...common,
+            outcome: teardownOutcome(proof.liveness), reason: proof.reason, forced: false,
+          }))
+        } else {
+          const liveness = store.probeEvidence(marker?.evidence)
+          rows.push(row(role, {
+            ...common,
+            outcome: teardownOutcome(liveness), reason: 'no-kill-target', forced: false,
+          }))
+        }
+      } catch (err) {
+        rows.push(row(role, {
+          session_id: seat?.sessionId ?? null,
+          pgid: seat?.pid ?? null,
+          reservation_id: seat?.handle?.reservation_id ?? null,
+          why: String(err?.message ?? err),
+        }))
+      }
+    }
+    return rows
+  }
   function close(role) {
     const targets = role ? [seats.get(role)].filter(Boolean) : [...seats.values()]
     for (const seat of targets) {
@@ -499,5 +625,5 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       seats.delete(seat.role)
     }
   }
-  return { assign, wait, steer, abort, entries, retire, close }
+  return { assign, wait, steer, abort, entries, retire, close, teardown }
 }

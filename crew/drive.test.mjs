@@ -13,7 +13,7 @@ import {
   validateScopeEntries, scopeMatcher, protectedHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
-  validateAcceptDecision, acceptContractLines,
+  validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
   MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines,
@@ -361,7 +361,7 @@ test('validateAcceptDecision collects each typed residual error without throwing
 
 test('validateAcceptDecision accepts empty findings with an empty decision', () => {
   assert.deepEqual(validateAcceptDecision({ findings: [], residuals: [], refuted: [] }), {
-    ok: true, residuals: [], refuted: [], unverified: [],
+    ok: true, residuals: [], refuted: [], unverified: [], refuted_must_fix: [],
   })
 })
 
@@ -375,6 +375,8 @@ test('acceptContractLines lists findings and the typed residual/refutation instr
   assert.ok(text.includes('- RV1-1 (must-fix) a.mjs:1 — close this'))
   assert.match(text, /residuals/)
   assert.match(text, /refuted/)
+  assert.ok(lines.some((line) => /Refuting a must-fix[\s\S]*escalates to a human every time/i.test(line)))
+  assert.ok(lines.some((line) => /refuted should-fix still accepts/i.test(line)))
   for (const finding of findings) assert.equal(text.split(finding.id).length - 1, 1)
   assert.deepEqual(acceptContractLines(null), [])
 })
@@ -1217,14 +1219,30 @@ const ACCEPT_FINDINGS = [
   { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'load-bearing defect' },
   { id: 'RV1-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'cosmetic follow-up' },
 ]
+const ACCEPT_FINDINGS_SOFT = [
+  { id: 'RV1-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'cosmetic follow-up' },
+]
+const MUST_FIX_REFUTATION_FINDINGS = [
+  { id: 'RV2-1', severity: 'must-fix', location: 'src/panel.svelte:41', summary: 'duplicate key in a keyed each' },
+]
+const REFUTATION_CLAIM = 'the reviewer is wrong: row.reason is unique within a group, so the keyed each cannot collide at render'
+const REFUTATION_CONVERGE_PLAN = () => planEnv({
+  details: { ...planEnv().details, gate_cmd: 'gate-cmd', commit_subject: 'feat: converge' },
+})
+const REFUTATION_CONVERGE_RUNS = {
+  'gate-cmd:1': { ok: false, output: `baseline red\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":3,"errored":0}` },
+  'gate-cmd': { ok: true, output: `all checks passed\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+  'lane-cmd': { ok: true, output: '' },
+  'suite-cmd': { ok: true, output: '' },
+}
 
-function exhaustionAcceptIo(details = {}, options = {}) {
+function exhaustionAcceptIo(details = {}, options = {}, findings = ACCEPT_FINDINGS, plan = planEnv()) {
   return fakeIo({
     envelopes: {
-      'planner:1': planEnv(),
+      'planner:1': plan,
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
-      'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS),
-      'reviewer:2': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'reviewer:1': reviewEnv('changes-needed', findings),
+      'reviewer:2': reviewEnv('changes-needed', findings),
       'lead:1': leadEnv('accept', 'because these are bounded residuals', details),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -1233,15 +1251,118 @@ function exhaustionAcceptIo(details = {}, options = {}) {
   })
 }
 
-test('valid typed accept at review exhaustion commits with residuals', () => {
+test('valid typed accept at review exhaustion commits with a should-fix refutation', () => {
   const io = exhaustionAcceptIo({
-    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
-    refuted: [{ id: 'RV1-1', evidence: 'the reviewer mistook a test fixture for runtime code' }],
-  })
+    residuals: [],
+    refuted: [{ id: 'RV1-2', evidence: 'the reviewer mistook a test fixture for runtime code' }],
+  }, {}, ACCEPT_FINDINGS_SOFT)
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.match(res.details.accepted_via, /residuals/)
   assert.equal(io.calls.commits.length, 1)
+})
+
+test('the viz-intake incident replays as an escalation', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV2-1', evidence: REFUTATION_CLAIM }],
+  }, { gh: true }, MUST_FIX_REFUTATION_FINDINGS)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'refuted-must-fix')
+  assert.match(res.details.escalation.why, /RV2-1/)
+  assert.match(res.details.escalation.why, /row\.reason is unique within a group/)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('the build-exhaustion must-fix refusal bypasses convergence', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV2-1', evidence: REFUTATION_CLAIM }],
+  }, { gh: true, runs: REFUTATION_CONVERGE_RUNS }, MUST_FIX_REFUTATION_FINDINGS, REFUTATION_CONVERGE_PLAN())
+  const res = driveTask({ ...CTX, limits: { build_rounds: 1, review_rounds: 1 } }, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'refuted-must-fix')
+  assert.match(res.details.escalation.why, /RV2-1/)
+  assert.match(res.details.escalation.why, /row\.reason is unique within a group/)
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('the refused decision is recorded valid, not malformed', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV2-1', evidence: REFUTATION_CLAIM }],
+  }, {}, MUST_FIX_REFUTATION_FINDINGS)
+  const res = driveTask(CTX, io)
+  const record = res.details.accept_decision
+  assert.deepEqual(record.errors, [])
+  assert.equal(record.outcome, 'escalated')
+  assert.deepEqual(record.refuted_must_fix, ['RV2-1'])
+  assert.equal(record.refuted[0].evidence, REFUTATION_CLAIM)
+})
+
+test('refutation evidence is bounded', () => {
+  const findings = [{ id: 'RV2-1', severity: 'should-fix' }]
+  const long = `${'x'.repeat(REFUTATION_EVIDENCE_MAX)}TAIL`
+  const bounded = validateAcceptDecision({
+    findings, residuals: [], refuted: [{ id: 'RV2-1', evidence: long }],
+  })
+  assert.equal(bounded.refuted[0].evidence.length, REFUTATION_EVIDENCE_MAX)
+  assert.equal(bounded.refuted[0].evidence.endsWith('…'), true)
+  const short = validateAcceptDecision({
+    findings, residuals: [], refuted: [{ id: 'RV2-1', evidence: '  a short claim  ' }],
+  })
+  assert.equal(short.refuted[0].evidence, 'a short claim')
+})
+
+test('a refuted should-fix still accepts', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV1-2', evidence: 'the reviewer mistook a test fixture for runtime code' }],
+  }, {}, ACCEPT_FINDINGS_SOFT)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('accepted_via states what the record contains', () => {
+  const shouldFixIo = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+  }, {}, ACCEPT_FINDINGS_SOFT)
+  const shouldFix = driveTask(CTX, shouldFixIo)
+  assert.match(shouldFix.details.accepted_via, /0 residuals and 1 refutation/)
+
+  const mixedFindings = [
+    { id: 'RV2-1', severity: 'should-fix', location: 'a.mjs:1', summary: 'first' },
+    { id: 'RV2-2', severity: 'should-fix', location: 'b.mjs:2', summary: 'second' },
+  ]
+  const mixedIo = exhaustionAcceptIo({
+    residuals: [{ id: 'RV2-1', type: 'cosmetic' }],
+    refuted: [{ id: 'RV2-2', evidence: 'not real' }],
+  }, {}, mixedFindings)
+  const mixed = driveTask(CTX, mixedIo)
+  assert.match(mixed.details.accepted_via, /1 residual and 1 refutation/)
+
+  const buildIo = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+  }, {}, ACCEPT_FINDINGS_SOFT)
+  const build = driveTask({ ...CTX, limits: { build_rounds: 1, review_rounds: 1 } }, buildIo)
+  assert.match(build.details.accepted_via, /\(build rounds exhausted\)$/)
+})
+
+test('the converge seam does not swallow a refuted must-fix', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV2-1', evidence: REFUTATION_CLAIM }],
+  }, { gh: true, runs: REFUTATION_CONVERGE_RUNS }, MUST_FIX_REFUTATION_FINDINGS, REFUTATION_CONVERGE_PLAN())
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'refuted-must-fix')
+  assert.equal(io.calls.gh.length, 0)
+  assert.equal(io.calls.commits.length, 0)
 })
 
 test('must-fix typed cosmetic accept fails closed to review escalation', () => {
@@ -1267,7 +1388,7 @@ test('correctness-unverified residual fails closed to review escalation', () => 
 })
 
 test('omitted finding id fails closed to review escalation', () => {
-  const io = exhaustionAcceptIo({ refuted: [{ id: 'RV1-1', evidence: 'not real' }] })
+  const io = exhaustionAcceptIo({ refuted: [{ id: 'RV1-1', evidence: '   ' }] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'review')
@@ -1279,7 +1400,7 @@ test('duplicate finding id fails closed to review escalation', () => {
     residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
     refuted: [
       { id: 'RV1-2', evidence: 'not real' },
-      { id: 'RV1-1', evidence: 'not real' },
+      { id: 'RV1-1', evidence: '   ' },
     ],
   })
   const res = driveTask(CTX, io)
@@ -1294,7 +1415,7 @@ test('unknown finding id fails closed to review escalation', () => {
       { id: 'RV1-2', type: 'cosmetic' },
       { id: 'RV1-9', type: 'cosmetic' },
     ],
-    refuted: [{ id: 'RV1-1', evidence: 'not real' }],
+    refuted: [{ id: 'RV1-1', evidence: '   ' }],
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
@@ -1346,9 +1467,9 @@ test('exhaustion accept brief lists every finding and the typed fields', () => {
 
 test('accept decision records accepted and refused outcomes in the journal and emit stream', () => {
   const acceptedIo = exhaustionAcceptIo({
-    residuals: [{ id: 'RV1-2', type: 'cosmetic' }],
-    refuted: [{ id: 'RV1-1', evidence: 'not real' }],
-  }, { emit: true })
+    residuals: [],
+    refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+  }, { emit: true }, ACCEPT_FINDINGS_SOFT)
   driveTask(CTX, acceptedIo)
   const acceptedLog = acceptedIo.calls.logs.find((line) => line.accept_decision)?.accept_decision
   assert.equal(acceptedLog.outcome, 'accepted')

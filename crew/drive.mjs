@@ -428,6 +428,11 @@ export function reviewFindings(details) {
 
 export const MAX_QUESTIONS = 10
 
+// A refutation's evidence is lead PROSE on its way into a durable record, so
+// it is bounded like every other prose field this system persists: 500 chars,
+// the ledger's own bound for note/detail/reason (scripts/factory/ledger.mjs:1266).
+export const REFUTATION_EVIDENCE_MAX = 500
+
 const isArray = (value) => {
   try { return Array.isArray(value) } catch { return false }
 }
@@ -731,10 +736,11 @@ export function validateAcceptDecision(input = {}) {
     const isObject = entry !== null && typeof entry === 'object' && !Array.isArray(entry)
     const id = isObject && typeof entry.id === 'string' && entry.id.trim() !== '' ? entry.id : null
     const evidence = isObject ? entry.evidence : undefined
-    const evidenceValid = typeof evidence === 'string' && evidence.trim().length > 0
+    const text = typeof evidence === 'string' ? evidence.trim() : ''
+    const evidenceValid = text.length > 0
     if (id === null) error(null, 'missing id')
     if (!evidenceValid) error(id, 'empty refutation evidence')
-    return { id, evidenceValid }
+    return { id, evidenceValid, evidence: text }
   })
 
   const claims = [...residualClaims, ...refutedClaims]
@@ -760,17 +766,28 @@ export function validateAcceptDecision(input = {}) {
   const residualsOut = residualClaims
     .filter(({ id, type }) => id !== null && findingById.has(id) && RESIDUAL_TYPES.includes(type))
     .map(({ id, type }) => ({ id, type, severity: findingById.get(id).severity }))
+  const bounded = (text) => text.length > REFUTATION_EVIDENCE_MAX
+    ? `${text.slice(0, REFUTATION_EVIDENCE_MAX - 1)}…`
+    : text
   const refutedOut = refutedClaims
     .filter(({ id, evidenceValid }) => id !== null && findingById.has(id) && evidenceValid)
-    .map(({ id }) => ({ id }))
+    .map(({ id, evidence }) => ({ id, severity: findingById.get(id).severity, evidence: bounded(evidence) }))
   const unverified = residualsOut
     .filter((residual) => residual.type === 'correctness-unverified')
     .map((residual) => residual.id)
+  // Code can check that evidence EXISTS; it can never check that the claim is
+  // TRUE. An unverifiable claim about a must-fix is the class this project
+  // already fails closed on (capability_unknown, breaker-unmeasurable,
+  // bound-unverifiable, an unratified profile field, #52 intake eligibility),
+  // so this is surfaced as a FACT, not an error: the decision is well-formed,
+  // and it is the caller that declines to honour it (see settleAccept).
+  const refuted_must_fix = refutedOut.filter((entry) => entry.severity === 'must-fix').map((entry) => entry.id)
   const result = {
     ok: errors.length === 0,
     residuals: residualsOut,
     refuted: refutedOut,
     unverified,
+    refuted_must_fix,
   }
   if (errors.length > 0) result.errors = errors
   return result
@@ -787,8 +804,23 @@ export function acceptContractLines(findings) {
   lines.push(
     'For an accept, name every listed finding exactly once across details.residuals: [{id, type}] (type must be "cosmetic" or "correctness-unverified") or details.refuted: [{id, evidence}] with non-empty evidence.',
     'A must-fix finding may not be typed cosmetic. A correctness-unverified residual is legitimate but asks a human and is refused by code into escalation.',
+    'Refuting a must-fix is recorded WITH your evidence and then escalates to a human every time: code can check that evidence exists, never that it is true. It is not an accept route — refute a must-fix only when you want a person to read the argument. A refuted should-fix still accepts.',
   )
   return lines
+}
+
+// accepted_via DESCRIBES THE RECORD. A label that contradicts the record is
+// worse than no label: the old hardcoded accepted-via sentence announced
+// residuals for a decision that carried none, and nearly got this defect filed
+// as "residuals were not recorded".
+export function acceptedViaLabel(record) {
+  const source = record && typeof record === 'object' ? record : {}
+  const n = Array.isArray(source.residuals) ? source.residuals.length : 0
+  const m = Array.isArray(source.refuted) ? source.refuted.length : 0
+  const phase = source.where === 'review-exhausted' ? 'review rounds exhausted'
+    : source.where === 'build-exhausted' ? 'build rounds exhausted'
+      : source.where
+  return `lead accepted with ${n} residual${n === 1 ? '' : 's'} and ${m} refutation${m === 1 ? '' : 's'} (${phase})`
 }
 
 // An entry ending in '/' is a DIRECTORY PREFIX; anything else is a literal
@@ -1289,13 +1321,16 @@ export function driveTask(ctx, io) {
   function settleAccept(c, where) {
     const findings = S.acceptFindings
     const check = findings === null
-      ? { ok: true, residuals: [], refuted: [], unverified: [] }
+      ? { ok: true, residuals: [], refuted: [], unverified: [], refuted_must_fix: [] }
       : validateAcceptDecision({ findings, residuals: c.residuals, refuted: c.refuted })
     const errors = check.errors || []
-    const outcome = check.ok && check.unverified.length === 0 ? 'accepted' : 'escalated'
+    const refusedMustFix = check.refuted_must_fix || []
+    const outcome = check.ok && check.unverified.length === 0 && refusedMustFix.length === 0 ? 'accepted' : 'escalated'
     const errorWhy = errors.map(({ id, why }) => `${id ?? 'decision'} ${why}`)
     const unverifiedWhy = check.unverified.map((id) => `${id} is correctness-unverified`)
-    const whyParts = [...errorWhy, ...unverifiedWhy]
+    const evidenceOf = (id) => check.refuted.find((entry) => entry.id === id)?.evidence ?? ''
+    const refutedWhy = refusedMustFix.map((id) => `${id} is a must-fix the lead refuted, claiming: "${evidenceOf(id)}"`)
+    const whyParts = [...errorWhy, ...unverifiedWhy, ...refutedWhy]
     const why = outcome === 'accepted' ? null
       : `${errors.length > 0 ? 'accept-with-residuals rejected' : 'accept-with-residuals escalated'}: ${whyParts.join('; ')}`
     const record = {
@@ -1305,11 +1340,12 @@ export function driveTask(ctx, io) {
       residuals: check.residuals,
       refuted: check.refuted,
       unverified: check.unverified,
+      refuted_must_fix: refusedMustFix,
       errors,
     }
     io.log({ at: io.now(), accept_decision: record })
     emit({ kind: 'accept-decision', ...record })
-    return { ok: outcome === 'accepted', why, record }
+    return { ok: outcome === 'accepted', why, record, refusedMustFix: refusedMustFix.length > 0 }
   }
 
   const acceptQuestion = (question) => {
@@ -2211,12 +2247,17 @@ export function driveTask(ctx, io) {
           continue build
         }
         const settledAccept = settleAccept(c, 'review-exhausted')
+        // A refuted must-fix is NOT a residual: convergeSettle would file it as one,
+        // commit the build and open a PR — the viz-intake outcome under another name.
+        // It fails closed to the human, and a distinct `where` keeps it out of the
+        // regrant path (crew/escalation-policy.mjs:174-181) without editing it.
+        if (settledAccept.refusedMustFix) return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
         if (!settledAccept.ok) {
           const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
           if (settled) return settled
           return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
         }
-        accepted = 'lead accepted with residuals (review rounds exhausted)'
+        accepted = acceptedViaLabel(settledAccept.record)
         break build
       }
       stage(`review:r${reviews + 1}`)
@@ -2256,12 +2297,17 @@ export function driveTask(ctx, io) {
             continue build
           }
           const settledAccept = settleAccept(c, 'build-exhausted')
+          // A refuted must-fix is NOT a residual: convergeSettle would file it as one,
+          // commit the build and open a PR — the viz-intake outcome under another name.
+          // It fails closed to the human, and a distinct `where` keeps it out of the
+          // regrant path (crew/escalation-policy.mjs:174-181) without editing it.
+          if (settledAccept.refusedMustFix) return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
           if (!settledAccept.ok) {
             const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
             if (settled) return settled
             return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
           }
-          accepted = 'lead accepted with residuals (build rounds exhausted)'
+          accepted = acceptedViaLabel(settledAccept.record)
           break build
         }
         const b = art(`build-bounce-r${round}.md`)

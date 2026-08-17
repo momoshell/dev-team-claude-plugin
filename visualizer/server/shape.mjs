@@ -3,6 +3,32 @@ const lanes = new Map()
 const PALETTE_SIZE = 8
 export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
+export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
+export const INTAKE_REFUSAL_REASONS = Object.freeze([
+  'stop-switch', 'window-cap', 'rate-limit-floor',
+  'priority-unknown', 'intake-block-missing', 'intake-block-malformed',
+  'brief-uncompilable', 'protected-path', 'tier-judge', 'not-first-in-order',
+])
+export const INTAKE_REFUSAL_GROUPS = Object.freeze([
+  Object.freeze({
+    group: 'authoring',
+    title: 'an issue needs a human to author or fix it',
+    asserts: 'a human editing the issue unblocks this',
+    reasons: Object.freeze(['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown']),
+  }),
+  Object.freeze({
+    group: 'guardrail',
+    title: 'the loop refused on purpose; lifting it is a human decision',
+    asserts: 'nothing is broken — something is being protected, and a stop-switch park means a human halted it deliberately',
+    reasons: Object.freeze(['stop-switch', 'window-cap', 'rate-limit-floor', 'protected-path', 'tier-judge']),
+  }),
+  Object.freeze({
+    group: 'ordering',
+    title: 'nothing is wrong; this candidate was simply not first',
+    asserts: 'no action',
+    reasons: Object.freeze(['not-first-in-order']),
+  }),
+])
 
 export function laneFor(role) {
   const key = String(role || 'unknown')
@@ -227,6 +253,178 @@ export function defaultRunSetWindow(now = Date.now()) {
     since: new Date(now - RUN_SET_WINDOW_MS).toISOString(),
     until: null,
     label: 'last 24 hours',
+  }
+}
+
+export function defaultIntakeWindow(now = Date.now()) {
+  return {
+    since: new Date(now - INTAKE_WINDOW_MS).toISOString(),
+    until: null,
+    label: 'last 24 hours',
+  }
+}
+
+function intakeNumber(value) {
+  const number = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(number) ? number : 0
+}
+
+function intakeWindowTimestamp(rows, key) {
+  let value = null
+  for (const row of rows) value = laterTimestamp(value, row?.[key] ?? null)
+  return value
+}
+
+function intakeReasonRow(row) {
+  return {
+    count: intakeNumber(row?.count),
+    first_at: row?.first_at ?? null,
+    last_at: row?.last_at ?? null,
+  }
+}
+
+export function shapeIntake({ sweeps, refusals, refusals_absent, picks, ever, absent, since, until, label } = {}) {
+  const window = { since: since ?? null, until: until ?? null, label: label ?? null }
+  const suppliedAbsent = typeof absent === 'string' && absent.length > 0 ? absent : null
+  const absentReason = suppliedAbsent || (sweeps == null ? 'intake_sweeps readout is unavailable' : null)
+  const sourceSweeps = absentReason ? [] : (Array.isArray(sweeps) ? sweeps : [])
+  const outcomes = sourceSweeps.map((row) => {
+    const reason = row?.reason ?? null
+    return {
+      outcome: row?.outcome ?? null,
+      reason,
+      recognised: INTAKE_REFUSAL_REASONS.includes(reason),
+      count: intakeNumber(row?.count),
+      first_at: row?.first_at ?? null,
+      last_at: row?.last_at ?? null,
+    }
+  })
+
+  let swept = 0, picked = 0, parked = 0, none = 0
+  for (const row of outcomes) {
+    swept += row.count
+    if (row.outcome === 'picked') picked += row.count
+    else if (row.outcome === 'parked') parked += row.count
+    else if (row.outcome === 'none') none += row.count
+  }
+  const lastSweepInWindow = absentReason ? null : intakeWindowTimestamp(sourceSweeps, 'last_at')
+  const everCount = absentReason ? null : (ever && Number.isFinite(Number(ever.sweeps)) ? Number(ever.sweeps) : swept)
+  const firstSweepAt = absentReason ? null : (ever?.first_at ?? intakeWindowTimestamp(sourceSweeps, 'first_at'))
+  const lastSweepAt = absentReason ? null : (ever?.last_at ?? lastSweepInWindow)
+  const measuredCounts = absentReason ? { swept: null, picked: null, parked: null, none: null } : { swept, picked, parked, none }
+  const windowLabel = window.label || 'the selected window'
+  const countSummary = `the loop swept ${swept} time${swept === 1 ? '' : 's'} in this window: ${picked} picked, ${parked} parked, ${none} found nothing eligible`
+  let state = 'unmeasured'
+  let why = 'the intake tables predate this ledger mirror — whether the loop is running is not measured here, which is not the same as a loop that is idle.'
+  if (!absentReason) {
+    if (everCount === 0) {
+      state = 'never-swept'
+      why = 'no sweep has ever been recorded — the loop has not run. This is not the same as a loop that swept and found nothing.'
+    } else if (swept === 0) {
+      state = 'not-swept-in-window'
+      why = `the loop last swept at ${lastSweepAt || 'an unknown time'}, before this window (${windowLabel}) — nothing in this window is not nothing ever.`
+    } else if (parked > 0) {
+      state = 'parked'
+      why = `${countSummary} — a park is holding the queue.`
+    } else if (picked > 0) {
+      state = 'picking'
+      why = `${countSummary} — the loop is picking work.`
+    } else {
+      state = 'swept-idle'
+      why = `${countSummary} — it is running; the queue is empty.`
+    }
+  }
+
+  const refusalAbsent = absentReason || (typeof refusals_absent === 'string' && refusals_absent.length > 0 ? refusals_absent : (refusals == null ? 'intake_refusals readout is unavailable' : null))
+  const refusalMeasured = refusalAbsent == null && Array.isArray(refusals)
+  const knownRefusals = new Map()
+  const unrecognised = []
+  const addKnownRefusal = (reason, row, fromSweep = false) => {
+    const current = knownRefusals.get(reason)
+    if (!current) {
+      knownRefusals.set(reason, { ...intakeReasonRow(row), from_sweep: fromSweep })
+      return
+    }
+    current.count += intakeNumber(row?.count)
+    current.first_at = earlierTimestamp(current.first_at, row?.first_at ?? null)
+    current.last_at = laterTimestamp(current.last_at, row?.last_at ?? null)
+    current.from_sweep ||= fromSweep
+  }
+  const addUnrecognised = (row) => {
+    unrecognised.push({
+      reason: row?.reason ?? null,
+      count: intakeNumber(row?.count),
+      first_at: row?.first_at ?? null,
+      last_at: row?.last_at ?? null,
+    })
+  }
+  // A parked sweep carries the loop's refusal reason even when no per-issue
+  // intake_refusals row exists. Keep this source separate for unrecognised
+  // values, while folding recognised reasons into their canonical group.
+  if (!absentReason) {
+    for (const row of sourceSweeps) {
+      const reason = row?.reason ?? null
+      if (reason == null) continue
+      if (INTAKE_REFUSAL_REASONS.includes(reason)) addKnownRefusal(reason, row, true)
+      else addUnrecognised(row)
+    }
+  }
+  if (refusalMeasured) {
+    for (const row of refusals) {
+      const reason = row?.reason ?? null
+      if (INTAKE_REFUSAL_REASONS.includes(reason)) addKnownRefusal(reason, row)
+      else addUnrecognised(row)
+    }
+  }
+
+  const groups = INTAKE_REFUSAL_GROUPS.map((group) => ({
+    group: group.group,
+    title: group.title,
+    asserts: group.asserts,
+    reasons: group.reasons.map((reason) => {
+      const row = knownRefusals.get(reason)
+      const sourceMeasured = refusalMeasured || row?.from_sweep === true
+      const count = sourceMeasured ? (row?.count ?? 0) : null
+      return {
+        reason,
+        count,
+        state: sourceMeasured ? (count === 0 ? 'not-in-window' : 'refused') : 'unmeasured',
+        first_at: sourceMeasured ? (row?.first_at ?? null) : null,
+        last_at: sourceMeasured ? (row?.last_at ?? null) : null,
+      }
+    }),
+  }))
+
+  const shapedPicks = absentReason ? [] : (Array.isArray(picks) ? picks.map((row) => ({
+    issue: row?.picked_issue ?? null,
+    board: row?.board_owner == null && row?.board_project == null
+      ? null
+      : { owner: row?.board_owner ?? null, project: row?.board_project ?? null },
+    at: row?.created_at ?? null,
+  })) : [])
+  return {
+    window,
+    absent: absentReason,
+    loop: {
+      state,
+      why,
+      ...measuredCounts,
+      first_sweep_at: firstSweepAt,
+      last_sweep_at: lastSweepAt,
+      last_sweep_in_window_at: lastSweepInWindow,
+    },
+    outcomes,
+    picks: shapedPicks,
+    refusals: {
+      measured: refusalMeasured,
+      absent: refusalAbsent,
+      groups,
+      unrecognised,
+    },
+    unmeasured: {
+      window: 'the window is a view, not the whole history — it cannot say whether the loop swept outside the selected window',
+    },
+    readonly: true,
   }
 }
 

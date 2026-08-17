@@ -15,5 +15,6 @@ export const getReturns = (repoSlug, taskSlug, adwId) => request(`/api/returns?$
 export const getRoster = () => request('/api/roster')
 export const getCellHealth = (params = {}) => request(`/api/cell-health?${new URLSearchParams(params)}`)
 export const getRunSet = (params = {}) => request(`/api/run-set?${new URLSearchParams(params)}`)
+export const getIntake = (params = {}) => request(`/api/intake?${new URLSearchParams(params)}`)
 export const postTriage = (adwId, reviewed) => request('/api/triage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adw_id: adwId, reviewed }) })
 export const proposeRosterEdit = (tier, role, cell) => request('/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier, role, cell }) })

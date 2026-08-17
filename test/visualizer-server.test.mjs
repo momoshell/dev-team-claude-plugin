@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { spawn, spawn as spawnProcess } from 'node:child_process'
 import { openLedger, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
+import { shapeIntake } from '../visualizer/server/shape.mjs'
 
 const require = createRequire(import.meta.url)
 function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
@@ -575,6 +576,122 @@ test('optional-column probe latches after both columns land', { skip: SKIP }, as
     const p3 = (await json(base, '/api/health')).json.probe
     const p4 = (await json(base, '/api/health')).json.probe
     assert.equal(p3.latched, true); assert.equal(p4.probes, p3.probes)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the feed reads sweeps, refusals and the un-windowed sweep probe', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-intake-feed-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const ledger = openLedger({ dbPath: ledgerDb })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'none', considered: 1, pages: 1, created_at: '2023-12-31T00:00:00.000Z' })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'none', considered: 2, pages: 1, created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'picked', picked_issue: 7, considered: 2, pages: 1, created_at: '2024-01-01T01:00:00.000Z' })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'parked', reason: 'stop-switch', considered: 2, pages: 1, created_at: '2024-01-01T02:00:00.000Z' })
+  ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 1, issue: 8, reason: 'intake-block-missing', created_at: '2024-01-01T00:30:00.000Z' })
+  ledger.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.intake({ since: '2024-01-01T00:00:00.000Z', until: null })
+    assert.equal(result.absent, null)
+    assert.equal(result.sweeps.length, 3)
+    assert.equal(result.sweeps.find((row) => row.outcome === 'none').count, 1)
+    assert.equal(result.sweeps.find((row) => row.outcome === 'parked').reason, 'stop-switch')
+    assert.equal(result.refusals[0].reason, 'intake-block-missing')
+    assert.equal(result.ever.sweeps, 4)
+    assert.equal(result.picks[0].picked_issue, 7)
+    const view = shapeIntake({ ...result, since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' })
+    assert.equal(view.refusals.groups[1].reasons.find((row) => row.reason === 'stop-switch').count, 1)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a mirror without intake tables is unanswerable, not empty', { skip: SKIP }, () => {
+  const makeLedger = (prefix) => {
+    const dir = mkdtempSync(join(tmpdir(), prefix)), ledgerDb = join(dir, 'ledger.db')
+    const ledger = openLedger({ dbPath: ledgerDb })
+    ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'none', considered: 1, pages: 1, created_at: '2024-01-01T00:00:00.000Z' })
+    ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 1, issue: 8, reason: 'stop-switch', created_at: '2024-01-01T00:00:01.000Z' })
+    ledger.close()
+    return { dir, ledgerDb }
+  }
+  const absentDir = makeLedger('visualizer-intake-absent-')
+  const absentDb = new (require('node:sqlite').DatabaseSync)(absentDir.ledgerDb)
+  absentDb.exec('DROP TABLE intake_sweeps')
+  absentDb.close()
+  const absentFeed = createLedgerFeed({ ledgerDb: absentDir.ledgerDb, triageDb: join(absentDir.dir, 'visualizer.db') })
+  try {
+    const result = absentFeed.intake({ since: new Date(0).toISOString() })
+    assert.equal(result.sweeps, null)
+    assert.ok(result.absent)
+    assert.doesNotMatch(JSON.stringify(result), /"swept":\s*0/)
+  } finally {
+    absentFeed.close()
+    rmSync(absentDir.dir, { recursive: true, force: true })
+  }
+  const refusalDir = makeLedger('visualizer-intake-refusal-absent-')
+  const refusalDb = new (require('node:sqlite').DatabaseSync)(refusalDir.ledgerDb)
+  refusalDb.exec('DROP TABLE intake_refusals')
+  refusalDb.close()
+  const refusalFeed = createLedgerFeed({ ledgerDb: refusalDir.ledgerDb, triageDb: join(refusalDir.dir, 'visualizer.db') })
+  try {
+    const result = refusalFeed.intake({ since: new Date(0).toISOString() })
+    assert.ok(Array.isArray(result.sweeps))
+    assert.equal(result.refusals, null)
+    assert.ok(result.refusals_absent)
+  } finally {
+    refusalFeed.close()
+    rmSync(refusalDir.dir, { recursive: true, force: true })
+  }
+})
+
+test('an additively added intake column does not break the view', { skip: SKIP }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-intake-column-'))
+  const ledgerDb = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath: ledgerDb })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'none', considered: 1, pages: 1, created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 1, issue: 8, reason: 'stop-switch', created_at: '2024-01-01T00:00:01.000Z' })
+  ledger.close()
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('ALTER TABLE intake_sweeps ADD COLUMN future_note TEXT')
+  writable.exec('ALTER TABLE intake_refusals ADD COLUMN future_note TEXT')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb: join(dir, 'visualizer.db') })
+  try {
+    const result = feed.intake({ since: new Date(0).toISOString() })
+    assert.equal(result.absent, null)
+    assert.ok(result.sweeps.length)
+    assert.ok(result.refusals.length)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/intake serves the loop read-only', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-intake-http-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const ledger = openLedger({ dbPath: ledgerDb })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'none', considered: 1, pages: 1, created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.close()
+  const before = digest(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const response = await json(base, '/api/intake')
+    assert.equal(response.status, 200)
+    assert.ok(response.json.loop.state)
+    assert.ok(response.json.window.label)
+    for (const method of ['POST', 'PUT', 'DELETE']) assert.equal((await json(base, '/api/intake', { method })).status, 405)
+    assert.equal((await json(base, '/api/intake?since=not-a-date')).status, 400)
+    const since = encodeURIComponent('2024-01-02T00:00:00.000Z'), until = encodeURIComponent('2024-01-01T00:00:00.000Z')
+    assert.equal((await json(base, `/api/intake?since=${since}&until=${until}`)).status, 400)
+    await stopServer(child); child = null
+    assert.equal(digest(ledgerDb), before)
   } finally {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })

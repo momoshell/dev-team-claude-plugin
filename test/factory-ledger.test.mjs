@@ -1258,32 +1258,58 @@ test('installFinalizer is idempotent: a second call installs nothing and returns
 test('AC-11: on SIGTERM the finalizer lands the session as fail, closes running processes rows, and does not swallow the signal', { skip: SKIP, timeout: 15000 }, async () => {
   const dir = nextDir()
   const dbPath = join(dir, 'ledger.db')
+  const readyPath = join(dir, 'finalizer-installed')
   const program = `
     const { openLedger, isoMs } = await import(${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)});
+    const { writeFileSync, renameSync } = await import('node:fs');
     const ledger = openLedger({ dbPath: ${JSON.stringify(dbPath)} });
     ledger.startSession({ adw_id: 'sig-1', repo_slug: 'r', task_slug: 't' });
     ledger.startProcess({ adw_id: 'sig-1', dispatch_id: 'd', pid: process.pid, command: 'child' });
     ledger.installFinalizer({ adw_id: 'sig-1' });
+    // Published only AFTER the handler is installed, and atomically, so the
+    // reader can never observe a half-written marker as readiness.
+    writeFileSync(${JSON.stringify(readyPath)} + '.tmp', 'ok');
+    renameSync(${JSON.stringify(readyPath)} + '.tmp', ${JSON.stringify(readyPath)});
     setInterval(() => {}, 1000);
   `
   const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  // Wait for the child to have COMMITTED its work rather than sleeping a fixed
-  // 400 ms and hoping. Under a loaded runner the child had not reached
-  // startSession before the SIGTERM, so no row existed, getSession returned
-  // null, and reading `.status` off it threw — a flake that surfaced only when
-  // three PRs' CI ran concurrently, reproduced here by shortening the sleep.
+  // Gate on the FINALIZER being installed, not on the session row existing.
+  //
+  // The row is committed by startSession, two statements before
+  // installFinalizer. Waiting on the row therefore only proves the child got
+  // as far as startSession — so on a slow runner SIGTERM could still land in
+  // the gap before the handler existed, the child would die on the DEFAULT
+  // SIGTERM disposition (which still satisfies the `signal === 'SIGTERM'`
+  // assertion below, so the failure surfaced two asserts later), and the
+  // session would stay 'running'. That is the CI failure this closes:
+  // 'running' !== 'fail'.
+  //
+  // An earlier fix replaced a fixed 400 ms sleep with a poll for the row; that
+  // closed the case where NO row existed and getSession returned null, but it
+  // moved the race one statement later rather than removing it. Gating on the
+  // precondition the test actually needs — a handler that can answer the
+  // signal — is what removes it. Verified by widening the
+  // startSession→installFinalizer window, which reproduces the exact CI
+  // failure before this change and cannot after it.
+  //
   // ONE reader is opened and reused: reopening per poll starves the sibling
   // SIGTERM test of the database lock.
   {
-    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
     let committed = false
     try {
       const deadline = Date.now() + 10000
       while (Date.now() < deadline) {
-        try { committed = probe.getSession('sig-1') != null } catch { committed = false }
-        if (committed) break
+        if (existsSync(readyPath)) { committed = true; break }
         await new Promise((resolve) => setTimeout(resolve, 25))
       }
+    } finally { /* the marker is a plain file; there is nothing to close */ }
+    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      // The marker is written after startSession, so the row must be present
+      // by now; assert it rather than assume it.
+      committed = committed && (() => {
+        try { return probe.getSession('sig-1') != null } catch { return false }
+      })()
     } finally {
       try { probe.close?.() } catch { /* a probe that cannot close is not a test failure */ }
     }

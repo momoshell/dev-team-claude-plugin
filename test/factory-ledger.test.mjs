@@ -10,6 +10,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync,
+  readdirSync, statSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -25,6 +26,7 @@ import {
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
+  REQUEST_MAX_CHARS,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
 
@@ -787,6 +789,8 @@ test('a run with no usage, discrimination or findings reads as absent, not zero'
   assert.deepEqual(readout.review_outcomes, [])
   assert.deepEqual(readout.accept_decisions, [])
   assert.deepEqual(readout.absent, {
+    request: 'this run predates request recording (#b19) / was not dispatched by the intake loop; the request was never measured, and NULL is never an empty ask',
+    context_occupancy: 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md',
     usage: 'predates per-agent token measurement (#119) — not a measured zero',
     gate_discrimination: 'predates gate discrimination (#168)',
     review_outcomes: 'predates structured review outcomes (#169/#170)',
@@ -1077,6 +1081,53 @@ test('AC-9b: a nonce-prefix-bearing value under an ordinary (non-DEVTEAM) key is
   assert.ok(!dump.includes(MARKER_NONCE_ONLY), 'nonce-bearing marker leaked into the events table')
   const jsonlBytes = readFileSync(ledger._jsonlPath, 'utf8')
   assert.ok(!jsonlBytes.includes(MARKER_NONCE_ONLY), 'nonce-bearing marker leaked into the JSONL raw record')
+})
+
+test('recordSessionRequest redaction is a replayable no-op with no request provenance', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({ adw_id: 'request-redacted', repo_slug: 'r', task_slug: 't' })
+  const args = source.recordSessionRequest({
+    adw_id: 'request-redacted', request: MARKER_NONCE_ONLY, source: 'dispatch',
+  })
+  assert.deepEqual(args, {
+    adw_id: 'request-redacted', request: null, source: null, redacted: true,
+  })
+  assert.deepEqual({
+    request: source.getSession('request-redacted').request,
+    request_source: source.getSession('request-redacted').request_source,
+  }, { request: null, request_source: null })
+  const jsonlBytes = readFileSync(source._jsonlPath, 'utf8')
+  assert.ok(!jsonlBytes.includes(MARKER_NONCE_ONLY), 'redacted request leaked into JSONL')
+
+  const replayed = openTestLedger()
+  assert.doesNotThrow(() => replayJsonl(source._jsonlPath, replayed))
+  assert.deepEqual({
+    request: replayed.getSession('request-redacted').request,
+    request_source: replayed.getSession('request-redacted').request_source,
+  }, { request: null, request_source: null })
+  replayed.recordSessionRequest({
+    adw_id: 'request-redacted', request: 'read safely from brief', source: 'brief-file',
+  })
+  assert.deepEqual({
+    request: replayed.getSession('request-redacted').request,
+    request_source: replayed.getSession('request-redacted').request_source,
+  }, { request: 'read safely from brief', request_source: 'brief-file' })
+})
+
+test('recordSessionRequest redacted replay sanitizes a forged adw_id marker before JSONL append', { skip: SKIP }, () => {
+  const forgedJsonl = join(nextDir(), 'forged-request.jsonl')
+  writeFileSync(forgedJsonl, `${JSON.stringify({
+    v: 1,
+    kind: 'recordSessionRequest',
+    at: new Date().toISOString(),
+    args: { adw_id: MARKER_NONCE_ONLY, request: null, source: null, redacted: true },
+  })}\n`)
+
+  const replayed = openTestLedger()
+  assert.deepEqual(replayJsonl(forgedJsonl, replayed), { applied: 1, skipped: 0 })
+  const jsonlBytes = readFileSync(replayed._jsonlPath, 'utf8')
+  assert.ok(!jsonlBytes.includes(MARKER_NONCE_ONLY), 'forged redacted adw_id leaked into replay JSONL')
+  assert.match(jsonlBytes, /"adw_id":null/, 'replay must preserve the redacted no-op shape')
 })
 
 // --- S3: a marker-bearing INVALID value must never reach a refusal message
@@ -1963,4 +2014,162 @@ test('an older migration prefix upgrades additively with seat_teardowns', { skip
   assert.deepEqual(ledger.dumpTable('seat_teardowns').map((row) => Object.keys(row)), [])
   ledger.recordSeatTeardown({ adw_id: 'seat-prefix', role: 'builder', outcome: 'proven' })
   assert.equal(ledger.dumpTable('seat_teardowns').length, 1)
+})
+
+// ---------------------------------------------------------------------------
+// Shopfloor slice D: request provenance, honest absence, and retirement.
+// ---------------------------------------------------------------------------
+
+test('recordSessionRequest round-trips request and request_source on an existing session', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'request-roundtrip', repo_slug: 'r', task_slug: 't' })
+  const args = ledger.recordSessionRequest({
+    adw_id: 'request-roundtrip', request: '  Compile the dispatch headline  ', source: 'dispatch',
+  })
+  assert.deepEqual({ request: args.request, source: args.source }, {
+    request: 'Compile the dispatch headline', source: 'dispatch',
+  })
+  const row = ledger.getSession('request-roundtrip')
+  assert.deepEqual({ request: row.request, request_source: row.request_source }, {
+    request: 'Compile the dispatch headline', request_source: 'dispatch',
+  })
+})
+
+test('recordSessionRequest is first-write-wins for both text and source', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'request-first', repo_slug: 'r', task_slug: 't' })
+  ledger.recordSessionRequest({ adw_id: 'request-first', request: 'first ask', source: 'dispatch' })
+  ledger.recordSessionRequest({ adw_id: 'request-first', request: 'later backfill', source: 'brief-file' })
+  assert.deepEqual({ request: ledger.getSession('request-first').request, request_source: ledger.getSession('request-first').request_source }, {
+    request: 'first ask', request_source: 'dispatch',
+  })
+})
+
+test('recordSessionRequest never inserts a sessions row for an unknown adw_id', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'request-known', repo_slug: 'r', task_slug: 't' })
+  ledger.recordSessionRequest({ adw_id: 'request-unknown', request: 'not a run', source: 'dispatch' })
+  assert.equal(ledger.dumpTable('sessions').length, 1)
+  assert.equal(ledger.getSession('request-unknown'), null)
+})
+
+test('recordSessionRequest refuses blank/non-string requests and an unknown source enum', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'request-invalid', repo_slug: 'r', task_slug: 't' })
+  for (const request of ['', '   ', null, 42]) {
+    assert.throws(
+      () => ledger.recordSessionRequest({ adw_id: 'request-invalid', request, source: 'dispatch' }),
+      LedgerUsageError,
+    )
+  }
+  assert.throws(
+    () => ledger.recordSessionRequest({ adw_id: 'request-invalid', request: 'ask', source: 'operator' }),
+    LedgerUsageError,
+  )
+  assert.equal(ledger.getSession('request-invalid').request, null)
+})
+
+test('recordSessionRequest clamps long text with a visible truncation marker', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'request-long', repo_slug: 'r', task_slug: 't' })
+  const args = ledger.recordSessionRequest({
+    adw_id: 'request-long', request: `  ${'x'.repeat(REQUEST_MAX_CHARS + 100)}  `, source: 'dispatch',
+  })
+  assert.equal(args.request.length, REQUEST_MAX_CHARS)
+  assert.match(args.request, /…\[truncated\]$/)
+  assert.equal(ledger.getSession('request-long').request, args.request)
+})
+
+test('taskReadout marks an unrecorded request absent and drops the marker after recording', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'request-readout', repo_slug: 'r', task_slug: 't' })
+  const before = ledger.taskReadout('request-readout')
+  assert.equal(before.session.request, null)
+  assert.ok(before.absent.request)
+  ledger.recordSessionRequest({ adw_id: 'request-readout', request: 'recorded ask', source: 'dispatch' })
+  const after = ledger.taskReadout('request-readout')
+  assert.equal(after.session.request, 'recorded ask')
+  assert.equal(after.session.request_source, 'dispatch')
+  assert.equal(after.absent.request, undefined)
+})
+
+test('taskReadout marks context occupancy absent when no agent row measures context_tokens', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'occupancy-absent', repo_slug: 'r', task_slug: 't' })
+  ledger.startAgentSession({
+    adw_id: 'occupancy-absent', dispatch_id: 'd1', role: 'builder', model: 'm',
+    claude_session_id: 'cs1', transcript_path: '/tmp/t.jsonl',
+  })
+  const readout = ledger.taskReadout('occupancy-absent')
+  assert.ok(readout.absent.context_occupancy)
+})
+
+test('a recordSessionRequest JSONL line replays through the closed writer set', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({ adw_id: 'request-replay', repo_slug: 'r', task_slug: 't' })
+  source.recordSessionRequest({ adw_id: 'request-replay', request: 'replay this ask', source: 'dispatch' })
+  const target = openTestLedger()
+  assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 2, skipped: 0 })
+  assert.deepEqual({ request: target.getSession('request-replay').request, request_source: target.getSession('request-replay').request_source }, {
+    request: 'replay this ask', request_source: 'dispatch',
+  })
+})
+
+test('request CLI reads the ask section and refuses missing or blank briefs without writing', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'request-cli.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  ledger.startSession({ adw_id: 'request-cli', repo_slug: 'r', task_slug: 't' })
+  ledger.close()
+  const brief = join(dir, 'brief.md')
+  writeFileSync(brief, '# Task\n## The ask\n\nUse the compiled ask\n\n## Proposed tier\nbuild\n')
+  const ok = run(['request', 'request-cli', '--from-brief', brief], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(ok.status, 0, ok.stderr)
+  const after = openLedger({ dbPath, stderr: { write: () => {} } })
+  assert.deepEqual({ request: after.getSession('request-cli').request, request_source: after.getSession('request-cli').request_source }, {
+    request: 'Use the compiled ask', request_source: 'brief-file',
+  })
+  after.close()
+  const beforeLines = readFileSync(join(dir, 'ledger.jsonl'), 'utf8').split('\n').filter(Boolean).length
+  const cases = [
+    ['missing', join(dir, 'missing.md')],
+    ['no-heading', join(dir, 'no-heading.md')],
+    ['blank', join(dir, 'blank.md')],
+  ]
+  writeFileSync(cases[1][1], '# no ask\n')
+  writeFileSync(cases[2][1], '## The ask\n\n## Proposed tier\nbuild\n')
+  for (const [, path] of cases) {
+    const refused = run(['request', 'request-cli', '--from-brief', path], { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(refused.status, 2, path)
+  }
+  const finalLines = readFileSync(join(dir, 'ledger.jsonl'), 'utf8').split('\n').filter(Boolean).length
+  assert.equal(finalLines, beforeLines)
+})
+
+test('doctor reports the retired envelopes reason beside an empty row count', { skip: SKIP }, () => {
+  const dbPath = join(nextDir(), 'doctor-retired.db')
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.row_counts.envelopes, 0)
+  assert.ok(typeof payload.retired_tables.envelopes === 'string' && payload.retired_tables.envelopes.length >= 40)
+})
+
+test('recordEnvelope has no production caller; future wiring must update the retirement record', { skip: SKIP }, () => {
+  const offenders = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry)
+      const stat = statSync(full)
+      if (stat.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!/\.(mjs|js)$/.test(entry) || /\.test\.mjs$/.test(entry)) continue
+      if (full.endsWith('scripts/factory/ledger.mjs')) continue
+      if (/\brecordEnvelope\s*\(/.test(readFileSync(full, 'utf8'))) offenders.push(full)
+    }
+  }
+  for (const root of ['crew', 'scripts', 'visualizer']) walk(join(ROOT, root))
+  assert.deepEqual(offenders, [], 'update RETIRED_TABLES.envelopes and docs/ledger-queries.md when wiring recordEnvelope')
 })

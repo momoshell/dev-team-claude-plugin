@@ -137,6 +137,7 @@ function visibleRows(runs, envelopes, now, filters) {
       review: reviewCell(run),
       duration: durationCell(run),
       tokens: tokenCell(run),
+      cost: costCell(run),
       heartbeat: heartbeatCell(run, now),
     }
   })

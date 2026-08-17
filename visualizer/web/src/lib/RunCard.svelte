@@ -49,7 +49,7 @@
   async function triage() { await postTriage(run.adw_id, !run.triage.reviewed_at); run.triage.reviewed_at = run.triage.reviewed_at ? null : new Date().toISOString() }
 </script>
 <article class="card">
-  <header><div><strong>{run.goal || 'Untitled run'}</strong><small>{run.repo_slug || 'repository pending'}</small></div><span class={`status ${status.tone}`} title={status.why || undefined}>{status.word}</span></header>
+  <header><div><strong>{run.goal || 'Untitled run'}</strong><small>{run.repo_slug || 'repository pending'}</small></div><span class={`status ${status.tone}`} title={status.why || undefined}><span class="status-dot" aria-hidden="true"></span>{status.word}</span></header>
   <div class="meta"><span class:muted={!run.mode} title={run.pending.mode}>mode {run.mode || '—'}</span><span class:mono={true} class:dashed={duration.dashed} title={duration.title || undefined}>{duration.text}</span><span class:mono={true} class:dashed={tokens.dashed} title={tokens.title || undefined}>tokens {tokens.text}</span><span class:dashed={heartbeat.dashed} title={heartbeat.title || undefined}>{heartbeat.text}</span><PhaseDots phases={run.phases} laneSource={run.phase_lanes} /><GateChips {run} /><span>{run.engineer || 'engineer —'}</span></div>
   <div class="agents">{#each run.agents as agent (agent.dispatch_id)}<RoleTag role={agent.role} lane={agent.lane} />{/each}</div>
   <footer><button onclick={triage}>{run.triage.reviewed_at ? 'Unarchive' : 'Archive'}</button><button onclick={toggleEvents}>{expanded ? 'Hide events' : 'Events'}</button><button onclick={() => onopen(run)}>Detail</button></footer>
@@ -60,11 +60,12 @@
 header, footer, .meta { display:flex; justify-content:space-between; gap:1rem; align-items:center; }
 header div { display:grid; gap:.2rem; }
 small, .muted { color:var(--muted); }
-.status { padding:.2rem .6rem; color:var(--bg); background:var(--neutral); }
-.status.ok { background:var(--status-ok); }
-.status.fail { background:var(--status-fail); }
-.status.busy { background:var(--status-running); }
-.status.serious { background:var(--status-escalated); }
+.status { display:inline-flex; align-items:center; gap:.35rem; }
+.status-dot { width:.55rem; height:.55rem; background:currentColor; display:inline-block; }
+.status.ok { color:var(--status-ok); }
+.status.fail { color:var(--status-fail); }
+.status.busy { color:var(--status-running); }
+.status.serious { color:var(--status-escalated); }
 .agents { display:flex; gap:.4rem; flex-wrap:wrap; }
 .events { white-space:nowrap; padding:.5rem; border-top:1px solid var(--line); }
 button { cursor:pointer; border:1px solid var(--line); background:var(--panel); color:inherit; }

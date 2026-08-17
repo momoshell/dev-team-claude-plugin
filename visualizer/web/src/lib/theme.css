@@ -41,7 +41,7 @@
   --panel: var(--paper-panel);
   --line: var(--paper-hairline);
   --muted: var(--paper-muted);
-  --accent: var(--spot-dark);
+  --accent: var(--spot-light);
   --neutral: var(--paper-muted);
   --status-ok: var(--status-ok-raw);
   --status-fail: var(--status-fail-raw);
@@ -71,7 +71,7 @@
   --panel: var(--ink-panel);
   --line: var(--ink-hairline);
   --muted: var(--ink-muted);
-  --accent: var(--spot-light);
+  --accent: var(--spot-dark);
   --neutral: var(--ink-muted);
   --status-ok: var(--status-ok-raw);
   --status-fail: var(--status-fail-raw);
@@ -102,7 +102,7 @@
     --panel: var(--ink-panel);
     --line: var(--ink-hairline);
     --muted: var(--ink-muted);
-    --accent: var(--spot-light);
+    --accent: var(--spot-dark);
     --neutral: var(--ink-muted);
     --status-ok: var(--status-ok-raw);
     --status-fail: var(--status-fail-raw);

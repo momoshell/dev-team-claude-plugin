@@ -410,6 +410,40 @@ test('fleet view pins escalations and silent runs and probes only non-green slug
   assert.equal(fleetView(runs, { now, filters: { hide_slugless: false, hide_archived: false } }).hidden.count, 0)
 })
 
+test('fleet surfaces pin honest cost, heartbeat, and escalated status tone', () => {
+  const now = Date.parse('2024-01-01T00:05:00.000Z')
+  const base = {
+    repo_slug: 'repo', status: 'ok', running: false, phases: [{ seq: 1 }], metrics: {},
+    triage: { reviewed_at: null }, pending: {},
+  }
+  const pane = {
+    ...base,
+    adw_id: 'pane',
+    goal: 'pane run',
+    pending: { billed_cost_usd: 'money deferred — a subscription seat is not billed per token (#185)' },
+  }
+  const unmeasured = { ...base, adw_id: 'unmeasured', goal: 'unmeasured run' }
+  const rows = fleetView([pane, unmeasured], { now }).rows
+  assert.equal(rows[0].cost.text, 'not measured · pane')
+  assert.equal(rows[0].cost.value, null)
+  assert.equal(rows[0].cost.dashed, true)
+  assert.equal(rows[1].cost.value, null)
+  assert.equal(rows[1].cost.dashed, true)
+  assert.notEqual(rows[1].cost.text, '0')
+
+  const root = join(process.cwd(), 'visualizer/web/src/lib')
+  const table = readFileSync(join(root, 'FleetTable.svelte'), 'utf8')
+  assert.match(table, /duration<\/th><th class="micro">tokens<\/th><th class="micro">cost<\/th><th class="micro">heartbeat<\/th>/)
+  assert.match(table, /\{@render mark\(row\.cost\)\}/)
+  assert.match(table, /row\.heartbeat/)
+  assert.match(table, /class:stale=\{row\.heartbeat\.stale\}/)
+  assert.match(table, /\.stale \{ color:var\(--status-escalated\); \}/)
+  assert.doesNotMatch(table, /\.status\.ok,\s*\.status\.serious\s*\{\s*color:var\(--status-ok\)/)
+  assert.match(table, /\.status\.serious\s*\{\s*color:var\(--status-escalated\)/)
+  const card = readFileSync(join(root, 'RunCard.svelte'), 'utf8')
+  assert.match(card, /status-dot[\s\S]*status\.word/)
+})
+
 test('return probing shares one six-request semaphore across refresh generations', async () => {
   const semaphore = createSemaphore(2)
   let active = 0

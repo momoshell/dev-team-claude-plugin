@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { splitFrames } from './headless-rpc.mjs'
+import { VARIANTS } from './variants.mjs'
 
 export const DEFAULT_TIMEOUT_MS = 5000
 
@@ -187,6 +188,10 @@ function requireRunArgs(args) {
   if (args.task !== undefined && (typeof args.task !== 'string' || !args.task)) throw new Error('run requires --task <slug> when --task is present')
   if (args.checkout !== undefined && (typeof args.checkout !== 'string' || !args.checkout)) throw new Error('run requires --checkout <dir> when --checkout is present')
   if (args.variant !== undefined && (typeof args.variant !== 'string' || !args.variant)) throw new Error('run requires --variant <name> when --variant is present')
+  if (args['files-in-scope'] !== undefined && (typeof args['files-in-scope'] !== 'string' || !args['files-in-scope'].trim())) throw new Error('run requires --files-in-scope <a,b> when --files-in-scope is present')
+  if (args.lane !== undefined && (typeof args.lane !== 'string' || !args.lane.trim())) throw new Error('run requires --lane <lane> when --lane is present')
+  if (typeof args['files-in-scope'] === 'string' && args['files-in-scope'].split(',').map((entry) => entry.trim()).filter(Boolean).length === 0) throw new Error('--files-in-scope supplied an empty list — an empty scope is never a scope')
+  if (VARIANTS[args.variant]?.sources?.scope === 'inherited' && args['files-in-scope'] === undefined) throw new Error(`run requires --files-in-scope for a ${args.variant} run — scope-sourced runs cannot declare an empty scope`)
 }
 
 // The slug defaults to the brief's filename; crew.mjs slugs it and refuses a degenerate one.
@@ -205,6 +210,16 @@ export async function runVerb(args, deps = {}) {
     params.task = typeof args.task === 'string' && args.task ? args.task : briefTask(args.brief)
   }
   if (typeof args.variant === 'string' && args.variant) params.variant = args.variant
+  if (typeof args.lane === 'string' && args.lane) params.lane = args.lane
+  if (typeof args['files-in-scope'] === 'string') {
+    const files = args['files-in-scope'].split(',').map((entry) => entry.trim()).filter(Boolean)
+    if (files.length === 0) throw new Error('--files-in-scope supplied an empty list — an empty scope is never a scope')
+    // Per-entry rules are adjudicated by enqueue; keeping no second copy here
+    // ensures the daemon names the offending entry in the operator's refusal.
+    params.files_in_scope = files
+  } else if (VARIANTS[args.variant]?.sources?.scope === 'inherited') {
+    throw new Error(`run requires --files-in-scope for a ${args.variant} run — scope-sourced runs cannot declare an empty scope`)
+  }
   const result = await call('enqueue', params)
   const stdout = outputSink(deps.stdout, process.stdout)
   stdout(`${JSON.stringify({ run_id: result?.run_id, ...(params.tier && result?.crew_dir ? { crew_dir: result.crew_dir } : {}) })}\n`)

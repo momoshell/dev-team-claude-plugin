@@ -12,7 +12,7 @@ import { basename, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { driveTask as defaultDriveTask } from './drive.mjs'
+import { driveTask as defaultDriveTask, VARIANTS, validateScopeEntries } from './drive.mjs'
 import { realIo as defaultRealIo } from './realio.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
@@ -34,6 +34,23 @@ function childArguments(argv) {
 function ledgerDbPath(env) {
   return env.DEVTEAM_LEDGER_DB
     || join(env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory'), 'ledger.db')
+}
+
+function declaredScope(value, variant) {
+  const inherited = VARIANTS[variant]?.sources?.scope === 'inherited'
+  if (value === undefined) {
+    if (inherited) throw new Error(`a ${variant} child spec inherits the failing run's files_in_scope; the spec declares none — the scope gate is never relaxed to let a child run without a declared scope`)
+    return null
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new Error(`files_in_scope in the ${variant || 'child'} spec must be a non-empty array — an empty scope is never a scope`)
+  }
+  const defects = validateScopeEntries(value)
+  if (defects.length) {
+    const listed = defects.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join(', ')
+    throw new Error(`files_in_scope in the child spec contains unsupported entries: ${listed}`)
+  }
+  return [...value]
 }
 
 function ledgerSidecarDbPath(crewDir, exists, read) {
@@ -93,6 +110,10 @@ export function runChild(argv, injected = {}) {
   try {
     const pane = paneSeat(crew)
     if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
+    // Resolve inside this try so an invalid scope becomes this run's
+    // escalation envelope (`child-preflight`), not a stack trace out of fork.
+    const filesInScope = declaredScope(spec.files_in_scope, spec.variant)
+    if (filesInScope) ctx.files_in_scope = filesInScope
     if (strictPreflight) {
       for (const role of ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
       if (roles.includes('lead') && !crew.members?.lead) throw new Error(`v3 run requires a lead seat (booted roles: ${roles.join(', ')})`)

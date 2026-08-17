@@ -24,7 +24,7 @@ import { pathToFileURL } from 'node:url'
 import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { slugOrNull } from './slug.mjs'
 import { regrantVerdict, continuationBrief } from './escalation-policy.mjs'
-import { VARIANT_NAMES } from './variants.mjs'
+import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 
 const regranted = new Set()
 const MAX_FRAME_BYTES = 1024 * 1024
@@ -45,6 +45,48 @@ function requestedVariant(spec) {
   if (raw === undefined || raw === null) return null
   if (typeof raw === 'string' && VARIANT_NAMES.includes(raw)) return raw
   throw runError('invalid-spec', `unknown variant ${JSON.stringify(raw)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+}
+
+// Deliberate duplicate of drive.mjs:830-848. The IMPORT FIREWALL forbids the
+// server process from loading drive.mjs, and daemon.test.mjs pins the two
+// validators against each other so this mirror cannot drift silently.
+export function scopeEntryDefects(entries) {
+  const errors = []
+  for (const entry of entries) {
+    let why = null
+    if (typeof entry !== 'string' || entry.length === 0) {
+      why = 'empty or non-string entry'
+    } else if (/[*?\[\]{}]/.test(entry)) {
+      why = 'glob patterns are not supported — list literal paths or a trailing-slash directory'
+    } else if (entry.startsWith('/')) {
+      why = 'absolute path — paths must be repo-relative, as git status prints them'
+    } else if (entry.split('/').some((segment) => segment === '.' || segment === '..')) {
+      why = 'must be a plain repo-relative path (no . or .. segments)'
+    } else if (entry.endsWith('/') && entry.split('/').filter(Boolean).length < 2) {
+      why = 'directory prefix is too broad — a top-level directory would authorize most of the tree; name a subdirectory (at least two segments) or list files'
+    }
+    if (why) errors.push({ entry, why })
+  }
+  return errors
+}
+
+function requestedScope(spec, variant) {
+  const hasScope = Object.prototype.hasOwnProperty.call(spec, 'files_in_scope')
+  const inherited = VARIANTS[variant]?.sources?.scope === 'inherited'
+  if (!hasScope) {
+    if (inherited) throw runError('invalid-spec', `a ${variant} run inherits the failing run's files_in_scope; enqueue declares none — the scope gate is never relaxed to let a repair run without a declared scope`)
+    return null
+  }
+  const files = spec.files_in_scope
+  if (!Array.isArray(files) || files.length === 0) {
+    throw runError('invalid-spec', `files_in_scope for ${variant || 'this'} run must be a non-empty array — an empty scope is never a scope`)
+  }
+  const defects = scopeEntryDefects(files)
+  if (defects.length) {
+    const listed = defects.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join(', ')
+    throw runError('invalid-spec', `files_in_scope contains unsupported entries: ${listed}`)
+  }
+  return [...files]
 }
 
 async function capabilityProfile(agent, transport) {
@@ -386,6 +428,7 @@ export function daemon(options = {}) {
       task: record.task,
       brief_file: record.brief_file,
       variant: record.variant || null,
+      files_in_scope: record.files_in_scope || null,
       lane: record.lane,
       suite: record.suite,
       checkout: record.checkout,
@@ -876,6 +919,7 @@ export function daemon(options = {}) {
       run_id: run.run_id,
       lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
       ...(run.variant ? { variant: run.variant } : {}),
+      ...(run.files_in_scope ? { files_in_scope: run.files_in_scope } : {}),
       continuation: run.continuation === true,
       ledger_db: budgetLedgerDb, budget_enabled: budget !== null,
     }
@@ -980,6 +1024,7 @@ export function daemon(options = {}) {
     const runId = String(spec.run_id || uuid())
     if (!RUN_ID_OK.test(runId)) throw runError('invalid-spec', 'run_id must match /^[A-Za-z0-9._-]{1,64}$/')
     const variant = requestedVariant(spec)
+    const filesInScope = requestedScope(spec, variant)
     assertBudget()
     if (hasTier) {
       const active = activeTierRun(spec)
@@ -1017,6 +1062,7 @@ export function daemon(options = {}) {
       task: spec.task || crew.task || null, brief_file: spec.brief_file || spec.briefFile || null,
       lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: canonicalCheckout(spec.checkout || crew.checkout),
       ...(variant ? { variant } : {}),
+      ...(filesInScope ? { files_in_scope: filesInScope } : {}),
       ...(identity ? { tier_identity: identity } : {}),
       task_return: taskReturn, attempt: 1,
     }

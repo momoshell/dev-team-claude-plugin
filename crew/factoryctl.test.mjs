@@ -94,15 +94,32 @@ async function enqueue(f, crewDir = f.crewDir) {
 
 function returnFor(f, runId, crewDir = f.crewDir) { return join(crewDir, 'returns', `${runId}.task.json`) }
 
-test('run forwards --variant to enqueue and omits it when absent', async () => {
+test('run forwards --variant, --files-in-scope, and --lane to enqueue and omits them when absent', async () => {
   const f = fixture()
   try {
     const sent = []
     const deps = { call: (cmd, params) => { sent.push({ cmd, params }); return { run_id: 'run-1' } }, stdout: () => {}, cwd: () => f.root }
-    await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--variant', 'repair']), deps)
+    await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--variant', 'repair', '--files-in-scope', 'a.mjs, b.mjs', '--lane', 'lane-cmd']), deps)
     assert.equal(sent.at(-1).params.variant, 'repair')
+    assert.deepEqual(sent.at(-1).params.files_in_scope, ['a.mjs', 'b.mjs'])
+    assert.equal(sent.at(-1).params.lane, 'lane-cmd')
     await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief]), deps)
     assert.equal(Object.prototype.hasOwnProperty.call(sent.at(-1).params, 'variant'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(sent.at(-1).params, 'files_in_scope'), false)
+    assert.equal(Object.prototype.hasOwnProperty.call(sent.at(-1).params, 'lane'), false)
+  } finally { f.cleanup() }
+})
+
+test('run refuses an inherited variant without --files-in-scope before calling the daemon', async () => {
+  const f = fixture()
+  try {
+    const sent = []
+    const deps = { call: (cmd, params) => { sent.push({ cmd, params }); return { run_id: 'run-1' } }, stdout: () => {}, cwd: () => f.root }
+    await assert.rejects(
+      runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--variant', 'repair', '--lane', 'lane-cmd']), deps),
+      /files-in-scope/,
+    )
+    assert.equal(sent.length, 0)
   } finally { f.cleanup() }
 })
 

@@ -1255,7 +1255,28 @@ test('AC-11: on SIGTERM the finalizer lands the session as fail, closes running 
     setInterval(() => {}, 1000);
   `
   const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  // Wait for the child to have COMMITTED its work rather than sleeping a fixed
+  // 400 ms and hoping. Under a loaded runner the child had not reached
+  // startSession before the SIGTERM, so no row existed, getSession returned
+  // null, and reading `.status` off it threw — a flake that surfaced only when
+  // three PRs' CI ran concurrently, reproduced here by shortening the sleep.
+  // ONE reader is opened and reused: reopening per poll starves the sibling
+  // SIGTERM test of the database lock.
+  {
+    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
+    let committed = false
+    try {
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        try { committed = probe.getSession('sig-1') != null } catch { committed = false }
+        if (committed) break
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    } finally {
+      try { probe.close?.() } catch { /* a probe that cannot close is not a test failure */ }
+    }
+    assert.equal(committed, true, 'the child must commit sig-1 before the finalizer is exercised')
+  }
   const exitInfo = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
   child.kill('SIGTERM')
   const { code, signal } = await exitInfo
@@ -1297,7 +1318,28 @@ test('S6: the finalizer never overwrites an already-completed session or clobber
     setInterval(() => {}, 1000);
   `
   const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 400))
+  // Wait for the child to have COMMITTED its work rather than sleeping a fixed
+  // 400 ms and hoping. Under a loaded runner the child had not reached
+  // startSession before the SIGTERM, so no row existed, getSession returned
+  // null, and reading `.status` off it threw — a flake that surfaced only when
+  // three PRs' CI ran concurrently, reproduced here by shortening the sleep.
+  // ONE reader is opened and reused: reopening per poll starves the sibling
+  // SIGTERM test of the database lock.
+  {
+    const probe = openLedger({ dbPath, stderr: { write: () => {} } })
+    let committed = false
+    try {
+      const deadline = Date.now() + 10000
+      while (Date.now() < deadline) {
+        try { committed = probe.getSession('sig-2')?.status === 'ok' } catch { committed = false }
+        if (committed) break
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    } finally {
+      try { probe.close?.() } catch { /* a probe that cannot close is not a test failure */ }
+    }
+    assert.equal(committed, true, 'the child must commit sig-2 before the finalizer is exercised')
+  }
   const exitInfo = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
   child.kill('SIGTERM')
   await exitInfo

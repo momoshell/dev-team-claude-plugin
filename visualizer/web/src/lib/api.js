@@ -14,6 +14,7 @@ export const getEvents = (adwId, after = 0, limit, filters = {}) => {
 export const getReturns = (repoSlug, taskSlug, adwId) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
 export const getRoster = () => request('/api/roster')
 export const getCellHealth = (params = {}) => request(`/api/cell-health?${new URLSearchParams(params)}`)
+export const getSeatTeardowns = (params = {}) => request(`/api/seat-teardowns?${new URLSearchParams(params)}`)
 export const getRunSet = (params = {}) => request(`/api/run-set?${new URLSearchParams(params)}`)
 export const getIntake = (params = {}) => request(`/api/intake?${new URLSearchParams(params)}`)
 export const getIntakeBrake = () => request('/api/intake/brake')

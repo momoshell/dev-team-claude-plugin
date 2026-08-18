@@ -6,7 +6,7 @@ import { shapeRun, matchesFilters } from './shape.mjs'
 
 const require = createRequire(import.meta.url)
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
-const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals']
+const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns']
 // Which shape fields a missing table makes unknowable. Feeding these into the
 // probe reuses #48's NULL-probe path (shape.mjs) instead of inventing a second
 // mechanism for the same idea.
@@ -134,6 +134,36 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     } catch (err) {
       if (!probe.missing_tables.includes('cell_failures')) probe.missing_tables.push('cell_failures')
       return { rows: null, absent: err?.message || String(err) }
+    }
+  }
+  function seatTeardowns({ since = null, until = null } = {}) {
+    probeColumns()
+    const handle = open()
+    if (!handle) return { runs: null, rows: null, absent: degradedReason || 'the ledger could not be opened' }
+    if (probe.missing_tables.includes('seat_teardowns')) return { runs: null, rows: null, absent: 'seat_teardowns predates this ledger mirror' }
+    try {
+      const runs = handle.prepare(`
+        SELECT adw_id, task_slug, repo_slug, status, started_at, ended_at
+        FROM sessions
+        WHERE started_at >= ? AND (? IS NULL OR started_at < ?)
+        ORDER BY started_at DESC, adw_id
+      `).all(since, until, until)
+      const ids = runs.map((row) => row.adw_id)
+      // Seat rows are deliberately not filtered by created_at: a teardown for
+      // a run started in the window can land after until, and dropping it would
+      // fabricate a not-measured run. The window note carries this semantics.
+      const rows = ids.length
+        ? handle.prepare(`
+          SELECT adw_id, phase_id, role, transport, outcome, reason, forced, evidence_kind, created_at
+          FROM seat_teardowns
+          WHERE adw_id IN (${ids.map(() => '?').join(',')})
+          ORDER BY adw_id, role
+        `).all(...ids)
+        : []
+      return { runs, rows, absent: null }
+    } catch (err) {
+      if (!probe.missing_tables.includes('seat_teardowns')) probe.missing_tables.push('seat_teardowns')
+      return { runs: null, rows: null, absent: err?.message || String(err) }
     }
   }
   function intake({ since = null, until = null } = {}) {
@@ -304,6 +334,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     listRuns,
     listEvents,
     cellFailures,
+    seatTeardowns,
     intake,
     runSet,
     budgetWindow,

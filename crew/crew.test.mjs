@@ -10,7 +10,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, seatLiveness, awaitSeatsReady, teardownCore,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
   grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
   CAPABILITY_DELIVERY, effectiveCapabilities, effectiveTools, LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet,
@@ -19,7 +19,7 @@ import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, v
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
-import { realIo, VARIANT_STAGE_PHASES } from './realio.mjs'
+import { realIo, VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
@@ -1294,18 +1294,225 @@ test('teardownCore skips all cmux closes without a workspace and still closes a 
     const dir = join(parent, 'headless')
     mkdirSync(dir, { recursive: true })
     const paths = { dir }
-    const archived = teardownCore(paths, { workspace_id: null, members: { builder: { surface_id: null } } }, { closeSurface, closeWorkspace })
+    const { archived } = teardownCore(paths, { workspace_id: null, members: { builder: { surface_id: null } } }, { closeSurface, closeWorkspace })
     assert.equal(existsSync(archived), true)
     assert.equal(closeSurface.calls.length, 0)
     assert.equal(closeWorkspace.calls.length, 0)
 
     const paned = join(parent, 'paned')
     mkdirSync(paned, { recursive: true })
-    const second = teardownCore({ dir: paned }, { workspace_id: 'workspace-1', members: { lead: { surface_id: null } } }, { closeSurface, closeWorkspace })
+    const { archived: second } = teardownCore({ dir: paned }, { workspace_id: 'workspace-1', members: { lead: { surface_id: null } } }, { closeSurface, closeWorkspace })
     assert.equal(existsSync(second), true)
     assert.equal(closeWorkspace.calls.length, 1)
     assert.deepEqual(closeWorkspace.calls[0], ['workspace-1'])
   } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('paneTeardownRows maps only positive death evidence to proven', () => {
+  const crew = { members: {
+    planner: { surface_id: 's-planner', transport: 'pane' },
+    builder: { surface_id: 's-builder', transport: 'pane' },
+    reviewer: { surface_id: 's-reviewer', transport: 'pane' },
+    lead: { surface_id: null, transport: 'headless-rpc' },
+  } }
+  const probes = { 's-planner': false, 's-builder': true, 's-reviewer': null }
+  const rows = paneTeardownRows(crew, { probe: (id) => probes[id], sleep: () => {} })
+  assert.deepEqual(rows, [
+    { role: 'planner', transport: 'pane', outcome: 'proven', reason: 'probe-dead', forced: false },
+    { role: 'builder', transport: 'pane', outcome: 'failed', reason: 'probe-alive', forced: false },
+    { role: 'reviewer', transport: 'pane', outcome: 'unproven', reason: 'probe-unknown', forced: false },
+  ])
+  assert.equal(rows.some((row) => row.role === 'lead'), false)
+})
+
+test('paneTeardownRows probes through the real paneAlive by default', () => {
+  const live = paneTeardownRows({ members: { builder: { surface_id: 's-builder', transport: 'pane' } } }, {
+    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 's-builder' }] }] }] }] }),
+    locate: (_tree, id) => id === 's-builder' ? { id } : null,
+    sleep: () => {}, polls: 2, intervalMs: 0,
+  })
+  assert.deepEqual(live[0], { role: 'builder', transport: 'pane', outcome: 'failed', reason: 'probe-alive', forced: false })
+
+  const blind = paneTeardownRows({ members: { builder: { surface_id: 's-builder', transport: 'pane' } } }, {
+    tree: () => { throw new Error('cmux unavailable') }, sleep: () => {}, polls: 2, intervalMs: 0,
+  })
+  assert.deepEqual(blind[0], { role: 'builder', transport: 'pane', outcome: 'unproven', reason: 'probe-unknown', forced: false })
+
+  const gone = paneTeardownRows({ members: { builder: { surface_id: 's-builder', transport: 'pane' } } }, {
+    tree: () => ({ windows: [] }), locate: () => null, sleep: () => {}, polls: 2, intervalMs: 0,
+  })
+  assert.deepEqual(gone[0], { role: 'builder', transport: 'pane', outcome: 'proven', reason: 'probe-dead', forced: false })
+})
+
+test('paneTeardownRows re-probes a bounded window before calling a seat failed', () => {
+  const sequence = [true, false]
+  let calls = 0
+  const waits = []
+  const settled = paneTeardownRows({ members: { builder: { surface_id: 's-builder', transport: 'pane' } } }, {
+    probe: () => { calls += 1; return sequence.shift() }, sleep: (ms) => waits.push(ms),
+  })
+  assert.equal(settled[0].outcome, 'proven')
+  assert.equal(calls, 2)
+  assert.deepEqual(waits, [PANE_SETTLE_MS])
+
+  let stubborn = 0
+  const stubbornWaits = []
+  const alive = paneTeardownRows({ members: { builder: { surface_id: 's-builder', transport: 'pane' } } }, {
+    probe: () => { stubborn += 1; return true }, sleep: (ms) => stubbornWaits.push(ms),
+  })
+  assert.equal(alive[0].outcome, 'failed')
+  assert.equal(stubborn, PANE_SETTLE_POLLS)
+  assert.deepEqual(stubbornWaits, Array(PANE_SETTLE_POLLS - 1).fill(PANE_SETTLE_MS))
+})
+
+test('teardownCore records one seat_teardowns row per pane seat it closed', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-teardown-record-'))
+  const dir = join(parent, 'crew')
+  mkdirSync(dir, { recursive: true })
+  const emitted = []
+  const journal = []
+  try {
+    const record = teardownCore({ dir }, { members: {
+      planner: { surface_id: 's-planner', transport: 'pane' },
+      builder: { surface_id: 's-builder', transport: 'pane' },
+    } }, {
+      closeSurface: () => true, closeWorkspace: () => true, renameSync: () => {},
+      probe: () => false, sleep: () => {},
+      io: { log: (row) => journal.push(row), emit: (event) => { emitted.push(event); return true } },
+    })
+    assert.deepEqual({ seats: record.seats.seats, proven: record.seats.proven, recorded: record.seats.recorded, record_failed: record.seats.record_failed }, { seats: 2, proven: 2, recorded: 2, record_failed: 0 })
+    assert.deepEqual(emitted.map((event) => event.kind), ['seat-teardown', 'seat-teardown'])
+    assert.deepEqual(emitted.map((event) => event.role).sort(), ['builder', 'planner'])
+    assert.equal(journal.filter((row) => row.event === 'seat-teardown').length, 2)
+    assert.equal(journal.filter((row) => row.event === 'seat-teardown-sweep').length, 1)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('teardownCore probes after every close and before the archive', () => {
+  const order = []
+  const record = teardownCore({ dir: join(tmpdir(), 'crew-teardown-order-unused') }, { members: {
+    planner: { surface_id: 's-planner', transport: 'pane' },
+    builder: { surface_id: 's-builder', transport: 'pane' },
+  } }, {
+    closeSurface: (id) => { order.push(`close:${id}`) }, closeWorkspace: () => {},
+    probe: (id) => { order.push(`probe:${id}`); return false }, sleep: () => {},
+    renameSync: () => { order.push('rename') }, io: { log: () => {}, emit: () => true },
+  })
+  assert.equal(typeof record.archived, 'string')
+  const probes = order.map((entry, index) => [entry, index]).filter(([entry]) => entry.startsWith('probe:')).map(([, index]) => index)
+  const closes = order.map((entry, index) => [entry, index]).filter(([entry]) => entry.startsWith('close:')).map(([, index]) => index)
+  assert.equal(probes.length, 2)
+  assert.equal(closes.length, 2)
+  assert.ok(Math.max(...closes) < Math.min(...probes))
+  assert.ok(order.indexOf('rename') > Math.max(...probes))
+})
+
+test('teardownCore reports no pane sweep for a crew with no pane seat', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-teardown-headless-'))
+  const dir = join(parent, 'crew')
+  mkdirSync(dir, { recursive: true })
+  const journal = []
+  try {
+    const record = teardownCore({ dir }, { members: {
+      builder: { surface_id: null, transport: 'headless-rpc' },
+    } }, {
+      closeSurface: () => true, closeWorkspace: () => {}, renameSync: () => {},
+      probe: () => { throw new Error('surface-less seat must not be probed') },
+      io: { log: (row) => journal.push(row), emit: () => true },
+    })
+    assert.equal(record.seats, null)
+    assert.equal(journal.some((row) => row.event === 'seat-teardown-sweep'), false)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('teardownCmd records every pane seat in the ledger and exits 0', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-teardown-ledger-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-teardown-ledger-checkout-')
+  const task = 'teardown-ledger'
+  const dir = testCrewDir(home, checkout, task)
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  mkdirSync(join(dir, 'task'), { recursive: true })
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task, checkout, workspace_id: null, roles: ['planner', 'builder'],
+    members: {
+      planner: { surface_id: 's-planner', transport: 'pane' },
+      builder: { surface_id: 's-builder', transport: 'pane' },
+    }, task_return: join(dir, 'returns', 'task.json'),
+  }, null, 2))
+  const dbPath = join(home, 'ledger.db')
+  const previousDb = process.env.DEVTEAM_LEDGER_DB
+  const savedExit = process.exitCode
+  try {
+    process.env.DEVTEAM_LEDGER_DB = dbPath
+    process.exitCode = undefined
+    let record
+    await withHome(home, () => {
+      record = teardownCmd({ task, checkout }, {
+        closeSurface: () => true, closeWorkspace: () => true, probe: () => false, sleep: () => {},
+      })
+    })
+    assert.deepEqual({ seats: record.seats.seats, proven: record.seats.proven, recorded: record.seats.recorded }, { seats: 2, proven: 2, recorded: 2 })
+    assert.equal(process.exitCode, undefined)
+    assert.equal(existsSync(record.archived), true)
+    const sidecar = JSON.parse(readFileSync(join(record.archived, 'ledger', 'run.json'), 'utf8'))
+    if (nodeMeetsLedgerFloor) {
+      const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+      let rows
+      try { rows = ledger.dumpTable('seat_teardowns') } finally { ledger.close() }
+      assert.equal(rows.length, 2)
+      assert.ok(rows.every((row) => row.adw_id === sidecar.adw_id && row.outcome === 'proven' && row.transport === 'pane'))
+    }
+  } finally {
+    process.exitCode = savedExit
+    if (previousDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = previousDb
+    rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('teardownCmd exits non-zero without proof of death or without a positive receipt', async () => {
+  const branches = [
+    { label: 'unproven', probe: () => null, key: 'unproven', expectedProven: 0, io: null },
+    { label: 'failed', probe: () => true, key: 'failed', expectedProven: 0, io: null },
+    { label: 'record-failed', probe: () => false, key: 'proven', expectedProven: 2, io: { log: () => {}, emit: () => false } },
+  ]
+  for (const branch of branches) {
+    const home = mkdtempSync(join(tmpdir(), `crew-teardown-${branch.label}-home-`))
+    const { root: checkoutRoot, checkout } = testCheckout(`crew-teardown-${branch.label}-checkout-`)
+    const task = `teardown-${branch.label}`
+    const dir = testCrewDir(home, checkout, task)
+    mkdirSync(join(dir, 'returns'), { recursive: true })
+    mkdirSync(join(dir, 'task'), { recursive: true })
+    writeFileSync(join(dir, 'crew.json'), JSON.stringify({
+      schema_version: 3, task, checkout, workspace_id: null, roles: ['planner', 'builder'],
+      members: {
+        planner: { surface_id: 's-planner', transport: 'pane' },
+        builder: { surface_id: 's-builder', transport: 'pane' },
+      }, task_return: join(dir, 'returns', 'task.json'),
+    }, null, 2))
+    const previousDb = process.env.DEVTEAM_LEDGER_DB
+    const savedExit = process.exitCode
+    try {
+      process.env.DEVTEAM_LEDGER_DB = join(home, 'ledger.db')
+      process.exitCode = 0
+      let record
+      await withHome(home, () => {
+        const options = { closeSurface: () => true, closeWorkspace: () => true, probe: branch.probe, sleep: () => {} }
+        if (branch.io) options.io = branch.io
+        record = teardownCmd({ task, checkout }, options)
+      })
+      assert.equal(record.seats[branch.key], 2)
+      assert.equal(record.seats.proven, branch.expectedProven)
+      if (branch.io) {
+        assert.equal(record.seats.recorded, 0)
+        assert.equal(record.seats.record_failed, 2)
+      } else assert.equal(record.seats.recorded, 2)
+      assert.equal(process.exitCode, 1)
+    } finally {
+      process.exitCode = savedExit
+      if (previousDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = previousDb
+      rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
+    }
+  }
 })
 
 test('awaitSeatsReady returns immediately without probing an all-headless crew', () => {

@@ -12,7 +12,8 @@ import {
   closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,
 } from './driver.mjs'
 import { headlessIo as defaultHeadlessIo } from './headless.mjs'
-import { headlessRpcIo as defaultHeadlessRpcIo } from './headless-rpc.mjs'
+import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
+import { LIVENESS } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 
@@ -354,6 +355,49 @@ export function settleSeatTeardown(io, deps = {}) {
   // per seat.
   try { io?.log?.({ at: at(), event: 'seat-teardown-sweep', ...summary }) } catch {}
   return { ...summary, rows }
+}
+
+// A pane's death is not instantaneous: close-surface returns as soon as cmux
+// accepts it, so ONE probe can read a still-listed surface and call a dying
+// seat `failed`. Poll a bounded window instead, so `failed` keeps meaning what
+// the ledger says it means — a MEASURED live seat after teardown.
+export const PANE_SETTLE_POLLS = 4
+export const PANE_SETTLE_MS = 250
+
+// One row per seat whose recorded SURFACE this teardown attempted to close —
+// exactly the seats realIo.teardown() structurally cannot see (it builds rows
+// from declared headless-rpc members only), which is why an all-pane crew
+// recorded `seats: 0`. The selection is deliberately narrow: it claims nothing
+// about a future transport that owns BOTH a surface and a place in the
+// transport sweep — two settles would then attempt two rows for one role, and
+// `seat_teardowns` is unique on (adw_id, role) with INSERT OR IGNORE
+// (scripts/factory/ledger.mjs:630,1755), so that case needs an ownership
+// decision, not this loop.
+// `unproven` is the answer for an indeterminate probe and never `proven`:
+// teardownOutcome is the only mapping, and only positive death evidence says
+// a seat is gone (ADR-030's closed set).
+export function paneTeardownRows(crew, deps = {}) {
+  // The default probe FORWARDS deps to paneAlive, so the real tri-state probe
+  // is what runs in production and is reachable (via tree/locate) from a test.
+  const probe = deps.probe || ((id) => paneAlive(id, deps))
+  const sleep = deps.sleep || ((ms) => { const sab = new SharedArrayBuffer(4); Atomics.wait(new Int32Array(sab), 0, 0, ms) })
+  const polls = deps.polls ?? PANE_SETTLE_POLLS
+  const intervalMs = deps.intervalMs ?? PANE_SETTLE_MS
+  const rows = []
+  for (const [role, member] of Object.entries(crew?.members || {})) {
+    if (!member?.surface_id) continue      // no surface closed here: not this sweep's seat
+    let alive = probe(member.surface_id)
+    for (let i = 1; i < polls && alive === true; i += 1) { sleep(intervalMs); alive = probe(member.surface_id) }
+    const liveness = alive === true ? LIVENESS.ALIVE : alive === false ? LIVENESS.DEAD : LIVENESS.UNKNOWN
+    rows.push({
+      role,
+      transport: member.transport || DEFAULT_TRANSPORT,
+      outcome: teardownOutcome(liveness),
+      reason: alive === true ? 'probe-alive' : alive === false ? 'probe-dead' : 'probe-unknown',
+      forced: false,
+    })
+  }
+  return rows
 }
 
 export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, now, sleep }) {

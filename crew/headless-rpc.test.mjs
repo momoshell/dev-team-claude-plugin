@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -20,7 +20,7 @@ function fixture(options = {}) {
   }
   const deps = {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
-    spawn: () => { commands.push({ kind: 'spawn' }); return { pid: options.spawnPid ?? 701, unref() {} } }, openSync: options.openSync || (() => 10),
+    spawn: () => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }, openSync: options.openSync || (() => 10),
     writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
     existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
     writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: () => {}, sleep: options.sleep || (() => {}),
@@ -444,8 +444,70 @@ test('teardown forces an in-flight turn but does not mark a settled seat forced'
   } finally { settled.cleanup() }
 })
 
-test('run-end teardown signals a marker-only worker left by FIFO acquisition failure', () => {
+test('run-end teardown refuses invalid marker pgids on both teardown paths', () => {
+  for (const leg of ['seat', 'marker-only']) {
+    for (const badPid of [1, 0, -5, undefined]) {
+      let clock = 0
+      const f = fixture({
+        spawnPid: badPid,
+        now: () => clock,
+        sleep: (ms) => { clock += ms },
+        openSync: leg === 'marker-only' ? () => { throw new Error('fifo unavailable') } : undefined,
+        kill: () => true,
+      })
+      try {
+        if (leg === 'marker-only') {
+          mkdirSync(join(f.paths.taskDir, 'headless-rpc', 'builder'), { recursive: true })
+          writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'pgid'), '702')
+        }
+        try { f.io.assign({ role: 'builder', briefFile: '/brief.md' }) }
+        catch (err) { if (leg !== 'marker-only') throw err }
+        const rows = f.io.teardown()
+        assert.equal(rows.length, 1, `${leg}/pid=${String(badPid)} row count`)
+        assert.deepEqual(f.signals.filter(([, signal]) => signal !== 0), [], `${leg}/pid=${String(badPid)} signalled`)
+        assert.equal(rows[0].reason, 'invalid-pgid', `${leg}/pid=${String(badPid)} reason`)
+        assert.equal(rows[0].outcome, 'unproven', `${leg}/pid=${String(badPid)} outcome`)
+        assert.equal(existsSync(join(f.paths.taskDir, 'headless-rpc', '.builder.active.json')), true,
+          `${leg}/pid=${String(badPid)} reservation retained`)
+      } finally { f.cleanup() }
+    }
+  }
+})
+
+test('run-end teardown does not prove a live group from stale pgid evidence', () => {
+  let clock = 0
   const f = fixture({
+    spawnPid: 701,
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    openSync: () => { throw new Error('fifo unavailable') },
+    kill: (pid, signal) => {
+      if (pid === -702 && signal === 0) {
+        const err = new Error('gone')
+        err.code = 'ESRCH'
+        throw err
+      }
+      return true
+    },
+  })
+  try {
+    mkdirSync(join(f.paths.taskDir, 'headless-rpc', 'builder'), { recursive: true })
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'pgid'), '702')
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (err) => err.stage === 'rpc-spawn-failed')
+    const rows = f.io.teardown()
+    assert.ok(f.signals.some(([pid, signal]) => pid === -701 && signal === 'SIGTERM'))
+    assert.equal(rows.some(({ reason }) => reason === 'probe-dead'), false)
+    assert.notEqual(rows[0].outcome, 'proven')
+    assert.equal(rows[0].reason, 'evidence-mismatch')
+    assert.equal(existsSync(join(f.paths.taskDir, 'headless-rpc', '.builder.active.json')), true)
+  } finally { f.cleanup() }
+})
+
+test('run-end teardown signals a marker-only worker left by FIFO acquisition failure', () => {
+  let clock = 0
+  const f = fixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
     openSync: () => { throw new Error('fifo unavailable') },
     kill: (_pid, signal) => {
       if (signal === 'SIGKILL') { const err = new Error('gone'); err.code = 'ESRCH'; throw err }
@@ -510,6 +572,51 @@ test('wait timeout retains an unproven reservation and clears one proved by the 
     assert.throws(() => cleared.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-timeout')
     assert.equal(existsSync(join(cleared.paths.taskDir, 'headless-rpc', '.builder.active.json')), false)
   } finally { cleared.cleanup() }
+})
+
+test('run-end teardown proves a worker that survives its first SIGTERM and the old 2s deadline dead', { timeout: 20_000 }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'headless-rpc-settle-window-'))
+  const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  const bin = join(dir, 'pi')
+  writeFileSync(bin, [
+    '#!/usr/bin/env node',
+    'let terms = 0',
+    'let firstTermAt = 0',
+    "process.on('SIGTERM', () => {",
+    '  terms += 1',
+    '  if (!firstTermAt) firstTermAt = Date.now()',
+    '  if (terms >= 2 && Date.now() - firstTermAt >= 2500) process.exit(0)',
+    '})',
+    'process.stdin.resume()',
+    "process.stdout.write('{\"type\":\"ready\"}\\n')",
+    'setInterval(() => {}, 1000)',
+    '',
+  ].join('\n'))
+  chmodSync(bin, 0o755)
+  const crew = { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
+  const pgidPath = join(paths.taskDir, 'headless-rpc', 'builder', 'pgid')
+  const streamPath = join(paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+  let rows = []
+  try {
+    const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: null, bin, deps: { log: () => {} } })
+    io.assign({ role: 'builder', briefFile: join(paths.taskDir, 'brief.md') })
+    const deadline = Date.now() + 10_000
+    while (Date.now() < deadline) {
+      if (existsSync(streamPath) && readFileSync(streamPath, 'utf8').includes('ready')) break
+      await new Promise((resolve) => setTimeout(resolve, 25))
+    }
+    assert.equal(existsSync(streamPath) && readFileSync(streamPath, 'utf8').includes('ready'), true,
+      'the fake worker must announce readiness before teardown')
+    rows = io.teardown()
+    assert.deepEqual(rows.map(({ outcome, reason }) => ({ outcome, reason })), [{ outcome: 'proven', reason: 'exit-marker' }])
+  } finally {
+    try {
+      const pgid = Number(String(readFileSync(pgidPath, 'utf8')).trim())
+      if (Number.isSafeInteger(pgid) && pgid > 1) process.kill(-pgid, 'SIGKILL')
+    } catch { /* already gone */ }
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 // Added by the orchestrator at close-out (batch eighteen, #278). Every other

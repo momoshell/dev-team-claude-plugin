@@ -15,7 +15,7 @@ import {
 import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { runChild } from './child.mjs'
-import { DEFAULT_TRANSPORT } from './realio.mjs'
+import { DEFAULT_TRANSPORT, emitAdapter, realIo, settleSeatTeardown } from './realio.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
@@ -2443,4 +2443,87 @@ test('run-end teardown kills a real piped seat and its recorded pgid is gone', {
     killRecordedGroup(pgidPath)
     f.cleanup()
   }
+})
+
+test('realIo teardown sweeps every declared headless-rpc transport', () => {
+  const members = {
+    builder: { model: 'm', transport: 'headless-rpc' },
+    reviewer: { model: 'm', transport: 'headless-rpc' },
+    lead: { model: 'm', transport: 'pane' },
+  }
+  function sweep(factory) {
+    const dir = mkdtempSync(join(tmpdir(), 'daemon-settle-transports-'))
+    const paths = { dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+    mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+    const logs = []
+    try {
+      const io = realIo({ task: 'settle', members }, paths, dir, null, null, {}, {
+        headlessRpcIo: factory, logLine: (_path, row) => logs.push(row),
+      })
+      return { rows: io.teardown(), logs }
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+  let instantiated = 0
+  const ok = sweep(() => {
+    instantiated += 1
+    return { teardown: () => ['builder', 'reviewer'].map((role) => ({
+      role, transport: 'headless-rpc', outcome: 'unproven', reason: 'probe-unknown',
+    })) }
+  })
+  assert.equal(instantiated, 1)
+  assert.deepEqual(ok.rows.map(({ role }) => role).sort(), ['builder', 'reviewer'])
+  assert.deepEqual(ok.logs.find(({ event }) => event === 'teardown-transports'), {
+    at: ok.logs.find(({ event }) => event === 'teardown-transports').at,
+    event: 'teardown-transports', declared: ['builder', 'reviewer'], transports: ['headless-rpc'],
+    init_failed: [], seats: 2,
+  })
+
+  const failed = sweep(() => { throw new Error('rpc unavailable') })
+  assert.deepEqual(failed.rows.map(({ role, transport, outcome, reason, why }) => ({ role, transport, outcome, reason, why })), [
+    { role: 'builder', transport: 'headless-rpc', outcome: 'unproven', reason: 'teardown-threw', why: 'rpc unavailable' },
+    { role: 'reviewer', transport: 'headless-rpc', outcome: 'unproven', reason: 'teardown-threw', why: 'rpc unavailable' },
+  ])
+  const failedLine = failed.logs.find(({ event }) => event === 'teardown-transports')
+  assert.deepEqual(failedLine.init_failed, [{ transport: 'headless-rpc', why: 'rpc unavailable' }])
+  assert.deepEqual(failedLine.declared, ['builder', 'reviewer'])
+  assert.deepEqual(failedLine.transports, [])
+})
+
+test('settleSeatTeardown accounts for every record verdict', () => {
+  const rows = () => [
+    { role: 'planner', outcome: 'proven', reason: 'exit-marker' },
+    { role: 'builder', outcome: 'proven', reason: 'exit-marker' },
+  ]
+  const logs = []
+  const falseVerdict = settleSeatTeardown({ teardown: rows, log: (row) => logs.push(row), emit: (event) => event.role !== 'builder' })
+  assert.deepEqual({ seats: falseVerdict.seats, recorded: falseVerdict.recorded, record_failed: falseVerdict.record_failed },
+    { seats: 2, recorded: 1, record_failed: 1 })
+  assert.ok(logs.some(({ event, role }) => event === 'seat-teardown-record-failed' && role === 'builder'))
+  assert.equal(logs.find(({ event }) => event === 'seat-teardown-sweep').record_failed, 1)
+
+  const undefinedVerdict = settleSeatTeardown({ teardown: rows, log: () => {}, emit: () => undefined })
+  assert.deepEqual({ recorded: undefinedVerdict.recorded, record_failed: undefinedVerdict.record_failed }, { recorded: 0, record_failed: 2 })
+  const throwingVerdict = settleSeatTeardown({ teardown: rows, log: () => {}, emit: () => { throw new Error('ledger down') } })
+  assert.deepEqual({ recorded: throwingVerdict.recorded, record_failed: throwingVerdict.record_failed }, { recorded: 0, record_failed: 2 })
+  const noEmitter = settleSeatTeardown({ teardown: rows, log: () => {} })
+  assert.deepEqual({ seats: noEmitter.seats, recorded: noEmitter.recorded, record_failed: noEmitter.record_failed }, { seats: 2, recorded: 0, record_failed: 0 })
+})
+
+test('emitAdapter returns a dropped seat-teardown verdict', () => {
+  const emitter = { adwId: 'adw-settle', phaseTransition: () => ({ phase_id: null }), emit: () => false }
+  const adapter = emitAdapter(emitter, { members: { builder: { transport: 'headless-rpc' } } })
+  assert.equal(adapter({ kind: 'seat-teardown', role: 'builder', outcome: 'proven', reason: 'exit-marker' }), false)
+})
+
+test('one settle path is shared by both run entrypoints', () => {
+  const child = readFileSync(join(HERE, 'child.mjs'), 'utf8')
+  const crew = readFileSync(join(HERE, 'crew.mjs'), 'utf8')
+  const realio = readFileSync(join(HERE, 'realio.mjs'), 'utf8')
+  const calls = (source) => /settleSeatTeardown\s*\(/.test(source)
+  const sweeps = (source) => (source.match(/seat-teardown-sweep/g) || []).length
+  assert.equal(calls(child), true)
+  assert.equal(calls(crew), true)
+  assert.equal(sweeps(realio), 1)
+  assert.equal(sweeps(child), 0)
+  assert.equal(sweeps(crew), 0)
 })

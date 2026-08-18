@@ -13,11 +13,12 @@ import {
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, seatLiveness, awaitSeatsReady, teardownCore,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
   grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
+  CAPABILITY_DELIVERY, effectiveCapabilities, effectiveTools, LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet,
 } from './crew.mjs'
 import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
-import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny } from './adapters/adapter-pi.mjs'
+import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import { realIo, VARIANT_STAGE_PHASES } from './realio.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
@@ -408,7 +409,7 @@ async function withoutMemoryEnv(fn) {
 }
 
 async function withBreakerEnv(values, fn) {
-  const keys = ['CREW_BREAKER_THRESHOLD', 'CREW_BREAKER_WINDOW_MS', ...Object.keys(values)]
+  const keys = ['CREW_BREAKER_THRESHOLD', 'CREW_BREAKER_WINDOW_MS', 'CREW_LOAD_THRESHOLD', ...Object.keys(values)]
   const previous = Object.fromEntries([...new Set(keys)].map((key) => [key, process.env[key]]))
   for (const key of Object.keys(previous)) {
     if (Object.hasOwn(values, key)) {
@@ -1995,17 +1996,24 @@ test('a grant not present in the register refuses to reach an adapter', () => {
   assert.doesNotThrow(() => assertGrantsBacked('planner', smuggled, backed))
 })
 
-test('a register-backed pi fan-out grant resolves to absolute definitions and enables subagents', async () => {
+test('a register-backed pi fan-out bundle resolves to absolute definitions and reaches the command', async () => {
   const root = capabilityFixtureRoot()
   try {
+    const base = capabilityRegister()
     const register = capabilityRegister({ roles: {
-      planner: { ...capabilityRegister().roles.planner, agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
+      planner: { ...base.roles.planner, extensions: ['crew/pi/fanout.js'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
     } })
     const resolved = await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register, root })
     assert.equal(resolved.planner.name, 'pi')
+    assert.equal(resolved.planner.grants.extensions[0], join(root, 'crew/pi/fanout.js'))
     assert.equal(resolved.planner.grants.agents[0].def, join(root, 'crew/pi/explore.json'))
     assert.equal(resolved.planner.grants.agents[0].name, 'Explore')
     assert.equal(resolved.planner.adapter.capabilitiesFor({ transport: 'pane', grants: resolved.planner.grants }).subagents, true)
+    const command = resolved.planner.adapter.seatCommand({
+      role: 'planner', model: 'openai-codex/gpt-5.6-luna', promptFile: '/tmp/role-planner.md',
+      tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir: '/tmp', bootBrief: 'boot', grants: resolved.planner.grants,
+    })
+    assert.ok(command.includes(`-e "${join(root, 'crew/pi/fanout.js')}"`))
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -2191,12 +2199,12 @@ test('probeLocalEndpoint never throws and rejects only failures and 5xx response
   assert.equal(await probeLocalEndpoint('http://injected/throw', { fetchFn: async () => { throw new Error('offline') } }), false)
 })
 
-test('shipped capability register mirrors role requirements and ships no grant content', async () => {
+test('the shipped register is where the fan-out grant lives', async () => {
   const register = loadCapabilities()
   assert.deepEqual(Object.keys(register.roles), ROLE_ORDER)
   for (const role of ROLE_ORDER) {
     assert.deepEqual(register.roles[role].requires, SEAT_DEFAULTS[role].requires)
-    assert.deepEqual(register.roles[role].tools, [])
+    assert.deepEqual(register.roles[role].tools, ['planner', 'reviewer'].includes(role) ? ['Task'] : [])
     assert.deepEqual(register.roles[role].extensions, [])
     assert.deepEqual(register.roles[role].agents, [])
     assert.deepEqual(register.roles[role].skills, [])
@@ -2206,4 +2214,287 @@ test('shipped capability register mirrors role requirements and ships no grant c
     const { roles, seats } = resolveTier(roster, tier, {})
     await assert.doesNotReject(() => resolveAdapters(roles, {}, seats), `tier ${tier} must boot with shipped capabilities`)
   }
+})
+
+test('SEAT_DEFAULTS leaves fan-out grants to the register while preserving denials and requirements', () => {
+  assert.doesNotMatch(SEAT_DEFAULTS.planner.tools, /Task/)
+  assert.doesNotMatch(SEAT_DEFAULTS.reviewer.tools, /Task/)
+  for (const role of ['lead', 'builder', 'tech-lead']) assert.match(SEAT_DEFAULTS[role].deny, /Task/)
+  assert.deepEqual(SEAT_DEFAULTS.planner.requires, ['subagents'])
+  for (const role of ['lead', 'builder', 'reviewer', 'tech-lead']) assert.deepEqual(SEAT_DEFAULTS[role].requires, [])
+})
+
+test('effectiveCapabilities keys subagent delivery on the command line in both adapters', () => {
+  const claudeBare = capabilitiesFor({ transport: 'pane', grants: EMPTY_GRANTS })
+  const claudeTaskGrants = { tools: ['Task'], agents: [], extensions: [] }
+  const claudeTask = effectiveCapabilities({
+    bare: claudeBare, declared: capabilitiesFor({ transport: 'pane', grants: claudeTaskGrants }), grants: claudeTaskGrants,
+  })
+  assert.equal(claudeTask.subagents, true)
+
+  const claudeAgentsOnlyGrants = { tools: [], agents: [{ name: 'Explore', def: '/tmp/explore.json' }], extensions: [] }
+  const claudeAgentsOnly = effectiveCapabilities({
+    bare: claudeBare, declared: capabilitiesFor({ transport: 'pane', grants: claudeAgentsOnlyGrants }), grants: claudeAgentsOnlyGrants,
+  })
+  assert.equal(claudeAgentsOnly.subagents, false)
+
+  const piBare = piCapabilitiesFor({ transport: 'pane', grants: EMPTY_GRANTS })
+  const piBundleGrants = { tools: [], extensions: ['crew/pi/fanout.js'], agents: [{ name: 'Explore', def: '/tmp/explore.json' }] }
+  const piBundle = effectiveCapabilities({
+    bare: piBare, declared: piCapabilitiesFor({ transport: 'pane', grants: piBundleGrants }), grants: piBundleGrants,
+  })
+  assert.equal(piBundle.subagents, true)
+
+  const piAgentsOnlyGrants = { tools: [], extensions: [], agents: [{ name: 'Explore', def: '/tmp/explore.json' }] }
+  const piAgentsOnly = effectiveCapabilities({
+    bare: piBare, declared: piCapabilitiesFor({ transport: 'pane', grants: piAgentsOnlyGrants }), grants: piAgentsOnlyGrants,
+  })
+  assert.equal(piAgentsOnly.subagents, false)
+
+  const piTaskOnlyGrants = { tools: ['Task'], extensions: [], agents: [] }
+  const piTaskOnly = effectiveCapabilities({
+    bare: piBare, declared: piCapabilitiesFor({ transport: 'pane', grants: piTaskOnlyGrants }), grants: piTaskOnlyGrants,
+  })
+  assert.equal(piTaskOnly.subagents, false)
+  assert.equal(effectiveCapabilities({ bare: piBare, declared: piBare, grants: EMPTY_GRANTS }).subagents, false)
+
+  const untouched = effectiveCapabilities({
+    bare: { effort: false, local_provider: true, tool_deny: false },
+    declared: { effort: false, local_provider: true, tool_deny: false },
+    grants: piBundleGrants,
+  })
+  assert.deepEqual(untouched, { effort: false, local_provider: true, tool_deny: false })
+  assert.equal(Object.isFrozen(piBundle), true)
+  assert.deepEqual(Object.keys(CAPABILITY_DELIVERY), ['subagents'])
+})
+
+test('withheld register grants refuse planners with the closed capability-shortfall reason', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const base = capabilityRegister()
+    const agentsOnly = capabilityRegister({ roles: {
+      planner: { ...base.roles.planner, agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
+    } })
+    const assertWithheld = async (args, register) => assert.rejects(
+      () => resolveAdapters(['planner'], args, null, { register, root }),
+      (err) => {
+        assert.equal(err.reason, 'capability-shortfall')
+        assert.equal(err.role, 'planner')
+        assert.match(err.message, /planner/)
+        assert.match(err.message, /subagents/)
+        assert.match(err.message, /crew\/capabilities\.json/)
+        assert.doesNotMatch(err.message, /agent adapter/)
+        return true
+      },
+    )
+    await assertWithheld({}, base)
+    await assertWithheld({}, agentsOnly)
+    await assertWithheld({ 'agent-planner': 'pi' }, agentsOnly)
+    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead'])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a granted register boots and a shortfall waiver still boots degraded', async () => {
+  const base = capabilityRegister()
+  const granted = capabilityRegister({ roles: {
+    planner: { ...base.roles.planner, tools: ['Task'] },
+  } })
+  const resolved = await resolveAdapters(['planner'], {}, null, { register: granted })
+  assert.deepEqual(resolved.planner.grants.tools, ['Task'])
+  const degraded = await resolveAdapters(['planner'], { 'allow-shortfall-planner': 'subagents' }, null, { register: base })
+  assert.deepEqual(degraded.planner.grants.tools, [])
+})
+
+test('effectiveTools and the composed planner command preserve the effective allowlist', () => {
+  const register = loadCapabilities()
+  const grants = grantsFor(register, 'planner')
+  assert.equal(effectiveTools('planner', grants), 'Read,Glob,Grep,Bash,Write,Task')
+  const command = seatCommand({
+    role: 'planner', model: 'opus', promptFile: '/tmp/role-planner.md', tools: SEAT_DEFAULTS.planner.tools,
+    deny: SEAT_DEFAULTS.planner.deny, taskDir: '/tmp', bootBrief: 'boot', grants,
+  })
+  assert.match(command, /--allowedTools "Read,Glob,Grep,Bash,Write,Task"/)
+})
+
+test('headless boot records effective planner and reviewer allowlists', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-effective-tools-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-effective-tools-checkout-')
+  try {
+    await withBreakerEnv({}, () => withHome(home, () => bootCmd(
+      { task: 'effective-tools', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const members = JSON.parse(readFileSync(join(testCrewDir(home, checkout, 'effective-tools'), 'crew.json'), 'utf8')).members
+    assert.match(members.planner.tools, /(^|,)Task(,|$)/)
+    assert.match(members.reviewer.tools, /(^|,)Task(,|$)/)
+    assert.doesNotMatch(members.builder.tools, /(^|,)Task(,|$)/)
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('a pi review seat keeps its built-in activator and deny boundary with register tools', () => {
+  const base = capabilityRegister()
+  const register = capabilityRegister({ roles: {
+    reviewer: { ...base.roles.reviewer, tools: ['Task'] },
+  } })
+  const grants = grantsFor(register, 'reviewer')
+  const command = piSeatCommand({
+    ...PI_SAMPLE, role: 'reviewer', tools: SEAT_DEFAULTS.reviewer.tools, deny: SEAT_DEFAULTS.reviewer.deny, grants,
+  })
+  for (const name of PI_BUILTIN_TOOLS) assert.ok(command.includes(name), `missing pi built-in tool ${name}`)
+  assert.match(command, /--tools "read,bash,edit,write,grep,find,ls,Task"/)
+  assert.match(command, /--exclude-tools "edit"/)
+  assert.doesNotMatch(command, /--exclude-tools "[^"]*Task/)
+})
+
+test('loadPolicy is opt-in and strictly validates a positive finite threshold', () => {
+  assert.deepEqual(LOAD_ENV, { threshold: 'CREW_LOAD_THRESHOLD' })
+  assert.equal(loadPolicy({}), null)
+  assert.equal(loadPolicy({ CREW_LOAD_THRESHOLD: '' }), null)
+  assert.deepEqual(loadPolicy({ CREW_LOAD_THRESHOLD: '1.5' }), { threshold: 1.5 })
+  for (const value of ['abc', '0', '-1', 'NaN', 'Infinity']) {
+    assert.throws(() => loadPolicy({ CREW_LOAD_THRESHOLD: value }), (err) => {
+      assert.match(err.message, /CREW_LOAD_THRESHOLD/)
+      assert.match(err.message, new RegExp(value.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+      return true
+    })
+  }
+})
+
+test('hostLoad measures only with a policy and uses a strict per-core threshold edge', () => {
+  let loadCalls = 0
+  let cpuCalls = 0
+  const none = hostLoad({ policy: null, loadavg: () => { loadCalls += 1; return [1] }, cpus: () => { cpuCalls += 1; return [{}] } })
+  assert.equal(none, null)
+  assert.equal(loadCalls, 0)
+  assert.equal(cpuCalls, 0)
+  const quiet = hostLoad({ policy: { threshold: 2 }, loadavg: () => [4, 0, 0], cpus: () => new Array(8).fill({}), platform: 'darwin' })
+  assert.deepEqual(quiet, {
+    configured: true, threshold: 2, basis: 'os.loadavg()[0] / os.cpus().length',
+    load_1m: 4, cores: 8, per_core: 0.5, verdict: 'quiet', why: null,
+  })
+  const edge = hostLoad({ policy: { threshold: 2 }, loadavg: () => [16, 0, 0], cpus: () => new Array(8).fill({}), platform: 'darwin' })
+  assert.equal(edge.verdict, 'quiet')
+  const saturated = hostLoad({ policy: { threshold: 2 }, loadavg: () => [291, 0, 0], cpus: () => new Array(10).fill({}), platform: 'darwin' })
+  assert.equal(saturated.verdict, 'saturated')
+  assert.equal(saturated.load_1m, 291)
+  assert.equal(saturated.cores, 10)
+})
+
+test('every unmeasurable host-load mode refuses without inventing a measurement', () => {
+  const cases = [
+    { loadavg: () => { throw new Error('no loadavg') }, cpus: () => new Array(8).fill({}), platform: 'darwin' },
+    { loadavg: () => [Number.NaN, 0, 0], cpus: () => new Array(8).fill({}), platform: 'darwin' },
+    { loadavg: () => [1, 1, 1], cpus: () => { throw new Error('no cpus') }, platform: 'darwin' },
+    { loadavg: () => [1, 1, 1], cpus: () => [], platform: 'darwin' },
+    { loadavg: () => [0, 0, 0], cpus: () => new Array(8).fill({}), platform: 'win32' },
+  ]
+  const saturated = hostLoad({ policy: { threshold: 1 }, loadavg: () => [3, 0, 0], cpus: () => [{}], platform: 'darwin' })
+  let saturatedMessage
+  assert.throws(() => assertHostQuiet(saturated), (err) => { saturatedMessage = err.message; return err.code === 'host-load-open' })
+  for (const deps of cases) {
+    const record = hostLoad({ policy: { threshold: 1 }, ...deps })
+    assert.equal(record.verdict, 'unmeasurable')
+    assert.equal(record.load_1m, null)
+    assert.equal(record.cores, null)
+    assert.equal(record.per_core, null)
+    assert.ok(record.why)
+    assert.throws(() => assertHostQuiet(record), (err) => {
+      assert.equal(err.code, 'host-load-unmeasurable')
+      assert.notEqual(err.message, saturatedMessage)
+      assert.doesNotMatch(err.message, /per core/)
+      return true
+    })
+  }
+})
+
+test('saturated host refusal names measured load, basis, threshold, and remediation', () => {
+  const quiet = hostLoad({ policy: { threshold: 2 }, loadavg: () => [1, 0, 0], cpus: () => new Array(8).fill({}), platform: 'darwin' })
+  assert.doesNotThrow(() => assertHostQuiet(null))
+  assert.doesNotThrow(() => assertHostQuiet(quiet))
+  const hot = hostLoad({ policy: { threshold: 1.5 }, loadavg: () => [291, 0, 0], cpus: () => new Array(10).fill({}), platform: 'darwin' })
+  assert.throws(() => assertHostQuiet(hot), (err) => {
+    assert.equal(err.code, 'host-load-open')
+    for (const value of ['291', '10', '1.5', 'CREW_LOAD_THRESHOLD', 'os.loadavg()[0] / os.cpus().length']) assert.ok(err.message.includes(value), `refusal omitted ${value}`)
+    assert.match(err.message, /wait for the host|seat fewer roles|unset CREW_LOAD_THRESHOLD/)
+    return true
+  })
+})
+
+test('saturated boot refuses before state, workspace, or seat creation for tier and roles', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-load-order-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-load-order-checkout-')
+  try {
+    await withBreakerEnv({ CREW_LOAD_THRESHOLD: '1' }, () => withHome(home, async () => {
+      for (const [task, extra] of [['load-tier', { tier: 'build', 'headless-all': true }], ['load-roles', { roles: 'lead,builder' }]]) {
+        const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+        await assert.rejects(
+          () => bootCmd({ task, checkout, ...extra, 'claude-bin': process.execPath }, { cmux, tree, renameTab, loadavg: () => [999, 0, 0], cpus: () => new Array(4).fill({}) }),
+          (err) => err.code === 'host-load-open',
+        )
+        assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+        assert.equal(cmux.calls.length, 0)
+        assert.equal(tree.calls.length, 0)
+        assert.equal(renameTab.calls.length, 0)
+      }
+    }))
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('a host-load refusal records no cell failure of its own', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-load-self-feed-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-load-self-feed-checkout-')
+  const dbPath = join(home, 'ledger.db')
+  const seeded = openLedger({ dbPath, stderr: { write: () => {} } })
+  seeded.cellFailures({ since: null })
+  seeded.close()
+  try {
+    await withBreakerEnv({ CREW_LOAD_THRESHOLD: '2', DEVTEAM_LEDGER_DB: dbPath }, () => withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task: 'load-self-feed', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), loadavg: () => [999, 0, 0], cpus: () => new Array(4).fill({}) },
+      ),
+      (err) => err.code === 'host-load-open',
+    )))
+    if (!nodeMeetsLedgerFloor) return
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    assert.deepEqual(ledger.dumpTable('cell_failures'), [])
+    ledger.close()
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('quiet host boots and journals measured load while unconfigured boot omits it', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-load-journal-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-load-journal-checkout-')
+  try {
+    let quietLoadCalls = 0; let quietCpuCalls = 0
+    await withBreakerEnv({ CREW_LOAD_THRESHOLD: '2' }, () => withHome(home, () => bootCmd(
+      { task: 'load-quiet', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      {
+        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+        loadavg: () => { quietLoadCalls += 1; return [4, 0, 0] },
+        cpus: () => { quietCpuCalls += 1; return new Array(8).fill({}) },
+      },
+    )))
+    const measured = bootRecord(testCrewDir(home, checkout, 'load-quiet')).load
+    assert.equal(measured.verdict, 'quiet')
+    assert.equal(measured.threshold, 2)
+    assert.equal(measured.basis, 'os.loadavg()[0] / os.cpus().length')
+    assert.equal(measured.load_1m, 4)
+    assert.equal(measured.cores, 8)
+    assert.equal(quietLoadCalls, 1)
+    assert.equal(quietCpuCalls, 1)
+
+    let plainLoadCalls = 0; let plainCpuCalls = 0
+    await withBreakerEnv({}, () => withHome(home, () => bootCmd(
+      { task: 'load-plain', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      {
+        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+        loadavg: () => { plainLoadCalls += 1; return [0, 0, 0] },
+        cpus: () => { plainCpuCalls += 1; return [{}] },
+      },
+    )))
+    assert.equal(Object.hasOwn(bootRecord(testCrewDir(home, checkout, 'load-plain')), 'load'), false)
+    assert.equal(plainLoadCalls, 0)
+    assert.equal(plainCpuCalls, 0)
+  } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
 })

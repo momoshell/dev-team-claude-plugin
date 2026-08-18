@@ -24,7 +24,7 @@ import {
   existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync,
 } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
-import { homedir } from 'node:os'
+import { homedir, loadavg as osLoadavg, cpus as osCpus } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { execSync } from 'node:child_process'
@@ -69,22 +69,34 @@ export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_R
 // `agent` names the adapter (crew/adapters/adapter-<name>.mjs) that fills
 // the seat; overridable per task via --agent-<role>, default 'claude'.
 // `requires` names the capability keys the charter depends on; a seat whose
-// adapter cannot deliver one refuses to boot.
-// Only the PLANNER requires `subagents`, and the asymmetry is deliberate: its
-// charter is "domain lead + architect + scout-commander", and fan-out
-// discovery IS the third of those. The reviewer's charter — conformance to
-// plan, then correctness, plus gate-defect triage and perspective duty — names
-// no fan-out, and the roster deliberately seats pi/terra on review at
+// adapter cannot deliver one refuses to boot. The fan-out tool itself is a
+// register-backed grant in crew/capabilities.json, not a hardcoded seat
+// default. Only the PLANNER requires `subagents`, and the asymmetry is
+// deliberate: its charter is "domain lead + architect + scout-commander", and
+// fan-out discovery IS the third of those. The reviewer's charter — conformance
+// to plan, then correctness, plus gate-defect triage and perspective duty —
+// names no fan-out, and the roster deliberately seats pi/terra on review at
 // `build`/`mechanical` under the ratified review-vendor rule. Requiring it
 // there would make two of three tiers unbootable, which is how this landed the
 // first time (#144).
 export const SEAT_DEFAULTS = Object.freeze({
   lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'lead.md', agent: 'claude' },
-  planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'planner.md', agent: 'claude' },
+  planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'planner.md', agent: 'claude' },
   builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', requires: [], prompt: 'builder.md', agent: 'claude' },
-  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write,Task', deny: 'Edit,NotebookEdit', requires: [], prompt: 'reviewer.md', agent: 'claude' },
+  reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit', requires: [], prompt: 'reviewer.md', agent: 'claude' },
   'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'tech-lead.md', agent: 'claude' },
 })
+
+// The seat's EFFECTIVE auto-approve allowlist: the seat default plus whatever
+// the register granted, in that order (identical to adapter-claude's own
+// allowedTools() merge, so the composed command is byte-unchanged).
+// crew.json records THIS, not the bare default: crew/headless.mjs rebuilds a
+// headless worker command from members.<role>.tools alone — grants never reach
+// it — so recording the default would silently narrow every factory seat.
+export function effectiveTools(role, grants = EMPTY_GRANTS) {
+  return [...new Set([...String(SEAT_DEFAULTS[role].tools || '').split(','), ...(grants?.tools || [])].filter(Boolean))].join(',')
+}
+
 export const DEFAULT_ROLES = Object.freeze(['lead', 'planner', 'builder', 'reviewer'])
 export const MEMORY_ROLES = Object.freeze(['lead', 'planner'])
 // Canonical seating order — also layout order (index 0 takes the left half).
@@ -197,9 +209,9 @@ function cloneJson(value) {
 }
 
 // The register is runtime policy: grant paths resolve against this checkout,
-// not the target checkout. The shipped file intentionally grants no content
-// until later slices commit checkout-pinned pi assets; advisor is reserved and
-// has no runtime behavior in this slice.
+// not the target checkout. The shipped file carries the claude Task fan-out
+// grant; checkout-pinned pi assets remain reserved for a later slice, as does
+// advisor runtime behavior.
 export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABILITIES_SCHEMA_PATH, register = null } = {}) {
   let schema
   try {
@@ -325,6 +337,51 @@ export const EMPTY_GRANTS = deepFreeze({
   tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [],
 })
 
+// A capability the REGISTER hands out, not one the binary simply has. The
+// adapter declares what its CLI can do; crew/capabilities.json decides what
+// THIS seat is given. HOW a grant delivers a capability is adapter-owned:
+// pi turns `subagents` false→true when an agent definition is granted
+// (crew/adapters/adapter-pi.mjs:74), while claude declares it invariantly true
+// and carries fan-out only in the `Task` tool it was granted
+// (crew/adapters/adapter-claude.mjs:17,61-63). So an adapter-owned false→true
+// transition is trusted as delivery, and an already-true (invariant) profile
+// still has to be backed by the registered tool — otherwise a claude seat with
+// an agents-only grant would boot with no Task in its command line.
+// Deliberately NOT inside adapter.capabilitiesFor(): visualizer/server/
+// roster-edit.mjs and crew/daemon.mjs call that seam WITHOUT grants to
+// pre-flight a roster cell, and narrowing there would refuse every claude
+// planner in the propose-only editor.
+export const CAPABILITY_DELIVERY = Object.freeze({
+  subagents: Object.freeze({
+    // claude: the CLI ships the Task tool and adapter-claude.mjs:61-63 merges a
+    // granted tool into --allowedTools. Its declaration is invariantly true, so
+    // the tool grant is the only thing that makes that declaration real.
+    tools: Object.freeze(['Task']),
+    // pi: the CLI ships NO subagent tool, so fan-out is an extension that
+    // implements it plus an agent definition that names it
+    // (crew/adapters/adapter-pi.mjs:24-26). Its capabilitiesFor flips on
+    // grants.agents alone (:74), but seatCommand (:182-194) emits `-e
+    // <extension>` and never emits the agent grant — an agents-only seat boots
+    // --no-extensions with nothing to fan out with. The whole bundle or nothing.
+    bundle: Object.freeze(['extensions', 'agents']),
+  }),
+})
+
+export function effectiveCapabilities({ declared, bare, grants = EMPTY_GRANTS } = {}) {
+  const nonEmpty = (key) => ((grants?.[key]) || []).length > 0
+  const out = { ...declared }
+  for (const [cap, delivery] of Object.entries(CAPABILITY_DELIVERY)) {
+    if (out[cap] !== true) continue
+    const delivered = bare?.[cap] === true
+      // declared with no grants at all: the registered tool is what gives it to this seat
+      ? delivery.tools.some((tool) => (grants?.tools || []).includes(tool))
+      // declared only because of a grant: every piece the command line needs
+      : delivery.bundle.every(nonEmpty)
+    if (!delivered) out[cap] = false
+  }
+  return Object.freeze(out)
+}
+
 export async function probeLocalEndpoint(url, { fetchFn = fetch, timeoutMs = 2000 } = {}) {
   try {
     const response = await fetchFn(url, { signal: AbortSignal.timeout(timeoutMs) })
@@ -332,6 +389,84 @@ export async function probeLocalEndpoint(url, { fetchFn = fetch, timeoutMs = 200
   } catch {
     return false
   }
+}
+
+export const LOAD_ENV = Object.freeze({ threshold: 'CREW_LOAD_THRESHOLD' })
+
+// Opt-in, exactly like the cell breaker: an absent/empty threshold means no
+// policy and nothing is measured; every other malformed value is a boot-time
+// configuration error. There is deliberately NO default threshold — a guessed
+// number is a number nobody measured.
+export function loadPolicy(env = process.env) {
+  const raw = env?.[LOAD_ENV.threshold]
+  if (raw === undefined || raw === '') return null
+  const threshold = Number(raw)
+  if (!Number.isFinite(threshold) || threshold <= 0) {
+    throw new Error(`${LOAD_ENV.threshold} must be a finite number > 0 (got ${JSON.stringify(raw)})`)
+  }
+  return { threshold }
+}
+
+const LOAD_BASIS = 'os.loadavg()[0] / os.cpus().length'
+
+function loadRecord(policy, verdict, why, load_1m = null, cores = null, per_core = null) {
+  return {
+    configured: true, threshold: policy.threshold, basis: LOAD_BASIS,
+    load_1m, cores, per_core, verdict, why,
+  }
+}
+
+export function hostLoad({ policy, loadavg = osLoadavg, cpus = osCpus, platform = process.platform } = {}) {
+  if (policy == null) return null
+  if (platform === 'win32') {
+    return loadRecord(policy, 'unmeasurable', 'Node documents win32 os.loadavg() as a constant, not a measured host load')
+  }
+
+  let load_1m
+  try {
+    load_1m = loadavg()?.[0]
+  } catch (err) {
+    return loadRecord(policy, 'unmeasurable', `os.loadavg() failed: ${err?.message || String(err)}`)
+  }
+  if (typeof load_1m !== 'number' || !Number.isFinite(load_1m) || load_1m < 0) {
+    return loadRecord(policy, 'unmeasurable', 'os.loadavg()[0] was not a finite non-negative number')
+  }
+
+  let coreList
+  try {
+    coreList = cpus()
+  } catch (err) {
+    return loadRecord(policy, 'unmeasurable', `os.cpus() failed: ${err?.message || String(err)}`)
+  }
+  if (!Array.isArray(coreList) || coreList.length === 0) {
+    return loadRecord(policy, 'unmeasurable', 'os.cpus() did not return a non-empty array')
+  }
+
+  const cores = coreList.length
+  const per_core = load_1m / cores
+  const verdict = per_core > policy.threshold ? 'saturated' : 'quiet'
+  return loadRecord(policy, verdict, null, load_1m, cores, per_core)
+}
+
+function loadError(code, message) {
+  const error = new Error(message)
+  error.code = code
+  return error
+}
+
+export function assertHostQuiet(record) {
+  if (!record || record.verdict === 'quiet') return
+  if (record.verdict === 'unmeasurable') {
+    throw loadError(
+      'host-load-unmeasurable',
+      `host load: CREW_LOAD_THRESHOLD=${record.threshold} is configured but host load is unmeasurable (${record.why || 'unknown reason'}) — refusing to boot without a measured host load; repair the host load probe or unset CREW_LOAD_THRESHOLD.`,
+    )
+  }
+  if (record.verdict !== 'saturated') return
+  throw loadError(
+    'host-load-open',
+    `host load: 1-minute load average ${record.load_1m} over ${record.cores} cores = ${record.per_core.toFixed(2)} per core exceeds CREW_LOAD_THRESHOLD=${record.threshold} (basis: ${record.basis}, measured at boot) — refusing to boot a crew onto a saturated host; wait for the host to quiet down, seat fewer roles (--roles/--tier), or unset CREW_LOAD_THRESHOLD.`,
+  )
 }
 
 // The rule itself lives in the leaf module `slug.mjs`, so daemon.mjs can share
@@ -452,7 +587,7 @@ export function seatTransport({ role, args = {}, adapter, agentName } = {}) {
   throw new Error(`seat ${role}: agent "${agentName}" ships no headless transport — tried ${HEADLESS_TRANSPORTS.join(', ')} (last refusal: ${last})`)
 }
 
-export function assertCapabilities(role, agentName, capabilities, allowed = [], requires = SEAT_DEFAULTS[role].requires) {
+export function assertCapabilities(role, agentName, capabilities, allowed = [], requires = SEAT_DEFAULTS[role].requires, { withheld = [] } = {}) {
   if (SEAT_DEFAULTS[role].deny && capabilities?.tool_deny !== true) {
     const err = new Error(`seat ${role} needs tool denial (deny: "${SEAT_DEFAULTS[role].deny}") but agent adapter "${agentName}" declares tool_deny: false — refusing to boot a weaker seat`)
     err.reason = 'capability-shortfall'
@@ -461,7 +596,9 @@ export function assertCapabilities(role, agentName, capabilities, allowed = [], 
   for (const cap of requires || []) {
     if (capabilities?.[cap] === true) continue
     if (allowed.includes(cap)) continue
-    const err = new Error(`seat ${role} requires capability "${cap}" but agent adapter "${agentName}" declares ${cap}: ${JSON.stringify(capabilities?.[cap])} — refusing to boot a weaker seat (pass --allow-shortfall-${role} ${cap} to boot it degraded on purpose)`)
+    const err = withheld.includes(cap)
+      ? new Error(`seat ${role} requires capability "${cap}" but crew/capabilities.json grants seat ${role} nothing that delivers it (tools: [...], agents: [...]) — refusing to boot a weaker seat (grant it in crew/capabilities.json roles.${role}, or pass --allow-shortfall-${role} ${cap} to boot it degraded on purpose)`)
+      : new Error(`seat ${role} requires capability "${cap}" but agent adapter "${agentName}" declares ${cap}: ${JSON.stringify(capabilities?.[cap])} — refusing to boot a weaker seat (pass --allow-shortfall-${role} ${cap} to boot it degraded on purpose)`)
     err.reason = 'capability-shortfall'
     throw err
   }
@@ -610,7 +747,11 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       }
 
       const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...grants.requires])]
-      assertCapabilities(role, name, adapter.capabilitiesFor({ transport, grants }), seatShortfalls(role, sourceArgs), requires)
+      const bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
+      const declared = adapter.capabilitiesFor({ transport, grants })
+      const effective = effectiveCapabilities({ declared, bare, grants })
+      const withheld = Object.keys(CAPABILITY_DELIVERY).filter((cap) => declared[cap] === true && effective[cap] !== true)
+      assertCapabilities(role, name, effective, seatShortfalls(role, sourceArgs), requires, { withheld })
       if (transport === HEADLESS_TRANSPORT && typeof adapter.headlessCommand !== 'function') {
         throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a headlessCommand function`)
       }
@@ -760,10 +901,11 @@ export async function bootCmd(args, deps = {}) {
   const {
     cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
     openLedger: openLedgerDep = null, existsSync: existsSyncDep = null,
+    loadavg: loadavgDep = null, cpus: cpusDep = null,
   } = deps
-  // Capture the invocation environment before async adapter resolution so a
-  // caller's policy cannot be lost while boot is awaiting imports.
-  const breakerEnv = { ...process.env }
+  // Capture the invocation environment before async adapter resolution so the
+  // breaker and host-load policies cannot be lost while boot is awaiting imports.
+  const bootEnv = { ...process.env }
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   let roles, tierName = null, tierSeats = null, sources = null
@@ -792,6 +934,19 @@ export async function bootCmd(args, deps = {}) {
     throw new Error(`transport role ${role} given but crew seats no ${role}`)
   }
   for (const role of roles) transportFor(role, args) // detects ambiguous lists before cmux boot
+  // #309: refuse a saturated HOST the way ADR-032's breaker refuses an open
+  // cell. Opt-in (CREW_LOAD_THRESHOLD); with no policy nothing is measured and
+  // boot is unchanged. Refuse HERE: before resolveAdapters, before the
+  // noteRunlessCellFailure wrapper below, and before pathsFor/mkdirSync or any
+  // cmux call, so a refusal leaves no state dir and no workspace behind. Host
+  // saturation is not evidence against a cell, so it is never recorded as one.
+  const load = hostLoad({
+    policy: loadPolicy(bootEnv),
+    ...(loadavgDep ? { loadavg: loadavgDep } : {}),
+    ...(cpusDep ? { cpus: cpusDep } : {}),
+  })
+  assertHostQuiet(load)
+
   // Resolve adapters before touching cmux — a bad --agent-<role> or a
   // capability shortfall must fail before a workspace gets created.
   let adapters
@@ -812,7 +967,7 @@ export async function bootCmd(args, deps = {}) {
   // as a side effect of the breaker check. Callers can still pin the precheck
   // explicitly through existsSync for a fake or custom ledger.
   const breaker = cellHealth({
-    policy: breakerPolicy(breakerEnv), seats, dbPath: ledgerDbPath(),
+    policy: breakerPolicy(bootEnv), seats, dbPath: ledgerDbPath(),
     ...(openLedgerDep ? {
       openLedger: openLedgerDep,
       existsSync: existsSyncDep ?? (() => true),
@@ -865,7 +1020,7 @@ export async function bootCmd(args, deps = {}) {
   const memberFor = (role, pane = null, surface = null) => ({
     pane_id: pane?.id || null, surface_id: surface?.id || null,
     transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
-    tools: SEAT_DEFAULTS[role].tools, deny: SEAT_DEFAULTS[role].deny,
+    tools: effectiveTools(role, adapters[role].grants), deny: SEAT_DEFAULTS[role].deny,
     ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
   })
   if (headlessOnly) {
@@ -949,6 +1104,7 @@ export async function bootCmd(args, deps = {}) {
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
+    ...(load ? { load } : {}),
     capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },
     ...(memory.record ? { memory: memory.record } : {}),
   })

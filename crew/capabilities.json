@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-17",
+  "updated_at": "2026-08-18",
   "roles": {
     "lead": {
       "tools": [],
@@ -11,7 +11,7 @@
       "requires": []
     },
     "planner": {
-      "tools": [],
+      "tools": ["Task"],
       "extensions": [],
       "agents": [],
       "skills": [],
@@ -27,7 +27,7 @@
       "requires": []
     },
     "reviewer": {
-      "tools": [],
+      "tools": ["Task"],
       "extensions": [],
       "agents": [],
       "skills": [],

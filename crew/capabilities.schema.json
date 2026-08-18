@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.internal/crew/capabilities.schema.json",
   "title": "checkout-pinned crew capability register",
-  "description": "Closed, runtime-owned grants. The shipped register is intentionally empty until checkout-pinned pi extensions, skills, and agent definitions arrive; advisor is reserved for a later runtime slice.",
+  "description": "Closed, runtime-owned grants. The register is the single place that says which seats may fan out, and a grant must carry everything the seat's command line needs: tools: [\"Task\"] for a claude seat, an extension and an agent definition together for a pi seat. Skill grants stay empty until checkout-pinned pi assets arrive, and advisor is reserved for a later runtime slice.",
   "type": "object",
   "required": [
     "schema_version",

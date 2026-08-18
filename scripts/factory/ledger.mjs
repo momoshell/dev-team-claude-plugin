@@ -151,6 +151,8 @@ export const INTAKE_REFUSALS = Object.freeze([
   'priority-unknown', 'intake-block-missing', 'intake-block-malformed',
   'brief-uncompilable', 'protected-path', 'tier-judge', 'not-first-in-order',
 ])
+export const INTAKE_BRAKE_TRANSITIONS = Object.freeze(['engaged', 'cleared'])
+export const INTAKE_BRAKE_OUTCOMES = Object.freeze(['ok', 'failed'])
 
 // One row per recorded STEP of one dispatch, appended never updated:
 // 'claimed' is written after the verified board move and before any boot, so a
@@ -568,6 +570,21 @@ export const TABLES = Object.freeze({
     unique: [['board_owner', 'board_project', 'issue', 'created_at']],
     indexes: [{ name: 'intake_refusals_reason_idx', cols: ['reason', 'created_at'] }],
   },
+  intake_brakes: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'checkout', decl: 'TEXT' },
+      { name: 'path', decl: 'TEXT' },
+      { name: 'transition', decl: 'TEXT' },
+      // This is a claim supplied by an unauthenticated console client, not a verified identity.
+      { name: 'actor', decl: 'TEXT' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'detail', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['checkout', 'path', 'transition', 'created_at']],
+    indexes: [{ name: 'intake_brakes_transition_idx', cols: ['transition', 'created_at'] }],
+  },
   intake_dispatches: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -620,7 +637,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeDispatch', 'recordSeatTeardown', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1631,6 +1648,38 @@ export function openLedger({
     return args
   }
 
+  // actor is a claim supplied by an unauthenticated console client, not a verified identity.
+  function recordIntakeBrake(input = {}) {
+    requireFields(input, ['checkout', 'path', 'transition', 'actor', 'outcome'], 'recordIntakeBrake')
+    requireEnum(input.transition, INTAKE_BRAKE_TRANSITIONS, 'recordIntakeBrake', 'transition')
+    requireEnum(input.outcome, INTAKE_BRAKE_OUTCOMES, 'recordIntakeBrake', 'outcome')
+    const args = redact({
+      checkout: input.checkout == null ? null : String(input.checkout),
+      path: input.path == null ? null : String(input.path),
+      transition: input.transition,
+      // This actor is a caller-supplied claim, never an authenticated identity.
+      actor: input.actor == null ? null : String(input.actor),
+      outcome: input.outcome,
+      detail: input.detail == null ? null : String(input.detail),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    if (args.checkout === undefined) args.checkout = 'redacted'
+    if (args.path === undefined) args.path = 'redacted'
+    if (args.checkout != null) args.checkout = args.checkout.slice(0, 1000)
+    if (args.path != null) args.path = args.path.slice(0, 1000)
+    if (args.actor === undefined) args.actor = 'redacted'
+    if (args.actor != null) args.actor = args.actor.slice(0, 120)
+    if (args.detail != null) args.detail = args.detail.slice(0, 500)
+    appendJsonl('recordIntakeBrake', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('intake_brakes').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO intake_brakes (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordIntakeDispatch(input = {}) {
     requireFields(input, ['board_owner', 'board_project', 'issue', 'outcome'], 'recordIntakeDispatch')
     requireEnum(input.outcome, INTAKE_DISPATCH_OUTCOMES, 'recordIntakeDispatch', 'outcome')
@@ -2149,6 +2198,17 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function intakeBrakes({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT transition, outcome,
+        COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM intake_brakes
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY transition, outcome
+      ORDER BY transition, outcome
+    `, [since, since, until, until])
+  }
+
   function intakeDispatches({ since = null, until = null } = {}) {
     return queryRows(`
       SELECT outcome, reason,
@@ -2409,10 +2469,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeDispatch, recordSeatTeardown,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeDispatches, seatTeardowns, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, seatTeardowns, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,

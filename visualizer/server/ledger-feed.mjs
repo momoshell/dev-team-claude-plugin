@@ -139,8 +139,16 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
   function intake({ since = null, until = null } = {}) {
     probeColumns()
     const handle = open()
-    if (!handle) return { sweeps: null, refusals: null, picks: null, ever: null, absent: degradedReason || 'the ledger could not be opened' }
-    if (probe.missing_tables.includes('intake_sweeps')) return { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake_sweeps predates this ledger mirror' }
+    if (!handle) return {
+      sweeps: null, refusals: null, picks: null, ever: null,
+      candidate_refusals: null, candidate_picks: null, candidates_absent: null,
+      absent: degradedReason || 'the ledger could not be opened',
+    }
+    if (probe.missing_tables.includes('intake_sweeps')) return {
+      sweeps: null, refusals: null, picks: null, ever: null,
+      candidate_refusals: null, candidate_picks: null, candidates_absent: null,
+      absent: 'intake_sweeps predates this ledger mirror',
+    }
 
     let sweeps, picks, ever
     try {
@@ -166,12 +174,18 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
       `).get()
     } catch (err) {
       if (!probe.missing_tables.includes('intake_sweeps')) probe.missing_tables.push('intake_sweeps')
-      return { sweeps: null, refusals: null, picks: null, ever: null, absent: err?.message || String(err) }
+      return {
+        sweeps: null, refusals: null, picks: null, ever: null,
+        candidate_refusals: null, candidate_picks: null, candidates_absent: null,
+        absent: err?.message || String(err),
+      }
     }
 
     let refusals = null, refusals_absent = null
+    let candidate_refusals = null, candidate_picks = null, candidates_absent = null
     if (probe.missing_tables.includes('intake_refusals')) {
       refusals_absent = 'intake_refusals predates this ledger mirror'
+      candidates_absent = refusals_absent
     } else {
       try {
         refusals = handle.prepare(`
@@ -182,12 +196,36 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
           GROUP BY reason
           ORDER BY reason
         `).all(since, since, until, until)
+        // Latest recorded refusal per issue. SQLite's bare-column-with-MAX()
+        // rule keeps the non-aggregated columns on the MAX(created_at) row.
+        candidate_refusals = handle.prepare(`
+          SELECT board_owner, board_project, issue, reason, detail, priority,
+                 issue_created_at, MAX(created_at) AS created_at, COUNT(*) AS refusals
+          FROM intake_refusals
+          WHERE issue IS NOT NULL
+            AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+          GROUP BY board_owner, board_project, issue
+          ORDER BY issue
+        `).all(since, since, until, until)
+        candidate_picks = handle.prepare(`
+          SELECT picked_issue AS issue, board_owner, board_project,
+                 MAX(created_at) AS created_at, COUNT(*) AS picks
+          FROM intake_sweeps
+          WHERE outcome = 'picked' AND picked_issue IS NOT NULL
+            AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+          GROUP BY picked_issue, board_owner, board_project
+          ORDER BY picked_issue
+        `).all(since, since, until, until)
       } catch (err) {
         if (!probe.missing_tables.includes('intake_refusals')) probe.missing_tables.push('intake_refusals')
         refusals_absent = err?.message || String(err)
+        candidates_absent = refusals_absent
       }
     }
-    return { sweeps, refusals, refusals_absent, picks, ever, absent: null }
+    return {
+      sweeps, refusals, refusals_absent, picks, ever,
+      candidate_refusals, candidate_picks, candidates_absent, absent: null,
+    }
   }
   function runSet({ since, until = null } = {}) {
     probeColumns()

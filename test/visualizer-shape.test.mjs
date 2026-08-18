@@ -544,6 +544,66 @@ test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the b
   }
 })
 
+test('shapeIntake merges per-issue candidates, keeps the latest refusal, and sorts by issue', () => {
+  const view = shapeIntake({
+    sweeps: [], refusals: [], picks: [], ever: { sweeps: 1 }, absent: null,
+    candidate_refusals: [
+      { board_owner: 'owner', board_project: 1, issue: 7, reason: 'protected-path', detail: 'newer', priority: 'P1', created_at: '2024-01-02T00:00:00.000Z', refusals: 1 },
+      { board_owner: 'owner', board_project: 1, issue: 7, reason: 'tier-judge', detail: 'older', priority: 'P1', created_at: '2024-01-01T00:00:00.000Z', refusals: 1 },
+    ],
+    candidate_picks: [{ issue: 9, board_owner: 'owner', board_project: 1, created_at: '2024-01-02T00:00:30.000Z', picks: 1 }],
+    candidates_absent: null,
+  })
+  assert.equal(view.candidates.measured, true)
+  assert.deepEqual(view.candidates.items.map((item) => item.issue), [7, 9])
+  assert.deepEqual(view.candidates.items.map((item) => item.verdict), ['would-refuse', 'would-take'])
+  assert.equal(view.candidates.items[0].reason, 'protected-path')
+  assert.equal(view.candidates.items[0].reason_recognised, true)
+  assert.equal(view.candidates.items[0].refused_at, '2024-01-02T00:00:00.000Z')
+})
+
+test('shapeIntake lets a strictly newer pick win, but not an older or tied pick', () => {
+  const source = (refusedAt, pickedAt) => shapeIntake({
+    sweeps: [], refusals: [], picks: [], ever: { sweeps: 1 }, absent: null,
+    candidate_refusals: [{ board_owner: 'owner', board_project: 1, issue: 7, reason: 'protected-path', created_at: refusedAt, refusals: 1 }],
+    candidate_picks: [{ issue: 7, board_owner: 'owner', board_project: 1, created_at: pickedAt, picks: 1 }],
+    candidates_absent: null,
+  }).candidates.items[0]
+  assert.equal(source('2024-01-01T00:00:00.000Z', '2024-01-02T00:00:00.000Z').verdict, 'would-take')
+  assert.equal(source('2024-01-02T00:00:00.000Z', '2024-01-01T00:00:00.000Z').verdict, 'would-refuse')
+  assert.equal(source('2024-01-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z').verdict, 'would-refuse')
+})
+
+test('shapeIntake preserves an off-set candidate reason and flags recognition', () => {
+  const view = shapeIntake({
+    sweeps: [], refusals: [], picks: [], ever: { sweeps: 1 }, absent: null,
+    candidate_refusals: [
+      { board_owner: 'owner', board_project: 1, issue: 7, reason: 'protected-path', created_at: '2024-01-01T00:00:00.000Z', refusals: 1 },
+      { board_owner: 'owner', board_project: 1, issue: 8, reason: 'made-up', created_at: '2024-01-01T00:00:01.000Z', refusals: 1 },
+    ],
+    candidate_picks: [], candidates_absent: null,
+  })
+  const seven = view.candidates.items.find((item) => item.issue === 7)
+  const eight = view.candidates.items.find((item) => item.issue === 8)
+  assert.equal(seven.reason_recognised, true)
+  assert.ok(INTAKE_REFUSAL_REASONS.includes(seven.reason))
+  assert.equal(eight.reason, 'made-up')
+  assert.equal(eight.reason_recognised, false)
+})
+
+test('shapeIntake keeps candidate absence unmeasured, including a wholly missing readout', () => {
+  const base = { sweeps: [], refusals: [], picks: [], ever: { sweeps: 1 }, absent: null, since: start, until: null, label: 'last 24 hours' }
+  const absent = shapeIntake({ ...base, candidate_refusals: null, candidate_picks: null, candidates_absent: 'intake_refusals predates this ledger mirror' })
+  assert.equal(absent.candidates.measured, false)
+  assert.equal(absent.candidates.absent, 'intake_refusals predates this ledger mirror')
+  assert.deepEqual(absent.candidates.items, [])
+  assert.match(absent.candidates.unmeasured, /not a live read|has not seen/i)
+  const missing = shapeIntake(base)
+  assert.equal(missing.candidates.measured, false)
+  assert.deepEqual(missing.candidates.items, [])
+  assert.equal(missing.readonly, true)
+})
+
 test('shapeIntake tells a loop that never swept from a loop that swept and found nothing', () => {
   const base = { refusals: [], picks: [], absent: null, since: '2024-01-01T00:00:00.000Z', until: null, label: 'last 24 hours' }
   const views = [

@@ -34,7 +34,7 @@ import { slug } from './slug.mjs'
 import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
-  realIo, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
+  realIo, settleSeatTeardown, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
 } from './realio.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
@@ -1087,9 +1087,12 @@ export function runCmd(args, deps = {}) {
     logLine(journal, { at: new Date().toISOString(), ...attention })
     try { io.emit?.(attention) } catch { /* instrumentation is never load-bearing */ }
   }
-  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
-  // The task envelope is written by CODE — same path `wait` watches.
+  // The task envelope is written by CODE — same path `wait` watches. It is
+  // written BEFORE the seats are settled: a worker that refuses to die must
+  // never change the run's recorded outcome.
   writeFileSync(crew.task_return, JSON.stringify(result, null, 2))
+  settleSeatTeardown(io)
+  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
 
   // Outcome-gated lifecycle, in code as policy:
   //   done       -> auto-teardown (archive the record, close the view),

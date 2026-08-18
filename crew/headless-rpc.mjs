@@ -18,6 +18,14 @@ import { translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
 const ABORT_SETTLE_MS = 2000
+// The pre-SIGKILL window. The seat shell traps TERM (:316), so a SIGTERM
+// delivered before the worker is exec'd is SWALLOWED and the worker never sees
+// it — widening the wait alone does not make `proven` reachable, because the
+// SIGNAL was lost, not the wait. Poll the seat's own exit marker on a short
+// interval and re-deliver the TERM inside the window.
+export const EXIT_MARKER_WINDOW_MS = 5000
+export const EXIT_MARKER_POLL_MS = 25
+export const TERM_REPEAT_MS = 500
 const FIFO_RETRIES = 20
 const FIFO_RETRY_MS = 100
 
@@ -376,7 +384,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     return { id, returnPath }
   }
   function finishTurn(seat) { seat.turn = null; seat.responses.clear() }
-  function killAfterTimeout(target) {
+  function proveGroupDead(target) {
     const clearIfDead = (liveness) => {
       if (liveness === LIVENESS.DEAD && target.handle) {
         try { store.clear(target.handle) } catch { /* proof remains useful even if release is unavailable */ }
@@ -387,25 +395,35 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       return { liveness, reason }
     }
     const exitProof = () => parseExit(target.exit, read, exists) !== null
+    // The signal target is validated BEFORE anything is trusted: kill(-0, sig)
+    // signals THIS crew's own group and kill(-1, sig) signals every process this
+    // user can signal. Neither is ever a teardown.
+    const pgid = Number(target.pid)
+    const signalable = Number.isSafeInteger(pgid) && pgid > 1
 
     // A reaped worker's pgid may have since been reused. Never signal a target
-    // that already left its own exit marker behind.
+    // that already left its own exit marker behind. This short-circuit is bound
+    // to the SEAT'S OWN file, which ensureProcess unlinks before every spawn.
     if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
+    // No probe either: an unsignalable target leaves the reservation intact and
+    // settles UNKNOWN. UNKNOWN is never clean.
+    if (!signalable) return finish(LIVENESS.UNKNOWN, 'invalid-pgid')
 
-    try { kill(-target.pid, 'SIGTERM') } catch {}
-    const deadline = now() + ABORT_SETTLE_MS
-    while (now() < deadline && !exitProof()) {
-      sleep(Math.min(WAIT_POLL_MS, Math.max(1, deadline - now())))
+    try { kill(-pgid, 'SIGTERM') } catch {}
+    let lastTerm = now()
+    const deadline = now() + EXIT_MARKER_WINDOW_MS
+    while (now() < deadline) {
+      if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
+      if (now() - lastTerm >= TERM_REPEAT_MS) {
+        lastTerm = now()
+        try { kill(-pgid, 'SIGTERM') } catch {}
+      }
+      sleep(Math.min(EXIT_MARKER_POLL_MS, Math.max(1, deadline - now())))
     }
     if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
 
-    try {
-      kill(-target.pid, 'SIGKILL')
-    } catch (err) {
-      if (err?.code === 'ESRCH') return finish(LIVENESS.DEAD, 'signal-esrch')
-    }
-    // A successful kill() only says that a signal was delivered to at least
-    // one member of the group. It is not evidence that the worker is gone.
+    try { kill(-pgid, 'SIGKILL') }
+    catch (err) { if (err?.code === 'ESRCH') return finish(LIVENESS.DEAD, 'signal-esrch') }
     if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
 
     const current = store.reconcile(target.role)
@@ -414,7 +432,14 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       || current.marker.reservation_id !== target.handle.reservation_id) {
       return finish(LIVENESS.UNKNOWN, 'reservation-mismatch')
     }
-    const liveness = store.probeEvidence(current.marker.evidence)
+    // The evidence file is written by the spawn shell AFTER mkfifo and nothing
+    // deletes it between spawns, so it can still hold a PREVIOUS run's number.
+    // Proving a STALE group dead is not proof this one is: bind the evidence to
+    // the validated target, and on mismatch keep the reservation (UNKNOWN never
+    // reaches clearIfDead).
+    const evidence = current.marker.evidence
+    if (evidencePgid(evidence) !== pgid) return finish(LIVENESS.UNKNOWN, 'evidence-mismatch')
+    const liveness = store.probeEvidence(evidence)
     if (liveness === LIVENESS.DEAD) return finish(LIVENESS.DEAD, 'probe-dead')
     if (liveness === LIVENESS.ALIVE) return finish(LIVENESS.ALIVE, 'probe-alive')
     return finish(LIVENESS.UNKNOWN, 'probe-unknown')
@@ -440,8 +465,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
     }
     try { closeFd(seat.fd) } catch {}
-    const proof = killAfterTimeout(seat)
-    // Do not clear here: killAfterTimeout retains an unproven reservation so a
+    const proof = proveGroupDead(seat)
+    // Do not clear here: proveGroupDead retains an unproven reservation so a
     // later reader can still find the worker whose death we could not prove.
     // The session id survives a retire on purpose: ensureProcess will resume it
     // while reading the newly selected model and effort from the crew member.
@@ -511,7 +536,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       sleep(WAIT_POLL_MS)
     }
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
-    if (!turn.state.settled) killAfterTimeout(seat)
+    if (!turn.state.settled) proveGroupDead(seat)
     // SIGTERM/abort handling can append a complete frame after the last
     // abort poll; drain it before the turn is cleared and usage is emitted.
     pollSeat(seat)
@@ -533,14 +558,23 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     saveSession(role, { cursor, entries: cursor })
     return response
   }
-  function pgidFor(role, marker) {
+  // The signal target is the marker's own RUN-BOUND pid. The role's `pgid` file
+  // is written by the spawn shell after mkfifo and nothing deletes it between
+  // spawns, so falling back to it means signalling the PREVIOUS run's group —
+  // measured at baseline: an absent marker pid sent SIGTERM and SIGKILL to -702
+  // and recorded `proven` from a stale probe while releasing the LIVE
+  // reservation. The file may be read only in proveGroupDead's post-SIGKILL
+  // tail, and only after it EQUALS this pid.
+  function markerPgid(marker) {
     const candidate = Number(marker?.pid)
-    if (Number.isSafeInteger(candidate) && candidate > 0) return candidate
-    const path = seatFile(role, 'pgid')
-    if (!exists(path)) return null
+    return Number.isSafeInteger(candidate) && candidate > 1 ? candidate : null
+  }
+  function evidencePgid(evidence) {
+    if (!evidence || evidence.kind !== EVIDENCE_KINDS.PGID
+      || typeof evidence.file !== 'string') return null
     try {
-      const value = Number(String(read(path, 'utf8')).trim())
-      return Number.isSafeInteger(value) && value > 0 ? value : null
+      const value = Number(String(read(evidence.file, 'utf8')).trim())
+      return Number.isSafeInteger(value) && value > 1 ? value : null
     } catch { return null }
   }
   // Run end: every piped seat this supervisor can identify, killed and PROVEN
@@ -585,27 +619,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
           continue
         }
         const marker = current.marker
-        const targetPid = pgidFor(role, marker)
+        const targetPid = markerPgid(marker)
         const common = {
           session_id: marker?.sessionId ?? marker?.session_id ?? null,
           pgid: targetPid,
           reservation_id: current.handle?.reservation_id ?? marker?.reservation_id ?? null,
         }
-        if (marker && targetPid != null) {
-          const proof = killAfterTimeout({
-            role, pid: targetPid, exit: seatFile(role, 'exit'), handle: current.handle,
-          })
-          rows.push(row(role, {
-            ...common,
-            outcome: teardownOutcome(proof.liveness), reason: proof.reason, forced: false,
-          }))
-        } else {
-          const liveness = store.probeEvidence(marker?.evidence)
-          rows.push(row(role, {
-            ...common,
-            outcome: teardownOutcome(liveness), reason: 'no-kill-target', forced: false,
-          }))
-        }
+        const proof = proveGroupDead({
+          role, pid: targetPid, exit: seatFile(role, 'exit'), handle: current.handle,
+        })
+        rows.push(row(role, {
+          ...common, outcome: teardownOutcome(proof.liveness), reason: proof.reason, forced: false,
+        }))
       } catch (err) {
         rows.push(row(role, {
           session_id: seat?.sessionId ?? null,

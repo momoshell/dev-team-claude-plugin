@@ -245,7 +245,7 @@ export function emitAdapter(emitter, crew = null) {
       }))
     } else if (event.kind === 'seat-teardown') {
       const m = (crew && crew.members && crew.members[event.role]) || null
-      emitter.emit((handle) => handle.recordSeatTeardown({
+      return emitter.emit((handle) => handle.recordSeatTeardown({
         adw_id: emitter.adwId, phase_id: phaseId, role: event.role ?? null,
         transport: event.transport ?? m?.transport ?? null,
         session_id: event.session_id ?? null, pgid: event.pgid ?? null,
@@ -315,6 +315,45 @@ export function emitAdapter(emitter, crew = null) {
       }
     }
   }
+}
+
+// Both run entrypoints settle their seats HERE. Teardown runs AFTER the run's
+// envelope on purpose: a worker that refuses to die must never change the
+// run's recorded outcome. A failure to RECORD is itself accounted — a
+// teardown row that never reached the ledger used to be indistinguishable
+// from a run with nothing to tear down.
+export function settleSeatTeardown(io, deps = {}) {
+  const at = deps.now || (() => new Date().toISOString())
+  let rows = []
+  try { rows = (typeof io?.teardown === 'function' ? io.teardown() : []) || [] }
+  catch (err) { rows = [{ role: null, outcome: 'unproven', reason: 'teardown-threw', why: err.message }] }
+  const tally = { proven: 0, failed: 0, unproven: 0 }
+  let recorded = 0
+  let recordFailed = 0
+  for (const seat of rows) {
+    tally[seat.outcome] = (tally[seat.outcome] ?? 0) + 1
+    try { io?.log?.({ at: at(), event: 'seat-teardown', ...seat }) } catch { /* journal is diagnostics */ }
+    // No emitter at all is an ABSENCE, not a failed write: neither counter
+    // moves, and `seats` still says how many rows went unrecorded.
+    if (typeof io?.emit !== 'function') continue
+    // Only a POSITIVE verdict is a receipt. There is no boolean contract on
+    // the optional io.emit (crew/io-contract.test.mjs:15-16), so `undefined`
+    // is not evidence that a row was written — it joins false and throw.
+    let ok = false
+    try { ok = io.emit({ kind: 'seat-teardown', ...seat }) === true } catch { ok = false }
+    if (ok) { recorded += 1; continue }
+    recordFailed += 1
+    try {
+      io?.log?.({ at: at(), event: 'seat-teardown-record-failed',
+        role: seat.role ?? null, outcome: seat.outcome, reason: seat.reason ?? null })
+    } catch { /* journal is diagnostics */ }
+  }
+  const summary = { seats: rows.length, ...tally, recorded, record_failed: recordFailed }
+  // Written even when it is zero: the journal is the archive and always says
+  // teardown ran, while the ledger is the query surface and carries one row
+  // per seat.
+  try { io?.log?.({ at: at(), event: 'seat-teardown-sweep', ...summary }) } catch {}
+  return { ...summary, rows }
 }
 
 export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, now, sleep }) {
@@ -515,19 +554,48 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         if (pop.status !== 0) throw new Error(`runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash (git stash list):\n${pop.stderr || pop.stdout || ''}`)
       }
     },
-    // Only a transport this run actually instantiated can be holding a worker, so
-    // an empty instance map is a MEASURED ZERO (a pane-only crew has nothing to
-    // retire), never an unproven. headless-json is deliberately not covered: it
-    // spawns one process per assignment which exits on its own and ships no
+    // Only headless-rpc is swept here. headless-json is deliberately not covered:
+    // it spawns one process per assignment which exits on its own and ships no
     // teardown operation — its absence from this record is honest, not a clean
     // bill of health.
     teardown() {
       const rows = []
+      // A DECLARED headless-rpc seat can hold a worker this run never assigned
+      // through: ensureProcess advances the marker to RUNNING and then throws when
+      // FIFO acquisition fails, and an earlier supervisor's marker outlives its
+      // process. Instantiating the declared transport is what makes an empty
+      // record a MEASURED zero instead of a run that never looked — and a
+      // transport that cannot be CONSTRUCTED is that same false zero by another
+      // route, so it lands one explicit unproven row per declared role.
+      const declared = Object.entries(crew.members || {})
+        .filter(([, member]) => member?.transport === HEADLESS_RPC_TRANSPORT)
+        .map(([role]) => role)
+      const initFailed = []
+      if (declared.length) {
+        try { transportIo(HEADLESS_RPC_TRANSPORT, declared[0]) }
+        catch (err) {
+          const why = String(err?.message ?? err)
+          initFailed.push({ transport: HEADLESS_RPC_TRANSPORT, why })
+          for (const role of declared) {
+            rows.push({
+              role, transport: HEADLESS_RPC_TRANSPORT, outcome: 'unproven',
+              reason: 'teardown-threw', why,
+            })
+          }
+        }
+      }
+      const swept = [...transportInstances.keys()]
       for (const transport of transportInstances.values()) {
         if (typeof transport.teardown !== 'function') continue
         try { rows.push(...transport.teardown()) }
         catch (err) { rows.push({ role: null, outcome: 'unproven', reason: 'teardown-threw', why: String(err?.message ?? err) }) }
       }
+      try {
+        logLine(join(paths.dir, 'journal.jsonl'), {
+          at: new Date(now()).toISOString(), event: 'teardown-transports',
+          declared, transports: swept, init_failed: initFailed, seats: rows.length,
+        })
+      } catch { /* diagnostics only */ }
       return rows
     },
     reseat(role, options = {}) {

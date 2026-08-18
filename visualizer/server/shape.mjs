@@ -323,6 +323,14 @@ function laterTimestamp(current, candidate) {
   return String(candidate) > String(current) ? candidate : current
 }
 
+function strictlyLaterTimestamp(current, candidate) {
+  if (current == null || candidate == null) return false
+  const latest = laterTimestamp(current, candidate)
+  if (String(latest) !== String(candidate) || String(current) === String(candidate)) return false
+  const currentMs = dateValue(current), candidateMs = dateValue(candidate)
+  return currentMs != null && candidateMs != null ? candidateMs > currentMs : String(candidate) > String(current)
+}
+
 function sortedValues(values) {
   return [...values].sort((a, b) => String(a).localeCompare(String(b)))
 }
@@ -370,7 +378,76 @@ function intakeReasonRow(row) {
   }
 }
 
-export function shapeIntake({ sweeps, refusals, refusals_absent, picks, ever, absent, since, until, label } = {}) {
+const INTAKE_CANDIDATE_UNMEASURED = 'this is what the loop last recorded per issue, not a live read of the board — an item the loop has not seen in this window does not appear here at all, and its absence is not eligibility'
+
+function candidateBoard(row) {
+  if (row?.board_owner == null && row?.board_project == null) return null
+  return { owner: row?.board_owner ?? null, project: row?.board_project ?? null }
+}
+
+function candidateSourceMap(rows, countKey) {
+  const map = new Map()
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const issue = row?.issue ?? row?.picked_issue ?? null
+    if (issue == null) continue
+    const key = String(issue)
+    const current = map.get(key) || { issue, latest: null, count: 0 }
+    current.count += intakeNumber(row?.[countKey] ?? row?.count ?? 1)
+    const candidate = { ...row, issue, board: candidateBoard(row), created_at: row?.created_at ?? null }
+    if (!current.latest || (current.latest.created_at == null && candidate.created_at != null) || strictlyLaterTimestamp(current.latest.created_at, candidate.created_at)) current.latest = candidate
+    map.set(key, current)
+  }
+  return map
+}
+
+function candidateIssueCompare(a, b) {
+  const an = Number(a?.issue), bn = Number(b?.issue)
+  if (Number.isFinite(an) && Number.isFinite(bn) && an !== bn) return an - bn
+  return String(a?.issue ?? '').localeCompare(String(b?.issue ?? ''), undefined, { numeric: true })
+}
+
+function shapeIntakeCandidates({ candidate_refusals, candidate_picks, candidates_absent, refusals_absent } = {}) {
+  const refusalRowsMeasured = Array.isArray(candidate_refusals)
+  const pickRowsMeasured = Array.isArray(candidate_picks)
+  const suppliedAbsent = typeof candidates_absent === 'string' && candidates_absent.length > 0 ? candidates_absent : null
+  const absent = suppliedAbsent || (!refusalRowsMeasured || !pickRowsMeasured
+    ? (typeof refusals_absent === 'string' && refusals_absent.length > 0 ? refusals_absent : 'intake candidate readout is unavailable')
+    : null)
+  if (absent) return { measured: false, absent, items: [], unmeasured: INTAKE_CANDIDATE_UNMEASURED }
+
+  const refusalsByIssue = candidateSourceMap(candidate_refusals, 'refusals')
+  const picksByIssue = candidateSourceMap(candidate_picks, 'picks')
+  const keys = new Set([...refusalsByIssue.keys(), ...picksByIssue.keys()])
+  const items = [...keys].map((key) => {
+    const refusal = refusalsByIssue.get(key)
+    const pick = picksByIssue.get(key)
+    const refusalRow = refusal?.latest ?? null
+    const pickRow = pick?.latest ?? null
+    const pickedAt = pickRow?.created_at ?? null
+    const refusedAt = refusalRow?.created_at ?? null
+    const take = pickRow != null && (refusalRow == null || strictlyLaterTimestamp(refusedAt, pickedAt))
+    const latest = take ? pickRow : refusalRow ?? pickRow
+    const reason = refusalRow?.reason ?? null
+    return {
+      issue: refusal?.issue ?? pick?.issue ?? null,
+      board: latest?.board ?? refusalRow?.board ?? pickRow?.board ?? null,
+      verdict: take ? 'would-take' : 'would-refuse',
+      reason,
+      reason_recognised: INTAKE_REFUSAL_REASONS.includes(reason),
+      detail: refusalRow?.detail ?? null,
+      priority: refusalRow?.priority ?? null,
+      refused_at: refusedAt,
+      picked_at: pickedAt,
+      last_seen_at: laterTimestamp(refusedAt, pickedAt),
+      refusals: refusal?.count ?? 0,
+      picks: pick?.count ?? 0,
+    }
+  }).sort(candidateIssueCompare)
+  return { measured: true, absent: null, items, unmeasured: INTAKE_CANDIDATE_UNMEASURED }
+}
+
+export function shapeIntake({ sweeps, refusals, refusals_absent, picks, ever, absent, since, until, label,
+  candidate_refusals, candidate_picks, candidates_absent } = {}) {
   const window = { since: since ?? null, until: until ?? null, label: label ?? null }
   const suppliedAbsent = typeof absent === 'string' && absent.length > 0 ? absent : null
   const absentReason = suppliedAbsent || (sweeps == null ? 'intake_sweeps readout is unavailable' : null)
@@ -489,6 +566,7 @@ export function shapeIntake({ sweeps, refusals, refusals_absent, picks, ever, ab
       : { owner: row?.board_owner ?? null, project: row?.board_project ?? null },
     at: row?.created_at ?? null,
   })) : [])
+  const candidates = shapeIntakeCandidates({ candidate_refusals, candidate_picks, candidates_absent, refusals_absent })
   return {
     window,
     absent: absentReason,
@@ -508,6 +586,7 @@ export function shapeIntake({ sweeps, refusals, refusals_absent, picks, ever, ab
       groups,
       unrecognised,
     },
+    candidates,
     unmeasured: {
       window: 'the window is a view, not the whole history — it cannot say whether the loop swept outside the selected window',
     },

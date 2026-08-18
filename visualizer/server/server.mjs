@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { resolve, join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -10,7 +10,12 @@ import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
+import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake } from './shape.mjs'
+
+// Mirrored from the intake loop's contract without importing that module: this
+// server must not acquire the loop's process-spawning dependency graph.
+export const STOP_SWITCH_PATH = '.factory/STOP'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
@@ -18,7 +23,7 @@ const schema = 1
 
 function defaults() {
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
+  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
 }
 function args(argv) {
   const out = defaults()
@@ -29,6 +34,7 @@ function args(argv) {
     else if (arg === '--ledger-db') out.ledgerDb = argv[++i]
     else if (arg === '--triage-db') out.triageDb = argv[++i]
     else if (arg === '--crew-root') out.crewRoot = argv[++i]
+    else if (arg === '--checkout') out.checkout = argv[++i]
     else if (arg === '--roster') out.rosterPath = argv[++i]
     else if (arg === '--ladder') out.ladderPath = argv[++i]
     else if (arg === '--model-reference') out.referencePath = argv[++i]
@@ -44,6 +50,30 @@ function integer(value, fallback) {
   if (value == null || value === '') return fallback
   if (!/^\d+$/.test(value)) return null
   return Number(value)
+}
+
+function readBrake(config) {
+  const path = join(config.checkout, STOP_SWITCH_PATH)
+  try {
+    const engaged = existsSync(path)
+    return { schema, state: engaged ? 'engaged' : 'clear', measured: true, path, checkout: config.checkout, read_error: null, readonly: false }
+  } catch (err) {
+    const message = `${path}: ${err?.message || String(err)}`
+    return { schema, state: null, measured: false, path, checkout: config.checkout, read_error: message, readonly: false }
+  }
+}
+
+function recordBrake(config, args) {
+  let ledger = null
+  try {
+    ledger = openLedger({ dbPath: config.ledgerDb })
+    ledger.recordIntakeBrake(args)
+    return { recorded: true, record_error: null }
+  } catch (err) {
+    return { recorded: false, record_error: err?.message || String(err) }
+  } finally {
+    try { ledger?.close() } catch {}
+  }
 }
 
 export function budgetCeiling(env = process.env) {
@@ -96,6 +126,7 @@ function staticResponse(req, res) {
 
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
+  config.checkout = resolve(config.checkout || process.cwd())
   const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
@@ -171,6 +202,55 @@ export function startServer(options = {}) {
           : { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake is unavailable from this feed' }
         return json(res, 200, { schema, ...shapeIntake({ ...result, since, until, label: defaults.label }) })
       }
+      if (url.pathname === '/api/intake/brake') {
+        if (req.method === 'GET') return json(res, 200, readBrake(config))
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.engaged !== 'boolean' || typeof input.actor !== 'string') {
+          return json(res, 400, { schema, error: 'engaged must be a boolean and actor must be a non-empty string of at most 120 characters' })
+        }
+        const actor = input.actor.trim()
+        if (!actor || actor.length > 120) {
+          return json(res, 400, { schema, error: 'engaged must be a boolean and actor must be a non-empty string of at most 120 characters' })
+        }
+        const path = join(config.checkout, STOP_SWITCH_PATH)
+        const transition = input.engaged ? 'engaged' : 'cleared'
+        const at = new Date().toISOString()
+        let wrote = false
+        let writeError = null
+        try {
+          if (input.engaged) {
+            mkdirSync(dirname(path), { recursive: true })
+            writeFileSync(path, `${JSON.stringify({ actor, at })}\n`)
+          } else {
+            rmSync(path, { force: true })
+          }
+          wrote = true
+        } catch (err) {
+          writeError = `${path}: ${err?.message || String(err)}`
+        }
+        const readback = readBrake(config)
+        const expected = input.engaged ? 'engaged' : 'clear'
+        const transitionError = writeError || (readback.measured !== true
+          ? readback.read_error || `${path}: switch state could not be read after ${transition}`
+          : readback.state !== expected ? `${path}: switch state did not become ${expected}` : null)
+        const ok = transitionError == null && wrote
+        const recorded = recordBrake(config, {
+          checkout: config.checkout,
+          path,
+          transition,
+          actor,
+          outcome: ok ? 'ok' : 'failed',
+          detail: ok ? `stop switch ${transition}` : transitionError,
+          created_at: at,
+        })
+        return json(res, 200, {
+          schema, ok, ...readback, actor, at, transition, wrote,
+          ...recorded,
+          ...(transitionError ? { error: transitionError } : {}),
+        })
+      }
       if (url.pathname === '/api/roster/propose') {
         if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
         let input
@@ -241,7 +321,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: true })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, readonly_reads: true, writes: ['stop-switch', 'intake brake ledger rows'] })}\n`)
   })
   return { server, feed }
 }

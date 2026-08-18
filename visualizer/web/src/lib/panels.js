@@ -464,6 +464,86 @@ export function intakePanel(payload = {}) {
   }
 }
 
+const INTAKE_CANDIDATE_UNMEASURED = 'this is what the loop last recorded per issue, not a live read of the board — an item the loop has not seen in this window does not appear here at all, and its absence is not eligibility'
+
+export function intakeCandidateRows(payload = {}) {
+  const candidates = payload?.candidates ?? {}
+  const measured = candidates.measured === true
+  const absent = measured ? null : (candidates.absent || 'intake candidate readout is unavailable')
+  const note = candidates.unmeasured || INTAKE_CANDIDATE_UNMEASURED
+  if (!measured) return { measured: false, absent, rows: [], note }
+  const rows = (Array.isArray(candidates.items) ? candidates.items : []).map((item) => {
+    const issue = item?.issue ?? null
+    const verdict = item?.verdict ?? null
+    const recognised = item?.reason == null || item?.reason_recognised === true
+    const tone = !recognised ? 'unmeasured' : verdict === 'would-take' ? 'take' : verdict === 'would-refuse' ? 'refused' : 'unmeasured'
+    const verdict_label = verdict === 'would-take' ? 'would take' : verdict === 'would-refuse' ? 'would refuse' : 'verdict unmeasured'
+    const reason_label = item?.reason == null ? 'no refusal recorded' : String(item.reason)
+    const at = item?.last_seen_at ?? null
+    return {
+      issue,
+      label: `${issue == null ? 'issue —' : `issue #${issue}`} · board ${intakeBoardLabel(item?.board)}`,
+      verdict,
+      verdict_label,
+      reason_label,
+      tone,
+      at_label: at == null ? 'last seen: time unavailable' : `last seen: ${at}`,
+    }
+  })
+  return { measured: true, absent: null, rows, note }
+}
+
+const BRAKE_UNMEASURED_NOTE = 'the switch is read from the resolved checkout on every poll; it affects the next sweep, not a run already in flight'
+
+export function brakePanel(payload = {}) {
+  const checkout = payload?.checkout ?? 'checkout unavailable'
+  const path = payload?.path ?? 'path unavailable'
+  const path_label = `checkout: ${checkout} · path: ${path}`
+  const validState = payload?.state === 'engaged' || payload?.state === 'clear'
+  const measured = payload?.measured !== false
+  const state = validState ? payload.state : null
+  const actionable = measured && validState
+  const action_label = state === 'engaged' ? 'Clear brake' : state === 'clear' ? 'Engage brake' : 'Action unavailable'
+  if (payload?.ok === false) {
+    const error = payload?.error || payload?.read_error || 'no failure reason was reported'
+    const readState = state || 'unreadable'
+    return {
+      state,
+      label: `the last transition FAILED: ${error}; the switch reads ${readState}`,
+      tone: 'unmeasured',
+      detail: error,
+      path_label,
+      actionable,
+      action_label,
+      note: BRAKE_UNMEASURED_NOTE,
+    }
+  }
+  if (!measured || !validState) {
+    const error = payload?.read_error || 'no read error was reported'
+    return {
+      state: null,
+      label: `brake state unreadable — ${error}`,
+      tone: 'unmeasured',
+      detail: error,
+      path_label,
+      actionable: false,
+      action_label,
+      note: BRAKE_UNMEASURED_NOTE,
+    }
+  }
+  const engaged = state === 'engaged'
+  return {
+    state,
+    label: engaged ? 'brake engaged — the next sweep will park with `stop-switch`' : 'brake clear — intake sweeps normally',
+    tone: engaged ? 'refused' : 'quiet',
+    detail: payload?.read_error ?? null,
+    path_label,
+    actionable,
+    action_label,
+    note: BRAKE_UNMEASURED_NOTE,
+  }
+}
+
 export function findingRows(returns = {}) {
   const envelopes = Array.isArray(returns?.envelopes) ? returns.envelopes : []
   const groups = []

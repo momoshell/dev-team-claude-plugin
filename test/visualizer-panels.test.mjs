@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { acceptRows, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
@@ -357,6 +357,65 @@ test('intakePanel states its window and offers no write path', () => {
   assert.match(result.window_label, /until now/)
   assert.equal(Object.keys(result).some((key) => /^(on|post|submit|mutate)/i.test(key)), false)
   assert.equal(result.readonly_note, 'this view reads the ledger; the intake module owns every decision shown here')
+})
+
+test('intakeCandidateRows labels verdicts and keeps take/refuse tones distinct', () => {
+  const result = intakeCandidateRows({ candidates: {
+    measured: true, absent: null, unmeasured: 'bound', items: [
+      { issue: 7, board: { owner: 'owner', project: 1 }, verdict: 'would-refuse', reason: 'protected-path', reason_recognised: true, last_seen_at: '2024-01-01T00:00:00.000Z' },
+      { issue: 9, board: { owner: 'owner', project: 1 }, verdict: 'would-take', reason: null, reason_recognised: false, last_seen_at: '2024-01-02T00:00:00.000Z' },
+    ],
+  } })
+  assert.match(result.rows[0].label, /#7|owner/)
+  assert.equal(result.rows[0].verdict_label, 'would refuse')
+  assert.equal(result.rows[0].reason_label, 'protected-path')
+  assert.equal(result.rows[1].verdict_label, 'would take')
+  assert.notEqual(result.rows[0].tone, result.rows[1].tone)
+  assert.match(result.rows[1].at_label, /2024-01-02/)
+})
+
+test('intakeCandidateRows renders an absent source without a zero candidate count', () => {
+  const result = intakeCandidateRows({ candidates: { measured: false, absent: 'intake_refusals predates this ledger mirror', items: [], unmeasured: 'bound note' } })
+  assert.equal(result.measured, false)
+  assert.deepEqual(result.rows, [])
+  assert.equal(result.absent, 'intake_refusals predates this ledger mirror')
+  assert.match(result.note, /bound note/)
+  assert.doesNotMatch(JSON.stringify(result), /0 candidates/i)
+})
+
+test('brakePanel keeps engaged, clear and unreadable states distinct', () => {
+  const common = { checkout: '/checkout', path: '/checkout/.factory/STOP' }
+  const engaged = brakePanel({ ...common, state: 'engaged', measured: true })
+  const clear = brakePanel({ ...common, state: 'clear', measured: true })
+  const unreadable = brakePanel({ ...common, state: null, measured: false, read_error: 'permission denied' })
+  assert.match(engaged.label, /brake engaged/)
+  assert.match(clear.label, /brake clear/)
+  assert.match(unreadable.label, /unreadable/)
+  assert.equal(unreadable.tone, 'unmeasured')
+  assert.doesNotMatch(unreadable.label, /engaged|stopped/i)
+  assert.equal(new Set([engaged.tone, clear.tone, unreadable.tone]).size, 3)
+})
+
+test('brakePanel preserves a failed transition while reporting the read state', () => {
+  const result = brakePanel({ ok: false, error: 'ENOTDIR', state: 'clear', checkout: '/checkout', path: '/checkout/.factory/STOP' })
+  assert.equal(result.state, 'clear')
+  assert.match(result.label, /failed/i)
+  assert.match(result.label, /clear/)
+  assert.equal(result.tone, 'unmeasured')
+})
+
+test('brakePanel names the resolved checkout and switch path in every state', () => {
+  const common = { checkout: '/tree-a', path: '/tree-a/.factory/STOP' }
+  for (const payload of [
+    { ...common, state: 'engaged', measured: true },
+    { ...common, state: 'clear', measured: true },
+    { ...common, state: null, measured: false, read_error: 'unreadable' },
+    { ...common, ok: false, state: 'clear', error: 'failed' },
+  ]) {
+    const result = brakePanel(payload)
+    assert.match(result.path_label, /\/tree-a/)
+    assert.match(result.path_label, /STOP/)
+  }
 })
 
 test('hash routes parse and format all five canonical views', () => {

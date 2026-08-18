@@ -6,7 +6,7 @@ import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn, spawn as spawnProcess } from 'node:child_process'
-import { openLedger, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
+import { openLedger, NODE_FLOOR, replayJsonl, WRITERS } from '../scripts/factory/ledger.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 
@@ -697,6 +697,138 @@ test('/api/intake serves the loop read-only', { skip: SKIP }, async () => {
   } finally {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/intake exposes latest per-issue verdicts from the ledger feed', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-intake-candidates-http-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const ledger = openLedger({ dbPath: ledgerDb })
+  // Newest first deliberately: a last-inserted read would choose tier-judge.
+  ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 1, issue: 7, reason: 'protected-path', detail: 'newer', priority: 'P1', created_at: '2026-01-02T00:00:00.000Z' })
+  ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 1, issue: 7, reason: 'tier-judge', detail: 'older', priority: 'P1', created_at: '2026-01-01T00:00:00.000Z' })
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'picked', considered: 2, pages: 1, picked_issue: 9, created_at: '2026-01-02T00:00:30.000Z' })
+  ledger.close()
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const response = await json(base, '/api/intake?since=2026-01-01T00:00:00.000Z')
+    assert.equal(response.status, 200)
+    const items = response.json.candidates.items
+    assert.deepEqual(items.map((item) => item.issue), [7, 9])
+    assert.equal(items[0].verdict, 'would-refuse')
+    assert.equal(items[0].reason, 'protected-path')
+    assert.equal(items[1].verdict, 'would-take')
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/intake/brake writes and re-reads the stop switch without touching a run', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-intake-brake-http-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db'), checkout = join(dir, 'checkout'), crewRoot = join(dir, 'crew')
+  mkdirSync(crewRoot, { recursive: true }); writeFileSync(join(crewRoot, 'session.txt'), 'in flight\n')
+  const ledger = openLedger({ dbPath: ledgerDb })
+  ledger.startSession({ adw_id: 'run-in-flight', repo_slug: 'repo', task_slug: 'task' })
+  ledger.close()
+  const beforeLedger = openLedger({ dbPath: ledgerDb })
+  const beforeSessions = beforeLedger.dumpTable('sessions')
+  beforeLedger.close()
+  const crewBefore = treeDigest(crewRoot)
+  const switchPath = join(checkout, '.factory', 'STOP')
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot, null, { DEVTEAM_INTAKE_CHECKOUT: checkout }))
+    const engaged = await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: true, actor: 'ops' }) })
+    assert.equal(engaged.status, 200); assert.equal(engaged.json.ok, true); assert.equal(engaged.json.state, 'engaged')
+    assert.equal(engaged.json.path, switchPath); assert.equal(engaged.json.checkout, checkout); assert.equal(existsSync(switchPath), true)
+    const readEngaged = await json(base, '/api/intake/brake')
+    assert.equal(readEngaged.json.state, 'engaged')
+    let boardCalls = 0
+    const { intakeSweep } = await import('../scripts/factory/intake.mjs')
+    const parked = intakeSweep({
+      board: { owner: 'owner', projectNumber: 1 }, checkout, dbPath: null, config: {},
+      deps: { now: () => Date.parse('2026-01-02T00:01:00.000Z'), runsInWindow: () => 0, github: () => { boardCalls += 1; return { data: {}, rateLimit: null } } },
+    })
+    assert.equal(parked.outcome, 'parked'); assert.equal(parked.reason, 'stop-switch'); assert.equal(boardCalls, 0)
+    rmSync(switchPath, { force: true })
+    const readClear = await json(base, '/api/intake/brake')
+    assert.equal(readClear.json.state, 'clear')
+    const cleared = await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: false, actor: 'ops' }) })
+    assert.equal(cleared.status, 200); assert.equal(cleared.json.ok, true); assert.equal(cleared.json.state, 'clear')
+    await stopServer(child); child = null
+    const after = openLedger({ dbPath: ledgerDb })
+    assert.deepEqual(after.dumpTable('sessions'), beforeSessions)
+    after.close()
+    assert.equal(treeDigest(crewRoot), crewBefore)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/intake/brake attributes successful and failed transitions and its writer replays', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-intake-brake-ledger-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db'), checkout = join(dir, 'checkout')
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout }))
+    assert.equal((await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: true, actor: 'ada' }) })).json.ok, true)
+    assert.equal((await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: false, actor: 'ada' }) })).json.ok, true)
+    await stopServer(child); child = null
+    const badCheckout = join(dir, 'bad-checkout')
+    mkdirSync(badCheckout, { recursive: true })
+    writeFileSync(join(badCheckout, '.factory'), 'not a directory\n');
+    ({ child, base } = await startServer(ledgerDb, triageDb, null, null, { DEVTEAM_INTAKE_CHECKOUT: badCheckout }))
+    const failed = await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: true, actor: 'ada' }) })
+    assert.equal(failed.status, 200); assert.equal(failed.json.ok, false); assert.equal(failed.json.wrote, false); assert.equal(failed.json.state, 'clear')
+    assert.match(failed.json.error, /STOP|factory/)
+    await stopServer(child); child = null
+
+    const source = openLedger({ dbPath: ledgerDb })
+    const rows = source.dumpTable('intake_brakes')
+    const jsonlPath = source._jsonlPath
+    assert.equal(WRITERS.includes('recordIntakeBrake'), true)
+    assert.equal(typeof source.recordIntakeBrake, 'function')
+    assert.equal(rows.filter((row) => row.outcome === 'ok').length, 2)
+    assert.equal(rows.filter((row) => row.outcome === 'failed').length, 1)
+    assert.ok(rows.every((row) => row.actor === 'ada' && /^\d{4}-\d{2}-\d{2}T/.test(row.created_at)))
+    source.close()
+    const replayed = openLedger({ dbPath: join(dir, 'replayed.db') })
+    assert.doesNotThrow(() => replayJsonl(jsonlPath, replayed))
+    assert.deepEqual(replayed.dumpTable('intake_brakes').map((row) => ({ checkout: row.checkout, path: row.path, transition: row.transition, actor: row.actor, outcome: row.outcome, detail: row.detail, created_at: row.created_at })), rows.map((row) => ({ checkout: row.checkout, path: row.path, transition: row.transition, actor: row.actor, outcome: row.outcome, detail: row.detail, created_at: row.created_at })))
+    replayed.close()
+
+    const markerDb = join(dir, 'marker.db'), marker = openLedger({ dbPath: markerDb, jsonlPath: join(dir, 'marker.jsonl') })
+    const markerArgs = marker.recordIntakeBrake({ checkout: 'devteam-done-checkout', path: 'devteam-done-path', transition: 'engaged', actor: 'devteam-done-actor', outcome: 'ok', detail: 'marker', created_at: '2026-01-02T00:00:00.000Z' })
+    assert.equal(markerArgs.checkout, 'redacted')
+    assert.equal(markerArgs.path, 'redacted')
+    assert.equal(markerArgs.actor, 'redacted')
+    const markerJsonl = marker._jsonlPath
+    marker.close()
+    const markerReplay = openLedger({ dbPath: join(dir, 'marker-replayed.db') })
+    assert.doesNotThrow(() => replayJsonl(markerJsonl, markerReplay))
+    assert.deepEqual(markerReplay.dumpTable('intake_brakes').map((row) => ({ checkout: row.checkout, path: row.path, actor: row.actor })), [{ checkout: 'redacted', path: 'redacted', actor: 'redacted' }])
+    markerReplay.close()
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('intake console keeps the stop-switch path in lockstep and has no boot or git-write surface', async () => {
+  const { STOP_SWITCH_PATH } = await import('../visualizer/server/server.mjs')
+  const { DEFAULT_INTAKE_CONFIG } = await import('../scripts/factory/intake.mjs')
+  assert.equal(STOP_SWITCH_PATH, DEFAULT_INTAKE_CONFIG.stopSwitchPath)
+  const files = [
+    'visualizer/server/server.mjs', 'visualizer/server/shape.mjs', 'visualizer/server/ledger-feed.mjs',
+    'visualizer/web/src/lib/IntakePanel.svelte', 'visualizer/web/src/lib/panels.js', 'visualizer/web/src/lib/api.js',
+  ]
+  const banned = [/node:child_process/, /\bspawnSync\b|\bspawn\(/, /['"`]\/api\/(boot|launch|merge|push)/, /\bgit (push|merge|commit)\b/, /\bgh (pr|api|issue) /, /crewBoot|crewRun/, /scripts\/factory\/intake\.mjs/]
+  for (const file of files) {
+    const source = readFileSync(join(process.cwd(), file), 'utf8')
+    for (const pattern of banned) assert.doesNotMatch(source, pattern, file)
   }
 })
 

@@ -35,7 +35,7 @@ import { slug } from './slug.mjs'
 import { driveTask, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries } from './drive.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
-  realIo, settleSeatTeardown, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
+  realIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
 } from './realio.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
@@ -1300,7 +1300,7 @@ export function runCmd(args, deps = {}) {
   // already-committed task into a reported error.
   let archived = null
   if (result.status === 'done' && !args.keep) {
-    try { archived = teardownCore(paths, crew) } catch (err) {
+    try { archived = teardownCore(paths, crew, { io }).archived } catch (err) {
       process.stderr.write(`warning: teardown/archive failed (${err.message}) — crew dir left at ${paths.dir}\n`)
     }
   }
@@ -1465,27 +1465,60 @@ export function teardownCore(paths, crew, deps = {}) {
   const closeSurfaceFn = deps.closeSurface || closeSurface
   const closeWorkspaceFn = deps.closeWorkspace || closeWorkspace
   const renameSyncFn = deps.renameSync || renameSync
+  const paneRowsFn = deps.paneTeardownRows || paneTeardownRows
+  const settleFn = deps.settle || settleSeatTeardown
+  const io = deps.io || null
   for (const m of Object.values(crew.members)) if (m.surface_id) closeSurfaceFn(m.surface_id)
   // The viewer is not in crew.members, so the loop above never sees it, and
   // close-workspace is documented to no-op while a live pane occupies the
   // workspace — close it by id rather than trusting the workspace close.
   if (crew.doc_viewer?.surface_id) closeSurfaceFn(crew.doc_viewer.surface_id)
   if (crew.workspace_id) closeWorkspaceFn(crew.workspace_id)
+  // Probe HERE and nowhere else: a live pane is not evidence about a close that
+  // has not happened yet, and the journal this settle writes lives in the dir
+  // the rename below moves. An empty row list is an ABSENCE, not a measured
+  // zero — a crew with no pane seat gets no sweep line at all, because that
+  // false zero is the whole defect this records against.
+  const rows = paneRowsFn(crew, deps)
+  const seats = rows.length
+    ? settleFn({ teardown: () => rows, log: io?.log, emit: io?.emit })
+    : null
   // Full timestamp, not date-only: a second same-day run of the same slug
   // must never ENOTEMPTY onto the first run's archive.
   const archived = `${paths.dir}.archive-${new Date().toISOString().replace(/[:.]/g, '-')}`
   renameSyncFn(paths.dir, archived)
-  return archived
+  return { archived, seats }
 }
 
-function teardownCmd(args) {
+export function teardownCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
-  const archived = teardownCore(paths, crew)
-  process.stdout.write(`${JSON.stringify({ archived })}\n`)
+  // The run that owned these seats already minted the sidecar in this dir, so
+  // openRun ADOPTS its adw_id (scripts/factory/emit.mjs:631) and the rows land
+  // on the right run. openRun never throws and degrades to an inert emitter;
+  // startRun is deliberately not called — this verb is not a run.
+  const openRunFn = deps.openRun || openRun
+  let emitter = null
+  try { emitter = openRunFn({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() }) } catch { emitter = null }
+  const io = deps.io || {
+    log: (row) => logLine(join(paths.dir, 'journal.jsonl'), row),
+    ...(emitter ? { emit: emitAdapter(emitter, crew) } : {}),
+  }
+  let record
+  try { record = teardownCore(paths, crew, { ...deps, io }) }
+  finally { try { emitter?.dispose() } catch { /* instrumentation is never load-bearing */ } }
+  const { archived, seats } = record
+  const tally = seats ? { seats: seats.seats, proven: seats.proven, failed: seats.failed, unproven: seats.unproven, recorded: seats.recorded, record_failed: seats.record_failed } : null
+  process.stdout.write(`${JSON.stringify({ archived, seats: tally })}\n`)
+  // A seat this verb could not prove dead — `failed` (measured alive) and
+  // `unproven` (unknown) alike — or a row that never reached the ledger, is a
+  // RESULT, not a silent success. `proven !== seats` covers both non-proven
+  // outcomes with one comparison; do not special-case one of them.
+  if (seats && (seats.proven !== seats.seats || seats.recorded !== seats.seats)) process.exitCode = 1
+  return record
 }
 
 // A --flag followed by another --flag (or by nothing) is a BOOLEAN true —

@@ -48,9 +48,13 @@ export const DEFAULT_INTAKE_CONFIG = Object.freeze({
   workCheckout: null,
   windowHours: 24,
   windowCap: 3,
+  sweepIntervalMs: 60_000,
   rateLimitFloor: 200,
   protectedPaths: Object.freeze([]),
 })
+
+// This is a floor the configuration can raise and can never lower.
+export const MIN_SWEEP_INTERVAL_MS = 60_000
 
 export const REQUIRED_INTAKE_CONFIG_KEYS = Object.freeze([
   'statusField', 'readyColumn', 'workColumn', 'reviewColumn',
@@ -280,6 +284,10 @@ export function normalDeps(deps = {}) {
     mkdirSync: deps.mkdirSync || fsMkdirSync,
     now: deps.now || (() => Date.now()),
   }
+  d.sleep = deps.sleep || ((ms) => {
+    const sab = new SharedArrayBuffer(4)
+    Atomics.wait(new Int32Array(sab), 0, 0, ms)
+  })
   d.github = deps.github || ((request) => defaultGithub(d, request))
   d.runsInWindow = deps.runsInWindow || defaultRunsInWindow
   d.branchFor = deps.branchFor || ((request) => defaultBranchFor(d, request))
@@ -1088,6 +1096,119 @@ export function intakeRun({ board, checkout = process.cwd(), dbPath = null, conf
     deps: d,
   })
   return { sweep, dispatch, promotions }
+}
+
+export function intakeLoop({ board, checkout = process.cwd(), dbPath = null, config = {}, deps = {}, maxTicks = null } = {}) {
+  const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
+  const d = normalDeps(deps)
+  const usableBoard = boardUsable(board)
+  if (!usableBoard) return { ok: false, reason: 'board-config-unusable', ticks: [] }
+  const unusable = intakeConfigUsable(settings)
+  if (unusable) return { ok: false, reason: 'intake-config-unusable', detail: unusable.key, ticks: [] }
+
+  const root = typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd()
+  const waitMs = Math.max(
+    MIN_SWEEP_INTERVAL_MS,
+    Number.isFinite(Number(settings.sweepIntervalMs)) ? Number(settings.sweepIntervalMs) : 0,
+  )
+  const limit = Number.isInteger(maxTicks) && maxTicks > 0 ? maxTicks : Infinity
+  const ticks = []
+  let stopped = false
+  let measured = null
+
+  for (let index = 0; index < limit; index += 1) {
+    if (index > 0) d.sleep(waitMs)
+    const startedAt = timestamp(nowValue(d))
+
+    let brake = false
+    try { brake = d.existsSync(resolve(root, settings.stopSwitchPath)) } catch { brake = false }
+    if (brake) {
+      const result = parkedResult({ sweptAt: startedAt, board: usableBoard, reason: 'stop-switch' })
+      recordResult({ dbPath, board: usableBoard, result })
+      ticks.push({
+        index,
+        started_at: startedAt,
+        swept: false,
+        outcome: result.outcome,
+        reason: result.reason,
+        failure: null,
+        rate_limit_remaining: result.rate_limit.remaining,
+        basis: null,
+        run: null,
+      })
+      stopped = true
+      break
+    }
+
+    if (measured?.remaining != null && measured.remaining <= settings.rateLimitFloor) {
+      const result = parkedResult({
+        sweptAt: startedAt,
+        board: usableBoard,
+        reason: 'rate-limit-floor',
+        rateLimit: {
+          remaining: measured.remaining,
+          reset_at: measured.reset_at,
+        },
+        degraded: true,
+      })
+      recordResult({ dbPath, board: usableBoard, result })
+      ticks.push({
+        index,
+        started_at: startedAt,
+        swept: false,
+        outcome: result.outcome,
+        reason: result.reason,
+        failure: null,
+        rate_limit_remaining: result.rate_limit.remaining,
+        basis: {
+          measured_remaining: measured.remaining,
+          floor: settings.rateLimitFloor,
+          measured_at: measured.at,
+        },
+        run: null,
+      })
+      measured = null
+      continue
+    }
+
+    const run = intakeRun({
+      board,
+      checkout,
+      dbPath,
+      config: settings,
+      // The outer check admits this sweep; a newly-created brake waits for the next tick.
+      deps: { ...d, existsSync: () => false },
+    })
+    let outcome = null
+    let reason = null
+    let failure = null
+    let rateLimitRemaining = null
+    if (run.sweep?.ok === false) {
+      failure = run.sweep.reason
+    } else {
+      outcome = run.sweep.outcome
+      reason = run.sweep.reason
+      rateLimitRemaining = run.sweep.rate_limit?.remaining ?? null
+      measured = {
+        remaining: run.sweep.rate_limit?.remaining ?? null,
+        reset_at: run.sweep.rate_limit?.reset_at ?? null,
+        at: run.sweep.swept_at,
+      }
+    }
+    ticks.push({
+      index,
+      started_at: startedAt,
+      swept: true,
+      outcome,
+      reason,
+      failure,
+      rate_limit_remaining: rateLimitRemaining,
+      basis: null,
+      run,
+    })
+  }
+
+  return { ok: true, stopped, ticks }
 }
 
 export function extractIntakeBlock(body) {

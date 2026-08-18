@@ -7,7 +7,7 @@ import { join, basename, dirname } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
-  composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
+  composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, seatLiveness, awaitSeatsReady, teardownCore,
@@ -187,13 +187,25 @@ test('seat deny lists are the ENFORCED boundary: only the builder may Edit, the 
   for (const [role, seat] of Object.entries(SEAT_DEFAULTS)) {
     assert.ok(seat.deny, `${role} has no deny list — under bypassPermissions it would be unconstrained`)
     if (role === 'builder') {
-      assert.match(seat.deny, /Task/), assert.match(seat.deny, /Agent/)
+      for (const tool of FANOUT_TOOLS) assert.match(seat.deny, new RegExp(tool))
       assert.doesNotMatch(seat.deny, /Edit/, 'the builder is the one seat that MUST keep Edit')
     } else {
       assert.match(seat.deny, /Edit/, `${role} must be tool-denied Edit, not just un-allowed`)
       assert.match(seat.deny, /NotebookEdit/)
     }
   }
+})
+
+test('FANOUT_TOOLS names every fan-out path once, and every denying seat withholds all of them', () => {
+  assert.deepEqual([...FANOUT_TOOLS], ['Task', 'Agent', 'Workflow'])
+  assert.ok(Object.isFrozen(FANOUT_TOOLS))
+  const names = (deny) => String(deny).split(',').map((s) => s.trim())
+  for (const role of ['lead', 'builder', 'tech-lead']) {
+    for (const tool of FANOUT_TOOLS) assert.ok(names(SEAT_DEFAULTS[role].deny).includes(tool), `${role} must deny ${tool}`)
+  }
+  // The other direction, pinned by VALUE not by exclusion: closing the hole
+  // must not revoke a granted seat's fan-out — nor widen it in any other way.
+  for (const role of ['planner', 'reviewer']) assert.equal(SEAT_DEFAULTS[role].deny, 'Edit,NotebookEdit')
 })
 
 test('adapter-claude.seatCommand is byte-identical to the pre-refactor paneCommand output', () => {
@@ -2295,7 +2307,9 @@ test('the shipped register is where the fan-out grant lives', async () => {
 test('SEAT_DEFAULTS leaves fan-out grants to the register while preserving denials and requirements', () => {
   assert.doesNotMatch(SEAT_DEFAULTS.planner.tools, /Task/)
   assert.doesNotMatch(SEAT_DEFAULTS.reviewer.tools, /Task/)
-  for (const role of ['lead', 'builder', 'tech-lead']) assert.match(SEAT_DEFAULTS[role].deny, /Task/)
+  for (const role of ['lead', 'builder', 'tech-lead']) {
+    for (const tool of FANOUT_TOOLS) assert.match(SEAT_DEFAULTS[role].deny, new RegExp(tool))
+  }
   assert.deepEqual(SEAT_DEFAULTS.planner.requires, ['subagents'])
   for (const role of ['lead', 'builder', 'reviewer', 'tech-lead']) assert.deepEqual(SEAT_DEFAULTS[role].requires, [])
 })

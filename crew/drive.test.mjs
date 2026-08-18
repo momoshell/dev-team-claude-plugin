@@ -14,7 +14,7 @@ import { regrantVerdict } from './escalation-policy.mjs'
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
-  validateScopeEntries, scopeMatcher, protectedHits, composeCommitMessage,
+  validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
@@ -621,6 +621,77 @@ test('protectedHits matches the ratified protected paths in both directions', ()
     'crew/model-ladder.json.bak',
   ]), ['docs/adr/031.md', '.github/workflows/test.yml', 'crew/drive.mjs', 'docs/adr/',
     'crew/capabilities.json', 'crew/capabilities.schema.json', 'crew/model-ladder.json'])
+})
+
+test('laneFenceHits names the owning lane and never inverts into an allow-list', () => {
+  const fence = [{ lane: 'intake-loop', files: ['scripts/factory/', 'dir/owned.mjs'] }]
+  assert.deepEqual(laneFenceHits([
+    'scripts/factory/intake.mjs', 'dir/', 'dir/', 'unowned.mjs',
+  ], fence), [
+    { entry: 'scripts/factory/intake.mjs', lane: 'intake-loop' },
+    { entry: 'dir/', lane: 'intake-loop' },
+  ])
+  assert.deepEqual(laneFenceHits(['unowned.mjs'], [{ lane: 'ignored', files: [] }]), [])
+  assert.deepEqual(laneFenceHits(['scripts/factory/intake.mjs'], undefined), [])
+  assert.deepEqual(laneFenceHits(['scripts/factory/intake.mjs'], []), [])
+  assert.deepEqual(laneFenceHits(['scripts/factory/intake.mjs'], [{ lane: 'ignored' }]), [])
+})
+
+test("a plan whose files_in_scope crosses a live lane fence is a refusal at plan acceptance", () => {
+  const file = 'scripts/factory/intake.mjs'
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [file] } }),
+    },
+  })
+  const result = driveTask({ ...CTX, laneFence: [{ lane: 'intake-loop', files: [file] }] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, new RegExp(file.replaceAll('/', '\\/')))
+  assert.match(result.details.escalation.why, /intake-loop/)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('the scope-gate catches a build that crossed another lane fence', () => {
+  const file = 'scripts/factory/intake.mjs'
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() },
+    changed: [file],
+  })
+  const result = driveTask({ ...CTX, laneFence: [{ lane: 'intake-loop', files: [file] }] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, /intake-loop/)
+  assert.equal(io.calls.run.some(({ cmd }) => cmd === 'lane-cmd' || cmd === 'suite-cmd'), false)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('a path no lane owns crosses no fence', () => {
+  const file = 'crew/roster-ladder.mjs'
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, files_in_scope: [file] } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: [file],
+  })
+  const result = driveTask({ ...CTX, laneFence: [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }] }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  assert.deepEqual(io.calls.commits[0].files, [file])
+})
+
+test('an unfenced ctx.laneFence leaves the run exactly as today', () => {
+  const input = {
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  }
+  const fencedIo = fakeIo(input)
+  const plainIo = fakeIo(input)
+  const fenced = driveTask({ ...CTX, laneFence: [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }] }, fencedIo)
+  const plain = driveTask(CTX, plainIo)
+  assert.equal(fenced.status, plain.status)
+  assert.deepEqual(fencedIo.calls.run, plainIo.calls.run)
+  assert.deepEqual(fencedIo.calls.commits, plainIo.calls.commits)
 })
 
 test('the closed variant set lives in the import-free leaf and drive re-exports it', () => {

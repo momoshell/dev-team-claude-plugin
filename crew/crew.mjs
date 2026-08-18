@@ -14,7 +14,8 @@
 //   crew.mjs boot  --task <slug> [--roles lead,planner,builder,reviewer[,tech-lead]]
 //                  [--checkout <dir>] [--model-<role> <id>] [--agent-<role> <name>]...
 //                  [--headless-all] [--memory-dir <dir>] [--memory-backend <name>]
-//                  [--memory-budget-bytes <n>]
+//                  [--memory-budget-bytes <n>] [--fences <register.json> --lane <name>]
+//                  # paired: both or neither
 //   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] [--files-in-scope <a,b>] # hand the task to the lead
 //                  variant names come from crew/drive.mjs's VARIANTS
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
@@ -43,6 +44,7 @@ export {
 } from './realio.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
+import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
@@ -555,6 +557,26 @@ export function resolveFilesInScope(args = {}, variant, taskReturn, deps = {}) {
   return [...files]
 }
 
+// --fences/--lane are the brief compiler's flag names for the SAME register, so the
+// orchestrator authors one file and both readers agree. Both or neither: a --lane
+// with no register, or a register with no lane, is a boot refusal — never a silently
+// unfenced run. Returns null when neither is given, and boot is unchanged.
+export function resolveLaneFence(args = {}, deps = {}) {
+  const gather = deps.gatherFences || gatherFences
+  const forLane = deps.laneFenceFor || laneFenceFor
+  const rawLane = args.lane
+  const rawFences = args.fences
+  if (rawLane === undefined && rawFences === undefined) return null
+  if (typeof rawLane !== 'string' || !rawLane.trim()) {
+    throw new Error('--lane needs a lane name from the fence register (--fences and --lane are given together or not at all)')
+  }
+  if (typeof rawFences !== 'string' || !rawFences.trim()) {
+    throw new Error('--fences needs a path to the fence register JSON (--fences and --lane are given together or not at all)')
+  }
+  const lane = rawLane.trim()
+  return { lane, fence: forLane({ fences: gather({ fencesPath: rawFences }), lane }) }
+}
+
 export function transportFor(role, args = {}) {
   const headless = String(args.headless === true ? '' : (args.headless || ''))
     .split(',').map((s) => s.trim()).filter(Boolean)
@@ -908,6 +930,7 @@ export async function bootCmd(args, deps = {}) {
   const bootEnv = { ...process.env }
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
+  const laneFence = resolveLaneFence(args)
   let roles, tierName = null, tierSeats = null, sources = null
   if (args.tier) {
     if (args.roles) throw new Error('--tier and --roles are mutually exclusive: the tier defines the seating')
@@ -1088,6 +1111,7 @@ export async function bootCmd(args, deps = {}) {
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
+    ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
   }
   // crew/daemon.mjs paneSeat() is the consumer: daemon run refuses pane transport.
   if (headlessOnly) {
@@ -1105,6 +1129,7 @@ export async function bootCmd(args, deps = {}) {
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
     ...(load ? { load } : {}),
+    ...(laneFence ? { lane_name: laneFence.lane, fenced_lanes: laneFence.fence.length } : {}),
     capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },
     ...(memory.record ? { memory: memory.record } : {}),
   })
@@ -1162,6 +1187,12 @@ export function runCmd(args, deps = {}) {
   const protectedFloor = checkoutProtectedPaths({ checkout })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
+  const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
+  if (laneFence) {
+    logLine(journal, { at: new Date().toISOString(), event: 'lane-fence',
+      lane_name: crew.lane_name ?? null, lanes: laneFence.length,
+      files: laneFence.reduce((n, record) => n + record.files.length, 0) })
+  }
   // Keep the test lane at 30 s per test: the slowest real test is ~25 ms,
   // giving ~1200× headroom even when the machine is saturated by three crews.
   // This is well below realIo.run's 900 s kill, so a hung test is reported by
@@ -1175,6 +1206,7 @@ export function runCmd(args, deps = {}) {
     task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal,
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
+    ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000', variant,
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }

@@ -175,6 +175,22 @@ export function runChild(argv, injected = {}) {
         io.log?.({ at: new Date().toISOString(), event: 'protected-paths',
           basis: protectedFloor.basis, count: protectedFloor.paths.length })
       } catch { /* instrumentation is never load-bearing */ }
+      // The lane fence rides the same seam as the protected paths: crew.mjs's
+      // run verb resolves it out of crew.json (crew/crew.mjs:1190) and the
+      // daemon-forked entrypoint must enforce the identical fence, or half the
+      // run entrypoints are unfenced. Read the PERSISTED result — never import
+      // resolveLaneFence from crew.mjs; the import firewall is deliberate.
+      // Deliberately not ctx.lane: that is the test suite lane (:98).
+      const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
+      if (laneFence) {
+        ctx.laneFence = laneFence
+        ctx.laneName = crew.lane_name ?? null
+        try {
+          io.log?.({ at: new Date().toISOString(), event: 'lane-fence',
+            lane_name: crew.lane_name ?? null, lanes: laneFence.length,
+            files: laneFence.reduce((n, record) => n + (record.files?.length ?? 0), 0) })
+        } catch { /* instrumentation is never load-bearing */ }
+      }
       try { result = driveTask(ctx, io) } catch (err) { result = failure(err) }
     }
   } catch (err) {

@@ -1588,6 +1588,147 @@ test('the child entry escalates by name on an unusable ratified cell', { timeout
   }
 })
 
+const withFence = (f, fence, laneName) => {
+  const path = join(f.crewDir, 'crew.json')
+  const base = JSON.parse(readFileSync(path, 'utf8'))
+  writeFileSync(path, JSON.stringify({ ...base, lane_name: laneName, lane_fence: fence }))
+}
+
+function childFenceIo({ taskDir, planFiles, includeBuilder = false, includeReviewer = false, changed = [] }) {
+  const envelopes = {
+    'planner:1': {
+      status: 'done', role: 'planner', summary: 'planned', artifacts: [`${taskDir}/plan.md`],
+      details: {
+        plan_path: `${taskDir}/plan.md`, files_in_scope: planFiles, validation_lane: 'lane-cmd',
+        consult_questions: [], carve_verdict: 'proceed',
+      },
+    },
+  }
+  if (includeBuilder) {
+    envelopes['builder:1'] = {
+      status: 'done', role: 'builder', summary: 'built',
+      details: { files_changed: planFiles, commit_message: 'feat: persisted fence child' },
+    }
+  }
+  if (includeReviewer) {
+    envelopes['reviewer:1'] = {
+      status: 'done', role: 'reviewer', summary: 'reviewed',
+      details: { verdict: 'pass', review_path: `${taskDir}/review.md`, must_fix: 0 },
+    }
+  }
+  const calls = { assign: [], run: [], commits: [], writes: {} }
+  const counts = {}
+  const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
+  return {
+    calls,
+    assign({ role }) {
+      counts[role] = (counts[role] || 0) + 1
+      const n = counts[role]
+      calls.assign.push({ role, n })
+      return { id: `${role}:${n}`, returnPath: `${role}:${n}` }
+    },
+    wait(returnPath) { return envelopes[returnPath] ?? null },
+    writeFile(path, content) { calls.writes[path] = content },
+    readFile() { return null },
+    run(cmd) { calls.run.push(cmd); return { ok: true, output: '' } },
+    changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
+    commit(files, message) { calls.commits.push({ files, message }); return 'abc1234' },
+    log() {},
+    now: () => 0,
+  }
+}
+
+test('the child entry rides the persisted lane fence into ctx and refuses at plan acceptance', () => {
+  const f = fixture()
+  const fence = [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }]
+  const logged = []
+  let seen
+  try {
+    withFence(f, fence, 'fence-slice2')
+    runChild({ crew_dir: f.crewDir, task: 'fence-plan', checkout: f.dir }, {
+      driveTask: (ctx) => {
+        seen = ctx
+        return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+      },
+      realIo: () => ({ log: (row) => logged.push(row) }),
+      preflight: false,
+    })
+    assert.deepEqual(seen.laneFence, fence)
+    assert.equal(seen.laneName, 'fence-slice2')
+    assert.equal(seen.lane, null)
+    const row = logged.find((entry) => entry.event === 'lane-fence')
+    assert.ok(row)
+    assert.equal(row.lane_name, 'fence-slice2')
+    assert.equal(row.lanes, 1)
+    assert.equal(row.files, 1)
+
+    const io = childFenceIo({ taskDir: seen.taskDir, planFiles: ['scripts/factory/intake.mjs'] })
+    const result = driveTask(seen, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.match(result.details.escalation.why, /intake-loop/)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+  } finally { f.cleanup() }
+})
+
+test("the child entry's persisted lane fence is caught again at the final scope-gate", () => {
+  const f = fixture()
+  const fence = [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }]
+  let seen
+  try {
+    withFence(f, fence, 'fence-slice2')
+    runChild({ crew_dir: f.crewDir, task: 'fence-scope', checkout: f.dir }, {
+      driveTask: (ctx) => {
+        seen = ctx
+        return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+      },
+      realIo: () => ({ log() {} }),
+      preflight: false,
+    })
+    const io = childFenceIo({
+      taskDir: seen.taskDir,
+      planFiles: ['a.mjs', 'a.test.mjs'],
+      includeBuilder: true,
+      changed: ['scripts/factory/intake.mjs'],
+    })
+    const result = driveTask(seen, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'scope')
+    assert.match(result.details.escalation.why, /intake-loop/)
+    assert.equal(io.calls.commits.length, 0)
+  } finally { f.cleanup() }
+})
+
+test('a crew.json with no lane_fence leaves the child entry ctx exactly as today', () => {
+  const f = fixture()
+  const logged = []
+  let seen
+  try {
+    runChild({ crew_dir: f.crewDir, task: 'unfenced-child', checkout: f.dir }, {
+      driveTask: (ctx) => {
+        seen = ctx
+        return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+      },
+      realIo: () => ({ log: (row) => logged.push(row) }),
+      preflight: false,
+    })
+    assert.equal(Object.prototype.hasOwnProperty.call(seen, 'laneFence'), false)
+    assert.equal(seen.laneName, undefined)
+    assert.equal(logged.some((entry) => entry.event === 'lane-fence'), false)
+
+    const io = childFenceIo({
+      taskDir: seen.taskDir,
+      planFiles: ['a.mjs', 'a.test.mjs'],
+      includeBuilder: true,
+      includeReviewer: true,
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    const result = driveTask(seen, io)
+    assert.equal(result.status, 'done')
+    assert.equal(io.calls.commits.length, 1)
+  } finally { f.cleanup() }
+})
+
 // ChildProcess errors are asynchronous and must remain inside the daemon.
 test('asynchronous child spawn errors orphan only their run', async () => {
   await each(async (f) => {

@@ -12,10 +12,10 @@ import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
   DEFAULT_INTAKE_CONFIG, REQUIRED_INTAKE_CONFIG_KEYS, compileIntakeBrief, dispatchPicked,
-  extractIntakeBlock, fetchBoard, intakeConfigUsable, intakeRun, intakeSweep, normalDeps,
-  normaliseBoardPage, observeDispatches, orderCandidates,
+  extractIntakeBlock, fetchBoard, intakeConfigUsable, intakeLoop, intakeRun, intakeSweep, normalDeps,
+  MIN_SWEEP_INTERVAL_MS, normaliseBoardPage, observeDispatches, orderCandidates,
 } from '../scripts/factory/intake.mjs'
-import { openLedger } from '../scripts/factory/ledger.mjs'
+import { INTAKE_OUTCOMES, INTAKE_REFUSALS, openLedger } from '../scripts/factory/ledger.mjs'
 
 const TARGET = 'scripts/factory/intake.mjs'
 const NOW = Date.parse('2026-01-02T00:00:00.000Z')
@@ -84,6 +84,36 @@ function sweepDeps(pages, extra = {}) {
       ...extra,
     },
   }
+}
+
+function loopDeps(pages = [page([])], options = {}) {
+  let index = 0
+  let clock = NOW
+  let brake = false
+  const calls = []
+  const sleeps = []
+  const sleepCalls = []
+  const setBrake = (value = true) => { brake = value }
+  const deps = {
+    now: () => clock,
+    sleep: (ms) => {
+      sleeps.push(ms)
+      clock += ms
+      sleepCalls.push(calls.length)
+      options.onSleep?.({ count: sleeps.length, ms, setBrake })
+    },
+    existsSync: () => brake,
+    runsInWindow: () => 0,
+    github: (request) => {
+      calls.push(request)
+      const response = pages.length > 0 ? pages[Math.min(index, pages.length - 1)] : page([])
+      index += 1
+      options.onGithub?.({ index: index - 1, request, setBrake })
+      return response
+    },
+    ...options.deps,
+  }
+  return { calls, sleeps, sleepCalls, setBrake, deps }
 }
 
 const baseConfig = {
@@ -747,4 +777,177 @@ test('the default configuration satisfies its own requirements', () => {
   })
   assert.equal(result.ok, true)
   assert.equal(result.outcome, 'none')
+})
+
+test('intakeLoop separates consecutive sweeps by at least sixty seconds even when a shorter interval is configured', () => {
+  const harness = loopDeps([page([])])
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: { ...baseConfig, sweepIntervalMs: 1000 }, deps: harness.deps, maxTicks: 3,
+  })
+  assert.equal(result.ok, true)
+  assert.equal(result.ticks.length, 3)
+  assert.deepEqual(harness.sleeps, [MIN_SWEEP_INTERVAL_MS, MIN_SWEEP_INTERVAL_MS])
+  const starts = result.ticks.map((tick) => Date.parse(tick.started_at))
+  assert.ok(starts.slice(1).every((start, index) => start - starts[index] >= MIN_SWEEP_INTERVAL_MS))
+})
+
+test('intakeLoop pauses instead of sweeping when the measured rate limit is at or below the floor and names the measured value', () => {
+  const floor = baseConfig.rateLimitFloor
+  const harness = loopDeps([
+    page([], { remaining: floor, resetAt: '2026-01-02T01:00:00Z' }),
+    page([], { remaining: 900 }),
+  ])
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: harness.deps, maxTicks: 3,
+  })
+  assert.equal(result.ticks.length, 3)
+  assert.equal(result.ticks[1].swept, false)
+  assert.equal(result.ticks[1].outcome, 'parked')
+  assert.equal(result.ticks[1].reason, 'rate-limit-floor')
+  assert.equal(result.ticks[1].basis.measured_remaining, floor)
+  assert.equal(result.ticks[1].basis.floor, floor)
+  assert.equal(result.ticks[1].rate_limit_remaining, floor)
+  assert.equal(harness.sleepCalls[1], 1)
+  assert.equal(harness.calls.length, 2)
+  assert.equal(result.ticks[2].swept, true)
+})
+
+test('an unmeasured rate limit never reads as zero', () => {
+  const withoutRateLimit = { data: page([]).data }
+  const harness = loopDeps([withoutRateLimit, page([])])
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: harness.deps, maxTicks: 2,
+  })
+  assert.equal(result.ticks.length, 2)
+  assert.equal(result.ticks[0].swept, true)
+  assert.equal(result.ticks[1].swept, true)
+  assert.equal(result.ticks[1].outcome, 'none')
+  assert.equal(harness.calls.length, 2)
+})
+
+test('a brake engaged between sweeps halts the next sweep', () => {
+  const harness = loopDeps([page([])], {
+    onSleep: ({ count, setBrake }) => { if (count === 1) setBrake() },
+  })
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: harness.deps, maxTicks: 3,
+  })
+  assert.equal(result.stopped, true)
+  assert.equal(result.ticks.length, 2)
+  assert.equal(result.ticks[1].swept, false)
+  assert.equal(result.ticks[1].outcome, 'parked')
+  assert.equal(result.ticks[1].reason, 'stop-switch')
+  assert.equal(harness.calls.length, 1)
+})
+
+test('a brake engaged during a sweep does not affect the sweep in flight', () => {
+  const harness = loopDeps([page([])], {
+    onGithub: ({ index, setBrake }) => { if (index === 0) setBrake() },
+  })
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: harness.deps, maxTicks: 2,
+  })
+  assert.equal(result.ticks[0].swept, true)
+  assert.equal(result.ticks[0].run.sweep.ok, true)
+  assert.equal(result.ticks[1].swept, false)
+  assert.equal(result.ticks[1].reason, 'stop-switch')
+  assert.equal(harness.calls.length, 1)
+})
+
+test('a brake created after admission waits for the next loop tick', () => {
+  let checks = 0
+  const harness = loopDeps([page([])], {
+    deps: {
+      existsSync: () => {
+        checks += 1
+        return checks > 1
+      },
+    },
+  })
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: harness.deps, maxTicks: 1,
+  })
+  assert.equal(result.stopped, false)
+  assert.equal(result.ticks[0].swept, true)
+  assert.equal(result.ticks[0].run.sweep.ok, true)
+  assert.equal(result.ticks[0].outcome, 'none')
+  assert.equal(checks, 1)
+  assert.equal(harness.calls.length, 1)
+})
+
+test('every loop tick is recorded through the closed intake vocabulary', () => {
+  const path = dbPath()
+  const floor = baseConfig.rateLimitFloor
+  const harness = loopDeps([page([], { remaining: floor, resetAt: '2026-01-02T01:00:00Z' })], {
+    onSleep: ({ count, setBrake }) => { if (count === 2) setBrake() },
+  })
+  const result = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    dbPath: path, config: baseConfig, deps: harness.deps, maxTicks: 3,
+  })
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('intake_sweeps')
+  ledger.close()
+  assert.equal(rows.length, result.ticks.length)
+  const limited = rows.find((row) => row.reason === 'rate-limit-floor')
+  const stopped = rows.find((row) => row.reason === 'stop-switch')
+  assert.equal(limited.outcome, 'parked')
+  assert.equal(limited.rate_limit_remaining, floor)
+  assert.equal(stopped.outcome, 'parked')
+  for (const tick of result.ticks) {
+    assert.equal(tick.outcome === null || INTAKE_OUTCOMES.includes(tick.outcome), true)
+    assert.equal(tick.reason === null || INTAKE_REFUSALS.includes(tick.reason), true)
+  }
+})
+
+test('intakeLoop delegates eligibility to intakeSweep and never reimplements it', () => {
+  const judge = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig,
+    deps: loopDeps([page([issue({ number: 90, body: intakeBody({ where: 'scripts/factory' }) })])]).deps,
+    maxTicks: 1,
+  })
+  assert.equal(judge.ticks[0].run.sweep.refusals[0].reason, 'tier-judge')
+
+  const failedHarness = loopDeps([page([])], {
+    onGithub: ({ index }) => { if (index === 0) throw new Error('temporary failure') },
+  })
+  const failed = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: failedHarness.deps, maxTicks: 2,
+  })
+  assert.equal(failed.ticks.length, 2)
+  assert.equal(failed.ticks[0].run.sweep.ok, false)
+  assert.equal(failed.ticks[0].failure, 'board-fetch-failed')
+  assert.equal(failed.ticks[1].run.sweep.ok, true)
+  assert.equal(failedHarness.calls.length, 2)
+})
+
+test('intakeLoop refuses an unusable board or configuration before sleeping or fetching', () => {
+  let sleeps = 0
+  let fetches = 0
+  const deps = {
+    sleep: () => { sleeps += 1; throw new Error('sleep must not run') },
+    github: () => { fetches += 1; throw new Error('github must not run') },
+    existsSync: () => { throw new Error('stop switch must not run') },
+  }
+  const board = intakeLoop({
+    board: { owner: '', projectNumber: null }, checkout: ROOT, config: baseConfig, deps, maxTicks: 1,
+  })
+  assert.deepEqual(board, { ok: false, reason: 'board-config-unusable', ticks: [] })
+  const config = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: { ...baseConfig, readyColumn: '' }, deps, maxTicks: 1,
+  })
+  assert.deepEqual(config, {
+    ok: false, reason: 'intake-config-unusable', detail: 'readyColumn', ticks: [],
+  })
+  assert.equal(sleeps, 0)
+  assert.equal(fetches, 0)
 })

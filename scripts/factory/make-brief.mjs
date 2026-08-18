@@ -707,6 +707,24 @@ export function resolveWriteSurface({ fences, lane, where = [] } = {}) {
   return { lane, basis: 'fences', files, reads: entry.reads || [] }
 }
 
+// The OTHER lanes' write surfaces, for a RUNTIME that must refuse to write what
+// another live lane owns. Resolving this lane's own surface first is load-bearing:
+// resolveWriteSurface refuses a missing register and an unknown lane name, so a typo
+// can never resolve to "every lane is somebody else's" and fence off the whole tree.
+// Returns [] when the register names only this lane. Additive: nothing above changes.
+export function laneFenceFor({ fences, lane } = {}) {
+  if (lane == null) refuseUsage('lane fence requires a lane name', MISSING_LINE)
+  if (!Array.isArray(fences)) refuseUsage(`no fence register supplied for lane: ${lane}`, UNKNOWN_LANE)
+  resolveWriteSurface({ fences, lane })
+  return fences
+    .filter((entry) => entry.lane !== lane)
+    .map((entry) => ({
+      lane: entry.lane,
+      files: [...new Set(entry.files.map((file) => normaliseRepoPath(file)))].sort(),
+    }))
+    .sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0))
+}
+
 function normaliseCoupledEntries(discovery) {
   if (!Array.isArray(discovery?.coupled)) return null
   const entries = new Map()

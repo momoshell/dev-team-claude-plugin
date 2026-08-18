@@ -865,6 +865,24 @@ export function protectedHits(entries, extra) {
   return protectedHitsIn(entries, resolveProtectedPaths(extra))
 }
 
+// A lane fence is a DENY-list and never an allow-list: a path no lane claims is
+// always allowed. The matching rule is protectedHitsIn's, per lane — one matcher,
+// one meaning of "this path is inside that surface".
+export function laneFenceHits(entries, laneFence) {
+  const hits = []
+  for (const record of Array.isArray(laneFence) ? laneFence : []) {
+    if (!record || typeof record.lane !== 'string' || !Array.isArray(record.files)) continue
+    for (const entry of protectedHitsIn(entries, record.files)) {
+      if (!hits.some((hit) => hit.entry === entry && hit.lane === record.lane)) {
+        hits.push({ entry, lane: record.lane })
+      }
+    }
+  }
+  return hits
+}
+
+const fenceBreachList = (hits) => hits.map(({ entry, lane }) => `${entry} is owned by lane ${lane}`).join('; ')
+
 export function composeCommitMessage({ task, planEnv, builderEnv }) {
   const firstNonEmptyLine = (value) => String(value || '').split('\n').map((line) => line.trim()).find(Boolean) || ''
   const subjectLine = firstNonEmptyLine(planEnv?.details?.commit_subject)
@@ -885,6 +903,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 // ctx: { task, briefFile, taskDir, checkout, roles: [..seated roles..],
 //        lane: <fallback validation command|null>, suite: <full-suite command>,
 //        protectedPaths: <resolved per-checkout paths>,
+//        laneFence?: [{lane, files:[..]}] — OTHER lanes' write surfaces; absent = unfenced,
 //        protectedPathsBasis: <why those paths are in force>,
 //        journal: <real journal.jsonl path (lives in the CREW dir)>,
 //        limits?, waits? }
@@ -1686,6 +1705,12 @@ export function driveTask(ctx, io) {
       `files_in_scope carries entries the scope gate cannot honor — fix the plan, not the build: ${scopeErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`,
       planEnv.artifacts || [])
   }
+  const planFenceHits = laneFenceHits(scopeFiles, ctx.laneFence)
+  if (planFenceHits.length > 0) {
+    return escalate('scope',
+      `the plan's files_in_scope crosses another live lane's fence: ${fenceBreachList(planFenceHits)} — this lane never edits another lane's write surface`,
+      planEnv.artifacts || [])
+  }
   const inScope = scopeMatcher(scopeFiles)
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
@@ -2124,6 +2149,11 @@ export function driveTask(ctx, io) {
     // Gate A (mechanical): scope by git, never by self-report.
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
+    const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
+    if (gateFenceHits.length > 0) {
+      return escalate('scope',
+        `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`)
+    }
     const outOfScope = outOfScopeFiles(changed, inScope)
     if (outOfScope.length > 0) {
       if (!plans || finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)

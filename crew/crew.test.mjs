@@ -10,7 +10,7 @@ import {
   composeLayout, SEAT_DEFAULTS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, seatLiveness, awaitSeatsReady, teardownCore,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, seatLiveness, awaitSeatsReady, teardownCore,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
   grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
   CAPABILITY_DELIVERY, effectiveCapabilities, effectiveTools, LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet,
@@ -578,6 +578,30 @@ test('resolveFilesInScope refuses every entry the gate rejects', () => {
   }
 })
 
+test('resolveLaneFence takes both flags or neither', () => {
+  assert.equal(resolveLaneFence({}), null)
+  assert.throws(() => resolveLaneFence({ lane: 'a' }), /given together or not at all/)
+  assert.throws(() => resolveLaneFence({ fences: '/missing/fences.json' }), /given together or not at all/)
+  const dir = mkdtempSync(join(tmpdir(), 'crew-fence-resolver-'))
+  const register = join(dir, 'fences.json')
+  try {
+    writeFileSync(register, JSON.stringify({ lanes: [
+      { lane: 'b', files: ['z.mjs', 'y.mjs'] },
+      { lane: 'a', files: ['x.mjs'] },
+    ] }))
+    assert.deepEqual(resolveLaneFence({ fences: register, lane: 'a' }), {
+      lane: 'a', fence: [{ lane: 'b', files: ['y.mjs', 'z.mjs'] }],
+    })
+    assert.throws(() => resolveLaneFence({ fences: register, lane: 'unknown' }), (err) => err.reason === 'unknown-lane')
+    writeFileSync(register, '{not json')
+    assert.throws(() => resolveLaneFence({ fences: register, lane: 'a' }), (err) => err.reason === 'bad-fences')
+    const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+    assert.match(source, /--fences/)
+    assert.match(source, /--lane/)
+    assert.match(source, /paired: both or neither/)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
 test('run refuses an inherited shape with no declared scope before driving', async () => {
   const inherited = VARIANT_NAMES.find((name) => VARIANTS[name]?.sources?.scope === 'inherited')
   const { root: checkoutRoot, checkout } = testCheckout('crew-scope-refusal-checkout-')
@@ -797,6 +821,58 @@ test('run resolves the repo protected paths and journals the basis', async () =>
   } finally {
     if (previousFactory === undefined) delete process.env.DEVTEAM_FACTORY_DIR
     else process.env.DEVTEAM_FACTORY_DIR = previousFactory
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('boot persists the fence and run rides it into ctx beside the protected paths', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-fence-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-fence-home-'))
+  const register = join(home, 'fences.json')
+  const brief = join(home, 'brief.md')
+  const task = 'fence-slice1'
+  const fenceArgs = {
+    fences: register, lane: 'fence-slice1',
+  }
+  writeFileSync(register, JSON.stringify({ lanes: [
+    { lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] },
+    { lane: 'fence-slice1', files: ['crew/crew.mjs', 'crew/crew.test.mjs'] },
+  ] }))
+  writeFileSync(brief, '# brief\n')
+  execSync('git init -q', { cwd: checkout })
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  const seen = []
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, ...fenceArgs },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: (ctx) => { seen.push(ctx); return done } })
+      await bootCmd(
+        { task: 'fence-plain', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task: 'fence-plain', checkout, 'brief-file': brief, keep: true }, { drive: (ctx) => { seen.push(ctx); return done } })
+    })
+    const fencedDir = testCrewDir(home, checkout, task)
+    const fencedCrew = JSON.parse(readFileSync(join(fencedDir, 'crew.json'), 'utf8'))
+    assert.equal(fencedCrew.lane_name, 'fence-slice1')
+    assert.deepEqual(fencedCrew.lane_fence, [{ lane: 'intake-loop', files: ['scripts/factory/intake.mjs'] }])
+    assert.deepEqual(seen[0].laneFence, fencedCrew.lane_fence)
+    assert.equal(seen[0].laneName, 'fence-slice1')
+    for (const path of PROTECTED_PATHS) assert.ok(seen[0].protectedPaths.includes(path), `${path} missing from ctx`)
+    const rows = readFileSync(seen[0].journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((row) => row.event === 'lane-fence')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].lane_name, 'fence-slice1')
+    assert.equal(rows[0].lanes, 1)
+    assert.equal(rows[0].files, 1)
+    const plainCrew = JSON.parse(readFileSync(join(testCrewDir(home, checkout, 'fence-plain'), 'crew.json'), 'utf8'))
+    assert.equal(Object.prototype.hasOwnProperty.call(plainCrew, 'lane_fence'), false)
+    assert.equal(seen[1].laneFence, undefined)
+  } finally {
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }

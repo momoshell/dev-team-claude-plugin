@@ -17,6 +17,11 @@ import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './recl
 import { translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
+// pi refuses input while compacting, and compaction runs between
+// agent_end and agent_settled. Keep the settle gate bounded by polls rather
+// than wall clock so injected supervisors can drive it deterministically.
+export const SETTLE_GATE_POLLS = 12
+export const PROMPT_REFUSAL_RETRIES = 2
 const ABORT_SETTLE_MS = 2000
 // The pre-SIGKILL window. The seat shell traps TERM (:316), so a SIGTERM
 // delivered before the worker is exec'd is SWALLOWED and the worker never sees
@@ -155,6 +160,23 @@ function staged(stage, message, role) {
   return err
 }
 
+// pi's refusal while it is compacting, verbatim: "Agent is already
+// processing. Specify streamingBehavior ('steer' or 'followUp') to queue
+// the message." A refusal is a boundary, not a failed turn.
+export function isBusyRefusal(frame) {
+  if (!frame || frame.success !== false) return false
+  return /already processing|streamingBehavior/i.test(String(frame.error ?? ''))
+}
+
+export function emptyTurnEnvelope({ id, role, returnPath }) {
+  return {
+    assignment_id: id, role, status: 'insufficient',
+    summary: `seat ${role} settled without writing an envelope to ${returnPath}; the turn produced no usable return`,
+    artifacts: [],
+    details: { degraded: 'rpc-no-envelope' },
+  }
+}
+
 export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, deps = {} }) {
   const spawn = deps.spawn || cpSpawn
   const open = deps.openSync || fsOpenSync
@@ -191,6 +213,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   const seats = new Map()
   const pending = new Map()
   let commandSeq = 0
+  let settlePolls = 0
 
   function log(value) {
     if (injectedLog) return injectedLog(value)
@@ -256,6 +279,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
         // agent_end is only the conversation boundary; it is not completion.
         if (frame.type === 'agent_end') seat.turn.state.ended = true
       }
+      if (!seat.turn && seat.settling && frame.type === 'agent_settled') seat.settling.state.settled = true
       if (frame.type === 'response') {
         if (frame.id != null) {
           seat.responses.set(frame.id, frame)
@@ -306,7 +330,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
       fd = open(fifo, 'r+')
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, handle: marker.handle }
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, handle: marker.handle }
       seats.set(role, seat)
       return seat
     }
@@ -344,7 +368,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       member.session_id = sessionId; member.started = true
       persistCrew(crew, paths, write)
       saveSession(role, { sessionId, pid: child.pid, startedAt: now(), lastAssignmentId: assignmentId })
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, handle }
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, handle }
       seats.set(role, seat)
       return seat
     } catch (err) {
@@ -364,11 +388,34 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     }
     return null
   }
+  function pollUntilSettled(seat, state, polls = SETTLE_GATE_POLLS) {
+    const limit = Math.max(0, Math.trunc(Number(polls) || 0))
+    settlePolls = 0
+    for (;;) {
+      try { pollSeat(seat) } catch { return false }
+      if (state.settled) return true
+      if (settlePolls >= limit) return false
+      settlePolls += 1
+      try { sleep(WAIT_POLL_MS) } catch { return false }
+    }
+  }
+  function awaitSettled(seat) {
+    const settling = seat.settling
+    if (!settling) return true
+    const settled = pollUntilSettled(seat, settling.state)
+    const polls = settlePolls
+    seat.settling = null
+    try {
+      log({ at: now(), rpc_settle_gate: { role: settling.role, id: settling.id, settled, polls } })
+    } catch { /* diagnostics only */ }
+    return settled
+  }
   function assign({ role, briefFile, note }) {
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     let existing = seats.get(role)
     if (existing?.turn && !existing.turn.state.settled) throw staged('rpc-session-busy', `rpc seat ${role} already has an in-flight turn`, role)
+    if (existing) awaitSettled(existing)
     const id = nextAssignmentId()
     const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
     if (exists(returnPath)) unlink(returnPath)
@@ -376,14 +423,21 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
-    const turn = { id, role, returnPath, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
+    const turn = { id, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id }, 'prompt')
     turn.promptId = promptId
     saveSession(role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(role).startedAt || now(), lastAssignmentId: id })
     return { id, returnPath }
   }
-  function finishTurn(seat) { seat.turn = null; seat.responses.clear() }
+  // The envelope is the record, but it is not the seat's readiness: pi may
+  // still be compacting. Park an unsettled turn so the next assign can wait
+  // for agent_settled instead of prompting into a refusal.
+  function finishTurn(seat) {
+    seat.settling = seat.turn && !seat.turn.state.settled ? seat.turn : null
+    seat.turn = null
+    seat.responses.clear()
+  }
   function proveGroupDead(target) {
     const clearIfDead = (liveness) => {
       if (liveness === LIVENESS.DEAD && target.handle) {
@@ -503,13 +557,26 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (!seat) throw staged('rpc-no-envelope', `no rpc turn for ${returnPath}`)
     const turn = seat.turn
     const deadline = now() + Number(timeoutS) * 1000
-    while (now() < deadline) {
+    waitLoop: while (now() < deadline) {
       const frames = pollSeat(seat)
       for (const frame of frames) {
         if (frame?.type === 'response' && frame.command === 'parse' && frame.success === false) {
           emitUsage(turn, seat, turn.usage); finishTurn(seat); throw staged('rpc-parse-error', `rpc parse failed: ${frame.error || 'malformed input'}`, turn.role)
         }
-        if (frame?.type === 'response' && frame.id === turn.id && frame.success === false) {
+        if (frame?.type === 'response' && frame.id === turn.promptId && frame.success === false) {
+          if (isBusyRefusal(frame) && turn.retries < PROMPT_REFUSAL_RETRIES) {
+            turn.retries += 1
+            seat.responses.delete(frame.id)
+            pollUntilSettled(seat, turn.state)
+            turn.state.settled = false
+            turn.state.ended = false
+            turn.promptId = send(seat, {
+              type: 'prompt', message: turn.prompt,
+              id: `${turn.id}-p${turn.retries}`,
+            }, 'prompt')
+            log({ at: now(), rpc_prompt_retry: { role: turn.role, id: turn.id, attempt: turn.retries } })
+            continue waitLoop
+          }
           emitUsage(turn, seat, turn.usage); finishTurn(seat); throw responseError(turn.role, frame)
         }
       }
@@ -529,9 +596,14 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
         throw staged(`rpc-${outcome}`, `rpc ${outcome}: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
       }
       if (turn.state.settled) {
+        const detail = `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`
+        try {
+          emit?.({ kind: 'cell-failure', role: turn.role, id: turn.id, failure: 'no-envelope', stage: 'rpc-no-envelope', detail })
+        } catch { /* ADR-026: instrumentation is never load-bearing */ }
+        try { log({ at: now(), rpc_outcome: 'no-envelope', role: turn.role, id: turn.id, degraded: true }) } catch { /* diagnostics only */ }
         emitUsage(turn, seat, turn.usage)
         finishTurn(seat)
-        throw staged('rpc-no-envelope', `rpc no-envelope: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
+        return emptyTurnEnvelope({ id: turn.id, role: turn.role, returnPath })
       }
       sleep(WAIT_POLL_MS)
     }

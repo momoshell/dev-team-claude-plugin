@@ -6,7 +6,10 @@ import { join } from 'node:path'
 import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
-import { foldRpcUsage, headlessRpcIo, rpcCommand, seatCommandPath, splitFrames, steerFrame, teardownOutcome } from './headless-rpc.mjs'
+import {
+  emptyTurnEnvelope, foldRpcUsage, headlessRpcIo, isBusyRefusal, PROMPT_REFUSAL_RETRIES,
+  rpcCommand, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
+} from './headless-rpc.mjs'
 
 function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
@@ -242,6 +245,92 @@ test('agent_end alone is not completion and times out', () => {
   } finally { f.cleanup() }
 })
 
+test('a compaction between agent_end and agent_settled does not let the next assignment prompt early', () => {
+  let streamPath
+  let settled = false
+  const f = fixture({ sleep: () => {
+    if (settled) return
+    settled = true
+    writeFileSync(streamPath, `${JSON.stringify({ type: 'compaction_start' })}\n${JSON.stringify({ type: 'compaction_end' })}\n${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
+  } })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    streamPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+    writeFileSync(streamPath, [
+      { type: 'message_end' }, { type: 'turn_end' }, { type: 'agent_end' },
+    ].map((frame) => JSON.stringify(frame)).join('\n') + '\n')
+    writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done' }))
+    assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
+    const second = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(second.id, 'd2')
+    assert.equal(settled, true)
+    assert.equal(f.writes.filter((frame) => frame.type === 'prompt').length, 2)
+  } finally { f.cleanup() }
+})
+
+test('the settle gate is bounded and prompts anyway when the seat never settles', () => {
+  let sleeps = 0
+  const f = fixture({ sleep: () => { sleeps += 1 } })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+    writeFileSync(stream, [
+      { type: 'message_end' }, { type: 'turn_end' }, { type: 'agent_end' },
+    ].map((frame) => JSON.stringify(frame)).join('\n') + '\n')
+    writeFileSync(first.returnPath, JSON.stringify({ assignment_id: first.id, role: 'builder', status: 'done' }))
+    assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
+    assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }))
+    assert.ok(sleeps <= SETTLE_GATE_POLLS)
+  } finally { f.cleanup() }
+})
+
+test('a prompt refused while pi is compacting is waited out and re-sent', () => {
+  let streamPath
+  let run
+  let sleeps = 0
+  const f = fixture({ sleep: () => {
+    sleeps += 1
+    if (sleeps === 1) writeFileSync(streamPath, `${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
+    if (sleeps === 2) writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
+  } })
+  try {
+    run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    streamPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+    const promptId = f.writes.find((frame) => frame.type === 'prompt')?.id
+    writeFileSync(streamPath, JSON.stringify({
+      type: 'response', id: promptId, command: 'prompt', success: false,
+      error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+    }) + '\n')
+    const env = f.io.wait(run.returnPath, 1)
+    assert.equal(env.status, 'done')
+    assert.equal(f.writes.filter((frame) => frame.type === 'prompt').length, 2)
+    assert.equal(f.writes.at(-1).id, `${run.id}-p1`)
+  } finally { f.cleanup() }
+})
+
+test('a prompt failure that is not a busy refusal still fails the turn', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const promptId = f.writes.find((frame) => frame.type === 'prompt')?.id
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), `${JSON.stringify({
+      type: 'response', id: promptId, command: 'prompt', success: false, error: 'model not found',
+    })}\n`)
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-command-error')
+    assert.equal(f.writes.filter((frame) => frame.type === 'prompt').length, 1)
+  } finally { f.cleanup() }
+})
+
+test("isBusyRefusal matches pi's refusal and nothing else", () => {
+  for (const [frame, expected] of [
+    [{ success: false, error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message." }, true],
+    [{ success: false, error: 'streamingBehavior is required while compacting' }, true],
+    [{ success: true, error: 'Agent is already processing' }, false],
+    [{ success: false, error: 'model not found' }, false],
+  ]) assert.equal(isBusyRefusal(frame), expected)
+  assert.equal(PROMPT_REFUSAL_RETRIES, 2)
+})
+
 test('response parse and command failures are staged distinctly', () => {
   for (const [frame, stage] of [
     [{ type: 'response', command: 'parse', success: false, error: 'Failed to parse command' }, 'rpc-parse-error'],
@@ -420,10 +509,25 @@ test('rpc crashed and settled turns emit partial usage without changing stage or
     assert.throws(() => crashed.f.io.wait(crashed.run.returnPath, 1), (err) => err.stage === 'rpc-aborted')
     assert.deepEqual(seen.at(-1).usage, { billed_input_tokens: 7, billed_output_tokens: 8, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 })
   } finally { crashed.f.cleanup() }
-  const settled = make(() => { throw new Error('emitter down') }, true)
+  const settledSeen = []
+  const settled = make((event) => settledSeen.push(event), true)
   try {
-    assert.throws(() => settled.f.io.wait(settled.run.returnPath, 1), (err) => err.stage === 'rpc-no-envelope')
+    const env = settled.f.io.wait(settled.run.returnPath, 1)
+    assert.equal(env.status, 'insufficient')
+    assert.equal(env.role, 'builder')
+    assert.equal(env.assignment_id, settled.run.id)
+    assert.ok(env.summary)
+    assert.deepEqual(env.artifacts, [])
+    assert.equal(env.details.degraded, 'rpc-no-envelope')
+    assert.ok(settledSeen.some((event) => event.kind === 'cell-failure' && event.failure === 'no-envelope'))
+    assert.equal(settled.f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd2')
   } finally { settled.f.cleanup() }
+
+  const throwing = make(() => { throw new Error('emitter down') }, true)
+  try {
+    const env = throwing.f.io.wait(throwing.run.returnPath, 1)
+    assert.equal(env.status, 'insufficient')
+  } finally { throwing.f.cleanup() }
 })
 
 test('teardown forces an in-flight turn but does not mark a settled seat forced', () => {

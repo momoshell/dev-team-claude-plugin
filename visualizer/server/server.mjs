@@ -11,7 +11,7 @@ import { proposeEdit } from './roster-edit.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
 import { openLedger } from '../../scripts/factory/ledger.mjs'
-import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake } from './shape.mjs'
+import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTeardownWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake, shapeSeatTeardowns } from './shape.mjs'
 
 // Mirrored from the intake loop's contract without importing that module: this
 // server must not acquire the loop's process-spawning dependency graph.
@@ -201,6 +201,20 @@ export function startServer(options = {}) {
           ? feed.intake({ since, until })
           : { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake is unavailable from this feed' }
         return json(res, 200, { schema, ...shapeIntake({ ...result, since, until, label: defaults.label }) })
+      }
+      if (url.pathname === '/api/seat-teardowns') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        const defaults = defaultTeardownWindow()
+        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
+        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
+        const sinceMs = Date.parse(since)
+        const untilMs = until == null ? null : Date.parse(until)
+        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
+        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const result = typeof feed.seatTeardowns === 'function'
+          ? feed.seatTeardowns({ since, until })
+          : { runs: null, rows: null, absent: 'seat teardowns are unavailable from this feed' }
+        return json(res, 200, { schema, ...shapeSeatTeardowns({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/intake/brake') {
         if (req.method === 'GET') return json(res, 200, readBrake(config))

@@ -9,6 +9,10 @@ const CONTEXT_PENDING = 'no live transport records occupancy — pane seats land
 const MODEL_PENDING = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/realio.mjs:399-410)'
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
+export const SEAT_TEARDOWN_WINDOW_MS = 24 * 60 * 60 * 1000
+// Keep this dependency-free copy lockstep with scripts/factory/ledger.mjs:134;
+// the shaper must not import the ledger module just to render its vocabulary.
+export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
 export const INTAKE_REFUSAL_REASONS = Object.freeze([
   'stop-switch', 'window-cap', 'rate-limit-floor',
   'priority-unknown', 'intake-block-missing', 'intake-block-malformed',
@@ -757,6 +761,114 @@ export function shapeRunSet({ rows, absent, since, until, label, ceiling = null,
     budget: budgetBlock({ ceiling, burn, since, until }),
     unmeasured,
     rows: shapedRows,
+  }
+}
+
+export function defaultTeardownWindow(now = Date.now()) {
+  return {
+    since: new Date(now - SEAT_TEARDOWN_WINDOW_MS).toISOString(),
+    until: null,
+    label: 'last 24 hours',
+  }
+}
+
+const NOT_MEASURED_WHY = 'no `seat_teardowns` rows for this run — not measured, never a measured zero and never a clean floor: a run predating the table, a crew with no piped seats, and a headless-json seat all record nothing here'
+const NOT_MEASURED_WHY_FOR_CONSOLE = NOT_MEASURED_WHY.replace('never a clean floor', 'never a settled floor')
+const TEARDOWN_READONLY_NOTE = 'this view reads the ledger; teardown and reclamation belong to the crew runtime, and nothing here can kill, reclaim or boot anything'
+const TEARDOWN_WINDOW_NOTE = 'runs are those started in this window; a teardown row for a run outside it is not shown here'
+
+function teardownForced(value) {
+  return value === true || value === 1 || value === '1'
+}
+
+function teardownSeat(row = {}) {
+  const outcome = row?.outcome ?? null
+  return {
+    role: row?.role ?? null,
+    transport: row?.transport ?? null,
+    outcome,
+    known: SEAT_TEARDOWN_OUTCOMES.includes(outcome),
+    reason: row?.reason ?? null,
+    forced: teardownForced(row?.forced),
+    evidence_kind: row?.evidence_kind ?? null,
+    phase_id: row?.phase_id ?? null,
+    at: row?.created_at ?? null,
+  }
+}
+
+function teardownRoleRank(role) {
+  const rank = ROLE_ORDER.indexOf(String(role ?? ''))
+  return rank < 0 ? ROLE_ORDER.length : rank
+}
+
+function sortTeardownSeats(a, b) {
+  const rank = teardownRoleRank(a?.role) - teardownRoleRank(b?.role)
+  if (rank !== 0) return rank
+  return String(a?.role ?? '').localeCompare(String(b?.role ?? ''))
+}
+
+function emptyTeardownTally() {
+  return { seats: null, proven: null, failed: null, unproven: null, unrecognised: null }
+}
+
+function teardownTally(rows = []) {
+  const tally = { seats: rows.length, proven: 0, failed: 0, unproven: 0, unrecognised: 0 }
+  for (const row of rows) {
+    if (SEAT_TEARDOWN_OUTCOMES.includes(row?.outcome)) tally[row.outcome] += 1
+    else tally.unrecognised += 1
+  }
+  return tally
+}
+
+export function shapeSeatTeardowns({ runs, rows, absent, since, until, label } = {}) {
+  const window = { since: since ?? null, until: until ?? null, label: label ?? null }
+  const suppliedAbsent = typeof absent === 'string' && absent.length > 0 ? absent : null
+  const absentReason = suppliedAbsent || (runs == null || rows == null ? 'seat teardown readout is unavailable' : null)
+  const sourceRuns = Array.isArray(runs) ? runs : []
+  const sourceRows = Array.isArray(rows) ? rows : []
+  const rowsByRun = new Map()
+  if (!absentReason) {
+    for (const row of sourceRows) {
+      if (row?.adw_id == null) continue
+      const key = String(row.adw_id)
+      const grouped = rowsByRun.get(key) || []
+      grouped.push(row)
+      rowsByRun.set(key, grouped)
+    }
+  }
+  const measured = absentReason == null && sourceRows.length > 0
+  const shapedRuns = sourceRuns.map((run) => {
+    const runRows = absentReason ? [] : (rowsByRun.get(String(run?.adw_id)) || [])
+    const runMeasured = absentReason == null && runRows.length > 0
+    const tally = runMeasured ? teardownTally(runRows) : emptyTeardownTally()
+    return {
+      adw_id: run?.adw_id ?? null,
+      task_slug: run?.task_slug ?? null,
+      repo_slug: run?.repo_slug ?? null,
+      run_status: run?.status ?? null,
+      started_at: run?.started_at ?? null,
+      ended_at: run?.ended_at ?? null,
+      measured: runMeasured,
+      state: absentReason ? 'undetermined' : runMeasured ? 'measured' : 'not-measured',
+      not_measured_why: absentReason || (runMeasured ? null : NOT_MEASURED_WHY_FOR_CONSOLE),
+      tally,
+      seats: runMeasured ? runRows.map(teardownSeat).sort(sortTeardownSeats) : [],
+    }
+  })
+  const totals = measured
+    ? teardownTally(sourceRows)
+    : emptyTeardownTally()
+  if (measured) totals.runs = sourceRuns.length
+  else totals.runs = null
+  return {
+    window,
+    absent: absentReason,
+    measured,
+    outcomes: [...SEAT_TEARDOWN_OUTCOMES],
+    note: TEARDOWN_READONLY_NOTE,
+    window_note: TEARDOWN_WINDOW_NOTE,
+    totals,
+    runs: shapedRuns,
   }
 }
 

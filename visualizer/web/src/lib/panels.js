@@ -242,6 +242,112 @@ export function cellHealthPanel(payload = {}) {
   return view
 }
 
+const TEARDOWN_OUTCOMES = ['proven', 'failed', 'unproven']
+const TEARDOWN_READONLY_NOTE = 'this view reads the ledger; teardown and reclamation belong to the crew runtime, and nothing here can kill, reclaim or boot anything'
+const TEARDOWN_WINDOW_NOTE = 'runs are those started in this window; a teardown row for a run outside it is not shown here'
+
+function teardownDisplayPart(value) {
+  return value == null ? '—' : String(value)
+}
+
+function teardownDisplayCount(value) {
+  return panelNumber(value) ?? '—'
+}
+
+function teardownForced(value) {
+  return value === true || value === 1 || value === '1'
+}
+
+function teardownSeatTone(row) {
+  const known = row?.known == null ? TEARDOWN_OUTCOMES.includes(row?.outcome) : row.known === true
+  return known && TEARDOWN_OUTCOMES.includes(row?.outcome) ? row.outcome : 'unrecognised'
+}
+
+function teardownRunTone(state, seats) {
+  if (state === 'undetermined') return 'undetermined'
+  if (state === 'not-measured') return 'not-measured'
+  if (seats.some((seat) => seat.tone === 'failed')) return 'leak'
+  if (seats.some((seat) => seat.tone === 'unproven' || seat.tone === 'unrecognised')) return 'unproven'
+  return 'proven'
+}
+
+export function teardownPanel(payload = {}) {
+  const absent = payload?.absent ?? null
+  const measured = payload?.measured === true
+  const window = payload?.window
+  const window_label = window && typeof window === 'object'
+    ? `${window.label} · since ${window.since} · until ${window.until || 'now'}`
+    : 'window unavailable'
+  const headline = absent
+    ? 'Seat teardown is unavailable'
+    : measured
+      ? 'Seat teardown recorded'
+      : 'Seat teardown is not measured'
+  const sourceTotals = payload?.totals ?? {}
+  const totals_label = measured
+    ? `proven ${teardownDisplayCount(sourceTotals.proven)} · failed ${teardownDisplayCount(sourceTotals.failed)} · unproven ${teardownDisplayCount(sourceTotals.unproven)}${Number(sourceTotals.unrecognised) > 0 ? ` · unrecognised ${teardownDisplayCount(sourceTotals.unrecognised)}` : ''}`
+    : 'not measured'
+  const rows = (Array.isArray(payload?.runs) ? payload.runs : []).map((run) => {
+    const state = absent ? 'undetermined' : run?.state || (run?.measured === true ? 'measured' : 'not-measured')
+    const seats = (state === 'undetermined'
+      ? []
+      : (Array.isArray(run?.seats) ? run.seats : [])).map((seat) => {
+      const tone = teardownSeatTone(seat)
+      const outcome = seat?.outcome ?? null
+      return {
+        role: seat?.role ?? null,
+        outcome,
+        known: seat?.known === true,
+        tone,
+        label: `${teardownDisplayPart(seat?.role)} · ${teardownDisplayPart(outcome)} · ${teardownDisplayPart(seat?.reason)}`,
+        forced: teardownForced(seat?.forced),
+        transport: seat?.transport ?? null,
+        at: seat?.at ?? null,
+      }
+    })
+    const tone = teardownRunTone(state, seats)
+    const tally = run?.tally ?? {}
+    const forced = seats.some((seat) => seat.forced)
+    const why = run?.not_measured_why || (absent || 'the teardown readout is unavailable')
+    const label = state === 'not-measured'
+      ? `not measured — ${why}`
+      : state === 'undetermined'
+        ? `teardown unavailable — ${why}`
+        : `${teardownDisplayCount(tally.seats)} seat${tally.seats === 1 ? '' : 's'} · proven ${teardownDisplayCount(tally.proven)} · failed ${teardownDisplayCount(tally.failed)} · unproven ${teardownDisplayCount(tally.unproven)}${forced ? ' · forced' : ''}`
+    return {
+      adw_id: run?.adw_id ?? null,
+      run_label: `${teardownDisplayPart(run?.task_slug)} · ${teardownDisplayPart(run?.repo_slug)}`,
+      task_slug: run?.task_slug ?? null,
+      state,
+      tone,
+      label,
+      seats,
+      at: run?.started_at ?? null,
+    }
+  })
+  const tone = absent
+    ? 'undetermined'
+    : !measured
+      ? 'not-measured'
+      : rows.some((row) => row.tone === 'leak')
+        ? 'leak'
+        : rows.some((row) => row.tone === 'unproven')
+          ? 'unproven'
+          : 'proven'
+  return {
+    absent,
+    measured,
+    window_label,
+    headline,
+    tone,
+    totals: payload?.totals ?? null,
+    totals_label,
+    note: payload?.note ?? TEARDOWN_READONLY_NOTE,
+    window_note: payload?.window_note ?? TEARDOWN_WINDOW_NOTE,
+    rows,
+  }
+}
+
 function runSetDisplayPart(value) {
   return value == null ? '—' : String(value)
 }

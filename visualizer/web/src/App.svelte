@@ -7,6 +7,7 @@
   import RunCard from './lib/RunCard.svelte'
   import MetricsStrip from './lib/MetricsStrip.svelte'
   import CellHealthPanel from './lib/CellHealthPanel.svelte'
+  import TeardownPanel from './lib/TeardownPanel.svelte'
   import RunSetPanel from './lib/RunSetPanel.svelte'
   import IntakePanel from './lib/IntakePanel.svelte'
   import RosterPanel from './lib/RosterPanel.svelte'
@@ -114,6 +115,7 @@
     <h1>Operations</h1>
     <MetricsStrip runs={runs} />
     <CellHealthPanel />
+    <TeardownPanel />
     <IntakePanel />
     <RunSetPanel />
   </main>
@@ -150,6 +152,7 @@
     {/if}
     <MetricsStrip runs={runs} />
     <CellHealthPanel />
+    <TeardownPanel />
     <IntakePanel />
     <RunSetPanel />
   </main>

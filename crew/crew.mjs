@@ -73,7 +73,8 @@ export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_R
 // `requires` names the capability keys the charter depends on; a seat whose
 // adapter cannot deliver one refuses to boot. The fan-out tool itself is a
 // register-backed grant in crew/capabilities.json, not a hardcoded seat
-// default. Only the PLANNER requires `subagents`, and the asymmetry is
+// default. FANOUT_TOOLS is the deny-side set for seats that withhold fan-out.
+// Only the PLANNER requires `subagents`, and the asymmetry is
 // deliberate: its charter is "domain lead + architect + scout-commander", and
 // fan-out discovery IS the third of those. The reviewer's charter — conformance
 // to plan, then correctness, plus gate-defect triage and perspective duty —
@@ -81,12 +82,20 @@ export const HEADLESS_TRANSPORTS = Object.freeze([HEADLESS_TRANSPORT, HEADLESS_R
 // `build`/`mechanical` under the ratified review-vendor rule. Requiring it
 // there would make two of three tiers unbootable, which is how this landed the
 // first time (#144).
+// Every fan-out tool name, in ONE place. Task and Agent spawn subagents;
+// Workflow fans out wider still — a script that spawns many seats at once —
+// and no seat denied the first two was ever denied it. A seat that withholds
+// fan-out withholds every name here, so a future fan-out tool is a single
+// edit to this line rather than a hunt through per-role deny literals.
+export const FANOUT_TOOLS = Object.freeze(['Task', 'Agent', 'Workflow'])
+const NO_FANOUT = FANOUT_TOOLS.join(',')
+
 export const SEAT_DEFAULTS = Object.freeze({
-  lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'lead.md', agent: 'claude' },
+  lead: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: `Edit,NotebookEdit,${NO_FANOUT}`, requires: [], prompt: 'lead.md', agent: 'claude' },
   planner: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit', requires: ['subagents'], prompt: 'planner.md', agent: 'claude' },
-  builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', requires: [], prompt: 'builder.md', agent: 'claude' },
+  builder: { model: 'sonnet', tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: NO_FANOUT, requires: [], prompt: 'builder.md', agent: 'claude' },
   reviewer: { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit', requires: [], prompt: 'reviewer.md', agent: 'claude' },
-  'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: 'Edit,NotebookEdit,Task,Agent', requires: [], prompt: 'tech-lead.md', agent: 'claude' },
+  'tech-lead': { model: 'opus', tools: 'Read,Glob,Grep,Bash,Write', deny: `Edit,NotebookEdit,${NO_FANOUT}`, requires: [], prompt: 'tech-lead.md', agent: 'claude' },
 })
 
 // The seat's EFFECTIVE auto-approve allowlist: the seat default plus whatever

@@ -149,12 +149,12 @@ deny list is translated before it reaches pi:
 
 | seat | claude deny | pi `--exclude-tools` |
 |---|---|---|
-| lead / tech-lead | `Edit,NotebookEdit,Task,Agent` | `"edit"` |
+| lead / tech-lead | `Edit,NotebookEdit,Task,Agent,Workflow` | `"edit"` |
 | planner / reviewer | `Edit,NotebookEdit` | `"edit"` |
-| builder | `Task,Agent` | *(flag omitted — empty translation)* |
+| builder | `Task,Agent,Workflow` | *(flag omitted — empty translation)* |
 
 A pi builder ends up with no `--exclude-tools` at all, because pi has no
-subagent tool for `Task`/`Agent` to translate to — that seat's real boundary
+subagent tool for `Task`/`Agent`/`Workflow` to translate to — that seat's real boundary
 is the git scope gate + commit-in-scope, the same posture `Write` already has
 everywhere.
 

@@ -7,6 +7,7 @@ import {
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { setTimeout as delay } from 'node:timers/promises'
+import { once } from 'node:events'
 
 import {
   DESCENDANT_DIR, DESCENDANT_MAX_ANCHORS, DESCENDANT_STORE_DIRS,
@@ -61,6 +62,16 @@ const groupGone = (pgid) => {
   try { process.kill(-pgid, 0); return false } catch (err) { return err?.code === 'ESRCH' }
 }
 const killGroup = (pgid) => { try { process.kill(-pgid, 'SIGKILL') } catch {} }
+// process.kill(pid, 0) still succeeds for a ZOMBIE, so it cannot answer "is this
+// root really gone". ps can: an unreaped row is present with stat Z.
+const rootAbsent = (pid) => {
+  const ps = spawnSync('ps', ['-eo', 'pid='], { encoding: 'utf8' })
+  if (ps.status !== 0) return false
+  for (const line of String(ps.stdout || '').split(/\r?\n/)) {
+    if (Number(line.trim()) === pid) return false
+  }
+  return true
+}
 // A detached child calls setsid() ITSELF after fork, so it is not yet observable
 // as escaped at the instant spawn() hands back its pid. Measured on a Linux CI
 // runner: the capture ran first and recorded nothing, so the reclaim had nothing
@@ -94,7 +105,7 @@ async function realSeat() {
     })
     child.once('error', () => { clearTimeout(timer); resolve(null) })
   })
-  return { rootPid: child.pid, escapedPgid: escaped }
+  return { rootPid: child.pid, escapedPgid: escaped, child }
 }
 
 
@@ -416,6 +427,15 @@ test('both run outcomes reclaim a real escaped group through the settle path', a
       // leaves nothing to reclaim, which is exactly how this test failed on Linux.
       assert.ok(records(taskDir).length > 0, 'the capture recorded no escaped descendant')
       killGroup(seat.rootPid)
+      // Measured on Linux: SIGKILL only signals. runCmd below is synchronous, so
+      // without turning the event loop libuv never reaps the child, ps still shows
+      // it ("Zs"), psSnapshot reports root_liveness "alive", and the reclaim defers
+      // as retryable with reason "root-alive" — leaving the escaped group up. Wait
+      // for the actual reap so the root is genuinely absent before the settle path.
+      if (seat.child.exitCode === null && seat.child.signalCode === null) await once(seat.child, 'exit')
+      const rootGoneBy = Date.now() + 10000
+      while (!rootAbsent(seat.rootPid) && Date.now() < rootGoneBy) await delay(50)
+      assert.equal(rootAbsent(seat.rootPid), true, 'the seat root was still listed by ps, so the reclaim will refuse it as root-alive')
       const result = status === 'done'
         ? { status: 'done', summary: '', artifacts: [], details: { commit: null } }
         : { status: 'escalation', summary: 'needs review', artifacts: [], details: { commit: null } }

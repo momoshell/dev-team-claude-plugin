@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, realIo, waitForEnvelope,
+  cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, readEnvelopeFile, realIo, WAIT_POLL_MS, waitForEnvelope,
 } from './realio.mjs'
 
 const CONTENT = Object.freeze({
@@ -256,4 +256,100 @@ test('realIo waits through an absent or refusing heartbeat emitter', () => {
       assert.doesNotThrow(() => assert.deepEqual(io.wait(returnPath, 600), envelope))
     })
   }
+})
+
+test('readEnvelopeFile returns null for an absent return file and parses a present one', () => {
+  const returnPath = '/tmp/pane-return.json'
+  const envelope = { assignment_id: 'd1', role: 'builder', status: 'done' }
+  assert.equal(readEnvelopeFile(returnPath, {
+    existsSync: () => false,
+    readFileSync: () => JSON.stringify(envelope),
+  }), null)
+  assert.deepEqual(readEnvelopeFile(returnPath, {
+    existsSync: () => true,
+    readFileSync: () => JSON.stringify(envelope),
+  }), envelope)
+})
+
+test('readEnvelopeFile returns null when the read itself fails', () => {
+  const error = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  assert.equal(readEnvelopeFile('/tmp/pane-return.json', {
+    existsSync: () => true,
+    readFileSync: () => { throw error },
+  }), null)
+})
+
+test("readEnvelopeFile throws a pane-parse-error naming the path, its existence and the parser's position", () => {
+  const returnPath = '/tmp/pane-return.json'
+  const malformed = '{"summary":"finished\nthe build"}'
+  let error
+  try {
+    readEnvelopeFile(returnPath, {
+      existsSync: () => true,
+      readFileSync: () => malformed,
+    })
+  } catch (err) {
+    error = err
+  }
+  assert.ok(error)
+  assert.equal(error.stage, 'pane-parse-error')
+  assert.match(error.message, new RegExp(returnPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  assert.match(error.message, /EXIST/i)
+  assert.match(error.message, /position \d+/)
+  assert.equal(cellFailureKind(error), 'unusable-envelope')
+})
+
+test('realIo.wait surfaces a malformed return file immediately as an unusable-envelope cell failure', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    let returnPath = null
+    const events = []
+    const malformed = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
+    const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: (path) => path === returnPath,
+      readFileSync: (path) => path === returnPath ? malformed : readFileSync(path, 'utf8'),
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    returnPath = assignment.returnPath
+    let error
+    try { io.wait(returnPath, 600) } catch (err) { error = err }
+    assert.ok(error)
+    assert.equal(error.stage, 'pane-parse-error')
+    assert.ok(clock <= WAIT_POLL_MS)
+    const failures = events.filter((event) => event.kind === 'cell-failure')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].failure, 'unusable-envelope')
+    assert.match(failures[0].detail, new RegExp(returnPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+  })
+})
+
+test('realIo.wait keeps polling an absent return file to its deadline', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    let returnPath = null
+    const events = []
+    const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: (path) => path === returnPath ? false : existsSync(path),
+      readFileSync: (path, ...args) => readFileSync(path, ...args),
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    returnPath = assignment.returnPath
+    assert.equal(io.wait(returnPath, 600), null)
+    assert.ok(clock >= 600 * 1000)
+    const failures = events.filter((event) => event.kind === 'cell-failure')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].failure, 'timeout')
+  })
 })

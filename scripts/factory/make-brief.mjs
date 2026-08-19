@@ -126,8 +126,48 @@ export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a No
   insufficient\` if incomplete. A silent seat is indistinguishable from a dead
   one.`)
 
+// The per-check mutation contract quoted from its single enforcement point,
+// `validateMutations` in crew/drive.mjs. Two lanes lost a plan round each to a
+// format documented nowhere a planner reads (#330, #345); a standing block is the
+// only delivery that does not depend on an orchestrator remembering.
+export const MUTATION_CONTRACT_BLOCK = Object.freeze(`A per-check mutation declaration is MACHINE-APPLIED: the driver find-and-replaces
+on a scratch copy of the built tree, re-runs the gate, and requires that one check
+to redden. A prose field (\`"kills": "leaving the loop unconditional"\`) cannot be
+applied and is refused — \`validateMutations\` in \`crew/drive.mjs\` is the single
+enforcement point. Each entry in \`details.mutations\` is EITHER a mutation OR an
+exemption, never both, and at most 32 entries in all (\`MUTATIONS_MAX\`).
+
+A mutation entry carries exactly:
+
+    { "check": "C1", "file": "lib/widget.mjs", "find": "<literal text present in the file>", "replace": "<literal replacement>" }
+
+- \`check\` — a stable token matching \`/^[A-Za-z0-9][A-Za-z0-9._-]*$/\` (letters,
+  digits, dot, underscore, hyphen; starting with a letter or digit), unique across
+  all entries. The gate MUST print \`FAIL <check>\` on that check's failing line
+  (\`CHECK_FAIL_PREFIX\`), matched as an exact token — the label you declare and the
+  label the gate prints are one string.
+- \`file\` — required, repo-relative, a file and not a directory, and inside
+  \`files_in_scope\`.
+- \`find\` — required, non-empty LITERAL text that actually occurs in that file; not
+  a regex, not a description.
+- \`replace\` — required string, and must DIFFER from \`find\`; an identical pair
+  mutates nothing.
+
+An exemption entry carries exactly \`{ "check": "<token>", "exempt": "<non-empty reason>" }\`
+and no \`file\`, \`find\` or \`replace\`.
+
+The human sentence saying what a mutation kills belongs in a comment beside the
+check in the gate file and in \`plan.md\`, never in the entry. Worked example — the
+gate carries, above the check that prints \`FAIL C1\`:
+
+    // MUTATION C1: neutralise the standing block in renderBrief's lines array and
+    // no compiled brief carries the contract any more.
+
+and the declaration is \`{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }\`.
+Rationale: #330.`)
+
 function standingBlocks() {
-  return { acceptance: ACCEPTANCE_GATE_BLOCK, conventions: CONVENTIONS_BLOCK }
+  return { acceptance: ACCEPTANCE_GATE_BLOCK, mutations: MUTATION_CONTRACT_BLOCK, conventions: CONVENTIONS_BLOCK }
 }
 
 export class BriefUsageError extends Error {
@@ -1172,6 +1212,8 @@ export function renderBrief(gathered) {
     `${request.done_means} · Full suite green. · ${SLOT_MARKER}`,
     '## Acceptance gate',
     standingBlocks().acceptance,
+    '## Per-check mutations',
+    standingBlocks().mutations,
     '## Validation lane',
     renderValidation(baseline, discovery),
     '## Conventions',

@@ -153,7 +153,37 @@ check round costs two seat hops. The three items, one line each:
 - **Baseline GATE-SUMMARY** — you ran your own gate at baseline and pasted its
   summary line into plan.md.
 - **Kill mutations** — every gate check names the mutation that kills it, in a
-  comment and in `details.mutations`.
+  comment and in `details.mutations`. The entry shape is machine-applied and
+  refused if it is prose: see [Declaring per-check mutations](#declaring-per-check-mutations-detailsmutations).
+
+## Declaring per-check mutations (`details.mutations`)
+
+A declaration is MACHINE-APPLIED: the driver find-and-replaces on a scratch copy of
+the built tree, re-runs the gate, and requires that one check to redden. A prose
+field cannot be applied, which is why `{ "check": "A1", "kills": "leaving the loop
+unconditional" }` is refused — the enforcement point is `validateMutations` in
+`crew/drive.mjs` and nothing here relaxes it. Each entry is EITHER a mutation OR an
+exemption, never both; at most `MUTATIONS_MAX` (32) entries.
+
+    { "check": "C1", "file": "lib/widget.mjs", "find": "<literal text present in the file>", "replace": "<literal replacement>" }
+
+- `check` — a stable token, `/^[A-Za-z0-9][A-Za-z0-9._-]*$/`, unique across entries;
+  the gate must print `FAIL <check>` on that check's failing line, matched as an
+  exact token.
+- `file` — repo-relative, a file not a directory, and inside `files_in_scope`.
+- `find` — non-empty literal text that occurs in that file; not a regex.
+- `replace` — a string that differs from `find`.
+- an exemption is exactly `{ "check": "<token>", "exempt": "<reason>" }`.
+
+The human sentence goes in a comment beside the check, never in the entry:
+
+    // MUTATION C1: neutralise the standing block in renderBrief's lines array and
+    // no compiled brief carries the contract any more.
+    check('C1', …)
+
+paired with `{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }`.
+Every compiled brief repeats this contract under `## Per-check mutations`.
+Rationale: #330.
 
 ## Team memory
 

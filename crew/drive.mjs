@@ -847,6 +847,73 @@ export function validateScopeEntries(entries) {
   return errors
 }
 
+// A plan may declare, per acceptance-gate check, ONE mutation of the built tree
+// that the check must catch. 32 is a bound, not a target: each entry costs one
+// gate run on the built tree (b31b's voluntary proof declared 19).
+export const MUTATIONS_MAX = 32
+export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt'])
+// The driver dictates ONE output convention for a gate that declares per-check
+// mutations, exactly as it already dictates GATE_SUMMARY_PREFIX (:204): a failing
+// check prints a line beginning `FAIL <check>`. A label SUBSTRING is not proof —
+// a gate that names every check on both outcomes prints the intended check's name
+// on its PASS line while some OTHER check supplies the red exit, which is the
+// whole-gate false positive this mechanism exists to remove (#330).
+export const CHECK_FAIL_PREFIX = 'FAIL'
+// A stable, delimiter-free identifier: no space and no colon can appear in a
+// declared label, so the only way one label can prefix another is a grammar
+// character, and the matcher below refuses that too.
+const CHECK_LABEL = /^[A-Za-z0-9][A-Za-z0-9._-]*$/
+export function checkFailureLine(output, check) {
+  const want = `${CHECK_FAIL_PREFIX} ${check}`
+  return String(output || '').split('\n').some((raw) => {
+    const line = raw.trim()
+    if (line === want) return true                  // the bare line
+    if (!line.startsWith(`${want}:`)) return false  // otherwise the ONE delimiter is a colon
+    const rest = line.slice(want.length + 1)
+    // …and what follows the colon may not EXTEND the label: `FAIL cache:v2: why`
+    // is check `cache:v2` failing, not check `cache`.
+    return rest.length === 0 || /^\s/.test(rest)
+  })
+}
+// Why a declared mutation cannot be honoured, per entry — the validateScopeEntries
+// shape: [{ entry, why }], empty when the declaration is usable.
+export function validateMutations(entries, inScope = () => true) {
+  if (!Array.isArray(entries)) return [{ entry: entries, why: 'mutations must be an array of declared checks' }]
+  if (entries.length > MUTATIONS_MAX) return [{ entry: entries, why: `declares ${entries.length} mutations, over the bound of ${MUTATIONS_MAX}` }]
+  const errors = []
+  const seen = new Set()
+  for (const entry of entries) {
+    let why = null
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      why = 'entry must be an object'
+    } else if (typeof entry.check !== 'string' || entry.check.length === 0) {
+      why = 'every entry must carry a non-empty check label the gate prints on a FAIL line when that check fails'
+    } else if (!CHECK_LABEL.test(entry.check)) {
+      why = 'a check label must be a stable token: letters, digits, dot, underscore or hyphen, starting with a letter or digit'
+    } else if (seen.has(entry.check)) {
+      why = 'duplicate check label'
+    } else {
+      seen.add(entry.check)
+      const exempt = Object.prototype.hasOwnProperty.call(entry, 'exempt')
+      if (exempt && ['file', 'find', 'replace'].some((key) => Object.prototype.hasOwnProperty.call(entry, key))) {
+        why = 'an exemption declares no mutation'
+      } else if (exempt && (typeof entry.exempt !== 'string' || entry.exempt.trim() === '')) {
+        why = 'an exemption must carry its reason'
+      } else if (!exempt && (typeof entry.file !== 'string' || entry.file.trim() === '')) {
+        why = 'a mutation must name the file it edits'
+      } else if (!exempt && (validateScopeEntries([entry.file]).length > 0 || entry.file.endsWith('/') || !inScope(entry.file))) {
+        why = 'file must be a repo-relative file inside files_in_scope'
+      } else if (!exempt && (typeof entry.find !== 'string' || entry.find.length === 0 || typeof entry.replace !== 'string')) {
+        why = 'a mutation must carry a non-empty literal find and a replace string'
+      } else if (!exempt && entry.find === entry.replace) {
+        why = 'find and replace are identical — that mutates nothing'
+      }
+    }
+    if (why) errors.push({ entry, why })
+  }
+  return errors
+}
+
 export function scopeMatcher(entries) {
   return (repoRelativePath) => entries.some((entry) => entry.endsWith('/')
     ? repoRelativePath.startsWith(entry)
@@ -1172,7 +1239,7 @@ export function driveTask(ctx, io) {
         commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
         dissents: S.dissents, accepted_via: null, escalation: { where, why },
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
-        gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
+        gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
         converge: {
           pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
           gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
@@ -1737,6 +1804,23 @@ export function driveTask(ctx, io) {
   // already exists, and either way the planner hears about it loudly (the
   // exact defect class the v2 plan review caught by hand, mechanized).
   let gateCmd = planEnv.details?.gate_cmd || null
+  // The declaration is FIXED for the task: a gate repair may not replace it, so
+  // a repair must preserve its check identifiers (the repair brief says so).
+  const declared = planEnv.details?.mutations
+  const mutations = declared == null ? [] : declared
+  if (declared != null) {
+    const mutationErrors = validateMutations(mutations, inScope)
+    if (mutationErrors.length > 0) {
+      return escalate('plan',
+        `details.mutations carries entries the per-check proof cannot honor — fix the plan, not the build: ${mutationErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`,
+        planEnv.artifacts || [])
+    }
+    if (!gateCmd && mutations.length > 0) {
+      return escalate('plan',
+        'details.mutations declares per-check proofs but the plan authored no gate_cmd — there is nothing for a mutation to redden',
+        planEnv.artifacts || [])
+    }
+  }
   let gateRepairs = 0
   let gateReverified = null // set only when a MID-RUN repair is accepted:
                             // true = proven red on the pristine tree,
@@ -1752,6 +1836,18 @@ export function driveTask(ctx, io) {
   let gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
   let gateProofNote = null        // operator-facing detail, set only on a contained throw
   let gateProofOutput = null
+  let checkProofs = null       // rows for the CURRENT generation, non-null once its pass completed
+  let checkProofOutput = null  // the mutated run of the first check that was not killed
+  let checkProofNote = null    // a CONTAINED io failure during the pass (never loses a build)
+  let checkProofVerdict = null // 'proven' | 'failed' | 'unproven' | null — the PER-CHECK
+                               // verdict, BESIDE the whole-gate one. `unproven` is what an
+                               // INTERRUPTED pass says: absence of evidence, never a claim.
+  let checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
+  let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
+  const resetCheckProof = () => {
+    checkProofs = null; checkProofOutput = null; checkProofNote = null
+    checkProofVerdict = null; checkProofPending = null
+  }
 
   // The proof, recorded ONCE per generation at that generation's first pristine
   // run — the repair re-proof when there is one, otherwise the gate's first
@@ -1766,7 +1862,8 @@ export function driveTask(ctx, io) {
   // message — which names the builder's work sitting in the stash — is kept on
   // details.gate and journalled, never swallowed.
   const recordGateProof = (label) => {
-    gateProvenGeneration = gateGeneration
+    resetCheckProof()                     // FIRST, before every early return: a
+    gateProvenGeneration = gateGeneration  // generation never inherits the previous
     const settleProof = (summary) => {
       io.log({ at: io.now(), gate_discrimination: gateDiscrimination, gate_generation: gateGeneration, gate_summary: summary, gate_proof_note: gateProofNote })
       emit({ kind: 'discrimination', generation: gateGeneration, verdict: gateDiscrimination, summary, note: gateProofNote })
@@ -1796,8 +1893,126 @@ export function driveTask(ctx, io) {
       : baselineGateDefect(pristine.output)
     gateDiscrimination = defect ? 'failed' : 'proven'
     gateProofNote = defect // null when proven; the throw path sets it above
+    if (gateDiscrimination === 'proven' && mutations.length > 0) checkProofPending = gateGeneration
     settleProof(parseGateSummary(pristine.output))
     return pristine
+  }
+
+  const percheckNote = (row) => `the per-check proof did not kill ${JSON.stringify(row?.check)}: ${row?.why}`
+  // The note the repair path SHOWS: a per-check failure explains itself, and the
+  // whole-gate note (gateProofNote) stays the whole-gate truth.
+  const proofNote = () => (checkProofVerdict === 'failed'
+    ? percheckNote((checkProofs || []).find((row) => row.outcome === 'survived' || row.outcome === 'unapplied'))
+    : gateProofNote)
+
+  // Per-CHECK discrimination (#330). The whole-gate proof shows the gate's verdict
+  // depends on the work; it cannot show that any INDIVIDUAL check does. Each
+  // declared mutation is applied to the BUILT tree, the gate re-runs, and the
+  // INTENDED check must print a FAIL line. Rules that are not negotiable:
+  //  - io.run, never io.runClean: ADR-030's 1 + gate_repairs bound counts PRISTINE
+  //    runs and does not move.
+  //  - the caller must hold an OBSERVED green for this generation (see the call site).
+  //  - every mutation is restored from the exact string that was read, in a finally.
+  //    A restore that cannot be PROVEN by byte comparison is fatal: the tree carries
+  //    the driver's own edit and must never be committed.
+  //  - a failure BEFORE any write is contained evidence, never a lost build
+  //    (ADR-030 ratification amendment).
+  const completeCheckProof = (label) => {
+    checkProofPending = null
+    stage(label)
+    const rows = []
+    let survivor = null
+    let active = null            // the ONE mutation in flight: {abs, original, writeAttempted}
+    try {
+      for (const [index, mutation] of mutations.entries()) {
+        if (mutation.exempt) {
+          rows.push({ check: mutation.check, outcome: 'exempt', why: mutation.exempt, file: null, summary: null })
+          continue
+        }
+        const abs = `${ctx.checkout}/${mutation.file}`
+        active = { abs, original: null, writeAttempted: false }
+        const original = io.readFile(abs)          // may throw: nothing written yet
+        active.original = original
+        if (original === null || !original.includes(mutation.find)) {
+          rows.push({ check: mutation.check, outcome: 'unapplied', file: mutation.file, summary: null,
+            why: original === null
+              ? `${mutation.file} does not exist in the built tree`
+              : `the declared find text is not in the built ${mutation.file}` })
+          survivor ??= rows[rows.length - 1]
+          active = null
+          continue
+        }
+        let res = null
+        try {
+          active.writeAttempted = true
+          io.writeFile(abs, original.replaceAll(mutation.find, mutation.replace))
+          res = runGate(mutationLabel(label, index), gateCmd)
+        } finally { io.writeFile(abs, original) }
+        active = null                              // restored: nothing in flight
+        const summary = parseGateSummary(res.output)
+        const why = res.ok
+          ? 'the gate stayed GREEN under the mutation'
+          : baselineGateDefect(res.output)
+            || (checkFailureLine(res.output, mutation.check)
+              ? null
+              : `the gate went red but printed no ${JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}`)} line, so the check that failed is not the one under proof`)
+        rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', file: mutation.file, summary, why })
+        if (why) { survivor ??= rows[rows.length - 1]; checkProofOutput ??= res.output }
+      }
+    } catch (err) {
+      checkProofNote = err?.message || String(err)
+      io.log({ at: io.now(), gate_check_proof_unproven: checkProofNote, gate_generation: gateGeneration })
+      gateProofFatal = dirtyAfterFailure(active, err)
+    }
+    checkProofs = rows
+    // Precedence, and it matters: a KNOWN survivor is a gate defect even if the
+    // pass was later interrupted; an interrupted pass with no survivor proved
+    // nothing and may never claim `proven` — that is the same false claim as a
+    // vacuous check passing the whole-gate proof, one level down.
+    checkProofVerdict = survivor ? 'failed' : checkProofNote ? 'unproven' : 'proven'
+    settleCheckProof()
+    return survivor
+  }
+
+  const mutationLabel = (label, index) => `${label}:m${index + 1}`
+
+  // BYTE IDENTITY, not inference. `includes(replace) && !includes(find)` is not a
+  // comparison: it misses a failed restore whose replacement CONTAINS the find
+  // text, and it misfires when either text occurs elsewhere. One read, one whole-
+  // string compare, and only when this driver actually wrote.
+  const dirtyAfterFailure = (active, err) => {
+    if (!active || !active.writeAttempted) return null   // nothing of ours is in the tree
+    let current
+    try { current = io.readFile(active.abs) }
+    catch (readErr) { return `${active.abs} could not be re-read after a failed per-check mutation (${readErr.message}; original failure: ${err.message})` }
+    if (current === active.original) return null
+    return `${active.abs} does not match the built content after a per-check mutation (${current === null ? 'the file is gone' : 'byte comparison failed'}): ${err.message}`
+  }
+
+  // Every path that can produce a REPLACEMENT gate says this, because the
+  // declaration is fixed for the task: the two PRE-BUILD fixes
+  // (crew/drive.mjs:1871 vacuous-green, :1892 defective-baseline) and the mid-run
+  // repair. A rename in any of them manufactures a survivor and burns the sole
+  // gate-repair budget restoring declaration/gate agreement.
+  const stableIdentifierNote = () => [
+    '',
+    'KEEP YOUR CHECK IDENTIFIERS STABLE. This plan declared per-check mutations and that',
+    `declaration is FIXED for the task: ${mutations.map((m) => m.check).join(', ')}.`,
+    `A failing check must print \`${CHECK_FAIL_PREFIX} <check>\` or \`${CHECK_FAIL_PREFIX} <check>: <reason>\` on its own`,
+    'line, with the identifier matching /^[A-Za-z0-9][A-Za-z0-9._-]*$/ (no spaces, no colons).',
+    'A renamed check cannot be re-declared and reads as a mutation that killed nothing.',
+  ].join('\n')
+
+  // The ADDITIVE record: its own journal line and its own event kind, beside the
+  // untouched whole-gate `discrimination` record. Today's ledger adapter ignores
+  // an unknown kind (crew/realio.mjs:226-232) and scripts/factory/ledger.mjs is
+  // fenced to lane b36, so persistence beside gate_discriminations is a follow-up
+  // lane, by decision, not by omission.
+  const settleCheckProof = () => {
+    io.log({ at: io.now(), gate_check_discrimination: checkProofVerdict, gate_generation: gateGeneration,
+      gate_check_discriminations: checkProofs, ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {}) })
+    emit({ kind: 'check-discrimination', generation: gateGeneration, verdict: checkProofVerdict,
+      checks: checkProofs, note: checkProofNote ?? null })
   }
 
   // Accept a planner-returned replacement gate: a NEW generation (identity is
@@ -1825,9 +2040,15 @@ export function driveTask(ctx, io) {
   // Returns { escalation } | { repaired: bool }.
   const settleFailedProof = () => {
     let repaired = false
-    while (gateDiscrimination === 'failed') {
+    while (true) {
+      if (gateProofFatal) {
+        return { escalation: gateEscalate(`the per-check proof could not restore the built tree: ${gateProofFatal} — the run stops rather than commit the driver's own mutation. Gate: ${gateCmd}`) }
+      }
+      // `unproven` is NOT `failed` and never reaches a repair: absence of evidence
+      // may not become a new way to lose a build (ADR-030 ratification amendment).
+      if (gateDiscrimination !== 'failed' && checkProofVerdict !== 'failed') break
       if (gateRepairs >= limits.gate_repairs) {
-        return { escalation: gateEscalate(`the acceptance gate did not prove it discriminates and the single gate repair is spent — ${gateProofNote}. Gate: ${gateCmd}`) }
+        return { escalation: gateEscalate(`the acceptance gate did not prove it discriminates and the single gate repair is spent — ${proofNote()}. Gate: ${gateCmd}`) }
       }
       gateRepairs += 1
       stage(`gate-repair:${gateRepairs}`)
@@ -1837,12 +2058,21 @@ export function driveTask(ctx, io) {
         '',
         'The build is GREEN against your acceptance gate — but the driver ran the SAME',
         "gate on the PRISTINE (pre-build) tree, with the builder's changes stashed away,",
-        `and the result is not proof that the gate measures the work: ${gateProofNote}.`,
+        `and the result is not proof that the gate measures the work: ${proofNote()}.`,
         '',
         'A gate whose verdict does not depend on the work cannot accept it.',
         '',
         'Pristine run (verbatim, last 2000 chars):',
-        gateProofOutput.slice(-2000),
+        String(gateProofOutput || '').slice(-2000),
+        ...(checkProofs ? [[
+          '',
+          'Per-check rows:',
+          ...checkProofs.map((row) => `- ${row.check}: ${row.outcome} — ${row.why}`),
+          '',
+          'Mutated run output (verbatim, last 2000 chars):',
+          String(checkProofOutput || gateProofOutput || '').slice(-2000),
+        ].join('\n')] : []),
+        ...(mutations.length > 0 ? [stableIdentifierNote()] : []),
         '',
         'Preserve your old gate under a .r1 suffix, then fix it so it checks exactly what',
         'the brief asked — you may NOT weaken or delete a legitimate check, and it must',
@@ -1855,7 +2085,7 @@ export function driveTask(ctx, io) {
       ].join('\n'))
       const rep = assignAndWait('planner', b, 'gate-repair')
       if (!(rep.status === 'done' && rep.details?.gate_cmd)) {
-        return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (planner returned ${rep.status}: ${rep.summary || 'no detail'}) — ${gateProofNote}. Gate: ${gateCmd}`) }
+        return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (planner returned ${rep.status}: ${rep.summary || 'no detail'}) — ${proofNote()}. Gate: ${gateCmd}`) }
       }
       acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
       repaired = true
@@ -1869,7 +2099,7 @@ export function driveTask(ctx, io) {
     if (baseline.ok) {
       stage('gate-baseline:green-bounce')
       const b = art('gate-vacuous-bounce.md')
-      io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYour acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
+      io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYour acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
       const env2 = assignAndWait('planner', b, 'gate-fix')
       if (env2.status !== 'done' || !env2.details?.gate_cmd) {
         return gateEscalate(`baseline-green gate could not be repaired (planner returned ${env2.status}: ${env2.summary || 'no detail'})`)
@@ -1889,7 +2119,7 @@ export function driveTask(ctx, io) {
       if (defect) {
         stage('gate-baseline:defect-bounce')
         const b = art('gate-defect-bounce.md')
-        io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYour gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}`)
+        io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYour gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
         const env3 = assignAndWait('planner', b, 'gate-fix')
         if (env3.status !== 'done' || !env3.details?.gate_cmd) {
           return gateEscalate(`defective gate could not be repaired (planner returned ${env3.status}: ${env3.summary || 'no detail'})`)
@@ -2229,6 +2459,19 @@ export function driveTask(ctx, io) {
         if (settled.escalation) return settled.escalation
         if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
+      // Per-CHECK proof, post-green BY CONSTRUCTION. An observed green built-tree
+      // run for THIS generation is the control a mutation is measured against; a
+      // repaired generation is proven pristine BEFORE its first built-tree run and
+      // may be red there (:2218, crew/drive.test.mjs:2373-2399). The loop repeats
+      // only because a repair mints a new generation that owes its own pass, and
+      // the single gate_repairs budget bounds that to once.
+      while (gateRes.ok && checkProofPending === gateGeneration) {
+        completeCheckProof(`gate-proof:${gateGeneration}:checks`)
+        if (!gateProofFatal && checkProofVerdict !== 'failed') break
+        const settled = settleFailedProof()
+        if (settled.escalation) return settled.escalation
+        if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
+      }
       if (!gateRes.ok) {
         if (finalRound()) {
           const c = consultLead(
@@ -2381,7 +2624,7 @@ export function driveTask(ctx, io) {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
-      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}) } : null,
+      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
     },
   }
 }

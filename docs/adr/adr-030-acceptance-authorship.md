@@ -1,6 +1,6 @@
 # ADR-030: Acceptance authorship — the seat that plans may draft the gate, but only a proof may accept it
 
-**Status:** RATIFIED 2026-08-14 · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
+**Status:** RATIFIED 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
 
 Ratified with three amendments to the proposal, each recorded inline at the
 decision it changes and summarised in §9: Decision 2 adopts in **two stages**
@@ -98,6 +98,9 @@ remain facts, while a human decision still escalates. If no tech-lead is seated,
 the plan-check block is skipped (`crew/drive.mjs:383`), but the planner still
 produces the gate and the driver can run the proof. No tier substitutes a lead
 or tech-lead merely to change who owns this artifact.
+This paragraph is about authorship only: since #334/PR #348 the *repair* of an
+accepted gate depends on a seated lead (§10), and a crew without one escalates
+rather than assigning any other seat.
 
 **Rejected:** (a) **status quo**—two vacuous gates appeared in one day, and #142
 already measured a no-fixed-point loop; (b) **reviewer authors the gate from the
@@ -121,8 +124,8 @@ and uses one predicate everywhere.
 
 - **Gate generation is driver-owned.** `driveTask` keeps a `gate_generation`
   counter. Generation 1 is the planner's original `gate_cmd`; the counter
-  increments whenever a planner-returned replacement is accepted on the repair
-  path—even when the command string is identical. The repair brief explicitly
+  increments whenever a **custodian**-returned replacement is accepted on the
+  repair path (`GATE_CUSTODIAN`, §10)—even when the command string is identical. The repair brief explicitly
   permits returning an identical command, and editing `gate.mjs` in place leaves
   `node …/gate.mjs` byte-identical (`crew/drive.mjs:583-588`). Command text or a
   hash is therefore not identity. `details.gate`, the journal line, the emitter
@@ -138,11 +141,15 @@ and uses one predicate everywhere.
   A missing summary, a crash, or an errored check is not discrimination. This
   corrects the current `gate-reverify` path, which trusts only `pristine.ok`
   (`crew/drive.mjs:595-603`).
-- **Routing:** a failed proof is a gate defect. The driver bounces the planner,
-  consumes the existing single `gate_repairs` budget, and never bounces the
-  builder for evidence about the gate. A second failed proof escalates. The
-  repair consumes no builder round, as the current repair path does
-  (`crew/drive.mjs:580-604`).
+- **Routing:** a failed proof is a gate defect.
+  The driver bounces the **gate custodian** — `GATE_CUSTODIAN = 'lead'`
+  (`crew/drive.mjs:197`) — consumes the existing single `gate_repairs` budget,
+  and never bounces the builder for evidence about the gate. A second failed
+  proof escalates. The repair consumes no builder round, as the repair path
+  does (`crew/drive.mjs:2085-2142`). A crew booted without that custodian
+  assigns nobody: `noGateCustodian()` escalates with the site's own diagnosis
+  attached (`crew/drive.mjs:1168-1173`). *(Routing amended 2026-08-19 — §10;
+  the three invariants in this bullet are unchanged.)*
 - **Cost and record:** there are at most two extra gate runs per task. Each is
   recorded on `details.gate` beside `reverified`, and the named journal,
   emitter, and ledger representations use the generation key. The gate is not
@@ -203,12 +210,13 @@ and uses one predicate everywhere.
   deliberately a re-entry question, not an unbounded mutation-testing project
   now.
 
-With no lead seated, the driver still records and routes the mechanical proof;
-there is simply no lead consultation to convert a failed gate proof into a
-free-text decision, so the existing escalation is used. With no tech-lead
-seated, plan-check is absent, but the driver's gate generation and pristine
-proof remain available for every production tier. Neither absence is described
-as a missing `runClean` capability.
+With no lead seated, the driver still records the mechanical proof, but the
+repair it would route needs the gate custodian: `noGateCustodian()` turns that
+site into an escalation carrying the site's own diagnosis, and
+no other seat is substituted (`crew/drive.mjs:1168-1173`; amended 2026-08-19 —
+§10). With no tech-lead seated, plan-check is absent, but the driver's gate
+generation and pristine proof remain available for every production tier.
+Neither absence is described as a missing `runClean` capability.
 
 **Rejected:** proving discrimination by prose in the brief—the status quo
 already demanded that and both vacuous gates cleared it; running the pristine
@@ -432,7 +440,7 @@ Decision 2 and the evidence-gap table, but it is not commissioned now.
 
 | Consequence | Owner |
 |---|---|
-| Driver-owned `gate_generation`; discrimination proof at the first green of each generation, bounded by `1 + gate_repairs`; full `baselineGateDefect` predicate on repair re-proof; planner-bounce routing; `discrimination` on `details.gate`; DI tests | #168 |
+| Driver-owned `gate_generation`; discrimination proof at the first green of each generation, bounded by `1 + gate_repairs`; full `baselineGateDefect` predicate on repair re-proof; gate-defect bounce routing (to the gate custodian since #334/PR #348 — §10); `discrimination` on `details.gate`; DI tests | #168 |
 | Test pinning that a headless-transport seat still drives on the outer `realIo` and therefore has `runClean`; stash-isolation coverage for ignored paths and `node_modules` | #168 |
 | Durable discrimination outcome keyed on `{run, gate_generation}`, and durable review outcome with normalized verdict and `must_fix` count, with named journal/emitter/ledger representation and DI tests | #169 |
 | Structured reviewer findings with stable IDs and severity—a runtime-wide migration of `reviewer.md`, envelope validation, fixtures, contract tests, and the exhaustion path; severity-constrained typed residuals/refuted-with-evidence; invalid accept fails closed; durable residual/refuted record | #170 |
@@ -486,3 +494,34 @@ rather than left as a note here.
 
 The amendments changed thresholds and sequencing, not a single decision's
 direction. Nothing in §§2–6 was reversed.
+
+## 10. Amendment record — 2026-08-19: gate custody is the lead's
+
+**Ratified:** user-directed, 2026-08-19 · **Implemented by:** #334, merged as
+PR #348 · **Amends:** Decision 2's Routing and gate-generation bullets and its
+no-lead paragraph (§3), Decision 1's no-lead paragraph (§2), and §8's #168
+consequence row. Decisions 1 and 3–5 are not reopened.
+
+Decision 2's former repair routing is what this amendment retires. #334 moved
+all four post-acceptance gate sites — a failed discrimination proof
+(`crew/drive.mjs:2097`), a vacuous green baseline (`:2148`), a gate that did not
+RUN (`:2169`), and the reviewer-triaged mid-run gate defect (`:2487`) — to
+`GATE_CUSTODIAN` (`crew/drive.mjs:197`), each guarded by `noGateCustodian()` so
+a crew booted without that seat escalates with the site's own diagnosis attached
+rather than assigning anybody (`crew/drive.mjs:1168-1173`). The assignment and
+confinement expressions are pinned at `crew/drive.test.mjs:4792-4815` — exactly
+two `planner` assignments remain in the driver, and neither is a gate site — and
+the lead-less diagnostic escalations at `crew/drive.test.mjs:4817-4862`.
+
+**Why — the domain argument recorded in #334.** Every seat cares about its own
+domain, and the planner is not invoked once its plan is done. Once a plan is
+accepted the gate stops being the planner's draft and becomes the crew's
+acceptance criteria, and custody of acceptance criteria is judgment work.
+
+**The measurement, from 164 archived lanes.** All 12 post-plan planner
+activations were gate work, and the lead is the most idle seat in the roster
+(90 turns, ~1.9 hours total) while `planner@plan` costs 34.4 hours.
+
+**The authorship-bias objection is answered mechanically, not by trust.** Every
+repaired gate is still re-proven by code — red at baseline and
+discrimination-proven — so a bad repair cannot bless itself.

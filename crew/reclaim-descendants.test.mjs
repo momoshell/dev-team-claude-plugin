@@ -61,6 +61,21 @@ const groupGone = (pgid) => {
   try { process.kill(-pgid, 0); return false } catch (err) { return err?.code === 'ESRCH' }
 }
 const killGroup = (pgid) => { try { process.kill(-pgid, 'SIGKILL') } catch {} }
+// A detached child calls setsid() ITSELF after fork, so it is not yet observable
+// as escaped at the instant spawn() hands back its pid. Measured on a Linux CI
+// runner: the capture ran first and recorded nothing, so the reclaim had nothing
+// to reclaim and the group stayed alive (ps said "Ssl", not a zombie). Wait for
+// the row to exist in its own group under the root before capturing.
+const escapedVisible = (seat) => {
+  const ps = spawnSync('ps', ['-eo', 'pid=,ppid=,pgid='], { encoding: 'utf8' })
+  for (const line of String(ps.stdout || '').split(/\r?\n/)) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\d+)\s*$/.exec(line)
+    if (!m) continue
+    if (Number(m[1]) !== seat.escapedPgid) continue
+    return Number(m[3]) === seat.escapedPgid && Number(m[2]) === seat.rootPid
+  }
+  return false
+}
 const ROOT_SCRIPT = [
   "const { spawn } = require('node:child_process')",
   "const c = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' })",
@@ -393,7 +408,13 @@ test('both run outcomes reclaim a real escaped group through the settle path', a
       const taskDir = join(home, '.crew', 'checkout', taskName, 'task')
       const seat = await realSeat(); seats.push(seat)
       marker(taskDir, `seat-${status}`, 'builder', 'd1', seat.rootPid)
+      const visibleBy = Date.now() + 10000
+      while (!escapedVisible(seat) && Date.now() < visibleBy) await delay(50)
+      assert.equal(escapedVisible(seat), true, 'the escaped child never became observable in its own group')
       descendantCapture({ taskDir, log: () => {} }).round(true)
+      // Without this the reclaim assertion below is vacuous: an empty capture
+      // leaves nothing to reclaim, which is exactly how this test failed on Linux.
+      assert.ok(records(taskDir).length > 0, 'the capture recorded no escaped descendant')
       killGroup(seat.rootPid)
       const result = status === 'done'
         ? { status: 'done', summary: '', artifacts: [], details: { commit: null } }
@@ -401,14 +422,6 @@ test('both run outcomes reclaim a real escaped group through the settle path', a
       runCmd({ task: taskName, checkout, 'brief-file': brief, keep: true }, { drive: () => result })
       const deadline = Date.now() + 30000 // generous: a contended CI runner reclaims far slower than a dev box; the assertion below is unchanged
       while (!groupGone(seat.escapedPgid) && Date.now() < deadline) await delay(50)
-      if (!groupGone(seat.escapedPgid)) {
-        // TEMPORARY CI DIAGNOSTIC (remove before merge): say WHY the group is not gone.
-        const ps = spawnSync('ps', ['-eo', 'pid=,ppid=,pgid=,stat=,lstart='], { encoding: 'utf8' })
-        const mine = String(ps.stdout || '').split('\n').filter((l) => new RegExp('\\s' + seat.escapedPgid + '\\s').test(l))
-        console.error('DIAG platform=' + process.platform + ' status=' + status + ' escapedPgid=' + seat.escapedPgid + ' rootPid=' + seat.rootPid)
-        console.error('DIAG ps-rows-for-pgid=' + JSON.stringify(mine))
-        console.error('DIAG records=' + JSON.stringify(records(taskDir)))
-      }
       assert.equal(groupGone(seat.escapedPgid), true)
     }
   } finally {

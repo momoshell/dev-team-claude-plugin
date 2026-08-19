@@ -960,12 +960,12 @@ export function phaseForStage(label) {
 
 // Map a transport's own err.stage onto the ledger's closed availability set.
 // The stage strings are the transports' (crew/headless.mjs:204-212/:298,
-// crew/headless-rpc.mjs:133-138, waitForEnvelope :248); anything unrecognised
-// is a transport error, never a silent drop.
+// crew/headless-rpc.mjs:133-138, pane read boundary, waitForEnvelope :248);
+// anything unrecognised is a transport error, never a silent drop.
 export function cellFailureKind(err) {
   const stage = String((err && err.stage) || '')
   if (stage === 'seat-died') return 'seat-died'
-  const tail = stage.replace(/^(headless|rpc)-/, '')
+  const tail = stage.replace(/^(headless|rpc|pane)-/, '')
   if (tail !== stage) {
     if (tail === 'timeout') return 'timeout'
     if (tail === 'no-envelope') return 'no-envelope'
@@ -1224,6 +1224,32 @@ export function paneTeardownRows(crew, deps = {}) {
   return rows
 }
 
+// An UNPARSEABLE return file is not an ABSENT one. `null` is the wait loop's
+// "nothing on disk yet" and is polled to the seat deadline; but NOTHING ever
+// rewrites a seat's envelope — reading is not authoring — so a file that IS
+// there and cannot be parsed polls the full budget on a condition that can
+// never resolve (lane b52-heartbeat: 40 minutes lost to one literal newline
+// inside a summary string, then an escalation that reported 'no valid
+// envelope' about a file sitting on disk). Fail at the READ boundary instead,
+// staged so cellFailureKind maps it onto the EXISTING 'unusable-envelope'
+// kind (:972). No new vocabulary, and no repair of the seat's own file.
+export function readEnvelopeFile(returnPath, deps = {}) {
+  const existsSync = deps.existsSync || fsExistsSync
+  const readFileSync = deps.readFileSync || fsReadFileSync
+  if (!existsSync(returnPath)) return null
+  let raw
+  // A read that loses a race with a rename, or that comes back denied, is an
+  // ABSENCE and not a defect: the next poll sees the file. Only bytes we
+  // actually read and cannot parse are terminal.
+  try { raw = String(readFileSync(returnPath, 'utf8')) } catch { return null }
+  try { return JSON.parse(raw) } catch (err) {
+    const parseFailure = new Error(`unusable envelope at ${returnPath}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${err.message}`)
+    parseFailure.stage = 'pane-parse-error'
+    if (deps.role) parseFailure.role = deps.role
+    throw parseFailure
+  }
+}
+
 export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, onAlive, now, sleep }) {
   const started = now()
   const deadline = started + timeoutS * 1000
@@ -1395,10 +1421,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           ? transport.wait(returnPath, timeoutS)
           : waitForEnvelope({
             returnPath, timeoutS, role: info?.role || 'unknown',
-            readEnvelope: () => {
-              if (!existsSync(returnPath)) return null
-              try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { return null }
-            },
+            readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
             probeSeat: info ? () => paneAlive(info.surface_id, { tree, locate }) : null,
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed

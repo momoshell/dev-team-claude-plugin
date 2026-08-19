@@ -122,7 +122,7 @@ export const ROLE_ORDER = Object.freeze(['lead', 'planner', 'builder', 'reviewer
 export const CAPABILITY_REFUSALS = Object.freeze([
   'register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
   'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
-  'local-endpoint-dead',
+  'local-endpoint-dead', 'grant-contradicts-deny',
 ])
 const CAPABILITIES_PATH = join(HERE, 'capabilities.json')
 const CAPABILITIES_SCHEMA_PATH = join(HERE, 'capabilities.schema.json')
@@ -347,6 +347,33 @@ export function assertGrantsBacked(role, grants, register) {
     throw refuse('unknown-grant', `seat ${role} has unregistered advisor grant`)
   }
   return grants
+}
+
+// Every FANOUT_TOOLS name this role's seat default withholds. The deny string
+// IS the seat's charter boundary, so this is the register-vs-charter comparison
+// the boot refusal below makes.
+export function deniedFanout(role) {
+  const deny = String(SEAT_DEFAULTS[role]?.deny || '').split(',').map((name) => name.trim())
+  return FANOUT_TOOLS.filter((tool) => deny.includes(tool))
+}
+
+// A register that grants fan-out to a seat whose defaults withhold it is a
+// CONTRADICTION between runtime policy and the seat's charter, and it is refused
+// at boot rather than resolved in the grant's favour. The deny boundary cannot
+// backstop the grant: adapter-pi's translateDeny (crew/adapters/adapter-pi.mjs:109)
+// maps every FANOUT_TOOLS name to nothing (PI_TOOL_NAMES, :95-98), so such a
+// seat's whole fan-out denial translates to an EMPTY list and seatCommand omits
+// --exclude-tools entirely — the grant would arrive with nothing ANDed after it.
+// No shipped register grants agents to such a role today, so this is a boundary
+// rather than a behaviour change, and capabilities.schema.json still permits the
+// grant deliberately — which is exactly why boot has to be the one to refuse it.
+export function assertFanoutCoherent(role, grants) {
+  const denied = deniedFanout(role)
+  if (!denied.length) return grants
+  const agents = grants?.agents || []
+  if (!agents.length) return grants
+  throw refuse('grant-contradicts-deny',
+    `seat ${role} is granted fan-out agents [${agents.map((a) => a.name).join(', ')}] by the runtime capability register, but seat ${role} defaults deny ${denied.join(',')} — refusing to boot a seat whose register contradicts its own charter boundary (drop roles.${role}.agents from crew/capabilities.json, or change the seat default that withholds fan-out)`)
 }
 
 export const EMPTY_GRANTS = deepFreeze({
@@ -787,6 +814,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name })
       const grants = grantsFor(registry, role, { root, exists })
       assertGrantsBacked(role, grants, registry)
+      assertFanoutCoherent(role, grants)
 
       let configDir = null
       const provider = seats?.[role]?.provider

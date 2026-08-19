@@ -12,7 +12,7 @@ import { once } from 'node:events'
 import {
   DESCENDANT_DIR, DESCENDANT_MAX_ANCHORS, DESCENDANT_STORE_DIRS,
   escapedDescendants, psSnapshot, reclaimDescendants, realIo, settleSeatRoots,
-  settleSeatTeardown, verifyGroup, descendantCapture,
+  settleSeatTeardown, statIsZombie, verifyGroup, descendantCapture,
 } from './realio.mjs'
 import { bootCmd, runCmd, teardownCore } from './crew.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
@@ -122,6 +122,259 @@ test('psSnapshot returns a measured process row with an opaque start string', ()
   assert.ok(row.start.trim())
   assert.ok(Number.isSafeInteger(row.ppid))
   assert.ok(Number.isSafeInteger(row.pgid))
+})
+
+test('psSnapshot reads the ps state column and keeps lstart last', () => {
+  const calls = []
+  const stdout = [
+    '    41       1      41 Zs   Tue Aug 19 10:04:47 2026',
+    '    43      41      42 Ss   Tue Aug 19 10:04:48 2026',
+    '',
+  ].join('\n')
+  const out = psSnapshot({
+    spawnSync: (cmd, args, options) => {
+      calls.push({ cmd, args, options })
+      return { status: 0, stdout }
+    },
+  })
+  assert.equal(out.ok, true)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].cmd, 'ps')
+  assert.equal(calls[0].args[0], '-eo')
+  assert.equal(calls[0].args[1], 'pid=,ppid=,pgid=,stat=,lstart=')
+  assert.equal(out.rows.get(41).stat, 'Zs')
+  assert.equal(out.rows.get(41).start, 'Tue Aug 19 10:04:47 2026')
+  assert.deepEqual({ ppid: out.rows.get(43).ppid, pgid: out.rows.get(43).pgid, stat: out.rows.get(43).stat }, {
+    ppid: 41, pgid: 42, stat: 'Ss',
+  })
+})
+
+test('a ps that cannot print stat still yields a usable snapshot', () => {
+  const formats = []
+  const stdout = '    41       1      41 Tue Aug 19 10:04:47 2026\n'
+  const out = psSnapshot({
+    spawnSync: (_cmd, args) => {
+      const format = String(args[1])
+      formats.push(format)
+      if (format.includes('stat=')) return { status: 1, stdout: '', stderr: 'ps: illegal argument' }
+      return { status: 0, stdout }
+    },
+  })
+  assert.deepEqual(formats, ['pid=,ppid=,pgid=,stat=,lstart=', 'pid=,ppid=,pgid=,lstart='])
+  assert.equal(out.ok, true)
+  assert.equal(out.rows.get(41).stat, null)
+  assert.equal(statIsZombie(out.rows.get(41).stat), false)
+})
+
+test('a zombie root sweeps the escaped group instead of deferring as retryable', () => {
+  const taskDir = task()
+  writeRecord(taskDir, {
+    root_pid: 41, root_pgid: 41, root_start: 'root',
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  let groupAlive = true
+  const calls = []
+  const events = []
+  const snapshotFor = () => snapshot([
+    { pid: 41, ppid: 1, pgid: 41, start: 'root', stat: 'Zs' },
+    ...(groupAlive ? [{ pid: 43, ppid: 41, pgid: 42, start: 'child', stat: 'Ss' }] : []),
+  ])
+  const kill = (pid, signal) => {
+    calls.push([pid, signal])
+    if (pid === -42 && signal === 'SIGTERM') { groupAlive = false; return true }
+    if (pid === -42 && signal === 0 && !groupAlive) {
+      const error = new Error('gone'); error.code = 'ESRCH'; throw error
+    }
+    return true
+  }
+  reclaimDescendants({ taskDir, log: (row) => events.push(row), emit: () => true, deps: { snapshot: snapshotFor, kill, sleep: () => {} } })
+  const row = events.find((item) => item.event === 'descendant-reclaim')
+  assert.notEqual(row.reason, 'root-alive')
+  assert.equal(row.root_liveness, 'dead')
+  assert.equal(row.signalled, 1)
+  assert.ok(calls.some(([pid, signal]) => pid === -42 && signal === 'SIGTERM'))
+})
+
+test('a running root is still refused exactly as today', () => {
+  const taskDir = task()
+  writeRecord(taskDir, {
+    root_pid: 41, root_pgid: 41, root_start: 'root',
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const calls = []
+  const events = []
+  reclaimDescendants({
+    taskDir, log: (row) => events.push(row), emit: () => true,
+    deps: {
+      snapshot: () => snapshot([
+        { pid: 41, ppid: 1, pgid: 41, start: 'root', stat: 'Ss' },
+        { pid: 43, ppid: 41, pgid: 42, start: 'child', stat: 'Ss' },
+      ]),
+      kill: (pid, signal) => { calls.push([pid, signal]); return true }, sleep: () => {},
+    },
+  })
+  const row = events.find((item) => item.event === 'descendant-reclaim')
+  assert.equal(row.reason, 'root-alive')
+  assert.equal(row.signalled, 0)
+  assert.equal(calls.some(([, signal]) => signal === 'SIGTERM' || signal === 'SIGKILL'), false)
+})
+
+test('a zombie root settles its live group peers and only then reads already-dead', () => {
+  const noPeers = task()
+  writeRecord(noPeers, { root_pid: 41, root_pgid: 41, root_start: 'root' })
+  const noPeerCalls = []
+  const noPeerResult = settleSeatRoots({
+    taskDir: noPeers, log: () => {},
+    deps: {
+      snapshot: () => snapshot([{ pid: 41, ppid: 1, pgid: 41, start: 'root', stat: 'Zs' }]),
+      kill: (pid, signal) => { noPeerCalls.push([pid, signal]); return true }, sleep: () => {},
+    },
+  })
+  assert.equal(noPeerResult.already_dead, 1)
+  assert.equal(noPeerCalls.some(([, signal]) => signal === 'SIGTERM' || signal === 'SIGKILL'), false)
+  assert.equal(records(noPeers)[0].root_settled, 'already-dead')
+  assert.equal(records(noPeers)[0].root_liveness, 'dead')
+
+  const withPeer = task()
+  writeRecord(withPeer, { root_pid: 41, root_pgid: 41, root_start: 'root' })
+  let peerAlive = true
+  const peerCalls = []
+  const peerResult = settleSeatRoots({
+    taskDir: withPeer, log: () => {},
+    deps: {
+      snapshot: () => snapshot([
+        { pid: 41, ppid: 1, pgid: 41, start: 'root', stat: 'Zs' },
+        ...(peerAlive ? [{ pid: 44, ppid: 1, pgid: 41, start: 'peer', stat: 'Ss' }] : []),
+      ]),
+      kill: (pid, signal) => {
+        peerCalls.push([pid, signal])
+        if (pid === -41 && signal === 'SIGTERM') peerAlive = false
+        return true
+      },
+      sleep: () => {},
+    },
+  })
+  assert.equal(peerResult.settled, 1)
+  assert.ok(peerCalls.some(([pid, signal]) => pid === -41 && signal === 'SIGTERM'))
+  assert.equal(records(withPeer)[0].root_settled, 'proven')
+  assert.equal(records(withPeer)[0].root_liveness, 'dead')
+})
+
+test('a dead anchor binds the group but never proves it dead', () => {
+  const candidate = { pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }
+  const deps = { kill: () => {} }
+  const dead = verifyGroup(candidate, snapshot([{ pid: 43, ppid: 1, pgid: 42, start: 'child', stat: 'Z' }]), deps)
+  assert.deepEqual({ signalable: dead.signalable, liveness: dead.liveness }, { signalable: false, liveness: 'dead' })
+  const mixed = verifyGroup(candidate, snapshot([
+    { pid: 43, ppid: 1, pgid: 42, start: 'child', stat: 'Z' },
+    { pid: 45, ppid: 1, pgid: 42, start: 'sibling', stat: 'Ss' },
+  ]), deps)
+  assert.deepEqual({ signalable: mixed.signalable, liveness: mixed.liveness }, { signalable: true, liveness: 'alive' })
+  const live = verifyGroup(candidate, snapshot([{ pid: 43, ppid: 1, pgid: 42, start: 'child', stat: 'Ss' }]), deps)
+  assert.deepEqual({ signalable: live.signalable, liveness: live.liveness }, { signalable: true, liveness: 'alive' })
+  const mismatch = verifyGroup(candidate, snapshot([{ pid: 43, ppid: 1, pgid: 42, start: 'other', stat: 'Ss' }]), deps)
+  assert.equal(mismatch.reason, 'evidence-mismatch')
+})
+
+test('escapedDescendants never captures an unreaped row as a live anchor', () => {
+  const out = escapedDescendants(snapshot([
+    { pid: 10, ppid: 1, pgid: 10, start: 'root', stat: 'Ss' },
+    { pid: 11, ppid: 10, pgid: 11, start: 'zombie-escape', stat: 'Z' },
+    { pid: 12, ppid: 10, pgid: 12, start: 'live-escape', stat: 'Ss' },
+  ]), 10)
+  assert.deepEqual(out, [{ pid: 12, pgid: 12, start: 'live-escape' }])
+})
+
+test('a real zombie is measured dead by both ps probes', async () => {
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' })
+  try {
+    assert.ok(Number.isSafeInteger(child.pid) && child.pid > 1)
+    child.kill('SIGKILL')
+    let row = null
+    const deadline = Date.now() + 5000
+    const wait = (ms) => {
+      const sab = new SharedArrayBuffer(4)
+      Atomics.wait(new Int32Array(sab), 0, 0, ms)
+    }
+    while (Date.now() < deadline) {
+      row = psSnapshot().rows.get(child.pid) || null
+      if (row && statIsZombie(row.stat)) break
+      wait(25)
+    }
+    assert.ok(row, `the killed child pid ${child.pid} disappeared before its zombie row was measured`)
+    assert.equal(statIsZombie(row.stat), true, `measured stat=${JSON.stringify(row.stat)}`)
+    assert.ok(psSnapshot().rows.has(child.pid), `the killed child pid ${child.pid} was not still listed by ps`)
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) await once(child, 'exit')
+  }
+})
+
+test('a cross-uid EPERM under a dead root stays unproven and signals nothing', () => {
+  const taskDir = task()
+  writeRecord(taskDir, {
+    root_pid: 999999, root_pgid: 999999, root_start: 'gone',
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const calls = []
+  const events = []
+  const kill = (pid, signal) => {
+    calls.push([pid, signal])
+    if (pid < -1) { const error = new Error('permission'); error.code = 'EPERM'; throw error }
+    return true
+  }
+  reclaimDescendants({
+    taskDir, log: (row) => events.push(row), emit: () => true,
+    deps: { snapshot: () => snapshot([{ pid: 43, ppid: 1, pgid: 42, start: 'child', stat: 'Ss' }]), kill, sleep: () => {} },
+  })
+  const row = events.find((item) => item.event === 'descendant-reclaim')
+  assert.ok(calls.some(([pid, signal]) => pid === -42 && signal === 0))
+  assert.equal(row.reclaimed, 0)
+  assert.equal(row.signalled, 0)
+  assert.ok(row.probe_unknown >= 1)
+  assert.equal(row.outcome, 'unproven')
+  assert.equal(row.reason, 'probe-unknown')
+})
+
+test('the run-end reclaim settles seat roots before it can stamp the record swept', () => {
+  const taskDir = task()
+  writeRecord(taskDir, {
+    root_pid: 41, root_pgid: 41, root_start: 'root',
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const events = []
+  const calls = []
+  let peerAlive = true
+  let escapedAlive = true
+  const snapshotFor = () => snapshot([
+    { pid: 41, ppid: 1, pgid: 41, start: 'root', stat: 'Zs' },
+    ...(peerAlive ? [{ pid: 44, ppid: 1, pgid: 41, start: 'peer', stat: 'Ss' }] : []),
+    ...(escapedAlive ? [{ pid: 43, ppid: 41, pgid: 42, start: 'child', stat: 'Ss' }] : []),
+  ])
+  const kill = (pid, signal) => {
+    calls.push([pid, signal])
+    if (pid === -41 && signal === 'SIGTERM') peerAlive = false
+    if (pid === -42 && signal === 'SIGTERM') escapedAlive = false
+    if (signal === 0 && pid === -41 && !peerAlive) { const error = new Error('gone'); error.code = 'ESRCH'; throw error }
+    if (signal === 0 && pid === -42 && !escapedAlive) { const error = new Error('gone'); error.code = 'ESRCH'; throw error }
+    return true
+  }
+  const io = realIo({}, { taskDir, dir: join(taskDir, '..') }, join(taskDir, '..'), null, {}, {}, {
+    logLine: (_path, row) => events.push(row),
+    snapshot: snapshotFor, kill, sleep: () => {},
+  })
+  io.reclaimDescendants()
+  const settleAt = events.findIndex((row) => row?.event === 'seat-root-settle')
+  const reclaimAt = events.findIndex((row) => row?.event === 'descendant-reclaim')
+  assert.ok(settleAt >= 0)
+  assert.ok(reclaimAt >= 0)
+  assert.ok(settleAt < reclaimAt)
+  const rootTerm = calls.findIndex(([pid, signal]) => pid === -41 && signal === 'SIGTERM')
+  const escapedProbe = calls.findIndex(([pid]) => pid === -42)
+  assert.ok(rootTerm >= 0)
+  assert.ok(escapedProbe < 0 || rootTerm < escapedProbe)
+  assert.equal(events[settleAt].root_settled, 'proven')
+  assert.equal(events[settleAt].root_liveness, 'dead')
+  assert.equal(records(taskDir)[0].root_settled, 'proven')
 })
 
 test('escapedDescendants walks strict descendants and excludes the root group', () => {

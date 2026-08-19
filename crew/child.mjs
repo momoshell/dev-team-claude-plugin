@@ -54,6 +54,28 @@ function declaredScope(value, variant) {
   return [...value]
 }
 
+// An identical copy of crew/crew.mjs's resolver: the two run entrypoints must
+// agree on what the round validation lane is, and child.mjs deliberately never
+// imports crew.mjs. crew/crew.test.mjs runs both against one shared table.
+// `validation_lane` is the spelling with no second meaning; `lane` is what the
+// daemon forwards (crew/daemon.mjs:1063) and what ci-repair dispatches.
+export const VALIDATION_LANE_REFUSAL = 'invalid-validation-lane'
+
+export function resolveValidationLane({ validationLane, lane, fences } = {}) {
+  const clean = (raw, flag) => {
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw Object.assign(
+        new Error(`--${flag} needs the shell command to run as the round validation lane, got ${JSON.stringify(raw)} [${VALIDATION_LANE_REFUSAL}]`),
+        { reason: VALIDATION_LANE_REFUSAL },
+      )
+    }
+    return raw.trim()
+  }
+  if (validationLane !== undefined) return { lane: clean(validationLane, 'validation-lane'), source: 'validation-lane' }
+  if (lane !== undefined && fences === undefined) return { lane: clean(lane, 'lane'), source: 'lane' }
+  return { lane: null, source: 'none' }
+}
+
 function ledgerSidecarDbPath(crewDir, exists, read) {
   const path = join(crewDir, 'ledger', 'run.json')
   if (!exists(path)) return null
@@ -98,7 +120,9 @@ export function runChild(argv, injected = {}) {
     seatedRoles: [...roles],
     // This is the same lane as package.json's scripts.test; reasoning lives in
     // crew/crew.mjs's ctx block, and crew/crew.test.mjs pins the agreement.
-    lane: spec.lane || null, suite: spec.suite || 'node --test --test-timeout=30000',
+    // lane is RESOLVED below, inside the try, so a malformed one becomes this
+    // run's child-preflight escalation rather than a throw out of fork.
+    lane: null, suite: spec.suite || 'node --test --test-timeout=30000',
     ...(spec.variant ? { variant: spec.variant } : {}),
   }
   const failure = (err) => ({
@@ -121,8 +145,16 @@ export function runChild(argv, injected = {}) {
     const limits = resolveLimits({ plan_rounds: spec.plan_rounds, build_rounds: spec.build_rounds, review_rounds: spec.review_rounds })
     const limitsOverlay = limitsCtx(limits)
     if (limitsOverlay) ctx.limits = limitsOverlay
+    // The round validation lane, resolved exactly as the attended entrypoint
+    // resolves --validation-lane/--lane.
+    const validationLane = resolveValidationLane({ validationLane: spec.validation_lane, lane: spec.lane })
+    ctx.lane = validationLane.lane
     if (strictPreflight) {
-      for (const role of ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
+      // The shape's DECLARED seats, not the tier three: an envelope shape runs
+      // exactly the seats crew/variants.mjs declares (crew/crew.mjs:assertSeats
+      // is the same rule at the attended entrypoint).
+      const declaredSeats = VARIANTS[spec.variant]?.required_seats
+      for (const role of Array.isArray(declaredSeats) ? declaredSeats : ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
       if (roles.includes('lead') && !crew.members?.lead) throw new Error(`v3 run requires a lead seat (booted roles: ${roles.join(', ')})`)
       if (!briefFile) throw new Error('run requires --brief-file <path to the task brief>')
       if (!existsChild(ctx.briefFile)) throw new Error(`brief file not found: ${ctx.briefFile}`)
@@ -186,6 +218,9 @@ export function runChild(argv, injected = {}) {
       // an escalation at round N reads differently against a budget of N.
       try {
         io.log?.({ at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
+      } catch { /* instrumentation is never load-bearing */ }
+      try {
+        io.log?.({ at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
       } catch { /* instrumentation is never load-bearing */ }
       // The lane fence rides the same seam as the protected paths: crew.mjs's
       // run verb resolves it out of crew.json (crew/crew.mjs:1190) and the

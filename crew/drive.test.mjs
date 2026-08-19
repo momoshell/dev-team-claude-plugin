@@ -42,9 +42,9 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
     calls,
-    assign({ role, briefFile }) {
+    assign({ role, briefFile, note }) {
       counts[role] = (counts[role] || 0) + 1
-      calls.assign.push({ role, briefFile, n: counts[role] })
+      calls.assign.push({ role, briefFile, note, n: counts[role] })
       return { id: `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
     },
     wait(returnPath) {
@@ -2075,11 +2075,11 @@ test('compounding policy: agreement leaves no dissent recorded', () => {
   assert.deepEqual(res.details.dissents, [])
 })
 
-test('gate-first: green baseline bounces the planner; repaired gate red at baseline proceeds; gate green after build -> done', () => {
+test('gate-first: green baseline bounces the lead; repaired gate red at baseline proceeds; gate green after build -> done', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-v1' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-v2' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-v2' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2101,7 +2101,7 @@ test('gate-first: repaired gate STILL green at baseline escalates — vacuous ac
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-v1' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-v2' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-v2' } },
     },
     runs: { 'gate-v1': { ok: true, output: '' }, 'gate-v2': { ok: true, output: '' } },
   })
@@ -2180,14 +2180,14 @@ test('gate exhaustion emits exactly one gate attention with an explicit null par
   assert.equal(attention[0].park_id, null)
 })
 
-test('repeated gate failures trigger reviewer triage; gate-defect diagnosis lets the planner repair once and re-runs without a builder round', () => {
+test('repeated gate failures trigger reviewer triage; gate-defect diagnosis lets the lead repair once and re-runs without a builder round', () => {
   const io = fakeIo({
     emit: true,
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -2220,7 +2220,7 @@ test('a repaired gate proven red on the pristine tree proceeds — and the proof
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -2257,7 +2257,7 @@ test('an io whose runClean is a this-using method survives gate-reverify', () =>
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -2289,7 +2289,7 @@ test('a repaired gate GREEN on the pristine tree is vacuous — escalate, never 
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -2316,7 +2316,7 @@ test('an io without runClean keeps the repair path exactly as it was', () => {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate checks a file the brief never named' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -2365,12 +2365,12 @@ test('first green records discrimination without adding a reverified field', () 
   }])
 })
 
-test("a failed first-green proof bounces the PLANNER for a gate repair, never the builder", () => {
+test("a failed first-green proof bounces the LEAD for a gate repair, never the builder", () => {
   const pristineOutput = 'green pristine output — the gate did not inspect the work'
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2390,7 +2390,7 @@ test("a failed first-green proof bounces the PLANNER for a gate repair, never th
   assert.equal(res.details.gate.generation, 2)
   assert.equal(res.details.gate.cmd, 'gate-fixed')
   assert.equal(res.details.gate.discrimination, 'proven')
-  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 1)
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
   assert.equal(io.calls.commits.length, 1)
   assert.equal(io.calls.runClean.length, 2)
@@ -2415,11 +2415,11 @@ test('pristine red with every check failed records proven discrimination', () =>
   assert.equal(res.details.gate.discrimination, 'proven')
 })
 
-test('a no-summary failed proof routes through the planner repair with its diagnosis', () => {
+test('a no-summary failed proof routes through the lead repair with its diagnosis', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2436,17 +2436,17 @@ test('a no-summary failed proof routes through the planner repair with its diagn
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.discrimination, 'proven')
   assert.equal(res.details.gate.repairs, 1)
-  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 1)
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
   assert.equal(io.calls.runClean.length, 2)
   assert.match(io.calls.writes[`${TD}/gate-discrimination-bounce.md`], /printed no GATE-SUMMARY/)
 })
 
-test('a THREW failed proof routes through the planner repair with its diagnosis', () => {
+test('a THREW failed proof routes through the lead repair with its diagnosis', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2463,7 +2463,7 @@ test('a THREW failed proof routes through the planner repair with its diagnosis'
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.discrimination, 'proven')
   assert.equal(res.details.gate.repairs, 1)
-  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 1)
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
   assert.equal(io.calls.runClean.length, 2)
   assert.match(io.calls.writes[`${TD}/gate-discrimination-bounce.md`], /THREW/)
@@ -2473,7 +2473,7 @@ test('a second failed proof escalates after the single gate repair is spent', ()
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(),
     },
     runs: {
@@ -2492,15 +2492,15 @@ test('a second failed proof escalates after the single gate repair is spent', ()
   assert.match(res.details.escalation.why, /gate-fixed/)
   assert.match(res.details.escalation.why, /spent/)
   assert.equal(io.calls.commits.length, 0)
-  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 1)
   assert.equal(io.calls.runClean.length, 2)
 })
 
-test('a triage repair with a failed no-summary re-proof escalates without a second planner repair', () => {
+test('a triage repair with a failed no-summary re-proof escalates without a second lead repair', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'gate is defective' } },
     },
@@ -2518,7 +2518,7 @@ test('a triage repair with a failed no-summary re-proof escalates without a seco
   assert.equal(res.details.escalation.where, 'gate')
   assert.match(res.details.escalation.why, /gate-fixed/)
   assert.match(res.details.escalation.why, /printed no GATE-SUMMARY/)
-  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 1)
   assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 1)
   assert.equal(io.calls.runClean.length, 1)
   assert.equal(io.calls.commits.length, 0)
@@ -2528,7 +2528,7 @@ test('a failed proof repaired to a red built-tree gate bounces the builder, then
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'builder:2': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2553,11 +2553,11 @@ test('a failed proof repaired to a red built-tree gate bounces the builder, then
   assert.equal(io.calls.commits.length, 1)
 })
 
-test('a failed proof whose planner repair omits gate_cmd escalates without a commit', () => {
+test('a failed proof whose lead repair omits gate_cmd escalates without a commit', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', summary: 'no gate returned', details: {} },
+      'lead:1': { status: 'done', role: 'lead', summary: 'no gate returned', details: {} },
       'builder:1': buildEnv(),
     },
     runs: {
@@ -2571,7 +2571,7 @@ test('a failed proof whose planner repair omits gate_cmd escalates without a com
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'gate')
   assert.match(res.details.escalation.why, /could not be repaired/)
-  assert.equal(io.calls.assign.filter((a) => a.role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'lead').length, 1)
   assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 1)
   assert.equal(io.calls.commits.length, 0)
 })
@@ -2657,7 +2657,7 @@ test('a byte-identical repair starts generation two and records its own proof', 
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'wrong target' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -2680,7 +2680,7 @@ test('a baseline defect replacement stays generation one and keeps its audit tra
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2823,7 +2823,7 @@ test('a malformed mutation declaration escalates at plan before assigning a buil
 test('an unapplied mutation is not accepted as proof', () => {
   const mutation = { ...CHECK_MUTATION, check: 'ghost', find: 'missing text' }
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
-    envelopes: CHECK_ENVELOPES([mutation], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } } }),
+    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
     cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
     runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
   const res = driveTask(CTX, io)
@@ -2846,7 +2846,7 @@ test('an interrupted read records unproven per-check evidence without losing the
 
 test('a failed restore escalates rather than committing the driver mutation', () => {
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, throwOn: 'restore', cleanRuns: CHECK_CLEAN,
-    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } } }), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } } }), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'gate')
@@ -2879,7 +2879,7 @@ test('an apply failure before landing is unproven and leaves no checkout write',
   assert.equal(io.calls.emits.filter((event) => event.kind === 'check-discrimination')[0].verdict, 'unproven')
 })
 
-test('a surviving mutation enters the existing planner gate repair path', () => {
+test('a surviving mutation enters the existing lead gate repair path', () => {
   const fixedRuns = {
     ...CHECK_RUNS(),
     'gate-cmd:3': { ok: true, output: `still green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
@@ -2888,12 +2888,12 @@ test('a surviving mutation enters the existing planner gate repair path', () => 
   }
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
     cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
-    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } } }),
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
     runs: fixedRuns, changed: ['a.mjs', 'a.test.mjs'] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.repairs, 1)
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
 })
 
 test('a known survivor outranks a later interrupted mutation pass', () => {
@@ -2906,7 +2906,7 @@ test('a known survivor outranks a later interrupted mutation pass', () => {
     files: { [CHECK_FILE]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT }, writeThrough: true,
     cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
     envelopes: {
-      'planner:1': plan, 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'planner:1': plan, 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2926,7 +2926,7 @@ test('a known survivor outranks a later interrupted mutation pass', () => {
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.generation, 2)
-  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
   const first = io.calls.emits.find((event) => event.kind === 'check-discrimination')
   assert.equal(first.generation, 1)
   assert.equal(first.verdict, 'failed')
@@ -2940,7 +2940,7 @@ test('a mutated gate that errors or omits its summary survives instead of claimi
       cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
       envelopes: {
         'planner:1': CHECK_PLAN([CHECK_MUTATION]),
-        'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+        'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
         'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
       },
       runs: {
@@ -2965,7 +2965,7 @@ test('the missing-file unapplied branch records its distinct reason and writes n
     files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
     cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
     envelopes: {
-      'planner:1': plan, 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'planner:1': plan, 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -2989,7 +2989,7 @@ test('the two pre-build replacement briefs carry fixed identifiers, but an undec
       cleanRuns: { 'gate-fixed': { ok: false, output: RED(3) } },
       envelopes: {
         'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: gate, ...(declared ? { mutations } : {}) } }),
-        'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+        'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
         'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
       },
       runs: {
@@ -3026,7 +3026,7 @@ test('a whole-proof repair brief stays byte-stable when no mutations are declare
     cleanRuns: { 'gate-cmd': { ok: true, output: 'green pristine' }, 'gate-fixed': { ok: false, output: RED(3) } },
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -3046,7 +3046,7 @@ test('a whole-proof repair brief stays byte-stable when no mutations are declare
 test('a longer sibling failure is not the intended check failure', () => {
   const output = `PASS cache\nFAIL cache warm: reason\nFAIL cache:v2: reason\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":2,"errored":0}`
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
-    envelopes: CHECK_ENVELOPES([{ ...CHECK_MUTATION, check: 'cache' }], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } } }),
+    envelopes: CHECK_ENVELOPES([{ ...CHECK_MUTATION, check: 'cache' }], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } } }),
     runs: { ...CHECK_RUNS(output), 'gate-cmd:3': { ok: false, output } }, changed: ['a.mjs', 'a.test.mjs'], emit: true })
   const res = driveTask(CTX, io)
   const event = io.calls.emits.find((entry) => entry.kind === 'check-discrimination')
@@ -3083,7 +3083,7 @@ test('a per-check pass is only owed after the generation has a whole-gate proof'
 test('the per-check repair brief names the surviving check and keeps identifiers stable', () => {
   const output = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
-    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } } }),
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } } }),
     runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: output }, 'gate-cmd:3': { ok: true, output }, 'gate-cmd:4': { ok: true, output }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
@@ -3122,11 +3122,11 @@ test('baselineGateDefect: names the three ways a non-zero exit is not proof of r
   assert.match(baselineGateDefect(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`), /contradicts the non-zero exit/)
 })
 
-test('#153: a baseline whose checks THREW bounces the planner and does NOT spend the gate repair', () => {
+test('#153: a baseline whose checks THREW bounces the lead and does NOT spend the gate repair', () => {
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-broken' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -3153,7 +3153,7 @@ test('#153: a baseline with no summary line at all is treated as a defective gat
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-silent' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: {
@@ -3172,7 +3172,7 @@ test('#153: a repaired gate that STILL does not run escalates rather than buildi
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-broken' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-still-broken' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-still-broken' } },
     },
     runs: { 'gate-broken': { ok: false, output: THREW }, 'gate-still-broken': { ok: false, output: THREW } },
   })
@@ -3186,7 +3186,7 @@ test('#153: a repaired gate that comes back GREEN at baseline escalates as vacuo
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-broken' } }),
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-vacuous' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-vacuous' } },
     },
     runs: { 'gate-broken': { ok: false, output: THREW }, 'gate-vacuous': { ok: true, output: '' } },
   })
@@ -3427,7 +3427,7 @@ test('a gate repair records the replaced command in the gate audit trail', () =>
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'wrong target' } },
-      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
       'reviewer:2': reviewEnv('pass'),
     },
     runs: {
@@ -3944,15 +3944,15 @@ test('round 1 does not require a carve verdict', () => {
   assert.ok(result.details.stages.includes('build:r1'))
 })
 
-test('a gate-repair planner dispatch is not mistaken for a plan revision carve check', () => {
-  const repaired = planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-fixed' } })
+test('a gate-repair lead dispatch is not mistaken for a plan revision carve check', () => {
+  const repaired = planEnv({ role: 'lead', details: { ...planEnv().details, gate_cmd: 'gate-fixed' } })
   delete repaired.details.carve_verdict
   const io = fakeIo({
     envelopes: {
       'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'wrong gate' } },
-      'planner:2': repaired, 'reviewer:2': reviewEnv('pass'),
+      'lead:1': repaired, 'reviewer:2': reviewEnv('pass'),
     },
     runs: {
       'gate-bad:1': { ok: false, output: RED(3) }, 'gate-bad:2': { ok: false, output: 'fail one' },
@@ -4199,9 +4199,9 @@ test('the converge seam exposes only issue creation and draft PR creation', () =
 })
 
 test('panelSeats chooses the first available partner and distinct adjudicator', () => {
-  assert.deepEqual(PANEL_PARTNERS, ['tech-lead', 'planner'])
+  assert.deepEqual(PANEL_PARTNERS, ['tech-lead'])
   assert.deepEqual(PANEL_ADJUDICATORS, ['lead', 'tech-lead'])
-  assert.deepEqual(panelSeats(['reviewer', 'planner', 'lead']), { partner: 'planner', adjudicator: 'lead' })
+  assert.equal(panelSeats(['reviewer', 'planner', 'lead']), null)
   assert.deepEqual(panelSeats(['reviewer', 'tech-lead', 'lead', 'planner']), { partner: 'tech-lead', adjudicator: 'lead' })
   assert.deepEqual(panelSeats(['reviewer', 'tech-lead']), null)
   assert.deepEqual(panelSeats(['reviewer', 'lead']), null)
@@ -4235,20 +4235,20 @@ test('continuation panel assigns reviewer, partner, and adjudicator with blind b
   const findingsB = [{ id: 'B1', severity: 'must-fix', location: 'a.mjs:12-18', summary: 'only B' }]
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', findingsA),
-      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'changes-needed', findings: findingsB } },
+      'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: findingsB } },
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true } },
       'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass', []),
-      'planner:3': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'tech-lead:3': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:2': { status: 'done', role: 'lead', details: { adjudications: [], closes_class: true } },
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
-  const result = driveTask({ ...CTX, continuation: true }, io)
+  const result = driveTask({ ...CTX_TL, continuation: true }, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(io.calls.assign.slice(0, 5).map(({ role }) => role), ['planner', 'builder', 'reviewer', 'planner', 'lead'])
+  assert.deepEqual(io.calls.assign.slice(0, 6).map(({ role }) => role), ['planner', 'tech-lead', 'builder', 'reviewer', 'tech-lead', 'lead'])
   const panelRow = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
   assert.equal(panelRow.findings[0].reviewer, 'both')
   assert.equal(io.calls.writes[`${TD}/panel-a-brief-1.md`].includes('only B'), false)
@@ -4258,30 +4258,30 @@ test('continuation panel assigns reviewer, partner, and adjudicator with blind b
 test('panel degradation falls back to reviewer A without escalating', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
-      // planner:1 is the plan; planner:2 (the panel partner) is deliberately absent.
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []),
+      // tech-lead:1 is the plan check; tech-lead:2 (the panel partner) is deliberately absent.
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
-  const result = driveTask({ ...CTX, continuation: true }, io)
+  const result = driveTask({ ...CTX_TL, continuation: true }, io)
   assert.equal(result.status, 'done')
-  assert.ok(io.calls.logs.some((line) => line.panel_degraded === 'planner'))
+  assert.ok(io.calls.logs.some((line) => line.panel_degraded === 'tech-lead'))
   assert.equal(io.calls.logs.some((line) => line.review_outcome?.panel), false)
 })
 
 test('panel dismissals become panel dissents and are removed from the fused verdict', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A only' }]),
-      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [{ id: 'A1', disposition: 'dismiss', reason: 'not a defect' }], closes_class: true } },
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
-  const result = driveTask({ ...CTX, continuation: true }, io)
+  const result = driveTask({ ...CTX_TL, continuation: true }, io)
   assert.equal(result.status, 'done')
   const dissent = result.details.dissents.find((entry) => entry.kind === 'panel-divergence')
   assert.deepEqual(dissent, {
@@ -4295,18 +4295,18 @@ test('panel dismissals become panel dissents and are removed from the fused verd
 test('an unclosed panel class adds a synthetic must-fix and preserves a review bounce without findings', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('pass', []),
-      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:1': { status: 'done', role: 'lead', details: { closes_class: false, class_invariant: 'class remains open' } },
       'builder:2': buildEnv(), 'reviewer:2': reviewEnv('pass', []),
-      'planner:3': { status: 'done', role: 'planner', details: { verdict: 'pass', findings: [] } },
+      'tech-lead:3': { status: 'done', role: 'tech-lead', details: { verdict: 'pass', findings: [] } },
       'lead:2': { status: 'done', role: 'lead', details: { closes_class: true } },
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
-  const result = driveTask({ ...CTX, continuation: true, limits: { build_rounds: 2, review_rounds: 2 } }, io)
+  const result = driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 2, review_rounds: 2 } }, io)
   assert.equal(result.status, 'done')
   const outcome = io.calls.logs.map((line) => line.review_outcome).find((row) => row?.panel)
   assert.equal(outcome.verdict, 'changes-needed')
@@ -4320,16 +4320,16 @@ test('an unclosed panel class adds a synthetic must-fix and preserves a review b
 test('a changes-needed reviewer without typed findings cannot be upgraded by an empty panel', () => {
   const io = fakeIo({
     envelopes: {
-      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed'),
-      'planner:2': { status: 'done', role: 'planner', details: { verdict: 'changes-needed', findings: [{ id: 'B1', severity: 'should-fix', location: 'a.mjs:2', summary: 'partner note' }] } },
+      'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: [{ id: 'B1', severity: 'should-fix', location: 'a.mjs:2', summary: 'partner note' }] } },
       'lead:1': { status: 'done', role: 'lead', details: { closes_class: true } },
       'lead:2': leadEnv('escalate'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
   })
-  const result = driveTask({ ...CTX, continuation: true, limits: { build_rounds: 1, review_rounds: 1 } }, io)
+  const result = driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 1, review_rounds: 1 } }, io)
   assert.equal(result.status, 'escalation')
   assert.equal(result.details.escalation.where, 'review')
   assert.equal(io.calls.commits.length, 0)
@@ -4740,4 +4740,163 @@ test('declarations remain frozen and observed behaviour stays within their close
   assert.equal(shapeDefect(VARIANTS.repair, 'repair'), null)
   assert.deepEqual(outOfScopeFiles(['a.mjs', 'b.mjs'], scopeMatcher([])), ['a.mjs', 'b.mjs'])
   assert.deepEqual(outOfScopeFiles('not-an-array', scopeMatcher(['a.mjs'])), [])
+})
+
+const B44_LEADLESS_CTX = Object.freeze({
+  ...CTX,
+  roles: ['planner', 'builder', 'reviewer'],
+  seatedRoles: ['planner', 'builder', 'reviewer'],
+})
+const b44GatePlan = (gate = 'gate-cmd') => planEnv({ details: { ...planEnv().details, gate_cmd: gate } })
+const b44AssertLeadlessGate = (result, io, diagnosis) => {
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.match(result.details.escalation.why, /no lead seated \(mechanical tier\)/)
+  assert.match(result.details.escalation.why, diagnosis)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+}
+const b44GateFixIo = () => fakeIo({
+  envelopes: {
+    'planner:1': b44GatePlan(),
+    'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  },
+  runs: {
+    'gate-cmd': { ok: true, output: 'green at baseline' },
+    'gate-fixed:1': { ok: false, output: RED() }, 'gate-fixed:2': { ok: true, output: '' },
+    'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+  },
+  changed: ['a.mjs', 'a.test.mjs'],
+})
+const b44MidRunRepairIo = () => fakeIo({
+  emit: true,
+  envelopes: {
+    'planner:1': b44GatePlan(),
+    'builder:1': buildEnv(), 'builder:2': buildEnv(),
+    'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'repeated acceptance failure' } },
+    'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    'reviewer:2': reviewEnv('pass'),
+  },
+  runs: {
+    'gate-cmd:1': { ok: false, output: RED() },
+    'gate-cmd:2': { ok: false, output: 'build gate failure A' },
+    'gate-cmd:3': { ok: false, output: 'build gate failure B' },
+    'gate-fixed': { ok: true, output: '' },
+    'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+  },
+  cleanRuns: { 'gate-fixed': { ok: false, output: RED() } },
+  changed: ['a.mjs', 'a.test.mjs'],
+})
+
+test('the planner is confined to its own stages — no post-acceptance path assigns it', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const hits = source.split('\n').filter((line) => /assignAndWait\(\s*'planner'\s*,/.test(line))
+  assert.equal(hits.length, 2)
+  assert.match(hits[0], /'triage'/)
+  assert.match(hits[1], /round === 1 \? 'plan' : 'plan-revision'/)
+  assert.equal(hits.some((line) => /gate-(repair|fix)/.test(line)), false)
+  const io = b44MidRunRepairIo()
+  driveTask(CTX, io)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
+})
+
+test('every gate site assigns the lead, and the repaired gate is still re-proven', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const sites = [...source.matchAll(/assignAndWait\(\s*([^,]+?)\s*,[^,]+,\s*'(gate-repair|gate-fix)'\s*\)/g)]
+  assert.equal(sites.length, 4)
+  assert.ok(sites.every(([, role]) => role === 'GATE_CUSTODIAN'))
+  const io = b44MidRunRepairIo()
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-repair').map(({ role, note }) => ({ role, note })), [{ role: 'lead', note: 'gate-repair' }])
+  assert.equal(result.details.gate.reverified, true)
+  assert.ok(result.details.stages.includes('gate-reverify:1'))
+})
+
+test('lead-less: a baseline-green gate escalates with its diagnosis, assigning nobody', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': b44GatePlan() },
+    runs: { 'gate-cmd': { ok: true, output: 'GREEN at baseline' } },
+  })
+  const result = driveTask(B44_LEADLESS_CTX, io)
+  b44AssertLeadlessGate(result, io, /GREEN at baseline/)
+})
+
+test('lead-less: a gate that did not RUN at baseline escalates with its diagnosis', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': b44GatePlan() },
+    runs: { 'gate-cmd': { ok: false, output: 'gate crashed before running' } },
+  })
+  const result = driveTask(B44_LEADLESS_CTX, io)
+  b44AssertLeadlessGate(result, io, /the gate did not RUN at baseline.*printed no GATE-SUMMARY/)
+})
+
+test('lead-less: a failed discrimination proof escalates with its diagnosis', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': b44GatePlan(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED() }, 'gate-cmd:2': { ok: true, output: 'green on built tree' },
+      'lane-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'gate-cmd': { ok: true, output: 'green on pristine tree' } },
+  })
+  const result = driveTask(B44_LEADLESS_CTX, io)
+  b44AssertLeadlessGate(result, io, /acceptance gate|discriminat/i)
+})
+
+test('lead-less: a reviewer-triaged gate defect escalates with the diagnosis attached', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': b44GatePlan(), 'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { defect: 'gate', reason: 'the gate checks the wrong acceptance target' } },
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED() },
+      'gate-cmd:2': { ok: false, output: 'build failure A' }, 'gate-cmd:3': { ok: false, output: 'build failure B' },
+      'lane-cmd': { ok: true, output: '' },
+    },
+  })
+  const result = driveTask(B44_LEADLESS_CTX, io)
+  b44AssertLeadlessGate(result, io, /the reviewer triaged.*the gate checks the wrong acceptance target/)
+  assert.equal(result.details.stages.some((stage) => stage.startsWith('gate-repair')), false)
+})
+
+test('a child-shaped ctx (lead only in seatedRoles) takes the gate repair on the lead', () => {
+  const childCtx = { ...CTX, roles: ['planner', 'builder', 'reviewer'], seatedRoles: ['lead', 'planner', 'builder', 'reviewer'] }
+  const io = b44GateFixIo()
+  const result = driveTask(childCtx, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.assign.filter(({ role, note }) => note === 'gate-fix').map(({ role, note }) => ({ role, note })), [{ role: 'lead', note: 'gate-fix' }])
+  assert.equal(result.details.escalation, null)
+
+  const attendedIo = b44GateFixIo()
+  const attended = driveTask(CTX, attendedIo)
+  assert.equal(attended.status, 'done')
+  assert.equal(attendedIo.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-fix').length, 1)
+})
+
+test('the panel is skipped without a tech-lead, and the planner is never a panel partner', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, continuation: true }, io)
+  assert.equal(result.status, 'done')
+  assert.ok(io.calls.logs.some((line) => line.panel_skipped === 'seats'))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+  assert.deepEqual(PANEL_PARTNERS, ['tech-lead'])
+  assert.deepEqual(PERSPECTIVE_TARGETS, ['reviewer', 'tech-lead'])
+})
+
+test('both charters state where the planner stops and the lead takes over', () => {
+  const lead = readFileSync(new URL('./roles/lead.md', import.meta.url), 'utf8')
+  const planner = readFileSync(new URL('./roles/planner.md', import.meta.url), 'utf8')
+  assert.match(lead, /## Gate custody \(post-acceptance\)/)
+  assert.match(lead, /gate_cmd/)
+  assert.match(lead, /spends no budget/)
+  assert.match(planner, /domain ends when your plan is accepted/)
+  assert.match(planner.slice(planner.indexOf('domain ends when your plan is accepted')), /lead/)
+  assert.doesNotMatch(planner, /## Perspective assignments/)
 })

@@ -644,7 +644,7 @@ test('every closed refusal reason survives to the view in exactly one group', ()
   const groups = result.refusals.groups
   const reasons = groups.flatMap((group) => group.reasons.map((row) => row.reason))
   assert.equal(new Set(reasons).size, INTAKE_REFUSAL_REASONS.length)
-  assert.deepEqual(reasons, ['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown', 'stop-switch', 'window-cap', 'rate-limit-floor', 'protected-path', 'tier-judge', 'not-first-in-order'])
+  assert.deepEqual(reasons, ['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown', 'repeat-escalation', 'stop-switch', 'window-cap', 'rate-limit-floor', 'protected-path', 'tier-judge', 'not-first-in-order'])
   assert.equal(groups[0].group, 'authoring')
   assert.equal(groups.at(-1).group, 'ordering')
   assert.equal(groups[1].reasons.find((row) => row.reason === 'stop-switch').count, 1)

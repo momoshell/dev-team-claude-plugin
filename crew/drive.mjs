@@ -674,6 +674,22 @@ export function answerBounceLines(questions, matched) {
   return lines
 }
 
+// A bounce is an APPLY instruction, not a re-derive instruction. Measured over
+// 164 archived lanes: a revision turn runs 7-15 minutes and re-derivation is
+// where fresh defects enter — b37-percheck-proof's round-3 delimiter hole
+// appeared during a revision, not in the original plan, while the check had
+// already prescribed the exact grammar. So every bounce brief that carries a
+// checker's verdict says this, in one place.
+export function applyPrescriptionLines(source) {
+  return [
+    '',
+    '## Apply, do not re-derive',
+    `Apply the corrections ${source} PRESCRIBED, verbatim — do not re-derive them.`,
+    'Where it names an exact edit, wording, grammar, or test, use those exact words.',
+    'Re-derive only what it did not prescribe, and say which parts those were.',
+  ]
+}
+
 export function reviewOutcome(role, env) {
   if (role !== 'reviewer') return null
   const v = verdictOf(env)
@@ -1632,6 +1648,20 @@ export function driveTask(ctx, io) {
   let planEnv = null
   let planBrief = ctx.briefFile
   let extraPlanRounds = 0
+  // ONE plan-revision brief for both bounce sites (ordinary and lead-granted).
+  // The brief points at the check DOCUMENT and says to apply what it prescribes
+  // verbatim: that document is the contracted source of exact corrections
+  // (crew/roles/tech-lead.md:22), and the envelope summary is only a headline.
+  const planRevisionBrief = (round, check) => {
+    const checkPath = check.details?.check_path || art('plan-check.md')
+    return [
+      `# Plan revision (round ${round})`, '',
+      `Revise plan.md per the check at ${checkPath}. Close every must-fix. Original brief: ${ctx.briefFile}`,
+      ...applyPrescriptionLines('the plan check'),
+      '',
+      ...growthLines(S.growth.at(-1)),
+    ].join('\n')
+  }
   for (let round = 1; plans && round <= limits.plan_rounds + extraPlanRounds; round += 1) {
     stage(`plan:r${round}`)
     const env = assignAndWait('planner', planBrief, round === 1 ? 'plan' : 'plan-revision')
@@ -1724,12 +1754,7 @@ export function driveTask(ctx, io) {
         extraPlanRounds += 1
         const b = art(`plan-bounce-r${round}.md`)
         failureUpgrade('plan', 'planner')
-        io.writeFile(b, [
-          `# Plan revision (round ${round})`, '',
-          `Revise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`,
-          '',
-          ...growthLines(S.growth.at(-1)),
-        ].join('\n'))
+        io.writeFile(b, planRevisionBrief(round, check))
         planBrief = b
         planEnv = null
         continue
@@ -1738,12 +1763,7 @@ export function driveTask(ctx, io) {
     }
     const b = art(`plan-bounce-r${round}.md`)
     failureUpgrade('plan', 'planner')
-    io.writeFile(b, [
-      `# Plan revision (round ${round})`, '',
-      `Revise plan.md per the check at ${check.details?.check_path || art('plan-check.md')}. Close every must-fix. Original brief: ${ctx.briefFile}`,
-      '',
-      ...growthLines(S.growth.at(-1)),
-    ].join('\n'))
+    io.writeFile(b, planRevisionBrief(round, check))
     planBrief = b
     planEnv = null
   }
@@ -2340,7 +2360,11 @@ export function driveTask(ctx, io) {
   const reviewBounceBrief = (round, reviewPath) => {
     const panelNote = panelBounceFindings
       ? `\n\nPanel fused findings (close every one):\n${panelBounceFindings}` : ''
-    return `# Review bounce (round ${round})\n\nClose every must-fix in the review at ${reviewPath}. Plan: ${planPath}${panelNote}`
+    return [
+      `# Review bounce (round ${round})`, '',
+      `Close every must-fix in the review at ${reviewPath}. Plan: ${planPath}${panelNote}`,
+      ...applyPrescriptionLines('the review'),
+    ].join('\n')
   }
   const seatList = Array.isArray(ctx.seatedRoles) ? ctx.seatedRoles : ctx.roles
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
@@ -2533,19 +2557,32 @@ export function driveTask(ctx, io) {
         accepted = acceptedViaLabel(settledAccept.record)
         break build
       }
-      stage(`review:r${reviews + 1}`)
-      const revBrief = art(`review-brief-${reviews + 1}.md`)
+      const roundNo = reviews + 1
+      stage(`review:r${roundNo}`)
+      const revBrief = art(`review-brief-${roundNo}.md`)
       panelBriefText = [
-        `# Review (round ${reviews + 1})`, '',
+        `# Review (round ${roundNo})`, '',
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
         `Re-run the validation lane yourself: ${lane}`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
-      const review = panel ? panelReview(reviews + 1, panel) : assignAndWait('reviewer', revBrief, 'review')
-      reviews += 1
+      const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
       lastReviewPath = review.details?.review_path || art('review.md')
       const v = verdictOf(review)
+      // A VERIFICATION COSTS NOTHING. Only a round that DEMANDS change spends a
+      // review_rounds slot. Measured over 164 archived lanes: of 86 re-reviews,
+      // 52 (60%) found nothing — they existed only to confirm the must-fixes
+      // were closed — and every one of them spent a slot, so the ordinary
+      // successful trajectory (r1 changes-needed -> fix -> r2 pass) spent the
+      // whole budget on success. A round that surfaces NEW must-fixes is
+      // changes-needed and is charged like any other: this changes what a
+      // verification COSTS, never whether it happens. An unreadable verdict is
+      // charged nothing either — the re-ask replaces the round in place, which
+      // is exactly what the old `reviews -= 1` refund below did.
+      const counted = v === 'revise'
+      if (counted) reviews += 1
+      io.log({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews } })
       if (v === 'pass') { stage('review:pass'); accepted = 'review pass'; break build }
       if (v === 'revise') {
         if (finalRound()) {
@@ -2595,7 +2632,8 @@ export function driveTask(ctx, io) {
         { exclude: 'reviewer' },
       )
       if (c.decision === 'escalate') return escalate('review', c.reason)
-      reviews -= 1 // the re-ask replaces the unreadable round; loop re-asks in place
+      // nothing to refund: an unreadable verdict was never charged (`counted` above),
+      // and the loop re-asks the reviewer in place under the same round number.
     }
   }
   if (!builderEnv || !accepted) {

@@ -63,9 +63,9 @@ export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // implements: an unimplemented value would pass validation and then be run as
 // something else, which is the drift the enum exists to stop.
 export const SHAPE_SOURCES = Object.freeze({
-  scope: Object.freeze(['plan', 'inherited']),
+  scope: Object.freeze(['plan', 'inherited', 'brief']),
   lane: Object.freeze(['plan', 'ctx']),
-  gate: Object.freeze(['plan', 'none']),
+  gate: Object.freeze(['plan', 'none', 'brief']),        // ⚓ A2
 })
 // The stages the reviewed executor emits unconditionally after the plan loop —
 // they ARE the reviewed loop, and no declaration may skip them (:1930-2167).
@@ -81,6 +81,24 @@ export const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane'
 export const TRIAGE_STAGE_HEAD = 'repair'
 export const TRIAGE_SOURCES = Object.freeze({ scope: 'inherited', lane: 'ctx', gate: 'none' })
 export const TRIAGE_STAGES = Object.freeze([TRIAGE_STAGE_HEAD, ...REVIEWED_CORE_STAGES])
+
+// The SECOND partial reviewed topology: the orchestrator's brief IS the plan.
+// It opens with its own key as the stage head — the factory ledger reads a run's
+// shape from that first row (scripts/factory/ledger.mjs:213-224) — and declares
+// no gate-repair/gate-reverify because its gate's author is outside the crew.
+export const DIRECTED_STAGE_HEAD = 'directed'
+export const DIRECTED_SOURCES = Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' })
+export const DIRECTED_SEATS = Object.freeze(['builder', 'reviewer'])
+export const DIRECTED_STAGES = Object.freeze([DIRECTED_STAGE_HEAD, 'build', 'scope-gate',
+  'lane', 'gate', 'gate-baseline', 'gate-proof', 'review', 'suite', 'commit', 'converge'])
+// The CLOSED table of partial reviewed topologies this executor implements. Data
+// consulted at fixed sites, never a composition engine: each key has its own
+// executor branch below, and a name absent from this table is refused before it
+// can reach a stage it does not declare.
+export const PARTIAL_REVIEWED = Object.freeze({
+  [TRIAGE_STAGE_HEAD]: Object.freeze({ sources: TRIAGE_SOURCES, stages: TRIAGE_STAGES, required_seats: 'tier' }),
+  [DIRECTED_STAGE_HEAD]: Object.freeze({ sources: DIRECTED_SOURCES, stages: DIRECTED_STAGES, required_seats: DIRECTED_SEATS }),
+})
 
 // Why a declaration's sources cannot be honoured, or null. The supplied key set
 // must EQUAL the schema's: a key nothing reads is not a harmless extra, it is a
@@ -136,28 +154,31 @@ export function shapeDefect(shape, variantName) {
     if (!ENVELOPE_FIELD_KINDS.includes(field?.kind)) return `envelope field ${JSON.stringify(field?.name)} must declare a kind in ${ENVELOPE_FIELD_KINDS.join(', ')}`
   }
   if (shape.execution === 'reviewed') {
-    if (shape.required_seats !== 'tier') return 'a reviewed shape is seated by the tier; required_seats must be "tier"'
     const missing = VARIANTS.full.stages.filter((head) => !shape.stages.includes(head))
-    if (missing.length) {
-      const undeclared = sourcesDefect(shape.sources)
-      if (undeclared) {
-        return `the reviewed executor implements exactly the full stage set; this declaration omits ${missing.join(', ')}, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run: ${undeclared}`
+    const topology = missing.length ? PARTIAL_REVIEWED[variantName] ?? null : null
+    const seats = topology ? topology.required_seats : 'tier'
+    if (Array.isArray(seats)) {
+      if (!Array.isArray(shape.required_seats) || shape.required_seats.length !== seats.length
+        || seats.some((role, i) => shape.required_seats[i] !== role)) {
+        return `the ${variantName} shape runs exactly ${seats.join(', ')}; required_seats must be that list`
       }
-      // Declared sources are necessary, never sufficient: the executor
-      // implements ONE partial topology, under ONE name, and anything else it
-      // would crash on is refused here rather than at the stage that reaches
-      // it. The name matters because a run opens with its enum KEY as the
-      // stage head — an alias would emit a head its own declaration lacks.
-      if (variantName !== TRIAGE_STAGE_HEAD) {
-        return `the only partial reviewed shape this driver implements is the bounded triage, which is the ${TRIAGE_STAGE_HEAD} variant; a declaration registered as ${JSON.stringify(variantName ?? null)} would open ${JSON.stringify(`${variantName}:r1`)}, a stage it does not declare`
-      }
-      const sourced = Object.keys(SHAPE_SOURCES).map((key) => `${key}=${shape.sources[key]}`).join(', ')
-      if (Object.keys(SHAPE_SOURCES).some((key) => shape.sources[key] !== TRIAGE_SOURCES[key])) {
-        return `the bounded triage sources ${Object.entries(TRIAGE_SOURCES).map(([k, v]) => `${k}=${v}`).join(', ')}; this declaration sources ${sourced}`
-      }
-      if (shape.stages.length !== TRIAGE_STAGES.length || TRIAGE_STAGES.some((head, i) => shape.stages[i] !== head)) {
-        return `a bounded-triage shape runs exactly ${TRIAGE_STAGES.join(', ')}; this declaration runs ${shape.stages.join(', ')}`
-      }
+    } else if (shape.required_seats !== 'tier') {
+      return 'a reviewed shape is seated by the tier; required_seats must be "tier"'
+    }
+    if (!missing.length) return null
+    const undeclared = sourcesDefect(shape.sources)
+    if (undeclared) {
+      return `the reviewed executor implements exactly the full stage set; this declaration omits ${missing.join(', ')}, and a partial reviewed shape needs declared sources for scope, lane and gate before it can be run: ${undeclared}`
+    }
+    if (!topology) {
+      return `the partial reviewed shapes this driver implements are ${Object.keys(PARTIAL_REVIEWED).join(' and ')}; a declaration registered as ${JSON.stringify(variantName ?? null)} would open ${JSON.stringify(`${variantName}:r1`)}, a stage it does not declare`
+    }
+    const sourced = Object.keys(SHAPE_SOURCES).map((key) => `${key}=${shape.sources[key]}`).join(', ')
+    if (Object.keys(SHAPE_SOURCES).some((key) => shape.sources[key] !== topology.sources[key])) {
+      return `the ${variantName} shape sources ${Object.entries(topology.sources).map(([k, v]) => `${k}=${v}`).join(', ')}; this declaration sources ${sourced}`
+    }
+    if (shape.stages.length !== topology.stages.length || topology.stages.some((head, i) => shape.stages[i] !== head)) {
+      return `a ${variantName} shape runs exactly ${topology.stages.join(', ')}; this declaration runs ${shape.stages.join(', ')}`
     }
     return null
   }
@@ -873,6 +894,38 @@ export function validateScopeEntries(entries) {
   return errors
 }
 
+// The directed shape's PLAN IS THE TASK BRIEF. The orchestrator authors exactly
+// one fenced ```directed block carrying the acceptance gate command and the write
+// surface. Closed key set, same posture as sourcesDefect (:88): a key nothing
+// reads is a claim this driver does not honour, not a harmless extra.
+export const DIRECTED_BLOCK = 'directed'
+export const DIRECTED_KEYS = Object.freeze(['gate_cmd', 'files_in_scope'])
+export function parseDirectedBrief(text) {
+  if (typeof text !== 'string' || !text.trim()) return { defect: 'the brief is empty or unreadable' }
+  const lines = text.split('\n')
+  const fence = '```' + DIRECTED_BLOCK
+  const blocks = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== fence) continue
+    const end = lines.findIndex((line, j) => j > i && line.trim() === '```')
+    if (end < 0) return { defect: `the ${fence} block is never closed` }
+    blocks.push(lines.slice(i + 1, end).join('\n'))
+    i = end
+  }
+  if (blocks.length === 0) return { defect: `the brief carries no ${fence} block declaring ${DIRECTED_KEYS.join(' and ')}` }
+  if (blocks.length > 1) return { defect: `the brief carries ${blocks.length} ${fence} blocks — exactly one of them is the plan` }
+  let parsed
+  try { parsed = JSON.parse(blocks[0]) } catch (err) { return { defect: `the ${DIRECTED_BLOCK} block is not JSON this driver can read: ${err.message}` } }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { defect: `the ${DIRECTED_BLOCK} block must be a JSON object` }
+  const extra = Object.keys(parsed).filter((key) => !DIRECTED_KEYS.includes(key))
+  if (extra.length) return { defect: `the ${DIRECTED_BLOCK} block declares ${extra.join(', ')}, which nothing reads — the keys are exactly ${DIRECTED_KEYS.join(', ')}` }
+  if (typeof parsed.gate_cmd !== 'string' || !parsed.gate_cmd.trim()) return { defect: 'gate_cmd must be the non-empty command the driver runs as the acceptance gate' }
+  if (!Array.isArray(parsed.files_in_scope) || parsed.files_in_scope.length === 0) return { defect: 'files_in_scope must be a non-empty list of repo-relative entries' }
+  const errors = validateScopeEntries(parsed.files_in_scope)
+  if (errors.length) return { defect: `files_in_scope carries entries the scope gate cannot honor: ${errors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}` }
+  return { defect: null, gate_cmd: parsed.gate_cmd.trim(), files_in_scope: [...parsed.files_in_scope] }
+}
+
 // A plan may declare, per acceptance-gate check, ONE mutation of the built tree
 // that the check must catch. 32 is a bound, not a target: each entry costs one
 // gate run on the built tree (b31b's voluntary proof declared 19).
@@ -1165,9 +1218,17 @@ export function driveTask(ctx, io) {
   // the existing 'gate' path and the same no_lead_escalation journal key; the
   // planner is not a fallback because its domain ended at acceptance.
   const seatList = Array.isArray(ctx.seatedRoles) ? ctx.seatedRoles : ctx.roles
-  const noGateCustodian = () => !seatList.includes(GATE_CUSTODIAN)
+  // A gate the CREW did not author has no custodian INSIDE it. The directed
+  // shape's gate comes from the orchestrator's brief (ADR-030: the acceptance
+  // criteria belong to whoever wrote them), so a defect LEAVES the crew instead
+  // of being repaired by a seat that never wrote it. #334 moved custody to the
+  // lead for reviewed shapes; this shape deliberately does not inherit that.
+  const gateAuthoredOutside = shape.sources?.gate === 'brief'
+  const noGateCustodian = () => gateAuthoredOutside || !seatList.includes(GATE_CUSTODIAN)   // ⚓ B3/B4/B5
   const gateCustodyEscalate = (diagnosis) => {
-    const why = `no lead seated (mechanical tier): the acceptance gate needs a repair this crew cannot make — ${diagnosis}. Gate: ${gateCmd}`
+    const why = gateAuthoredOutside
+      ? `the ${variant} gate is authored outside the crew by the orchestrator, so no seat may repair it — ${diagnosis}. Gate: ${gateCmd}`
+      : `no lead seated (mechanical tier): the acceptance gate needs a repair this crew cannot make — ${diagnosis}. Gate: ${gateCmd}`
     io.log({ at: io.now(), no_lead_escalation: why })
     return gateEscalate(why)
   }
@@ -1667,6 +1728,38 @@ export function driveTask(ctx, io) {
     } }
   }
 
+  // The directed shape's plan IS the brief: NO seat opens this run. The driver
+  // reads the orchestrator's declared gate and write surface out of the task
+  // brief and normalizes them into the same plan envelope every later scope,
+  // lane, gate, review and finish check already consumes.
+  const driveDirectedRound = () => {
+    stage(`${variant}:r1`)
+    let text = null
+    try { text = io.readFile(ctx.briefFile) } catch { text = null }
+    const directed = parseDirectedBrief(text)
+    if (directed.defect) {                                                     // ⚓ B2
+      return { stop: escalate(variant, `the ${variant} brief at ${ctx.briefFile} is not a plan this driver can build from: ${directed.defect} — its gate and write surface are the orchestrator's to author, so there is no seat to bounce this to`) }
+    }
+    const laneCmd = shape.sources.lane === 'ctx' ? ctx.lane : null
+    if (!laneCmd) {
+      return { stop: escalate(variant, `a ${variant} run takes its validation lane from the dispatch (--validation-lane) and ctx carries none`) }
+    }
+    io.log({ at: io.now(), directed: {
+      variant, seat: null, scope_source: shape.sources.scope, lane_source: shape.sources.lane,
+      gate_source: shape.sources.gate, scope: directed.files_in_scope.length,
+    } })
+    return { plan: {
+      status: 'done', role: null, summary: `directed by the task brief at ${ctx.briefFile}`,
+      artifacts: [ctx.briefFile],
+      details: {
+        plan_path: ctx.briefFile,
+        files_in_scope: directed.files_in_scope,
+        validation_lane: laneCmd,
+        gate_cmd: directed.gate_cmd,
+      },
+    } }
+  }
+
   // ---- 1. PLAN ----------------------------------------------------------------
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = null
@@ -1792,9 +1885,9 @@ export function driveTask(ctx, io) {
     planEnv = null
   }
   if (!plans) {
-    const triaged = driveTriageRound()
-    if (triaged.stop) return triaged.stop
-    planEnv = triaged.plan
+    const sourced = variant === DIRECTED_STAGE_HEAD ? driveDirectedRound() : driveTriageRound()   // ⚓ B1
+    if (sourced.stop) return sourced.stop
+    planEnv = sourced.plan
   }
   if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds + extraPlanRounds} rounds`)
 
@@ -2689,6 +2782,7 @@ export function driveTask(ctx, io) {
     summary: `Task ${ctx.task} complete: committed ${S.commit} (${committing.length} files), suite green, ${accepted}. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), journal],
     details: {
+      ...(variant === DIRECTED_STAGE_HEAD ? { variant } : {}),
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,

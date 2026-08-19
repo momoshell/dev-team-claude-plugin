@@ -21,7 +21,7 @@ import { ROOT } from './helpers.mjs'
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
 import {
-  openLedger, mkdirpBounded, replayJsonl, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
+  openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
@@ -2172,4 +2172,49 @@ test('recordEnvelope has no production caller; future wiring must update the ret
   }
   for (const root of ['crew', 'scripts', 'visualizer']) walk(join(ROOT, root))
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.envelopes and docs/ledger-queries.md when wiring recordEnvelope')
+})
+
+test('sessions declares last_heartbeat_at last and starts each row with it NULL', { skip: SKIP }, () => {
+  assert.equal(TABLES.sessions.columns.at(-1).name, 'last_heartbeat_at')
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'heartbeat-null', repo_slug: 'r', task_slug: 't' })
+  assert.equal(ledger.getSession('heartbeat-null').last_heartbeat_at, null)
+})
+
+test('session heartbeat updates only last_heartbeat_at in place and overwrites it', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'heartbeat-update'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 't' })
+  const before = ledger.getSession(adwId)
+  const firstAt = Date.parse('2026-01-02T03:04:05.006Z')
+  ledger.heartbeat({ adw_id: adwId, target: 'session', at: firstAt })
+  const afterFirst = ledger.getSession(adwId)
+  assert.equal(afterFirst.last_heartbeat_at, isoMs(firstAt))
+  for (const column of TABLES.sessions.columns.map(({ name }) => name).filter((name) => name !== 'last_heartbeat_at')) {
+    assert.deepEqual(afterFirst[column], before[column], `session column changed: ${column}`)
+  }
+  const secondAt = Date.parse('2026-01-02T03:04:06.007Z')
+  ledger.heartbeat({ adw_id: adwId, target: 'session', at: secondAt })
+  const afterSecond = ledger.getSession(adwId)
+  assert.equal(afterSecond.last_heartbeat_at, isoMs(secondAt))
+  for (const column of TABLES.sessions.columns.map(({ name }) => name).filter((name) => name !== 'last_heartbeat_at')) {
+    assert.deepEqual(afterSecond[column], before[column], `session column changed: ${column}`)
+  }
+})
+
+test('session heartbeat requires adw_id and rejects an unknown target', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  assert.throws(() => ledger.heartbeat({ target: 'session' }), LedgerUsageError)
+  assert.throws(() => ledger.heartbeat({ adw_id: 'heartbeat-invalid', target: 'unknown' }), LedgerUsageError)
+})
+
+test('a session heartbeat JSONL line replays into the sessions last_heartbeat_at column', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const adwId = 'heartbeat-replay'
+  const at = Date.parse('2026-02-03T04:05:06.007Z')
+  source.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 't' })
+  source.heartbeat({ adw_id: adwId, target: 'session', at })
+  const target = openTestLedger()
+  assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 2, skipped: 0 })
+  assert.equal(target.getSession(adwId).last_heartbeat_at, isoMs(at))
 })

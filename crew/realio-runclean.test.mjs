@@ -6,7 +6,9 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { realIo } from './realio.mjs'
+import {
+  emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, realIo, waitForEnvelope,
+} from './realio.mjs'
 
 const CONTENT = Object.freeze({
   committed: 'committed tracked content\n',
@@ -150,5 +152,108 @@ test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {
   } finally {
     if (saved === undefined) delete process.env.FORCE_COLOR
     else process.env.FORCE_COLOR = saved
+  }
+})
+
+test('waitForEnvelope calls onAlive only for observed alive probes with their timestamps', () => {
+  let clock = 0
+  let probes = 0
+  const outcomes = [true, null, false, true]
+  const aliveAt = []
+  const envelope = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 600, role: 'builder',
+    readEnvelope: () => (probes >= outcomes.length ? { status: 'done' } : null),
+    probeSeat: () => outcomes[probes++],
+    onAlive: (at) => aliveAt.push(at),
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+  })
+  assert.deepEqual(envelope, { status: 'done' })
+  assert.deepEqual(aliveAt, [LIVENESS_PROBE_MS, LIVENESS_PROBE_MS * 4])
+})
+
+test('waitForEnvelope keeps seat-died accounting unchanged and never stamps missed probes', () => {
+  let clock = 0
+  const aliveAt = []
+  let error
+  try {
+    waitForEnvelope({
+      returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+      readEnvelope: () => null,
+      probeSeat: () => false,
+      onAlive: (at) => aliveAt.push(at),
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+    })
+  } catch (err) {
+    error = err
+  }
+  assert.ok(error)
+  assert.equal(error.stage, 'seat-died')
+  assert.equal(error.role, 'builder')
+  assert.equal(error.message, `seat died: builder — its pane is gone (${LIVENESS_MISSES_TO_DIE} consecutive liveness probes) and no envelope arrived at /tmp/return.json`)
+  assert.deepEqual(aliveAt, [])
+})
+
+test('emitAdapter maps only finite heartbeat timestamps to the session writer', () => {
+  const calls = []
+  const emitter = {
+    adwId: 'adw-heartbeat',
+    emit: (fn) => fn({ heartbeat: (row) => calls.push(row) }),
+  }
+  const adapter = emitAdapter(emitter)
+  adapter({ kind: 'heartbeat', at: 12345 })
+  for (const at of [undefined, null, '12345', Infinity, NaN]) adapter({ kind: 'heartbeat', at })
+  assert.deepEqual(calls, [{ adw_id: 'adw-heartbeat', target: 'session', at: 12345 }])
+})
+
+test('realIo stamps a pane heartbeat from the probe timestamp before the envelope arrives', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    let returnPath = null
+    const envelope = { assignment_id: 'd1', role: 'builder', status: 'done' }
+    const heartbeats = []
+    const emitter = {
+      adwId: 'adw-pane',
+      emit: (fn) => fn({ heartbeat: (row) => heartbeats.push(row) }),
+    }
+    const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, emitter, null, {}, {
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: (path) => path === returnPath ? clock > LIVENESS_PROBE_MS : existsSync(path),
+      readFileSync: (path, ...args) => path === returnPath ? JSON.stringify(envelope) : readFileSync(path, ...args),
+    })
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    returnPath = assignment.returnPath
+    assert.deepEqual(io.wait(returnPath, 600), envelope)
+    assert.deepEqual(heartbeats, [{ adw_id: 'adw-pane', target: 'session', at: LIVENESS_PROBE_MS }])
+  })
+})
+
+test('realIo waits through an absent or refusing heartbeat emitter', () => {
+  for (const emitter of [null, {
+    adwId: 'adw-refusing',
+    emit: (fn) => fn({ heartbeat: () => { throw new Error('ledger down') } }),
+  }]) {
+    withRepo({ dirty: false }, (fixture) => {
+      let clock = 0
+      let returnPath = null
+      const envelope = { assignment_id: 'd1', role: 'builder', status: 'done' }
+      const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, emitter, null, {}, {
+        now: () => clock,
+        sleep: (ms) => { clock += ms },
+        sendLine: () => {},
+        tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+        locate: (_tree, id) => id === 'surface-builder',
+        existsSync: (path) => path === returnPath ? clock > LIVENESS_PROBE_MS : existsSync(path),
+        readFileSync: (path, ...args) => path === returnPath ? JSON.stringify(envelope) : readFileSync(path, ...args),
+      })
+      const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+      returnPath = assignment.returnPath
+      assert.doesNotThrow(() => assert.deepEqual(io.wait(returnPath, 600), envelope))
+    })
   }
 })

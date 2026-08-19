@@ -182,9 +182,19 @@ export const MODIFIER_OUTCOMES = Object.freeze(['applied', 'transport', 'exhaust
 // independent) — and re-asks the lead once, with the perspective attached
 // and the valve removed. One hop, then the judge must judge. The whole
 // exchange counts as ONE consult against the limit.
+// The planner is not a perspective target: it would advise a decision about
+// the plan it wrote. It is not a panel partner: it would be the second
+// INDEPENDENT reviewer of code built to its own plan. The consult path guards
+// that with `exclude`, but the panel has no equivalent, so the seat is removed
+// rather than guarded. Without a tech-lead there is no panel partner; the
+// existing panel-skipped path runs the single-reviewer round.
 export const SECOND_OPINION = 'second-opinion'
-export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead', 'planner'])
-export const PANEL_PARTNERS = Object.freeze(['tech-lead', 'planner'])
+export const PERSPECTIVE_TARGETS = Object.freeze(['reviewer', 'tech-lead'])
+export const PANEL_PARTNERS = Object.freeze(['tech-lead'])
+// The planner's domain ends at plan acceptance. Post-acceptance, the gate is
+// the crew's acceptance criteria (judgment work), not the planner's draft;
+// code still re-proves every repaired gate, so a bad repair cannot bless itself.
+export const GATE_CUSTODIAN = 'lead'
 export const PANEL_ADJUDICATORS = Object.freeze(['lead', 'tech-lead'])
 
 export function panelSeats(seated) {
@@ -1147,6 +1157,20 @@ export function driveTask(ctx, io) {
   const gateAttention = (why, artifacts = []) =>
     emit({ kind: 'attention', moment: 'gate', park_id: null, task: ctx.task, why, artifacts })
   const gateEscalate = (why, extra = []) => { gateAttention(why, [journal, ...extra]); return escalate('gate', why, extra) }
+  // The forked runner strips `lead` from ctx.roles for every tier while
+  // ctx.seatedRoles keeps the real seating (`crew/child.mjs:96`). ctx.roles
+  // answers whether this child may CONSULT a judge; gate custody is an
+  // ASSIGNMENT, so use the same seat list the panel asks for below. Only a
+  // genuinely lead-less mechanical crew (roster lead is null) escalates under
+  // the existing 'gate' path and the same no_lead_escalation journal key; the
+  // planner is not a fallback because its domain ended at acceptance.
+  const seatList = Array.isArray(ctx.seatedRoles) ? ctx.seatedRoles : ctx.roles
+  const noGateCustodian = () => !seatList.includes(GATE_CUSTODIAN)
+  const gateCustodyEscalate = (diagnosis) => {
+    const why = `no lead seated (mechanical tier): the acceptance gate needs a repair this crew cannot make — ${diagnosis}. Gate: ${gateCmd}`
+    io.log({ at: io.now(), no_lead_escalation: why })
+    return gateEscalate(why)
+  }
 
   // Factory-only terminal: an injected GH seam is the mode switch for this
   // slice. Without both methods every precondition returns before any extra
@@ -2035,7 +2059,7 @@ export function driveTask(ctx, io) {
       checks: checkProofs, note: checkProofNote ?? null })
   }
 
-  // Accept a planner-returned replacement gate: a NEW generation (identity is
+  // Accept a lead-returned replacement gate: a NEW generation (identity is
   // the driver's, not the command string) that must prove itself on the
   // pristine tree before it is trusted against the already-built tree.
   const acceptRepairedGate = (cmd, label) => {
@@ -2046,7 +2070,7 @@ export function driveTask(ctx, io) {
     gateReverified = gateDiscrimination === 'proven'
   }
 
-  // ADR-030 §3: a failed proof is a GATE defect. The planner repairs it once,
+  // ADR-030 §3: a failed proof is a GATE defect. The lead repairs it once,
   // against the SAME single gate_repairs budget the reviewer-triage path uses,
   // and the builder is NEVER bounced for evidence about the gate (#153 burned
   // nine stages on exactly that misroute). The repair consumes no builder
@@ -2070,13 +2094,17 @@ export function driveTask(ctx, io) {
       if (gateRepairs >= limits.gate_repairs) {
         return { escalation: gateEscalate(`the acceptance gate did not prove it discriminates and the single gate repair is spent — ${proofNote()}. Gate: ${gateCmd}`) }
       }
+      if (noGateCustodian()) return { escalation: gateCustodyEscalate(proofNote()) }
       gateRepairs += 1
       stage(`gate-repair:${gateRepairs}`)
       const b = art('gate-discrimination-bounce.md')
       io.writeFile(b, [
-        '# Gate repair: your gate does not DISCRIMINATE (one repair allowed per task)',
+        '# Gate repair: the acceptance gate does not DISCRIMINATE (one repair allowed per task)',
         '',
-        'The build is GREEN against your acceptance gate — but the driver ran the SAME',
+        'You hold gate custody: after the plan is accepted the gate is the crew\'s',
+        'acceptance criteria, not the planner\'s draft. Read the plan, then the gate.',
+        '',
+        'The build is GREEN against the acceptance gate — but the driver ran the SAME',
         "gate on the PRISTINE (pre-build) tree, with the builder's changes stashed away,",
         `and the result is not proof that the gate measures the work: ${proofNote()}.`,
         '',
@@ -2094,7 +2122,7 @@ export function driveTask(ctx, io) {
         ].join('\n')] : []),
         ...(mutations.length > 0 ? [stableIdentifierNote()] : []),
         '',
-        'Preserve your old gate under a .r1 suffix, then fix it so it checks exactly what',
+        'Preserve the old gate under a .r1 suffix, then fix it so it checks exactly what',
         'the brief asked — you may NOT weaken or delete a legitimate check, and it must',
         'print a final GATE-SUMMARY {"total":<n>,"failed":<n>,"errored":0} line.',
         'Return the (possibly identical) gate_cmd in details.',
@@ -2103,9 +2131,9 @@ export function driveTask(ctx, io) {
         `Plan: ${planPath}`,
         `Brief: ${ctx.briefFile}`,
       ].join('\n'))
-      const rep = assignAndWait('planner', b, 'gate-repair')
+      const rep = assignAndWait(GATE_CUSTODIAN, b, 'gate-repair')
       if (!(rep.status === 'done' && rep.details?.gate_cmd)) {
-        return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (planner returned ${rep.status}: ${rep.summary || 'no detail'}) — ${proofNote()}. Gate: ${gateCmd}`) }
+        return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (${GATE_CUSTODIAN} returned ${rep.status}: ${rep.summary || 'no detail'}) — ${proofNote()}. Gate: ${gateCmd}`) }
       }
       acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
       repaired = true
@@ -2117,12 +2145,13 @@ export function driveTask(ctx, io) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
     if (baseline.ok) {
+      if (noGateCustodian()) return gateCustodyEscalate('the gate ran GREEN at baseline, so it is vacuous or the work already exists')
       stage('gate-baseline:green-bounce')
       const b = art('gate-vacuous-bounce.md')
-      io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYour acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
-      const env2 = assignAndWait('planner', b, 'gate-fix')
+      io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe plan's acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
+      const env2 = assignAndWait(GATE_CUSTODIAN, b, 'gate-fix')
       if (env2.status !== 'done' || !env2.details?.gate_cmd) {
-        return gateEscalate(`baseline-green gate could not be repaired (planner returned ${env2.status}: ${env2.summary || 'no detail'})`)
+        return gateEscalate(`baseline-green gate could not be repaired (${GATE_CUSTODIAN} returned ${env2.status}: ${env2.summary || 'no detail'})`)
       }
       gateHistory.push(gateCmd)
       gateCmd = env2.details.gate_cmd
@@ -2137,12 +2166,13 @@ export function driveTask(ctx, io) {
       // gateRepairs, exactly like the vacuous-green bounce above.
       let defect = baselineGateDefect(baseline.output)
       if (defect) {
+        if (noGateCustodian()) return gateCustodyEscalate(`the gate did not RUN at baseline: ${defect}`)
         stage('gate-baseline:defect-bounce')
         const b = art('gate-defect-bounce.md')
-        io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYour gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
-        const env3 = assignAndWait('planner', b, 'gate-fix')
+        io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe plan's gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
+        const env3 = assignAndWait(GATE_CUSTODIAN, b, 'gate-fix')
         if (env3.status !== 'done' || !env3.details?.gate_cmd) {
-          return gateEscalate(`defective gate could not be repaired (planner returned ${env3.status}: ${env3.summary || 'no detail'})`)
+          return gateEscalate(`defective gate could not be repaired (${GATE_CUSTODIAN} returned ${env3.status}: ${env3.summary || 'no detail'})`)
         }
         gateHistory.push(gateCmd)
         gateCmd = env3.details.gate_cmd
@@ -2366,7 +2396,6 @@ export function driveTask(ctx, io) {
       ...applyPrescriptionLines('the review'),
     ].join('\n')
   }
-  const seatList = Array.isArray(ctx.seatedRoles) ? ctx.seatedRoles : ctx.roles
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
@@ -2440,9 +2469,9 @@ export function driveTask(ctx, io) {
     // Gate B2 (mechanical): the acceptance gate, when the plan authored one.
     // Failures feed back VERBATIM; repeated failures trigger ONE build-vs-gate
     // defect triage by the reviewer (closed enum); a gate defect lets the
-    // planner repair its own gate ONCE (old gate preserved in gateHistory),
-    // and the repaired gate re-runs immediately WITHOUT consuming a builder
-    // round. The repair contract forbids weakening any legitimate check. When
+    // lead repair the gate ONCE (old gate preserved in gateHistory), and the
+    // repaired gate re-runs immediately WITHOUT consuming a builder round.
+    // The repair contract forbids weakening any legitimate check. When
     // the io supports it, the repaired gate is re-proved red on the pristine
     // (pre-build) tree before it is trusted against the already-built tree.
     if (gateCmd) {
@@ -2455,11 +2484,12 @@ export function driveTask(ctx, io) {
         io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.`)
         const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
         if (triage.status === 'done' && triage.details?.defect === 'gate') {
+          if (noGateCustodian()) return gateCustodyEscalate(`the reviewer triaged the repeated gate failures as a GATE defect: ${triage.details?.reason || 'no reason given'}`)
           gateRepairs += 1
           stage(`gate-repair:${gateRepairs}`)
           const rBrief = art('gate-repair-bounce.md')
-          io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve your old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
-          const rep = assignAndWait('planner', rBrief, 'gate-repair')
+          io.writeFile(rBrief, `# Gate repair (one allowed per task)\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe reviewer diagnosed a GATE DEFECT: ${triage.details?.reason || ''}\n\nPreserve the old gate under a .r1 suffix, then fix the gate so it checks exactly what the brief asked — you may NOT weaken any legitimate check. Return the (possibly identical) gate_cmd in details.\n\nGate: ${gateCmd}\nPlan: ${planPath}\nBrief: ${ctx.briefFile}`)
+          const rep = assignAndWait(GATE_CUSTODIAN, rBrief, 'gate-repair')
           if (rep.status === 'done' && rep.details?.gate_cmd) {
             acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
             // The re-proof no longer trusts bare `pristine.ok`: a repaired gate

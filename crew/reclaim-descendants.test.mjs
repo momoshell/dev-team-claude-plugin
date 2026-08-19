@@ -401,6 +401,14 @@ test('both run outcomes reclaim a real escaped group through the settle path', a
       runCmd({ task: taskName, checkout, 'brief-file': brief, keep: true }, { drive: () => result })
       const deadline = Date.now() + 30000 // generous: a contended CI runner reclaims far slower than a dev box; the assertion below is unchanged
       while (!groupGone(seat.escapedPgid) && Date.now() < deadline) await delay(50)
+      if (!groupGone(seat.escapedPgid)) {
+        // TEMPORARY CI DIAGNOSTIC (remove before merge): say WHY the group is not gone.
+        const ps = spawnSync('ps', ['-eo', 'pid=,ppid=,pgid=,stat=,lstart='], { encoding: 'utf8' })
+        const mine = String(ps.stdout || '').split('\n').filter((l) => new RegExp('\\s' + seat.escapedPgid + '\\s').test(l))
+        console.error('DIAG platform=' + process.platform + ' status=' + status + ' escapedPgid=' + seat.escapedPgid + ' rootPid=' + seat.rootPid)
+        console.error('DIAG ps-rows-for-pgid=' + JSON.stringify(mine))
+        console.error('DIAG records=' + JSON.stringify(records(taskDir)))
+      }
       assert.equal(groupGone(seat.escapedPgid), true)
     }
   } finally {

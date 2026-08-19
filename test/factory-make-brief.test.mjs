@@ -13,10 +13,11 @@ import { ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   REFUSAL_REASONS, SLOT_MARKER, crossCheckCoupling, discoverTripwires, extractKeys,
-  extractSymbols, gatherFences, gatherProtectedPaths, main, profileField, proposeTier,
-  renderBrief, resolveWriteSurface, validateAsk, verifyWhere,
+  extractSymbols, gatherFences, gatherProtectedPaths, main, MUTATION_CONTRACT_BLOCK,
+  profileField, proposeTier, renderBrief, resolveWriteSurface, validateAsk, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
+import { CHECK_FAIL_PREFIX, MUTATIONS_MAX } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
@@ -535,6 +536,47 @@ test('standing blocks and unfilled slots render verbatim', () => {
   assert.ok(brief.includes('Never push'))
   assert.ok(brief.includes('ReturnEnvelope'))
   assert.ok(brief.split(SLOT_MARKER).length - 1 >= 2)
+})
+
+// The per-check mutation contract must reach a planner mechanically: two lanes lost
+// a plan round each to a format that lived only inside crew/drive.mjs (#330, #345).
+// This test is also the anti-drift pin — the constants come from the enforcement
+// point, so changing MUTATIONS_MAX or CHECK_FAIL_PREFIX reddens the prose.
+test('every compiled brief carries the per-check mutation contract', () => {
+  const root = fixture('mutation-contract')
+  const { brief } = compile(root)
+  assert.ok(brief.includes(MUTATION_CONTRACT_BLOCK))
+  const contract = section(brief, '## Per-check mutations')
+  assert.ok(contract.includes(MUTATION_CONTRACT_BLOCK))
+  for (const clause of [
+    'stable token', 'unique', `${CHECK_FAIL_PREFIX} <check>`, 'exempt', 'files_in_scope',
+    'non-empty LITERAL', 'must DIFFER', 'at most', String(MUTATIONS_MAX),
+    '/^[A-Za-z0-9][A-Za-z0-9._-]*$/', '"find"', '"replace"', '"check"',
+  ]) assert.ok(MUTATION_CONTRACT_BLOCK.includes(clause), clause)
+  // Additive: the section sits between the acceptance block and the validation lane,
+  // appears once, and removing it leaves the rest of the brief untouched.
+  const inserted = `\n## Per-check mutations\n${MUTATION_CONTRACT_BLOCK}`
+  assert.equal(brief.split(inserted).length, 2)
+  assert.ok(brief.indexOf(ACCEPTANCE_GATE_BLOCK) < brief.indexOf(inserted))
+  assert.ok(brief.indexOf(inserted) < brief.indexOf('## Validation lane'))
+  assert.equal(brief.replace(inserted, '').includes('Per-check mutations'), false)
+})
+
+test('the charter and the checklist state the contract the driver enforces', () => {
+  const charter = readFileSync(join(ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
+  const checklist = readFileSync(join(ROOT, 'crew', 'guidelines', 'seat-pre-return-checklist.md'), 'utf8')
+  for (const token of ['"check"', '"file"', '"find"', '"replace"', '"exempt"', 'files_in_scope', '#330']) {
+    assert.ok(charter.includes(token), token)
+  }
+  assert.match(charter, /\{\s*"check":\s*"[A-Za-z0-9][A-Za-z0-9._-]*"/)
+  // the worked example pairs a token label with the human sentence in a comment
+  assert.match(charter, /\/\/ MUTATION [A-Za-z0-9][A-Za-z0-9._-]*:/)
+  assert.ok(charter.includes(String(MUTATIONS_MAX)))
+  const p3 = checklist.slice(checklist.indexOf('- **P3'))
+  for (const token of ['`find`', '`replace`', '`exempt`', 'files_in_scope', 'stable token']) {
+    assert.ok(p3.includes(token), token)
+  }
+  assert.ok(p3.includes(`${CHECK_FAIL_PREFIX} <check>`))
 })
 
 test('out refusal and force overwrite follow the CLI contract', () => {

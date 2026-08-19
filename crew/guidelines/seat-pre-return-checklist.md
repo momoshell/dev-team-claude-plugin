@@ -69,3 +69,11 @@ the builder's own diff; neither needs a reviewer to notice.
   driver can apply them to the built tree. Kills: the whole-gate false positive
   — a gate that is red overall while some individual check adjudicates nothing
   (#330, `crew/drive.mjs:851-914`).
+  The entry is machine-applied, not prose: `{ "check": "<stable token>", "file":
+  "<a file inside files_in_scope>", "find": "<non-empty literal text in that file>",
+  "replace": "<a different string>" }` — or, for a check no single edit can kill,
+  exactly a `check` plus `exempt` and nothing else. Never both shapes in one entry,
+  and never a prose field, which `validateMutations` refuses. The label is a
+  `stable token` the gate prints verbatim on its `FAIL <check>` line, and `find` and
+  `replace` must differ. Every compiled brief repeats the full contract under
+  `## Per-check mutations`.

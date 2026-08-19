@@ -284,6 +284,11 @@ export const TABLES = Object.freeze({
       // headline), not the whole request object.
       { name: 'request', decl: 'TEXT' },
       { name: 'request_source', decl: 'TEXT' },
+      // #297: the run's last MEASURED liveness observation — written only from
+      // a probe that came back alive (crew/realio.mjs's wait loop), UPDATEd in
+      // place per ADR-024 (a last-known-alive column, never a trace row).
+      // Declared LAST so an upgraded db receives it via ADD COLUMN (#290).
+      { name: 'last_heartbeat_at', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -1166,6 +1171,7 @@ export function openLedger({
       // recordSessionRequest. Keep explicit nulls rather than omitting facts.
       request: null,
       request_source: null,
+      last_heartbeat_at: null,
     }, stats)
     sessionStatusByAdwId.set(args.adw_id, args.status)
     appendJsonl('startSession', args)
@@ -1959,10 +1965,10 @@ export function openLedger({
 
   function heartbeat(input = {}) {
     requireFields(input, ['adw_id', 'target'], 'heartbeat')
-    requireEnum(input.target, ['process', 'agent_session'], 'heartbeat', 'target')
+    requireEnum(input.target, ['process', 'agent_session', 'session'], 'heartbeat', 'target')
     if (input.target === 'process') {
       requireFields(input, ['pid', 'started_at'], 'heartbeat(process)')
-    } else {
+    } else if (input.target === 'agent_session') {
       requireFields(input, ['claude_session_id'], 'heartbeat(agent_session)')
     }
     const args = redact({
@@ -1978,9 +1984,15 @@ export function openLedger({
       if (args.target === 'process') {
         conn.prepare('UPDATE processes SET last_heartbeat_at = ? WHERE adw_id = ? AND pid = ? AND started_at = ?')
           .run(toBindable(args.at), toBindable(args.adw_id), toBindable(args.pid), toBindable(args.started_at))
-      } else {
+      } else if (args.target === 'agent_session') {
         conn.prepare('UPDATE agent_sessions SET last_heartbeat_at = ? WHERE adw_id = ? AND claude_session_id = ?')
           .run(toBindable(args.at), toBindable(args.adw_id), toBindable(args.claude_session_id))
+      } else {
+        // The run row is the pane seat's only identity home: a pane seat has
+        // no pid and no claude_session_id, and inventing one would fabricate
+        // the very thing this column is supposed to measure.
+        conn.prepare('UPDATE sessions SET last_heartbeat_at = ? WHERE adw_id = ?')
+          .run(toBindable(args.at), toBindable(args.adw_id))
       }
     })
     return args

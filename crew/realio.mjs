@@ -1125,6 +1125,16 @@ export function emitAdapter(emitter, crew = null) {
           raw_read_tokens: null, raw_written_tokens: null, ...total,
         }))
       }
+    } else if (event.kind === 'heartbeat') {
+      // The ONE measured-liveness write (#297): realio's wait loop calls this
+      // only after a probe came back TRUE, carrying that probe's timestamp.
+      // A heartbeat with no probe timestamp behind it is a wall clock, not a
+      // measurement — dropped, never stamped, because heartbeat() would
+      // otherwise substitute its own now() and fabricate the observation.
+      if (!Number.isFinite(event.at)) return
+      return emitter.emit((handle) => handle.heartbeat({
+        adw_id: emitter.adwId, target: 'session', at: event.at,
+      }))
     }
   }
 }
@@ -1214,7 +1224,7 @@ export function paneTeardownRows(crew, deps = {}) {
   return rows
 }
 
-export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, now, sleep }) {
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, onAlive, now, sleep }) {
   const started = now()
   const deadline = started + timeoutS * 1000
   let lastProbeAt = started
@@ -1227,7 +1237,13 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
     if (probeSeat && current - lastProbeAt >= LIVENESS_PROBE_MS) {
       lastProbeAt = current
       const alive = probeSeat()
-      if (alive === true) misses = 0
+      // A heartbeat is a MEASUREMENT: stamped only where liveness was
+      // OBSERVED. `current` is that probe's own timestamp — the same instant
+      // the miss accounting records as `lastProbeAt`. An indeterminate probe
+      // (null) and a miss (false) write NOTHING: a NULL beats a value nobody
+      // measured (#297). The callback is the caller's to guard — realIo.wait
+      // owns that try/catch because it owns the emitter.
+      if (alive === true) { misses = 0; if (onAlive) onAlive(current) }
       else if (alive === false) misses += 1
       if (misses >= LIVENESS_MISSES_TO_DIE) {
         const arrived = readEnvelope()
@@ -1384,6 +1400,12 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
               try { return JSON.parse(readFileSync(returnPath, 'utf8')) } catch { return null }
             },
             probeSeat: info ? () => paneAlive(info.surface_id, { tree, locate }) : null,
+            onAlive: (at) => {
+              // An absent or refusing emitter is an ABSENCE, never a failed
+              // write: the ledger is diagnostics, the wait is the run.
+              try { io.emit?.({ kind: 'heartbeat', at, role: info?.role || null }) }
+              catch { /* the ledger is never load-bearing for a wait */ }
+            },
             now, sleep,
           })
         if (env == null) {

@@ -4,12 +4,15 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { regrantVerdict } from './escalation-policy.mjs'
+
+import { assertSeats } from './crew.mjs'
+import { runChild } from './child.mjs'
 
 import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
@@ -24,6 +27,7 @@ import {
   MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines, applyPrescriptionLines,
   VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, EXECUTIONS, WRITE_SURFACES, ENVELOPE_FIELD_KINDS,
   UNIVERSAL_STAGE_HEADS, SHAPE_SOURCES, REVIEWED_CORE_STAGES, TRIAGE_STAGE_HEAD, TRIAGE_SOURCES, TRIAGE_STAGES,
+  DIRECTED_STAGE_HEAD, DIRECTED_SOURCES, DIRECTED_SEATS, DIRECTED_STAGES, PARTIAL_REVIEWED, parseDirectedBrief,
   stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect,
 } from './drive.mjs'
 
@@ -116,6 +120,18 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
 }
 
 const CTX_REPAIR = Object.freeze({ ...CTX, variant: 'repair', lane: 'lane-cmd', files_in_scope: ['a.mjs', 'a.test.mjs'] })
+const DIRECTED_BRIEF_PATH = `${TD}/directed-brief.md`
+const DIRECTED_BRIEF_TEXT = [
+  '# Directed task', '',
+  '```directed',
+  JSON.stringify({ gate_cmd: 'directed-gate', files_in_scope: ['a.mjs', 'a.test.mjs'] }),
+  '```', '',
+].join('\n')
+const DIRECTED_FILES = { [DIRECTED_BRIEF_PATH]: DIRECTED_BRIEF_TEXT }
+const CTX_DIRECTED = Object.freeze({
+  ...CTX, variant: 'directed', briefFile: DIRECTED_BRIEF_PATH,
+  roles: ['lead', 'builder', 'reviewer'], seatedRoles: ['lead', 'builder', 'reviewer'], lane: 'lane-cmd',
+})
 const TRIAGE_NOTE = `${TD}/triage.md`
 const TRIAGE_FILES = { [TRIAGE_NOTE]: '# Triage\n\nfix the off-by-one in a.mjs\n' }
 const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))
@@ -4508,6 +4524,256 @@ test('repair protected scope still fires the sensitivity floor', () => {
   assert.equal(result.details.escalation.where, 'sensitivity-floor')
 })
 
+test('directed declaration is pinned and honourable', () => {
+  const DIRECTED_SNAPSHOT = {
+    execution: 'reviewed', required_seats: ['builder', 'reviewer'],
+    stages: ['directed', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-proof',
+      'review', 'suite', 'commit', 'converge'],
+    writes: 'planned',
+    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
+    envelope_fields: [], assignment: null,
+    sources: { scope: 'brief', lane: 'ctx', gate: 'brief' },
+  }
+  assert.deepEqual(VARIANTS.directed, DIRECTED_SNAPSHOT)
+  assert.equal(shapeDefect(VARIANTS.directed, 'directed'), null)
+  assert.ok(shapeDefect(VARIANTS.directed, 'quality'))
+  assert.deepEqual(Object.keys(PARTIAL_REVIEWED), ['repair', 'directed'])
+})
+
+test('directed declares no plan, check, gate-repair or gate-reverify stage', () => {
+  for (const label of ['plan:r1', 'check:r1', 'gate-repair:1', 'gate-reverify:1']) {
+    assert.match(undeclaredStage(VARIANTS.directed, label), /not declared/)
+  }
+  for (const label of ['directed:r1', 'gate-baseline', 'gate:r1', 'gate-proof:1', 'converge:suite', 'done']) {
+    assert.equal(undeclaredStage(VARIANTS.directed, label), null, label)
+  }
+})
+
+test('a directed run seats no planner, opens with directed:r1, and proves its gate discriminates', () => {
+  const red = `red\n${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: DIRECTED_FILES,
+    envelopes: { 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: {
+      'directed-gate:1': { ok: false, output: red }, 'directed-gate': { ok: true, output: green },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'directed-gate': { ok: false, output: red } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_DIRECTED, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 0)
+  assert.equal(result.details.stages[0], 'directed:r1')
+  assert.equal(result.details.stages.some((label) => label.startsWith('plan') || label.startsWith('check')), false)
+  assert.ok(io.calls.run.some(({ cmd }) => cmd === 'directed-gate'))
+  assert.equal(io.calls.runClean.length, 1)
+  assert.ok(result.details.stages.some((label) => label.startsWith('gate-proof')))
+  assert.equal(result.details.gate.discrimination, 'proven')
+  assert.equal(result.details.variant, 'directed')
+  assert.equal(result.details.commit, 'abc1234')
+})
+
+test("the brief's files_in_scope is authoritative over a conflicting ctx scope", () => {
+  const red = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const io = fakeIo({
+    files: DIRECTED_FILES,
+    envelopes: { 'builder:1': buildEnv() },
+    runs: { 'directed-gate:1': { ok: false, output: red } },
+    changed: ['a.mjs', 'a.test.mjs', 'rogue.mjs'],
+  })
+  const result = driveTask({ ...CTX_DIRECTED, files_in_scope: ['a.mjs', 'a.test.mjs', 'rogue.mjs'] }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'scope')
+  assert.match(result.details.escalation.why, /rogue\.mjs/)
+  const directed = io.calls.logs.find((line) => line.directed)?.directed
+  assert.equal(directed.scope_source, 'brief')
+  assert.equal(directed.gate_source, 'brief')
+})
+
+test('a directed brief that is not a plan escalates before any seat', () => {
+  const block = (value) => ['```directed', value, '```'].join('\n')
+  const valid = JSON.stringify({ gate_cmd: 'directed-gate', files_in_scope: ['a.mjs'] })
+  const cases = [
+    '# no block',
+    `${block(valid)}\n${block(valid)}`,
+    '```directed\n' + valid,
+    block('{ not json'),
+    block('[]'),
+    block(JSON.stringify({ gate_cmd: 'directed-gate', files_in_scope: ['a.mjs'], extra: true })),
+    block(JSON.stringify({ files_in_scope: ['a.mjs'] })),
+    block(JSON.stringify({ gate_cmd: '   ', files_in_scope: ['a.mjs'] })),
+    block(JSON.stringify({ gate_cmd: 'directed-gate', files_in_scope: [] })),
+    block(JSON.stringify({ gate_cmd: 'directed-gate', files_in_scope: 'a.mjs' })),
+    block(JSON.stringify({ gate_cmd: 'directed-gate', files_in_scope: ['src/*.mjs'] })),
+  ]
+  for (const text of cases) {
+    assert.ok(parseDirectedBrief(text).defect, text)
+    const io = fakeIo({ files: { [DIRECTED_BRIEF_PATH]: text } })
+    const result = driveTask(CTX_DIRECTED, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'directed')
+    assert.equal(io.calls.assign.length, 0)
+  }
+})
+
+test('a directed run with no validation lane escalates', () => {
+  const io = fakeIo({ files: DIRECTED_FILES })
+  const result = driveTask({ ...CTX_DIRECTED, lane: undefined }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'directed')
+  assert.equal(io.calls.assign.length, 0)
+})
+
+test("a green-at-baseline directed gate escalates and assigns nobody to repair it", () => {
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const io = fakeIo({ files: DIRECTED_FILES, runs: { 'directed-gate': { ok: true, output: green } } })
+  const result = driveTask(CTX_DIRECTED, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(result.details.stages.includes('gate-baseline:green-bounce'), false)
+  assert.match(result.details.escalation.why, /authored outside the crew by the orchestrator/)
+})
+
+test('a directed gate that did not RUN at baseline escalates', () => {
+  const io = fakeIo({ files: DIRECTED_FILES, runs: { 'directed-gate': { ok: false, output: 'Error: boom\n' } } })
+  const result = driveTask(CTX_DIRECTED, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(result.details.stages.includes('gate-baseline:defect-bounce'), false)
+})
+
+test('a directed gate that fails its discrimination proof escalates', () => {
+  const red = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const io = fakeIo({
+    files: DIRECTED_FILES,
+    envelopes: { 'builder:1': buildEnv() },
+    runs: {
+      'directed-gate:1': { ok: false, output: red }, 'directed-gate': { ok: true, output: green },
+      'lane-cmd': { ok: true, output: '' },
+    },
+    cleanRuns: { 'directed-gate': { ok: true, output: green } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_DIRECTED, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'gate')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(result.details.stages.some((label) => label.startsWith('gate-repair') || label.startsWith('gate-reverify')), false)
+})
+
+test('a lead-seated full run still repairs its gate', () => {
+  const full = Object.freeze({ ...CTX, roles: ['lead', 'planner', 'builder', 'reviewer'], seatedRoles: ['lead', 'planner', 'builder', 'reviewer'] })
+  const red = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}`
+  const green = `${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}`
+  const cases = [
+    {
+      runs: { 'gate-cmd': { ok: true, output: green } },
+      envelopes: {
+        'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+        'lead:1': leadEnv('accept'),
+      },
+    },
+    {
+      runs: { 'gate-cmd': { ok: false, output: 'Error: boom\n' } },
+      envelopes: {
+        'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+        'lead:1': leadEnv('accept'),
+      },
+    },
+    {
+      runs: {
+        'gate-cmd:1': { ok: false, output: red }, 'gate-cmd': { ok: true, output: green },
+        'lane-cmd': { ok: true, output: '' },
+      },
+      cleanRuns: { 'gate-cmd': { ok: true, output: green } },
+      envelopes: {
+        'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+        'builder:1': buildEnv(), 'lead:1': leadEnv('accept'),
+      },
+      changed: ['a.mjs', 'a.test.mjs'],
+    },
+  ]
+  for (const spec of cases) {
+    const io = fakeIo(spec)
+    driveTask(full, io)
+    assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  }
+})
+
+
+test('the variant-aware attended seat guard accepts a planner-less directed crew', () => {
+  assert.deepEqual(VARIANTS.directed.required_seats, ['builder', 'reviewer'])
+  assert.doesNotThrow(() => assertSeats({ roles: ['builder', 'reviewer'], members: { builder: {}, reviewer: {} } }, 'directed'))
+  assert.throws(
+    () => assertSeats({ roles: ['builder', 'reviewer'], members: { builder: {}, reviewer: {} } }, 'full'),
+    /requires a planner seat/,
+  )
+  assert.throws(
+    () => assertSeats({ roles: ['reviewer'], members: { reviewer: {} } }, 'directed'),
+    /requires a builder seat/,
+  )
+  assert.throws(
+    () => assertSeats({ roles: ['builder'], members: { builder: {} } }, 'directed'),
+    /requires a reviewer seat/,
+  )
+  assert.throws(
+    () => assertSeats({ roles: ['lead', 'builder', 'reviewer'], members: { builder: {}, reviewer: {} } }, 'directed'),
+    /requires a lead seat/,
+  )
+})
+
+test('the daemon child preflight accepts the same planner-less directed crew', () => {
+  const makeFixture = (roles) => {
+    const dir = mkdtempSync(join(tmpdir(), 'directed-child-'))
+    const crewDir = join(dir, 'crew')
+    const taskDir = join(crewDir, 'task')
+    const returnsDir = join(crewDir, 'returns')
+    mkdirSync(taskDir, { recursive: true })
+    mkdirSync(returnsDir, { recursive: true })
+    const taskReturn = join(returnsDir, 'task.json')
+    const briefFile = join(dir, 'brief.md')
+    const members = Object.fromEntries(roles.map((role) => [role, { model: 'x', transport: 'headless-json' }]))
+    writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+      task: 'x', checkout: dir, roles, members, task_return: taskReturn,
+    }))
+    writeFileSync(join(crewDir, 'journal.jsonl'), '')
+    writeFileSync(briefFile, DIRECTED_BRIEF_TEXT)
+    return { dir, crewDir, briefFile, taskReturn }
+  }
+  const run = (fixture) => runChild({
+    crew_dir: fixture.crewDir, task: 'x', brief_file: fixture.briefFile,
+    variant: 'directed', validation_lane: 'lane-cmd',
+  }, {
+    execSync: () => '',
+    env: { DEVTEAM_LEDGER_DB: join(fixture.dir, 'ledger.db') },
+    realIo: () => ({ log() {} }),
+    driveTask: () => ({ status: 'done', summary: 'ok', artifacts: [], details: { stages: [] } }),
+  })
+
+  const complete = makeFixture(['builder', 'reviewer'])
+  try {
+    const result = run(complete)
+    assert.equal(result.status, 'done')
+    assert.equal(JSON.parse(readFileSync(complete.taskReturn, 'utf8')).status, 'done')
+  } finally {
+    rmSync(complete.dir, { recursive: true, force: true })
+  }
+
+  for (const missing of [['reviewer'], ['builder']]) {
+    const fixture = makeFixture(missing)
+    try {
+      assert.throws(() => run(fixture), /requires a (builder|reviewer) seat/)
+    } finally {
+      rmSync(fixture.dir, { recursive: true, force: true })
+    }
+  }
+})
+
 test('shape sources and the repair declaration are pinned', () => {
   assert.equal(shapeDefect(VARIANTS.repair, 'repair'), null)
   assert.equal(sourcesDefect(undefined) !== null, true)
@@ -4516,9 +4782,9 @@ test('shape sources and the repair declaration are pinned', () => {
   assert.match(sourcesDefect({ ...TRIAGE_SOURCES, gate: 'bad' }), /gate/)
   assert.match(sourcesDefect({ ...TRIAGE_SOURCES, proof: 'self' }), /proof/)
   assert.equal(sourcesDefect(VARIANTS.repair.sources), null)
-  assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited'])
+  assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited', 'brief'])
   assert.deepEqual(SHAPE_SOURCES.lane, ['plan', 'ctx'])
-  assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none'])
+  assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none', 'brief'])
   assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'suite', 'commit'])
   assert.equal(TRIAGE_STAGE_HEAD, 'repair')
   assert.deepEqual(TRIAGE_STAGES, ['repair', ...REVIEWED_CORE_STAGES])
@@ -4549,7 +4815,7 @@ test('undeclaredStage still bounds repair heads', () => {
   for (const label of ['repair:r1', 'escalate:triage', 'done']) assert.equal(undeclaredStage(VARIANTS.repair, label), null)
 })
 
-test('full and scout declarations remain byte-identical snapshots', () => {
+test('full, scout and repair declarations remain byte-identical snapshots', () => {
   const FULL_SNAPSHOT = {
     execution: 'reviewed', required_seats: 'tier',
     stages: ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
@@ -4566,8 +4832,18 @@ test('full and scout declarations remain byte-identical snapshots', () => {
     envelope_fields: [{ name: 'findings', kind: 'records', item_fields: ['summary', 'evidence'] }],
     assignment: 'Read-only recon. Answer the brief from the code and the checkout, write your notes into the task dir, and change nothing.',
   }
+  const REPAIR_SNAPSHOT = {
+    execution: 'reviewed', required_seats: 'tier',
+    stages: ['repair', 'build', 'scope-gate', 'lane', 'review', 'suite', 'commit'],
+    writes: 'planned',
+    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
+    envelope_fields: [],
+    assignment: 'Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.',
+    sources: { scope: 'inherited', lane: 'ctx', gate: 'none' },
+  }
   assert.deepEqual(VARIANTS.full, FULL_SNAPSHOT)
   assert.deepEqual(VARIANTS.scout, SCOUT_SNAPSHOT)
+  assert.deepEqual(VARIANTS.repair, REPAIR_SNAPSHOT)
 })
 
 test('omitting the variant is equivalent to explicitly selecting full', () => {
@@ -4727,7 +5003,7 @@ test('read-only scout shapes do not fire the protected-path sensitivity floor', 
 
 test('declarations remain frozen and observed behaviour stays within their closed vocabulary', () => {
   assert.equal(Object.isFrozen(VARIANTS), true)
-  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'repair'])
+  assert.deepEqual(VARIANT_NAMES, ['full', 'scout', 'repair', 'directed'])
   assert.equal(VARIANTS.full.required_seats, 'tier')
   assert.match(VARIANTS.full.accepted_by, /review.*pass/)
   assert.match(VARIANTS.full.accepted_by, /lead accept/)

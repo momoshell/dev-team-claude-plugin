@@ -40,6 +40,23 @@ export const VARIANTS = Object.freeze({
     assignment: 'Bounded triage. Read the failure the task brief carries verbatim, then write the smallest fix the builder can execute inside the scope this run inherits. This is NOT a plan round: there is no revision, no plan-check, no second attempt, and no acceptance gate.',
     sources: Object.freeze({ scope: 'inherited', lane: 'ctx', gate: 'none' }),
   }),
+  // The brief IS the plan (#251 follow-on): the ORCHESTRATOR authors the gate
+  // and the write surface in the task brief, so this shape seats no planner and
+  // runs no plan or check round. It declares no gate-repair/gate-reverify on
+  // purpose: the gate's author is outside the crew, so a defective directed gate
+  // ESCALATES rather than being repaired by a seat that never wrote it.
+  directed: Object.freeze({
+    execution: 'reviewed',
+    required_seats: Object.freeze(['builder', 'reviewer']),   // ⚓ A1
+    stages: Object.freeze(['directed', 'build', 'scope-gate',   // ⚓ A4 (the first three)
+      'lane', 'gate', 'gate-baseline', 'gate-proof', 'review',
+      'suite', 'commit', 'converge']),
+    writes: 'planned',
+    accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
+    envelope_fields: Object.freeze([]),
+    assignment: null,
+    sources: Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' }),
+  }),
 })
 export const VARIANT_NAMES = Object.freeze(Object.keys(VARIANTS))
 export const DEFAULT_VARIANT = 'full'

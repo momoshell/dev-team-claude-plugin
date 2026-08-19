@@ -38,7 +38,7 @@ import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateSc
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
-  realIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
+  realIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
 } from './realio.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
@@ -1493,11 +1493,20 @@ export function teardownCore(paths, crew, deps = {}) {
   const seats = rows.length
     ? settleFn({ teardown: () => rows, log: io?.log, emit: io?.emit })
     : null
+  const descendantTaskDir = paths.taskDir || join(paths.dir, 'task')
+  const settleRootsFn = deps.settleSeatRoots || settleSeatRoots
+  const reclaimFn = deps.reclaimDescendants || reclaimDescendants
+  let roots = null
+  let descendants = null
+  try { roots = settleRootsFn({ taskDir: descendantTaskDir, log: io?.log }) }
+  catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'seat-root-settle-failed', error: err.message }) } catch {} }
+  try { descendants = reclaimFn({ taskDir: descendantTaskDir, log: io?.log, emit: io?.emit }) }
+  catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'descendant-reclaim-failed', error: err.message }) } catch {} }
   // Full timestamp, not date-only: a second same-day run of the same slug
   // must never ENOTEMPTY onto the first run's archive.
   const archived = `${paths.dir}.archive-${new Date().toISOString().replace(/[:.]/g, '-')}`
   renameSyncFn(paths.dir, archived)
-  return { archived, seats }
+  return { archived, seats, roots, descendants }
 }
 
 export function teardownCmd(args, deps = {}) {
@@ -1528,6 +1537,8 @@ export function teardownCmd(args, deps = {}) {
   // RESULT, not a silent success. `proven !== seats` covers both non-proven
   // outcomes with one comparison; do not special-case one of them.
   if (seats && (seats.proven !== seats.seats || seats.recorded !== seats.seats)) process.exitCode = 1
+  const d = record.descendants
+  if (d && (d.incomplete > 0 || d.record_failed > 0)) process.exitCode = 1
   return record
 }
 

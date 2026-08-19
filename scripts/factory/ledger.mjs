@@ -635,6 +635,41 @@ export const TABLES = Object.freeze({
     unique: [['adw_id', 'role']],
     indexes: [{ name: 'seat_teardowns_outcome_idx', cols: ['outcome', 'created_at'] }],
   },
+  seat_reclaims: {
+    columns: [
+      { name: 'id', decl: 'INTEGER PRIMARY KEY' },
+      { name: 'adw_id', decl: 'TEXT NOT NULL' },
+      { name: 'phase_id', decl: 'INTEGER' },
+      { name: 'transport', decl: 'TEXT NOT NULL' },
+      { name: 'seat_id', decl: 'TEXT NOT NULL' },
+      { name: 'reservation_id', decl: 'TEXT NOT NULL' },
+      { name: 'sweep_id', decl: 'TEXT NOT NULL' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'owner_pid', decl: 'INTEGER' },
+      { name: 'owner_liveness', decl: 'TEXT' },
+      { name: 'root_pid', decl: 'INTEGER' },
+      { name: 'root_pgid', decl: 'INTEGER' },
+      { name: 'root_start', decl: 'TEXT' },
+      { name: 'root_liveness', decl: 'TEXT' },
+      { name: 'root_settled', decl: 'TEXT' },
+      { name: 'captures', decl: 'INTEGER' },
+      { name: 'missed_snapshots', decl: 'INTEGER' },
+      { name: 'discovery_failures', decl: 'INTEGER' },
+      { name: 'captured', decl: 'INTEGER' },
+      { name: 'signalled', decl: 'INTEGER' },
+      { name: 'reclaimed', decl: 'INTEGER' },
+      { name: 'live', decl: 'INTEGER' },
+      { name: 'identity_refused', decl: 'INTEGER' },
+      { name: 'probe_unknown', decl: 'INTEGER' },
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'reason', decl: 'TEXT' },
+      { name: 'coverage_outcome', decl: 'TEXT' },
+      { name: 'coverage_reason', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'transport', 'seat_id', 'reservation_id', 'sweep_id']],
+    indexes: [{ name: 'seat_reclaims_outcome_idx', cols: ['outcome', 'created_at'] }],
+  },
 })
 
 // The closed set of public writer method names — also the closed set of
@@ -642,7 +677,7 @@ export const TABLES = Object.freeze({
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
   'recordEnvelope', 'recordSessionRequest', 'recordGateResult', 'recordGateDiscrimination',
-  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'startProcess', 'endProcess', 'heartbeat',
+  'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
@@ -1765,6 +1800,56 @@ export function openLedger({
     return args
   }
 
+  function recordSeatReclaim(input = {}) {
+    requireFields(input, ['adw_id', 'transport', 'seat_id', 'reservation_id', 'sweep_id', 'outcome', 'coverage_outcome'], 'recordSeatReclaim')
+    requireEnum(input.outcome, SEAT_TEARDOWN_OUTCOMES, 'recordSeatReclaim', 'outcome')
+    requireEnum(input.coverage_outcome, SEAT_TEARDOWN_OUTCOMES, 'recordSeatReclaim', 'coverage_outcome')
+    if (input.coverage_outcome !== 'unproven') refuse("recordSeatReclaim: coverage_outcome must be 'unproven'")
+    const args = redact({
+      adw_id: input.adw_id,
+      phase_id: Number(input.phase_id) || 0,
+      transport: input.transport,
+      seat_id: input.seat_id,
+      reservation_id: input.reservation_id,
+      sweep_id: input.sweep_id,
+      role: input.role ?? null,
+      owner_pid: Number(input.owner_pid) || 0,
+      owner_liveness: input.owner_liveness ?? null,
+      root_pid: Number(input.root_pid) || 0,
+      root_pgid: Number(input.root_pgid) || 0,
+      root_start: input.root_start ?? null,
+      root_liveness: input.root_liveness ?? null,
+      root_settled: input.root_settled ?? null,
+      captures: Number(input.captures) || 0,
+      missed_snapshots: Number(input.missed_snapshots) || 0,
+      discovery_failures: Number(input.discovery_failures) || 0,
+      captured: Number(input.captured) || 0,
+      signalled: Number(input.signalled) || 0,
+      reclaimed: Number(input.reclaimed) || 0,
+      live: Number(input.live) || 0,
+      identity_refused: Number(input.identity_refused) || 0,
+      probe_unknown: Number(input.probe_unknown) || 0,
+      outcome: input.outcome,
+      reason: input.reason == null ? null : String(input.reason),
+      coverage_outcome: input.coverage_outcome,
+      coverage_reason: input.coverage_reason == null ? null : String(input.coverage_reason),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    for (const key of ['adw_id', 'transport', 'seat_id', 'reservation_id', 'sweep_id']) {
+      if (typeof args[key] !== 'string' || args[key].trim() === '') refuse(`recordSeatReclaim: invalid identity field '${key}'`)
+    }
+    if (args.reason != null) args.reason = args.reason.slice(0, 500)
+    if (args.coverage_reason != null) args.coverage_reason = args.coverage_reason.slice(0, 500)
+    appendJsonl('recordSeatReclaim', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('seat_reclaims').filter((c) => c !== 'id')
+      const sqlCols = cols.map(quoteSqlIdentifier)
+      conn.prepare(`INSERT OR IGNORE INTO seat_reclaims (${sqlCols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((c) => toBindable(args[c])))
+    })
+    return args
+  }
+
   function recordModifierAttempt(input = {}) {
     requireFields(input, ['role', 'modifier', 'outcome'], 'recordModifierAttempt')
     requireEnum(input.modifier, MODIFIER_KINDS, 'recordModifierAttempt', 'modifier')
@@ -2253,6 +2338,17 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function seatReclaims({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT outcome, reason, coverage_outcome, coverage_reason,
+        COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM seat_reclaims
+      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY outcome, reason, coverage_outcome, coverage_reason
+      ORDER BY outcome, reason, coverage_outcome, coverage_reason
+    `, [since, since, until, until])
+  }
+
   function eligibleTasks() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -2491,10 +2587,10 @@ export function openLedger({
   const handle = {
     get degraded() { return degraded },
     startSession, endSession, recordSessionRequest, startPhase, endPhase, recordEvent, recordEnvelope,
-    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown,
+    recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,

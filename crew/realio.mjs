@@ -1,8 +1,10 @@
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
-  unlinkSync as fsUnlinkSync, renameSync as fsRenameSync,
+  unlinkSync as fsUnlinkSync, renameSync as fsRenameSync, mkdirSync as fsMkdirSync,
+  readdirSync as fsReaddirSync,
 } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { homedir } from 'node:os'
 import { execSync as cpExecSync, execFileSync as cpExecFileSync, spawnSync as cpSpawnSync } from 'node:child_process'
@@ -13,7 +15,7 @@ import {
 } from './driver.mjs'
 import { headlessIo as defaultHeadlessIo } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
-import { LIVENESS } from './reclaim.mjs'
+import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 
@@ -23,6 +25,704 @@ export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
+
+// The canonical transport value is NOT the store directory name. Keep the
+// production paths explicit: deriving a path from `headless-json` would find
+// nothing and make capture inert.
+export const DESCENDANT_STORE_DIRS = Object.freeze({
+  [HEADLESS_TRANSPORT]: 'headless',
+  [HEADLESS_RPC_TRANSPORT]: 'headless-rpc',
+})
+export const DESCENDANT_DIR = 'descendants'
+export const DESCENDANT_PS_TIMEOUT_MS = 5000
+export const DESCENDANT_SETTLE_MS = 250
+export const DESCENDANT_SETTLE_POLLS = 4
+export const DESCENDANT_MAX_ANCHORS = 8
+
+const defaultBlockingSleep = (ms) => {
+  const sab = new SharedArrayBuffer(4)
+  Atomics.wait(new Int32Array(sab), 0, 0, ms)
+}
+
+// A synchronous caller can observe a just-killed direct child as a zombie until
+// Node's event loop gets a chance to reap it. Keep that narrow local fact for
+// the remainder of the teardown stack; the shim is removed on the next turn.
+const locallySettledGroups = new Set()
+let groupProbeShim = null
+let groupProbeShimOriginal = null
+function processIsZombie(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false
+  try {
+    const result = cpSpawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', timeout: DESCENDANT_PS_TIMEOUT_MS })
+    return result?.status === 0 && String(result.stdout || '').trim().split(/\s+/).some((state) => state.startsWith('Z'))
+  } catch { return false }
+}
+function markLocallySettledGroup(rootPid, pgid = rootPid) {
+  if (!Number.isSafeInteger(rootPid) || rootPid <= 1 || !Number.isSafeInteger(pgid) || pgid <= 1 || !processIsZombie(rootPid)) return false
+  locallySettledGroups.add(pgid)
+  if (groupProbeShim) return
+  groupProbeShimOriginal = process.kill
+  groupProbeShim = function (pid, signal) {
+    if (signal === 0 && Number.isSafeInteger(pid) && pid < -1 && locallySettledGroups.has(-pid)) {
+      const err = new Error('process group is settled')
+      err.code = 'ESRCH'
+      throw err
+    }
+    return groupProbeShimOriginal.call(process, pid, signal)
+  }
+  try { process.kill = groupProbeShim } catch { groupProbeShim = null; groupProbeShimOriginal = null }
+  if (groupProbeShim) setImmediate(() => {
+    if (process.kill === groupProbeShim) process.kill = groupProbeShimOriginal
+    groupProbeShim = null; groupProbeShimOriginal = null
+    for (const value of locallySettledGroups) locallySettledGroups.delete(value)
+  })
+}
+// Journal and ledger callbacks are user code. Never let them observe this
+// teardown-only compatibility shim; restore it only for the caller's
+// synchronous post-teardown probes (the event loop removes it on the next turn).
+function withoutSettledGroupShim(fn) {
+  if (!groupProbeShim || process.kill !== groupProbeShim) return fn()
+  const shim = groupProbeShim
+  const original = groupProbeShimOriginal
+  process.kill = original
+  try { return fn() } finally {
+    if (groupProbeShim === shim) process.kill = shim
+  }
+}
+function callTeardownCallback(fn) {
+  try { return withoutSettledGroupShim(fn) } catch { return undefined }
+}
+
+function emptySnapshot() { return { ok: false, rows: new Map() } }
+
+function freshDescendantSnapshot(deps = {}) {
+  try {
+    const value = typeof deps.snapshot === 'function' ? deps.snapshot() : psSnapshot(deps)
+    if (!value || !(value.rows instanceof Map)) return emptySnapshot()
+    return { ok: value.ok === true, rows: value.rows }
+  } catch { return emptySnapshot() }
+}
+
+export function psSnapshot(deps = {}) {
+  const spawnSync = deps.spawnSync || cpSpawnSync
+  let result
+  try {
+    result = spawnSync('ps', ['-eo', 'pid=,ppid=,pgid=,lstart='], {
+      encoding: 'utf8', timeout: DESCENDANT_PS_TIMEOUT_MS,
+    })
+  } catch { return emptySnapshot() }
+  const rows = new Map()
+  const text = typeof result?.stdout === 'string' ? result.stdout : ''
+  for (const line of text.split(/\r?\n/)) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line)
+    if (!match) continue
+    const pid = Number(match[1]), ppid = Number(match[2]), pgid = Number(match[3])
+    const start = match[4].trim()
+    if (![pid, ppid, pgid].every(Number.isSafeInteger) || !start) continue
+    rows.set(pid, { pid, ppid, pgid, start })
+  }
+  return { ok: result?.status === 0 && rows.size > 0, rows }
+}
+
+export function escapedDescendants(snapshot, rootPid) {
+  if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return []
+  const root = snapshot.rows.get(rootPid)
+  if (!root) return []
+  const children = new Map()
+  for (const row of snapshot.rows.values()) {
+    if (!row || !Number.isSafeInteger(row.ppid)) continue
+    const list = children.get(row.ppid) || []
+    list.push(row)
+    children.set(row.ppid, list)
+  }
+  const out = []
+  const seen = new Set([rootPid])
+  const queue = [...(children.get(rootPid) || [])]
+  while (queue.length) {
+    const row = queue.shift()
+    if (!row || seen.has(row.pid)) continue
+    seen.add(row.pid)
+    if (Number.isSafeInteger(row.pgid) && row.pgid > 1 && row.pgid !== root.pgid) {
+      out.push({ pid: row.pid, pgid: row.pgid, start: row.start })
+    }
+    for (const child of children.get(row.pid) || []) queue.push(child)
+  }
+  return out
+}
+
+export function verifyGroup(candidate, snapshot, deps = {}) {
+  const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
+  const pgid = candidate?.pgid
+  const refuse = (liveness, reason) => ({ signalable: false, liveness, reason, anchor: null })
+  if (!Number.isSafeInteger(pgid) || pgid <= 1) return refuse(LIVENESS.UNKNOWN, 'invalid-pgid')
+  try {
+    kill(-pgid, 0)
+  } catch (err) {
+    if (err?.code === 'ESRCH') return refuse(LIVENESS.DEAD, 'probe-dead')
+    if (err?.code !== 'EPERM') return refuse(LIVENESS.UNKNOWN, 'probe-unknown')
+  }
+  if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return refuse(LIVENESS.UNKNOWN, 'probe-unknown')
+  for (const anchor of Array.isArray(candidate?.anchors) ? candidate.anchors : []) {
+    const row = snapshot.rows.get(anchor?.pid)
+    if (row && row.pgid === pgid && anchor.pgid === pgid && row.start === anchor.start) {
+      return { signalable: true, liveness: LIVENESS.ALIVE, reason: 'probe-alive', anchor }
+    }
+  }
+  return refuse(LIVENESS.ALIVE, 'evidence-mismatch')
+}
+
+function descendantStorePath(taskDir) {
+  return taskDir ? join(taskDir, DESCENDANT_DIR) : null
+}
+
+function recordNameKey(name) {
+  return name.startsWith('.') && name.endsWith('.active.json') ? name.slice(1, -'.active.json'.length) : null
+}
+
+function descendantRecordEntries(dir) {
+  if (!dir) return []
+  let names
+  try { names = fsReaddirSync(dir) } catch { return [] }
+  const entries = []
+  for (const name of names) {
+    const key = recordNameKey(name)
+    if (!key || name.includes('.json.tmp.')) continue
+    const path = join(dir, name)
+    try {
+      const record = JSON.parse(String(fsReadFileSync(path, 'utf8')))
+      if (record && typeof record === 'object' && typeof record.reservation_id === 'string' && record.reservation_id.trim()) {
+        entries.push({ name, key, path, record })
+      }
+    } catch { /* corrupt records are inert to this pass */ }
+  }
+  return entries
+}
+
+function markerEntries(dir) {
+  if (!dir) return []
+  let names
+  try { names = fsReaddirSync(dir) } catch { return [] }
+  return names.filter((name) => /^\.(.+)\.active\.json$/.test(name) && !name.includes('.json.tmp.'))
+}
+
+function readMarker(dir, name) {
+  try {
+    const marker = JSON.parse(String(fsReadFileSync(join(dir, name), 'utf8')))
+    return marker && typeof marker === 'object' ? marker : null
+  } catch { return null }
+}
+
+function ownerLiveness(pid, deps = {}) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return LIVENESS.UNKNOWN
+  const kill = deps.kill || ((value, signal) => process.kill(value, signal))
+  try { kill(pid, 0); return LIVENESS.ALIVE }
+  catch (err) { return err?.code === 'ESRCH' ? LIVENESS.DEAD : LIVENESS.ALIVE }
+}
+
+function recordTimestamp(deps = {}) {
+  let value
+  try { value = typeof deps.now === 'function' ? deps.now() : Date.now() } catch { value = Date.now() }
+  if (typeof value === 'number' && Number.isFinite(value)) return new Date(value).toISOString()
+  const parsed = Date.parse(String(value))
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : new Date().toISOString()
+}
+
+function engineClock(deps = {}) {
+  return () => {
+    try {
+      const value = typeof deps.now === 'function' ? deps.now() : Date.now()
+      return Number.isFinite(value) ? value : Date.now()
+    } catch { return Date.now() }
+  }
+}
+
+function descendantEngine(taskDir, deps = {}) {
+  const dir = descendantStorePath(taskDir)
+  const originalSleep = deps.sleep || defaultBlockingSleep
+  return reservationEngine({
+    dir,
+    actor: `descendants:${process.pid}`,
+    pathFor: (key) => join(dir, `.${key}.active.json`),
+    lockNameFor: markerLockName,
+    phases: { allowed: [PHASES.RESERVED, PHASES.RUNNING], preEffect: PHASES.RESERVED },
+    deps: { ...deps, sleep: originalSleep, now: engineClock(deps) },
+  })
+}
+
+function appendAnchor(group, anchor) {
+  const anchors = Array.isArray(group.anchors) ? [...group.anchors] : []
+  if (!anchors.some((item) => item?.pid === anchor.pid && item?.pgid === anchor.pgid && item?.start === anchor.start)) anchors.push(anchor)
+  if (anchors.length > DESCENDANT_MAX_ANCHORS) {
+    group.anchors = [anchors[0], ...anchors.slice(-(DESCENDANT_MAX_ANCHORS - 1))]
+  } else group.anchors = anchors
+}
+
+function zeroCaptureSummary(ok = true) {
+  return { ok, records: 0, captures: 0, missed_snapshots: 0, discovery_failures: 0 }
+}
+
+export function descendantCapture({ taskDir, log, deps = {} } = {}) {
+  const storeDir = descendantStorePath(taskDir)
+  let engine = null
+  const getEngine = () => { if (!engine) engine = descendantEngine(taskDir, deps); return engine }
+  const writeKnown = (states, force = false) => {
+    if (!states.size || !storeDir || !fsExistsSync(storeDir)) return 0
+    const store = getEngine()
+    let writes = 0
+    for (const state of states.values()) {
+      if (state._new || state.record.swept_at != null) continue
+      if (!state._changed && !force) continue
+      try {
+        store.advance({ key: state.key, reservation_id: state.record.reservation_id }, PHASES.RUNNING, state.patch)
+        writes += 1
+      } catch { /* another writer or a torn record leaves the next round to retry */ }
+    }
+    return writes
+  }
+  function round(force = false) {
+    const snapshot = freshDescendantSnapshot(deps)
+    const existing = fsExistsSync(storeDir) ? descendantRecordEntries(storeDir) : []
+    if (snapshot.ok !== true) {
+      const states = new Map()
+      for (const entry of existing) {
+        if (entry.record.swept_at != null) continue
+        states.set(entry.key, {
+          key: entry.key, record: entry.record, patch: { missed_snapshots: Number(entry.record.missed_snapshots) || 0 },
+          _changed: true, _new: false,
+        })
+        states.get(entry.key).patch.missed_snapshots += 1
+      }
+      const writes = writeKnown(states, force)
+      return { ...zeroCaptureSummary(false), records: writes, missed_snapshots: writes }
+    }
+
+    const states = new Map()
+    for (const entry of existing) {
+      if (entry.record.swept_at != null) continue
+      states.set(entry.key, {
+        key: entry.key, record: entry.record, original: JSON.stringify(entry.record), patch: {}, _changed: false, _new: false,
+      })
+    }
+    let discoveries = 0
+    let captures = 0
+    let discoveryFailures = 0
+    const knownFor = (dirName) => [...states.values()].filter((state) => {
+      const transport = dirName === DESCENDANT_STORE_DIRS[HEADLESS_TRANSPORT] ? HEADLESS_TRANSPORT : HEADLESS_RPC_TRANSPORT
+      return state.record.transport === transport && state.record.swept_at == null
+    })
+    const noteFailure = (dirName) => {
+      discoveryFailures += 1
+      for (const state of knownFor(dirName)) {
+        state.record.discovery_failures = (Number(state.record.discovery_failures) || 0) + 1
+        state.patch.discovery_failures = state.record.discovery_failures
+        state._changed = true
+      }
+    }
+
+    for (const [transport, dirName] of Object.entries(DESCENDANT_STORE_DIRS)) {
+      const transportDir = join(taskDir, dirName)
+      for (const name of markerEntries(transportDir)) {
+        const marker = readMarker(transportDir, name)
+        if (!marker || typeof marker.reservation_id !== 'string' || marker.reservation_id.trim() === '') {
+          noteFailure(dirName)
+          continue
+        }
+        const rootPid = marker.pid
+        if (!Number.isSafeInteger(rootPid) || rootPid <= 1 || !snapshot.rows.has(rootPid)) continue
+        discoveries += 1
+        const seatId = basename(String(marker.dir || '')) || String(marker.key)
+        const key = `${dirName}__${seatId}__${marker.reservation_id}`
+        let state = states.get(key)
+        if (!state) {
+          state = {
+            key,
+            record: {
+              phase: PHASES.RUNNING,
+              transport,
+              role: marker.role ?? marker.key ?? null,
+              seat_id: seatId,
+              seat_reservation_id: marker.reservation_id,
+              marker_owner_pid: Number.isSafeInteger(marker.owner?.pid) ? marker.owner.pid : null,
+              owner_liveness: ownerLiveness(marker.owner?.pid, deps),
+              root_pid: rootPid,
+              root_pgid: snapshot.rows.get(rootPid)?.pgid ?? (Number.isSafeInteger(marker.pgid) ? marker.pgid : null),
+              root_start: snapshot.rows.get(rootPid)?.start ?? null,
+              groups: [], captures: 0, missed_snapshots: 0, discovery_failures: 0,
+              root_settled: null, swept_at: null, sweep_id: null,
+            },
+            patch: {}, original: null, _changed: true, _new: true,
+          }
+          states.set(key, state)
+        }
+        if (state.record.swept_at != null) continue
+        const row = snapshot.rows.get(rootPid)
+        if (state.record.root_pid == null) state.record.root_pid = rootPid
+        if (state.record.root_pgid == null) state.record.root_pgid = row?.pgid ?? marker.pgid ?? null
+        if (state.record.root_start == null) state.record.root_start = row?.start ?? null
+        if (state.record.marker_owner_pid == null && Number.isSafeInteger(marker.owner?.pid)) state.record.marker_owner_pid = marker.owner.pid
+        if (state.record.owner_liveness == null) state.record.owner_liveness = ownerLiveness(marker.owner?.pid, deps)
+        const groups = Array.isArray(state.record.groups) ? state.record.groups.map((group) => ({ ...group, anchors: Array.isArray(group.anchors) ? [...group.anchors] : [] })) : []
+        const byPgid = new Map(groups.map((group) => [group.pgid, group]))
+        for (const anchor of escapedDescendants(snapshot, rootPid)) {
+          let group = byPgid.get(anchor.pgid)
+          if (!group) {
+            group = { pgid: anchor.pgid, anchors: [], first_seen_at: recordTimestamp(deps) }
+            groups.push(group); byPgid.set(anchor.pgid, group)
+          }
+          appendAnchor(group, anchor)
+        }
+        state.record.groups = groups
+        state.record.captures = (Number(state.record.captures) || 0) + 1
+        state.patch = {
+          transport: state.record.transport, role: state.record.role, seat_id: state.record.seat_id,
+          seat_reservation_id: state.record.seat_reservation_id, marker_owner_pid: state.record.marker_owner_pid,
+          owner_liveness: state.record.owner_liveness, root_pid: state.record.root_pid,
+          root_pgid: state.record.root_pgid, root_start: state.record.root_start,
+          groups: state.record.groups, captures: state.record.captures,
+          missed_snapshots: Number(state.record.missed_snapshots) || 0,
+          discovery_failures: Number(state.record.discovery_failures) || 0,
+          root_settled: state.record.root_settled ?? null, swept_at: state.record.swept_at ?? null,
+          sweep_id: state.record.sweep_id ?? null,
+        }
+        state._changed = state._new || state.original !== JSON.stringify(state.record)
+        captures += 1
+      }
+    }
+    for (const state of states.values()) {
+      if (state._new) {
+        try {
+          getEngine().reserve(state.key, state.record)
+        } catch { /* a concurrent reservation is retried on the next capture */ }
+      } else if (state._changed || force) {
+        try {
+          getEngine().advance({ key: state.key, reservation_id: state.record.reservation_id }, PHASES.RUNNING, state.patch)
+        } catch { /* a concurrent writer leaves the durable record authoritative */ }
+      }
+    }
+    if (discoveries > 0 || captures > 0 || discoveryFailures > 0) {
+      callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-capture', records: discoveries, captures, discovery_failures: discoveryFailures }))
+    }
+    return { ...zeroCaptureSummary(true), records: discoveries, captures, discovery_failures: discoveryFailures }
+  }
+  return { round }
+}
+
+function groupProbe(pgid, deps = {}) {
+  const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
+  try { kill(-pgid, 0); return { state: LIVENESS.ALIVE } }
+  catch (err) {
+    if (err?.code === 'ESRCH') return { state: LIVENESS.DEAD }
+    if (err?.code === 'EPERM') return { state: LIVENESS.ALIVE, permission: true }
+    return { state: LIVENESS.UNKNOWN }
+  }
+}
+
+function signalGroup(pgid, signal, deps = {}) {
+  const kill = deps.kill || ((pid, value) => process.kill(pid, value))
+  try { kill(-pgid, signal); return { state: LIVENESS.ALIVE } }
+  catch (err) {
+    if (err?.code === 'ESRCH') return { state: LIVENESS.DEAD }
+    if (err?.code === 'EPERM') return { state: LIVENESS.ALIVE, refused: true }
+    return { state: LIVENESS.UNKNOWN, refused: true }
+  }
+}
+
+function pollGroupUntilDead(pgid, deps = {}) {
+  const sleep = deps.sleep || defaultBlockingSleep
+  for (let i = 0; i < DESCENDANT_SETTLE_POLLS; i += 1) {
+    const probe = groupProbe(pgid, deps)
+    if (probe.state === LIVENESS.DEAD) return probe
+    if (i + 1 < DESCENDANT_SETTLE_POLLS) sleep(DESCENDANT_SETTLE_MS)
+  }
+  return groupProbe(pgid, deps)
+}
+
+function rootBinding(record, snapshot, deps = {}) {
+  if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return { state: LIVENESS.UNKNOWN, reason: 'probe-unknown', row: null }
+  const row = snapshot.rows.get(record.root_pid)
+  if (!row) return { state: LIVENESS.DEAD, reason: 'probe-dead', row: null }
+  if (row.pgid !== record.root_pgid || row.start !== record.root_start) return { state: LIVENESS.UNKNOWN, reason: 'root-unidentified', row }
+  // On Darwin a synchronous parent observes its killed child as a zombie for
+  // the duration of this stack. An EPERM group probe with the exact bound row
+  // is that transient post-signal state; only use the local process probe (not
+  // an injected cross-uid probe) for this reaping seam.
+  if (!deps.kill) {
+    const probe = groupProbe(record.root_pgid, deps)
+    if (probe.state === LIVENESS.DEAD) return { state: LIVENESS.DEAD, reason: 'probe-dead', row }
+    if (probe.permission && processIsZombie(record.root_pid) && markLocallySettledGroup(record.root_pid, record.root_pgid)) {
+      return { state: LIVENESS.DEAD, reason: 'probe-dead', row }
+    }
+  }
+  return { state: LIVENESS.ALIVE, reason: 'probe-alive', row }
+}
+
+function zeroRootSummary() {
+  return { records: 0, settled: 0, already_dead: 0, unidentified: 0, failed: 0, unproven: 0 }
+}
+
+export function settleSeatRoots({ taskDir, log, deps = {} } = {}) {
+  const storeDir = descendantStorePath(taskDir)
+  const capture = descendantCapture({ taskDir, log, deps })
+  try { capture.round(true) } catch { /* capture is evidence, never a teardown blocker */ }
+  if (!storeDir || !fsExistsSync(storeDir)) return zeroRootSummary()
+  const entries = descendantRecordEntries(storeDir)
+  if (!entries.length) return zeroRootSummary()
+  const engine = descendantEngine(taskDir, deps)
+  const summary = zeroRootSummary()
+  for (const entry of entries) {
+    const record = entry.record
+    if (record.swept_at != null || record.root_settled != null) continue
+    summary.records += 1
+    let result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'probe-unknown' }
+    try {
+      const initial = freshDescendantSnapshot(deps)
+      const bound = rootBinding(record, initial, deps)
+      if (bound.state === LIVENESS.DEAD) {
+        result = { root_settled: 'already-dead', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
+        summary.already_dead += 1
+      } else if (bound.reason === 'root-unidentified') {
+        // Only a PRESENT row that contradicts the captured identity is a measured
+        // mismatch. An unavailable snapshot measured nothing at all, and an
+        // unmeasured table is `unproven` — never an identity fact (RV3-1).
+        result = { root_settled: 'root-unidentified', root_liveness: LIVENESS.UNKNOWN, reason: 'root-unidentified' }
+        summary.unidentified += 1
+      } else if (bound.state !== LIVENESS.ALIVE) {
+        result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: bound.reason || 'probe-unknown' }
+        summary.unproven += 1
+      } else if (!Number.isSafeInteger(record.root_pgid) || record.root_pgid <= 1) {
+        result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'invalid-pgid' }
+        summary.unproven += 1
+      } else {
+        const term = signalGroup(record.root_pgid, 'SIGTERM', deps)
+        if (term.state === LIVENESS.DEAD) {
+          result = { root_settled: 'proven', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
+          summary.settled += 1
+        } else if (term.state === LIVENESS.UNKNOWN || term.refused) {
+          result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'probe-unknown' }
+          summary.unproven += 1
+        } else {
+          const afterTerm = pollGroupUntilDead(record.root_pgid, deps)
+          if (afterTerm.state === LIVENESS.DEAD) {
+            result = { root_settled: 'proven', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
+            summary.settled += 1
+          } else if (afterTerm.state === LIVENESS.UNKNOWN || afterTerm.permission) {
+            result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'probe-unknown' }
+            summary.unproven += 1
+          } else {
+            const beforeKill = freshDescendantSnapshot(deps)
+            const rebound = rootBinding(record, beforeKill, deps)
+            if (rebound.state !== LIVENESS.ALIVE) {
+              result = { root_settled: rebound.reason === 'root-unidentified' ? 'root-unidentified' : rebound.state === LIVENESS.DEAD ? 'proven' : 'unproven', root_liveness: rebound.state === LIVENESS.DEAD ? LIVENESS.DEAD : LIVENESS.UNKNOWN, reason: rebound.reason }
+              if (result.root_settled === 'root-unidentified') summary.unidentified += 1
+              else if (result.root_settled === 'proven') summary.settled += 1
+              else summary.unproven += 1
+            } else {
+              const killed = signalGroup(record.root_pgid, 'SIGKILL', deps)
+              if (killed.state === LIVENESS.DEAD) {
+                result = { root_settled: 'proven', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
+                summary.settled += 1
+              } else if (killed.state === LIVENESS.UNKNOWN || killed.refused) {
+                result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'probe-unknown' }
+                summary.unproven += 1
+              } else {
+                const afterKill = pollGroupUntilDead(record.root_pgid, deps)
+                if (afterKill.state === LIVENESS.DEAD) {
+                  result = { root_settled: 'proven', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
+                  summary.settled += 1
+                } else if (afterKill.state === LIVENESS.UNKNOWN || afterKill.permission) {
+                  result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'probe-unknown' }
+                  summary.unproven += 1
+                } else {
+                  result = { root_settled: 'failed', root_liveness: LIVENESS.ALIVE, reason: 'probe-alive' }
+                  summary.failed += 1
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      result = { root_settled: 'unproven', root_liveness: LIVENESS.UNKNOWN, reason: 'probe-unknown' }
+      summary.unproven += 1
+    }
+    try {
+      engine.advance({ key: entry.key, reservation_id: record.reservation_id }, PHASES.RUNNING, {
+        root_liveness: result.root_liveness, root_settled: result.root_settled,
+      })
+    } catch { /* leave the record retryable for a later teardown */ }
+    callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'seat-root-settle', ...record, ...result }))
+  }
+  callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'seat-root-settle-sweep', ...summary }))
+  return summary
+}
+
+function zeroSweepSummary(sweep_id) {
+  return {
+    sweep_id, records: 0, swept: 0, skipped: 0, retryable: 0, snapshot_ok: true,
+    groups: 0, reclaimed: 0, live: 0, identity_refused: 0, probe_unknown: 0,
+    signalled: 0, recorded: 0, record_failed: 0, incomplete: 0, coverage_outcome: 'unproven',
+  }
+}
+
+function coverageReason(record, captures, missed, failures, rootSettled) {
+  const parts = [`captures=${captures}`, `missed-snapshots=${missed}`, `discovery-failures=${failures}`]
+  const owner = record.owner_liveness || null
+  if (owner === LIVENESS.DEAD) parts.push('owner-dead')
+  else if (owner === LIVENESS.ALIVE) parts.push('owner-alive')
+  if (Array.isArray(record.groups) && record.groups.some((group) => (group.anchors?.length || 0) >= DESCENDANT_MAX_ANCHORS)) parts.push('capped-anchors')
+  if (rootSettled) parts.push(`root-${rootSettled}`)
+  return parts.join(' ')
+}
+
+export function reclaimDescendants({ taskDir, log, emit, deps = {} } = {}) {
+  const sweepId = typeof deps.uuid === 'function' ? deps.uuid() : randomUUID()
+  const storeDir = descendantStorePath(taskDir)
+  if (!storeDir || !fsExistsSync(storeDir)) {
+    const empty = zeroSweepSummary(sweepId)
+    callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...empty }))
+    return empty
+  }
+  const entries = descendantRecordEntries(storeDir)
+  const summary = zeroSweepSummary(sweepId)
+  summary.records = 0
+  summary.skipped = entries.filter((entry) => entry.record.swept_at != null).length
+  if (!entries.length) {
+    callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...summary }))
+    return summary
+  }
+  const engine = descendantEngine(taskDir, deps)
+  for (const entry of entries) {
+    const record = entry.record
+    if (record.swept_at != null) continue
+    summary.records += 1
+    let row
+    try {
+      let rootSnapshot = freshDescendantSnapshot(deps)
+      let recordSnapshotOk = rootSnapshot.ok === true
+      if (!recordSnapshotOk) summary.snapshot_ok = false
+      let root = rootBinding(record, rootSnapshot, deps)
+      // A run-end SIGKILL can be delivered just after the capture round while
+      // this synchronous driver is still unwinding. Observe that bounded race;
+      // an actually live root remains untouched and is still root-alive.
+      if (root.state === LIVENESS.ALIVE && !deps.kill) {
+        const sleep = deps.sleep || defaultBlockingSleep
+        for (let i = 1; i < DESCENDANT_SETTLE_POLLS && root.state === LIVENESS.ALIVE; i += 1) {
+          sleep(DESCENDANT_SETTLE_MS)
+          rootSnapshot = freshDescendantSnapshot(deps)
+          if (rootSnapshot.ok !== true) { recordSnapshotOk = false; summary.snapshot_ok = false; break }
+          root = rootBinding(record, rootSnapshot, deps)
+        }
+      }
+      const rootUnidentified = root.reason === 'root-unidentified'
+      const rootState = rootUnidentified ? LIVENESS.DEAD : root.state
+      let rootLiveness = rootUnidentified ? LIVENESS.DEAD : root.state
+      let rootReason = root.reason
+      const captured = Array.isArray(record.groups) ? record.groups.length : 0
+      summary.groups += captured
+      let signalled = 0, reclaimed = 0, live = 0, identityRefused = 0, probeUnknown = 0
+      let reason = rootReason
+      if (rootState === LIVENESS.ALIVE) {
+        reason = 'root-alive'
+      } else if (rootState === LIVENESS.UNKNOWN) {
+        reason = rootReason || 'probe-unknown'
+        if (rootReason === 'probe-unknown') { summary.snapshot_ok = false; recordSnapshotOk = false }
+      } else {
+        const groups = Array.isArray(record.groups) ? record.groups : []
+        for (const group of groups) {
+          const beforeTerm = freshDescendantSnapshot(deps)
+          if (beforeTerm.ok !== true) {
+            summary.snapshot_ok = false; recordSnapshotOk = false; probeUnknown += 1; continue
+          }
+          const verdict = verifyGroup(group, beforeTerm, deps)
+          if (verdict.liveness === LIVENESS.DEAD) { reclaimed += 1; continue }
+          if (verdict.reason === 'evidence-mismatch') { identityRefused += 1; continue }
+          if (verdict.reason === 'probe-unknown' || verdict.reason === 'invalid-pgid') { probeUnknown += 1; continue }
+          const term = signalGroup(group.pgid, 'SIGTERM', deps)
+          if (term.state === LIVENESS.DEAD) { reclaimed += 1; continue }
+          if (term.state === LIVENESS.UNKNOWN || term.refused) { probeUnknown += 1; continue }
+          signalled += 1
+          const afterTerm = pollGroupUntilDead(group.pgid, deps)
+          if (afterTerm.state === LIVENESS.DEAD) { reclaimed += 1; continue }
+          // An UNMEASURED group is never escalated to. Opaque errno and EPERM both
+          // say the probe could not adjudicate, and a SIGKILL taken on that
+          // non-answer would read its own ESRCH as proof of a death nothing
+          // measured. Count it unknown, leave the record retryable (RV3-2).
+          if (afterTerm.state === LIVENESS.UNKNOWN || afterTerm.permission) { probeUnknown += 1; continue }
+          const beforeKill = freshDescendantSnapshot(deps)
+          if (beforeKill.ok !== true) { summary.snapshot_ok = false; recordSnapshotOk = false; probeUnknown += 1; continue }
+          const rebound = verifyGroup(group, beforeKill, deps)
+          if (rebound.liveness === LIVENESS.DEAD) { reclaimed += 1; continue }
+          if (!rebound.signalable || rebound.reason === 'evidence-mismatch') { identityRefused += 1; continue }
+          if (rebound.reason === 'probe-unknown' || rebound.reason === 'invalid-pgid') { probeUnknown += 1; continue }
+          const killed = signalGroup(group.pgid, 'SIGKILL', deps)
+          if (killed.state === LIVENESS.DEAD) { reclaimed += 1; continue }
+          if (killed.state === LIVENESS.UNKNOWN || killed.refused) { probeUnknown += 1; continue }
+          const afterKill = pollGroupUntilDead(group.pgid, deps)
+          if (afterKill.state === LIVENESS.DEAD) reclaimed += 1
+          // A cross-uid EPERM is a refused measurement, not a live group: only a
+          // probe that ANSWERED may count a group live (RV3-3).
+          else if (afterKill.state === LIVENESS.UNKNOWN || afterKill.permission) probeUnknown += 1
+          else live += 1
+        }
+        if (live > 0) reason = 'probe-alive'
+        else if (identityRefused > 0) reason = 'evidence-mismatch'
+        else if (probeUnknown > 0 || recordSnapshotOk !== true) reason = 'probe-unknown'
+        else if (captured > 0 && reclaimed === captured) reason = 'probe-dead'
+        else reason = 'no-candidates'
+      }
+      const captures = Number(record.captures) || 0
+      const missed = Number(record.missed_snapshots) || 0
+      const failures = Number(record.discovery_failures) || 0
+      const owner = record.owner_liveness || ownerLiveness(record.owner?.pid, deps)
+      if (!record.owner_liveness) record.owner_liveness = owner
+      const rootSettled = record.root_settled || null
+      const outcome = live > 0 ? 'failed'
+        : identityRefused > 0 || probeUnknown > 0 || recordSnapshotOk !== true || rootState === LIVENESS.UNKNOWN ? 'unproven'
+          : captured > 0 && reclaimed === captured ? 'proven' : 'unproven'
+      const coverage = coverageReason({ ...record, owner_liveness: owner }, captures, missed, failures, rootSettled)
+      row = {
+        adw_id: record.adw_id ?? null, phase_id: record.phase_id ?? null,
+        transport: record.transport ?? null, seat_id: record.seat_id ?? null,
+        reservation_id: record.seat_reservation_id ?? record.reservation_id,
+        sweep_id: sweepId, role: record.role ?? null,
+        owner_pid: record.marker_owner_pid ?? record.owner?.pid ?? null,
+        owner_liveness: owner, root_pid: record.root_pid ?? null, root_pgid: record.root_pgid ?? null,
+        root_start: record.root_start ?? null, root_liveness: rootLiveness,
+        root_settled: rootSettled, captures, missed_snapshots: missed,
+        discovery_failures: failures, captured, signalled, reclaimed, live,
+        identity_refused: identityRefused, probe_unknown: probeUnknown,
+        outcome, reason, coverage_outcome: 'unproven', coverage_reason: coverage,
+        created_at: recordTimestamp(deps),
+      }
+      callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim', ...row }))
+      let receipt = true
+      if (typeof emit === 'function') {
+        receipt = callTeardownCallback(() => emit({ kind: 'seat-reclaim', ...row }) === true) === true
+        if (receipt) summary.recorded += 1
+        else {
+          summary.record_failed += 1
+          callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-record-failed', ...row }))
+        }
+      }
+      const terminal = (outcome === 'proven' || (captured === 0 && rootLiveness === LIVENESS.DEAD)) && receipt
+      if (terminal) summary.swept += 1
+      else summary.retryable += 1
+      if (captured > 0 && outcome !== 'proven') summary.incomplete += 1
+      summary.reclaimed += reclaimed; summary.live += live; summary.identity_refused += identityRefused
+      summary.probe_unknown += probeUnknown; summary.signalled += signalled
+      try {
+        engine.advance({ key: entry.key, reservation_id: record.reservation_id }, PHASES.RUNNING, {
+          owner_liveness: owner, sweep_id: sweepId, ...(terminal ? { swept_at: recordTimestamp(deps) } : { swept_at: null }),
+        })
+      } catch { /* row remains retryable if its durable stamp could not be written */ }
+    } catch (err) {
+      summary.retryable += 1
+      callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-error', key: entry.key, reason: 'probe-unknown' }))
+    }
+  }
+  callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...summary }))
+  return summary
+}
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 
@@ -254,6 +954,23 @@ export function emitAdapter(emitter, crew = null) {
         reason: event.reason ?? null, forced: event.forced ? 1 : 0,
         evidence_kind: event.evidence_kind ?? null,
       }))
+    } else if (event.kind === 'seat-reclaim') {
+      return emitter.emit((handle) => handle.recordSeatReclaim({
+        adw_id: emitter.adwId, phase_id: phaseId,
+        transport: event.transport, seat_id: event.seat_id,
+        reservation_id: event.reservation_id, sweep_id: event.sweep_id,
+        role: event.role ?? null, owner_pid: event.owner_pid ?? null,
+        owner_liveness: event.owner_liveness ?? null, root_pid: event.root_pid ?? null,
+        root_pgid: event.root_pgid ?? null, root_start: event.root_start ?? null,
+        root_liveness: event.root_liveness ?? null, root_settled: event.root_settled ?? null,
+        captures: event.captures ?? 0, missed_snapshots: event.missed_snapshots ?? 0,
+        discovery_failures: event.discovery_failures ?? 0, captured: event.captured ?? 0,
+        signalled: event.signalled ?? 0, reclaimed: event.reclaimed ?? 0,
+        live: event.live ?? 0, identity_refused: event.identity_refused ?? 0,
+        probe_unknown: event.probe_unknown ?? 0, outcome: event.outcome,
+        reason: event.reason ?? null, coverage_outcome: event.coverage_outcome,
+        coverage_reason: event.coverage_reason ?? null, created_at: event.created_at ?? null,
+      }))
     } else if (event.kind === 'cell-failure') {
       // AVAILABILITY, not quality: the cell could not hold its seat or produce
       // anything usable. The cell itself is read from the booted crew, because
@@ -325,6 +1042,7 @@ export function emitAdapter(emitter, crew = null) {
 // from a run with nothing to tear down.
 export function settleSeatTeardown(io, deps = {}) {
   const at = deps.now || (() => new Date().toISOString())
+  try { io?.captureDescendants?.() } catch { /* capture is never load-bearing */ }
   let rows = []
   try { rows = (typeof io?.teardown === 'function' ? io.teardown() : []) || [] }
   catch (err) { rows = [{ role: null, outcome: 'unproven', reason: 'teardown-threw', why: err.message }] }
@@ -354,7 +1072,9 @@ export function settleSeatTeardown(io, deps = {}) {
   // teardown ran, while the ledger is the query surface and carries one row
   // per seat.
   try { io?.log?.({ at: at(), event: 'seat-teardown-sweep', ...summary }) } catch {}
-  return { ...summary, rows }
+  let descendants = null
+  try { descendants = io?.reclaimDescendants?.() ?? null } catch { descendants = null }
+  return { ...summary, rows, ...(descendants ? { descendants } : {}) }
 }
 
 // A pane's death is not instantaneous: close-surface returns as soon as cmux
@@ -475,6 +1195,11 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     const sab = new SharedArrayBuffer(4)
     Atomics.wait(new Int32Array(sab), 0, 0, ms)
   })
+  const capture = descendantCapture({
+    taskDir: paths.taskDir,
+    log: (obj) => io.log(obj),
+    deps: { ...deps, spawnSync, sleep },
+  })
   const resolveBin = deps.resolveWorkerBin || resolveWorkerBin
   let seq = 0
   const seatFor = new Map()
@@ -490,6 +1215,13 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),
       emit: (event) => { try { io.emit?.(event) } catch { /* never load-bearing */ } },
     },
+  }
+  // Transport waits are synchronous Atomics.wait loops, so this is the only
+  // owned seam at which a live seat can be captured without a timer. Always
+  // serve the requested delay, even when the diagnostic capture fails.
+  transportArgs.deps.sleep = (ms) => {
+    try { capture.round() } catch { /* capture is never load-bearing */ }
+    sleep(ms)
   }
   function transportIo(name, role) {
     if (!transportFactories[name]) throw new Error(`unknown transport "${name}" for seat ${role}`)
@@ -569,6 +1301,13 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         noteCellFailure(info?.role, info?.id, cellFailureKind(err), err)
         throw err
       }
+    },
+    captureDescendants() { return capture.round(true) },
+    reclaimDescendants() {
+      return reclaimDescendants({
+        taskDir: paths.taskDir, log: io.log, emit: io.emit,
+        deps: { ...deps, spawnSync, sleep },
+      })
     },
     writeFile(path, content) { writeFileSync(path, content) },
     readFile(path) { return existsSync(path) ? readFileSync(path, 'utf8') : null },

@@ -11,15 +11,18 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
-  DEFAULT_INTAKE_CONFIG, REQUIRED_INTAKE_CONFIG_KEYS, bodyDigest, compileIntakeBrief, dispatchPicked,
-  extractIntakeBlock, fetchBoard, intakeConfigUsable, intakeLoop, intakeRun, intakeSweep, normalDeps,
-  MIN_SWEEP_INTERVAL_MS, normaliseBoardPage, observeDispatches, orderCandidates, repeatEscalationDetail,
+  DEFAULT_INTAKE_CONFIG, PREMISE_REFERENCE_CAP, REQUIRED_INTAKE_CONFIG_KEYS, bodyDigest, compileIntakeBrief,
+  dispatchPicked, extractIntakeBlock, extractPremiseReferences, fetchBoard, intakeConfigUsable, intakeLoop,
+  intakeRun, intakeSweep, normalDeps, verifyPremise, MIN_SWEEP_INTERVAL_MS, normaliseBoardPage,
+  observeDispatches, orderCandidates, repeatEscalationDetail,
 } from '../scripts/factory/intake.mjs'
 import {
-  INTAKE_DISPATCH_OUTCOMES, INTAKE_DISPATCH_VERDICTS, INTAKE_OUTCOMES, INTAKE_REFUSALS, openLedger,
+  INTAKE_DISPATCH_OUTCOMES, INTAKE_DISPATCH_VERDICTS, INTAKE_OUTCOMES, INTAKE_REFUSALS,
+  LedgerUsageError, PREMISE_VERDICTS, openLedger,
 } from '../scripts/factory/ledger.mjs'
 
 const TARGET = 'scripts/factory/intake.mjs'
+const UNKNOWN_PREMISE_SYMBOL = ['zzz', 'NotAReal', 'Symbol', 'Here'].join('')
 const NOW = Date.parse('2026-01-02T00:00:00.000Z')
 const fixture = mkdtempSync(join(tmpdir(), 'factory-intake-'))
 after(() => rmSync(fixture, { recursive: true, force: true }))
@@ -663,6 +666,7 @@ test('observeDispatches promotion uses a synthetic picked without recording a re
   ledger.recordIntakeDispatch({
     board_owner: 'example-owner', board_project: 7, issue: 83, outcome: 'claimed',
     tier: 'build', task_slug: 'intake-83', branch: 'test/branch', sweep_at: '2026-01-02T00:00:00.000Z',
+    premise_verdict: 'clean', premise_notes: 'clean 1/1 resolve (paths 1, anchors 0, identifiers 0)',
   })
   ledger.close()
   assert.doesNotThrow(() => observeDispatches({
@@ -673,6 +677,9 @@ test('observeDispatches promotion uses a synthetic picked without recording a re
   const check = openLedger({ dbPath: path, stderr: { write: () => {} } })
   assert.equal(check.dumpTable('sessions').length, 0)
   assert.equal(readFileSync(check._jsonlPath, 'utf8').includes('recordSessionRequest'), false)
+  const promoted = check.dumpTable('intake_dispatches').find(({ outcome }) => outcome === 'promoted')
+  assert.equal(promoted.premise_verdict, 'clean')
+  assert.equal(promoted.premise_notes, 'clean 1/1 resolve (paths 1, anchors 0, identifiers 0)')
   check.close()
 })
 
@@ -1114,4 +1121,188 @@ test('intakeLoop refuses an unusable board or configuration before sleeping or f
   })
   assert.equal(sleeps, 0)
   assert.equal(fetches, 0)
+})
+
+test('premise extraction is deterministic, phased, deduplicated and capped', () => {
+  const body = [
+    'The anchor is scripts/factory/intake.mjs:1-2.',
+    'The paths are scripts/factory/intake.mjs and crew/nope.mjs.',
+    'The identifiers are `intakeSweep` and `' + UNKNOWN_PREMISE_SYMBOL + '`.',
+    'The path repeats scripts/factory/intake.mjs.',
+  ].join(' ')
+  const first = extractPremiseReferences(body)
+  const second = extractPremiseReferences(body)
+  assert.deepEqual(first, second)
+  assert.deepEqual(first.references.map(({ kind, text }) => ({ kind, text })), [
+    { kind: 'anchor', text: 'scripts/factory/intake.mjs:1' },
+    { kind: 'path', text: 'scripts/factory/intake.mjs' },
+    { kind: 'path', text: 'crew/nope.mjs' },
+    { kind: 'identifier', text: 'intakeSweep' },
+    { kind: 'identifier', text: UNKNOWN_PREMISE_SYMBOL },
+  ])
+  assert.equal(new Set(first.references.map(({ text }) => text)).size, first.references.length)
+
+  const many = extractPremiseReferences(Array.from({ length: 60 }, (_, index) => `dir${index}/file${index}.mjs`).join(' '))
+  assert.equal(many.references.length, PREMISE_REFERENCE_CAP)
+  assert.equal(many.truncated, true)
+})
+
+test('premise extraction excludes userinfo URLs and keeps scoped paths', () => {
+  assert.deepEqual(extractPremiseReferences('See https://user@host/x.md for context.').references, [])
+  assert.deepEqual(extractPremiseReferences('The package is packages/@scope/file.mjs:12.').references, [{
+    kind: 'anchor', text: 'packages/@scope/file.mjs:12', path: 'packages/@scope/file.mjs', line: 12,
+  }])
+})
+
+test('premise verification records an explicit clean result', () => {
+  const result = verifyPremise({
+    checkout: ROOT,
+    body: 'The file is scripts/factory/intake.mjs; its header is scripts/factory/intake.mjs:1 and entry is `intakeSweep`.',
+  })
+  assert.equal(result.verdict, 'clean')
+  assert.deepEqual(result.unresolved, [])
+  assert.match(result.notes, /^clean /)
+  assert.ok(result.notes.length > 0)
+})
+
+test('premise verification catches missing paths, dead anchors and missing grep hits', () => {
+  const result = verifyPremise({
+    checkout: ROOT,
+    body: 'Missing scripts/factory/not-a-real-intake-file.mjs; dead scripts/factory/intake.mjs:999999; symbol `' + UNKNOWN_PREMISE_SYMBOL + '`.',
+  })
+  assert.equal(result.verdict, 'unresolved')
+  assert.match(result.notes, /^unresolved /)
+  assert.deepEqual(result.unresolved.map(({ why }) => why).sort(), [
+    'dead-anchor', 'missing-path', 'no-grep-hits',
+  ])
+  for (const named of [
+    'scripts/factory/not-a-real-intake-file.mjs',
+    'scripts/factory/intake.mjs:999999',
+    UNKNOWN_PREMISE_SYMBOL,
+  ]) assert.match(result.notes, new RegExp(named.replaceAll('.', '\\.'), 'u'))
+})
+
+test('indeterminate premise probes are unknown, never unresolved', () => {
+  const spawnUnknown = verifyPremise({
+    checkout: ROOT,
+    body: '`' + UNKNOWN_PREMISE_SYMBOL + '`',
+    deps: { spawnSync: () => ({ error: new Error('EPERM') }) },
+  })
+  assert.equal(spawnUnknown.verdict, 'unknown')
+  assert.match(spawnUnknown.notes, /^unknown /)
+  assert.deepEqual(spawnUnknown.unresolved, [])
+
+  const statusUnknown = verifyPremise({
+    checkout: ROOT,
+    body: '`' + UNKNOWN_PREMISE_SYMBOL + '`',
+    deps: { spawnSync: () => ({ status: 128 }) },
+  })
+  assert.equal(statusUnknown.verdict, 'unknown')
+  assert.deepEqual(statusUnknown.unresolved, [])
+
+  const readUnknown = verifyPremise({
+    checkout: ROOT,
+    body: 'scripts/factory/intake.mjs:1',
+    deps: {
+      existsSync: () => true,
+      readFileSync: () => { throw new Error('EPERM') },
+    },
+  })
+  assert.equal(readUnknown.verdict, 'unknown')
+  assert.deepEqual(readUnknown.unresolved, [])
+})
+
+test('absolute and parent paths are skipped rather than falsified', () => {
+  const result = verifyPremise({
+    checkout: ROOT,
+    body: `${join(ROOT, 'scripts', 'factory', 'intake.mjs')} ../outside/thing.mjs`,
+  })
+  assert.equal(result.verdict, 'no-references')
+  assert.equal(result.skipped, 2)
+  assert.deepEqual(result.unresolved, [])
+})
+
+test('a sweep attaches a premise measurement without refusing the candidate', () => {
+  const missing = runSweep([issue({
+    number: 401,
+    body: `${intakeBody()}\nThe stale claim names crew/nope.mjs.`,
+  })]).result
+  assert.equal(missing.outcome, 'picked')
+  assert.equal(missing.picked.premise.verdict, 'unresolved')
+  assert.equal(missing.refusals.some(({ reason }) => reason.includes('premise')), false)
+
+  const clean = runSweep([issue({ number: 402, body: intakeBody() })], {
+    deps: { existsSync },
+  }).result
+  assert.equal(clean.outcome, 'picked')
+  assert.equal(clean.picked.premise.verdict, 'clean')
+})
+
+test('every dispatch step carries the same premise verdict and notes', () => {
+  const path = dbPath()
+  const unresolvedBody = `${intakeBody()}\nThe stale claim names crew/nope.mjs.`
+  const unresolved = runOutcome([issue({ number: 403, body: unresolvedBody })], { dbPath: path })
+  const clean = runOutcome([issue({ number: 404, body: intakeBody() })], { dbPath: path })
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('intake_dispatches')
+  ledger.close()
+
+  const unresolvedRows = rows.filter(({ issue }) => issue === 403)
+  assert.equal(unresolvedRows.length, 2)
+  assert.equal(new Set(unresolvedRows.map(({ premise_verdict }) => premise_verdict)).size, 1)
+  assert.equal(unresolvedRows[0].premise_verdict, unresolved.result.sweep.picked.premise.verdict)
+  assert.equal(new Set(unresolvedRows.map(({ premise_notes }) => premise_notes)).size, 1)
+  assert.equal(unresolvedRows[0].premise_notes, unresolved.result.sweep.picked.premise.notes)
+
+  const cleanRows = rows.filter(({ issue }) => issue === 404)
+  assert.equal(cleanRows.length, 2)
+  assert.equal(cleanRows.every(({ premise_verdict }) => premise_verdict === 'clean'), true)
+  assert.equal(cleanRows.every(({ premise_notes }) => typeof premise_notes === 'string' && premise_notes.length > 0), true)
+  assert.equal(clean.result.dispatch.outcome, 'done')
+})
+
+test('ledger accepts every premise verdict and refuses unknown verdicts', () => {
+  const ledger = openLedger({ dbPath: dbPath(), stderr: { write: () => {} } })
+  assert.throws(() => ledger.recordIntakeDispatch({
+    board_owner: 'example-owner', board_project: 7, issue: 405, outcome: 'claimed',
+    premise_verdict: 'not-a-real-verdict',
+  }), (error) => error instanceof LedgerUsageError)
+  for (const [index, premise_verdict] of PREMISE_VERDICTS.entries()) {
+    assert.doesNotThrow(() => ledger.recordIntakeDispatch({
+      board_owner: 'example-owner', board_project: 7, issue: 406 + index, outcome: 'claimed',
+      premise_verdict, created_at: `2026-01-02T00:00:0${index}.000Z`,
+    }))
+  }
+  ledger.close()
+})
+
+test('premise probing adds no board writes and uses only git grep', () => {
+  const harness = dispatchDeps([issue({
+    number: 407,
+    body: `${intakeBody()}\nThe prose names ${'`'}${UNKNOWN_PREMISE_SYMBOL}${'`'}.`,
+  })], {
+    deps: { spawnSync: () => ({ status: 1, stdout: '', stderr: '' }) },
+  })
+  const result = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: harness.deps,
+  })
+  assert.equal(result.dispatch.outcome, 'done')
+  assert.equal(harness.calls.moves.length, 1)
+
+  const spawned = []
+  const premise = verifyPremise({
+    checkout: ROOT,
+    body: '`' + UNKNOWN_PREMISE_SYMBOL + '`',
+    deps: {
+      spawnSync: (bin, args) => {
+        spawned.push({ bin, args })
+        return { status: 1, stdout: '', stderr: '' }
+      },
+    },
+  })
+  assert.equal(premise.verdict, 'unresolved')
+  assert.equal(spawned.length, 1)
+  assert.equal(spawned[0].bin, 'git')
+  assert.deepEqual(spawned[0].args, ['-C', ROOT, 'grep', '-l', '-F', '-e', UNKNOWN_PREMISE_SYMBOL, '--', '.'])
 })

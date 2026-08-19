@@ -91,7 +91,9 @@ export function modelString({ provider, id, localProviders }) {
 
 // claude tool name -> pi tool name. null = the tool has no pi equivalent, so
 // denying it is vacuously satisfied: pi has NO subagent tool at all, which is
-// why Task/Agent drop. That drop is honest, not a hole.
+// why Task/Agent drop. The drop stays honest only because the grant that would
+// make pi fan out is refused at boot (assertFanoutCoherent, crew/crew.mjs); the
+// dropped denial itself enforces nothing.
 const PI_TOOL_NAMES = Object.freeze({
   Read: 'read', Write: 'write', Edit: 'edit', Bash: 'bash',
   NotebookEdit: null, Task: null, Agent: null,
@@ -141,11 +143,17 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // crew/adapter-pi.test.mjs.
   // --exclude-tools beats --tools on both of pi's filter paths
   // (dist/core/sdk.js:137 and dist/core/agent-session.js:1945), so activation
-  // cannot widen a seat's deny boundary; denial remains the only real
-  // boundary, exactly as before.
+  // cannot widen the denial of any tool pi ACTUALLY HAS.
   // Activation is append-only over pi's built-in set: register tools can add
-  // names, but never remove or replace a built-in. --exclude-tools still beats
-  // --tools, so no grant can widen the deny boundary.
+  // names, but never remove or replace a built-in.
+  // What that ANDed denial does NOT cover, and this is the honest statement of
+  // it: a claude name with no pi equivalent translates to nothing, so for the
+  // FANOUT_TOOLS names (PI_TOOL_NAMES maps Task/Agent/NotebookEdit to null,
+  // :95-98) the deny list comes back EMPTY, --exclude-tools is omitted, and
+  // there is nothing for a grant to be ANDed with. The fan-out boundary for a
+  // pi seat is therefore NOT --exclude-tools: it is assertFanoutCoherent
+  // (crew/crew.mjs), which refuses at boot a register that grants fan-out to a
+  // seat whose defaults withhold it.
   // --no-extensions disables discovery while explicit -e paths remain usable;
   // --no-skills is the matching closed posture when no skill is granted. These
   // flags make a seat a function of this checkout rather than user-global pi

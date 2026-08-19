@@ -12,7 +12,7 @@ import {
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
-  grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
+  grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint, refuse,
   CAPABILITY_DELIVERY, effectiveCapabilities, effectiveTools, LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet,
 } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
@@ -2761,7 +2761,7 @@ test('grantsFor fails closed for missing paths and invalid definitions, and reso
 
 test('capability refusal reasons are closed and EMPTY_GRANTS is frozen', () => {
   assert.equal(Object.isFrozen(CAPABILITY_REFUSALS), true)
-  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead'])
+  assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny'])
   assert.throws(() => refuse('not-a-capability-reason', 'bad'))
   assert.throws(
     () => seatCommand({ role: 'builder', model: 'sonnet', promptFile: '/tmp/role.md', tools: 'Read', deny: 'Task,Agent', taskDir: '/tmp', bootBrief: 'boot', grants: { tools: [], extensions: ['/tmp/ext.js'], skills: [], agents: [], advisor: false } }),
@@ -2971,7 +2971,50 @@ test('withheld register grants refuse planners with the closed capability-shortf
     await assertWithheld({}, base)
     await assertWithheld({}, agentsOnly)
     await assertWithheld({ 'agent-planner': 'pi' }, agentsOnly)
-    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead'])
+    assert.deepEqual([...CAPABILITY_REFUSALS], ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported', 'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing', 'local-endpoint-dead', 'grant-contradicts-deny'])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a register granting fan-out to a seat whose defaults withhold it refuses at boot', async () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const base = capabilityRegister()
+    const bundle = { tools: [], extensions: ['crew/pi/fanout.js'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }], skills: [], advisor: false, requires: [] }
+    // The contradiction is register-vs-charter, so it refuses on EVERY adapter.
+    for (const role of ['lead', 'builder', 'tech-lead']) {
+      assert.deepEqual(deniedFanout(role), [...FANOUT_TOOLS])
+      const register = capabilityRegister({ roles: { [role]: { ...base.roles[role], ...bundle } } })
+      for (const args of [{}, { [`agent-${role}`]: 'pi' }]) {
+        await assert.rejects(
+          () => resolveAdapters([role], args, null, { register, root }),
+          (err) => {
+            assert.equal(err.reason, 'grant-contradicts-deny')
+            assert.ok(CAPABILITY_REFUSALS.includes(err.reason))
+            assert.equal(err.role, role)
+            assert.match(err.message, new RegExp(role))
+            assert.match(err.message, /Task,Agent,Workflow/)
+            assert.match(err.message, /Explore/)
+            return true
+          },
+        )
+      }
+    }
+    // The other direction: a role that legitimately fans out is untouched.
+    assert.deepEqual(deniedFanout('planner'), [])
+    assert.deepEqual(deniedFanout('reviewer'), [])
+    const planner = capabilityRegister({ roles: { planner: { ...base.roles.planner, ...bundle, requires: ['subagents'] } } })
+    const resolved = await resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register: planner, root })
+    assert.equal(resolved.planner.grants.agents.length, 1)
+    assert.deepEqual(assertFanoutCoherent('planner', resolved.planner.grants), resolved.planner.grants)
+    // An agents-free grant to a denying seat is no contradiction.
+    assert.deepEqual(assertFanoutCoherent('builder', EMPTY_GRANTS), EMPTY_GRANTS)
+    // The refusal is wired into the boot seam, not merely exported.
+    assert.match(readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8'), /assertFanoutCoherent\(role, grants\)/)
+    // translateDeny is UNCHANGED: it still drops every name it cannot map, which
+    // is why the boundary has to live at boot.
+    assert.deepEqual(translateDeny(SEAT_DEFAULTS.builder.deny), [])
+    assert.deepEqual(translateDeny(SEAT_DEFAULTS.lead.deny), ['edit'])
+    assert.deepEqual(translateDeny('Edit,NoSuchTool,Task'), ['edit'])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

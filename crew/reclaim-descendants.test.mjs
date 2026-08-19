@@ -399,7 +399,7 @@ test('both run outcomes reclaim a real escaped group through the settle path', a
         ? { status: 'done', summary: '', artifacts: [], details: { commit: null } }
         : { status: 'escalation', summary: 'needs review', artifacts: [], details: { commit: null } }
       runCmd({ task: taskName, checkout, 'brief-file': brief, keep: true }, { drive: () => result })
-      const deadline = Date.now() + 5000
+      const deadline = Date.now() + 30000 // generous: a contended CI runner reclaims far slower than a dev box; the assertion below is unchanged
       while (!groupGone(seat.escapedPgid) && Date.now() < deadline) await delay(50)
       assert.equal(groupGone(seat.escapedPgid), true)
     }
@@ -506,7 +506,10 @@ test('realIo transport sleep captures and still serves the requested delay', () 
   mkdirSync(paths.returnsDir, { recursive: true })
   marker(root, 'sleep-res')
   let received = null
-  const io = realIo({ members: { builder: { transport: 'headless-json', model: 'x' } } }, paths, root, null, null, {}, {
+  // The injected headlessIo means nothing is spawned, but realIo still resolves a
+  // worker binary first — so name one explicitly instead of falling through to the
+  // host's ~/.local/bin/claude, which does not exist on a CI runner.
+  const io = realIo({ members: { builder: { transport: 'headless-json', model: 'x' } } }, paths, root, null, null, { 'claude-bin': process.execPath }, {
     headlessIo: (args) => { received = args; return { assign: () => ({ id: 'd1', returnPath: join(root, 'returns', 'd1.json') }) } },
     sleep: () => {},
   })

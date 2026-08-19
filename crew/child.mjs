@@ -12,7 +12,8 @@ import { basename, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { driveTask as defaultDriveTask, VARIANTS, validateScopeEntries } from './drive.mjs'
+import { driveTask as defaultDriveTask, LIMITS, VARIANTS, validateScopeEntries } from './drive.mjs'
+import { limitsRecord, resolvePlanRounds } from './limits.mjs'
 import { realIo as defaultRealIo, settleSeatTeardown } from './realio.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
@@ -114,6 +115,11 @@ export function runChild(argv, injected = {}) {
     // escalation envelope (`child-preflight`), not a stack trace out of fork.
     const filesInScope = declaredScope(spec.files_in_scope, spec.variant)
     if (filesInScope) ctx.files_in_scope = filesInScope
+    // The same validation the attended entrypoint runs, from the same leaf: an
+    // invalid budget refuses here as a child-preflight escalation rather than
+    // silently defaulting. Absent leaves ctx without a `limits` key at all.
+    const planRounds = resolvePlanRounds(spec.plan_rounds)
+    if (planRounds !== null) ctx.limits = { plan_rounds: planRounds }
     if (strictPreflight) {
       for (const role of ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
       if (roles.includes('lead') && !crew.members?.lead) throw new Error(`v3 run requires a lead seat (booted roles: ${roles.join(', ')})`)
@@ -174,6 +180,11 @@ export function runChild(argv, injected = {}) {
       try {
         io.log?.({ at: new Date().toISOString(), event: 'protected-paths',
           basis: protectedFloor.basis, count: protectedFloor.paths.length })
+      } catch { /* instrumentation is never load-bearing */ }
+      // Record the EFFECTIVE plan-round budget on every run, flagged or not:
+      // an escalation at round N reads differently against a budget of N.
+      try {
+        io.log?.({ at: new Date().toISOString(), event: 'limits', ...limitsRecord(planRounds, LIMITS) })
       } catch { /* instrumentation is never load-bearing */ }
       // The lane fence rides the same seam as the protected paths: crew.mjs's
       // run verb resolves it out of crew.json (crew/crew.mjs:1190) and the

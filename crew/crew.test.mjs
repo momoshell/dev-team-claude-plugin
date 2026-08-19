@@ -10,12 +10,12 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, validateCapabilities, loadCapabilities,
   grantsFor, assertGrantsBacked, EMPTY_GRANTS, probeLocalEndpoint, refuse,
   CAPABILITY_DELIVERY, effectiveCapabilities, effectiveTools, LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet,
 } from './crew.mjs'
-import { runChild } from './child.mjs'
+import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
   LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
@@ -619,6 +619,28 @@ test('resolveLaneFence takes both flags or neither', () => {
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
+test('attended and child entrypoints resolve validation lanes identically', () => {
+  const table = [
+    [{}, { lane: null, source: 'none' }],
+    [{ validationLane: '  node --test  ' }, { lane: 'node --test', source: 'validation-lane' }],
+    [{ lane: '  npm test  ' }, { lane: 'npm test', source: 'lane' }],
+    [{ lane: 'fence-register-name', fences: 'register.json' }, { lane: null, source: 'none' }],
+    [{ validationLane: '  validation-command  ', lane: 'fence-register-name', fences: 'register.json' }, { lane: 'validation-command', source: 'validation-lane' }],
+  ]
+  for (const resolver of [resolveValidationLane, resolveChildValidationLane]) {
+    for (const [args, expected] of table) assert.deepEqual(resolver(args), expected)
+    for (const raw of [true, '   ', 42]) {
+      assert.throws(() => resolver({ validationLane: raw }), (err) => {
+        assert.equal(err.reason, 'invalid-validation-lane')
+        assert.match(err.message, /--validation-lane/)
+        assert.match(err.message, /\[invalid-validation-lane\]/)
+        return true
+      })
+      assert.throws(() => resolver({ lane: raw }), (err) => err.reason === 'invalid-validation-lane')
+    }
+  }
+})
+
 test('resolvePlanRounds resolves absent and valid values and refuses invalid budgets closed', () => {
   assert.equal(resolvePlanRounds(undefined), null)
   assert.equal(resolvePlanRounds(null), null)
@@ -758,6 +780,42 @@ test('run plumbs flagged budgets, records defaults when absent, and preserves dr
   }
 })
 
+test('run resolves, threads, and journals validation lanes without overloading fence names', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-validation-lane-run-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-validation-lane-run-home-'))
+  const register = join(home, 'fences.json')
+  const brief = join(home, 'brief.md')
+  const task = 'validation-lane-run'
+  writeFileSync(register, JSON.stringify({ lanes: [{ lane: 'fence-name', files: ['crew/crew.mjs'] }] }))
+  writeFileSync(brief, '# validation lane brief\n')
+  execSync('git init -q', { cwd: checkout })
+  const seen = []
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      const capture = (ctx) => { seen.push(ctx); return done }
+      runCmd({ task, checkout, 'brief-file': brief, 'validation-lane': '  npm test  ', keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, fences: register, lane: 'fence-name', keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, lane: '  ci-repair lane  ', keep: true }, { drive: capture })
+    })
+    assert.deepEqual(seen.map((ctx) => ctx.lane), ['npm test', null, 'ci-repair lane'])
+    const rows = readFileSync(seen[0].journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((row) => row.event === 'validation-lane')
+    assert.deepEqual(rows.map(({ lane, source }) => ({ lane, source })), [
+      { lane: 'npm test', source: 'validation-lane' },
+      { lane: null, source: 'none' },
+      { lane: 'ci-repair lane', source: 'lane' },
+    ])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
 test('child entrypoint plumbs, journals, and refuses round budgets', () => {
   const root = mkdtempSync(join(tmpdir(), 'crew-rounds-child-'))
   const crewDir = join(root, 'crew')
@@ -822,11 +880,114 @@ test('child entrypoint plumbs, journals, and refuses round budgets', () => {
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
+test('child entrypoint resolves both validation lane spellings, journals them, and refuses malformed specs', () => {
+  const root = mkdtempSync(join(tmpdir(), 'crew-validation-lane-child-'))
+  const crewDir = join(root, 'crew')
+  const checkout = join(root, 'checkout')
+  mkdirSync(crewDir, { recursive: true })
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  const brief = join(crewDir, 'brief.md')
+  writeFileSync(brief, '# child validation lane brief\n')
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'child-validation-lane', checkout,
+    roles: ['lead', 'planner', 'builder', 'reviewer'],
+    members: Object.fromEntries(['lead', 'planner', 'builder', 'reviewer'].map((role) => [role, {
+      surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude',
+    }])),
+    task_return: join('returns', 'task.json'),
+  }))
+  const base = { crew_dir: crewDir, task: 'child-validation-lane', brief_file: brief, checkout }
+  const makeRun = (laneSpec) => {
+    const rows = []
+    let seen = null
+    let drove = 0
+    const io = {
+      log: (row) => rows.push(row), assign: () => ({ id: 'x', returnPath: 'x' }), wait: () => null,
+      writeFile: () => {}, readFile: () => null, run: () => ({ ok: true, output: '' }),
+      changedFiles: () => [], commit: () => 'abc1234', now: () => 0,
+    }
+    runChild({ ...base, ...laneSpec }, {
+      preflight: false, realIo: () => io,
+      driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
+      env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
+    })
+    return { rows, seen, drove }
+  }
+  try {
+    for (const [laneSpec, expected] of [
+      [{ validation_lane: '  node --test  ' }, { lane: 'node --test', source: 'validation-lane' }],
+      [{ lane: '  daemon repair lane  ' }, { lane: 'daemon repair lane', source: 'lane' }],
+    ]) {
+      const result = makeRun(laneSpec)
+      assert.equal(result.seen.lane, expected.lane)
+      assert.deepEqual(result.rows.find((row) => row.event === 'validation-lane'), {
+        at: result.rows.find((row) => row.event === 'validation-lane').at, event: 'validation-lane', ...expected,
+      })
+    }
+    let drove = 0
+    assert.throws(() => runChild(
+      { ...base, validation_lane: true },
+      { preflight: false, realIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
+    ), (err) => err.reason === 'invalid-validation-lane')
+    assert.equal(drove, 0)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('child preflight uses the scout shape seats and keeps the default tier guard', () => {
+  const root = mkdtempSync(join(tmpdir(), 'crew-scout-child-'))
+  const crewDir = join(root, 'crew')
+  const checkout = join(root, 'checkout')
+  mkdirSync(crewDir, { recursive: true })
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  const brief = join(crewDir, 'brief.md')
+  writeFileSync(brief, '# scout brief\n')
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'scout-child', checkout,
+    roles: ['planner'],
+    members: { planner: { surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude' } },
+    task_return: join('returns', 'task.json'),
+  }))
+  execSync('git init -q', { cwd: checkout })
+  const base = { crew_dir: crewDir, task: 'scout-child', brief_file: brief, checkout }
+  let drove = 0
+  let seen = null
+  const io = { log: () => {} }
+  try {
+    runChild({ ...base, variant: 'scout' }, {
+      realIo: () => io,
+      driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
+      env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
+    })
+    assert.deepEqual(seen.roles, ['planner'])
+    assert.equal(drove, 1)
+    assert.throws(() => runChild(base, {
+      realIo: () => io,
+      driveTask: () => { drove += 1 },
+      env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
+    }), /requires a builder seat/)
+    assert.equal(drove, 1)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('repair lane absence remains the current triage refusal', () => {
+  const result = driveTask({
+    task: 'repair-lane-refusal', briefFile: '/tmp/brief.md', taskDir: '/tmp/repair-lane-refusal',
+    checkout: '/tmp/repo', journal: '/tmp/repair-lane-refusal/journal.jsonl',
+    files_in_scope: ['crew/crew.mjs'], lane: null, variant: 'repair',
+  }, { log: () => {}, now: () => 0 })
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'triage')
+  assert.match(result.details.escalation.why, /takes its validation lane from the failing run \(--lane\) and ctx carries none/)
+})
+
 test('crew CLI usage documents all per-run round budget flags', () => {
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   assert.match(source, /--plan-rounds/)
   assert.match(source, /--build-rounds/)
   assert.match(source, /--review-rounds/)
+  assert.match(source, /--validation-lane/)
 })
 
 test('run refuses an inherited shape with no declared scope before driving', async () => {
@@ -2054,6 +2215,14 @@ test('assertSeats: a lead-less crew passes; a seated-but-missing lead or missing
   assert.doesNotThrow(() => assertSeats({ roles: ['planner', 'builder', 'reviewer'], members: { planner: {}, builder: {}, reviewer: {} } }))
   assert.throws(() => assertSeats({ roles: ['lead', 'planner', 'builder', 'reviewer'], members: { planner: {}, builder: {}, reviewer: {} } }))
   assert.throws(() => assertSeats({ roles: ['planner', 'builder'], members: { planner: {}, builder: {} } }))
+})
+
+test('assertSeats reads declared envelope seats and keeps the lead rule', () => {
+  const plannerOnlyCrew = { roles: ['lead', 'planner'], members: { lead: {}, planner: {} } }
+  assert.doesNotThrow(() => assertSeats(plannerOnlyCrew, 'scout'))
+  assert.throws(() => assertSeats(plannerOnlyCrew, 'full'), /requires a builder seat/)
+  assert.throws(() => assertSeats({ roles: ['lead', 'planner'], members: { planner: {} } }, 'scout'), /requires a lead seat/)
+  assert.throws(() => assertSeats(plannerOnlyCrew), /requires a builder seat/)
 })
 
 test('a lead-less layout is still strictly binary, with the first seated role on the left', () => {

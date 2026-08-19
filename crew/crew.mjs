@@ -17,6 +17,8 @@
 //                  [--memory-budget-bytes <n>] [--fences <register.json> --lane <name>]
 //                  # paired: both or neither
 //   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] [--files-in-scope <a,b>] # hand the task to the lead
+//                  [--validation-lane <command>]  # the round validation lane;
+//                  # --lane stays the fence-register NAME (see resolveValidationLane)
 //                  [--plan-rounds <n>] [--build-rounds <n>] [--review-rounds <n>]
 //                  # per-run round budgets; an absent flag = drive.mjs LIMITS
 //                  variant names come from crew/drive.mjs's VARIANTS
@@ -587,6 +589,32 @@ export function resolveLaneFence(args = {}, deps = {}) {
   }
   const lane = rawLane.trim()
   return { lane, fence: forLane({ fences: gather({ fencesPath: rawFences }), lane }) }
+}
+
+// The ROUND VALIDATION LANE — a different thing from the fence-register lane
+// NAME above, which shares the --lane flag. --validation-lane is the spelling
+// with no second meaning; a bare --lane keeps working because
+// scripts/factory/ci-repair.mjs:270 dispatches a repair run that way, but a
+// --lane given WITH --fences is a register key and is never handed to the
+// driver as a command. Same posture as crew/limits.mjs: validate, refuse from
+// a closed set, and record the effective value and where it came from.
+// crew/child.mjs carries an identical copy (the import firewall is deliberate)
+// and crew/crew.test.mjs pins the two against one shared table.
+export const VALIDATION_LANE_REFUSAL = 'invalid-validation-lane'
+
+export function resolveValidationLane({ validationLane, lane, fences } = {}) {
+  const clean = (raw, flag) => {
+    if (typeof raw !== 'string' || raw.trim() === '') {
+      throw Object.assign(
+        new Error(`--${flag} needs the shell command to run as the round validation lane, got ${JSON.stringify(raw)} [${VALIDATION_LANE_REFUSAL}]`),
+        { reason: VALIDATION_LANE_REFUSAL },
+      )
+    }
+    return raw.trim()
+  }
+  if (validationLane !== undefined) return { lane: clean(validationLane, 'validation-lane'), source: 'validation-lane' }
+  if (lane !== undefined && fences === undefined) return { lane: clean(lane, 'lane'), source: 'lane' }
+  return { lane: null, source: 'none' }
 }
 
 export function transportFor(role, args = {}) {
@@ -1180,6 +1208,9 @@ export function runCmd(args, deps = {}) {
   // default (a silently defaulted budget is the ambiguity this flag removes).
   const limits = resolveLimits({ plan_rounds: args['plan-rounds'], build_rounds: args['build-rounds'], review_rounds: args['review-rounds'] })
   const limitsOverlay = limitsCtx(limits)
+  // Same posture, same breath: a malformed validation lane refuses before any
+  // state is read, spawned or written.
+  const validationLane = resolveValidationLane({ validationLane: args['validation-lane'], lane: args.lane, fences: args.fences })
   const { drive = driveTask } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -1191,7 +1222,7 @@ export function runCmd(args, deps = {}) {
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
   // The driver assigns planner/builder/reviewer unconditionally — discover a
   // missing seat NOW, not mid-loop after a plan and a build are spent.
-  assertSeats(crew)
+  assertSeats(crew, variant)
   const filesInScope = resolveFilesInScope(
     args, variant, crew.task_return ? resolvePath(paths.dir, crew.task_return) : join(paths.returnsDir, 'task.json'),
   )
@@ -1205,6 +1236,9 @@ export function runCmd(args, deps = {}) {
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
   logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
+  // The EFFECTIVE round validation lane and its source, recorded on every run:
+  // an escalation at the lane stage reads differently when no lane was declared.
+  logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
   const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
   if (laneFence) {
     logLine(journal, { at: new Date().toISOString(), event: 'lane-fence',
@@ -1225,7 +1259,7 @@ export function runCmd(args, deps = {}) {
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
-    roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000', variant,
+    roles: crew.roles, lane: validationLane.lane, suite: args.suite || 'node --test --test-timeout=30000', variant,
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
@@ -1368,11 +1402,15 @@ export function awaitSeatsReady(crew, timeoutS = 120, journal = null, deps = {})
   }
 }
 
-// planner/builder/reviewer are assigned unconditionally by the driver. The
+// A reviewed shape (required_seats: 'tier') has planner/builder/reviewer
+// assigned unconditionally by the driver; an ENVELOPE shape declares the seats
+// it actually runs (crew/variants.mjs) and crew/drive.mjs runs exactly those,
+// so demanding the tier three would refuse a shape this runtime ships. The
 // lead is required ONLY if the crew was booted with one: a lead-less crew
 // (mechanical tier) is valid, and drive.mjs escalates where it would consult.
-export function assertSeats(crew) {
-  for (const role of ['planner', 'builder', 'reviewer']) {
+export function assertSeats(crew, variant = DEFAULT_VARIANT) {
+  const declared = VARIANTS[variant]?.required_seats
+  for (const role of Array.isArray(declared) ? declared : ['planner', 'builder', 'reviewer']) {
     if (!crew.members[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${crew.roles.join(', ')})`)
   }
   if (crew.roles.includes('lead') && !crew.members.lead) {

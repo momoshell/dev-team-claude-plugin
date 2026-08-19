@@ -16,6 +16,7 @@ import {
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
+  validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
@@ -34,9 +35,10 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null } = {}) {
-  const calls = { assign: [], run: [], runClean: [], reseat: [], commits: [], writes: {}, logs: [], showDoc: [], emits: [], gh: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null } = {}) {
+  const calls = { assign: [], run: [], runClean: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], files }
   const counts = {}
+  const writeCounts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
     calls,
@@ -49,8 +51,20 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       const env = envelopes[returnPath]
       return typeof env === 'function' ? env() : env ?? null
     },
-    writeFile(path, content) { calls.writes[path] = content },
-    readFile(p) { return Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null },
+    writeFile(path, content) {
+      if (path.startsWith(`${CTX.checkout}/`)) {
+        writeCounts[path] = (writeCounts[path] || 0) + 1
+        if (throwOn === 'apply' && writeCounts[path] % 2 === 1) throw new Error('writeFile: read-only filesystem')
+        if (throwOn === 'restore' && writeCounts[path] % 2 === 0) throw new Error('writeFile: the restore write failed')
+      }
+      calls.writes[path] = content
+      calls.writeLog.push({ path, content })
+      if (writeThrough) files[path] = content
+    },
+    readFile(p) {
+      if (throwOn === 'read' && p.startsWith(`${CTX.checkout}/`)) throw new Error('readFile: permission denied')
+      return Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null
+    },
     run(cmd) {
       counts[cmd] = (counts[cmd] || 0) + 1
       calls.run.push({ cmd, n: counts[cmd] })
@@ -2559,6 +2573,392 @@ test('a happy path without a gate does not measure runClean', () => {
 // --- #153: baseline-red must mean the gate RAN, not merely that it exited ----
 const RED = (n = 3) => `some failure\n${GATE_SUMMARY_PREFIX} {"total":${n},"failed":${n},"errored":0}`
 const THREW = `FAIL x: expected the check to run, found it threw: linkSync is not defined\n${GATE_SUMMARY_PREFIX} {"total":47,"failed":1,"errored":1}`
+
+const CHECK_FILE = `${CTX.checkout}/a.mjs`
+const CHECK_BUILT = 'export const guard = true\n'
+const CHECK_MUTATION = { check: 'check-one', file: 'a.mjs', find: 'true', replace: 'false' }
+const CHECK_PLAN = (mutations) => planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd', mutations } })
+const CHECK_RUNS = (mutationOutput = `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`) => ({
+  'gate-cmd:1': { ok: false, output: RED(3) },
+  'gate-cmd:2': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+  'gate-cmd:3': { ok: false, output: mutationOutput },
+  'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+})
+const CHECK_CLEAN = { 'gate-cmd': { ok: false, output: RED(3) } }
+const CHECK_ENVELOPES = (mutations, extra = {}) => ({
+  'planner:1': CHECK_PLAN(mutations), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...extra,
+})
+
+// --- b37: per-check gate discrimination -------------------------------------
+test('validateMutations accepts a mutation and exemption and rejects malformed declarations', () => {
+  const inScope = scopeMatcher(['a.mjs', 'a.test.mjs'])
+  assert.deepEqual(validateMutations([CHECK_MUTATION, { check: 'skip', exempt: 'not applicable' }], inScope), [])
+  const cases = [
+    null, 42, [{ file: 'a.mjs', find: 'a', replace: 'b' }], [CHECK_MUTATION, CHECK_MUTATION],
+    [{ ...CHECK_MUTATION, file: 'crew/drive.mjs' }], [{ ...CHECK_MUTATION, file: 'a/' }],
+    [{ ...CHECK_MUTATION, file: '/tmp/a.mjs' }], [{ ...CHECK_MUTATION, find: '' }],
+    [{ ...CHECK_MUTATION, find: 'true', replace: 'true' }],
+    [{ check: 'x', exempt: 'why', file: 'a.mjs' }], [{ check: 'x', exempt: '' }],
+    [{ ...CHECK_MUTATION, check: '' }], [{ ...CHECK_MUTATION, check: 'bad\nlabel' }],
+    [{ ...CHECK_MUTATION, check: 'bad\rlabel' }], [{ ...CHECK_MUTATION, check: '   ' }],
+    [{ ...CHECK_MUTATION, check: ' check-one ' }], [{ ...CHECK_MUTATION, check: '-cache' }],
+    [{ ...CHECK_MUTATION, check: 'cache/v2' }], [{ ...CHECK_MUTATION, check: 'bad label' }], [{ ...CHECK_MUTATION, check: 'bad:label' }],
+    Array.from({ length: MUTATIONS_MAX + 1 }, (_, i) => ({ ...CHECK_MUTATION, check: `c${i}` })),
+  ]
+  for (const entries of cases) {
+    const errors = validateMutations(entries, inScope)
+    assert.ok(errors.length > 0, JSON.stringify(entries))
+    assert.ok(errors.every((error) => error.why), JSON.stringify(entries))
+  }
+})
+
+test('checkFailureLine requires the intended failure line and a strict delimiter', () => {
+  assert.equal(checkFailureLine(`FAIL check-one: why\n${RED()}`, 'check-one'), true)
+  assert.equal(checkFailureLine('  FAIL check-one', 'check-one'), true)
+  assert.equal(checkFailureLine('FAIL check-one:', 'check-one'), true)
+  for (const output of ['FAIL check-one extra words', 'FAIL check-one warm: reason', 'FAIL check-one:v2: reason', 'FAIL check-one-two: why', 'PASS check-one', 'prose check-one', '']) {
+    assert.equal(checkFailureLine(output, 'check-one'), false, output)
+  }
+})
+
+test('per-check mutation records an additive killed row and event', () => {
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'proven')
+  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'check-one', outcome: 'killed', file: 'a.mjs', summary: { total: 3, failed: 1, errored: 0 }, why: null })
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'check-discrimination').length, 1)
+  assert.equal(io.calls.runClean.length, 1)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+})
+
+test('per-check mutations restore each file byte-identically', () => {
+  const mutations = [CHECK_MUTATION, { check: 'check-two', file: 'a.mjs', find: 'guard', replace: 'fence' }]
+  const runs = { ...CHECK_RUNS('FAIL check-one: caught\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}'),
+    'gate-cmd:4': { ok: false, output: 'FAIL check-two: caught\nGATE-SUMMARY {"total":3,"failed":1,"errored":0}' } }
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES(mutations), runs, changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const writes = io.calls.writeLog.filter(({ path }) => path === CHECK_FILE)
+  assert.deepEqual(writes.map(({ content }) => content), [
+    'export const guard = false\n', CHECK_BUILT, 'export const fence = true\n', CHECK_BUILT,
+  ])
+  assert.equal(io.calls.files[CHECK_FILE], CHECK_BUILT)
+})
+
+test('an exemption is recorded with its reason and runs no mutation gate', () => {
+  const mutations = [{ check: 'skip', exempt: 'not applicable' }, CHECK_MUTATION]
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES(mutations), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.gate.check_discriminations[0], { check: 'skip', outcome: 'exempt', why: 'not applicable', file: null, summary: null })
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 3)
+})
+
+test('no mutation declaration leaves whole-gate proof output unchanged', () => {
+  const io = fakeIo({ cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES(undefined), runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(Object.hasOwn(res.details.gate, 'check_discrimination'), false)
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'check-discrimination').length, 0)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length, 2)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+  assert.equal(res.details.stages.some((stage) => stage.endsWith(':checks')), false)
+})
+
+test('a malformed mutation declaration escalates at plan before assigning a builder', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': CHECK_PLAN([{ check: 'missing-file' }]) } })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'plan')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
+
+test('an unapplied mutation is not accepted as proof', () => {
+  const mutation = { ...CHECK_MUTATION, check: 'ghost', find: 'missing text' }
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    envelopes: CHECK_ENVELOPES([mutation], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } } }),
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'gate')
+  assert.equal(res.details.escalation.why.includes('ghost'), true)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).length, 0)
+})
+
+test('an interrupted read records unproven per-check evidence without losing the build', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, throwOn: 'read', cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'unproven')
+  assert.equal(res.details.gate.check_discriminations.length, 0)
+  assert.equal(io.calls.commits.length, 1)
+  assert.ok(io.calls.logs.some((line) => line.gate_check_proof_unproven))
+})
+
+test('a failed restore escalates rather than committing the driver mutation', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, throwOn: 'restore', cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } } }), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'gate')
+  assert.equal(io.calls.commits.length, 0)
+  assert.match(res.details.escalation.why, /a\.mjs/)
+})
+
+test('a thrown mutation gate with a successful restore remains contained', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
+  const run = io.run
+  io.run = function (cmd) {
+    if (cmd === 'gate-cmd' && this.calls.run.filter(({ cmd: name }) => name === cmd).length >= 2) throw new Error('mutation gate exploded')
+    return run.call(this, cmd)
+  }
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'unproven')
+  assert.equal(io.calls.files[CHECK_FILE], CHECK_BUILT)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('an apply failure before landing is unproven and leaves no checkout write', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, throwOn: 'apply', cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'unproven')
+  assert.deepEqual(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).map(({ content }) => content), [CHECK_BUILT])
+  assert.equal(io.calls.emits.filter((event) => event.kind === 'check-discrimination')[0].verdict, 'unproven')
+})
+
+test('a surviving mutation enters the existing planner gate repair path', () => {
+  const fixedRuns = {
+    ...CHECK_RUNS(),
+    'gate-cmd:3': { ok: true, output: `still green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+    'gate-fixed:1': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+    'gate-fixed:2': { ok: false, output: `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+  }
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } } }),
+    runs: fixedRuns, changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.repairs, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+})
+
+test('a known survivor outranks a later interrupted mutation pass', () => {
+  const mutations = [
+    CHECK_MUTATION,
+    { check: 'second-check', file: 'b.mjs', find: 'true', replace: 'false' },
+  ]
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'b.mjs'], gate_cmd: 'gate-cmd', mutations } })
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT, [`${CTX.checkout}/b.mjs`]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: {
+      'planner:1': plan, 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'gate-cmd:3': { ok: true, output: `still green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+      'gate-fixed:1': { ok: true, output: '' },
+      'gate-fixed:2': { ok: false, output: `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'b.mjs'], emit: true,
+  })
+  const originalRead = io.readFile
+  io.readFile = function (path) {
+    if (path === `${CTX.checkout}/b.mjs`) throw new Error('second read failed')
+    return originalRead.call(this, path)
+  }
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.generation, 2)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+  const first = io.calls.emits.find((event) => event.kind === 'check-discrimination')
+  assert.equal(first.generation, 1)
+  assert.equal(first.verdict, 'failed')
+  assert.equal(first.checks[0].outcome, 'survived')
+})
+
+test('a mutated gate that errors or omits its summary survives instead of claiming a kill', () => {
+  for (const output of [THREW, 'FAIL check-one: red without a summary']) {
+    const io = fakeIo({
+      files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+      cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+      envelopes: {
+        'planner:1': CHECK_PLAN([CHECK_MUTATION]),
+        'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+        'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      },
+      runs: {
+        ...CHECK_RUNS(output),
+        'gate-fixed:1': { ok: true, output: '' },
+        'gate-fixed:2': { ok: false, output: `FAIL check-one: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+      },
+      changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    })
+    const res = driveTask(CTX, io)
+    assert.equal(res.status, 'done')
+    const first = io.calls.emits.find((event) => event.kind === 'check-discrimination')
+    assert.equal(first.checks[0].outcome, 'survived')
+    assert.match(first.checks[0].why, output === THREW ? /THREW/ : /GATE-SUMMARY/)
+  }
+})
+
+test('the missing-file unapplied branch records its distinct reason and writes nothing', () => {
+  const mutation = { ...CHECK_MUTATION, check: 'missing-file', file: 'missing.mjs' }
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'missing.mjs'], gate_cmd: 'gate-cmd', mutations: [mutation] } })
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: {
+      'planner:1': plan, 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'gate-fixed:1': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  const first = io.calls.emits.find((event) => event.kind === 'check-discrimination')
+  assert.equal(first.checks[0].outcome, 'unapplied')
+  assert.match(first.checks[0].why, /does not exist/)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+})
+
+test('the two pre-build replacement briefs carry fixed identifiers, but an undeclared plan does not', () => {
+  const mutations = [CHECK_MUTATION]
+  const runBrief = (gate, baseline, declared) => {
+    const io = fakeIo({
+      cleanRuns: { 'gate-fixed': { ok: false, output: RED(3) } },
+      envelopes: {
+        'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: gate, ...(declared ? { mutations } : {}) } }),
+        'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+        'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      },
+      runs: {
+        [gate]: baseline, 'gate-fixed': { ok: false, output: RED(3) }, 'gate-fixed:2': { ok: true, output: '' },
+        'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+      },
+      changed: ['a.mjs', 'a.test.mjs'],
+    })
+    try { driveTask(CTX, io) } catch { /* the brief is the assertion */ }
+    return io.calls.writes[`${TD}/${gate === 'gate-cmd' ? 'gate-vacuous-bounce' : 'gate-defect-bounce'}.md`]
+  }
+  const vacuous = runBrief('gate-cmd', { ok: true, output: 'green' }, true)
+  const defective = runBrief('gate-bad', { ok: false, output: 'no summary' }, true)
+  const plain = runBrief('gate-cmd', { ok: true, output: 'green' }, false)
+  assert.match(vacuous, /CHECK IDENTIFIERS STABLE/)
+  assert.match(vacuous, /check-one/)
+  assert.match(defective, /CHECK IDENTIFIERS STABLE/)
+  assert.match(defective, /check-one/)
+  assert.doesNotMatch(plain, /CHECK IDENTIFIERS STABLE/)
+})
+
+test('a null io failure is still an unproven per-check pass, never a proven one', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  io.readFile = () => { throw null }
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(res.details.gate.check_discrimination, 'unproven')
+  assert.match(res.details.gate.check_proof_note, /null/)
+})
+
+test('a whole-proof repair brief stays byte-stable when no mutations are declared', () => {
+  const io = fakeIo({
+    cleanRuns: { 'gate-cmd': { ok: true, output: 'green pristine' }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'gate-fixed:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const brief = io.calls.writes[`${TD}/gate-discrimination-bounce.md`]
+  assert.equal(typeof brief, 'string')
+  assert.doesNotMatch(brief, /CHECK IDENTIFIERS STABLE/)
+  assert.doesNotMatch(brief, /Per-check rows:/)
+})
+
+test('a longer sibling failure is not the intended check failure', () => {
+  const output = `PASS cache\nFAIL cache warm: reason\nFAIL cache:v2: reason\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":2,"errored":0}`
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([{ ...CHECK_MUTATION, check: 'cache' }], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } } }),
+    runs: { ...CHECK_RUNS(output), 'gate-cmd:3': { ok: false, output } }, changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  const res = driveTask(CTX, io)
+  const event = io.calls.emits.find((entry) => entry.kind === 'check-discrimination')
+  assert.equal(event?.checks?.[0]?.outcome, 'survived')
+  assert.equal(res.status, 'escalation')
+})
+
+test('mutation outcomes are frozen and every observed row uses the closed vocabulary', () => {
+  assert.equal(Object.isFrozen(MUTATION_OUTCOMES), true)
+  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['exempt', 'killed', 'survived', 'unapplied'])
+})
+
+test('the per-check proof stage is declared by the full variant', () => {
+  assert.equal(undeclaredStage(VARIANTS.full, 'gate-proof:1:checks'), null)
+  assert.deepEqual(VARIANTS.full.stages, ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review', 'suite', 'commit', 'converge'])
+})
+
+test('the whole-gate discrimination event retains its five-field shape beside per-check evidence', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'], emit: true })
+  driveTask(CTX, io)
+  const event = io.calls.emits.find((entry) => entry.kind === 'discrimination')
+  assert.equal(Object.keys(event).sort().join(','), 'generation,kind,note,summary,verdict')
+})
+
+test('a per-check pass is only owed after the generation has a whole-gate proof', () => {
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  const stages = res.details.stages
+  assert.ok(stages.indexOf('gate-proof:1') < stages.indexOf('gate-proof:1:checks'))
+})
+
+test('the per-check repair brief names the surviving check and keeps identifiers stable', () => {
+  const output = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+  const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([CHECK_MUTATION], { 'planner:2': { status: 'done', role: 'planner', details: { gate_cmd: 'gate-cmd' } } }),
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: output }, 'gate-cmd:3': { ok: true, output }, 'gate-cmd:4': { ok: true, output }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  const brief = io.calls.writes[`${TD}/gate-discrimination-bounce.md`]
+  assert.match(brief, /CHECK IDENTIFIERS STABLE/)
+  assert.match(brief, /check-one/)
+})
+
+test('a declared gate without a gate command is a plan defect', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, mutations: [CHECK_MUTATION] } }) } })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'plan')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
+})
 
 test('parseGateSummary: last line wins, and anything malformed reads as ABSENT', () => {
   assert.deepEqual(parseGateSummary(`${GATE_SUMMARY_PREFIX} {"total":3,"failed":3,"errored":0}`), { total: 3, failed: 3, errored: 0 })

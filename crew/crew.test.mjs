@@ -17,7 +17,10 @@ import {
 } from './crew.mjs'
 import { runChild } from './child.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
-import { LIMIT_REFUSALS, PLAN_ROUNDS_MAX, limitsRecord, resolvePlanRounds } from './limits.mjs'
+import {
+  LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
+  limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds,
+} from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
@@ -632,33 +635,73 @@ test('resolvePlanRounds resolves absent and valid values and refuses invalid bud
   }
 })
 
-test('limitsRecord records the effective default or flagged plan-round budget', () => {
-  assert.deepEqual(limitsRecord(null, LIMITS), { plan_rounds: LIMITS.plan_rounds, source: 'default' })
-  assert.deepEqual(limitsRecord(6, LIMITS), { plan_rounds: 6, source: 'flag' })
+test('resolveBuildRounds and resolveReviewRounds resolve absent and valid values and refuse invalid budgets closed', () => {
+  for (const [resolve, reason, max] of [
+    [resolveBuildRounds, 'invalid-build-rounds', BUILD_ROUNDS_MAX],
+    [resolveReviewRounds, 'invalid-review-rounds', REVIEW_ROUNDS_MAX],
+  ]) {
+    assert.equal(resolve(undefined), null)
+    assert.equal(resolve(null), null)
+    assert.equal(resolve(''), null)
+    assert.equal(resolve('3'), 3)
+    assert.equal(resolve(3), 3)
+    assert.equal(resolve(' 3 '), 3)
+    for (const raw of [true, 'abc', '2.5', 2.5, 0, -1, '0x4', [], max + 1]) {
+      assert.throws(() => resolve(raw), (err) => {
+        assert.equal(err.reason, reason)
+        assert.ok(LIMIT_REFUSALS.includes(err.reason))
+        return true
+      })
+    }
+  }
 })
 
-test('run refuses an invalid plan-round budget before reading crew state', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'crew-plan-rounds-refusal-home-'))
+test('resolveLimits and limitsCtx overlay only the flagged keys', () => {
+  const none = resolveLimits({})
+  assert.deepEqual(none, { plan_rounds: null, build_rounds: null, review_rounds: null })
+  assert.equal(limitsCtx(none), null)
+  assert.deepEqual(limitsCtx(resolveLimits({ build_rounds: 4 })), { build_rounds: 4 })
+})
+
+test('limitsRecord records all effective round budgets with per-key sources', () => {
+  assert.deepEqual(limitsRecord(resolveLimits({}), LIMITS), {
+    plan_rounds: LIMITS.plan_rounds, build_rounds: LIMITS.build_rounds, review_rounds: LIMITS.review_rounds,
+    source: { plan_rounds: 'default', build_rounds: 'default', review_rounds: 'default' },
+  })
+  assert.deepEqual(limitsRecord(resolveLimits({ build_rounds: 6, review_rounds: 1 }), LIMITS), {
+    plan_rounds: LIMITS.plan_rounds, build_rounds: 6, review_rounds: 1,
+    source: { plan_rounds: 'default', build_rounds: 'flag', review_rounds: 'flag' },
+  })
+})
+
+test('run refuses an invalid round budget before reading crew state', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-rounds-refusal-home-'))
   let drove = 0
   try {
     await withHome(home, () => {
-      assert.throws(
-        () => runCmd({ task: 'invalid-plan-rounds-run', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), 'plan-rounds': '2.5' }, { drive: () => { drove += 1 } }),
-        (err) => err.reason === 'invalid-plan-rounds',
-      )
+      for (const [flag, reason] of [
+        ['plan-rounds', 'invalid-plan-rounds'],
+        ['build-rounds', 'invalid-build-rounds'],
+        ['review-rounds', 'invalid-review-rounds'],
+      ]) {
+        assert.throws(
+          () => runCmd({ task: 'invalid-rounds-run', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), [flag]: '2.5' }, { drive: () => { drove += 1 } }),
+          (err) => err.reason === reason,
+        )
+      }
       assert.equal(existsSync(join(home, '.crew')), false)
     })
     assert.equal(drove, 0)
   } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
-test('run plumbs a flagged budget, records defaults when absent, and the driver honors the override', async () => {
-  const { root: checkoutRoot, checkout } = testCheckout('crew-plan-rounds-run-checkout-')
-  const home = mkdtempSync(join(tmpdir(), 'crew-plan-rounds-run-home-'))
-  const task = 'plan-rounds-run'
+test('run plumbs flagged budgets, records defaults when absent, and preserves driver overrides', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-rounds-run-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-rounds-run-home-'))
+  const task = 'rounds-run'
   execSync('git init -q', { cwd: checkout })
   const brief = join(home, 'brief.md')
-  writeFileSync(brief, '# plan-rounds brief\n')
+  writeFileSync(brief, '# rounds brief\n')
   const previousLedger = process.env.DEVTEAM_LEDGER_DB
   process.env.DEVTEAM_LEDGER_DB = join(home, 'ledger.db')
   const seen = []
@@ -671,15 +714,27 @@ test('run plumbs a flagged budget, records defaults when absent, and the driver 
       )
       const capture = (ctx) => { seen.push(ctx); return done }
       runCmd({ task, checkout, 'brief-file': brief, 'plan-rounds': '4', keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, 'build-rounds': '5', 'review-rounds': '1', keep: true }, { drive: capture })
       runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: capture })
 
       assert.deepEqual(seen[0].limits, { plan_rounds: 4 })
-      assert.equal(Object.prototype.hasOwnProperty.call(seen[1], 'limits'), false)
+      assert.deepEqual(seen[1].limits, { build_rounds: 5, review_rounds: 1 })
+      assert.equal(Object.prototype.hasOwnProperty.call(seen[2], 'limits'), false)
       const rows = readFileSync(seen[0].journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
         .filter((row) => row.event === 'limits')
-      assert.equal(rows.length, 2)
-      assert.deepEqual({ plan_rounds: rows[0].plan_rounds, source: rows[0].source }, { plan_rounds: 4, source: 'flag' })
-      assert.deepEqual({ plan_rounds: rows[1].plan_rounds, source: rows[1].source }, { plan_rounds: LIMITS.plan_rounds, source: 'default' })
+      assert.equal(rows.length, 3)
+      assert.deepEqual(rows[0], {
+        at: rows[0].at, event: 'limits', plan_rounds: 4, build_rounds: LIMITS.build_rounds, review_rounds: LIMITS.review_rounds,
+        source: { plan_rounds: 'flag', build_rounds: 'default', review_rounds: 'default' },
+      })
+      assert.deepEqual(rows[1], {
+        at: rows[1].at, event: 'limits', plan_rounds: LIMITS.plan_rounds, build_rounds: 5, review_rounds: 1,
+        source: { plan_rounds: 'default', build_rounds: 'flag', review_rounds: 'flag' },
+      })
+      assert.deepEqual(rows[2], {
+        at: rows[2].at, event: 'limits', plan_rounds: LIMITS.plan_rounds, build_rounds: LIMITS.build_rounds, review_rounds: LIMITS.review_rounds,
+        source: { plan_rounds: 'default', build_rounds: 'default', review_rounds: 'default' },
+      })
 
       const stages = []
       const io = {
@@ -703,24 +758,24 @@ test('run plumbs a flagged budget, records defaults when absent, and the driver 
   }
 })
 
-test('child entrypoint plumbs, journals, and refuses the plan-round budget', () => {
-  const root = mkdtempSync(join(tmpdir(), 'crew-plan-rounds-child-'))
+test('child entrypoint plumbs, journals, and refuses round budgets', () => {
+  const root = mkdtempSync(join(tmpdir(), 'crew-rounds-child-'))
   const crewDir = join(root, 'crew')
   const checkout = join(root, 'checkout')
   mkdirSync(crewDir, { recursive: true })
   mkdirSync(checkout, { recursive: true })
   mkdirSync(join(crewDir, 'returns'), { recursive: true })
   const brief = join(crewDir, 'brief.md')
-  writeFileSync(brief, '# child plan-rounds brief\n')
+  writeFileSync(brief, '# child rounds brief\n')
   writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
-    schema_version: 3, task: 'child-plan-rounds', checkout,
+    schema_version: 3, task: 'child-rounds', checkout,
     roles: ['lead', 'planner', 'builder', 'reviewer'],
     members: Object.fromEntries(['lead', 'planner', 'builder', 'reviewer'].map((role) => [role, {
       surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude',
     }])),
     task_return: join('returns', 'task.json'),
   }))
-  const makeRun = (plan_rounds) => {
+  const makeRun = (budget = {}) => {
     const rows = []
     let seen = null
     let drove = 0
@@ -729,7 +784,7 @@ test('child entrypoint plumbs, journals, and refuses the plan-round budget', () 
       writeFile: () => {}, readFile: () => null, run: () => ({ ok: true, output: '' }),
       changedFiles: () => [], commit: () => 'abc1234', now: () => 0,
     }
-    const spec = { crew_dir: crewDir, task: 'child-plan-rounds', brief_file: brief, checkout, ...(plan_rounds === undefined ? {} : { plan_rounds }) }
+    const spec = { crew_dir: crewDir, task: 'child-rounds', brief_file: brief, checkout, ...budget }
     runChild(spec, {
       preflight: false, realIo: () => io,
       driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
@@ -738,24 +793,40 @@ test('child entrypoint plumbs, journals, and refuses the plan-round budget', () 
     return { rows, seen, drove }
   }
   try {
-    const flagged = makeRun(4)
-    assert.deepEqual(flagged.seen.limits, { plan_rounds: 4 })
-    assert.deepEqual({ plan_rounds: flagged.rows.find((row) => row.event === 'limits').plan_rounds, source: flagged.rows.find((row) => row.event === 'limits').source }, { plan_rounds: 4, source: 'flag' })
-    const plain = makeRun(undefined)
+    const flagged = makeRun({ build_rounds: 4, review_rounds: 1 })
+    assert.deepEqual(flagged.seen.limits, { build_rounds: 4, review_rounds: 1 })
+    assert.deepEqual(flagged.rows.find((row) => row.event === 'limits'), {
+      at: flagged.rows.find((row) => row.event === 'limits').at, event: 'limits',
+      plan_rounds: LIMITS.plan_rounds, build_rounds: 4, review_rounds: 1,
+      source: { plan_rounds: 'default', build_rounds: 'flag', review_rounds: 'flag' },
+    })
+    const plain = makeRun()
     assert.equal(Object.prototype.hasOwnProperty.call(plain.seen, 'limits'), false)
     const plainRow = plain.rows.find((row) => row.event === 'limits')
-    assert.deepEqual({ plan_rounds: plainRow.plan_rounds, source: plainRow.source }, { plan_rounds: LIMITS.plan_rounds, source: 'default' })
-    let drove = 0
-    assert.throws(() => runChild(
-      { crew_dir: crewDir, task: 'child-plan-rounds', brief_file: brief, checkout, plan_rounds: '2.5' },
-      { preflight: false, realIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
-    ), (err) => err.reason === 'invalid-plan-rounds')
-    assert.equal(drove, 0)
+    assert.deepEqual(plainRow, {
+      at: plainRow.at, event: 'limits',
+      plan_rounds: LIMITS.plan_rounds, build_rounds: LIMITS.build_rounds, review_rounds: LIMITS.review_rounds,
+      source: { plan_rounds: 'default', build_rounds: 'default', review_rounds: 'default' },
+    })
+    for (const [budget, reason] of [
+      [{ build_rounds: '2.5' }, 'invalid-build-rounds'],
+      [{ review_rounds: 0 }, 'invalid-review-rounds'],
+    ]) {
+      let drove = 0
+      assert.throws(() => runChild(
+        { crew_dir: crewDir, task: 'child-rounds', brief_file: brief, checkout, ...budget },
+        { preflight: false, realIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
+      ), (err) => err.reason === reason)
+      assert.equal(drove, 0)
+    }
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('crew CLI usage documents the per-run plan-round budget flag', () => {
-  assert.match(readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8'), /--plan-rounds/)
+test('crew CLI usage documents all per-run round budget flags', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.match(source, /--plan-rounds/)
+  assert.match(source, /--build-rounds/)
+  assert.match(source, /--review-rounds/)
 })
 
 test('run refuses an inherited shape with no declared scope before driving', async () => {

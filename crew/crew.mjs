@@ -17,7 +17,8 @@
 //                  [--memory-budget-bytes <n>] [--fences <register.json> --lane <name>]
 //                  # paired: both or neither
 //   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] [--files-in-scope <a,b>] # hand the task to the lead
-//                  [--plan-rounds <n>]  # per-run plan-round budget; absent = drive.mjs LIMITS
+//                  [--plan-rounds <n>] [--build-rounds <n>] [--review-rounds <n>]
+//                  # per-run round budgets; an absent flag = drive.mjs LIMITS
 //                  variant names come from crew/drive.mjs's VARIANTS
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
@@ -34,7 +35,7 @@ import { execSync } from 'node:child_process'
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries } from './drive.mjs'
-import { limitsRecord, resolvePlanRounds } from './limits.mjs'
+import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
   realIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
@@ -1177,7 +1178,8 @@ export function runCmd(args, deps = {}) {
   // Refuse a malformed budget in the same breath as an unknown shape: before
   // any state is read, spawned or written, and never by falling back to the
   // default (a silently defaulted budget is the ambiguity this flag removes).
-  const planRounds = resolvePlanRounds(args['plan-rounds'])
+  const limits = resolveLimits({ plan_rounds: args['plan-rounds'], build_rounds: args['build-rounds'], review_rounds: args['review-rounds'] })
+  const limitsOverlay = limitsCtx(limits)
   const { drive = driveTask } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -1202,7 +1204,7 @@ export function runCmd(args, deps = {}) {
   const protectedFloor = checkoutProtectedPaths({ checkout })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
-  logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(planRounds, LIMITS) })
+  logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
   const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
   if (laneFence) {
     logLine(journal, { at: new Date().toISOString(), event: 'lane-fence',
@@ -1224,7 +1226,7 @@ export function runCmd(args, deps = {}) {
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: args.lane || null, suite: args.suite || 'node --test --test-timeout=30000', variant,
-    ...(planRounds === null ? {} : { limits: { plan_rounds: planRounds } }),
+    ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
   // Seats are TUI processes and the first assignment must not race their

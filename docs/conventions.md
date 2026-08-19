@@ -30,6 +30,8 @@ describe the retired scripts/cmux/* runtime, which is not on main.
 - `crew/crew.mjs`
 - `crew/drive.mjs`
 - `crew/daemon.mjs`
+- `crew/capabilities.mjs`
+- `crew/host-load.mjs`
 
 ## Format
 

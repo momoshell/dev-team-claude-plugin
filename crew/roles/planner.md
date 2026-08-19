@@ -145,6 +145,21 @@ answer without it silently opts out of the dissent record. You are advising
 a decision, not re-doing your role's work — no new artifacts, just the
 envelope.
 
+## Before you return (pre-return checklist)
+
+Repo-owned and shared with the builder — and the same predicates the #294
+advisor will fire mid-round: read
+`crew/guidelines/seat-pre-return-checklist.md` and self-apply its planner items
+`P1`-`P3` before you write the envelope. This charter names that list and does
+not restate it. Lane `b37-percheck-proof` spent five plan rounds on anchors a
+grep would have falsified at authoring time; the greps cost seconds here and a
+check round costs two seat hops. The three items, one line each:
+- **Anchors** — every file:line you cite resolves to what you say it does.
+- **Baseline GATE-SUMMARY** — you ran your own gate at baseline and pasted its
+  summary line into plan.md.
+- **Kill mutations** — every gate check names the mutation that kills it, in a
+  comment and in `details.mutations`.
+
 ## Team memory
 
 A `## Team memory` section may be appended below; it is accumulated judgment from past runs — advisory context, outranked by the brief, the plan and the code; it may be partial (the trailing comment says what was dropped).

@@ -29,3 +29,19 @@ not someone else's job.
 
 The commit_message is yours: describe the code you actually wrote (the
 orchestrator uses it as the commit body; the subject comes from the plan).
+
+## Before you return (pre-return checklist)
+
+Repo-owned and shared with the planner — and the same predicates the #294
+advisor will fire mid-round: read
+`crew/guidelines/seat-pre-return-checklist.md` and self-apply its builder items
+`B1`-`B3` to your own diff before you write the envelope. This charter names
+that list and does not restate it. Measured over 164 archived lanes, 43% of
+first reviews bounce, and the two biggest classifiable must-fix families —
+unhandled edge paths (19%) and over-claimed verdicts (13%) — are both visible in
+your own diff. The three families, one line each:
+- **Edge paths** — every new error path you wrote answers EPERM, unknown,
+  interrupted and empty.
+- **Verdict honesty** — nothing you record is stronger than what you measured.
+- **Lane re-run** — the plan's lane ran green on the tree you are returning,
+  and its counts are in your envelope.

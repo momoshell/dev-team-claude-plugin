@@ -74,6 +74,198 @@ export function bodyDigest(body) {
   return createHash('sha256').update(body, 'utf8').digest('hex')
 }
 
+export const PREMISE_REFERENCE_CAP = 40      // references checked per body
+const PREMISE_GREP_BIN = 'git'               // the premise probe reads the checkout, never a board
+export const PREMISE_IDENTIFIER_CAP = 20     // of those, identifiers (one grep each)
+const PREMISE_IDENTIFIER_MIN_CHARS = 4
+const PREMISE_NOTES_MAX_CHARS = 500
+
+const PREMISE_ANCHOR_PATTERN = /(?<![\w./-])(?<!@)((?:\/)?(?:[A-Za-z0-9_@.-]+\/)*[A-Za-z0-9_@.-]+\.[A-Za-z0-9_-]+):(\d+)(?:-\d+)?/g
+const PREMISE_PATH_PATTERN = /(?<![\w./-])(?<!@)(?:\/)?(?:[A-Za-z0-9_@.-]+\/)+[A-Za-z0-9_@.-]+\.[A-Za-z0-9_-]+/g
+const PREMISE_IDENTIFIER_PATTERN = new RegExp('`([^`]{1,120})`', 'g')
+
+export function extractPremiseReferences(body) {
+  if (typeof body !== 'string' || body.length === 0) {
+    return { references: [], truncated: false }
+  }
+
+  const references = []
+  const seen = new Set()
+  let truncated = false
+  let identifierCount = 0
+  const add = (reference, { identifier = false } = {}) => {
+    const key = `${reference.kind}:${reference.text}`
+    if (seen.has(key)) return false
+    if (references.length >= PREMISE_REFERENCE_CAP
+      || (identifier && identifierCount >= PREMISE_IDENTIFIER_CAP)) {
+      truncated = true
+      return false
+    }
+    references.push(reference)
+    seen.add(key)
+    if (identifier) identifierCount += 1
+    return true
+  }
+
+  const working = body.replace(PREMISE_ANCHOR_PATTERN, (match, path, line) => {
+    add({
+      kind: 'anchor',
+      text: `${path}:${line}`,
+      path,
+      line: Number.parseInt(line, 10),
+    })
+    return ' '.repeat(match.length)
+  })
+
+  for (const match of working.matchAll(PREMISE_PATH_PATTERN)) {
+    const text = match[0]
+    add({ kind: 'path', text, path: text, line: null })
+  }
+
+  for (const match of body.matchAll(PREMISE_IDENTIFIER_PATTERN)) {
+    const text = match[1]
+    if (text.length < PREMISE_IDENTIFIER_MIN_CHARS
+      || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(text)) continue
+    add({ kind: 'identifier', text, path: null, line: null }, { identifier: true })
+  }
+
+  return { references, truncated }
+}
+
+function anchorResolves(lineCount, line) { return line <= lineCount }
+
+function premiseVerdictFor({ unresolved, unknown, checked }) {
+  if (unresolved.length > 0) return 'unresolved'
+  if (unknown.length > 0) return 'unknown'
+  if (checked > 0) return 'clean'
+  return 'no-references'
+}
+
+function premiseHasParentSegment(path) {
+  return /(?:^|[\/])\.\.(?:[\/]|$)/.test(path)
+}
+
+function boundPremiseNotes(text, truncated, referenceCount) {
+  const note = String(text)
+  if (!truncated) {
+    return note.length <= PREMISE_NOTES_MAX_CHARS
+      ? note
+      : `${note.slice(0, PREMISE_NOTES_MAX_CHARS - 1)}…`
+  }
+  const suffix = ` [truncated at ${referenceCount} references]`
+  const available = PREMISE_NOTES_MAX_CHARS - suffix.length
+  if (note.length <= available) return `${note}${suffix}`
+  return `${note.slice(0, Math.max(0, available - 1))}…${suffix}`
+}
+
+export function verifyPremise({ checkout, body, deps = {} } = {}) {
+  const d = normalDeps(deps)
+  const root = typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd()
+  const extracted = extractPremiseReferences(body)
+  const unresolved = []
+  const unknown = []
+  const displays = []
+  const kindCounts = { path: 0, anchor: 0, identifier: 0 }
+  let checked = 0
+  let resolved = 0
+  let skipped = 0
+
+  const unresolvedReference = (reference, why, display = `${why} ${reference.text}`) => {
+    unresolved.push({ kind: reference.kind, text: reference.text, why })
+    displays.push(display)
+  }
+  const unknownReference = (reference, why, display = `${why} ${reference.text}`) => {
+    unknown.push({ kind: reference.kind, text: reference.text, why })
+    displays.push(display)
+  }
+  const resolvedReference = (reference) => {
+    resolved += 1
+    kindCounts[reference.kind] += 1
+  }
+
+  for (const reference of extracted.references) {
+    if (reference.kind !== 'identifier'
+      && (isAbsolute(reference.text) || isAbsolute(reference.path) || premiseHasParentSegment(reference.path))) {
+      skipped += 1
+      continue
+    }
+
+    checked += 1
+    if (reference.kind === 'identifier') {
+      let result
+      try {
+        result = d.spawnSync(PREMISE_GREP_BIN, [
+          '-C', root, 'grep', '-l', '-F', '-e', reference.text, '--', '.',
+        ], { encoding: 'utf8', timeout: 10_000 })
+      } catch {
+        unknownReference(reference, 'grep-failed')
+        continue
+      }
+      if (!result || result.error || (result.status !== 0 && result.status !== 1)) {
+        unknownReference(reference, 'grep-failed')
+      } else if (result.status === 0) {
+        resolvedReference(reference)
+      } else {
+        unresolvedReference(reference, 'no-grep-hits')
+      }
+      continue
+    }
+
+    const path = reference.kind === 'anchor' ? reference.path : reference.text
+    const absolute = resolve(root, path)
+    let exists
+    try {
+      exists = d.existsSync(absolute)
+    } catch {
+      unknownReference(reference, 'probe-failed')
+      continue
+    }
+    if (!exists) {
+      unresolvedReference(reference, 'missing-path')
+      continue
+    }
+    if (reference.kind === 'path') {
+      resolvedReference(reference)
+      continue
+    }
+
+    try {
+      const contents = d.readFileSync(absolute, 'utf8')
+      const lineCount = (typeof contents === 'string' ? contents : contents == null ? '' : String(contents)).split(/\r?\n/).length
+      if (!anchorResolves(lineCount, reference.line)) {
+        unresolvedReference(reference, 'dead-anchor', `dead-anchor ${reference.text} (${lineCount} lines)`)
+      } else {
+        resolvedReference(reference)
+      }
+    } catch {
+      unknownReference(reference, 'probe-failed')
+    }
+  }
+
+  let notes
+  if (checked === 0) {
+    notes = 'no-references: the body names no checkable reference'
+  } else if (unresolved.length === 0 && unknown.length === 0) {
+    notes = `clean ${resolved}/${checked} resolve (paths ${kindCounts.path}, anchors ${kindCounts.anchor}, identifiers ${kindCounts.identifier})`
+  } else if (unresolved.length > 0) {
+    notes = `unresolved ${unresolved.length}/${checked}: ${displays.join('; ')}`
+    if (resolved > 0) notes += `; resolved ${resolved}`
+  } else {
+    notes = `unknown ${unknown.length}/${checked}: ${displays.join('; ')}; resolved ${resolved}`
+  }
+
+  return {
+    verdict: premiseVerdictFor({ unresolved, unknown, checked }),
+    checked,
+    resolved,
+    unresolved,
+    unknown,
+    skipped,
+    truncated: extracted.truncated,
+    notes: boundPremiseNotes(notes, extracted.truncated, extracted.references.length),
+  }
+}
+
 // verdicts: newest-first rows from ledger.issueDispatchVerdicts.
 // Returns null to dispatch, or the refusal detail to park.
 export function repeatEscalationDetail({ verdicts = [], digest = null } = {}) {
@@ -785,6 +977,19 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
     refusals.push(refusalFor(candidate, 'not-first-in-order', `concurrency=${concurrency}`))
   }
 
+  let pickedPremise = null
+  if (pickedCandidate) {
+    try {
+      pickedPremise = verifyPremise({ checkout: root, body: pickedCandidate.item.body, deps: d })
+    } catch (err) {
+      // A measurement must never cost the sweep its pick.
+      pickedPremise = {
+        verdict: 'unknown', checked: 0, resolved: 0, unresolved: [], unknown: [],
+        skipped: 0, truncated: false,
+        notes: `unknown: premise-check-errored: ${err?.message || String(err)}`.slice(0, PREMISE_NOTES_MAX_CHARS),
+      }
+    }
+  }
   const picked = pickedCandidate
     ? {
         issue: pickedCandidate.item.issue,
@@ -796,6 +1001,7 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
         where: pickedCandidate.where,
         request: pickedCandidate.request,
         body_digest: bodyDigest(pickedCandidate.item.body),
+        premise: pickedPremise,
       }
     : null
   const result = {
@@ -923,6 +1129,8 @@ function recordDispatchStep({ dbPath, board, picked, sweptAt, deps, outcome, rea
     pr_number: fields.pr_number ?? null,
     pr_url: fields.pr_url ?? null,
     issue_body_digest: picked.body_digest ?? null,
+    premise_verdict: picked.premise?.verdict ?? null,
+    premise_notes: picked.premise?.notes ?? null,
   }
   let recorded = { ...row, created_at: timestamp(nowValue(deps)) }
   withLedger(dbPath, (ledger) => {
@@ -1116,6 +1324,7 @@ export function observeDispatches({ board, boardItems = [], checkout = process.c
       picked: {
         issue: item.issue,
         tier: claim.tier,
+        premise: { verdict: claim.premise_verdict, notes: claim.premise_notes },
       },
       sweptAt: claim.sweep_at,
       deps: d,

@@ -166,6 +166,15 @@ export const INTAKE_DISPATCH_OUTCOMES = Object.freeze([
 // claimed/promoted are steps, not verdicts, and refused never reached a crew.
 export const INTAKE_DISPATCH_VERDICTS = Object.freeze(['done', 'escalation', 'converge', 'unreadable'])
 
+// A premise result is a MEASUREMENT of the references an issue body names, not
+// a decision: 'clean' = at least one reference and all of them resolve;
+// 'unresolved' = at least one does not; 'unknown' = the probe could not answer
+// (grep failed, unreadable file) and nothing was falsified; 'no-references' =
+// the body names nothing checkable. NULL on a row means the check never ran.
+export const PREMISE_VERDICTS = Object.freeze([
+  'clean', 'unresolved', 'unknown', 'no-references',
+])
+
 // The closed set of CELL availability failures — a cell that could not hold a
 // seat, died mid-assignment, or returned nothing usable. Deliberately NOT a
 // quality axis: review_outcomes (#169) and accept_decisions (#170) already
@@ -612,6 +621,8 @@ export const TABLES = Object.freeze({
       { name: 'pr_url', decl: 'TEXT' },
       { name: 'created_at', decl: 'TEXT' },
       { name: 'issue_body_digest', decl: 'TEXT' },
+      { name: 'premise_verdict', decl: 'TEXT' },
+      { name: 'premise_notes', decl: 'TEXT' },
     ],
     unique: [['board_owner', 'board_project', 'issue', 'outcome', 'created_at']],
     indexes: [{ name: 'intake_dispatches_outcome_idx', cols: ['outcome', 'created_at'] }],
@@ -1723,6 +1734,7 @@ export function openLedger({
   function recordIntakeDispatch(input = {}) {
     requireFields(input, ['board_owner', 'board_project', 'issue', 'outcome'], 'recordIntakeDispatch')
     requireEnum(input.outcome, INTAKE_DISPATCH_OUTCOMES, 'recordIntakeDispatch', 'outcome')
+    if (input.premise_verdict != null) requireEnum(input.premise_verdict, PREMISE_VERDICTS, 'recordIntakeDispatch', 'premise_verdict')
     if (input.outcome === 'promoted' && input.pr_number == null) {
       refuse("recordIntakeDispatch: outcome 'promoted' requires pr_number")
     }
@@ -1747,6 +1759,8 @@ export function openLedger({
       pr_url: input.pr_url == null ? null : String(input.pr_url),
       created_at: isoMs(input.created_at ?? now()),
       issue_body_digest: input.issue_body_digest == null ? null : String(input.issue_body_digest),
+      premise_verdict: input.premise_verdict == null ? null : String(input.premise_verdict),
+      premise_notes: input.premise_notes == null ? null : String(input.premise_notes),
     }, stats)
     if (args.board_owner != null) args.board_owner = args.board_owner.slice(0, 120)
     if (args.sweep_at != null) args.sweep_at = String(args.sweep_at).slice(0, 40)
@@ -1762,6 +1776,8 @@ export function openLedger({
     if (args.board_to != null) args.board_to = args.board_to.slice(0, 120)
     if (args.pr_url != null) args.pr_url = args.pr_url.slice(0, 1000)
     if (args.issue_body_digest != null) args.issue_body_digest = args.issue_body_digest.slice(0, 64)
+    if (args.premise_verdict != null) args.premise_verdict = args.premise_verdict.slice(0, 40)
+    if (args.premise_notes != null) args.premise_notes = args.premise_notes.slice(0, 500)
     appendJsonl('recordIntakeDispatch', args)
     mirror((conn) => {
       const cols = tableColumnNames('intake_dispatches').filter((c) => c !== 'id')

@@ -18,8 +18,10 @@ import { createHash } from 'node:crypto'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync,
   writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync,
+  realpathSync as fsRealpathSync,
 } from 'node:fs'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import {
   INTAKE_REFUSALS, INTAKE_OUTCOMES, openLedger,
 } from './ledger.mjs'
@@ -1340,13 +1342,13 @@ export function observeDispatches({ board, boardItems = [], checkout = process.c
   return promotions
 }
 
-export function intakeRun({ board, checkout = process.cwd(), dbPath = null, config = {}, deps = {} } = {}) {
+export function intakeRun({ board, checkout = process.cwd(), dbPath = null, config = {}, deps = {}, recordOnly = false } = {}) {
   const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
   const d = normalDeps(deps)
   const sweep = intakeSweep({ board, checkout, dbPath, config: settings, deps: d })
   if (sweep.ok === false) return { sweep, dispatch: null, promotions: [] }
   const selectedBoard = boardUsable(board) || dispatchBoard(sweep.board)
-  const dispatch = sweep.outcome === 'picked'
+  const dispatch = sweep.outcome === 'picked' && recordOnly !== true
     ? dispatchPicked({
         board: selectedBoard,
         picked: sweep.picked,
@@ -1358,7 +1360,7 @@ export function intakeRun({ board, checkout = process.cwd(), dbPath = null, conf
         deps: d,
       })
     : null
-  const promotions = observeDispatches({
+  const promotions = recordOnly === true ? [] : observeDispatches({
     board: selectedBoard,
     boardItems: sweep.board_items,
     checkout,
@@ -1369,7 +1371,7 @@ export function intakeRun({ board, checkout = process.cwd(), dbPath = null, conf
   return { sweep, dispatch, promotions }
 }
 
-export function intakeLoop({ board, checkout = process.cwd(), dbPath = null, config = {}, deps = {}, maxTicks = null } = {}) {
+export function intakeLoop({ board, checkout = process.cwd(), dbPath = null, config = {}, deps = {}, maxTicks = null, recordOnly = false } = {}) {
   const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
   const d = normalDeps(deps)
   const usableBoard = boardUsable(board)
@@ -1447,6 +1449,7 @@ export function intakeLoop({ board, checkout = process.cwd(), dbPath = null, con
       checkout,
       dbPath,
       config: settings,
+      recordOnly,
       // The outer check admits this sweep; a newly-created brake waits for the next tick.
       deps: { ...d, existsSync: () => false },
     })
@@ -1513,3 +1516,295 @@ export function extractIntakeBlock(body) {
   }
 }
 
+
+// ---------------------------------------------------------------------------
+// CLI — the operator's bounded, report-only sweep verb, and the only caller of
+// intakeLoop.
+//
+// Exit codes: 0 ok, 1 unexpected internal error, 2 usage, refusal, or a run
+// that did not finish cleanly — a board fetch that threw. This verb never
+// reports a failed attempt as a success.
+//
+// RECORDING ONLY, UNCONDITIONALLY: the loop is called with recordOnly: true and
+// there is no flag to turn that off. The verb reports what WOULD have been
+// dispatched and invokes no dispatch dep. Enabling dispatch is a separate slice
+// (#231), and it is the slice that will own durable attribution too.
+//
+// WRITES NOTHING, ANYWHERE. This verb has no flag naming a file or a directory,
+// and it passes dbPath: null into the loop. That is not cosmetic: a non-null
+// ledger path reaches recordIntakeSweep -> appendJsonl, which creates
+// directories and appends a durable file (ledger.mjs:1089-1093, :1010-1014,
+// :86-104). With a null path, withLedger short-circuits before openLedger
+// (intake.mjs:775-777) and nothing is opened at all. The tick report returned
+// here is the ONLY record this slice produces, and it uses the shipped closed
+// vocabulary rather than inventing one.
+//
+// The cost is stated rather than hidden: the two history-backed guards fail
+// OPEN without a ledger — the run-window count is 0 (intake.mjs:340-341) and
+// the repeat-escalation breaker sees no verdicts (intake.mjs:905-907, whose own
+// comment says it "fails OPEN rather than inventing history"). The stop switch,
+// the board-derived guards, the Ready-column filter and the closed vocabulary
+// are all unchanged.
+// ---------------------------------------------------------------------------
+
+export class IntakeUsageError extends Error {
+  constructor(message, reason) {
+    super(message)
+    this.name = 'IntakeUsageError'
+    this.reason = reason
+  }
+}
+
+function refuseUsage(message, reason) {
+  throw new IntakeUsageError(`intake: ${message}`, reason)
+}
+
+// A sweep waits at least MIN_SWEEP_INTERVAL_MS between ticks, so this cap is
+// also a wall-clock bound: 24 ticks is at least 23 minutes of waiting.
+export const MAX_SWEEP_TICKS = 24
+// The same bound the ledger puts on its own actor claims (ledger.mjs:1728).
+export const ACTOR_CLAIM_MAX_CHARS = 120
+
+export const SWEEP_USAGE = [
+  'a verb is required: sweep',
+  'usage: intake.mjs sweep --board <owner>/<project> --actor <claim> [--ticks <n>] [--json] [--checkout <dir>]',
+  `--ticks defaults to 1 and may not exceed ${MAX_SWEEP_TICKS}; consecutive sweeps are separated by at least ${MIN_SWEEP_INTERVAL_MS}ms`,
+  'this verb is RECORDING ONLY and has no switch to change that: it reports what would have been dispatched and dispatches nothing',
+  `--actor is required and is a caller-supplied claim, never a verified identity (at most ${ACTOR_CLAIM_MAX_CHARS} characters)`,
+  'this verb writes no file, creates no directory and opens no ledger; the report it prints is the only record of the run',
+  'no ledger means the run-window count and the repeat-escalation breaker fail open; the stop switch, the board guards and the Ready-column filter are unchanged',
+  `stop switch: create ${DEFAULT_INTAKE_CONFIG.stopSwitchPath} under the checkout to halt the next sweep; a sweep already in flight finishes`,
+].join('\n')
+
+const CLI_BOOLEAN_FLAGS = new Set(['json'])
+const CLI_VALUE_FLAGS = new Set(['board', 'actor', 'ticks', 'checkout'])
+
+// Strict by construction: an unknown or repeated flag refuses rather than being
+// swallowed (the shape is make-brief.mjs:1229-1255, with emit.mjs's leading
+// verb). --record, --db and --dispatch are not flags of this verb and therefore
+// refuse as unknown options.
+function parseCliArgs(argv) {
+  const [verb, ...rest] = Array.isArray(argv) ? argv : []
+  const flags = {}
+  const positional = []
+  for (let index = 0; index < rest.length; index += 1) {
+    const argument = String(rest[index])
+    if (!argument.startsWith('--')) {
+      positional.push(argument)
+      continue
+    }
+    const name = argument.slice(2)
+    if (CLI_BOOLEAN_FLAGS.has(name)) {
+      if (Object.hasOwn(flags, name)) refuseUsage(`duplicate --${name}`, 'duplicate-flag')
+      flags[name] = true
+      continue
+    }
+    if (!CLI_VALUE_FLAGS.has(name)) refuseUsage(`unknown option: --${name}`, 'unknown-option')
+    if (Object.hasOwn(flags, name)) refuseUsage(`duplicate --${name}`, 'duplicate-flag')
+    const value = rest[index + 1]
+    if (value == null || String(value).startsWith('--')) refuseUsage(`--${name} requires a value`, 'missing-value')
+    flags[name] = String(value)
+    index += 1
+  }
+  if (positional.length > 0) refuseUsage(`unexpected argument: ${positional[0]}`, 'unexpected-argument')
+  return { verb, flags }
+}
+
+// The claim is reported, never inferred: no $USER, no git identity. The repo
+// says an inferred identity is not the thing being recorded
+// (ledger.mjs:597, probe-repo.mjs:10).
+function actorClaim(value) {
+  const claim = typeof value === 'string' ? value.trim() : ''
+  if (!claim) refuseUsage('--actor <claim> is required: a sweep names who asked for it', 'missing-actor')
+  if (claim.length > ACTOR_CLAIM_MAX_CHARS) {
+    refuseUsage(`--actor is at most ${ACTOR_CLAIM_MAX_CHARS} characters`, 'actor-too-long')
+  }
+  return claim
+}
+
+function sweepTicks(value) {
+  if (value == null) return 1
+  const ticks = Number(value)
+  if (!Number.isInteger(ticks) || ticks < 1 || ticks > MAX_SWEEP_TICKS) {
+    refuseUsage(`--ticks must be a whole number between 1 and ${MAX_SWEEP_TICKS}`, 'ticks-out-of-range')
+  }
+  return ticks
+}
+
+export function parseBoardArgument(value) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  // A regex, not a lastIndexOf: no string literal in this module may begin
+  // with a path separator (test/factory-intake.test.mjs:847-854).
+  const match = /^(.+)\/(\d+)$/.exec(text)
+  const owner = match ? match[1].trim() : ''
+  const projectNumber = match ? Number(match[2]) : Number.NaN
+  if (!owner || !Number.isInteger(projectNumber) || projectNumber <= 0) {
+    refuseUsage('--board <owner>/<project> is required, where <project> is the project number', 'board-unusable')
+  }
+  return { owner, projectNumber }
+}
+
+// The verb's whole body. main() is a thin shim over this: tests drive it with
+// injected deps, per the house rule that anything a test drives is a library
+// function taking deps (ci-watch.mjs:193, intake.mjs:510).
+export function sweepCommand({
+  board, actor, checkout = process.cwd(),
+  config = {}, deps = {}, ticks = 1, onStart = null,
+} = {}) {
+  const claim = actorClaim(actor)
+  const count = sweepTicks(ticks)
+  const settings = { ...DEFAULT_INTAKE_CONFIG, ...(config || {}) }
+  const root = typeof checkout === 'string' && checkout.length > 0 ? checkout : process.cwd()
+  const stopSwitch = resolve(root, settings.stopSwitchPath)
+  const d = normalDeps(deps)
+
+  const start = {
+    schema: 1,
+    verb: 'sweep',
+    phase: 'start',
+    mode: 'record-only',
+    actor: claim,
+    board: { owner: board?.owner ?? null, project: board?.projectNumber ?? null },
+    checkout: root,
+    // Named in the report so an operator reading it knows the run left no trace
+    // and knows which guards therefore failed open.
+    durable_record: 'none',
+    fails_open: ['window-cap', 'repeat-escalation'],
+    requested_ticks: count,
+    stop_switch: {
+      path: stopSwitch,
+      halts: 'the next sweep; a sweep already in flight finishes',
+    },
+    started_at: timestamp(nowValue(d)),
+  }
+  // The header is emitted BEFORE the first sweep. A bounded run can wait 23
+  // minutes; an operator who interrupts it at minute 20, or who needs the
+  // brake now, must not have to wait for the report to learn who started it
+  // and how to stop it.
+  if (typeof onStart === 'function') onStart(start)
+
+  const result = intakeLoop({
+    board,
+    checkout: root,
+    // NOT a placeholder: a path here would make the run write. See the header.
+    dbPath: null,
+    config: settings,
+    deps,
+    maxTicks: count,
+    recordOnly: true,
+  })
+
+  const ticksOut = (result.ticks || []).map((tick) => ({
+    index: tick.index,
+    started_at: tick.started_at,
+    swept: tick.swept,
+    outcome: tick.outcome,
+    reason: tick.reason,
+    failure: tick.failure,
+    picked_issue: tick.run?.sweep?.picked?.issue ?? null,
+  }))
+  const picked = ticksOut.filter((tick) => tick.picked_issue != null)
+  // A board fetch that threw is a FAILED ATTEMPT, not a park: its reason is
+  // not in INTAKE_REFUSALS and must never be reported as one.
+  const failures = ticksOut
+    .filter((tick) => tick.failure != null)
+    .map((tick) => ({ index: tick.index, failure: tick.failure }))
+  return {
+    ...start,
+    phase: 'complete',
+    ok: result.ok === true && failures.length === 0,
+    stopped: result.stopped === true,
+    reason: result.reason ?? null,
+    detail: result.detail ?? null,
+    ticks: ticksOut,
+    failures,
+    would_dispatch: picked.map((tick) => tick.picked_issue),
+    finished_at: timestamp(nowValue(d)),
+  }
+}
+
+export function renderStartHeader(start) {
+  return [
+    `intake sweep starting: mode=${start.mode} board=${start.board.owner}/${start.board.project} ticks=${start.requested_ticks} at=${start.started_at}`,
+    `actor: ${start.actor} (a caller-supplied claim, not a verified identity)`,
+    `brake: create ${start.stop_switch.path} to halt ${start.stop_switch.halts}`,
+    `record: ${start.durable_record} — this run writes no file and opens no ledger; ${start.fails_open.join(' and ')} therefore fail open`,
+  ]
+}
+
+export function renderSweepReport(report) {
+  const lines = [
+    `intake sweep: mode=${report.mode} board=${report.board.owner}/${report.board.project} ticks=${report.ticks.length}/${report.requested_ticks} ok=${report.ok} stopped=${report.stopped}`,
+    `actor: ${report.actor} (a caller-supplied claim, not a verified identity)`,
+    `stop: create ${report.stop_switch.path} to halt ${report.stop_switch.halts}`,
+    `record: ${report.durable_record} — the lines below are the only record of this run; ${report.fails_open.join(' and ')} failed open`,
+  ]
+  if (!report.ok && report.reason) lines.push(`refused: ${report.reason}${report.detail ? ` (${report.detail})` : ''}`)
+  for (const failure of report.failures) lines.push(`  attempt ${failure.index} FAILED: ${failure.failure} (not a sweep outcome)`)
+  for (const tick of report.ticks) {
+    lines.push(`  tick ${tick.index} ${tick.started_at} swept=${tick.swept} outcome=${tick.outcome ?? 'none-recorded'} reason=${tick.reason ?? '-'}${tick.failure ? ` failure=${tick.failure}` : ''}`)
+  }
+  lines.push(report.would_dispatch.length === 0
+    ? 'would dispatch: nothing (recording only: no issue was dispatched)'
+    : `would dispatch: ${report.would_dispatch.join(', ')} (recording only: nothing was dispatched)`)
+  return lines
+}
+
+function sweepVerb(flags, stdout, stderr, deps) {
+  const root = flags.checkout ? resolve(String(flags.checkout)) : process.cwd()
+  if (!fsExistsSync(root)) refuseUsage('--checkout must be an existing directory', 'missing-checkout')
+  const report = sweepCommand({
+    board: parseBoardArgument(flags.board),
+    actor: flags.actor,
+    checkout: root,
+    ticks: flags.ticks,
+    deps,
+    // The header goes to stderr, so stdout carries exactly one payload — the
+    // human report, or a single valid JSON document. The ledger CLI splits its
+    // streams the same way (ledger.mjs:2993-2994).
+    onStart: (start) => { for (const line of renderStartHeader(start)) stderr.write(`${line}\n`) },
+  })
+  if (flags.json) {
+    stdout.write(`${JSON.stringify(report)}\n`)
+  } else {
+    for (const line of renderSweepReport(report)) stdout.write(`${line}\n`)
+  }
+  return report.ok ? 0 : 2
+}
+
+// `deps` is the ONLY departure from the house main(argv): it is a pass-through
+// to sweepCommand so a test can pin the whole CLI route — argv in, board
+// fetches out — instead of pinning sweepCommand alone. The direct-invocation
+// guard below never passes it, so the shipped path is the real deps.
+export function main(argv, deps = {}) {
+  const stdout = process.stdout
+  const stderr = process.stderr
+  try {
+    const { verb, flags } = parseCliArgs(argv)
+    if (!verb) refuseUsage(SWEEP_USAGE, 'missing-verb')
+    if (verb === 'sweep') return sweepVerb(flags, stdout, stderr, deps)
+    refuseUsage(`unknown verb: ${verb}`, 'unknown-verb')
+    return 2
+  } catch (err) {
+    if (err instanceof IntakeUsageError) {
+      stderr.write(`${err.message} [reason: ${err.reason}]\n`)
+      return 2
+    }
+    stderr.write(`${err && err.stack}\n`)
+    return 1
+  }
+}
+
+// realpath both sides: the ESM loader realpaths import.meta.url while argv[1]
+// stays literal, so under a symlinked path component a literal compare is
+// silently false and the CLI would no-op.
+function realpathOr(path) {
+  try { return fsRealpathSync(path) } catch { return path }
+}
+
+const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
+if (invokedDirectly) {
+  // process.exitCode, not process.exit: a piped stdout can be truncated by
+  // process.exit's synchronous teardown.
+  process.exitCode = main(process.argv.slice(2))
+}

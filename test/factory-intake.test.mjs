@@ -6,14 +6,16 @@ import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
-  DEFAULT_INTAKE_CONFIG, PREMISE_REFERENCE_CAP, REQUIRED_INTAKE_CONFIG_KEYS, bodyDigest, compileIntakeBrief,
+  ACTOR_CLAIM_MAX_CHARS, DEFAULT_INTAKE_CONFIG, MAX_SWEEP_TICKS, PREMISE_REFERENCE_CAP,
+  REQUIRED_INTAKE_CONFIG_KEYS, SWEEP_USAGE, bodyDigest, compileIntakeBrief,
   dispatchPicked, extractIntakeBlock, extractPremiseReferences, fetchBoard, intakeConfigUsable, intakeLoop,
-  intakeRun, intakeSweep, normalDeps, verifyPremise, MIN_SWEEP_INTERVAL_MS, normaliseBoardPage,
+  intakeRun, intakeSweep, main, normalDeps, parseBoardArgument, renderStartHeader, renderSweepReport,
+  sweepCommand, verifyPremise, MIN_SWEEP_INTERVAL_MS, normaliseBoardPage,
   observeDispatches, orderCandidates, repeatEscalationDetail,
 } from '../scripts/factory/intake.mjs'
 import {
@@ -29,6 +31,94 @@ after(() => rmSync(fixture, { recursive: true, force: true }))
 
 function dbPath() {
   return join(mkdtempSync(join(tmpdir(), 'factory-intake-')), 'ledger.db')
+}
+
+function withLedgerSentinel(fn) {
+  const base = mkdtempSync(join(tmpdir(), 'factory-intake-sentinel-'))
+  const db = join(base, 'db', 'ledger.db')
+  const dir = join(base, 'dir')
+  const previousDb = process.env.DEVTEAM_LEDGER_DB
+  const previousDir = process.env.DEVTEAM_LEDGER_DIR
+  process.env.DEVTEAM_LEDGER_DB = db
+  process.env.DEVTEAM_LEDGER_DIR = dir
+  try {
+    return fn({ db, dir, base })
+  } finally {
+    if (previousDb === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousDb
+    if (previousDir === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+    else process.env.DEVTEAM_LEDGER_DIR = previousDir
+    assert.equal(existsSync(db), false, `ledger sentinel was created: ${db}`)
+    assert.equal(existsSync(dir), false, `ledger directory sentinel was created: ${dir}`)
+    rmSync(base, { recursive: true, force: true })
+  }
+}
+
+let callerCheckoutMemo = null
+function callerCheckout() {
+  if (callerCheckoutMemo) return callerCheckoutMemo
+  const root = mkdtempSync(join(fixture, 'caller-checkout-'))
+  mkdirSync(join(root, 'lib'), { recursive: true })
+  mkdirSync(join(root, 'test'), { recursive: true })
+  writeFileSync(join(root, 'lib', 'widget.mjs'), 'export function widgetLoop() { return 1 }\n')
+  writeFileSync(join(root, 'test', 'widget.test.mjs'), "import { widgetLoop } from '../lib/widget.mjs'\nwidgetLoop()\n")
+  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' })
+  assert.equal(git('init', '-q').status, 0)
+  assert.equal(git('config', 'user.email', 'factory@example.test').status, 0)
+  assert.equal(git('config', 'user.name', 'factory-test').status, 0)
+  assert.equal(git('add', '-A').status, 0)
+  assert.equal(git('-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-q', '-m', 'fixture').status, 0)
+  callerCheckoutMemo = root
+  return root
+}
+
+function callerBody() {
+  return [
+    'ask: Give the shipped `widgetLoop` a caller',
+    'where: lib/widget.mjs',
+    'done-means: The selected issue is reported',
+    'out-of-scope: Dispatching and status changes',
+  ].join('\n')
+}
+
+function captureStreams(fn) {
+  const stdout = []
+  const stderr = []
+  const realStdoutWrite = process.stdout.write
+  const realStderrWrite = process.stderr.write
+  process.stdout.write = (chunk) => { stdout.push(String(chunk)); return true }
+  process.stderr.write = (chunk) => { stderr.push(String(chunk)); return true }
+  let value
+  try {
+    value = fn()
+  } finally {
+    process.stdout.write = realStdoutWrite
+    process.stderr.write = realStderrWrite
+  }
+  return { value, stdout: stdout.join(''), stderr: stderr.join('') }
+}
+
+function cliRefusalCases(checkout) {
+  const board = 'example-owner/7'
+  const actor = 'ops'
+  const checkoutFlag = ['--checkout', checkout]
+  return [
+    ['missing-verb', []],
+    ['unknown-verb', ['sweepy']],
+    ['unknown-option', ['sweep', '--board', board, '--actor', actor, '--nope', 'x', ...checkoutFlag]],
+    ['unknown-option', ['sweep', '--board', board, '--actor', actor, '--record', 'x', ...checkoutFlag]],
+    ['unknown-option', ['sweep', '--board', board, '--actor', actor, '--db', 'x', ...checkoutFlag]],
+    ['unknown-option', ['sweep', '--board', board, '--actor', actor, '--dispatch', ...checkoutFlag]],
+    ['duplicate-flag', ['sweep', '--board', board, '--board', board, '--actor', actor, ...checkoutFlag]],
+    ['duplicate-flag', ['sweep', '--board', board, '--actor', actor, '--json', '--json', ...checkoutFlag]],
+    ['missing-value', ['sweep', '--board', board, '--actor', ...checkoutFlag]],
+    ['unexpected-argument', ['sweep', 'stray', '--board', board, '--actor', actor, ...checkoutFlag]],
+    ['missing-checkout', ['sweep', '--board', board, '--actor', actor, '--checkout', join(checkout, 'no-such-dir')]],
+    ['board-unusable', ['sweep', '--board', 'owner', '--actor', actor, ...checkoutFlag]],
+    ['missing-actor', ['sweep', '--board', board, ...checkoutFlag]],
+    ['actor-too-long', ['sweep', '--board', board, '--actor', 'x'.repeat(121), ...checkoutFlag]],
+    ['ticks-out-of-range', ['sweep', '--board', board, '--actor', actor, '--ticks', '999', ...checkoutFlag]],
+  ]
 }
 
 function field(name, value) {
@@ -1305,4 +1395,380 @@ test('premise probing adds no board writes and uses only git grep', () => {
   assert.equal(spawned.length, 1)
   assert.equal(spawned[0].bin, 'git')
   assert.deepEqual(spawned[0].args, ['-C', ROOT, 'grep', '-l', '-F', '-e', UNKNOWN_PREMISE_SYMBOL, '--', '.'])
+})
+
+test('the sweep verb runs exactly the ticks it was given and waits the shipped floor between them', () => {
+  withLedgerSentinel(() => {
+    const harness = loopDeps([page([])])
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 },
+      actor: 'ops', checkout: ROOT, config: baseConfig, deps: harness.deps, ticks: 3,
+    })
+    assert.equal(report.ticks.length, 3)
+    assert.equal(harness.calls.length, 3)
+    assert.deepEqual(harness.sleeps, [MIN_SWEEP_INTERVAL_MS, MIN_SWEEP_INTERVAL_MS])
+  })
+})
+
+test('the sweep verb refuses a tick count outside its bound', () => {
+  withLedgerSentinel(() => {
+    for (const ticks of [0, -1, MAX_SWEEP_TICKS + 1, 'many']) {
+      const harness = loopDeps([page([])])
+      assert.throws(() => sweepCommand({
+        board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+        config: baseConfig, deps: harness.deps, ticks,
+      }), (error) => error?.reason === 'ticks-out-of-range')
+    }
+    const omitted = loopDeps([page([])])
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: omitted.deps,
+    })
+    assert.equal(report.ticks.length, 1)
+  })
+})
+
+test('the sweep verb is recording only and calls no dispatch dep', () => {
+  withLedgerSentinel(() => {
+    const checkout = callerCheckout()
+    const calls = { branches: 0, moves: 0, boots: 0, runs: 0, prs: 0 }
+    const harness = loopDeps([page([issue({ number: 501, body: callerBody() })])], {
+      deps: {
+        existsSync,
+        branchFor: () => { calls.branches += 1; return 'test/branch' },
+        boardMove: () => { calls.moves += 1; return { ok: true, status: 'In progress' } },
+        crewBoot: () => { calls.boots += 1; return { exit: 0, stdout: '', stderr: '' } },
+        crewRun: () => { calls.runs += 1; return { exit: 0, stdout: '', stderr: '' } },
+        pullRequestFor: () => { calls.prs += 1; return null },
+      },
+    })
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout,
+      config: baseConfig, deps: harness.deps, ticks: 1,
+    })
+    assert.equal(report.mode, 'record-only')
+    assert.deepEqual(report.would_dispatch, [501])
+    assert.deepEqual(calls, { branches: 0, moves: 0, boots: 0, runs: 0, prs: 0 })
+  })
+})
+
+test('the sweep verb opens no ledger and writes no file', () => {
+  withLedgerSentinel(({ db, dir }) => {
+    let writes = 0
+    let mkdirs = 0
+    const windows = []
+    const harness = loopDeps([page([])], {
+      deps: {
+        writeFileSync: () => { writes += 1 },
+        mkdirSync: () => { mkdirs += 1 },
+        runsInWindow: (request) => { windows.push(request); return 0 },
+      },
+    })
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: harness.deps, ticks: 1,
+    })
+    assert.equal(report.ok, true)
+    assert.equal(existsSync(db), false)
+    assert.equal(existsSync(dir), false)
+    assert.equal(writes, 0)
+    assert.equal(mkdirs, 0)
+    assert.ok(windows.length >= 1)
+    assert.equal(windows.every((request) => request.dbPath === null), true)
+  })
+})
+
+test('the brake halts the next sweep and leaves the sweep in flight alone', () => {
+  withLedgerSentinel(() => {
+    const between = loopDeps([page([])], {
+      onSleep: ({ count, setBrake }) => { if (count === 1) setBrake() },
+    })
+    const halted = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: between.deps, ticks: 3,
+    })
+    assert.equal(halted.stopped, true)
+    assert.equal(halted.ticks.length, 2)
+    assert.deepEqual(halted.ticks[1], {
+      index: 1,
+      started_at: halted.ticks[1].started_at,
+      swept: false,
+      outcome: 'parked',
+      reason: 'stop-switch',
+      failure: null,
+      picked_issue: null,
+    })
+
+    const during = loopDeps([page([])], {
+      onGithub: ({ index, setBrake }) => { if (index === 0) setBrake() },
+    })
+    const inFlight = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: during.deps, ticks: 2,
+    })
+    assert.equal(inFlight.ticks[0].swept, true)
+    assert.equal(inFlight.ticks[0].outcome, 'none')
+    assert.equal(inFlight.ticks[1].swept, false)
+    assert.equal(inFlight.ticks[1].reason, 'stop-switch')
+  })
+})
+
+test('the sweep report and its rendered form name the stop switch that halts it, and say what it did not record', () => {
+  withLedgerSentinel(() => {
+    let start = null
+    const harness = loopDeps([page([])])
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: harness.deps, ticks: 1, onStart: (value) => { start = value },
+    })
+    const stopPath = resolve(ROOT, DEFAULT_INTAKE_CONFIG.stopSwitchPath)
+    assert.equal(report.stop_switch.path, stopPath)
+    assert.equal(report.durable_record, 'none')
+    assert.deepEqual(report.fails_open, ['window-cap', 'repeat-escalation'])
+    const rendered = renderSweepReport(report)
+    const stopLine = rendered.find((line) => line.startsWith('stop: create '))
+    assert.ok(stopLine?.includes(stopPath))
+    assert.ok(rendered.some((line) => line.includes('window-cap') && line.includes('repeat-escalation')))
+    const header = renderStartHeader(start)
+    const brakeLine = header.find((line) => line.startsWith('brake: create '))
+    assert.ok(brakeLine?.includes(stopPath))
+    assert.ok(header.some((line) => line.includes('window-cap') && line.includes('repeat-escalation')))
+    for (const token of ['sweep', '--board', '--actor', '--ticks', '.factory/STOP']) {
+      assert.equal(SWEEP_USAGE.includes(token), true)
+    }
+    for (const token of ['--record', '--db', '--dispatch']) {
+      assert.equal(SWEEP_USAGE.includes(token), false)
+    }
+  })
+})
+
+test('every tick the verb reports uses the closed intake vocabulary', () => {
+  withLedgerSentinel(() => {
+    const harness = loopDeps([page([])], {
+      onSleep: ({ count, setBrake }) => { if (count === 1) setBrake() },
+    })
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: harness.deps, ticks: 3,
+    })
+    const outcomes = new Set(report.ticks.map((tick) => tick.outcome))
+    assert.equal(outcomes.has('none'), true)
+    assert.equal(outcomes.has('parked'), true)
+    for (const tick of report.ticks) {
+      assert.equal(tick.outcome === null || INTAKE_OUTCOMES.includes(tick.outcome), true)
+      assert.equal(tick.reason === null || INTAKE_REFUSALS.includes(tick.reason), true)
+    }
+  })
+})
+
+test('the verb reports the actor claim it was given and refuses to invent one', () => {
+  withLedgerSentinel(() => {
+    let start = null
+    const valid = loopDeps([page([])])
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: valid.deps, ticks: 1, onStart: (value) => { start = value },
+    })
+    assert.equal(report.actor, 'ops')
+    assert.equal(start.actor, 'ops')
+    assert.equal(renderStartHeader(start).join('\n').includes('ops'), true)
+    assert.equal(renderSweepReport(report).join('\n').includes('ops'), true)
+
+    for (const [actor, reason] of [
+      [undefined, 'missing-actor'], ['', 'missing-actor'], ['   ', 'missing-actor'],
+      ['x'.repeat(ACTOR_CLAIM_MAX_CHARS + 1), 'actor-too-long'],
+    ]) {
+      let writes = 0
+      const harness = loopDeps([page([])], {
+        deps: { writeFileSync: () => { writes += 1 } },
+      })
+      assert.throws(() => sweepCommand({
+        board: { owner: 'example-owner', projectNumber: 7 }, actor, checkout: ROOT,
+        config: baseConfig, deps: harness.deps, ticks: 1,
+      }), (error) => error?.reason === reason)
+      assert.equal(harness.calls.length, 0)
+      assert.equal(harness.sleeps.length, 0)
+      assert.equal(writes, 0)
+    }
+  })
+})
+
+test('main refuses every malformed invocation and knows no write-path or dispatch flag', () => {
+  withLedgerSentinel(() => {
+    const checkout = callerCheckout()
+    assert.deepEqual(parseBoardArgument('momoshell/7'), { owner: 'momoshell', projectNumber: 7 })
+    for (const token of ['--record', '--db', '--dispatch']) assert.equal(SWEEP_USAGE.includes(token), false)
+    for (const [reason, argv] of cliRefusalCases(checkout)) {
+      let writes = 0
+      let mkdirs = 0
+      const harness = loopDeps([page([])], {
+        deps: {
+          writeFileSync: () => { writes += 1 },
+          mkdirSync: () => { mkdirs += 1 },
+        },
+      })
+      const captured = captureStreams(() => main(argv, harness.deps))
+      assert.equal(captured.value, 2, `${JSON.stringify(argv)}: ${captured.stderr}`)
+      assert.equal(captured.stderr.includes(reason), true, `${JSON.stringify(argv)}: ${captured.stderr}`)
+      assert.equal(writes, 0)
+      assert.equal(mkdirs, 0)
+      assert.equal(harness.calls.length, 0)
+    }
+  })
+})
+
+test('no refusal and no successful run touches the checkout, a ledger, or a branch', () => {
+  withLedgerSentinel(({ db, dir }) => {
+    const checkout = callerCheckout()
+    const status = () => {
+      const result = spawnSync('git', ['-C', checkout, 'status', '--porcelain'], { encoding: 'utf8' })
+      assert.equal(result.status, 0)
+      return result.stdout
+    }
+    const before = status()
+    const run = (argv, nodes = []) => {
+      const calls = { writes: 0, mkdirs: 0, dispatch: 0, spawns: [] }
+      const harness = loopDeps([page(nodes)], {
+        deps: {
+          existsSync,
+          spawnSync: (bin, args, options) => {
+            calls.spawns.push({ bin, args: [...args] })
+            return spawnSync(bin, args, options)
+          },
+          writeFileSync: () => { calls.writes += 1 },
+          mkdirSync: () => { calls.mkdirs += 1 },
+          branchFor: () => { calls.dispatch += 1; return 'test/branch' },
+          boardMove: () => { calls.dispatch += 1; return { ok: true, status: 'In progress' } },
+          crewBoot: () => { calls.dispatch += 1; return { exit: 1, stdout: '', stderr: '' } },
+          crewRun: () => { calls.dispatch += 1; return { exit: 1, stdout: '', stderr: '' } },
+          pullRequestFor: () => { calls.dispatch += 1; return null },
+        },
+      })
+      const captured = captureStreams(() => main(argv, harness.deps))
+      return { calls, harness, captured }
+    }
+    for (const [, argv] of cliRefusalCases(checkout)) {
+      const { calls } = run(argv, [issue({ number: 502, body: callerBody() })])
+      assert.equal(status(), before)
+      assert.equal(existsSync(db), false)
+      assert.equal(existsSync(dir), false)
+      assert.equal(calls.writes, 0)
+      assert.equal(calls.mkdirs, 0)
+      assert.equal(calls.dispatch, 0)
+      for (const spawn of calls.spawns) {
+        assert.equal(spawn.bin, 'git')
+        assert.equal(spawn.args.includes('grep'), true)
+        for (const forbidden of ['push', 'merge', 'commit', 'worktree', '-b']) {
+          assert.equal(spawn.args.includes(forbidden), false)
+        }
+      }
+    }
+    const success = run([
+      'sweep', '--board', 'example-owner/7', '--actor', 'ops', '--ticks', '1', '--checkout', checkout,
+    ], [issue({ number: 503, body: callerBody() })])
+    assert.equal(success.captured.value, 0, success.captured.stderr)
+    assert.equal(status(), before)
+    assert.equal(existsSync(db), false)
+    assert.equal(existsSync(dir), false)
+    assert.equal(success.calls.writes, 0)
+    assert.equal(success.calls.mkdirs, 0)
+    assert.equal(success.calls.dispatch, 0)
+    assert.ok(success.calls.spawns.length >= 1)
+    for (const spawn of success.calls.spawns) {
+      assert.equal(spawn.bin, 'git')
+      assert.equal(spawn.args.includes('grep'), true)
+      for (const forbidden of ['push', 'merge', 'commit', 'worktree', '-b']) {
+        assert.equal(spawn.args.includes(forbidden), false)
+      }
+    }
+  })
+})
+
+test('a board fetch that throws is a failed attempt, never a park, and the run is not a success', () => {
+  withLedgerSentinel(() => {
+    const harness = loopDeps([page([])], {
+      onGithub: ({ index }) => { if (index === 0) throw new Error('temporary board failure') },
+    })
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: harness.deps, ticks: 2,
+    })
+    assert.equal(report.ok, false)
+    assert.equal(report.ticks[0].failure, 'board-fetch-failed')
+    assert.equal(report.ticks[0].outcome, null)
+    assert.equal(INTAKE_REFUSALS.includes(report.ticks[0].reason), false)
+    assert.deepEqual(report.failures, [{ index: 0, failure: 'board-fetch-failed' }])
+    assert.equal(report.ticks.length, 2)
+    assert.equal(harness.calls.length, 2)
+  })
+})
+
+test('the CLI route sweeps and prints one JSON document', () => {
+  withLedgerSentinel(() => {
+    const harness = loopDeps([page([])])
+    const captured = captureStreams(() => main([
+      'sweep', '--board', 'example-owner/7', '--actor', 'ops', '--ticks', '2', '--checkout', ROOT, '--json',
+    ], harness.deps))
+    assert.equal(captured.value, 0, captured.stderr)
+    assert.equal(harness.calls.length, 2)
+    assert.equal(captured.stderr.includes('ops'), true)
+    const report = JSON.parse(captured.stdout)
+    assert.equal(report.ticks.length, 2)
+    assert.equal(report.actor, 'ops')
+    assert.equal(report.mode, 'record-only')
+    assert.equal(report.durable_record, 'none')
+  })
+})
+
+test('the start header is emitted before the first sweep', () => {
+  withLedgerSentinel(() => {
+    let start = null
+    let checkedBeforeFetch = false
+    const harness = loopDeps([page([])], {
+      onGithub: () => { checkedBeforeFetch = start != null },
+    })
+    const report = sweepCommand({
+      board: { owner: 'example-owner', projectNumber: 7 }, actor: 'ops', checkout: ROOT,
+      config: baseConfig, deps: harness.deps, ticks: 2, onStart: (value) => { start = value },
+    })
+    assert.equal(report.ok, true)
+    assert.equal(checkedBeforeFetch, true)
+    assert.equal(start.actor, 'ops')
+    assert.equal(start.stop_switch.path, resolve(ROOT, DEFAULT_INTAKE_CONFIG.stopSwitchPath))
+    assert.equal(start.requested_ticks, 2)
+    assert.equal(start.mode, 'record-only')
+  })
+})
+
+test('the recordOnly seam leaves existing library callers alone', () => {
+  const nodes = [issue({ number: 504, body: intakeBody() })]
+  const defaultHarness = dispatchDeps(nodes)
+  const defaultResult = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: defaultHarness.deps,
+  })
+  assert.deepEqual(Object.keys(defaultResult), ['sweep', 'dispatch', 'promotions'])
+  assert.equal(defaultResult.dispatch.outcome, 'done')
+  assert.equal(defaultHarness.calls.branches.length, 1)
+  assert.equal(defaultHarness.calls.moves.length, 1)
+
+  const loopHarness = dispatchDeps(nodes)
+  const loopResult = intakeLoop({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: loopHarness.deps, maxTicks: 1,
+  })
+  assert.equal(loopResult.ticks[0].run.dispatch.outcome, 'done')
+  assert.equal(loopHarness.calls.branches.length, 1)
+  assert.equal(loopHarness.calls.moves.length, 1)
+
+  const recordingHarness = dispatchDeps(nodes)
+  const recordingResult = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 }, checkout: ROOT,
+    config: baseConfig, deps: recordingHarness.deps, recordOnly: true,
+  })
+  assert.deepEqual(Object.keys(recordingResult), ['sweep', 'dispatch', 'promotions'])
+  assert.equal(recordingResult.dispatch, null)
+  assert.deepEqual(recordingResult.promotions, [])
+  assert.equal(recordingHarness.calls.branches.length, 0)
+  assert.equal(recordingHarness.calls.moves.length, 0)
 })

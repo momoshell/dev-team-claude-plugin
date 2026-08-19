@@ -17,13 +17,14 @@ export const INTAKE_REFUSAL_REASONS = Object.freeze([
   'stop-switch', 'window-cap', 'rate-limit-floor',
   'priority-unknown', 'intake-block-missing', 'intake-block-malformed',
   'brief-uncompilable', 'protected-path', 'tier-judge', 'not-first-in-order',
+  'repeat-escalation',
 ])
 export const INTAKE_REFUSAL_GROUPS = Object.freeze([
   Object.freeze({
     group: 'authoring',
     title: 'an issue needs a human to author or fix it',
     asserts: 'a human editing the issue unblocks this',
-    reasons: Object.freeze(['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown']),
+    reasons: Object.freeze(['intake-block-missing', 'intake-block-malformed', 'brief-uncompilable', 'priority-unknown', 'repeat-escalation']),
   }),
   Object.freeze({
     group: 'guardrail',

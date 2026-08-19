@@ -11,11 +11,13 @@ import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from './helpers.mjs'
 import {
-  DEFAULT_INTAKE_CONFIG, REQUIRED_INTAKE_CONFIG_KEYS, compileIntakeBrief, dispatchPicked,
+  DEFAULT_INTAKE_CONFIG, REQUIRED_INTAKE_CONFIG_KEYS, bodyDigest, compileIntakeBrief, dispatchPicked,
   extractIntakeBlock, fetchBoard, intakeConfigUsable, intakeLoop, intakeRun, intakeSweep, normalDeps,
-  MIN_SWEEP_INTERVAL_MS, normaliseBoardPage, observeDispatches, orderCandidates,
+  MIN_SWEEP_INTERVAL_MS, normaliseBoardPage, observeDispatches, orderCandidates, repeatEscalationDetail,
 } from '../scripts/factory/intake.mjs'
-import { INTAKE_OUTCOMES, INTAKE_REFUSALS, openLedger } from '../scripts/factory/ledger.mjs'
+import {
+  INTAKE_DISPATCH_OUTCOMES, INTAKE_DISPATCH_VERDICTS, INTAKE_OUTCOMES, INTAKE_REFUSALS, openLedger,
+} from '../scripts/factory/ledger.mjs'
 
 const TARGET = 'scripts/factory/intake.mjs'
 const NOW = Date.parse('2026-01-02T00:00:00.000Z')
@@ -33,7 +35,7 @@ function field(name, value) {
 function issue({
   number, title = `Issue ${number}`, body = null, status = 'Ready', priority = 'P1',
   id = `ITEM-${number}`,
-  createdAt = `2025-12-${String(number).padStart(2, '0')}T00:00:00Z`,
+  createdAt = `2025-12-${String(number).padStart(2, '0')}T00:00:00Z`, content = {},
 } = {}) {
   const nodes = []
   if (status !== undefined) nodes.push(field('Status', status))
@@ -41,7 +43,7 @@ function issue({
   return {
     id,
     content: {
-      number, title, url: `https://example.test/issues/${number}`, body, createdAt,
+      number, title, url: `https://example.test/issues/${number}`, body, createdAt, ...content,
     },
     fieldValues: { nodes },
   }
@@ -195,6 +197,28 @@ function runIntake(nodes, options = {}) {
     dbPath: options.dbPath ?? null,
     config: { ...baseConfig, ...(options.config || {}) },
     deps: harness.deps,
+  })
+  return { ...harness, result }
+}
+
+function runOutcome(nodes, { dbPath: path, outcome = 'done', now = NOW, overrides = {} } = {}) {
+  const harness = dispatchDeps(nodes, overrides)
+  if (outcome === 'escalation') {
+    writeFileSync(harness.taskReturn, JSON.stringify({
+      status: 'escalation', summary: 'fixture', artifacts: [], details: { escalation: { why: 'same wall' } },
+    }))
+    harness.deps.crewRun = () => ({
+      exit: 3,
+      stdout: `${JSON.stringify({ status: 'escalation', task_return: harness.taskReturn })}\n`,
+      stderr: '',
+    })
+  }
+  const result = intakeRun({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    checkout: ROOT,
+    dbPath: path ?? null,
+    config: baseConfig,
+    deps: { ...harness.deps, now: () => now },
   })
   return { ...harness, result }
 }
@@ -418,6 +442,146 @@ test('normalDeps keeps the injected seams and defaults the runner without spawni
   assert.equal(deps.existsSync('x'), false)
   assert.equal(deps.runsInWindow(), 0)
   assert.equal(spawned, 0)
+})
+
+test('body digests are deterministic and repeat escalation details fail closed', () => {
+  assert.equal(bodyDigest(null), null)
+  assert.equal(bodyDigest(''), null)
+  assert.equal(bodyDigest('same'), bodyDigest('same'))
+  assert.notEqual(bodyDigest('same'), bodyDigest('changed'))
+  const verdicts = [
+    { outcome: 'escalation', task_slug: 'intake-297', created_at: '2026-01-02T01:00:00.000Z', issue_body_digest: bodyDigest('same') },
+    { outcome: 'escalation', task_slug: 'intake-297', created_at: '2026-01-02T00:00:00.000Z', issue_body_digest: null },
+  ]
+  const detail = repeatEscalationDetail({ verdicts, digest: bodyDigest('same') })
+  assert.match(detail, /2 consecutive escalations/)
+  assert.equal((detail.match(/intake-297/g) || []).length, 2)
+  assert.match(detail, /2026-01-02T00:00:00.000Z.*2026-01-02T01:00:00.000Z/)
+  assert.ok(detail.length < 400)
+  assert.equal(repeatEscalationDetail({ verdicts: verdicts.slice(0, 1), digest: bodyDigest('same') }), null)
+  assert.equal(repeatEscalationDetail({ verdicts, digest: bodyDigest('changed') }), null)
+
+  const longDetail = repeatEscalationDetail({
+    verdicts: [
+      { outcome: 'escalation', task_slug: `second-${'b'.repeat(193)}`, created_at: '2026-01-02T01:00:00.000Z' },
+      { outcome: 'escalation', task_slug: `first-${'a'.repeat(194)}`, created_at: '2026-01-02T00:00:00.000Z' },
+    ],
+  })
+  assert.ok(longDetail.length < 400)
+  assert.match(longDetail, /first-/)
+  assert.match(longDetail, /second-/)
+  assert.equal((longDetail.match(/2026-01-02T0[01]:00:00\.000Z/g) || []).length, 2)
+})
+
+test('two escalations park a same-body third sweep with dated evidence', () => {
+  const path = dbPath()
+  const nodes = [issue({ number: 297, body: intakeBody() })]
+  const first = runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T00:00:00.000Z') })
+  const second = runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T01:00:00.000Z') })
+  assert.equal(first.result.dispatch.outcome, 'escalation')
+  assert.equal(second.result.dispatch.outcome, 'escalation')
+  const third = runSweep(nodes, {
+    dbPath: path,
+    deps: { now: () => Date.parse('2026-01-02T02:00:00.000Z') },
+  }).result
+  assert.equal(third.picked, null)
+  const refusal = third.refusals.find(({ issue: number }) => number === 297)
+  assert.equal(refusal.reason, 'repeat-escalation')
+  assert.equal((refusal.detail.match(/intake-297/g) || []).length, 2)
+  assert.equal((refusal.detail.match(/2026-01-02T0[01]:00:00\.000Z/g) || []).length, 2)
+  assert.match(refusal.detail, /2 consecutive escalations/)
+})
+
+test('a changed body lifts the repeat escalation park, while metadata bumps do not', () => {
+  const path = dbPath()
+  const original = intakeBody()
+  const nodes = [issue({ number: 298, body: original })]
+  runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T00:00:00.000Z') })
+  runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T01:00:00.000Z') })
+  const bumped = runSweep([issue({
+    number: 298,
+    body: original,
+    content: {
+      updatedAt: '2026-06-01T00:00:00Z',
+      labels: { nodes: [{ name: 'needs-triage' }] },
+      comments: { totalCount: 4 },
+    },
+  })], { dbPath: path }).result
+  assert.equal(bumped.picked, null)
+  assert.equal(bumped.refusals[0].reason, 'repeat-escalation')
+  const changed = runSweep([issue({
+    number: 298,
+    body: intakeBody({ ask: 'Rescope the issue body before dispatch' }),
+  })], { dbPath: path }).result
+  assert.equal(changed.picked.issue, 298)
+  assert.equal(changed.refusals.some(({ reason }) => reason === 'repeat-escalation'), false)
+})
+
+test('an escalation followed by done leaves the issue pickable', () => {
+  const path = dbPath()
+  const nodes = [issue({ number: 299, body: intakeBody() })]
+  runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T00:00:00.000Z') })
+  runOutcome(nodes, { dbPath: path, outcome: 'done', now: Date.parse('2026-01-02T01:00:00.000Z') })
+  const next = runSweep(nodes, { dbPath: path }).result
+  assert.equal(next.picked.issue, 299)
+  assert.equal(next.refusals.some(({ reason }) => reason === 'repeat-escalation'), false)
+})
+
+test('hand dispatch still boots after two escalations and digest rows pair by dispatch', () => {
+  const path = dbPath()
+  const nodes = [issue({ number: 300, body: intakeBody() })]
+  const first = runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T00:00:00.000Z') })
+  runOutcome(nodes, { dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T01:00:00.000Z') })
+  const harness = dispatchDeps(nodes)
+  harness.deps.now = () => Date.parse('2026-01-02T02:00:00.000Z')
+  const row = dispatchPicked({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    picked: first.result.sweep.picked,
+    sweptAt: '2026-01-02T02:00:00.000Z',
+    boardItems: [{ issue: 300, item_id: 'ITEM-300', status: 'Ready' }],
+    checkout: ROOT, dbPath: path, config: baseConfig, deps: harness.deps,
+  })
+  assert.equal(row.outcome, 'done')
+  assert.equal(harness.calls.boots.length, 1)
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('intake_dispatches')
+  const hand = rows.filter(({ sweep_at }) => sweep_at === '2026-01-02T02:00:00.000Z')
+  assert.equal(hand.every(({ issue_body_digest }) => issue_body_digest === first.result.sweep.picked.body_digest), true)
+  ledger.close()
+})
+
+test('dispatch rows carry the body digest on claimed and settled steps, and changed bodies differ', () => {
+  const path = dbPath()
+  const firstBody = intakeBody()
+  const secondBody = intakeBody({ ask: 'A genuinely different rescope' })
+  const first = runOutcome([issue({ number: 301, body: firstBody })], {
+    dbPath: path, outcome: 'escalation', now: Date.parse('2026-01-02T00:00:00.000Z'),
+  })
+  const second = runOutcome([issue({ number: 301, body: secondBody })], {
+    dbPath: path, outcome: 'done', now: Date.parse('2026-01-02T01:00:00.000Z'),
+  })
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const rows = ledger.dumpTable('intake_dispatches')
+  const firstRows = rows.filter(({ sweep_at }) => sweep_at === first.result.sweep.swept_at)
+  const secondRows = rows.filter(({ sweep_at }) => sweep_at === second.result.sweep.swept_at)
+  const firstDigest = bodyDigest(firstBody)
+  const secondDigest = bodyDigest(secondBody)
+  assert.equal(firstRows.find(({ outcome }) => outcome === 'claimed').issue_body_digest, firstDigest)
+  assert.equal(firstRows.find(({ outcome }) => outcome === 'escalation').issue_body_digest, firstDigest)
+  assert.equal(secondRows.find(({ outcome }) => outcome === 'claimed').issue_body_digest, secondDigest)
+  assert.equal(secondRows.find(({ outcome }) => outcome === 'done').issue_body_digest, secondDigest)
+  assert.notEqual(firstDigest, secondDigest)
+  ledger.close()
+})
+
+test('adjudicated dispatch verdicts are a strict subset of dispatch outcomes', () => {
+  assert.equal(INTAKE_DISPATCH_VERDICTS.every((outcome) => INTAKE_DISPATCH_OUTCOMES.includes(outcome)), true)
+  for (const excluded of ['claimed', 'promoted', 'refused']) assert.equal(INTAKE_DISPATCH_VERDICTS.includes(excluded), false)
+})
+
+test('intake source never names updatedAt as rescope evidence', () => {
+  const source = readFileSync(join(ROOT, 'scripts/factory/intake.mjs'), 'utf8')
+  assert.equal(source.includes('updatedAt'), false)
 })
 
 test('a picked issue compiles one brief, boots once, runs once, and claims the work column', () => {

@@ -150,6 +150,7 @@ export const INTAKE_REFUSALS = Object.freeze([
   'stop-switch', 'window-cap', 'rate-limit-floor',
   'priority-unknown', 'intake-block-missing', 'intake-block-malformed',
   'brief-uncompilable', 'protected-path', 'tier-judge', 'not-first-in-order',
+  'repeat-escalation',
 ])
 export const INTAKE_BRAKE_TRANSITIONS = Object.freeze(['engaged', 'cleared'])
 export const INTAKE_BRAKE_OUTCOMES = Object.freeze(['ok', 'failed'])
@@ -161,6 +162,9 @@ export const INTAKE_BRAKE_OUTCOMES = Object.freeze(['ok', 'failed'])
 export const INTAKE_DISPATCH_OUTCOMES = Object.freeze([
   'claimed', 'done', 'escalation', 'converge', 'refused', 'unreadable', 'promoted',
 ])
+// The subset of dispatch outcomes where a crew actually ran and adjudicated.
+// claimed/promoted are steps, not verdicts, and refused never reached a crew.
+export const INTAKE_DISPATCH_VERDICTS = Object.freeze(['done', 'escalation', 'converge', 'unreadable'])
 
 // The closed set of CELL availability failures — a cell that could not hold a
 // seat, died mid-assignment, or returned nothing usable. Deliberately NOT a
@@ -607,6 +611,7 @@ export const TABLES = Object.freeze({
       { name: 'pr_number', decl: 'INTEGER' },
       { name: 'pr_url', decl: 'TEXT' },
       { name: 'created_at', decl: 'TEXT' },
+      { name: 'issue_body_digest', decl: 'TEXT' },
     ],
     unique: [['board_owner', 'board_project', 'issue', 'outcome', 'created_at']],
     indexes: [{ name: 'intake_dispatches_outcome_idx', cols: ['outcome', 'created_at'] }],
@@ -1706,6 +1711,7 @@ export function openLedger({
       pr_number: input.pr_number ?? null,
       pr_url: input.pr_url == null ? null : String(input.pr_url),
       created_at: isoMs(input.created_at ?? now()),
+      issue_body_digest: input.issue_body_digest == null ? null : String(input.issue_body_digest),
     }, stats)
     if (args.board_owner != null) args.board_owner = args.board_owner.slice(0, 120)
     if (args.sweep_at != null) args.sweep_at = String(args.sweep_at).slice(0, 40)
@@ -1720,6 +1726,7 @@ export function openLedger({
     if (args.board_from != null) args.board_from = args.board_from.slice(0, 120)
     if (args.board_to != null) args.board_to = args.board_to.slice(0, 120)
     if (args.pr_url != null) args.pr_url = args.pr_url.slice(0, 1000)
+    if (args.issue_body_digest != null) args.issue_body_digest = args.issue_body_digest.slice(0, 64)
     appendJsonl('recordIntakeDispatch', args)
     mirror((conn) => {
       const cols = tableColumnNames('intake_dispatches').filter((c) => c !== 'id')
@@ -2220,6 +2227,21 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  // The most recent ADJUDICATED dispatches for one issue, newest first — the
+  // breaker's evidence. Steps (claimed/promoted) and crew-less refusals are
+  // excluded by INTAKE_DISPATCH_VERDICTS.
+  function issueDispatchVerdicts({ board_owner, board_project, issue, limit = 2 } = {}) {
+    const marks = INTAKE_DISPATCH_VERDICTS.map(() => '?').join(', ')
+    return queryRows(`
+      SELECT outcome, reason, task_slug, issue_body_digest, created_at
+      FROM intake_dispatches
+      WHERE board_owner = ? AND board_project = ? AND issue = ?
+        AND outcome IN (${marks})
+      ORDER BY created_at DESC, id DESC
+      LIMIT ?
+    `, [board_owner, board_project, issue, ...INTAKE_DISPATCH_VERDICTS, limit])
+  }
+
   function seatTeardowns({ since = null, until = null } = {}) {
     return queryRows(`
       SELECT outcome, reason,
@@ -2472,7 +2494,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, seatTeardowns, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, eligibleTasks, runSet, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,

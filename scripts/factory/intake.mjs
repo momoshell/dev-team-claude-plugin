@@ -14,6 +14,7 @@
 // from the caller's checkout or process.cwd().
 
 import { spawnSync as cpSpawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync,
   writeFileSync as fsWriteFileSync, mkdirSync as fsMkdirSync,
@@ -55,6 +56,45 @@ export const DEFAULT_INTAKE_CONFIG = Object.freeze({
 
 // This is a floor the configuration can raise and can never lower.
 export const MIN_SWEEP_INTERVAL_MS = 60_000
+
+// Two consecutive escalations is the MEASURED bound from #329 (issue #297
+// and #145 each burned four dispatches). Deliberately not a config knob in
+// this slice; the number is named in the refusal text.
+const REPEAT_ESCALATION_BOUND = 2
+const REPEAT_ESCALATION_TASK_DISPLAY_CHARS = 60
+const REPEAT_ESCALATION_TIME_DISPLAY_CHARS = 24
+
+function repeatEscalationDisplay(value, limit) {
+  const text = String(value)
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`
+}
+
+export function bodyDigest(body) {
+  if (typeof body !== 'string' || body.length === 0) return null
+  return createHash('sha256').update(body, 'utf8').digest('hex')
+}
+
+// verdicts: newest-first rows from ledger.issueDispatchVerdicts.
+// Returns null to dispatch, or the refusal detail to park.
+export function repeatEscalationDetail({ verdicts = [], digest = null } = {}) {
+  if (!Array.isArray(verdicts) || verdicts.length < REPEAT_ESCALATION_BOUND) return null
+  const recent = verdicts.slice(0, REPEAT_ESCALATION_BOUND)
+  if (recent.some((row) => row?.outcome !== 'escalation')) return null
+
+  const newest = recent[0]
+  const hasNewestDigest = typeof newest?.issue_body_digest === 'string'
+    && newest.issue_body_digest.length > 0
+  const hasDigest = typeof digest === 'string' && digest.length > 0
+  if (hasNewestDigest && hasDigest && newest.issue_body_digest !== digest) return null
+
+  const [oldest, latest] = [...recent].reverse()
+  const escalations = [oldest, latest].map((row) => {
+    const task = repeatEscalationDisplay(row?.task_slug ?? 'unknown-task', REPEAT_ESCALATION_TASK_DISPLAY_CHARS)
+    const at = repeatEscalationDisplay(row?.created_at ?? 'unknown-time', REPEAT_ESCALATION_TIME_DISPLAY_CHARS)
+    return `${task} at ${at}`
+  }).join(', ')
+  return `${REPEAT_ESCALATION_BOUND} consecutive escalations (the measured bound; not configurable): ${escalations} — the issue body is unchanged since the last escalated dispatch, so a third dispatch walks into the same wall. Rescope the issue body to lift this park.`
+}
 
 export const REQUIRED_INTAKE_CONFIG_KEYS = Object.freeze([
   'statusField', 'readyColumn', 'workColumn', 'reviewColumn',
@@ -669,11 +709,31 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
   const candidates = fetched.items.filter((item) => item.status === settings.readyColumn)
   const refusals = []
   const survivors = []
+  const parks = new Map() // issue string -> refusal detail
+  // withLedger is a no-op without dbPath, and degraded mirrors return no rows;
+  // with no evidence the breaker fails OPEN rather than inventing history.
+  withLedger(dbPath, (ledger) => {
+    for (const item of candidates) {
+      const detail = repeatEscalationDetail({
+        verdicts: ledger.issueDispatchVerdicts({
+          board_owner: usableBoard.owner,
+          board_project: usableBoard.projectNumber,
+          issue: item.issue,
+          limit: REPEAT_ESCALATION_BOUND,
+        }),
+        digest: bodyDigest(item.body),
+      })
+      if (detail) parks.set(String(item.issue), detail)
+    }
+  })
   for (const item of candidates) {
     if (!Array.isArray(settings.priorityOrder) || !settings.priorityOrder.includes(item.priority)) {
       refusals.push(refusalFor(item, 'priority-unknown'))
       continue
     }
+
+    const park = parks.get(String(item.issue))
+    if (park) { refusals.push(refusalFor(item, 'repeat-escalation', park)); continue }
 
     const block = extractIntakeBlock(item.body)
     if (!block.ok) {
@@ -735,6 +795,7 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
         tier: pickedCandidate.tier,
         where: pickedCandidate.where,
         request: pickedCandidate.request,
+        body_digest: bodyDigest(pickedCandidate.item.body),
       }
     : null
   const result = {
@@ -861,6 +922,7 @@ function recordDispatchStep({ dbPath, board, picked, sweptAt, deps, outcome, rea
     board_to: fields.board_to ?? null,
     pr_number: fields.pr_number ?? null,
     pr_url: fields.pr_url ?? null,
+    issue_body_digest: picked.body_digest ?? null,
   }
   let recorded = { ...row, created_at: timestamp(nowValue(deps)) }
   withLedger(dbPath, (ledger) => {

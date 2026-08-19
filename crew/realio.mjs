@@ -50,11 +50,19 @@ const defaultBlockingSleep = (ms) => {
 const locallySettledGroups = new Set()
 let groupProbeShim = null
 let groupProbeShimOriginal = null
+// ONE notion of liveness for both ps probes: a `Z` state means the process has
+// terminated and the kernel is holding its exit status for a parent that has not
+// reaped it. That is a MEASURED death, not an over-claim (ADR-030) — unlike
+// process.kill(pid, 0), which succeeds for a zombie and cannot see this at all.
+export function statIsZombie(stat) {
+  return typeof stat === 'string' && stat.trim().startsWith('Z')
+}
+
 function processIsZombie(pid) {
   if (!Number.isSafeInteger(pid) || pid <= 1) return false
   try {
     const result = cpSpawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', timeout: DESCENDANT_PS_TIMEOUT_MS })
-    return result?.status === 0 && String(result.stdout || '').trim().split(/\s+/).some((state) => state.startsWith('Z'))
+    return result?.status === 0 && String(result.stdout || '').trim().split(/\s+/).some(statIsZombie)
   } catch { return false }
 }
 function markLocallySettledGroup(rootPid, pgid = rootPid) {
@@ -105,23 +113,36 @@ function freshDescendantSnapshot(deps = {}) {
 
 export function psSnapshot(deps = {}) {
   const spawnSync = deps.spawnSync || cpSpawnSync
-  let result
-  try {
-    result = spawnSync('ps', ['-eo', 'pid=,ppid=,pgid=,lstart='], {
-      encoding: 'utf8', timeout: DESCENDANT_PS_TIMEOUT_MS,
-    })
-  } catch { return emptySnapshot() }
-  const rows = new Map()
-  const text = typeof result?.stdout === 'string' ? result.stdout : ''
-  for (const line of text.split(/\r?\n/)) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/.exec(line)
-    if (!match) continue
-    const pid = Number(match[1]), ppid = Number(match[2]), pgid = Number(match[3])
-    const start = match[4].trim()
-    if (![pid, ppid, pgid].every(Number.isSafeInteger) || !start) continue
-    rows.set(pid, { pid, ppid, pgid, start })
+  // `stat` is what tells a running process from a terminated-but-unreaped one;
+  // `lstart` stays LAST because it is the only column that contains spaces. A ps
+  // that cannot print the state column still yields a usable table: fall back to
+  // the four-column request and leave `stat` null — unmeasured is never a
+  // zombie, so a platform that cannot answer weakens no refusal.
+  const read = (format) => {
+    let result
+    try {
+      result = spawnSync('ps', ['-eo', format], { encoding: 'utf8', timeout: DESCENDANT_PS_TIMEOUT_MS })
+    } catch { return null }
+    const withStat = format.includes('stat=')
+    const pattern = withStat
+      ? /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/
+      : /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/
+    const rows = new Map()
+    const text = typeof result?.stdout === 'string' ? result.stdout : ''
+    for (const line of text.split(/\r?\n/)) {
+      const match = pattern.exec(line)
+      if (!match) continue
+      const pid = Number(match[1]), ppid = Number(match[2]), pgid = Number(match[3])
+      const stat = withStat ? match[4] : null
+      const start = (withStat ? match[5] : match[4]).trim()
+      if (![pid, ppid, pgid].every(Number.isSafeInteger) || !start) continue
+      rows.set(pid, { pid, ppid, pgid, start, stat })
+    }
+    return { ok: result?.status === 0 && rows.size > 0, rows }
   }
-  return { ok: result?.status === 0 && rows.size > 0, rows }
+  const measured = read('pid=,ppid=,pgid=,stat=,lstart=')
+  if (measured?.ok === true) return measured
+  return read('pid=,ppid=,pgid=,lstart=') || measured || emptySnapshot()
 }
 
 export function escapedDescendants(snapshot, rootPid) {
@@ -142,7 +163,7 @@ export function escapedDescendants(snapshot, rootPid) {
     const row = queue.shift()
     if (!row || seen.has(row.pid)) continue
     seen.add(row.pid)
-    if (Number.isSafeInteger(row.pgid) && row.pgid > 1 && row.pgid !== root.pgid) {
+    if (Number.isSafeInteger(row.pgid) && row.pgid > 1 && row.pgid !== root.pgid && !statIsZombie(row.stat)) {
       out.push({ pid: row.pid, pgid: row.pgid, start: row.start })
     }
     for (const child of children.get(row.pid) || []) queue.push(child)
@@ -162,11 +183,22 @@ export function verifyGroup(candidate, snapshot, deps = {}) {
     if (err?.code !== 'EPERM') return refuse(LIVENESS.UNKNOWN, 'probe-unknown')
   }
   if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return refuse(LIVENESS.UNKNOWN, 'probe-unknown')
+  let unreaped = null
   for (const anchor of Array.isArray(candidate?.anchors) ? candidate.anchors : []) {
     const row = snapshot.rows.get(anchor?.pid)
-    if (row && row.pgid === pgid && anchor.pgid === pgid && row.start === anchor.start) {
-      return { signalable: true, liveness: LIVENESS.ALIVE, reason: 'probe-alive', anchor }
-    }
+    if (!(row && row.pgid === pgid && anchor.pgid === pgid && row.start === anchor.start)) continue
+    if (statIsZombie(row.stat)) { unreaped = unreaped || anchor; continue }
+    return { signalable: true, liveness: LIVENESS.ALIVE, reason: 'probe-alive', anchor }
+  }
+  if (unreaped) {
+    // A dead ANCHOR is not a dead GROUP: kill(-pgid, 0) stays positive while that
+    // anchor is unreaped, and a `Z` state measures ONE pid. The matched anchor
+    // binds the identity; the table decides liveness, and only a group with no
+    // running member at all is dead.
+    const peers = groupPeerState(pgid, snapshot)
+    if (peers.state === LIVENESS.DEAD) return { signalable: false, liveness: LIVENESS.DEAD, reason: 'probe-dead', anchor: unreaped }
+    if (peers.state === LIVENESS.UNKNOWN) return refuse(LIVENESS.UNKNOWN, 'probe-unknown')
+    return { signalable: true, liveness: LIVENESS.ALIVE, reason: 'probe-alive', anchor: unreaped }
   }
   return refuse(LIVENESS.ALIVE, 'evidence-mismatch')
 }
@@ -437,6 +469,50 @@ function pollGroupUntilDead(pgid, deps = {}) {
   return groupProbe(pgid, deps)
 }
 
+// Group liveness measured from a ps TABLE, never from kill(-pgid, 0): an unreaped
+// member keeps signal zero positive forever, so only the snapshot can say whether
+// any member of the group is still RUNNING. A table we could not read is unknown,
+// never a death claim.
+function groupPeerState(pgid, snapshot) {
+  if (!Number.isSafeInteger(pgid) || pgid <= 1) return { state: LIVENESS.UNKNOWN }
+  if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return { state: LIVENESS.UNKNOWN }
+  for (const member of snapshot.rows.values()) {
+    if (member?.pgid === pgid && !statIsZombie(member.stat)) return { state: LIVENESS.ALIVE }
+  }
+  return { state: LIVENESS.DEAD }
+}
+
+function pollGroupPeersUntilGone(pgid, deps = {}) {
+  const sleep = deps.sleep || defaultBlockingSleep
+  let probe = groupPeerState(pgid, freshDescendantSnapshot(deps))
+  for (let i = 0; i < DESCENDANT_SETTLE_POLLS && probe.state === LIVENESS.ALIVE; i += 1) {
+    sleep(DESCENDANT_SETTLE_MS)
+    probe = groupPeerState(pgid, freshDescendantSnapshot(deps))
+  }
+  return probe
+}
+
+// A root that is an exact ZOMBIE row has already passed the pgid/start binding,
+// so unlike an ABSENT root it still safely identifies -root_pgid. Its live
+// same-pgid peers are excluded from descendant capture, so no later escaped-group
+// sweep will ever reclaim them: settle them here, on the same TERM/KILL ladder,
+// measuring what remains from ps rather than from signal zero.
+function settleZombieRootPeers(pgid, deps = {}) {
+  const unproven = { result: { root_settled: 'unproven', root_liveness: LIVENESS.DEAD, reason: 'probe-unknown' }, tally: 'unproven' }
+  const proven = { result: { root_settled: 'proven', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }, tally: 'settled' }
+  const term = signalGroup(pgid, 'SIGTERM', deps)
+  if (term.state === LIVENESS.UNKNOWN || term.refused) return unproven
+  let peers = pollGroupPeersUntilGone(pgid, deps)
+  if (peers.state === LIVENESS.DEAD) return proven
+  if (peers.state === LIVENESS.UNKNOWN) return unproven
+  const killed = signalGroup(pgid, 'SIGKILL', deps)
+  if (killed.state === LIVENESS.UNKNOWN || killed.refused) return unproven
+  peers = pollGroupPeersUntilGone(pgid, deps)
+  if (peers.state === LIVENESS.DEAD) return proven
+  if (peers.state === LIVENESS.UNKNOWN) return unproven
+  return { result: { root_settled: 'failed', root_liveness: LIVENESS.DEAD, reason: 'probe-alive' }, tally: 'failed' }
+}
+
 function rootBinding(record, snapshot, deps = {}) {
   if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return { state: LIVENESS.UNKNOWN, reason: 'probe-unknown', row: null }
   const row = snapshot.rows.get(record.root_pid)
@@ -453,6 +529,11 @@ function rootBinding(record, snapshot, deps = {}) {
       return { state: LIVENESS.DEAD, reason: 'probe-dead', row }
     }
   }
+  // ps prints what signal-zero cannot: a `Z` state is a root that has already
+  // terminated and is merely unreaped. Treat the PROCESS as dead — the existing,
+  // already-proven sweep path — while keeping the binding that still identifies
+  // its process group.
+  if (statIsZombie(row.stat)) return { state: LIVENESS.DEAD, reason: 'probe-dead', row, zombie: true }
   return { state: LIVENESS.ALIVE, reason: 'probe-alive', row }
 }
 
@@ -478,8 +559,21 @@ export function settleSeatRoots({ taskDir, log, deps = {} } = {}) {
       const initial = freshDescendantSnapshot(deps)
       const bound = rootBinding(record, initial, deps)
       if (bound.state === LIVENESS.DEAD) {
-        result = { root_settled: 'already-dead', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
-        summary.already_dead += 1
+        // An ABSENT root has lost its identity and any claim on a pgid with it; an
+        // exact zombie row has not. Only the zombie case may still settle
+        // -root_pgid, and only while ps shows a non-zombie member of that group.
+        const peers = bound.zombie === true ? groupPeerState(record.root_pgid, initial) : { state: LIVENESS.DEAD }
+        if (peers.state === LIVENESS.ALIVE) {
+          const settled = settleZombieRootPeers(record.root_pgid, deps)
+          result = settled.result
+          summary[settled.tally] += 1
+        } else if (peers.state === LIVENESS.UNKNOWN) {
+          result = { root_settled: 'unproven', root_liveness: LIVENESS.DEAD, reason: 'probe-unknown' }
+          summary.unproven += 1
+        } else {
+          result = { root_settled: 'already-dead', root_liveness: LIVENESS.DEAD, reason: 'probe-dead' }
+          summary.already_dead += 1
+        }
       } else if (bound.reason === 'root-unidentified') {
         // Only a PRESENT row that contradicts the captured identity is a measured
         // mismatch. An unavailable snapshot measured nothing at all, and an
@@ -1304,6 +1398,11 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     },
     captureDescendants() { return capture.round(true) },
     reclaimDescendants() {
+      // settleSeatTeardown calls THIS method, and it is the run-end sweep that
+      // can stamp a record terminal. Settle roots FIRST, or a zombie root's live
+      // same-pgid peers are never examined: the final teardownCore pass skips
+      // every already-swept record. Never let it block the sweep.
+      try { settleSeatRoots({ taskDir: paths.taskDir, log: io.log, deps: { ...deps, spawnSync, sleep } }) } catch { /* root settlement is evidence, never a sweep blocker */ }
       return reclaimDescendants({
         taskDir: paths.taskDir, log: io.log, emit: io.emit,
         deps: { ...deps, spawnSync, sleep },

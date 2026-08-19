@@ -21,7 +21,7 @@ import {
   validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
-  MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines,
+  MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines, applyPrescriptionLines,
   VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, EXECUTIONS, WRITE_SURFACES, ENVELOPE_FIELD_KINDS,
   UNIVERSAL_STAGE_HEADS, SHAPE_SOURCES, REVIEWED_CORE_STAGES, TRIAGE_STAGE_HEAD, TRIAGE_SOURCES, TRIAGE_STAGES,
   stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect,
@@ -1227,6 +1227,146 @@ test('review changes-needed bounces the builder, second review passes', () => {
   assert.equal(res.status, 'done')
   assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 2)
   assert.match(Object.values(io.calls.writes).find((w) => /Review bounce/.test(w)), /review\.md/)
+})
+
+test('a passing verify round is free while the changes-needed round is charged', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(
+    io.calls.logs.filter((r) => r.review_round).map((r) => r.review_round),
+    [
+      { n: 1, verdict: 'changes-needed', accounting: 'counted', charged: 1 },
+      { n: 2, verdict: 'pass', accounting: 'free', charged: 1 },
+    ],
+  )
+})
+
+test('a re-review that surfaces NEW must-fixes is charged like any other', () => {
+  const firstFindings = [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the original defect' }]
+  const secondFindings = [{ id: 'RV2-1', severity: 'must-fix', location: 'a.mjs:9', summary: 'a NEW defect the fix introduced' }]
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', firstFindings),
+      'reviewer:2': reviewEnv('changes-needed', secondFindings),
+      'lead:1': leadEnv('accept'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  driveTask(CTX, io)
+  const rounds = io.calls.logs.filter((r) => r.review_round).map((r) => r.review_round)
+  assert.equal(rounds.length, 2)
+  assert.equal(rounds[0].accounting, 'counted')
+  assert.equal(rounds[0].charged, 1)
+  assert.equal(rounds[1].accounting, 'counted')
+  assert.equal(rounds[1].charged, 2)
+})
+
+test('review exhaustion on a revise-revise sequence is unchanged', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
+      'lead:1': leadEnv('accept'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  const want = 'Review rounds are exhausted (2) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?'
+  assert.ok(io.calls.writes[`${TD}/decision-1.md`].includes(want))
+  assert.equal(res.details.consults, 1)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'reviewer').length, 2)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('an unreadable verdict is charged nothing and reuses its round number', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': { status: 'done', role: 'reviewer', details: { verdict: 'unknown-shape', review_path: `${TD}/review.md` } },
+      'lead:1': leadEnv('bounce'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.deepEqual(
+    io.calls.logs.filter((r) => r.review_round).map((r) => r.review_round),
+    [
+      { n: 1, verdict: 'unknown-shape', accounting: 'free', charged: 0 },
+      { n: 1, verdict: 'pass', accounting: 'free', charged: 0 },
+    ],
+  )
+})
+
+test('the plan-revision brief names the check and says to apply it verbatim', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': planEnv(), 'tech-lead:2': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  const brief = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.ok(brief.startsWith('# Plan revision (round 1)'))
+  assert.ok(brief.includes('plan-check.md'))
+  assert.match(brief, /verbatim/)
+  assert.match(brief, /do not re-derive/)
+})
+
+test('the granted plan-revision bounce carries the same instruction', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('approve'),
+      'lead:1': leadEnv('bounce'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX_TL, io)
+  assert.equal(res.status, 'done')
+  assert.match(io.calls.writes[`${TD}/plan-bounce-r2.md`], /do not re-derive/)
+})
+
+test('the review bounce brief tells the builder to apply the review verbatim', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const brief = io.calls.writes[`${TD}/build-bounce-r1.md`]
+  assert.ok(brief.startsWith('# Review bounce (round 1)'))
+  assert.match(brief, /review\.md/)
+  assert.match(brief, /Plan:/)
+  assert.match(brief, /do not re-derive/)
+  assert.equal(applyPrescriptionLines('the review')[0], '')
+  assert.match(applyPrescriptionLines('the review').join('\n'), /the review PRESCRIBED, verbatim/)
 })
 
 test('planner insufficient -> lead consult; bounce with guidance lands in the bounce brief', () => {

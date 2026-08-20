@@ -227,6 +227,61 @@ test('adapter-claude.seatCommand is byte-identical to the pre-refactor paneComma
   assert.equal(seatCommand(SAMPLE), EXPECTED)
 })
 
+// #412 — the PERMANENT pin for the guarantee #403/#411 rests on. The task gate
+// that first proved it (G6) died with its run; nothing in the suite pinned the
+// claude planner's composed pane command. These two tests are that pin: they
+// compose through the REAL shipped register (loadCapabilities/grantsFor/
+// assertGrantsBacked — the boot path of resolveAdapters, crew.mjs:807-809) and
+// assert the whole command STRING, not that a flag was present.
+// A synthetic register root keeps resolved grant paths machine-independent.
+const PIN_SEAT = Object.freeze({
+  role: 'planner', promptFile: '/tmp/crew-task/role-planner.md',
+  tools: SEAT_DEFAULTS.planner.tools, deny: SEAT_DEFAULTS.planner.deny, taskDir: '/tmp/crew-task',
+  bootBrief: 'Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait.',
+})
+const PIN_ROOT = { root: '/repo', exists: () => true, readFile: () => JSON.stringify({ name: 'scout', prompt: 'pinned stub' }) }
+const pinnedGrants = (register, agent) =>
+  assertGrantsBacked('planner', grantsFor(register, 'planner', { ...PIN_ROOT, agent }), register, { agent })
+
+test('the default claude planner pane command is pinned byte for byte across the granted and ungranted paths', () => {
+  const register = loadCapabilities()
+  // GRANTED: the register's role-level `tools: ["Task"]` reaches --allowedTools
+  // through adapter-claude's allowedTools() merge. Byte-for-byte, no exceptions.
+  assert.equal(
+    seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+  )
+  // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
+  // (no Task), so the granted assertion above is not vacuous.
+  assert.equal(
+    seatCommand({ ...PIN_SEAT, model: 'opus', grants: EMPTY_GRANTS }),
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+  )
+  // The load-bearing constraint of #403: the by_agent overlay never reaches the
+  // claude planner, so stripping it from the register moves NOTHING.
+  const stripped = JSON.parse(JSON.stringify(register))
+  delete stripped.roles.planner.by_agent
+  assert.equal(
+    seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(loadCapabilities({ register: stripped }), 'claude') }),
+    seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
+  )
+})
+
+test('the granted pi planner pane command is pinned byte for byte so by_agent delivery reaches argv', () => {
+  const register = loadCapabilities()
+  // The by_agent overlay's extension and agent grant must reach ARGV: -e, the
+  // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
+  assert.equal(
+    piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+  )
+  // Ungranted: the same pi seat with no grants loses exactly the delivery.
+  assert.equal(
+    piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: EMPTY_GRANTS }),
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls" --exclude-tools "edit" --no-extensions --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+  )
+})
+
 test('every shipped capability profile is exact, complete, and frozen', async () => {
   for (const [role, seat] of Object.entries(SEAT_DEFAULTS)) assert.equal(seat.agent, 'claude', `${role} has no agent`)
   const claudeMod = await import('./adapters/adapter-claude.mjs')

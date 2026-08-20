@@ -268,9 +268,13 @@ test('loadAgentDefinition mirrors the register four refusal classes', () => {
   const badPrompt = mod.loadAgentDefinition({ name: 'scout', def: '/prompt' }, { readFile: () => JSON.stringify({ name: 'scout', prompt: '' }) })
   assert.match(badPrompt.error, /non-empty prompt/)
   const accepted = mod.loadAgentDefinition({ name: 'scout', def: '/ok' }, {
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'm', thinking: 'high' }),
+  })
+  assert.deepEqual(accepted.definition, { name: 'scout', prompt: 'p', tools: ['read'], model: 'm', thinking: 'high' })
+  const noThinking = mod.loadAgentDefinition({ name: 'scout', def: '/no-thinking' }, {
     readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'm' }),
   })
-  assert.deepEqual(accepted.definition, { name: 'scout', prompt: 'p', tools: ['read'], model: 'm' })
+  assert.equal(noThinking.definition.thinking, undefined)
   const defaults = mod.loadAgentDefinition({ name: 'scout', def: '/defaults' }, { readFile: () => JSON.stringify({ name: 'scout', prompt: 'p' }) })
   assert.deepEqual(defaults.definition.tools, ['read', 'grep', 'find', 'ls'])
 })
@@ -492,6 +496,11 @@ test('ctx supplies the child model, thinking level and cwd', async () => {
   })
   assert.equal(pinned.calls[0].args[pinned.calls[0].args.indexOf('--model') + 1], 'anthropic/custom')
   assert.equal(pinned.calls[0].args.includes('--thinking'), false)
+  const pinnedThinking = await driven(mod, {
+    defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'anthropic/custom', thinking: 'high' }),
+  })
+  assert.equal(pinnedThinking.calls[0].args[pinnedThinking.calls[0].args.indexOf('--model') + 1], 'anthropic/custom')
+  assert.equal(pinnedThinking.calls[0].args[pinnedThinking.calls[0].args.indexOf('--thinking') + 1], 'high')
 })
 
 test('the granted pi seat activates the agent tool and transports the allowlist', () => {

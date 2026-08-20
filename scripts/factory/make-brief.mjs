@@ -26,7 +26,7 @@
 // A tier is proposed, never decided: #45 item 4's ratified rule lives here
 // because these mechanical signals exist before boot. Protected paths are the
 // authored floor plus additions from the profile, --protected JSON, or a
-// library parameter; blueprint/shape proposal is deliberately absent pending #251.
+// library parameter; blueprint proposal is deliberately absent pending #251.
 //
 // A blank decision slot is not authored by this module: it is emitted as the
 // literal UNFILLED SLOT marker so the orchestrator can fill it. The ask is the
@@ -62,6 +62,30 @@ const BASELINE_TIMEOUT_MS = 300_000
 
 export const TIER_NAMES = Object.freeze(['mechanical', 'build', 'judge'])
 export const DEFAULT_PROTECTED_PATHS = resolveProtectedPaths()
+export const LADDER_PATH = new URL('../../crew/model-ladder.json', import.meta.url)
+
+// The four ratified strength bands (crew/model-ladder.json, ratified 2026-08-14).
+// A strength proposal is only ever a member of this list; an unreadable ladder
+// proposes nothing rather than inventing a name.
+export function readLadderBands(ladderPath = LADDER_PATH) {
+  try {
+    const data = JSON.parse(readFileSync(ladderPath, 'utf8'))
+    return Object.freeze(data.bands
+      .map((band) => band && band.band)
+      .filter((name) => typeof name === 'string' && name.length > 0))
+  } catch {
+    return Object.freeze([])
+  }
+}
+
+export const LADDER_BANDS = readLadderBands()
+
+// #291: risk pins the seats that GOVERN (shape) …
+const JUDGE_PROTECTED_FLOOR = 2
+// … and complexity prices the seats that PRODUCE (strength).
+const STRENGTH_BY_COMPLEXITY = Object.freeze({
+  mechanical: 'utility', build: 'workhorse', judge: 'frontier',
+})
 const MECHANICAL_MAX_SOURCES = 1
 const BUILD_MAX_SOURCES = 4
 const BROAD_TRIPWIRE_FLOOR = 6
@@ -899,7 +923,41 @@ function proposalBand(sourceCount) {
   return { band: '≥5', tier: 'judge' }
 }
 
-export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECTED_PATHS, protectedBasis = null } = {}) {
+function proposeShape(protectedHits) {
+  if (protectedHits.length === 0) {
+    return { shape: 'mechanical', reasons: ['risk signal · protected-path hits: none — shape mechanical'] }
+  }
+  if (protectedHits.length < JUDGE_PROTECTED_FLOOR) {
+    return { shape: 'build', reasons: [`risk signal · protected path hit: ${protectedHits.join(', ')} — shape build`] }
+  }
+  return {
+    shape: 'judge',
+    reasons: [`risk signal · ${protectedHits.length} protected path hits: ${protectedHits.join(', ')} — shape judge`],
+  }
+}
+
+function proposeStrength(complexityTier, signals, ladderBands) {
+  const band = STRENGTH_BY_COMPLEXITY[complexityTier] ?? null
+  const reasons = [
+    `complexity signal · scope breadth: ${signals.sourceCount} source file(s) named by where`,
+    `complexity signal · tripwire tests pinning that scope: ${signals.tripwireCount}`,
+    `complexity signal · directory where: ${signals.directoryWhere.length ? signals.directoryWhere.join(', ') : 'none'}`,
+  ]
+  if (band == null || !ladderBands.includes(band)) {
+    return { strength: null, reasons: [...reasons, `no ratified ladder band for complexity ${complexityTier} — proposing none`] }
+  }
+  return { strength: band, reasons: [...reasons, `complexity ${complexityTier} → ratified ladder band ${band}`] }
+}
+
+// The three absence cases propose NEITHER and say why, rather than defaulting.
+function absentProposal(reasons, signals) {
+  return {
+    tier: null, shape: null, strength: null,
+    reasons, shapeReasons: [...reasons], strengthReasons: [...reasons], signals,
+  }
+}
+
+export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECTED_PATHS, protectedBasis = null, ladderBands = LADDER_BANDS } = {}) {
   const normalised = normaliseProtectedPaths(protectedPaths)
   const protectedEntries = resolveProtectedPaths(normalised)
   const basisReason = `protected paths in force: ${protectedEntries.length}${protectedBasis ? ` · ${protectedBasis}` : ' · authored floor (no profile basis supplied)'}`
@@ -909,17 +967,16 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
       && ['file', 'directory'].includes(entry.kind))
     : []
   if (verifiedWhere.length === 0) {
-    return {
-      tier: null,
-      reasons: [basisReason, 'no verified where entries — nothing to measure'],
-      signals: {
+    return absentProposal(
+      [basisReason, 'no verified where entries — nothing to measure'],
+      {
         sourceCount: 0,
         tripwireCount: 0,
         directoryWhere: [],
         protectedHits: [],
         suppressedKeys: [],
       },
-    }
+    )
   }
 
   const sourceDiscovery = discovery && typeof discovery === 'object' ? discovery : {}
@@ -930,10 +987,9 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
       .sort()
     : []
   if (candidates.length === 0) {
-    return {
-      tier: null,
-      reasons: [basisReason, 'discovery produced no scope candidates'],
-      signals: {
+    return absentProposal(
+      [basisReason, 'discovery produced no scope candidates'],
+      {
         sourceCount: 0,
         tripwireCount: 0,
         directoryWhere: [...new Set(verifiedWhere
@@ -942,7 +998,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
         protectedHits: [],
         suppressedKeys: [],
       },
-    }
+    )
   }
 
   const tripwires = Array.isArray(sourceDiscovery.tripwires) ? sourceDiscovery.tripwires : []
@@ -966,11 +1022,10 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   }
 
   if (tripwires.length === 0 && broadKeys.length > 0) {
-    return {
-      tier: null,
-      reasons: [basisReason, `breadth is unmeasured: 0 tripwire tests found while ${broadKeys.length} key(s) exceeded the broad-key limit — absent, not zero`],
+    return absentProposal(
+      [basisReason, `breadth is unmeasured: 0 tripwire tests found while ${broadKeys.length} key(s) exceeded the broad-key limit — absent, not zero`],
       signals,
-    }
+    )
   }
 
   const { band, tier: baseTier } = proposalBand(sourceCount)
@@ -990,6 +1045,7 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
     reasons.push(`broad pinning: ${tripwires.length} tripwire tests — raised mechanical → build`)
   }
 
+  const complexityTier = tier   // raises so far are complexity-only
   signals.protectedHits = candidates.filter((candidate) => protectedEntries.some((protectedPath) => (
     protectedPath.endsWith('/')
       ? candidate.startsWith(protectedPath)
@@ -1008,7 +1064,9 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
     }
   }
 
-  return { tier, reasons, signals }
+  const { shape, reasons: shapeReasons } = proposeShape(signals.protectedHits)
+  const { strength, reasons: strengthReasons } = proposeStrength(complexityTier, signals, ladderBands)
+  return { tier, shape, strength, reasons, shapeReasons, strengthReasons, signals }
 }
 
 function formatCountBasis(profileBaseline) {
@@ -1115,12 +1173,26 @@ export function renderProposedTier(proposal) {
   const reasons = proposal && Array.isArray(proposal.reasons)
     ? proposal.reasons.filter((reason) => typeof reason === 'string' && reason.length > 0)
     : []
+  const shape = proposal && TIER_NAMES.includes(proposal.shape) ? proposal.shape : null
+  const strength = proposal && LADDER_BANDS.includes(proposal.strength) ? proposal.strength : null
+  const shapeReasons = proposal && Array.isArray(proposal.shapeReasons)
+    ? proposal.shapeReasons.filter((reason) => typeof reason === 'string' && reason.length > 0)
+    : []
+  const strengthReasons = proposal && Array.isArray(proposal.strengthReasons)
+    ? proposal.strengthReasons.filter((reason) => typeof reason === 'string' && reason.length > 0)
+    : []
   return [
     'PROPOSAL ONLY — compiled from mechanical signals. The orchestrator confirms',
     'or overrides this at boot; the compiler never decides the tier.',
     `proposed tier: ${tier || 'no proposal'}`,
     'because:',
     ...(reasons.length ? reasons.map((reason) => `- ${reason}`) : ['- no mechanical signals were available']),
+    `proposed shape: ${shape || 'no proposal'}`,
+    'because (risk signals):',
+    ...(shapeReasons.length ? shapeReasons.map((reason) => `- ${reason}`) : ['- no risk signals were available']),
+    `proposed strength: ${strength || 'no proposal'}`,
+    'because (complexity signals):',
+    ...(strengthReasons.length ? strengthReasons.map((reason) => `- ${reason}`) : ['- no complexity signals were available']),
   ].join('\n')
 }
 

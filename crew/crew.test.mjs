@@ -5,7 +5,7 @@ import { execSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
-import { openRun } from '../scripts/factory/emit.mjs'
+import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
@@ -816,6 +816,231 @@ test('run resolves, threads, and journals validation lanes without overloading f
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+test('run wires the compiled brief into the session row', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-proposal-run-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-proposal-run-home-'))
+  const task = 'proposal-run'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n')
+  const dbPath = join(home, 'ledger.db')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => done })
+    })
+    if (!nodeMeetsLedgerFloor) return
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, 'mechanical')
+      assert.equal(row.proposed_strength, 'workhorse')
+    } finally { ledger.close() }
+  } finally {
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run keeps a blockless brief unmeasured and distinguishable from a compiler proposal', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-proposal-blockless-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-proposal-blockless-home-'))
+  const task = 'proposal-blockless'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# blockless brief\nno compiler proposal here\n')
+  const dbPath = join(home, 'ledger.db')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => done })
+    })
+    if (!nodeMeetsLedgerFloor) return
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, null)
+      assert.equal(row.proposed_strength, null)
+      assert.notDeepEqual(
+        { shape: row.proposed_shape, strength: row.proposed_strength },
+        { shape: 'mechanical', strength: 'workhorse' },
+      )
+    } finally { ledger.close() }
+  } finally {
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run leaves a malformed proposal unmeasured and completes the driver', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-proposal-malformed-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-proposal-malformed-home-'))
+  const task = 'proposal-malformed'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# malformed brief\n```proposal\n{ not json\n```\n')
+  const dbPath = join(home, 'ledger.db')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  const stderrSeen = []
+  const previousStderrWrite = process.stderr.write
+  let drove = 0
+  let threw = null
+  _resetNoticeGuardsForTest()
+  try {
+    process.stderr.write = (chunk) => { stderrSeen.push(String(chunk)); return true }
+    try {
+      await withHome(home, async () => {
+        await bootCmd(
+          { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+          { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+        )
+        try {
+          runCmd({ task, checkout, 'brief-file': brief, keep: true }, {
+            drive: () => { drove += 1; return done },
+          })
+        } catch (err) { threw = err }
+      })
+    } finally { process.stderr.write = previousStderrWrite }
+    assert.equal(threw, null)
+    assert.equal(drove, 1)
+    if (!nodeMeetsLedgerFloor) return
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, null)
+      assert.equal(row.proposed_strength, null)
+    } finally { ledger.close() }
+    assert.match(stderrSeen.join(''), /no readable compiler proposal/)
+  } finally {
+    process.stderr.write = previousStderrWrite
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('run does not backfill historical session proposals', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-proposal-backfill-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-proposal-backfill-home-'))
+  const task = 'proposal-backfill'
+  const historical = 'historical-proposal-row'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n')
+  const dbPath = join(home, 'ledger.db')
+  const previousLedger = process.env.DEVTEAM_LEDGER_DB
+  process.env.DEVTEAM_LEDGER_DB = dbPath
+  const seeded = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    seeded.startSession({ adw_id: historical, repo_slug: 'r', task_slug: historical })
+  } finally { seeded.close() }
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => done })
+    })
+    if (!nodeMeetsLedgerFloor) return
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('sessions')
+      const oldRow = rows.find((candidate) => candidate.adw_id === historical)
+      const newRow = rows.find((candidate) => candidate.task_slug === task)
+      assert.ok(oldRow)
+      assert.ok(newRow)
+      assert.equal(oldRow.proposed_shape, null)
+      assert.equal(oldRow.proposed_strength, null)
+      assert.equal(newRow.proposed_shape, 'mechanical')
+      assert.equal(newRow.proposed_strength, 'workhorse')
+      const proposedRows = rows.filter((row) => row.proposed_shape !== null || row.proposed_strength !== null)
+      assert.equal(proposedRows.length, 1)
+      assert.equal(proposedRows[0].adw_id, newRow.adw_id)
+    } finally { ledger.close() }
+  } finally {
+    if (previousLedger === undefined) delete process.env.DEVTEAM_LEDGER_DB
+    else process.env.DEVTEAM_LEDGER_DB = previousLedger
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('daemon path keeps the crew.json brief_file fallback byte-identical', () => {
+  const proposal = '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n'
+  const daemonRun = (task, includeBriefFile) => {
+    const root = mkdtempSync(join(tmpdir(), `crew-proposal-daemon-${task}-`))
+    const crewDir = join(root, 'crew')
+    const checkout = join(root, 'checkout')
+    mkdirSync(crewDir, { recursive: true })
+    mkdirSync(checkout, { recursive: true })
+    mkdirSync(join(crewDir, 'returns'), { recursive: true })
+    const brief = join(crewDir, 'brief.md')
+    writeFileSync(brief, proposal)
+    writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+      schema_version: 3, task, checkout,
+      roles: ['lead', 'planner', 'builder', 'reviewer'],
+      members: Object.fromEntries(['lead', 'planner', 'builder', 'reviewer'].map((role) => [role, {
+        surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude',
+      }])),
+      task_return: join('returns', 'task.json'),
+      ...(includeBriefFile ? { brief_file: brief } : {}),
+    }))
+    const dbPath = join(crewDir, 'ledger.db')
+    try {
+      runChild({ crew_dir: crewDir, task, brief_file: brief, checkout }, {
+        preflight: false,
+        seatIo: () => ({
+          log: () => {}, assign: () => ({ id: 'x', returnPath: 'x' }), wait: () => null,
+          writeFile: () => {}, readFile: () => null, run: () => ({ ok: true, output: '' }),
+          changedFiles: () => [], commit: () => 'abc1234', now: () => 0,
+        }),
+        driveTask: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+        env: { DEVTEAM_LEDGER_DB: dbPath },
+      })
+      if (!nodeMeetsLedgerFloor) return null
+      const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+      try { return ledger.dumpTable('sessions').find((row) => row.task_slug === task) } finally { ledger.close() }
+    } finally { rmSync(root, { recursive: true, force: true }) }
+  }
+  if (!nodeMeetsLedgerFloor) {
+    daemonRun('proposal-daemon-key', true)
+    daemonRun('proposal-daemon-nokey', false)
+    return
+  }
+  const withKey = daemonRun('proposal-daemon-key', true)
+  const withoutKey = daemonRun('proposal-daemon-nokey', false)
+  assert.ok(withKey)
+  assert.equal(withKey.proposed_shape, 'mechanical')
+  assert.equal(withKey.proposed_strength, 'workhorse')
+  assert.ok(withoutKey)
+  assert.equal(withoutKey.proposed_shape, null)
+  assert.equal(withoutKey.proposed_strength, null)
 })
 
 test('child entrypoint plumbs, journals, and refuses round budgets', () => {

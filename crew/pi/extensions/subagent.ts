@@ -247,7 +247,7 @@ export function loadAgentDefinition(grant: any, deps: any = {}): any {
     return { error: `expected a non-empty prompt, found ${JSON.stringify(definition.prompt)}, at ${path}` }
   }
   const tools = Array.isArray(definition.tools) && definition.tools.length ? definition.tools.map(String) : ['read', 'grep', 'find', 'ls']
-  return { definition: { name: definition.name, prompt: definition.prompt, tools, model: typeof definition.model === 'string' ? definition.model : undefined } }
+  return { definition: { name: definition.name, prompt: definition.prompt, tools, model: typeof definition.model === 'string' ? definition.model : undefined, thinking: typeof definition.thinking === 'string' && definition.thinking.trim() ? definition.thinking : undefined } }
 }
 
 // -p/--no-session are correct HERE (a one-shot child) and forbidden on a seat
@@ -534,8 +534,10 @@ export function createAgentTool(deps: any = {}) {
       const parentModel = ctx?.model?.provider && ctx?.model?.id ? `${ctx.model.provider}/${ctx.model.id}` : undefined
       const model = def.model ?? parentModel
       // The parent's thinking level belongs to the parent's model; it does not
-      // ride along onto a model the definition pinned itself.
-      const thinking = def.model ? undefined : ctx?.thinkingLevel
+      // ride along onto a model the definition pinned itself. A definition may carry
+      // its OWN thinking level, which rides along with its own model pin; with no
+      // `thinking` key the pin still suppresses the parent's level.
+      const thinking = def.thinking ?? (def.model ? undefined : ctx?.thinkingLevel)
 
       let dir: string | undefined
       let promptFile = ''

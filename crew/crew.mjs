@@ -399,6 +399,34 @@ export function resolveValidationLane({ validationLane, lane, fences } = {}) {
   return { lane: null, source: 'none' }
 }
 
+// Which supplied input answers a shape's 'ctx' source, and how a missing one
+// refuses. Keyed by the source name crew/variants.mjs declares; today
+// SHAPE_SOURCES (crew/drive.mjs:66) permits 'ctx' for `lane` alone.
+const CTX_SOURCE_INPUTS = Object.freeze({
+  lane: Object.freeze({ flag: 'validation-lane', reason: VALIDATION_LANE_REFUSAL }),
+})
+
+// #378 check 3: a partial shape declares where each plan-round product comes
+// from, and crew/drive.mjs:1743 escalates a 'ctx' source ctx does not carry --
+// correctly, but only after every seat has booted (#145 attempt 2 paid for a
+// full judge-tier boot to learn it). The flags alone answer the same question,
+// so it is answered HERE, before any state is read, spawned or written. The
+// post-boot escalation STAYS as the backstop: this is a second, earlier reader
+// of one declaration, never a move.
+export function assertCtxSources(variant, { validationLane } = {}) {
+  const supplied = { lane: validationLane?.lane ?? null }
+  for (const [key, source] of Object.entries(VARIANTS[variant]?.sources || {})) {
+    if (source !== 'ctx') continue
+    const input = CTX_SOURCE_INPUTS[key]
+    if (!input) throw new Error(`variant ${variant} declares sources.${key} "ctx" and this command supplies no such input`)
+    if (supplied[key]) continue
+    throw Object.assign(
+      new Error(`a ${variant} run takes its ${key} from the dispatch (--${input.flag}) and none was supplied [${input.reason}]`),
+      { reason: input.reason },
+    )
+  }
+}
+
 export function transportFor(role, args = {}) {
   const headless = String(args.headless === true ? '' : (args.headless || ''))
     .split(',').map((s) => s.trim()).filter(Boolean)
@@ -707,6 +735,50 @@ export function assertBandFloors(seats, tier, ladder, { adapters = null, localPr
   }
 }
 
+// The models granted agent DEFINITIONS pin, as band-checkable records. A def
+// with no `model` key contributes nothing: absence is never an error. The def
+// JSON is read HERE because grantsFor returns only {name, def}
+// (crew/capabilities.mjs:197) and capabilities.mjs is imported BY this file, so
+// widening it would put a band question inside the register loader.
+export function grantedDefModels(adapters, { readFile = readFileSync } = {}) {
+  const out = []
+  for (const [role, seat] of Object.entries(adapters || {})) {
+    for (const grant of seat?.grants?.agents || []) {
+      let definition
+      try { definition = JSON.parse(String(readFile(grant.def, 'utf8'))) } catch { continue }
+      const model = definition?.model
+      if (typeof model !== 'string' || !model.trim()) continue
+      out.push({ role, agent: grant.name, path: grant.def, model: model.trim() })
+    }
+  }
+  return out
+}
+
+// #377: a granted agent definition that PINS a model spawns its child at that
+// model, and that string went raw to the child's --model with no band check
+// while every SEAT model is floored (#367). Same ratified floor, same closed
+// vocabulary, same refuse-never-downgrade posture. The def's string is the
+// GRANTING seat's adapter namespace, because that adapter is what composes the
+// child's command line (crew/adapters/adapter-pi.mjs:241).
+export function assertDefBandFloors(defs, tier, ladder, { adapters = null, localProviders = null } = {}) {
+  if (!defs || defs.length === 0) return
+  const floorName = ladder?.floors?.[tier]
+  if (typeof floorName !== 'string' || !ladder?.ranks?.has(floorName)) {
+    throw refuseBandFloor('floor-unratified', `tier ${tier} expected a ratified floor band, found ${JSON.stringify(floorName ?? null)}, at ${ladder?.path} tier_floors.${tier}`)
+  }
+  const floorRank = ladder.ranks.get(floorName)
+  for (const { role, agent, path, model } of defs) {
+    const defBand = bandForRaw(ladder, model, adapters?.[role]?.adapter, localProviders)
+    if (defBand === null) {
+      throw refuseBandFloor('band-unknown', `seat ${role} agent definition ${agent} expected a model in a ratified band at or above "${floorName}" for tier ${tier}, found ${JSON.stringify(model ?? null)} proven by no ratified member, at ${path}`)
+    }
+    const defRank = ladder.ranks.get(defBand.band)
+    if (defRank < floorRank) {
+      throw refuseBandFloor('band-below-floor', `seat ${role} agent definition ${agent} expected band at or above "${floorName}" (rank ${floorRank}) for tier ${tier}, found "${defBand.band}" (rank ${defRank}) for model ${model} (ratified member ${defBand.member}), at ${path}`)
+    }
+  }
+}
+
 // Resolve each role's agent name to its adapter module, by filename — this
 // IS the seam: adding an agent means dropping a file in crew/adapters/, not
 // editing crew.mjs. Dynamic import() is inherently async. `seats` (optional)
@@ -980,7 +1052,12 @@ export async function bootCmd(args, deps = {}) {
   // namespace and only that adapter can prove which ratified member it denotes.
   // Only a TIER boot has a ratified floor: tier_floors is keyed by tier, and a
   // --roles boot names none.
-  if (seats && tierName) assertBandFloors(seats, tierName, loadLadder(), { adapters, localProviders: registry.local_providers })
+  if (seats && tierName) {
+    const ladder = loadLadder()
+    assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers })
+    // #377: the same floor over the models granted agent DEFINITIONS pin.
+    assertDefBandFloors(grantedDefModels(adapters), tierName, ladder, { adapters, localProviders: registry.local_providers })
+  }
   // #45 Tier B: opt-in cell breaker. With no policy configured this is a
   // null and the ledger is never opened (acceptance #1). An open cell
   // refuses here, before any state dir or seat exists, and is NOT recorded
@@ -1179,6 +1256,10 @@ export function runCmd(args, deps = {}) {
   // Same posture, same breath: a malformed validation lane refuses before any
   // state is read, spawned or written.
   const validationLane = resolveValidationLane({ validationLane: args['validation-lane'], lane: args.lane, fences: args.fences })
+  // Same breath again: a shape whose declaration takes an input from the
+  // dispatch refuses HERE when the dispatch carries none — before crew state is
+  // read and long before a seat is driven.
+  assertCtxSources(variant, { validationLane })
   const { drive = driveTask } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())

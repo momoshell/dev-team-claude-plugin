@@ -8,9 +8,9 @@ import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/fa
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, loadLadder, assertBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
@@ -1007,7 +1007,7 @@ test('run refuses an inherited shape with no declared scope before driving', asy
         { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
         { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
       )
-      assert.throws(() => runCmd({ task, checkout, 'brief-file': brief, variant: inherited, keep: true }, { drive: () => { drove += 1 } }), (err) => err.message.includes('task.json'))
+      assert.throws(() => runCmd({ task, checkout, 'brief-file': brief, variant: inherited, lane: 'lane-cmd', keep: true }, { drive: () => { drove += 1 } }), (err) => err.message.includes('task.json'))
     })
     assert.equal(drove, 0)
   } finally {
@@ -1035,7 +1035,7 @@ test('run places explicit scope on ctx and omits it for a neutral shape', async 
         { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
       )
       const capture = (ctx) => { seen.push(ctx); return done }
-      runCmd({ task, checkout, 'brief-file': brief, variant: inherited, 'files-in-scope': 'a.mjs, a.test.mjs', keep: true }, { drive: capture })
+      runCmd({ task, checkout, 'brief-file': brief, variant: inherited, lane: 'lane-cmd', 'files-in-scope': 'a.mjs, a.test.mjs', keep: true }, { drive: capture })
       runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: capture })
     })
     assert.deepEqual(seen[0].files_in_scope, ['a.mjs', 'a.test.mjs'])
@@ -1082,6 +1082,51 @@ test('run inheritance reaches the repair stage and planner assignment', async ()
       assert.equal(assigned[0], 'planner')
     })
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('directed dispatch without a validation lane refuses before crew state or seats', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-directed-lane-refusal-home-'))
+  let drove = 0
+  try {
+    await withHome(home, () => {
+      assert.throws(
+        () => runCmd(
+          { task: 'directed-never-booted', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), variant: 'directed' },
+          { drive: () => { drove += 1 } },
+        ),
+        (err) => err.reason === VALIDATION_LANE_REFUSAL,
+      )
+      assert.equal(drove, 0)
+      assert.equal(existsSync(join(home, '.crew')), false)
+    })
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test('ctx source validation permits supplied lanes and neutral full dispatches', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-ctx-source-pass-home-'))
+  try {
+    await withHome(home, () => {
+      assert.throws(
+        () => runCmd({ task: 'directed-with-lane', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), variant: 'directed', 'validation-lane': 'node --test' }),
+        /no crew booted/,
+      )
+      assert.throws(
+        () => runCmd({ task: 'full-without-lane', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), variant: 'full' }),
+        /no crew booted/,
+      )
+    })
+  } finally { rmSync(home, { recursive: true, force: true }) }
+})
+
+test('assertCtxSources follows every variant declaration without restating shape names', () => {
+  for (const name of VARIANT_NAMES) {
+    const needsLane = VARIANTS[name]?.sources?.lane === 'ctx'
+    if (needsLane) {
+      assert.throws(() => assertCtxSources(name), (err) => err.reason === VALIDATION_LANE_REFUSAL)
+    } else {
+      assert.doesNotThrow(() => assertCtxSources(name))
+    }
+  }
 })
 
 test('run refuses an unknown variant before reading or writing crew state', async () => {
@@ -1306,6 +1351,16 @@ test('crew CLI reads the closed variant set from drive.mjs without quoted shape 
     assert.doesNotMatch(source, new RegExp("(['\"`])" + name + "\\1"))
   }
   assert.match(source, /import\s*\{[^}]*VARIANT_NAMES[^}]*DEFAULT_VARIANT[^}]*\}\s*from '\.\/drive\.mjs'/)
+})
+
+test('boot wiring places the definition band check before the breaker', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  const seatFloors = source.indexOf('assertBandFloors(seats, tierName,')
+  const breaker = source.indexOf('assertCellsClosed(breaker)')
+  assert.ok(seatFloors >= 0)
+  assert.ok(breaker > seatFloors)
+  const sites = [...source.matchAll(/assertDefBandFloors\(/g)].map((match) => match.index)
+  assert.equal(sites.filter((index) => index > seatFloors && index < breaker).length, 1)
 })
 
 test('all-headless tier boot makes no cmux calls and records daemon-acceptable seats', async () => {
@@ -2148,6 +2203,39 @@ test('resolveSeatModels end to end through the REAL adapters, on the real roster
   // Tracks the LIVE roster cell (planning floor, ratified 2026-08-13: the
   // planner seat is opus-grade at EVERY tier — never sonnet/haiku/luna).
   assert.equal(out.planner.model, 'claude-opus-5')
+})
+
+test('grantedDefModels reads only pinned defs', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-def-models-'))
+  const pinned = join(dir, 'pinned.json')
+  const bare = join(dir, 'bare.json')
+  try {
+    writeFileSync(pinned, JSON.stringify({ name: 'pinner', prompt: 'p', model: 'anthropic/claude-opus-5' }))
+    writeFileSync(bare, JSON.stringify({ name: 'bare', prompt: 'p' }))
+    const adapters = {
+      planner: { grants: { agents: [{ name: 'pinner', def: pinned }, { name: 'bare', def: bare }] } },
+      builder: { grants: { agents: [] } },
+    }
+    assert.deepEqual(grantedDefModels(adapters), [{
+      role: 'planner', agent: 'pinner', path: pinned, model: 'anthropic/claude-opus-5',
+    }])
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('assertDefBandFloors refuses below-floor and unknown pinned models', () => {
+  const ladder = loadLadder()
+  const adapters = { planner: { adapter: { modelString: piModelString } } }
+  const defs = (model) => [{ role: 'planner', agent: 'scout', path: '/tmp/scout.json', model }]
+  assert.throws(
+    () => assertDefBandFloors(defs('anthropic/claude-haiku-4-5'), 'build', ladder, { adapters }),
+    (err) => err.reason === 'band-below-floor' && BAND_FLOOR_REFUSALS.includes(err.reason),
+  )
+  assert.throws(
+    () => assertDefBandFloors(defs('anthropic/no-such-model'), 'build', ladder, { adapters }),
+    (err) => err.reason === 'band-unknown' && BAND_FLOOR_REFUSALS.includes(err.reason),
+  )
+  assert.doesNotThrow(() => assertDefBandFloors(defs('anthropic/claude-opus-5'), 'build', ladder, { adapters }))
+  assert.doesNotThrow(() => assertDefBandFloors([], 'not-a-tier', ladder, { adapters }))
 })
 
 test('loadLadder reads the ratified bands and tier floors through the runtime seam', () => {

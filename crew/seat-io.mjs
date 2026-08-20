@@ -26,6 +26,14 @@ export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
 
+// #392: an unparseable envelope from a seat that is still THERE is a defect in
+// the report about the work, not in the work. Ask the one participant who can
+// fix it — exactly once. The bound is DATA, not a loop: REASK_MAX asks per
+// assignment, and the re-ask's own wait is clamped so a hung seat cannot
+// double a stage budget.
+export const REASK_MAX = 1
+export const REASK_TIMEOUT_S = 600
+
 // The canonical transport value is NOT the store directory name. Keep the
 // production paths explicit: deriving a path from `headless-json` would find
 // nothing and make capture inert.
@@ -1287,8 +1295,49 @@ export function readEnvelopeFile(returnPath, deps = {}) {
     const parseFailure = new Error(`unusable envelope at ${returnPath}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${err.message}`)
     parseFailure.stage = 'pane-parse-error'
     if (deps.role) parseFailure.role = deps.role
+    parseFailure.raw = raw   // the exact bytes that failed to parse, so a re-ask
+    // can tell "not re-emitted yet" from "re-emitted and still broken". Nothing
+    // ever writes them back: reading is not authoring.
     throw parseFailure
   }
+}
+
+// Who may be re-asked, decided from measured facts only. Exported and pure so
+// the refusals are unit-testable without a seat: a re-ask to a seat that is
+// settled, absent, indeterminate, or on a transport whose send seam this module
+// does not own is a FABRICATED recovery, and the escalation must say which.
+export function reaskDecision({ kind, transport, surfaceId, alive, asked }) {
+  if (kind !== 'unusable-envelope') return { ask: false, why: `failure kind ${String(kind)} is not an unparseable envelope, so there is nothing a re-emit could fix` }
+  if (asked) return { ask: false, why: `a re-ask was already sent for this envelope; the bound is ${REASK_MAX} per assignment` }
+  const paneSeat = transport === DEFAULT_TRANSPORT
+  if (!paneSeat) return { ask: false, why: `transport ${String(transport)} owns its own wait and send seam, so this driver has nobody here to ask` }
+  if (!surfaceId) return { ask: false, why: 'the seat has no recorded surface, so there is no live participant to ask' }
+  if (alive !== true) return { ask: false, why: `the pane probe returned ${alive === false ? 'probe-dead' : 'probe-unknown'}, and a re-ask to a seat that is not measurably alive is a fabricated recovery` }
+  return { ask: true, why: 'a live pane seat can re-emit its own envelope' }
+}
+
+// The assignment line's charset admits neither parentheses nor quotes
+// (crew/driver.mjs:69), and #359's message carries both — so the verbatim
+// failure travels in a FILE and the line points at it, exactly as every other
+// brief does.
+export function reaskBrief({ role, id, returnPath, message }) {
+  return [
+    `# Re-ask ${id}: your ReturnEnvelope could not be parsed`,
+    '',
+    'Your WORK is not in question and the repo must not be touched. The file you',
+    'wrote is on disk exactly as you left it; this driver never repairs,',
+    're-encodes or rewrites it.',
+    '',
+    `verbatim parse failure: ${message}`,
+    '',
+    `Write the SAME ReturnEnvelope again as valid JSON to ${returnPath}, with one`,
+    'complete write. The usual cause is a literal control character (most often a',
+    'newline) inside a JSON string value where the escape belongs.',
+    'Change nothing about the work you already did and make no repo edits.',
+    `Then print exactly: CREW-DONE ${role} ${id}`,
+    '',
+    'This is the only re-ask; a second unparseable envelope ends the run.',
+  ].join('\n')
 }
 
 export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, onAlive, now, sleep }) {
@@ -1381,6 +1430,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const resolveBin = deps.resolveWorkerBin || resolveWorkerBin
   let seq = 0
   const seatFor = new Map()
+  const reasked = new Set()   // returnPaths already re-asked — the bound, per assignment
   const transportForPath = new Map()
   const transportFactories = {
     [HEADLESS_TRANSPORT]: deps.headlessIo || defaultHeadlessIo,
@@ -1439,6 +1489,81 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     try { io.log({ at: now(), ...paneSampleRow({ role, transport: m?.transport ?? DEFAULT_TRANSPORT, model: m?.model ?? null, condition, observed }) }) }
     catch { /* the journal is diagnostics, never load-bearing */ }
     return condition
+  }
+  // #392: ONE bounded re-ask, composed by code the same way a bounce brief is.
+  // The seat is alive, its bytes are on disk, and we hold a quotable parse
+  // error — so ask the only participant who can fix it. Never repairs the file.
+  const reaskUnusableEnvelope = ({ returnPath, info, transport, err, timeoutS }) => {
+    const role = info?.role || 'unknown'
+    const surfaceId = transport ? null : (info?.surface_id || null)
+    const alive = surfaceId ? paneAlive(surfaceId, { tree, locate }) : null
+    const decision = reaskDecision({
+      kind: cellFailureKind(err),
+      transport: transport ? (crew.members?.[role]?.transport || 'unknown') : DEFAULT_TRANSPORT,
+      surfaceId,
+      alive,
+      asked: reasked.has(returnPath),
+    })
+    const note = (outcome, extra = {}) => {
+      try { io.log({ at: now(), event: 'envelope-reask', role, id: info?.id ?? null, returnPath, outcome, ...extra }) }
+      catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+    }
+    if (!decision.ask) {
+      err.message = `${err.message}\n[no re-ask: ${decision.why}]`
+      err.reask = { attempted: false, why: decision.why }
+      note('declined', { why: decision.why })
+      return { envelope: null, error: err }
+    }
+    reasked.add(returnPath)
+    const staleRaw = typeof err.raw === 'string' ? err.raw : null
+    const briefPath = join(paths.taskDir, `reask-${info?.id || 'seat'}.${role}.md`)
+    try {
+      // The brief is written BEFORE the message is annotated, so what the seat
+      // reads is the parse failure verbatim and nothing else.
+      writeFileSync(briefPath, reaskBrief({ role, id: info?.id || 'reask', returnPath, message: err.message }))
+      sendLine(surfaceId, assignmentLine({ id: info?.id || 'reask', role, briefFile: briefPath, returnPath, taskDir: paths.taskDir }))
+    } catch (sendErr) {
+      err.message = `${err.message}\n[re-ask attempted and not delivered: ${sendErr.message}]`
+      err.reask = { attempted: true, delivered: false, recovered: false, why: sendErr.message }
+      note('undelivered', { why: sendErr.message })
+      return { envelope: null, error: err }
+    }
+    note('sent', { brief: briefPath })
+    const window = Math.min(timeoutS, REASK_TIMEOUT_S)
+    try {
+      const env = waitForEnvelope({
+        returnPath,
+        timeoutS: window,
+        role,
+        // Only CHANGED bytes are an answer: the stale file is still on disk and
+        // re-reading it would report the same defect before the seat could act.
+        readEnvelope: () => {
+          let raw
+          try { raw = String(readFileSync(returnPath, 'utf8')) } catch { return null }
+          if (raw === staleRaw) return null
+          return readEnvelopeFile(returnPath, { existsSync, readFileSync, role })
+        },
+        probeSeat: () => paneAlive(surfaceId, { tree, locate }),
+        sampleSeat: () => samplePaneSeat(role, surfaceId),
+        onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
+        now,
+        sleep,
+      })
+      if (env != null) {
+        err.message = `${err.message}\n[re-ask recovered: the seat re-emitted a parseable envelope and the run continued]`
+        err.reask = { attempted: true, delivered: true, recovered: true }
+        note('recovered')
+        return { envelope: env, error: err }
+      }
+      err.message = `${err.message}\n[re-ask attempted: one re-ask was sent to ${role} and the file's bytes never changed within ${window}s]`
+      err.reask = { attempted: true, delivered: true, recovered: false, second: null }
+      note('no-new-bytes', { window_s: window })
+    } catch (secondErr) {
+      err.message = `${err.message}\n[re-ask attempted: one re-ask was sent to ${role} and the second envelope is still unparseable: ${secondErr.message}]`
+      err.reask = { attempted: true, delivered: true, recovered: false, second: secondErr.message }
+      note('unparseable-again', { second: secondErr.stage || null })
+    }
+    return { envelope: null, error: err }
   }
   const io = {
     assign(spec) {
@@ -1500,10 +1625,22 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         return env
       } catch (err) {
-        if (err.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
-        const sampled = sampledConditions.get(info?.role); if (sampled) err.sampledProviderCondition = sampled.condition
-        noteCellFailure(info?.role, info?.id, cellFailureKind(err), err)
-        throw err
+        let failure = err
+        if (cellFailureKind(err) === 'unusable-envelope') {
+          const recovery = reaskUnusableEnvelope({ returnPath, info, transport, err, timeoutS })
+          if (recovery.envelope != null) {
+            // One cell failure is still recorded — the wasted turn is a real
+            // cell defect — but the RUN continues as if the first envelope had
+            // been readable.
+            noteCellFailure(info?.role, info?.id, 'unusable-envelope', recovery.error || err)
+            return recovery.envelope
+          }
+          failure = recovery.error || err
+        }
+        if (failure.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
+        const sampled = sampledConditions.get(info?.role); if (sampled) failure.sampledProviderCondition = sampled.condition
+        noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
+        throw failure
       }
     },
     captureDescendants() { return capture.round(true) },

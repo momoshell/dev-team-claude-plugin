@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, providerConditionDetail,
-  readEnvelopeFile, samplePaneScreen, seatIo, WAIT_POLL_MS, waitForEnvelope,
+  readEnvelopeFile, reaskDecision, samplePaneScreen, seatIo, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
 import { recogniseProviderCondition } from './headless.mjs'
 
@@ -604,7 +604,9 @@ test('seatIo.wait surfaces a malformed return file immediately as an unusable-en
       sleep: (ms) => { clock += ms },
       sendLine: () => {},
       tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
-      locate: (_tree, id) => id === 'surface-builder',
+      // This pane is not steerable; the immediate-surface property is what the
+      // no-re-ask path preserves.
+      locate: () => false,
       existsSync: (path) => path === returnPath,
       readFileSync: (path) => path === returnPath ? malformed : readFileSync(path, 'utf8'),
     })
@@ -616,11 +618,134 @@ test('seatIo.wait surfaces a malformed return file immediately as an unusable-en
     assert.ok(error)
     assert.equal(error.stage, 'pane-parse-error')
     assert.ok(clock <= WAIT_POLL_MS)
+    assert.match(error.message, /no re-ask/)
     const failures = events.filter((event) => event.kind === 'cell-failure')
     assert.equal(failures.length, 1)
     assert.equal(failures[0].failure, 'unusable-envelope')
     assert.match(failures[0].detail, new RegExp(returnPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
   })
+})
+
+function makeReaskHarness(fixture, { alive = true, onReask = null } = {}) {
+  let clock = 0
+  let returnPath = null
+  const sends = []
+  const events = []
+  const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    cmux: () => ({ ok: false, stdout: '' }),
+    sendLine: (surface, line) => {
+      sends.push({ surface, line })
+      if (sends.length === 2 && onReask) onReask({ returnPath, line })
+    },
+    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+    locate: (_tree, id) => alive === true && id === 'surface-builder',
+    existsSync: (path) => existsSync(path),
+    readFileSync: (path, ...args) => readFileSync(path, ...args),
+    writeFileSync: (path, content) => writeFileSync(path, content),
+  })
+  io.emit = (event) => events.push(event)
+  const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+  returnPath = assignment.returnPath
+  return {
+    io, sends, events, returnPath, clock: () => clock,
+    seed: (content) => writeFileSync(returnPath, content),
+  }
+}
+
+const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
+const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
+const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
+
+test('a live steerable pane seat gets exactly one re-ask carrying the return path and the verbatim parse failure', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const harness = makeReaskHarness(fixture, { onReask: ({ returnPath }) => writeFileSync(returnPath, MALFORMED_REASK_2) })
+    harness.seed(MALFORMED_REASK)
+    assert.throws(() => harness.io.wait(harness.returnPath, 1), (error) => {
+      assert.match(error.message, /re-ask attempted/)
+      return true
+    })
+    assert.equal(harness.sends.length, 2)
+    assert.equal(harness.sends[1].surface, 'surface-builder')
+    assert.match(harness.sends[1].line, new RegExp(harness.returnPath.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
+    const briefPath = join(fixture.paths.taskDir, 'reask-d1.builder.md')
+    assert.equal(existsSync(briefPath), true)
+    assert.match(readFileSync(briefPath, 'utf8'), /verbatim parse failure:/)
+    assert.match(readFileSync(briefPath, 'utf8'), /the file EXISTED \(\d+ bytes\) and is not JSON this driver can read/)
+  })
+})
+
+test('a valid envelope on the re-ask continues the run as if the first envelope had been readable', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const harness = makeReaskHarness(fixture, { onReask: ({ returnPath }) => writeFileSync(returnPath, VALID_REASK) })
+    harness.seed(MALFORMED_REASK)
+    assert.deepEqual(harness.io.wait(harness.returnPath, 600), JSON.parse(VALID_REASK))
+    assert.equal(harness.sends.length, 2)
+    const failures = harness.events.filter((event) => event.kind === 'cell-failure')
+    assert.equal(failures.length, 1)
+    assert.equal(failures[0].failure, 'unusable-envelope')
+  })
+})
+
+test('a second unparseable envelope escalates naming the attempted re-ask, and the bound sends nothing more', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const harness = makeReaskHarness(fixture, { onReask: ({ returnPath }) => writeFileSync(returnPath, MALFORMED_REASK_2) })
+    harness.seed(MALFORMED_REASK)
+    let first
+    try { harness.io.wait(harness.returnPath, 600) } catch (error) { first = error }
+    assert.ok(first)
+    assert.match(first.message, /the file EXISTED \(\d+ bytes\) and is not JSON this driver can read/)
+    assert.match(first.message, /re-ask attempted.*second envelope is still unparseable/s)
+    assert.equal(harness.sends.length, 2)
+    let second
+    try { harness.io.wait(harness.returnPath, 600) } catch (error) { second = error }
+    assert.ok(second)
+    assert.match(second.message, /no re-ask/)
+    assert.equal(harness.sends.length, 2)
+  })
+})
+
+test('a non-steerable seat gets no re-ask and the escalation says so', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const harness = makeReaskHarness(fixture, { alive: false })
+    harness.seed(MALFORMED_REASK)
+    let error
+    try { harness.io.wait(harness.returnPath, 600) } catch (err) { error = err }
+    assert.ok(error)
+    assert.match(error.message, /no re-ask/)
+    assert.match(error.message, /probe-dead/)
+    assert.equal(harness.sends.length, 1)
+  })
+})
+
+test('a failed re-ask leaves the envelope file byte-identical', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const harness = makeReaskHarness(fixture)
+    harness.seed(MALFORMED_REASK)
+    const before = readFileSync(harness.returnPath, 'utf8')
+    let error
+    try { harness.io.wait(harness.returnPath, 1) } catch (err) { error = err }
+    assert.ok(error)
+    assert.equal(readFileSync(harness.returnPath, 'utf8'), before)
+    assert.match(error.message, /re-ask attempted/)
+    assert.equal(harness.sends.length, 2)
+  })
+})
+
+test('reaskDecision refuses a settled, absent, indeterminate or non-pane seat and states why', () => {
+  const refusals = [
+    { kind: 'unusable-envelope', transport: 'pane', surfaceId: 'surface-builder', alive: true, asked: true },
+    { kind: 'unusable-envelope', transport: 'pane', surfaceId: null, alive: true, asked: false },
+    { kind: 'unusable-envelope', transport: 'pane', surfaceId: 'surface-builder', alive: null, asked: false },
+    { kind: 'unusable-envelope', transport: 'headless-json', surfaceId: 'surface-builder', alive: true, asked: false },
+  ]
+  for (const args of refusals) {
+    const result = reaskDecision(args)
+    assert.equal(result.ask, false)
+    assert.match(result.why, /\S/)
+  }
+  assert.equal(reaskDecision({ kind: 'unusable-envelope', transport: 'pane', surfaceId: 'surface-builder', alive: true, asked: false }).ask, true)
 })
 
 test('seatIo.wait keeps polling an absent return file to its deadline', () => {

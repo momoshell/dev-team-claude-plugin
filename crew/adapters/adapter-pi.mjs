@@ -1,3 +1,5 @@
+import { fileURLToPath } from 'node:url'
+
 // crew/adapters/adapter-pi.mjs — the pi agent adapter.
 //
 // An adapter is the seam between a crew seat and the CLI agent that fills it:
@@ -129,9 +131,24 @@ export function translateDeny(deny) {
 // register-path tests can name it without a literal.
 export const PI_SUBAGENT_TOOL = 'agent'
 
+// The advisor extension a register-granted seat loads. The register grants a
+// BOOLEAN, not a path, so the path is the adapter's own checkout-pinned
+// knowledge — resolved from this file's URL, never from cwd.
+export const PI_ADVISOR_EXTENSION = fileURLToPath(new URL('../pi/extensions/advisor.ts', import.meta.url))
+export const PI_ADVISOR_ENV = 'CREW_ADVISOR'
+export const PI_ADVISOR_ENDPOINT_ENV = 'CREW_ADVISOR_ENDPOINT'
+export const PI_ADVISOR_MODEL_ENV = 'CREW_ADVISOR_MODEL'
+
+// POSIX single-quoting: a literal apostrophe closes the quote, escapes and
+// reopens. A loopback URL may legally contain one and a model id is a
+// command-line value, so neither is interpolated raw.
+export function shellSingleQuote(value) {
+  return `'${String(value).replaceAll("'", `\'"\'"\'`)}'`
+}
+
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
 
-export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null }) {
+export function seatCommand({ role, model, promptFile, tools, deny, taskDir, bootBrief, effort, grants = NO_GRANTS, configDir = null, advisorCell = null }) {
   // Same env-var contract as the claude adapter (`env`, DEVTEAM_WORKER=1,
   // CREW_ROLE, CREW_TASK_DIR) so plugin-quieting and role/taskDir discovery
   // work regardless of which binary fills the seat.
@@ -205,11 +222,18 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // mandatory here, not merely additive.
   const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
   const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout])]
-  const extensions = grants?.extensions || []
+  const advisor = grants?.advisor === true
+  const extensions = [...new Set([...(grants?.extensions || []), ...(advisor ? [PI_ADVISOR_EXTENSION] : [])])]
   const skills = grants?.skills || []
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(configDir !== null && configDir !== undefined ? [`PI_CODING_AGENT_DIR="${configDir}"`] : []),
+    // The advisor activates no tool; --tools stays the complete built-in set.
+    ...(advisor ? [
+      `${PI_ADVISOR_ENV}=1`,
+      ...(advisorCell?.endpoint !== undefined ? [`${PI_ADVISOR_ENDPOINT_ENV}=${shellSingleQuote(advisorCell.endpoint)}`] : []),
+      ...(advisorCell?.model !== undefined ? [`${PI_ADVISOR_MODEL_ENV}=${shellSingleQuote(advisorCell.model)}`] : []),
+    ] : []),
     // The register-resolved allowlist, transported to the extension. Emitted
     // ONLY when an agent is granted, so every ungranted command is unchanged.
     // Before `pi`, because the boot brief must stay last.

@@ -274,6 +274,24 @@ const SOURCE_ERROR_REASONS = Object.freeze(['RecordInvalidError', 'SyntaxError',
 // strings (see the header comment on recordSourceError below).
 const VIOLATION_NAME_RE = /^[^\s]{1,200}:[^\s]{1,80}$/
 
+// review_outcomes' seat-cell columns (#404), spelled EXACTLY as cell_failures
+// spells its own (:1575-1580) so one query can read a cell out of either
+// table. Appended AFTER created_at on purpose: applyMigrations ADD COLUMNs a
+// new column onto an existing db and ALTER TABLE appends, so an upgraded db's
+// PRAGMA order still equals this declared order (AC-1).
+const REVIEW_CELL_COLUMNS = Object.freeze([
+  { name: 'agent', decl: 'TEXT' },
+  { name: 'provider', decl: 'TEXT' },
+  { name: 'model_id', decl: 'TEXT' },
+  { name: 'model', decl: 'TEXT' },
+  { name: 'effort', decl: 'TEXT' },
+  { name: 'transport', decl: 'TEXT' },
+])
+
+function cellFieldsFrom(input) {
+  return Object.fromEntries(REVIEW_CELL_COLUMNS.map(({ name }) => [name, input[name] ?? null]))
+}
+
 // TABLES: { <table>: { columns: [{name, decl}], unique: [[...cols]], indexes: [{name, cols}] } }.
 // The CREATE TABLE / CREATE UNIQUE INDEX / CREATE INDEX DDL below is
 // GENERATED from this constant — a table declared here but missing from the
@@ -415,6 +433,7 @@ export const TABLES = Object.freeze({
       { name: 'should_fix', decl: 'INTEGER' },
       { name: 'consider', decl: 'INTEGER' },
       { name: 'created_at', decl: 'TEXT' },
+      ...REVIEW_CELL_COLUMNS,
     ],
     unique: [['adw_id', 'dispatch_id']],
     indexes: [],
@@ -1509,6 +1528,11 @@ export function openLedger({
       must_fix: input.must_fix ?? null,
       should_fix: input.should_fix ?? null,
       consider: input.consider ?? null,
+      // The cell the seat BOOTED with, handed in by the caller (#404): never
+      // re-derived here from crew/roster.json, which a raw --model-<role>
+      // override makes wrong for exactly the runs #376 measures. Absence is
+      // NULL, never a guess.
+      ...cellFieldsFrom(input),
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
     appendJsonl('recordReviewOutcome', args)

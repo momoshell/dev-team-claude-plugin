@@ -1004,11 +1004,26 @@ export function emitAdapter(emitter, crew = null) {
       record('agent_start', { role: event.role, dispatch_id: event.id })
     } else if (event.kind === 'envelope') {
       record('agent_end', { role: event.role, outcome: event.status, dispatch_id: event.id })
-      if (event.review) emitter.emit((handle) => handle.recordReviewOutcome({
-        adw_id: emitter.adwId, phase_id: phaseId, dispatch_id: event.id, role: event.role,
-        verdict: event.review.verdict, must_fix: event.review.must_fix ?? null,
-        should_fix: event.review.should_fix ?? null, consider: event.review.consider ?? null,
-      }))
+      if (event.review) {
+        // The reviewing seat's CELL, read from the booted crew — the same
+        // source and the same reason as the cell-failure branch below (:1080):
+        // the driver only ever knows the role. This is what makes a PANE
+        // review attributable at all: a pane seat emits no `usage` frame, so
+        // agent_sessions never gets a row to join (#404). Spread ONLY when the
+        // role is seated: an unseated role has no cell, and
+        // recordReviewOutcome's own `?? null` is the single place absence is
+        // decided.
+        const m = (crew && crew.members && crew.members[event.role]) || null
+        emitter.emit((handle) => handle.recordReviewOutcome({
+          adw_id: emitter.adwId, phase_id: phaseId, dispatch_id: event.id, role: event.role,
+          verdict: event.review.verdict, must_fix: event.review.must_fix ?? null,
+          should_fix: event.review.should_fix ?? null, consider: event.review.consider ?? null,
+          ...(m ? {
+            agent: m.agent ?? null, provider: m.provider ?? null, model_id: m.id ?? null,
+            model: m.model ?? null, effort: m.effort ?? null, transport: m.transport ?? null,
+          } : {}),
+        }))
+      }
     } else if (event.kind === 'decision') {
       record('decision', { decided: event.decided, why: event.why })
     } else if (event.kind === 'dissent') {

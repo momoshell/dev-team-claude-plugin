@@ -29,6 +29,10 @@ import {
   REQUEST_MAX_CHARS,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
+// openRun is the only production writer of sessions.tier: it reads the boot
+// record and forwards it. The forwarding is pinned here, next to the column it
+// writes, because test/factory-emit.test.mjs is not this lane's to edit.
+import { openRun } from '../scripts/factory/emit.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
 // AC-13 (both test files never reference the CLI-only default-db-path
@@ -47,6 +51,29 @@ function sqliteAvailable() {
 }
 const SQLITE_OK = sqliteAvailable()
 const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
+
+// Boots a run the way crew/crew.mjs and crew/child.mjs do — stateDir is the
+// crew dir, which is where crew.json lives — and returns its mirrored sessions
+// row. `tier: null` writes a boot record with NO tier key at all, which is
+// exactly what a --roles boot produces.
+function bootTieredRun(tier) {
+  const stateDir = mkdtempSync(join(tmpdir(), 'factory-ledger-boot-'))
+  writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'boot-tier', roles: ['lead', 'planner'], ...(tier === null ? {} : { tier }),
+  }))
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'boot-tier', dbPath })
+  try {
+    emitter.startRun()
+    const ledger = openLedger({ dbPath })
+    try {
+      return ledger.getSession(emitter.adwId)
+    } finally { ledger.close() }
+  } finally {
+    emitter.dispose()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+}
 
 const fixture = mkdtempSync(join(tmpdir(), 'factory-ledger-'))
 after(() => rmSync(fixture, { recursive: true, force: true }))
@@ -2174,11 +2201,20 @@ test('recordEnvelope has no production caller; future wiring must update the ret
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.envelopes and docs/ledger-queries.md when wiring recordEnvelope')
 })
 
-test('sessions declares last_heartbeat_at last and starts each row with it NULL', { skip: SKIP }, () => {
-  assert.equal(TABLES.sessions.columns.at(-1).name, 'last_heartbeat_at')
+test('sessions declares tier last and starts each row with heartbeat and tier NULL', { skip: SKIP }, () => {
+  assert.equal(TABLES.sessions.columns.at(-1).name, 'tier')
+  assert.equal(TABLES.sessions.columns.at(-2).name, 'last_heartbeat_at')
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'heartbeat-null', repo_slug: 'r', task_slug: 't' })
   assert.equal(ledger.getSession('heartbeat-null').last_heartbeat_at, null)
+  assert.equal(ledger.getSession('heartbeat-null').tier, null)
+})
+
+test('openRun records the boot tier on the session row and records null when the boot record carries none', { skip: SKIP }, () => {
+  const booted = bootTieredRun('build')
+  assert.equal(booted.tier, 'build')
+  const untiered = bootTieredRun(null)
+  assert.equal(untiered.tier, null)
 })
 
 test('session heartbeat updates only last_heartbeat_at in place and overwrites it', { skip: SKIP }, () => {

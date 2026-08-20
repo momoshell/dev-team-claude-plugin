@@ -289,6 +289,13 @@ export const TABLES = Object.freeze({
       // place per ADR-024 (a last-known-alive column, never a trace row).
       // Declared LAST so an upgraded db receives it via ADD COLUMN (#290).
       { name: 'last_heartbeat_at', decl: 'TEXT' },
+      // #291 step 3: the crew SHAPE this run was booted with (mechanical |
+      // build | judge), forwarded from the boot record crew/crew.mjs:831 wrote
+      // — never re-derived here. NULL means unmeasured: a run booted with
+      // explicit --roles carries no tier at all, and a row that predates this
+      // column is never backfilled. Declared LAST so an upgraded db receives it
+      // via ADD COLUMN (#290).
+      { name: 'tier', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -788,6 +795,21 @@ function refuse(message, reason = 'usage') {
   throw new LedgerUsageError(`ledger: ${message}`, reason)
 }
 
+// The tier VOCABULARY (mechanical | build | judge) lives in crew/roster.json
+// and is resolved at boot (crew/crew.mjs resolveTier throws on an unknown
+// tier), so this deliberately declares no enum of its own rather than becoming
+// a second source of truth for a ratified artifact. An absent tier is a fact
+// (null); a non-string, blank or unbounded tier is a CALLER BUG and refuses.
+const TIER_MAX_CHARS = 64
+
+function normaliseTier(value, ctx) {
+  if (value === undefined || value === null) return null
+  if (typeof value !== 'string' || value.trim() === '' || value.length > TIER_MAX_CHARS) {
+    refuse(`${ctx}: field 'tier' must be a non-blank string of at most ${TIER_MAX_CHARS} characters when present`)
+  }
+  return value.trim()
+}
+
 function normaliseRequestText(value, ctx) {
   if (typeof value !== 'string' || value.trim() === '') {
     refuse(`${ctx}: request must be a non-blank string`)
@@ -1172,6 +1194,9 @@ export function openLedger({
       request: null,
       request_source: null,
       last_heartbeat_at: null,
+      // Forwarded from the caller's boot record (scripts/factory/emit.mjs),
+      // never derived here. Explicit null when the boot recorded no tier.
+      tier: normaliseTier(input.tier, 'startSession'),
     }, stats)
     sessionStatusByAdwId.set(args.adw_id, args.status)
     appendJsonl('startSession', args)

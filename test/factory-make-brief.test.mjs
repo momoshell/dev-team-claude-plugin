@@ -15,7 +15,7 @@ import {
   LADDER_BANDS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
   MUTATION_CONTRACT_BLOCK, profileField, proposeTier, readLadderBands, renderBrief,
-  resolveWriteSurface, validateAsk, verifyWhere,
+  resolveWriteSurface, validateAsk, validateScopeEntries, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { CHECK_FAIL_PREFIX, MUTATIONS_MAX } from '../crew/drive.mjs'
@@ -50,6 +50,7 @@ function git(root, args) {
 
 function fixture(label, {
   scripts = 'node --test', broad = false, coupledCaller = false, broadSources = false,
+  citingComment = false,
 } = {}) {
   const root = nextRoot(label)
   const packageData = { name: `brief-${label}`, private: true, type: 'module' }
@@ -84,6 +85,13 @@ function fixture(label, {
     "test('config path is pinned', () => { readFileSync('config/thing.yml', 'utf8') })",
     '',
   ].join('\n'))
+  if (citingComment) {
+    put(root, 'lib/cites.js', [
+      '// The cache shape is owned by lib/widget.mjs; keep this reader in step.',
+      'export const READER_VERSION = 2',
+      '',
+    ].join('\n'))
+  }
   if (broad || broadSources) {
     put(root, 'lib/broad.mjs', "export const BROAD_PIN = 'out/broad.json'\n")
   }
@@ -274,8 +282,47 @@ test('broad keys are reported with counts and are not tripwires', () => {
   assert.ok(broadLine)
   const hitCount = Number(broadLine.match(/(\d+) hits/)[1])
   assert.ok(hitCount > BROAD_KEY_HIT_LIMIT)
+  const broadPathLine = brief.split('\n').find((line) => line === '- broad.mjs · 32 hits')
+  assert.ok(broadPathLine)
   const tripwireSection = section(brief, '## Tripwires')
   assert.doesNotMatch(tripwireSection, /test\/broad-.*BROAD_PIN/)
+  assert.doesNotMatch(section(brief, '## Coupled sources'), /lib\/broad-\d+\.mjs/)
+})
+
+test('citation-only code comments couple to a where owner', () => {
+  const root = fixture('citation-coupling', { citingComment: true })
+  const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs'] })
+  const discovery = discoverTripwires({ checkout: root, files: where })
+  const citation = discovery.coupled.find((entry) => entry.file === 'lib/cites.js')
+  assert.ok(citation)
+  assert.ok(citation.keys.includes('lib/widget.mjs') || citation.keys.includes('widget.mjs'))
+})
+
+test('citation-only coupling is enforced by fences and can be acknowledged as read-only', () => {
+  const root = fixture('citation-fence', { citingComment: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
+  }, null, 2)}\n`)
+  const requestPath = request(root, { where: ['lib/widget.mjs'] })
+  const refused = run(root, [
+    '--request', requestPath, '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
+  ])
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /coupled-source-unfenced/)
+  assert.match(refused.stderr, /lib\/cites\.js/)
+
+  const acknowledgedPath = put(root, 'ack-fences.json', `${JSON.stringify({
+    lanes: [{
+      lane: 'own',
+      files: ['lib/widget.mjs'],
+      reads: [{ file: 'lib/cites.js', why: 'citation-only reader is adjacent-owned' }],
+    }],
+  }, null, 2)}\n`)
+  const { brief } = compile(root, { where: ['lib/widget.mjs'] }, [
+    '--fences', acknowledgedPath, '--lane', 'own',
+  ], 'acknowledged.md')
+  assert.match(brief, /lib\/cites\.js · .*acknowledged read-only/)
 })
 
 test('baseline is measured, colour-neutral, and absent test scripts are unknown', () => {
@@ -509,6 +556,23 @@ test('without fences the write surface is the authored where paths and names its
   assert.match(readLine, /test\/widget\.test\.mjs/)
 })
 
+test('an unslashed directory fence entry refuses at compile time', () => {
+  const root = fixture('scope-unslashed')
+  assert.throws(() => validateScopeEntries({ checkout: root, files: ['config'] }), (error) => (
+    error.name === 'BriefUsageError' && error.reason === 'scope-directory-unslashed'
+  ))
+})
+
+test('scope validation allows slashed directories, files and absent paths', () => {
+  const root = fixture('scope-validation')
+  assert.doesNotThrow(() => validateScopeEntries({
+    checkout: root,
+    files: ['config/', 'lib/widget.mjs', 'lib/absent.mjs'],
+  }))
+  assert.throws(() => validateScopeEntries({ checkout: root, files: 'config' }), (error) => error.reason === 'wrong-type')
+  assert.throws(() => validateScopeEntries({ checkout: root, files: ['   '] }), (error) => error.reason === 'wrong-type')
+})
+
 test('the lane is never inferred from the output filename', () => {
   const root = fixture('lane-output-name')
   const fencesPath = put(root, 'fences.json', JSON.stringify({
@@ -521,6 +585,47 @@ test('the lane is never inferred from the output filename', () => {
   const writeLine = section(brief, '## Conventions')
     .split('\n').find((line) => line.startsWith('files_in_scope'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: fence register, lane "own"): lib/widget.mjs, test/widget-new.test.mjs')
+})
+
+test('scope validation refuses unslashed directories without changing the rendered surface', () => {
+  const root = fixture('scope-surface')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [
+      { lane: 'own', files: ['lib/widget.mjs', 'config'] },
+      { lane: 'control', files: ['lib/widget.mjs'] },
+    ],
+  }, null, 2)}\n`)
+  const requestPath = request(root, { where: ['lib/widget.mjs'] })
+  const refused = run(root, [
+    '--request', requestPath, '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
+  ])
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /scope-directory-unslashed/)
+
+  writeFileSync(fencesPath, `${JSON.stringify({
+    lanes: [
+      { lane: 'own', files: ['lib/widget.mjs', 'config/'] },
+      { lane: 'control', files: ['lib/widget.mjs'] },
+    ],
+  }, null, 2)}\n`)
+  const slashed = run(root, [
+    '--request', requestPath, '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'slashed.md'),
+  ])
+  assert.equal(slashed.status, 0, slashed.stderr)
+  const control = run(root, [
+    '--request', requestPath, '--checkout', root,
+    '--fences', fencesPath, '--lane', 'control', '--out', join(root, 'control.md'),
+  ])
+  assert.equal(control.status, 0, control.stderr)
+  const withoutSurface = (brief) => brief.split('\n')
+    .filter((line) => !line.startsWith('files_in_scope ('))
+    .join('\n')
+  assert.equal(
+    withoutSurface(readFileSync(join(root, 'slashed.md'), 'utf8')),
+    withoutSurface(readFileSync(join(root, 'control.md'), 'utf8')),
+  )
 })
 
 test('standing blocks and unfilled slots render verbatim', () => {
@@ -944,7 +1049,8 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 16)
+  assert.equal(REFUSAL_REASONS.length, 17)
+  assert.ok(REFUSAL_REASONS.includes('scope-directory-unslashed'))
   assert.ok(REFUSAL_REASONS.includes('coupled-source-unfenced'))
   assert.ok(REFUSAL_REASONS.includes('stale-read-ack'))
   assert.ok(REFUSAL_REASONS.includes('profile-unreadable'))
@@ -1051,6 +1157,7 @@ test('a coupled fixture renders an in-fence caller', () => {
   const body = section(brief, '## Coupled sources')
   assert.match(body, /lib\/caller\.mjs · .*computeWidget.*inside this lane's fence/)
   assert.match(brief, /floor, not a proof/)
+  assert.match(brief, /cit(e|ation)/i)
 })
 
 test('a coupled fixture can acknowledge a read-only caller verbatim', () => {

@@ -109,6 +109,7 @@ const COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'
 const STALE_READ_ACK = 'stale-read-ack'
 const PROFILE_UNREADABLE = 'profile-unreadable'
 const PROFILE_UNRATIFIED = 'profile-unratified'
+const SCOPE_DIRECTORY_UNSLASHED = 'scope-directory-unslashed'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -127,6 +128,7 @@ export const REFUSAL_REASONS = Object.freeze([
   STALE_READ_ACK,
   PROFILE_UNREADABLE,
   PROFILE_UNRATIFIED,
+  SCOPE_DIRECTORY_UNSLASHED,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -498,6 +500,20 @@ export function discoverTripwires({ checkout, files }) {
     mentionsByOwner.set(owner, mentions)
   }
 
+  // Check 1: seed coupling with each owner's OWN repo path and basename, so a
+  // non-test code file that only CITES a fenced path — in a comment, sharing no
+  // exported symbol — surfaces through the same coupled-source flow (#327).
+  const citationOwners = new Map()
+  for (const owner of ownerFiles) {
+    for (const citation of [owner, basename(owner)]) {
+      if (!allKeys.has(citation)) allKeys.add(citation)
+      if (!keyOwners.has(citation)) keyOwners.set(citation, new Set())
+      keyOwners.get(citation).add(owner)
+      if (!citationOwners.has(citation)) citationOwners.set(citation, new Set())
+      citationOwners.get(citation).add(owner)
+    }
+  }
+
   const tripwireMap = new Map()
   const coupledMap = new Map()
   const broadKeys = []
@@ -516,7 +532,7 @@ export function discoverTripwires({ checkout, files }) {
       }
       if (!CODE_EXTENSIONS.includes(extname(hit).toLowerCase())) continue
       if (ownerFiles.has(hit)) continue
-      const owners = symbolOwners.get(key)
+      const owners = symbolOwners.get(key) ?? citationOwners.get(key)
       if (!owners) continue
       const namedOwner = [...owners].find((owner) => mentionsByOwner.get(owner)?.has(hit))
       if (!namedOwner) continue
@@ -754,6 +770,28 @@ export function gatherFences({ fencesPath } = {}) {
     return { lane: entry.lane, files: [...new Set(entry.files)].sort(), reads }
   })
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
+}
+
+// Check 2: an entry that resolves to an existing directory can ONLY be satisfied
+// by the trailing slash scopeMatcher requires (crew/drive.mjs:997); without it the
+// driver compares it as an exact file path and every file under it falls out of
+// scope — #145 attempt 3 died there with a gate-green tree. The matching rule is
+// correct; the silence was the defect, so this refuses at compile time.
+export function validateScopeEntries({ checkout, files = [] } = {}) {
+  if (!Array.isArray(files)) refuseUsage('files_in_scope must be an array', WRONG_TYPE)
+  const root = gitRoot(checkout)
+  for (const entry of files) {
+    if (typeof entry !== 'string' || !entry.trim()) {
+      refuseUsage(`scope entry is invalid: ${String(entry)}`, WRONG_TYPE)
+    }
+    const normalised = normaliseRepoPath(entry)
+    if (normalised.endsWith('/')) continue
+    let stat
+    try { stat = statSync(resolve(root, normalised)) } catch { continue }
+    if (!stat.isDirectory()) continue
+    refuseUsage(`scope entry resolves to a directory and can only match with a trailing slash: ${entry} (write "${normalised}/")`, SCOPE_DIRECTORY_UNSLASHED)
+  }
+  return files
 }
 
 export function resolveWriteSurface({ fences, lane, where = [] } = {}) {
@@ -1142,7 +1180,7 @@ function renderTripwires(discovery) {
 // string-built, or renamed couplings.
 function renderCoupled(coupling) {
   const lines = [
-    'coupling rule: a coupled source is a non-test .js/.mjs file that names an exported symbol of a where file and names that file; a key-based grep sees a coupling only when both sides share a named symbol, so this is a floor, not a proof (dynamic, string-built, or renamed couplings are invisible).',
+    'coupling rule: a coupled source is a non-test .js/.mjs file that names an exported symbol of a where file and names that file; a key-based grep sees a coupling only when both sides share a named symbol, so this is a floor, not a proof (dynamic, string-built, or renamed couplings are invisible); a non-test code file which only CITES a where/fence path by repo path or basename, for example in a comment, is coupled too, and a citation key over the broad-key limit is reported as broad rather than coupled.',
   ]
   if (!coupling || coupling.coupled == null) {
     lines.push('- (not discovered — this caller supplied no coupling discovery)')
@@ -1396,6 +1434,7 @@ function compile(flags) {
       : `package.json scripts.test — ${testCommand.basis}`
   const fences = gatherFences({ fencesPath: flags.fences })
   const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
+  if (writeSurface.basis === 'fences') validateScopeEntries({ checkout, files: writeSurface.files })
   const coupling = crossCheckCoupling({ discovery, writeSurface })
   const baseline = gatherBaseline({ checkout, lane, laneBasis })
   let fromProfile

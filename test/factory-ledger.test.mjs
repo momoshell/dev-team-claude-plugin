@@ -2426,6 +2426,34 @@ test('recordEnvelope has no production caller; future wiring must update the ret
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.envelopes and docs/ledger-queries.md when wiring recordEnvelope')
 })
 
+test('doctor reports the retired processes reason beside an empty row count', { skip: SKIP }, () => {
+  const dbPath = join(nextDir(), 'doctor-retired-processes.db')
+  const res = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.row_counts.processes, 0)
+  assert.ok(typeof payload.retired_tables.processes === 'string' && payload.retired_tables.processes.length >= 40)
+})
+
+test('startProcess has no production caller; future wiring must update the retirement record', { skip: SKIP }, () => {
+  const offenders = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry)
+      const stat = statSync(full)
+      if (stat.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!/\.(mjs|js)$/.test(entry) || /\.test\.mjs$/.test(entry)) continue
+      if (full.endsWith('scripts/factory/ledger.mjs')) continue
+      if (/\bstartProcess\s*\(/.test(readFileSync(full, 'utf8'))) offenders.push(full)
+    }
+  }
+  for (const root of ['crew', 'scripts', 'visualizer']) walk(join(ROOT, root))
+  assert.deepEqual(offenders, [], 'update RETIRED_TABLES.processes and docs/ledger-queries.md when wiring startProcess')
+})
+
 test('sessions ends with tier, proposed_shape, proposed_strength and starts each row with all three NULL', { skip: SKIP }, () => {
   assert.deepEqual(TABLES.sessions.columns.slice(-3).map(({ name }) => name), [
     'tier', 'proposed_shape', 'proposed_strength',

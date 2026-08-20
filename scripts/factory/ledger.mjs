@@ -123,6 +123,7 @@ export const REQUEST_SOURCES = Object.freeze(['dispatch', 'brief-file'])
 export const REQUEST_MAX_CHARS = 2000
 export const RETIRED_TABLES = Object.freeze({
   envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/seat-io.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
+  processes: 'Retired: never held a row in any production ledger — startProcess has no caller outside scripts/factory/ledger.mjs itself and its own tests (#405), so `ledger procs <adw_id>` returns [] for every run. The table, startProcess and endProcess stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
 })
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])

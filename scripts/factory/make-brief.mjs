@@ -134,6 +134,15 @@ export const REFUSAL_REASONS = Object.freeze([
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
 export const SLOT_MARKER = 'UNFILLED SLOT'
 
+// #291 step 3: the compiler's shape and strength proposals travel to the boot
+// path as a fenced, machine-readable block beside the prose above. Closed key
+// set, same posture as DIRECTED_KEYS (crew/drive.mjs:902): a key nothing reads
+// is a claim no reader honours. The reader re-declares this pair locally
+// (scripts/factory/emit.mjs) rather than importing this module; the two
+// declarations are pinned equal by test/factory-make-brief.test.mjs.
+export const PROPOSAL_BLOCK = 'proposal'
+export const PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
+
 // Copied byte-for-byte from the converged brief's standing acceptance block.
 export const ACCEPTANCE_GATE_BLOCK = Object.freeze(`Planner authors it; **RED at baseline**, printing
 \`GATE-SUMMARY {"total":n,"failed":n,"errored":n}\` (\`GATE_SUMMARY_PREFIX\`,
@@ -1234,6 +1243,16 @@ export function renderProposedTier(proposal) {
   ].join('\n')
 }
 
+// A RENDERING of signals the prose already shows — never a new input. Both
+// values are filtered through the same closed vocabularies renderProposedTier
+// uses, so an absent or unratified proposal renders explicit JSON null rather
+// than a guess, and the bytes are a pure function of the proposal object.
+export function renderProposalBlock(proposal) {
+  const shape = proposal && TIER_NAMES.includes(proposal.shape) ? proposal.shape : null
+  const strength = proposal && LADDER_BANDS.includes(proposal.strength) ? proposal.strength : null
+  return ['```' + PROPOSAL_BLOCK, JSON.stringify({ shape, strength }, null, 2), '```'].join('\n')
+}
+
 function renderFences(fences) {
   if (fences == null) return 'no fence register supplied (`--fences` not given)'
   const lines = []
@@ -1302,6 +1321,7 @@ export function renderBrief(gathered) {
     request.ask,
     '## Proposed tier',
     renderProposedTier(proposal),
+    renderProposalBlock(proposal),
     '## Where',
     renderWhere(where),
     '## Done means',

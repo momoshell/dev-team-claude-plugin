@@ -560,6 +560,57 @@ export function recordCiDispatch({ dbPath, stderr = process.stderr, _openLedger,
 // A recorded tier is a short roster shape name; anything longer is not one.
 const TIER_MAX_CHARS = 64
 
+// The compiler's block, re-declared here rather than imported: this module's
+// import list is `node:*` + ./ledger.mjs only (see the factory
+// import-specifier pins), and the boot path must not take a dependency on the
+// brief compiler. test/factory-make-brief.test.mjs pins the two declarations
+// equal. Emitter: scripts/factory/make-brief.mjs renderProposalBlock.
+export const PROPOSAL_BLOCK = 'proposal'
+export const PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
+const NO_PROPOSAL = Object.freeze({ shape: null, strength: null })
+
+function proposalDefect(defect, absent = false) {
+  return { defect, absent, ...NO_PROPOSAL }
+}
+
+// Reuses the refusal SHAPE of parseDirectedBrief (crew/drive.mjs:903) — a named
+// defect per failure, never a silent skip — without importing it: the directed
+// block is the DRIVER's contract and this is the COMPILER's. `absent: true`
+// distinguishes "this brief carries no proposal" (a fact: unmeasured) from a
+// block that is present and unusable (a defect worth naming on stderr).
+export function parseProposalBrief(text) {
+  if (typeof text !== 'string' || !text.trim()) return proposalDefect('the brief is empty or unreadable', true)
+  const lines = text.split('\n')
+  const fence = '```' + PROPOSAL_BLOCK
+  const blocks = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== fence) continue
+    const end = lines.findIndex((line, j) => j > i && line.trim() === '```')
+    if (end < 0) return proposalDefect(`the ${fence} block is never closed`)
+    blocks.push(lines.slice(i + 1, end).join('\n'))
+    i = end
+  }
+  if (blocks.length === 0) return proposalDefect(`the brief carries no ${fence} block declaring ${PROPOSAL_KEYS.join(' and ')}`, true)
+  if (blocks.length > 1) return proposalDefect(`the brief carries ${blocks.length} ${fence} blocks — exactly one of them is the compiler's proposal`)
+  let parsed
+  try { parsed = JSON.parse(blocks[0]) } catch (err) { return proposalDefect(`the ${PROPOSAL_BLOCK} block is not JSON this reader can read: ${err.message}`) }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return proposalDefect(`the ${PROPOSAL_BLOCK} block must be a JSON object`)
+  const extra = Object.keys(parsed).filter((key) => !PROPOSAL_KEYS.includes(key))
+  if (extra.length) return proposalDefect(`the ${PROPOSAL_BLOCK} block declares ${extra.join(', ')}, which nothing reads — the keys are exactly ${PROPOSAL_KEYS.join(', ')}`)
+  const absentKeys = PROPOSAL_KEYS.filter((key) => !Object.prototype.hasOwnProperty.call(parsed, key))
+  if (absentKeys.length) return proposalDefect(`the ${PROPOSAL_BLOCK} block omits ${absentKeys.join(', ')} — a proposal names both or neither`)
+  const values = { ...NO_PROPOSAL }
+  for (const key of PROPOSAL_KEYS) {
+    const value = parsed[key]
+    if (value === null) continue
+    if (typeof value !== 'string' || value.trim() === '' || value.length > TIER_MAX_CHARS) {
+      return proposalDefect(`the ${PROPOSAL_BLOCK} block's ${key} must be a non-blank name of at most ${TIER_MAX_CHARS} characters, or null`)
+    }
+    values[key] = value.trim()
+  }
+  return { defect: null, absent: false, ...values }
+}
+
 function openRunInner({
   stateDir,
   repoSlug,
@@ -568,6 +619,11 @@ function openRunInner({
   nodeVersion,
   now = () => Date.now(),
   stderr = process.stderr,
+  // The compiled brief for this run. The two production call sites
+  // (crew/crew.mjs:1142, crew/child.mjs:187) each hold it as ctx.briefFile and
+  // are outside this lane's fence, so today only a direct caller passes it; the
+  // boot record's optional `brief_file` key is the fallback (bootProposal).
+  briefPath = null,
   // TEST SEAM ONLY (never used by a real call site): overrides how emit()
   // obtains its ledger handle, so a test can inject a handle whose writers
   // throw or are otherwise degraded without touching the real ledger.
@@ -615,6 +671,32 @@ function openRunInner({
     } catch {
       return null
     }
+  }
+
+  // #291 step 3, recording half: the COMPILER's shape and strength proposals
+  // travel in the brief as a fenced ```proposal block
+  // (scripts/factory/make-brief.mjs renderProposalBlock). This READS that block
+  // and never re-derives either value — no roster, no ladder, no signals here.
+  // An absent brief, an unreadable one, or one carrying no block records null,
+  // which reads as unmeasured rather than as a guess; a block that is PRESENT
+  // and unusable is named on stderr once (this module never throws out of a
+  // facade) rather than silently ignored.
+  function bootProposal() {
+    let path = briefPath
+    if (!path) {
+      try {
+        const value = JSON.parse(readFileSync(join(stateDir, 'crew.json'), 'utf8')).brief_file
+        path = typeof value === 'string' && value ? value : null
+      } catch { path = null }
+    }
+    if (!path) return { ...NO_PROPOSAL }
+    let text
+    try { text = readFileSync(path, 'utf8') } catch { return { ...NO_PROPOSAL } }
+    const read = parseProposalBrief(text)
+    if (read.defect && !read.absent) {
+      noteStderrOnce(`emit: the brief at ${path} carries no readable compiler proposal — ${read.defect}`)
+    }
+    return { shape: read.shape, strength: read.strength }
   }
 
   function initialSidecar(adwId, nowMs) {
@@ -953,10 +1035,13 @@ function openRunInner({
       })
       if (!ok) return
       if (result.alreadyStarted) return
+      const proposal = bootProposal()
       emit((handle) => {
         handle.startSession({
           adw_id: adwId, repo_slug: repoSlug, task_slug: taskSlug, started_at: isoMs(now()),
           tier: bootTier(),
+          proposed_shape: proposal.shape,
+          proposed_strength: proposal.strength,
         })
       })
       phaseTransition('planning')

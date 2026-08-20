@@ -12,9 +12,10 @@ import { spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
-  REFUSAL_REASONS, SLOT_MARKER, crossCheckCoupling, discoverTripwires, extractKeys,
-  extractSymbols, gatherFences, gatherProtectedPaths, main, MUTATION_CONTRACT_BLOCK,
-  profileField, proposeTier, renderBrief, resolveWriteSurface, validateAsk, verifyWhere,
+  LADDER_BANDS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
+  discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
+  MUTATION_CONTRACT_BLOCK, profileField, proposeTier, readLadderBands, renderBrief,
+  resolveWriteSurface, validateAsk, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { CHECK_FAIL_PREFIX, MUTATIONS_MAX } from '../crew/drive.mjs'
@@ -680,6 +681,107 @@ test('proposeTier pins breadth bands, directory raises, and tripwire-floor raise
   assert.match(floor.reasons.join('\n'), /6 tripwire tests.*mechanical.*build/i)
 })
 
+test('proposeTier returns separate shape and strength proposals with distinct reasons', () => {
+  const proposal = proposeTier({
+    where: [{ path: 'lib/source.mjs', kind: 'file' }],
+    discovery: { candidates: ['lib/source.mjs'], tripwires: [], broadKeys: [] },
+    protectedPaths: ['lib/source.mjs'],
+  })
+  for (const field of ['tier', 'shape', 'strength', 'reasons', 'shapeReasons', 'strengthReasons', 'signals']) {
+    assert.ok(Object.prototype.hasOwnProperty.call(proposal, field), `${field} missing`)
+  }
+  assert.equal(proposal.shape, 'build')
+  assert.equal(proposal.strength, 'utility')
+  assert.notDeepEqual(proposal.shapeReasons, proposal.strengthReasons)
+  assert.ok(!TIER_NAMES.includes(proposal.strength))
+})
+
+test('risk signals drive shape independently of complexity', () => {
+  const proposal = (sourceCount, protectedPaths = []) => proposeTier({
+    where: Array.from({ length: sourceCount }, (_, index) => ({ path: `lib/source-${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: sourceCount }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths,
+  })
+  assert.equal(proposal(5).shape, 'mechanical')
+  assert.equal(proposal(1, ['lib/source-0.mjs']).shape, 'build')
+  assert.equal(proposal(5, ['lib/source-0.mjs', 'lib/source-1.mjs']).shape, 'judge')
+})
+
+test('complexity signals drive ratified strength independently of risk', () => {
+  const proposal = (sourceCount, protectedPaths = []) => proposeTier({
+    where: Array.from({ length: sourceCount }, (_, index) => ({ path: `lib/source-${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: sourceCount }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths,
+  })
+  assert.equal(proposal(1).strength, 'utility')
+  assert.equal(proposal(3).strength, 'workhorse')
+  assert.equal(proposal(5).strength, 'frontier')
+  assert.equal(proposal(1, ['lib/source-0.mjs']).strength, 'utility')
+})
+
+test('strength proposals are restricted to the ratified ladder and explain each signal group', () => {
+  assert.deepEqual([...LADDER_BANDS], readLadderBands())
+  assert.ok(Object.isFrozen(LADDER_BANDS))
+  assert.deepEqual(readLadderBands(join(fixtureRoot, 'missing-model-ladder.json')), [])
+  const proposal = proposeTier({
+    where: Array.from({ length: 5 }, (_, index) => ({ path: `lib/source-${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: 5 }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths: ['lib/source-0.mjs'],
+    ladderBands: ['basement'],
+  })
+  assert.equal(proposal.strength, null)
+  assert.match(proposal.shapeReasons.join('\n'), /protected/i)
+  assert.match(proposal.strengthReasons.join('\n'), /scope breadth/)
+  assert.match(proposal.strengthReasons.join('\n'), /tripwire tests pinning that scope/)
+  assert.doesNotMatch(proposal.strengthReasons.join('\n'), /protected/i)
+})
+
+test('renderProposedTier labels tier, shape, and strength in risk then complexity order', () => {
+  const proposal = proposeTier({
+    where: Array.from({ length: 5 }, (_, index) => ({ path: `lib/source-${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: 5 }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths: [],
+  })
+  const rendered = (renderBrief({
+    request: { ask: 'ask', done_means: 'done', out_of_scope: 'out' },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    proposal,
+  })).split('## Proposed tier')[1]
+  assert.match(rendered, /proposed tier: judge/)
+  assert.match(rendered, /proposed shape: mechanical/)
+  assert.match(rendered, /because \(risk signals\):/)
+  assert.match(rendered, /proposed strength: frontier/)
+  assert.match(rendered, /because \(complexity signals\):/)
+  assert.ok(rendered.indexOf('proposed shape:') < rendered.indexOf('proposed strength:'))
+})
+
+test('protected-path risk leaves the legacy tier and protected hits unchanged', () => {
+  const proposal = proposeTier({
+    where: [{ path: 'lib/source.mjs', kind: 'file' }],
+    discovery: { candidates: ['lib/source.mjs'], tripwires: [], broadKeys: [] },
+    protectedPaths: ['lib/source.mjs'],
+  })
+  assert.equal(proposal.tier, 'build')
+  assert.deepEqual(proposal.signals.protectedHits, ['lib/source.mjs'])
+})
+
 test('protected paths default to the floor, raise one step, match directory prefixes, and reject malformed input', () => {
   const where = [{ path: 'lib/widget.mjs', kind: 'file' }]
   const discovery = {
@@ -779,33 +881,64 @@ test('a ratified protected-path list that is not a list refuses the compile', ()
   assert.equal(existsSync(outPath), false)
 })
 
-test('absence cases return no proposal with reasons and render no proposal', () => {
+test('absence cases return neither proposal with reasons and render no proposal', () => {
   const emptyWhere = proposeTier({ where: [], discovery: { candidates: ['lib/a.mjs'], tripwires: [], broadKeys: [] } })
   assert.equal(emptyWhere.tier, null)
+  assert.equal(emptyWhere.shape, null)
+  assert.equal(emptyWhere.strength, null)
   assert.ok(emptyWhere.reasons.length)
+  assert.ok(emptyWhere.shapeReasons.length)
+  assert.ok(emptyWhere.strengthReasons.length)
   const emptyCandidates = proposeTier({ where: [{ path: 'lib/a.mjs', kind: 'file' }], discovery: { candidates: [], tripwires: [], broadKeys: [] } })
   assert.equal(emptyCandidates.tier, null)
+  assert.equal(emptyCandidates.shape, null)
+  assert.equal(emptyCandidates.strength, null)
   assert.ok(emptyCandidates.reasons.length)
+  assert.ok(emptyCandidates.shapeReasons.length)
+  assert.ok(emptyCandidates.strengthReasons.length)
   assert.deepEqual(emptyCandidates.signals.directoryWhere, [])
   const suppressed = proposeTier({
     where: [{ path: 'lib/a.mjs', kind: 'file' }],
     discovery: { candidates: ['lib/a.mjs'], tripwires: [], broadKeys: [{ key: 'a', count: 99 }, { key: 'b', count: 99 }] },
   })
   assert.equal(suppressed.tier, null)
+  assert.equal(suppressed.shape, null)
+  assert.equal(suppressed.strength, null)
+  assert.ok(suppressed.shapeReasons.length)
+  assert.ok(suppressed.strengthReasons.length)
   assert.match(suppressed.reasons.find((reason) => /2 key\(s\).*absent, not zero/.test(reason)), /2 key\(s\).*absent, not zero/)
 
   const root = fixture('no-proposal-render', { broad: true })
   const { brief } = compile(root, { where: ['lib/broad.mjs'] })
   const body = section(brief, '## Proposed tier')
   assert.match(body, /proposed tier: no proposal/)
+  assert.match(body, /proposed shape: no proposal/)
+  assert.match(body, /proposed strength: no proposal/)
   assert.match(body, /^- .+/m)
 })
 
-test('shape proposal stays deferred while tier proposal wiring is present', () => {
+test('shape and strength proposals ship inside the Proposed tier section', () => {
   const source = readFileSync(SCRIPT, 'utf8')
   assert.match(source, /export function proposeTier/)
   assert.doesNotMatch(source, /--blueprint|proposeBlueprint/i)
   assert.doesNotMatch(source, /^##+\s*(Shape|Blueprint)\b/im)
+  const brief = renderBrief({
+    request: { ask: 'an ask', done_means: 'done means', out_of_scope: 'out of scope' },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    proposal: proposeTier({ where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] } }),
+  })
+  assert.deepEqual(brief.match(/^## .+$/gm), [
+    '## The ask', '## Proposed tier', '## Where', '## Done means', '## Tripwires',
+    '## Coupled sources', '## Baseline', '## Out of scope', '## Fences',
+    '## What the crew decides', '## Acceptance', '## Acceptance gate',
+    '## Per-check mutations', '## Validation lane', '## Conventions',
+  ])
+  assert.equal((brief.match(/proposed strength:/g) || []).length, 1)
+  const start = brief.indexOf('## Proposed tier')
+  const end = brief.indexOf('## Where')
+  const strength = brief.indexOf('proposed strength:')
+  assert.ok(strength > start && strength < end)
 })
 
 test('the parser returns a refusal code for an unknown CLI option', () => {

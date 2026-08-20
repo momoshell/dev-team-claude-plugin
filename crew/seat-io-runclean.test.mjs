@@ -7,8 +7,10 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, readEnvelopeFile, seatIo, WAIT_POLL_MS, waitForEnvelope,
+  cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, providerConditionDetail,
+  readEnvelopeFile, samplePaneScreen, seatIo, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
+import { recogniseProviderCondition } from './headless.mjs'
 
 const CONTENT = Object.freeze({
   committed: 'committed tracked content\n',
@@ -155,6 +157,91 @@ test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {
   }
 })
 
+test('samplePaneScreen asks for scrollback and sees through colour and box rules', () => {
+  const calls = []
+  const frame = '╭──╮\n│ \x1b[31mrate\x1b[0m│limit exceeded │\n╰──╯\n'
+  const condition = samplePaneScreen('surface-builder', {
+    cmux: (verb, args, options) => {
+      calls.push({ verb, args: [...args], options })
+      return { ok: true, stdout: frame }
+    },
+  })
+  assert.equal(condition, 'rate-limit')
+  assert.equal(recogniseProviderCondition(frame), null)
+  assert.deepEqual(calls, [{
+    verb: 'read-screen',
+    args: ['--surface', 'surface-builder', '--scrollback', '--lines', '200'],
+    options: { timeoutMs: 5000 },
+  }])
+})
+
+test('a failed, empty or throwing screen read records nothing', () => {
+  assert.equal(samplePaneScreen('surface-builder', {
+    cmux: () => ({ ok: false, stdout: 'API Error 529 overloaded' }),
+  }), null)
+  assert.equal(samplePaneScreen('surface-builder', {
+    cmux: () => ({ ok: true, stdout: '' }),
+  }), null)
+  assert.equal(samplePaneScreen('surface-builder', {
+    cmux: () => { throw new Error('read-screen failed') },
+  }), null)
+
+  withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    const journal = []
+    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      cmux: () => ({ ok: false, stdout: 'API Error 529 overloaded' }),
+      logLine: (_path, row) => journal.push(row),
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: () => false,
+    })
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.equal(io.wait(assignment.returnPath, 35), null)
+    assert.equal(journal.some((row) => row.event === 'pane-provider-sample'), false)
+  })
+})
+
+test('waitForEnvelope sampling cannot change liveness decisions', () => {
+  const aliveRun = (sampleSeat) => {
+    let clock = 0
+    let probes = 0
+    const outcomes = [true, null, false, true]
+    const aliveAt = []
+    const envelope = waitForEnvelope({
+      returnPath: '/tmp/return.json', timeoutS: 600, role: 'builder',
+      readEnvelope: () => (probes >= outcomes.length ? { status: 'done' } : null),
+      probeSeat: () => outcomes[probes++], sampleSeat,
+      onAlive: (at) => aliveAt.push(at), now: () => clock,
+      sleep: (ms) => { clock += ms },
+    })
+    return { envelope, aliveAt }
+  }
+  const deadRun = (sampleSeat) => {
+    let clock = 0
+    let error
+    try {
+      waitForEnvelope({
+        returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+        readEnvelope: () => null, probeSeat: () => false, sampleSeat,
+        now: () => clock, sleep: (ms) => { clock += ms },
+      })
+    } catch (err) { error = err }
+    return { stage: error?.stage, role: error?.role, message: error?.message }
+  }
+  const base = aliveRun(undefined)
+  assert.deepEqual(aliveRun(() => 'overloaded'), base)
+  assert.deepEqual(aliveRun(() => { throw new Error('sample failed') }), base)
+  const deadBase = deadRun(undefined)
+  assert.deepEqual(deadRun(() => 'overloaded'), deadBase)
+  assert.deepEqual(deadRun(() => { throw new Error('sample failed') }), deadBase)
+  assert.equal(LIVENESS_PROBE_MS, 30_000)
+  assert.equal(LIVENESS_MISSES_TO_DIE, 2)
+})
+
 test('waitForEnvelope calls onAlive only for observed alive probes with their timestamps', () => {
   let clock = 0
   let probes = 0
@@ -277,6 +364,118 @@ test('a recognised provider condition lands in the cell-failure detail with role
   })
 })
 
+test('a sampled condition lands on the seat failure with SAMPLED evidence', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    const events = []
+    const journal = []
+    const crew = {
+      task: 'b73-pane',
+      members: { builder: {
+        agent: 'claude', provider: 'anthropic', id: 'model-id', model: 'sonnet', transport: 'pane',
+        surface_id: 'surface-builder',
+      } },
+    }
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      cmux: () => ({ ok: true, stdout: 'API Error 529 overloaded' }),
+      logLine: (_path, row) => journal.push(row),
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: () => false,
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.equal(io.wait(assignment.returnPath, 35), null)
+    const event = events.find((candidate) => candidate.kind === 'cell-failure')
+    assert.ok(event)
+    assert.match(event.detail, /^\[provider-sampled:overloaded\] /)
+    assert.equal(journal.filter((row) => row.event === 'pane-provider-sample').length, 1)
+
+    const rows = []
+    const adapter = emitAdapter({
+      adwId: 'adw-pane-provider',
+      emit: (fn) => fn({ recordCellFailure: (row) => rows.push(row) }),
+    }, crew)
+    adapter(event)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].role, 'builder')
+    assert.equal(rows[0].transport, 'pane')
+    assert.equal(rows[0].model, 'sonnet')
+    assert.equal(rows[0].detail, event.detail)
+
+    assert.match(providerConditionDetail({ message: 'captured', providerCondition: 'overloaded' }), /^\[provider:overloaded\] /)
+    assert.equal(providerConditionDetail({ message: 'transport failure' }), 'transport failure')
+  })
+})
+
+test('nothing branches on a sampled condition', () => {
+  const run = (stdout) => withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    const events = []
+    const thrown = new Error('driver transport failure')
+    const crew = { members: { builder: { model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      cmux: () => ({ ok: true, stdout }),
+      now: () => clock,
+      sleep: (ms) => {
+        clock += ms
+        if (clock > LIVENESS_PROBE_MS) throw thrown
+      },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: () => false,
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => io.wait(assignment.returnPath, 35), (err) => {
+      assert.equal(err, thrown)
+      return true
+    })
+    return { event: events.find((event) => event.kind === 'cell-failure'), thrown }
+  })
+
+  const sampled = run('API Error 529 overloaded')
+  const clean = run('nothing interesting here')
+  assert.deepEqual(
+    [sampled.event.failure, sampled.event.stage, cellFailureKind(sampled.thrown), sampled.thrown.message],
+    [clean.event.failure, clean.event.stage, cellFailureKind(clean.thrown), clean.thrown.message],
+  )
+  assert.notEqual(sampled.event.detail, clean.event.detail)
+  for (const condition of ['not-a-condition', '__proto__']) {
+    assert.equal(providerConditionDetail({ message: 'same provider failure', sampledProviderCondition: condition }), 'same provider failure')
+  }
+})
+
+test('sample counts are lower bounds, never totals', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    const journal = []
+    const crew = { members: { builder: { model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      cmux: () => ({ ok: true, stdout: 'API Error 529 overloaded' }),
+      logLine: (_path, row) => journal.push(row),
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: () => false,
+    })
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.equal(io.wait(assignment.returnPath, 65), null)
+    const samples = journal.filter((row) => row.event === 'pane-provider-sample')
+    assert.equal(samples.length, 2)
+    assert.deepEqual(samples.map((row) => [row.basis, row.bound, row.observed_at_least]), [
+      ['sampled', 'lower', 1], ['sampled', 'lower', 2],
+    ])
+    for (const row of samples) assert.equal(Object.keys(row).some((key) => /^(total|count|samples_total)$/.test(key)), false)
+  })
+})
+
 test('provider recognition branches no adjudication, escalation, reseat or retry', () => {
   withRepo({ dirty: false }, (fixture) => {
     const runFailure = (condition) => {
@@ -316,11 +515,15 @@ test('provider recognition branches no adjudication, escalation, reseat or retry
 
     const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
     const listed = execFileSync('git', [
-      'grep', '-l', '-e', 'providerCondition', '-e', 'PROVIDER_CONDITIONS', '--', 'crew/', 'scripts/', 'visualizer/',
+      'grep', '-l', '-e', 'providerCondition', '-e', 'PROVIDER_CONDITIONS', '-e', 'recogniseProviderCondition', '--', 'crew/', 'scripts/', 'visualizer/',
     ], { cwd: repoRoot, encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean).sort()
     assert.deepEqual(listed, [
       'crew/headless.mjs', 'crew/headless.test.mjs', 'crew/seat-io-runclean.test.mjs', 'crew/seat-io.mjs',
     ])
+    const seatIoSource = readFileSync(join(repoRoot, 'crew/seat-io.mjs'), 'utf8')
+    for (const pattern of [/overloaded_error/, /rate_limit_error/, /authentication_error/, /\b529\b/, /\b429\b/]) {
+      assert.doesNotMatch(seatIoSource, pattern)
+    }
   })
 })
 

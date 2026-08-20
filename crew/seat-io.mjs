@@ -13,7 +13,7 @@ import {
   cmux as defaultCmux, tree as defaultTree, locate as defaultLocate, sendLine as defaultSendLine,
   closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,
 } from './driver.mjs'
-import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS } from './headless.mjs'
+import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, recogniseProviderCondition } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
@@ -1181,6 +1181,47 @@ export function settleSeatTeardown(io, deps = {}) {
   return { ...summary, rows, ...(descendants ? { descendants } : {}) }
 }
 
+export const PANE_SAMPLE_LINES = 200
+export const PANE_SAMPLE_TIMEOUT_MS = 5000
+const BOX_DRAWING = /[─-▟]/g
+
+export function normaliseScreenText(text) {
+  if (typeof text !== 'string' || !text) return ''
+  return text.replace(BOX_DRAWING, ' ').replace(/\s+/g, ' ').trim()
+}
+
+export function samplePaneScreen(surfaceId, deps = {}) {
+  const cmux = deps.cmux || defaultCmux
+  let res
+  try {
+    res = cmux('read-screen', ['--surface', surfaceId, '--scrollback', '--lines', String(PANE_SAMPLE_LINES)], { timeoutMs: PANE_SAMPLE_TIMEOUT_MS })
+  } catch { return null }
+  if (!res || res.ok !== true) return null
+  return recogniseProviderCondition(normaliseScreenText(String(res.stdout || '')))
+}
+
+export function paneSampleRow({ role, transport, model, condition, observed }) {
+  return {
+    event: 'pane-provider-sample',
+    role: role ?? null,
+    transport: transport ?? null,
+    model: model ?? null,
+    condition,
+    basis: 'sampled',
+    bound: 'lower',
+    observed_at_least: observed,
+  }
+}
+
+export function providerConditionDetail(err) {
+  const message = (err && err.message) || null
+  const captured = err && err.providerCondition
+  if (PROVIDER_CONDITIONS.some((c) => c.condition === captured)) return `[provider:${captured}] ${message ?? ''}`.trim()
+  const sampled = err && err.sampledProviderCondition
+  if (PROVIDER_CONDITIONS.some((c) => c.condition === sampled)) return `[provider-sampled:${sampled}] ${message ?? ''}`.trim()
+  return message
+}
+
 // A pane's death is not instantaneous: close-surface returns as soon as cmux
 // accepts it, so ONE probe can read a still-listed surface and call a dying
 // seat `failed`. Poll a bounded window instead, so `failed` keeps meaning what
@@ -1250,7 +1291,7 @@ export function readEnvelopeFile(returnPath, deps = {}) {
   }
 }
 
-export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, onAlive, now, sleep }) {
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, onAlive, now, sleep }) {
   const started = now()
   const deadline = started + timeoutS * 1000
   let lastProbeAt = started
@@ -1263,6 +1304,7 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
     if (probeSeat && current - lastProbeAt >= LIVENESS_PROBE_MS) {
       lastProbeAt = current
       const alive = probeSeat()
+      if (sampleSeat) try { sampleSeat(current) } catch { /* a sample is never load-bearing */ }
       // A heartbeat is a MEASUREMENT: stamped only where liveness was
       // OBSERVED. `current` is that probe's own timestamp — the same instant
       // the miss accounting records as `lastProbeAt`. An indeterminate probe
@@ -1378,19 +1420,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // drop the whole row rather than enrich it. The prefix LEADS the string
   // because the ledger truncates detail at 500 chars (:1558). Only a member of
   // the closed condition set is ever recorded, and nothing branches on it.
-  const detailWithCondition = (err) => {
-    const message = (err && err.message) || null
-    const condition = err && err.providerCondition
-    if (!PROVIDER_CONDITIONS.some((c) => c.condition === condition)) return message
-    return `[provider:${condition}] ${message ?? ''}`.trim()
-  }
   const noteCellFailure = (role, id, failure, err) => {
     try {
       io.emit?.({
         kind: 'cell-failure', role, id: id ?? null, failure,
-        stage: (err && err.stage) || null, detail: detailWithCondition(err),
+        stage: (err && err.stage) || null, detail: providerConditionDetail(err),
       })
     } catch { /* never load-bearing */ }
+  }
+  const sampledConditions = new Map()
+  const samplePaneSeat = (role, surfaceId) => {
+    const condition = samplePaneScreen(surfaceId, { cmux })
+    if (!condition) return null
+    const prior = sampledConditions.get(role)
+    const observed = (prior && prior.condition === condition ? prior.observed : 0) + 1
+    sampledConditions.set(role, { condition, observed })
+    const m = crew.members?.[role] || null
+    try { io.log({ at: now(), ...paneSampleRow({ role, transport: m?.transport ?? DEFAULT_TRANSPORT, model: m?.model ?? null, condition, observed }) }) }
+    catch { /* the journal is diagnostics, never load-bearing */ }
+    return condition
   }
   const io = {
     assign(spec) {
@@ -1435,6 +1483,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
             probeSeat: info ? () => paneAlive(info.surface_id, { tree, locate }) : null,
+            sampleSeat: info?.surface_id ? () => samplePaneSeat(info.role, info.surface_id) : null,
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed
               // write: the ledger is diagnostics, the wait is the run.
@@ -1444,11 +1493,15 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             now, sleep,
           })
         if (env == null) {
-          noteCellFailure(info?.role, info?.id, 'timeout', { message: `no envelope at ${returnPath} within ${timeoutS}s` })
+          noteCellFailure(info?.role, info?.id, 'timeout', {
+            message: `no envelope at ${returnPath} within ${timeoutS}s`,
+            sampledProviderCondition: sampledConditions.get(info?.role)?.condition,
+          })
         }
         return env
       } catch (err) {
         if (err.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
+        const sampled = sampledConditions.get(info?.role); if (sampled) err.sampledProviderCondition = sampled.condition
         noteCellFailure(info?.role, info?.id, cellFailureKind(err), err)
         throw err
       }

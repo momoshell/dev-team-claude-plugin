@@ -2772,9 +2772,82 @@ test('checkFailureLine requires the intended failure line and a strict delimiter
   assert.equal(checkFailureLine(`FAIL check-one: why\n${RED()}`, 'check-one'), true)
   assert.equal(checkFailureLine('  FAIL check-one', 'check-one'), true)
   assert.equal(checkFailureLine('FAIL check-one:', 'check-one'), true)
-  for (const output of ['FAIL check-one extra words', 'FAIL check-one warm: reason', 'FAIL check-one:v2: reason', 'FAIL check-one-two: why', 'PASS check-one', 'prose check-one', '']) {
+  assert.equal(checkFailureLine('FAIL cache:v2: why', 'cache'), false)
+  assert.equal(checkFailureLine('FAIL cache:v2: why', 'cache:v2'), true)
+  for (const output of ['FAIL check-one extra words', 'FAIL check-one — why', 'FAIL check-one why', 'FAIL check-one warm: reason', 'FAIL check-one:v2: reason', 'FAIL check-one-two: why', 'PASS check-one', 'prose check-one', '']) {
     assert.equal(checkFailureLine(output, 'check-one'), false, output)
   }
+})
+
+test('a present-but-misdelimited FAIL label is diagnosed as a delimiter, not an absent print', () => {
+  for (const [label, output] of [['C1', 'FAIL C1 — why'], ['check-one', 'FAIL check-one why']]) {
+    const mutation = { ...CHECK_MUTATION, check: label }
+    const io = fakeIo({
+      files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+      cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+      envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+      runs: {
+        ...CHECK_RUNS(`${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`),
+        'gate-fixed:1': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+        'gate-fixed:2': { ok: false, output: `FAIL ${label}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+      },
+      changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    })
+    const res = driveTask(CTX, io)
+    assert.equal(res.status, 'done')
+    const event = io.calls.emits.find((entry) => entry.kind === 'check-discrimination')
+    const row = event.checks[0]
+    assert.equal(row.outcome, 'survived')
+    assert.match(row.why, new RegExp(`DID print "FAIL ${label}"`))
+    assert.match(row.why, /must END THE LINE or be followed by a colon/)
+    assert.doesNotMatch(row.why, new RegExp(`printed no "FAIL ${label}" line`))
+    assert.equal(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0].why, row.why)
+  }
+})
+
+test('a genuinely absent FAIL label keeps the absent-line diagnosis', () => {
+  const label = 'check-one'
+  const output = 'PASS check-one'
+  const mutation = { ...CHECK_MUTATION, check: label }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+    runs: {
+      ...CHECK_RUNS(`${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`),
+      'gate-fixed:1': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+      'gate-fixed:2': { ok: false, output: `FAIL ${label}: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+    },
+    changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const journal = io.calls.logs.find((line) => line.gate_check_discriminations)
+  const row = journal.gate_check_discriminations[0]
+  assert.match(row.why, /printed no "FAIL check-one" line/)
+  assert.match(row.why, /not the one under proof/)
+  assert.doesNotMatch(row.why, /DID print/)
+})
+
+test('the delimiter diagnosis reaches the escalation record', () => {
+  const label = 'C1'
+  const output = 'FAIL C1 — why'
+  const mutation = { ...CHECK_MUTATION, check: label }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+    runs: {
+      ...CHECK_RUNS(`${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`),
+      'gate-fixed:1': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` },
+      'gate-fixed:2': { ok: false, output: `${output}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}` },
+    },
+    changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(res.details.escalation.where, 'gate')
+  assert.match(res.details.escalation.why, /DID print "FAIL C1"/)
 })
 
 test('per-check mutation records an additive killed row and event', () => {
@@ -2846,6 +2919,7 @@ test('an unapplied mutation is not accepted as proof', () => {
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'gate')
   assert.equal(res.details.escalation.why.includes('ghost'), true)
+  assert.deepEqual(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0], { check: 'ghost', outcome: 'unapplied', file: 'a.mjs', summary: null, why: 'the declared find text is not in the built a.mjs' })
   assert.equal(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).length, 0)
 })
 
@@ -2910,6 +2984,7 @@ test('a surviving mutation enters the existing lead gate repair path', () => {
   assert.equal(res.status, 'done')
   assert.equal(res.details.gate.repairs, 1)
   assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.equal(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0].why, 'the gate stayed GREEN under the mutation')
 })
 
 test('a known survivor outranks a later interrupted mutation pass', () => {
@@ -2995,6 +3070,7 @@ test('the missing-file unapplied branch records its distinct reason and writes n
   const first = io.calls.emits.find((event) => event.kind === 'check-discrimination')
   assert.equal(first.checks[0].outcome, 'unapplied')
   assert.match(first.checks[0].why, /does not exist/)
+  assert.deepEqual(first.checks[0], { check: 'missing-file', outcome: 'unapplied', file: 'missing.mjs', summary: null, why: 'missing.mjs does not exist in the built tree' })
   assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
 })
 
@@ -3060,13 +3136,14 @@ test('a whole-proof repair brief stays byte-stable when no mutations are declare
 })
 
 test('a longer sibling failure is not the intended check failure', () => {
-  const output = `PASS cache\nFAIL cache warm: reason\nFAIL cache:v2: reason\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":2,"errored":0}`
+  const output = `PASS cache\nFAIL cache:v2: reason\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":2,"errored":0}`
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true, cleanRuns: CHECK_CLEAN,
     envelopes: CHECK_ENVELOPES([{ ...CHECK_MUTATION, check: 'cache' }], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-cmd' } } }),
     runs: { ...CHECK_RUNS(output), 'gate-cmd:3': { ok: false, output } }, changed: ['a.mjs', 'a.test.mjs'], emit: true })
   const res = driveTask(CTX, io)
   const event = io.calls.emits.find((entry) => entry.kind === 'check-discrimination')
   assert.equal(event?.checks?.[0]?.outcome, 'survived')
+  assert.match(event?.checks?.[0]?.why, /printed no "FAIL cache" line/)
   assert.equal(res.status, 'escalation')
 })
 

@@ -157,6 +157,19 @@ function page(nodes, {
   return { data, rateLimit: { remaining, resetAt } }
 }
 
+function ghResponse({ root, project, errors = [], stderr } = {}) {
+  const data = {
+    user: root === 'user' ? { projectV2: project } : null,
+    organization: root === 'organization' ? { projectV2: project } : null,
+    rateLimit: { remaining: 900, resetAt: '2026-01-02T01:00:00Z' },
+  }
+  return {
+    status: 1,
+    stdout: JSON.stringify({ data, errors }),
+    stderr: stderr ?? errors.map((error) => error?.message || '').filter(Boolean).join('\n'),
+  }
+}
+
 function intakeBody({ ask = 'Implement measured queue selection', where = TARGET } = {}) {
   return `ask: ${ask}\nwhere: ${where}\ndone-means: The selected issue is recorded\nout-of-scope: Dispatching and status changes`
 }
@@ -521,6 +534,117 @@ test('fetchBoard tracks the lowest rate limit while preserving the latest reset 
   assert.equal(result.ok, true)
   assert.deepEqual(result.rateLimit, { remaining: 450, reset_at: 'second' })
   assert.equal(calls.length, 2)
+})
+
+test('user-owned board accepts the sibling-root error through the real runner', () => {
+  const calls = []
+  const response = ghResponse({
+    root: 'user',
+    project: { items: { nodes: [issue({ number: 101 })], pageInfo: { hasNextPage: false, endCursor: null } } },
+    errors: [{
+      type: 'NOT_FOUND', path: ['organization'],
+      message: "Could not resolve to an Organization with the login of 'example-owner'.",
+    }],
+    stderr: "gh: Could not resolve to an Organization with the login of 'example-owner'.\n",
+  })
+  const result = fetchBoard({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: { ...baseConfig, pageSize: 5, maxPages: 3 },
+    deps: {
+      spawnSync: (command, args) => {
+        calls.push({ command, args })
+        return response
+      },
+    },
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.items.map(({ issue: number }) => number), [101])
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].command, 'gh')
+  assert.deepEqual(calls[0].args.slice(0, 2), ['api', 'graphql'])
+  const query = calls[0].args.find((arg) => arg.startsWith('query='))
+  assert.match(query, /user\(login:\$owner\)/)
+  assert.match(query, /organization\(login:\$owner\)/)
+  assert.ok(calls[0].args.includes('owner=example-owner'))
+  assert.ok(calls[0].args.includes('number=7'))
+  assert.ok(calls[0].args.includes('first=5'))
+})
+
+test('organization-owned board accepts the sibling-root error through the real runner', () => {
+  const response = ghResponse({
+    root: 'organization',
+    project: { items: { nodes: [issue({ number: 202 })], pageInfo: { hasNextPage: false, endCursor: null } } },
+    errors: [{
+      type: 'NOT_FOUND', path: ['user'],
+      message: "Could not resolve to a User with the login of 'example-owner'.",
+    }],
+    stderr: "gh: Could not resolve to a User with the login of 'example-owner'.\n",
+  })
+  const result = fetchBoard({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: { ...baseConfig, pageSize: 5, maxPages: 3 },
+    deps: { spawnSync: () => response },
+  })
+  assert.equal(result.ok, true)
+  assert.deepEqual(result.items.map(({ issue: number }) => number), [202])
+})
+
+test('a missing project fails with a distinct runner verdict instead of an empty board', () => {
+  const missing = ghResponse({
+    root: 'user', project: null,
+    errors: [
+      {
+        type: 'NOT_FOUND', path: ['organization'],
+        message: "Could not resolve to an Organization with the login of 'example-owner'.",
+      },
+      {
+        type: 'NOT_FOUND', path: ['user', 'projectV2'],
+        message: 'Could not resolve to a ProjectV2 with the number 7.',
+      },
+    ],
+    stderr: "gh: Could not resolve to an Organization with the login of 'example-owner'.\nCould not resolve to a ProjectV2 with the number 7.\n",
+  })
+  const transport = { status: 1, stdout: '', stderr: 'gh: could not connect to api.github.com\n' }
+  const messageFor = (response) => {
+    const deps = normalDeps({ spawnSync: () => response })
+    try {
+      deps.github({ owner: 'example-owner', projectNumber: 7, first: 5, after: null })
+    } catch (err) {
+      return String(err?.message || err)
+    }
+    return null
+  }
+  const missingMessage = messageFor(missing)
+  const transportMessage = messageFor(transport)
+  assert.match(missingMessage, /could not resolve project example-owner\/7/)
+  assert.doesNotMatch(transportMessage, /could not resolve project example-owner\/7/)
+
+  const result = fetchBoard({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: { ...baseConfig, pageSize: 5, maxPages: 3 },
+    deps: { spawnSync: () => missing },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'board-fetch-failed')
+  assert.deepEqual(result.items, [])
+})
+
+test('an error touching the resolved root still fails through the real runner', () => {
+  const response = ghResponse({
+    root: 'user',
+    project: { items: { nodes: [issue({ number: 303 })], pageInfo: { hasNextPage: false, endCursor: null } } },
+    errors: [{
+      type: 'SERVER_ERROR', path: ['user', 'projectV2', 'items'], message: 'items could not be read',
+    }],
+  })
+  const result = fetchBoard({
+    board: { owner: 'example-owner', projectNumber: 7 },
+    config: { ...baseConfig, pageSize: 5, maxPages: 3 },
+    deps: { spawnSync: () => response },
+  })
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'board-fetch-failed')
+  assert.deepEqual(result.items, [])
 })
 
 test('normalDeps keeps the injected seams and defaults the runner without spawning at construction', () => {

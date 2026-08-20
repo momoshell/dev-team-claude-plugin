@@ -301,6 +301,32 @@ const EMPTY_PAGE = Object.freeze({
   drafts: 0,
 })
 
+const OWNER_ROOTS = Object.freeze(['user', 'organization'])
+
+// One root of the dual-root board query always fails: an owner is a user or an
+// organization, never both, so `gh` exits non-zero and reports a NOT_FOUND for
+// the sibling root even when the project the caller asked for resolved in the
+// same response. Tolerate exactly that sibling-root error and nothing else:
+// an error touching the resolved root, or a response carrying no project at
+// all, is still a fetch failure. Returns null when the response is usable, or
+// a message describing why it is not.
+function boardResponseProblem(response, { owner, projectNumber }) {
+  const data = response && typeof response === 'object' ? response.data : null
+  const resolvedRoot = OWNER_ROOTS.find((root) => {
+    const project = data && typeof data === 'object' ? data[root]?.projectV2 : null
+    return project != null && typeof project === 'object'
+  }) ?? null
+  if (resolvedRoot == null) return `could not resolve project ${owner}/${projectNumber}`
+  const errors = Array.isArray(response?.errors) ? response.errors : []
+  const untolerated = errors.filter((error) => {
+    const path = Array.isArray(error?.path) ? error.path : []
+    return !(path.length === 1 && OWNER_ROOTS.includes(path[0]) && path[0] !== resolvedRoot)
+  })
+  if (untolerated.length === 0) return null
+  const detail = untolerated.map((error) => String(error?.message || 'unknown error')).join('; ')
+  return `graphql errors touching ${resolvedRoot}: ${detail}`
+}
+
 function defaultGithub(d, { owner, projectNumber, first, after }) {
   const query = `query($owner:String!,$number:Int!,$first:Int!,$after:String){
     user(login:$owner){projectV2(number:$number){items(first:$first,after:$after){nodes{
@@ -329,14 +355,23 @@ function defaultGithub(d, { owner, projectNumber, first, after }) {
   } catch (err) {
     throw new Error(`github runner failed: ${String(err?.message || err)}`)
   }
-  if (!result || result.error || result.status !== 0) {
-    throw new Error(`github runner failed: ${String(result?.stderr || result?.error?.message || 'unknown error')}`)
+  if (!result || result.error) {
+    throw new Error(`github runner failed: ${String(result?.error?.message || 'unknown error')}`)
   }
+  let response
   try {
-    return JSON.parse(String(result.stdout || ''))
+    response = JSON.parse(String(result.stdout || ''))
   } catch {
+    // A non-zero exit with no parseable body is a transport failure, not the
+    // sibling-root NOT_FOUND this fetch deliberately tolerates.
+    if (result.status !== 0) {
+      throw new Error(`github runner failed: ${String(result.stderr || 'unknown error')}`)
+    }
     throw new Error('github runner returned non-JSON output')
   }
+  const problem = boardResponseProblem(response, { owner, projectNumber })
+  if (problem != null) throw new Error(`github runner failed: ${problem}`)
+  return response
 }
 
 function defaultRunsInWindow({ since, dbPath } = {}) {

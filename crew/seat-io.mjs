@@ -1213,17 +1213,28 @@ export function normaliseScreenText(text) {
   return text.replace(BOX_DRAWING, ' ').replace(/\s+/g, ' ').trim()
 }
 
+// A READ and a CONDITION are different facts. A screen that could not be read
+// is no evidence at all, and only a screen the probe actually read can be
+// evidence that a condition has ENDED (#413).
 export function samplePaneScreen(surfaceId, deps = {}) {
   const cmux = deps.cmux || defaultCmux
   let res
   try {
     res = cmux('read-screen', ['--surface', surfaceId, '--scrollback', '--lines', String(PANE_SAMPLE_LINES)], { timeoutMs: PANE_SAMPLE_TIMEOUT_MS })
-  } catch { return null }
-  if (!res || res.ok !== true) return null
-  return recogniseProviderCondition(normaliseScreenText(String(res.stdout || '')))
+  } catch { return { read: false, condition: null } }
+  if (!res || res.ok !== true) return { read: false, condition: null }
+  const text = normaliseScreenText(String(res.stdout || ''))
+  if (!text) return { read: false, condition: null }
+  return { read: true, condition: recogniseProviderCondition(text) }
 }
 
-export function paneSampleRow({ role, transport, model, condition, observed }) {
+// One record per RUN — one continuous stretch of the same recognised condition
+// on one pane. `bound: 'lower'` still says the row can only undercount: the
+// condition may have begun before first_seen_at and outlived last_seen_at, and
+// a probe that misses it entirely is never recorded. What the row no longer
+// does is COUNT: a per-probe counter turned one persistent on-screen artifact
+// into N sightings that read as N incidents (#413).
+export function paneSampleRow({ role, transport, model, condition, firstSeenAt, lastSeenAt }) {
   return {
     event: 'pane-provider-sample',
     role: role ?? null,
@@ -1232,7 +1243,8 @@ export function paneSampleRow({ role, transport, model, condition, observed }) {
     condition,
     basis: 'sampled',
     bound: 'lower',
-    observed_at_least: observed,
+    first_seen_at: firstSeenAt ?? null,
+    last_seen_at: lastSeenAt ?? null,
   }
 }
 
@@ -1493,16 +1505,42 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       })
     } catch { /* never load-bearing */ }
   }
+  // `sampledConditions` is the LAST condition recognised for a seat and is
+  // never cleared: it is the evidence a cell failure quotes. `sampleRuns` is
+  // the OPEN run, and it is the journal's unit — closed, and only then
+  // written, when the condition changes, when a read shows it gone, or when
+  // the wait ends.
   const sampledConditions = new Map()
-  const samplePaneSeat = (role, surfaceId) => {
-    const condition = samplePaneScreen(surfaceId, { cmux })
-    if (!condition) return null
-    const prior = sampledConditions.get(role)
-    const observed = (prior && prior.condition === condition ? prior.observed : 0) + 1
-    sampledConditions.set(role, { condition, observed })
+  const sampleRuns = new Map()
+  const closeSampleRun = (role) => {
+    const run = sampleRuns.get(role)
+    if (!run) return
+    sampleRuns.delete(role)
     const m = crew.members?.[role] || null
-    try { io.log({ at: now(), ...paneSampleRow({ role, transport: m?.transport ?? DEFAULT_TRANSPORT, model: m?.model ?? null, condition, observed }) }) }
-    catch { /* the journal is diagnostics, never load-bearing */ }
+    try {
+      io.log({ at: now(), ...paneSampleRow({
+        role, transport: m?.transport ?? DEFAULT_TRANSPORT, model: m?.model ?? null,
+        condition: run.condition, firstSeenAt: run.firstSeenAt, lastSeenAt: run.lastSeenAt,
+      }) })
+    } catch { /* the journal is diagnostics, never load-bearing */ }
+  }
+  const samplePaneSeat = (role, surfaceId, at) => {
+    const sample = samplePaneScreen(surfaceId, { cmux })
+    // A failed or empty read is not evidence the condition ended — leave the
+    // open run exactly as it was and record nothing.
+    if (!sample.read) return null
+    const condition = sample.condition
+    if (!condition) { closeSampleRun(role); return null }
+    // `at` is the probe's own instant, the same one the miss accounting and
+    // the heartbeat stamp; now() is the fallback for a caller that has none.
+    const seenAt = typeof at === 'number' ? at : now()
+    const run = sampleRuns.get(role)
+    if (run && run.condition === condition) run.lastSeenAt = seenAt
+    else {
+      closeSampleRun(role)
+      sampleRuns.set(role, { condition, firstSeenAt: seenAt, lastSeenAt: seenAt })
+    }
+    sampledConditions.set(role, { condition })
     return condition
   }
   // #392: ONE bounded re-ask, composed by code the same way a bounce brief is.
@@ -1559,7 +1597,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           return readEnvelopeFile(returnPath, { existsSync, readFileSync, role })
         },
         probeSeat: () => paneAlive(surfaceId, { tree, locate }),
-        sampleSeat: () => samplePaneSeat(role, surfaceId),
+        sampleSeat: (at) => samplePaneSeat(role, surfaceId, at),
         onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
         now,
         sleep,
@@ -1623,7 +1661,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
             probeSeat: info ? () => paneAlive(info.surface_id, { tree, locate }) : null,
-            sampleSeat: info?.surface_id ? () => samplePaneSeat(info.role, info.surface_id) : null,
+            sampleSeat: info?.surface_id ? (at) => samplePaneSeat(info.role, info.surface_id, at) : null,
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed
               // write: the ledger is diagnostics, the wait is the run.
@@ -1656,6 +1694,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         const sampled = sampledConditions.get(info?.role); if (sampled) failure.sampledProviderCondition = sampled.condition
         noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
         throw failure
+      } finally {
+        // The wait ending closes the run: a condition still on screen has been
+        // seen from its first sighting to its last, and one row says so.
+        closeSampleRun(info?.role)
       }
     },
     captureDescendants() { return capture.round(true) },

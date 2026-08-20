@@ -160,13 +160,13 @@ test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {
 test('samplePaneScreen asks for scrollback and sees through colour and box rules', () => {
   const calls = []
   const frame = '╭──╮\n│ \x1b[31mrate\x1b[0m│limit exceeded │\n╰──╯\n'
-  const condition = samplePaneScreen('surface-builder', {
+  const sample = samplePaneScreen('surface-builder', {
     cmux: (verb, args, options) => {
       calls.push({ verb, args: [...args], options })
       return { ok: true, stdout: frame }
     },
   })
-  assert.equal(condition, 'rate-limit')
+  assert.deepEqual(sample, { read: true, condition: 'rate-limit' })
   assert.equal(recogniseProviderCondition(frame), null)
   assert.deepEqual(calls, [{
     verb: 'read-screen',
@@ -176,15 +176,20 @@ test('samplePaneScreen asks for scrollback and sees through colour and box rules
 })
 
 test('a failed, empty or throwing screen read records nothing', () => {
-  assert.equal(samplePaneScreen('surface-builder', {
+  assert.deepEqual(samplePaneScreen('surface-builder', {
     cmux: () => ({ ok: false, stdout: 'API Error 529 overloaded' }),
-  }), null)
-  assert.equal(samplePaneScreen('surface-builder', {
+  }), { read: false, condition: null })
+  assert.deepEqual(samplePaneScreen('surface-builder', {
     cmux: () => ({ ok: true, stdout: '' }),
-  }), null)
-  assert.equal(samplePaneScreen('surface-builder', {
+  }), { read: false, condition: null })
+  assert.deepEqual(samplePaneScreen('surface-builder', {
     cmux: () => { throw new Error('read-screen failed') },
-  }), null)
+  }), { read: false, condition: null })
+  // A failed, empty or throwing read is NOT a clean screen: `read: false` is
+  // what keeps it from being read as evidence a condition ended.
+  assert.deepEqual(samplePaneScreen('surface-builder', {
+    cmux: () => ({ ok: true, stdout: 'nothing interesting here' }),
+  }), { read: true, condition: null })
 
   withRepo({ dirty: false }, (fixture) => {
     let clock = 0
@@ -450,29 +455,72 @@ test('nothing branches on a sampled condition', () => {
   }
 })
 
-test('sample counts are lower bounds, never totals', () => {
+// One 95s wait fires the liveness probe three times (30s / 60s / 90s), reading
+// one scripted screen each; the last screen repeats if fewer are supplied.
+function paneSampleRun(fixture, screens) {
+  let clock = 0
+  let reads = 0
+  const journal = []
+  const crew = { members: { builder: { model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }
+  const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+    cmux: (verb) => {
+      if (verb !== 'read-screen') return { ok: true, stdout: '' }
+      return screens[Math.min(reads++, screens.length - 1)]
+    },
+    logLine: (_path, row) => journal.push(row),
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    sendLine: () => {},
+    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+    locate: (_tree, id) => id === 'surface-builder',
+    existsSync: () => false,
+  })
+  const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+  assert.equal(io.wait(assignment.returnPath, 95), null)
+  assert.equal(reads, 3)
+  return journal.filter((row) => row.event === 'pane-provider-sample')
+}
+
+const CONDITION_SCREEN = { ok: true, stdout: 'API Error 529 overloaded' }
+const CLEAN_SCREEN = { ok: true, stdout: 'nothing interesting here' }
+const FAILED_READ = { ok: false, stdout: 'API Error 529 overloaded' }
+
+test('a condition persisting across probes is ONE record, first sighting to last', () => {
   withRepo({ dirty: false }, (fixture) => {
-    let clock = 0
-    const journal = []
-    const crew = { members: { builder: { model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }
-    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
-      cmux: () => ({ ok: true, stdout: 'API Error 529 overloaded' }),
-      logLine: (_path, row) => journal.push(row),
-      now: () => clock,
-      sleep: (ms) => { clock += ms },
-      sendLine: () => {},
-      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
-      locate: (_tree, id) => id === 'surface-builder',
-      existsSync: () => false,
-    })
-    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
-    assert.equal(io.wait(assignment.returnPath, 65), null)
-    const samples = journal.filter((row) => row.event === 'pane-provider-sample')
+    const samples = paneSampleRun(fixture, [CONDITION_SCREEN])
+    assert.equal(samples.length, 1)
+    assert.deepEqual(
+      [samples[0].condition, samples[0].basis, samples[0].bound, samples[0].first_seen_at, samples[0].last_seen_at],
+      ['overloaded', 'sampled', 'lower', LIVENESS_PROBE_MS, 3 * LIVENESS_PROBE_MS],
+    )
+    // The row is a WINDOW, never a tally: three probes saw one condition, and
+    // nothing on the row can be read as three of anything (#413).
+    for (const row of samples) {
+      assert.equal(Object.keys(row).some((key) => /(count|total|observed|sightings|probes)/i.test(key)), false)
+    }
+  })
+})
+
+test('an intermittent condition stays distinguishable from a persistent one', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const samples = paneSampleRun(fixture, [CONDITION_SCREEN, CLEAN_SCREEN, CONDITION_SCREEN])
     assert.equal(samples.length, 2)
-    assert.deepEqual(samples.map((row) => [row.basis, row.bound, row.observed_at_least]), [
-      ['sampled', 'lower', 1], ['sampled', 'lower', 2],
+    assert.deepEqual(samples.map((row) => [row.first_seen_at, row.last_seen_at]), [
+      [LIVENESS_PROBE_MS, LIVENESS_PROBE_MS],
+      [3 * LIVENESS_PROBE_MS, 3 * LIVENESS_PROBE_MS],
     ])
-    for (const row of samples) assert.equal(Object.keys(row).some((key) => /^(total|count|samples_total)$/.test(key)), false)
+    assert.deepEqual([...new Set(samples.map((row) => row.condition))], ['overloaded'])
+  })
+})
+
+test('a failed read never splits one run into two records', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const samples = paneSampleRun(fixture, [CONDITION_SCREEN, FAILED_READ, CONDITION_SCREEN])
+    assert.equal(samples.length, 1)
+    assert.deepEqual(
+      [samples[0].first_seen_at, samples[0].last_seen_at],
+      [LIVENESS_PROBE_MS, 3 * LIVENESS_PROBE_MS],
+    )
   })
 })
 

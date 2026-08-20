@@ -233,6 +233,97 @@ test('seatIo stamps a pane heartbeat from the probe timestamp before the envelop
   })
 })
 
+test('a recognised provider condition lands in the cell-failure detail with role, transport and model', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const events = []
+    const crew = {
+      task: 'b70-provider', claude_bin: '/worker/bin',
+      members: { builder: {
+        agent: 'claude', provider: 'anthropic', id: 'model-id', model: 'sonnet', effort: 'high', transport: 'headless-json',
+      } },
+    }
+    const failure = Object.assign(new Error('headless no-envelope: provider did not answer'), {
+      stage: 'headless-no-envelope', providerCondition: 'overloaded',
+    })
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      headlessIo: () => ({
+        assign: () => ({ id: 'd1', returnPath: join(fixture.paths.returnsDir, 'd1.builder.json') }),
+        wait: () => { throw failure },
+      }),
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => io.wait(assignment.returnPath, 1), (err) => {
+      assert.equal(err.stage, 'headless-no-envelope')
+      return true
+    })
+    const event = events.find((candidate) => candidate.kind === 'cell-failure')
+    assert.ok(event)
+    assert.equal(event.failure, 'no-envelope')
+    assert.equal(event.stage, 'headless-no-envelope')
+    assert.match(event.detail, /^\[provider:overloaded\] /)
+
+    const rows = []
+    const adapter = emitAdapter({
+      adwId: 'adw-provider',
+      emit: (fn) => fn({ recordCellFailure: (row) => rows.push(row) }),
+    }, crew)
+    adapter(event)
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].role, 'builder')
+    assert.equal(rows[0].transport, 'headless-json')
+    assert.equal(rows[0].model, 'sonnet')
+    assert.equal(rows[0].detail, event.detail)
+  })
+})
+
+test('provider recognition branches no adjudication, escalation, reseat or retry', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const runFailure = (condition) => {
+      const events = []
+      const crew = {
+        claude_bin: '/worker/bin',
+        members: { builder: { model: 'sonnet', transport: 'headless-json' } },
+      }
+      const failure = Object.assign(new Error('same provider failure'), { stage: 'headless-no-envelope' })
+      if (condition !== undefined) failure.providerCondition = condition
+      const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+        headlessIo: () => ({
+          assign: () => ({ id: 'd1', returnPath: join(fixture.paths.returnsDir, 'd1.builder.json') }),
+          wait: () => { throw failure },
+        }),
+      })
+      io.emit = (event) => events.push(event)
+      const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+      let thrown
+      try { io.wait(assignment.returnPath, 1) } catch (err) { thrown = err }
+      return { event: events.find((event) => event.kind === 'cell-failure'), thrown }
+    }
+
+    const recognised = runFailure('overloaded')
+    const plain = runFailure(undefined)
+    assert.deepEqual(
+      [recognised.event.failure, recognised.event.stage],
+      [plain.event.failure, plain.event.stage],
+    )
+    assert.equal(recognised.thrown.stage, plain.thrown.stage)
+    assert.equal(cellFailureKind(recognised.thrown), cellFailureKind(plain.thrown))
+
+    for (const condition of ['not-a-condition', '__proto__']) {
+      const forged = runFailure(condition)
+      assert.equal(forged.event.detail, 'same provider failure')
+    }
+
+    const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
+    const listed = execFileSync('git', [
+      'grep', '-l', '-e', 'providerCondition', '-e', 'PROVIDER_CONDITIONS', '--', 'crew/', 'scripts/', 'visualizer/',
+    ], { cwd: repoRoot, encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean).sort()
+    assert.deepEqual(listed, [
+      'crew/headless.mjs', 'crew/headless.test.mjs', 'crew/seat-io-runclean.test.mjs', 'crew/seat-io.mjs',
+    ])
+  })
+})
+
 test('seatIo waits through an absent or refusing heartbeat emitter', () => {
   for (const emitter of [null, {
     adwId: 'adw-refusing',

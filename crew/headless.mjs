@@ -19,6 +19,40 @@ import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './recl
 export const WAIT_POLL_MS = 5000
 const KILL_GRACE_MS = 10_000
 
+// The provider conditions this transport can RECOGNISE in bytes it ALREADY
+// captured. Evidence about a run, never a verdict on one: nothing in the crew
+// branches on the result (#373 owns the pane half and will reuse this). Ordered
+// — first match wins — and a DATA table, so a new condition is a data edit.
+export const PROVIDER_CONDITIONS = Object.freeze([
+  { condition: 'overloaded', pattern: /overloaded_error|\boverloaded\b|\b529\b/i },
+  { condition: 'rate-limit', pattern: /rate_limit_error|\brate limit\b|\b429\b/i },
+  { condition: 'auth', pattern: /authentication_error|invalid api key|\bunauthorized\b|\b401\b|\b403\b/i },
+])
+
+// The SAME CSI pattern scripts/factory/make-brief.mjs:53 carries, re-inlined
+// rather than imported across the factory boundary — the precedent is
+// scripts/factory/probe-repo.mjs:498. A worker colourises inside the phrase
+// ("rate\x1b[0m limit"), which a raw-byte matcher cannot see at all.
+// eslint-disable-next-line no-control-regex
+const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
+
+export function recogniseProviderCondition(text) {
+  if (typeof text !== 'string' || !text) return null
+  const plain = text.replace(ANSI_CSI, '')
+  for (const { condition, pattern } of PROVIDER_CONDITIONS) if (pattern.test(plain)) return condition
+  return null
+}
+
+// ONLY the stderr the wrapper already redirected (:238). One read on the
+// failure path: no new capture, no poll, no timer. A missing, empty or
+// unreadable file is an ABSENCE — it never fabricates a condition, and it
+// never fabricates the absence of one either (the caller attaches nothing).
+function capturedCondition(run, read, exists) {
+  const path = run && run.stderr
+  if (!path || !exists(path)) return null
+  try { return recogniseProviderCondition(String(read(path, 'utf8'))) } catch { return null }
+}
+
 // Quote one shell argument. The returned token is safe to interpolate into
 // the detached /bin/sh -c wrapper, while the worker itself receives argv.
 export function shq(value) {
@@ -201,7 +235,10 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)
-    err.stage = `headless-${outcome}`; err.role = run.role; return err
+    err.stage = `headless-${outcome}`; err.role = run.role
+    const condition = capturedCondition(run, read, exists)
+    if (condition) err.providerCondition = condition
+    return err
   }
   function busy(role, sessionId) {
     const err = new Error(`headless: seat ${role} already has a live invocation against session ${sessionId} — refusing a concurrent turn (ADR-029 §5 c3)`)

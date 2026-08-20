@@ -13,7 +13,7 @@ import {
   cmux as defaultCmux, tree as defaultTree, locate as defaultLocate, sendLine as defaultSendLine,
   closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,
 } from './driver.mjs'
-import { headlessIo as defaultHeadlessIo } from './headless.mjs'
+import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
@@ -1372,11 +1372,23 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     return transportInstances.get(name)
   }
+  // Recognition is EVIDENCE on the EXISTING detail column. The closed kind set
+  // lives in scripts/factory/ledger.mjs:183 (another lane's file) and
+  // recordCellFailure refuses an unlisted kind (:1540), so a new member would
+  // drop the whole row rather than enrich it. The prefix LEADS the string
+  // because the ledger truncates detail at 500 chars (:1558). Only a member of
+  // the closed condition set is ever recorded, and nothing branches on it.
+  const detailWithCondition = (err) => {
+    const message = (err && err.message) || null
+    const condition = err && err.providerCondition
+    if (!PROVIDER_CONDITIONS.some((c) => c.condition === condition)) return message
+    return `[provider:${condition}] ${message ?? ''}`.trim()
+  }
   const noteCellFailure = (role, id, failure, err) => {
     try {
       io.emit?.({
         kind: 'cell-failure', role, id: id ?? null, failure,
-        stage: (err && err.stage) || null, detail: (err && err.message) || null,
+        stage: (err && err.stage) || null, detail: detailWithCondition(err),
       })
     } catch { /* never load-bearing */ }
   }

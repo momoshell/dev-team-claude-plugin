@@ -1,6 +1,6 @@
 # ADR-030: Acceptance authorship — the seat that plans may draft the gate, but only a proof may accept it
 
-**Status:** RATIFIED 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348); 2026-08-20 (§11 — module rename, #327) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
+**Status:** RATIFIED 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348); 2026-08-20 (§11 — module rename, #327); 2026-08-20 (§10 anchors re-derived, #406) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
 
 Ratified with three amendments to the proposal, each recorded inline at the
 decision it changes and summarised in §9: Decision 2 adopts in **two stages**
@@ -143,12 +143,12 @@ and uses one predicate everywhere.
   (`crew/drive.mjs:595-603`).
 - **Routing:** a failed proof is a gate defect.
   The driver bounces the **gate custodian** — `GATE_CUSTODIAN = 'lead'`
-  (`crew/drive.mjs:197`) — consumes the existing single `gate_repairs` budget,
+  (`crew/drive.mjs:218`) — consumes the existing single `gate_repairs` budget,
   and never bounces the builder for evidence about the gate. A second failed
   proof escalates. The repair consumes no builder round, as the repair path
   does (`crew/drive.mjs:2085-2142`). A crew booted without that custodian
   assigns nobody: `noGateCustodian()` escalates with the site's own diagnosis
-  attached (`crew/drive.mjs:1168-1173`). *(Routing amended 2026-08-19 — §10;
+  attached (`crew/drive.mjs:1246-1253`). *(Routing amended 2026-08-19 — §10;
   the three invariants in this bullet are unchanged.)*
 - **Cost and record:** there are at most two extra gate runs per task. Each is
   recorded on `details.gate` beside `reverified`, and the named journal,
@@ -213,7 +213,7 @@ and uses one predicate everywhere.
 With no lead seated, the driver still records the mechanical proof, but the
 repair it would route needs the gate custodian: `noGateCustodian()` turns that
 site into an escalation carrying the site's own diagnosis, and
-no other seat is substituted (`crew/drive.mjs:1168-1173`; amended 2026-08-19 —
+no other seat is substituted (`crew/drive.mjs:1246-1253`; amended 2026-08-19 —
 §10). With no tech-lead seated, plan-check is absent, but the driver's gate
 generation and pristine proof remain available for every production tier.
 Neither absence is described as a missing `runClean` capability.
@@ -504,14 +504,24 @@ consequence row. Decisions 1 and 3–5 are not reopened.
 
 Decision 2's former repair routing is what this amendment retires. #334 moved
 all four post-acceptance gate sites — a failed discrimination proof
-(`crew/drive.mjs:2097`), a vacuous green baseline (`:2148`), a gate that did not
-RUN (`:2169`), and the reviewer-triaged mid-run gate defect (`:2487`) — to
-`GATE_CUSTODIAN` (`crew/drive.mjs:197`), each guarded by `noGateCustodian()` so
+(`crew/drive.mjs:2214`), a vacuous green baseline (`:2265`), a gate that did not
+RUN (`:2286`), and the reviewer-triaged mid-run gate defect (`:2604`) — to
+`GATE_CUSTODIAN` (`crew/drive.mjs:218`), each guarded by `noGateCustodian()` so
 a crew booted without that seat escalates with the site's own diagnosis attached
-rather than assigning anybody (`crew/drive.mjs:1168-1173`). The assignment and
-confinement expressions are pinned at `crew/drive.test.mjs:4792-4815` — exactly
+rather than assigning anybody (`crew/drive.mjs:1246-1253`). The assignment and
+confinement expressions are pinned at `crew/drive.test.mjs:5145-5168` — exactly
 two `planner` assignments remain in the driver, and neither is a gate site — and
-the lead-less diagnostic escalations at `crew/drive.test.mjs:4817-4862`.
+the lead-less diagnostic escalations at `crew/drive.test.mjs:5170-5216`.
+
+*(Anchors re-derived 2026-08-20 at commit `0999743` — #406. Every line number in
+this section, and this amendment's `GATE_CUSTODIAN` and `noGateCustodian()`
+references in Decision 2 (§3), was re-read on that checkout: the numbers
+ratified on 2026-08-19 had drifted and resolved to unrelated modifier, mutation
+and review code. The amendment's routing, substance and verdict are unchanged.
+Not re-anchored here: Decision 2's `crew/drive.mjs:2085-2142` reference to the
+builder-round-consuming repair path, which has drifted too but whose referent
+cannot be re-derived from the sentence, and the ratification-era citations
+elsewhere in this document, which this note neither re-anchors nor audits.)*
 
 **Why — the domain argument recorded in #334.** Every seat cares about its own
 domain, and the planner is not invoked once its plan is done. Once a plan is

@@ -954,6 +954,25 @@ export function checkFailureLine(output, check) {
     return rest.length === 0 || /^\s/.test(rest)
   })
 }
+
+// The DIAGNOSIS of a rejected FAIL line, never the RULE (#387). checkFailureLine's
+// semantics above do not move: widening the delimiter would let `FAIL cache` match
+// a `FAIL cache-v2` line and reintroduce the whole-gate false positive #330 exists to
+// remove. What was missing is the distinction the READER needs -- three lanes read
+// "printed no FAIL C1 line" off an output that carried `FAIL C1 — why`, went looking
+// for a print that was never absent, and repaired the wrong thing. True only when a
+// line carries the label and what follows cannot be reading a LONGER label: a label
+// character or a colon EXTENDS it (`FAIL cache:v2:` is check `cache:v2`), and an
+// empty rest is what checkFailureLine already accepts.
+function checkLabelMisdelimited(output, check) {
+  const want = `${CHECK_FAIL_PREFIX} ${check}`
+  return String(output || '').split('\n').some((raw) => {
+    const line = raw.trim()
+    if (!line.startsWith(want)) return false
+    const rest = line.slice(want.length)
+    return rest.length > 0 && !/^[A-Za-z0-9._:-]/.test(rest)
+  })
+}
 // Why a declared mutation cannot be honoured, per entry — the validateScopeEntries
 // shape: [{ entry, why }], empty when the declaration is usable.
 export function validateMutations(entries, inScope = () => true) {
@@ -2087,12 +2106,17 @@ export function driveTask(ctx, io) {
         } finally { io.writeFile(abs, original) }
         active = null                              // restored: nothing in flight
         const summary = parseGateSummary(res.output)
+        const wantedLine = JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}`)
         const why = res.ok
           ? 'the gate stayed GREEN under the mutation'
           : baselineGateDefect(res.output)
             || (checkFailureLine(res.output, mutation.check)
               ? null
-              : `the gate went red but printed no ${JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}`)} line, so the check that failed is not the one under proof`)
+              // The label IS on a line and only its DELIMITER is wrong: say so, and
+              // name what is accepted, so nobody hunts a print that never went missing.
+              : checkLabelMisdelimited(res.output, mutation.check)
+                ? `the gate went red and DID print ${wantedLine}, but with a delimiter the driver does not read: the label must END THE LINE or be followed by a colon (${wantedLine} or ${JSON.stringify(`${CHECK_FAIL_PREFIX} ${mutation.check}: why`)}) — the print is not missing, its delimiter is wrong`
+                : `the gate went red but printed no ${wantedLine} line, so the check that failed is not the one under proof`)
         rows.push({ check: mutation.check, outcome: why ? 'survived' : 'killed', file: mutation.file, summary, why })
         if (why) { survivor ??= rows[rows.length - 1]; checkProofOutput ??= res.output }
       }

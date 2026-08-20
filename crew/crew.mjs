@@ -1358,9 +1358,12 @@ export function runCmd(args, deps = {}) {
   // crew run down. nodeVersion is deliberately NOT passed: openLedger's own
   // default is process.versions.node, and passing process.version silently
   // fails the ledger floor parse and drops every mirror row.
+  // Pass the resolved brief so bootProposal reads its optional compiler
+  // proposal block; this run's boot record has no brief_file key, so a missing
+  // or blockless brief still records null proposal fields.
   let emitter = null
   try {
-    emitter = openRun({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath() })
+    emitter = openRun({ stateDir: paths.dir, repoSlug: paths.repo, taskSlug, dbPath: ledgerDbPath(), briefPath: briefFile })
     emitter.startRun()
   } catch { emitter = null }
 

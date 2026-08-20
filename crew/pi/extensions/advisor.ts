@@ -652,7 +652,8 @@ export function createAdvisor({ env = process.env, deps = {} } = {}) {
 
   function appendDelta(entryText) {
     const text = String(entryText ?? '')
-    if (!text || isSelfEcho(text, injected)) return
+    if (!text) return
+    if (isSelfEcho(text, injected)) return
     const entry = entryFromText(text)
     if (!entry.text) return
     delta = [...delta, entry].slice(-DELTA_ENTRIES)
@@ -932,7 +933,10 @@ export async function attachAdvisor(pi, { env = process.env, deps = {} } = {}) {
   if (!live) return unavailable('endpoint-dead')
   if (typeof pi?.on !== 'function' || typeof pi?.sendMessage !== 'function') throw new Error('advisor extension needs pi.on and pi.sendMessage')
   const boot = { role, outcome: 'attached', endpoint: cell.endpoint, model: cell.model, config_version: ADVISOR_CONFIG_VERSION }
-  const written = appendLine({ appendFile, journalPath, row: rowWithRole({ at: atOf(now), payloadKey: 'advisor_boot', payload: boot, role }) })
+  const written = appendLine({
+    appendFile, journalPath,
+    row: { at: atOf(now), advisor_boot: boot, role },
+  })
   if (!written) throw new Error('advisor extension could not append its boot audit row')
   const advisor = createAdvisor({
     env, deps: {

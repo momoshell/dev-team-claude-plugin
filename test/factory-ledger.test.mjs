@@ -2605,6 +2605,79 @@ test('a skipped adjudication renders the readout incomplete', () => {
   assert.ok(advisorReasons(result.payload).includes('skipped-finding'))
 })
 
+test('two malformed adjudications for different findings in one dispatch are distinguishable', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1'), advisorAbFinding('F2')]) },
+    adjudications: [
+      { dispatch_id: 'd1', finding_id: 'F1', verdict: 'not-a-verdict', note_refs: [] },
+      { dispatch_id: 'd1', finding_id: 'F2', verdict: 'overlap', note_refs: ['bogus'] },
+    ],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  const malformed = result.payload.incomplete.filter(({ reason }) => reason === 'adjudication-malformed')
+  assert.equal(malformed.length, 2)
+  const details = malformed.map(({ detail }) => detail)
+  assert.deepEqual(details, ['dispatch d1 finding F1', 'dispatch d1 finding F2'])
+  assert.equal(result.payload.ratifiable, false)
+})
+
+test('a malformed adjudication with no usable finding id still refuses, and says so', () => {
+  const missingId = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', verdict: 'not-a-verdict', note_refs: [] }],
+  })
+  const missingIdResult = runAdvisorAb(missingId, ['d1'])
+  assert.equal(missingIdResult.status, 0, missingIdResult.stderr)
+  const missingIdMalformed = missingIdResult.payload.incomplete.filter(({ reason }) => reason === 'adjudication-malformed')
+  assert.equal(missingIdMalformed.length, 1)
+  assert.equal(missingIdMalformed[0].detail, 'dispatch d1 finding <none>')
+  assert.equal(missingIdResult.payload.ratifiable, false)
+
+  const unusableId = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 42, verdict: 'not-a-verdict', note_refs: [] }],
+  })
+  const unusableIdResult = runAdvisorAb(unusableId, ['d1'])
+  assert.equal(unusableIdResult.status, 0, unusableIdResult.stderr)
+  const unusableIdMalformed = unusableIdResult.payload.incomplete.filter(({ reason }) => reason === 'adjudication-malformed')
+  assert.equal(unusableIdMalformed.length, 1)
+  assert.equal(unusableIdMalformed[0].detail, 'dispatch d1 finding <none>')
+  assert.equal(unusableIdResult.payload.ratifiable, false)
+})
+
+test('a richer malformed detail changes no other incomplete detail, reason or count', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10, d9: ADVISOR_AB_EPOCH + 20 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [
+      { dispatch_id: 'd1', finding_id: 'F1', verdict: 'skipped', note_refs: [] },
+      { dispatch_id: 'd9', finding_id: 'F9', verdict: 'no-overlap', note_refs: [] },
+      null,
+    ],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.deepEqual(result.payload.incomplete, [
+    { reason: 'skipped-finding', detail: `${ADVISOR_AB_EPOCH}|d1|F1` },
+    { reason: 'adjudication-unknown-dispatch', detail: 'dispatch d9' },
+    { reason: 'adjudication-malformed', detail: 'adjudication entry' },
+  ])
+  assert.equal(result.payload.skipped, 1)
+  assert.equal(result.payload.findings_total, 1)
+  assert.equal(result.payload.overlap_findings, 0)
+  assert.equal(result.payload.unadjudicated, 0)
+  assert.deepEqual(result.payload.duplicate_keys, [])
+  assert.deepEqual(result.payload.malformed, [])
+})
+
 test('an unadjudicated finding renders the readout incomplete', () => {
   const fx = advisorAbFixture({
     attest: { d1: ADVISOR_AB_EPOCH + 10 },

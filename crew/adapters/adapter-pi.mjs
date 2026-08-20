@@ -71,7 +71,12 @@ export function capabilitiesFor({ transport, grants } = {}) {
   if (!p) throw new Error(`adapter-pi: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
   return Object.freeze({
     ...INVARIANT, ...p,
-    subagents: (grants?.agents?.length ?? 0) > 0,
+    // PANE ONLY, deliberately: seatCommand is the only path that emits
+    // `-e <extension>` and the `agent` activator. rpcCommand
+    // (crew/headless-rpc.mjs:70-88) is --no-extensions with no -e and no
+    // --tools at all, so an rpc seat handed an agent grant would claim a
+    // capability it cannot load — a silently weaker seat.
+    subagents: transport === 'pane' && (grants?.agents?.length ?? 0) > 0,
   })
 }
 
@@ -119,6 +124,10 @@ export function translateDeny(deny) {
   }
   return out
 }
+
+// The tool name crew/pi/extensions/subagent.ts registers. Exported so the
+// register-path tests can name it without a literal.
+export const PI_SUBAGENT_TOOL = 'agent'
 
 const NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [], advisor: false })
 
@@ -187,12 +196,26 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   // roster model id passes through untouched and effort stays a separate,
   // auditable dimension).
   const piDeny = translateDeny(deny)
-  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || [])])]
+  // An agent grant must ALSO activate the tool: pi filters EXTENSION tools
+  // through this same --tools allowlist (dist/core/agent-session.js:1945 and
+  // :1953 drop any registered tool the allowlist omits), so a granted seat
+  // whose activator omits the name loads the extension and registers nothing
+  // callable. Extension tools are active by default ONLY when --tools is
+  // absent (:2003-2007) — this adapter always passes it, so activation is
+  // mandatory here, not merely additive.
+  const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
+  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout])]
   const extensions = grants?.extensions || []
   const skills = grants?.skills || []
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     ...(configDir !== null && configDir !== undefined ? [`PI_CODING_AGENT_DIR="${configDir}"`] : []),
+    // The register-resolved allowlist, transported to the extension. Emitted
+    // ONLY when an agent is granted, so every ungranted command is unchanged.
+    // Before `pi`, because the boot brief must stay last.
+    ...(grants?.agents?.length
+      ? [`CREW_PI_AGENTS='${JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def })))}'`]
+      : []),
     'pi',
     '--model', model,
     ...(effort ? ['--thinking', effort] : []),

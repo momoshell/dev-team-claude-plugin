@@ -181,6 +181,21 @@ A mutation entry carries exactly:
   all entries. The gate MUST print \`FAIL <check>\` on that check's failing line
   (\`CHECK_FAIL_PREFIX\`), matched as an exact token — the label you declare and the
   label the gate prints are one string.
+  Nothing may FOLLOW that label except a colon. \`checkFailureLine\`
+  (\`crew/drive.mjs\`) is the matcher that decides, and it accepts the bare line or a
+  single colon delimiter — nothing else. Literally:
+
+      FAIL <check>                  ← accepted, the bare line
+      FAIL <check>: <why>           ← accepted, the ONE delimiter is a colon
+      FAIL <check> — <why>          ← REJECTED, an em dash is not a delimiter
+      FAIL <check> <why>            ← REJECTED, a space is not a delimiter
+
+  The reason, not merely the prohibition: a label may not be EXTENDED by what follows
+  it. Were a space or a dash a legal delimiter, \`FAIL cache\` would match a
+  \`FAIL cache-v2\` line and one check's red would be credited to another — the
+  whole-gate false positive #330 exists to remove. Two planners in one day each wrote
+  a human-readable separator instead, costing four gate generations across three lanes
+  and escalating one lane whose code was correct (#387).
 - \`file\` — required, repo-relative, a file and not a directory, and inside
   \`files_in_scope\`.
 - \`find\` — required, non-empty LITERAL text that actually occurs in that file; not

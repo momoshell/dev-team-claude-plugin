@@ -3,6 +3,7 @@
 // module root; no live crew tree is read or written.
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
+import { createHash } from 'node:crypto'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
@@ -645,6 +646,11 @@ test('standing blocks and unfilled slots render verbatim', () => {
   assert.ok(brief.includes('Never push'))
   assert.ok(brief.includes('ReturnEnvelope'))
   assert.ok(brief.split(SLOT_MARKER).length - 1 >= 2)
+  // Every other standing block is byte-identical to fc13fa1; b76 touched only the
+  // mutation contract.
+  const digest = (text) => createHash('sha256').update(text).digest('hex')
+  assert.equal(digest(ACCEPTANCE_GATE_BLOCK), 'd8fc7641f8ad456c0bd60032571a3c09d5f2a81e2fe0a480190369e854db61a2')
+  assert.equal(digest(CONVENTIONS_BLOCK), '52a0dcc6dd2833218dbe5a635e35acd8d92f55de7e6a83817f4d162786a7993f')
 })
 
 // The per-check mutation contract must reach a planner mechanically: two lanes lost
@@ -669,6 +675,25 @@ test('every compiled brief carries the per-check mutation contract', () => {
   assert.ok(brief.indexOf(ACCEPTANCE_GATE_BLOCK) < brief.indexOf(inserted))
   assert.ok(brief.indexOf(inserted) < brief.indexOf('## Validation lane'))
   assert.equal(brief.replace(inserted, '').includes('Per-check mutations'), false)
+})
+
+// The delimiter is load-bearing: checkFailureLine (crew/drive.mjs) accepts the bare
+// line or a colon and nothing else, and two lanes lost four gate generations to a
+// human-readable separator (#387). The forms are asserted LITERALLY.
+test('the mutation contract states the FAIL-line separator rule', () => {
+  const root = fixture('fail-separator')
+  const { brief } = compile(root)
+  const contract = section(brief, '## Per-check mutations')
+  assert.equal(contract, MUTATION_CONTRACT_BLOCK)
+  for (const form of [
+    'FAIL <check>',
+    'FAIL <check>: <why>',
+    'FAIL <check> — <why>',
+    'FAIL <check> <why>',
+  ]) assert.ok(contract.includes(form), form)
+  for (const token of ['accepted', 'REJECTED', 'checkFailureLine', 'EXTENDED', 'FAIL cache-v2', '#330', '#387']) {
+    assert.ok(contract.includes(token), token)
+  }
 })
 
 test('the charter and the checklist state the contract the driver enforces', () => {

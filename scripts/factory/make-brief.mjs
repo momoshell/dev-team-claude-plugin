@@ -214,7 +214,34 @@ gate carries, above the check that prints \`FAIL C1\`:
     // no compiled brief carries the contract any more.
 
 and the declaration is \`{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": "standingBlocks().mutations", "replace": "standingBlocks().nothing" }\`.
-Rationale: #330.`)
+Rationale: #330.
+
+A gate that shells out to \`node --test\` MUST pass \`--test-reporter=tap\`. node
+--test picks its reporter by context and the summary lines differ in their
+leading character; measured on this checkout, same file and same environment,
+the two shapes are LITERALLY:
+
+    ℹ pass 7      ← default reporter, no --test-reporter flag
+    ℹ fail 0
+    # pass 7      ← --test-reporter=tap
+    # fail 0
+
+That leading character is \`ℹ\` (U+2139 INFORMATION SOURCE), not the ASCII
+letter \`i\`, so a gate greping \`^# fail (\\d+)$\` parses NOTHING under the
+default reporter and reports no failures for a suite it never read. Pin the
+reporter rather than widening the regex: the default is context-dependent and a
+future Node release may change it again, so a tolerant regex accepting both
+shapes still silently depends on the reporter for every shape it does not
+anticipate. Match the LAST summary line, not the first — an earlier echoed
+\`# fail 0\` otherwise satisfies the check while a later real nonzero summary
+passes it.
+
+Colour is the other half: \`FORCE_COLOR\` OVERRIDES \`NO_COLOR\`, so a
+colour-neutral child must DELETE \`FORCE_COLOR\` (and \`CLICOLOR_FORCE\`) from its
+environment rather than only setting \`NO_COLOR=1\`. Under \`FORCE_COLOR=3
+NO_COLOR=1\` the measured line is \`ESC[34mℹ pass 7ESC[39m\` (ESC = 0x1b), so an
+\`^\`-anchored grep matches nothing. Strip ANSI before parsing either shape
+(#240). Rationale: #399.`)
 
 function standingBlocks() {
   return { acceptance: ACCEPTANCE_GATE_BLOCK, mutations: MUTATION_CONTRACT_BLOCK, conventions: CONVENTIONS_BLOCK }

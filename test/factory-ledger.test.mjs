@@ -29,10 +29,13 @@ import {
   REQUEST_MAX_CHARS,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
-// openRun is the only production writer of sessions.tier: it reads the boot
-// record and forwards it. The forwarding is pinned here, next to the column it
-// writes, because test/factory-emit.test.mjs is not this lane's to edit.
-import { openRun } from '../scripts/factory/emit.mjs'
+// openRun is the only production writer of sessions.tier and the compiler
+// proposal columns: it reads the boot record/brief and forwards them. The
+// forwarding is pinned here, next to the columns it writes, because
+// test/factory-emit.test.mjs is not this lane's to edit.
+import {
+  _resetNoticeGuardsForTest, openRun, parseProposalBrief,
+} from '../scripts/factory/emit.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
 // AC-13 (both test files never reference the CLI-only default-db-path
@@ -68,6 +71,32 @@ function bootTieredRun(tier) {
     const ledger = openLedger({ dbPath })
     try {
       return ledger.getSession(emitter.adwId)
+    } finally { ledger.close() }
+  } finally {
+    emitter.dispose()
+    rmSync(stateDir, { recursive: true, force: true })
+  }
+}
+
+function bootBriefRun(brief, label = 'proposal', { includeBriefPath = true } = {}) {
+  const stateDir = mkdtempSync(join(tmpdir(), `factory-ledger-${label}-`))
+  writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: label, roles: ['lead', 'planner'],
+  }))
+  const briefPath = join(stateDir, 'brief.md')
+  if (brief !== null) writeFileSync(briefPath, brief)
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  const stderrLines = []
+  const emitter = openRun({
+    stateDir, repoSlug: 'r', taskSlug: label, dbPath,
+    ...(includeBriefPath ? { briefPath } : {}),
+    stderr: { write: (chunk) => stderrLines.push(chunk) },
+  })
+  try {
+    emitter.startRun()
+    const ledger = openLedger({ dbPath })
+    try {
+      return { row: ledger.getSession(emitter.adwId), stderr: stderrLines.join('') }
     } finally { ledger.close() }
   } finally {
     emitter.dispose()
@@ -2201,20 +2230,144 @@ test('recordEnvelope has no production caller; future wiring must update the ret
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.envelopes and docs/ledger-queries.md when wiring recordEnvelope')
 })
 
-test('sessions declares tier last and starts each row with heartbeat and tier NULL', { skip: SKIP }, () => {
-  assert.equal(TABLES.sessions.columns.at(-1).name, 'tier')
-  assert.equal(TABLES.sessions.columns.at(-2).name, 'last_heartbeat_at')
+test('sessions ends with tier, proposed_shape, proposed_strength and starts each row with all three NULL', { skip: SKIP }, () => {
+  assert.deepEqual(TABLES.sessions.columns.slice(-3).map(({ name }) => name), [
+    'tier', 'proposed_shape', 'proposed_strength',
+  ])
+  assert.equal(TABLES.sessions.columns.at(-4).name, 'last_heartbeat_at')
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'heartbeat-null', repo_slug: 'r', task_slug: 't' })
-  assert.equal(ledger.getSession('heartbeat-null').last_heartbeat_at, null)
-  assert.equal(ledger.getSession('heartbeat-null').tier, null)
+  const row = ledger.getSession('heartbeat-null')
+  assert.equal(row.last_heartbeat_at, null)
+  assert.equal(row.tier, null)
+  assert.equal(row.proposed_shape, null)
+  assert.equal(row.proposed_strength, null)
 })
 
-test('openRun records the boot tier on the session row and records null when the boot record carries none', { skip: SKIP }, () => {
+test('openRun records the boot tier and brief proposals, while a blockless brief records null', { skip: SKIP }, () => {
   const booted = bootTieredRun('build')
   assert.equal(booted.tier, 'build')
   const untiered = bootTieredRun(null)
   assert.equal(untiered.tier, null)
+  const carrying = bootBriefRun([
+    '# Task: compiled',
+    '## Proposed tier',
+    'proposed shape: mechanical',
+    'proposed strength: workhorse',
+    '```proposal',
+    '{',
+    '  "shape": "mechanical",',
+    '  "strength": "workhorse"',
+    '}',
+    '```',
+    '## Where',
+  ].join('\n'), 'proposal-record')
+  assert.equal(carrying.row.proposed_shape, 'mechanical')
+  assert.equal(carrying.row.proposed_strength, 'workhorse')
+  assert.equal(carrying.stderr, '')
+  const blockless = bootBriefRun('# Task: compiled\n## Proposed tier\nno proposal\n', 'proposal-absent')
+  assert.equal(blockless.row.proposed_shape, null)
+  assert.equal(blockless.row.proposed_strength, null)
+})
+
+test('proposal parser names malformed, duplicated and unknown blocks, and boot records null with one notice', { skip: SKIP }, () => {
+  const fence = '```proposal'
+  const cases = [
+    ['malformed', [fence, '{ not json', '```'].join('\n'), /not JSON/],
+    ['duplicated', [
+      fence, '{"shape":"mechanical","strength":"workhorse"}', '```',
+      fence, '{"shape":"mechanical","strength":"workhorse"}', '```',
+    ].join('\n'), /duplicated|2 .*proposal/],
+    ['unknown', [fence, '{"shape":"mechanical","strength":"workhorse","tier":"build"}', '```'].join('\n'), /tier/],
+  ]
+  for (const [label, brief, defect] of cases) {
+    const parsed = parseProposalBrief(brief)
+    assert.equal(parsed.absent, false)
+    assert.match(parsed.defect, defect)
+    assert.equal(parsed.shape, null)
+    assert.equal(parsed.strength, null)
+    _resetNoticeGuardsForTest()
+    const booted = bootBriefRun(brief, `proposal-${label}`)
+    assert.equal(booted.row.proposed_shape, null)
+    assert.equal(booted.row.proposed_strength, null)
+    assert.equal(booted.stderr.split('\n').filter(Boolean).length, 1)
+    assert.match(booted.stderr, defect)
+  }
+})
+
+test('a sessions table predating the proposal columns upgrades without backfilling any existing value', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dbPath = join(nextDir(), 'proposal-upgrade.db')
+  const db = new DatabaseSync(dbPath)
+  const older = TABLES.sessions.columns.filter(({ name }) => !['proposed_shape', 'proposed_strength'].includes(name))
+  const names = older.map(({ name }) => name)
+  try {
+    db.exec(`CREATE TABLE sessions (${older.map(({ name, decl }) => `"${name}" ${decl}`).join(', ')})`)
+    const values = names.map((name) => name === 'adw_id' ? 'historical-proposal' : name === 'tier' ? 'build' : null)
+    db.prepare(`INSERT INTO sessions (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`).run(...values)
+    const before = db.prepare('SELECT * FROM sessions WHERE adw_id = ?').get('historical-proposal')
+    applyMigrations(db)
+    const after = db.prepare('SELECT * FROM sessions WHERE adw_id = ?').get('historical-proposal')
+    for (const name of names) assert.deepEqual(after[name], before[name], `existing session column changed: ${name}`)
+    assert.equal(after.proposed_shape, null)
+    assert.equal(after.proposed_strength, null)
+  } finally { db.close() }
+})
+
+test('startSession refuses blank or over-long proposal names and accepts explicit nulls', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  for (const [field, value] of [
+    ['proposed_shape', '   '],
+    ['proposed_strength', ''],
+    ['proposed_shape', 'x'.repeat(65)],
+    ['proposed_strength', 'x'.repeat(65)],
+  ]) {
+    assert.throws(
+      () => ledger.startSession({
+        adw_id: `proposal-invalid-${field}-${value.length}`,
+        repo_slug: 'r', task_slug: 't', [field]: value,
+      }),
+      LedgerUsageError,
+    )
+  }
+  const row = ledger.startSession({
+    adw_id: 'proposal-null', repo_slug: 'r', task_slug: 't', proposed_shape: null, proposed_strength: null,
+  })
+  assert.equal(row.proposed_shape, null)
+  assert.equal(row.proposed_strength, null)
+})
+
+test('proposal fields replay through JSONL into sessions', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({
+    adw_id: 'proposal-replay', repo_slug: 'r', task_slug: 't',
+    proposed_shape: 'mechanical', proposed_strength: 'workhorse',
+  })
+  const target = openTestLedger()
+  assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 1, skipped: 0 })
+  const row = target.getSession('proposal-replay')
+  assert.equal(row.proposed_shape, 'mechanical')
+  assert.equal(row.proposed_strength, 'workhorse')
+})
+
+test('no non-test factory or crew module consumes the recorded proposal columns', () => {
+  const offenders = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry)
+      const stat = statSync(full)
+      if (stat.isDirectory()) {
+        walk(full)
+        continue
+      }
+      if (!/\.mjs$/.test(entry) || /\.test\.mjs$/.test(entry)) continue
+      if (full.endsWith('scripts/factory/ledger.mjs') || full.endsWith('scripts/factory/emit.mjs')) continue
+      const source = readFileSync(full, 'utf8')
+      if (/proposed_shape|proposed_strength/.test(source)) offenders.push(full)
+    }
+  }
+  for (const root of ['crew', 'scripts/factory']) walk(join(ROOT, root))
+  assert.deepEqual(offenders, [])
 })
 
 test('session heartbeat updates only last_heartbeat_at in place and overwrites it', { skip: SKIP }, () => {

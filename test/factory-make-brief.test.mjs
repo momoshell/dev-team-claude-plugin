@@ -14,9 +14,11 @@ import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   LADDER_BANDS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
-  MUTATION_CONTRACT_BLOCK, profileField, proposeTier, readLadderBands, renderBrief,
-  resolveWriteSurface, validateAsk, validateScopeEntries, verifyWhere,
+  MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
+  readLadderBands, renderBrief, renderProposalBlock, resolveWriteSurface, validateAsk,
+  validateScopeEntries, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
+import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
 import { CHECK_FAIL_PREFIX, MUTATIONS_MAX } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
@@ -192,6 +194,7 @@ test('the four authored lines are carried verbatim and compilation is idempotent
   for (const line of [ASK, DONE, OUT]) assert.ok(first.includes(line))
   assert.ok(first.includes('lib/widget.mjs'))
   assert.match(first, /## Proposed tier/)
+  assert.equal((first.match(/^```proposal$/gm) || []).length, 1)
   assert.equal(first, second)
 })
 
@@ -1020,6 +1023,15 @@ test('absence cases return neither proposal with reasons and render no proposal'
   assert.match(body, /proposed shape: no proposal/)
   assert.match(body, /proposed strength: no proposal/)
   assert.match(body, /^- .+/m)
+  assert.equal(renderProposalBlock({ shape: null, strength: null }), [
+    '```proposal',
+    '{',
+    '  "shape": null,',
+    '  "strength": null',
+    '}',
+    '```',
+  ].join('\n'))
+  assert.match(body, /```proposal\n\{\n  "shape": null,\n  "strength": null\n\n?\}\n```/)
 })
 
 test('shape and strength proposals ship inside the Proposed tier section', () => {
@@ -1043,7 +1055,36 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
   const start = brief.indexOf('## Proposed tier')
   const end = brief.indexOf('## Where')
   const strength = brief.indexOf('proposed strength:')
-  assert.ok(strength > start && strength < end)
+  const fence = brief.indexOf('```proposal')
+  assert.ok(strength > start && strength < fence)
+  assert.ok(fence > start && fence < end)
+  assert.equal(brief.slice(fence, brief.indexOf('```', fence + 3) + 3), renderProposalBlock(brief.includes('proposed shape: mechanical')
+    ? { shape: 'mechanical', strength: 'workhorse' }
+    : { shape: null, strength: null }))
+})
+
+test('proposal block renders exact mechanical/workhorse bytes and filters out-of-vocabulary values', () => {
+  assert.equal(renderProposalBlock({ shape: 'mechanical', strength: 'workhorse' }), [
+    '```proposal',
+    '{',
+    '  "shape": "mechanical",',
+    '  "strength": "workhorse"',
+    '}',
+    '```',
+  ].join('\n'))
+  assert.equal(renderProposalBlock({ shape: 'not-a-shape', strength: 'not-a-band' }), [
+    '```proposal',
+    '{',
+    '  "shape": null,',
+    '  "strength": null',
+    '}',
+    '```',
+  ].join('\n'))
+})
+
+test('compiler and emitter proposal declarations stay in agreement', () => {
+  assert.equal(PROPOSAL_BLOCK, EMIT_PROPOSAL_BLOCK)
+  assert.deepEqual(PROPOSAL_KEYS, EMIT_PROPOSAL_KEYS)
 })
 
 test('the parser returns a refusal code for an unknown CLI option', () => {

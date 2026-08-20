@@ -296,6 +296,15 @@ export const TABLES = Object.freeze({
       // column is never backfilled. Declared LAST so an upgraded db receives it
       // via ADD COLUMN (#290).
       { name: 'tier', decl: 'TEXT' },
+      // #291 step 3: recording half: the COMPILER's proposals for this run,
+      // forwarded from the brief's fenced ```proposal block by
+      // scripts/factory/emit.mjs — never re-derived here and never consumed to
+      // change seating (#291 step 4). NULL means unmeasured: a brief with no
+      // block, and every row that predates these columns, which are never
+      // backfilled. Declared LAST so an upgraded db receives them via ADD
+      // COLUMN (#290).
+      { name: 'proposed_shape', decl: 'TEXT' },
+      { name: 'proposed_strength', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -802,10 +811,10 @@ function refuse(message, reason = 'usage') {
 // (null); a non-string, blank or unbounded tier is a CALLER BUG and refuses.
 const TIER_MAX_CHARS = 64
 
-function normaliseTier(value, ctx) {
+function normaliseShortName(value, ctx, field) {
   if (value === undefined || value === null) return null
   if (typeof value !== 'string' || value.trim() === '' || value.length > TIER_MAX_CHARS) {
-    refuse(`${ctx}: field 'tier' must be a non-blank string of at most ${TIER_MAX_CHARS} characters when present`)
+    refuse(`${ctx}: field '${field}' must be a non-blank string of at most ${TIER_MAX_CHARS} characters when present`)
   }
   return value.trim()
 }
@@ -1196,7 +1205,11 @@ export function openLedger({
       last_heartbeat_at: null,
       // Forwarded from the caller's boot record (scripts/factory/emit.mjs),
       // never derived here. Explicit null when the boot recorded no tier.
-      tier: normaliseTier(input.tier, 'startSession'),
+      tier: normaliseShortName(input.tier, 'startSession', 'tier'),
+      // Forwarded from the brief's compiler block by scripts/factory/emit.mjs;
+      // explicit null when the brief carried no proposal.
+      proposed_shape: normaliseShortName(input.proposed_shape, 'startSession', 'proposed_shape'),
+      proposed_strength: normaliseShortName(input.proposed_strength, 'startSession', 'proposed_strength'),
     }, stats)
     sessionStatusByAdwId.set(args.adw_id, args.status)
     appendJsonl('startSession', args)

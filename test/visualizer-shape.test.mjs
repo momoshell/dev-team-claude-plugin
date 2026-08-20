@@ -178,6 +178,16 @@ test('laneFor follows the ratified role order and folds unknown roles into stabl
   assert.equal(unknown, laneFor('nobody'))
 })
 
+test('shapeRun surfaces a recorded tier and keeps an unmeasured row unmeasured', () => {
+  const now = Date.parse('2024-01-01T00:02:00.000Z')
+  const measured = shapeRun({ ...base, tier: 'build' }, [], [], null, missingProbe, now)
+  assert.equal(measured.tier, 'build')
+  assert.equal(measured.pending.tier, undefined)
+  const unmeasured = shapeRun(base, [], [], null, missingProbe, now)
+  assert.equal(unmeasured.tier, null)
+  assert.match(unmeasured.pending.tier, /^not measured/)
+})
+
 test('shapeRun keeps tier and heartbeat absent until their sources measure them', () => {
   const now = Date.parse('2024-01-01T00:02:00.000Z')
   const absent = shapeRun(base, [], [], null, missingProbe, now)

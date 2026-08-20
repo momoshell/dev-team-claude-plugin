@@ -557,6 +557,9 @@ export function recordCiDispatch({ dbPath, stderr = process.stderr, _openLedger,
   }
 }
 
+// A recorded tier is a short roster shape name; anything longer is not one.
+const TIER_MAX_CHARS = 64
+
 function openRunInner({
   stateDir,
   repoSlug,
@@ -593,6 +596,24 @@ function openRunInner({
       stderr.write(`${line}\n`)
     } catch {
       // Best-effort: a broken stderr sink must not itself become a throw.
+    }
+  }
+
+  // #291 step 3: the run's tier is DECIDED at boot and written to the boot
+  // record crew.json by crew/crew.mjs:831 (`tier` is present only when --tier
+  // was used; a --roles boot omits the key entirely). This READS that record
+  // and never re-derives the tier — no roster resolution here. An unreadable,
+  // absent or malformed boot record records null, which reads as unmeasured
+  // rather than as a guess.
+  function bootTier() {
+    try {
+      const raw = readFileSync(join(stateDir, 'crew.json'), 'utf8')
+      const value = JSON.parse(raw).tier
+      if (typeof value !== 'string') return null
+      const text = value.trim()
+      return text && text.length <= TIER_MAX_CHARS ? text : null
+    } catch {
+      return null
     }
   }
 
@@ -935,6 +956,7 @@ function openRunInner({
       emit((handle) => {
         handle.startSession({
           adw_id: adwId, repo_slug: repoSlug, task_slug: taskSlug, started_at: isoMs(now()),
+          tier: bootTier(),
         })
       })
       phaseTransition('planning')

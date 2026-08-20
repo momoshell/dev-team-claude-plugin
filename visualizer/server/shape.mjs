@@ -115,9 +115,14 @@ function sumBilled(rows, column, fallback) {
   return total ?? (typeof fallback === 'number' ? fallback : null)
 }
 
+// Why a row can legitimately carry no tier: it was booted with --roles rather
+// than --tier (crew/crew.mjs writes the key only for a tiered boot), or it
+// predates the sessions.tier column and is never backfilled.
+const TIER_UNMEASURED = "not measured — this run's session row records no tier: it was booted with explicit --roles rather than --tier, or it predates the sessions.tier column and is never backfilled; intake_dispatches records tier by issue, not by run"
+
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
-  if (field === 'tier') return "not measured — the ledger's sessions table records no tier (scripts/factory/ledger.mjs:246-263); intake_dispatches records tier by issue, not by run"
+  if (field === 'tier') return TIER_UNMEASURED
   if (field === 'last_heartbeat_at') return 'not measured here — agent_sessions.last_heartbeat_at is not selected by this feed (visualizer/server/ledger-feed.mjs:76)'
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
@@ -201,7 +206,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   }
   const heartbeatMs = dateValue(last_heartbeat_at)
   const heartbeat_age_ms = heartbeatMs == null || !Number.isFinite(now) ? null : now - heartbeatMs
-  const tier = null
+  const tier = Object.prototype.hasOwnProperty.call(session, 'tier') ? (session.tier ?? null) : null
   const gateRows = [...gateDiscriminations].sort((a, b) => (a.gate_generation ?? 0) - (b.gate_generation ?? 0))
   const gateGenerations = gateRows.length ? gateRows.map((row) => ({
     gate_generation: row.gate_generation ?? null,

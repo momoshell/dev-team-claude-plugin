@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'nod
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBacked,
+  CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, assertGrantsBacked,
   effectiveCapabilities, grantsFor, loadCapabilities, refuse, validateCapabilities,
 } from './capabilities.mjs'
 import { seatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
@@ -34,7 +34,9 @@ function capabilityFixtureRoot() {
 }
 
 test('a grant not present in the register refuses to reach an adapter', () => {
-  assert.match(readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8'), /assertGrantsBacked\(role, grants, registry\)/)
+  const crewSource = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.match(crewSource, /assertGrantsBacked\(role, grants, registry, \{ agent: name \}\)/)
+  assert.match(crewSource, /grantsFor\(registry, role, \{ root, exists, agent: name \}\)/)
   const register = capabilityRegister()
   const smuggled = {
     tools: ['task'], extensions: [], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }],
@@ -48,6 +50,74 @@ test('a grant not present in the register refuses to reach an adapter', () => {
     planner: { ...register.roles.planner, tools: ['task'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
   } })
   assert.doesNotThrow(() => assertGrantsBacked('planner', smuggled, backed))
+})
+
+test('the shipped planner pi overlay resolves its checkout-pinned bundle', () => {
+  const grants = grantsFor(loadCapabilities(), 'planner', { agent: 'pi' })
+  assert.deepEqual(grants.extensions, [join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts')])
+  assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
+})
+
+test('an adapter without an overlay gets exactly the role-level grant', () => {
+  const shipped = loadCapabilities()
+  const roleLevel = grantsFor(shipped, 'planner')
+  const claude = grantsFor(shipped, 'planner', { agent: 'claude' })
+  assert.deepEqual(claude, roleLevel)
+  assert.deepEqual(claude.extensions, [])
+  assert.deepEqual(claude.agents, [])
+  assert.deepEqual(Object.keys(claude), ['tools', 'extensions', 'agents', 'skills', 'advisor', 'requires'])
+})
+
+test('adapter-scoped grants are backed only when the adapter is named', () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const base = capabilityRegister()
+    const register = capabilityRegister({ roles: {
+      planner: { ...base.roles.planner, by_agent: {
+        pi: { extensions: ['crew/pi/fanout.js'], agents: [{ name: 'Explore', def: 'crew/pi/explore.json' }] },
+      } },
+    } })
+    const grants = grantsFor(register, 'planner', { root, agent: 'pi' })
+    assert.doesNotThrow(() => assertGrantsBacked('planner', grants, register, { agent: 'pi' }))
+    assert.throws(() => assertGrantsBacked('planner', grants, register), (err) => err.reason === 'unknown-grant')
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('adapter-scoped paths fail closed with the same refusal reasons', () => {
+  const root = capabilityFixtureRoot()
+  try {
+    const cases = [
+      ['extension-missing', { extensions: ['crew/pi/nope.js'] }],
+      ['unknown-skill', { skills: ['crew/pi/skills/nope.md'] }],
+      ['agent-def-invalid', { agents: [{ name: 'Explore', def: 'crew/pi/nope.json' }] }],
+    ]
+    for (const [reason, overlay] of cases) {
+      const base = capabilityRegister()
+      const register = capabilityRegister({ roles: {
+        builder: { ...base.roles.builder, by_agent: { pi: overlay } },
+      } })
+      assert.throws(() => grantsFor(register, 'builder', { root, agent: 'pi' }), (err) => err.reason === reason)
+    }
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('overlay schema decisions refuse unknown keys but ignore unknown adapters', () => {
+  const shipped = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  for (const key of ['sneaky', 'tools', 'advisor', 'requires']) {
+    const bad = JSON.parse(JSON.stringify(shipped))
+    bad.roles.planner.by_agent.pi[key] = key === 'sneaky' ? true : []
+    assert.throws(() => loadCapabilities({ register: bad }), (err) => err.reason === 'register-invalid')
+  }
+  const variant = JSON.parse(JSON.stringify(shipped))
+  variant.roles.planner.by_agent.zz = { extensions: ['crew/pi/extensions/advisor.ts'] }
+  const baseline = loadCapabilities({ register: shipped })
+  const unknownAdapter = loadCapabilities({ register: variant })
+  for (const agent of ['pi', 'claude']) {
+    assert.deepEqual(
+      grantsFor(unknownAdapter, 'planner', { agent }),
+      grantsFor(baseline, 'planner', { agent }),
+    )
+  }
 })
 
 test('capability register validation is closed, non-vacuous, and enforced at load', () => {

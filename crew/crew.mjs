@@ -805,8 +805,8 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
       if (typeof adapter.seatCommand !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a seatCommand function`)
       if (typeof adapter.capabilitiesFor !== 'function') throw new Error(`agent adapter "${name}" for seat ${role} (${file}) does not export a capabilitiesFor function`)
       const transport = seatTransport({ role, args: sourceArgs, adapter, agentName: name })
-      const grants = grantsFor(registry, role, { root, exists })
-      assertGrantsBacked(role, grants, registry)
+      const grants = grantsFor(registry, role, { root, exists, agent: name })
+      assertGrantsBacked(role, grants, registry, { agent: name })
       assertFanoutCoherent(role, grants)
 
       let configDir = null

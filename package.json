@@ -16,7 +16,8 @@
     "ledger:task": "node scripts/factory/ledger.mjs task",
     "viz:serve": "node visualizer/server/server.mjs",
     "viz:build": "vite build --config visualizer/web/vite.config.mjs",
-    "viz:dev": "vite --config visualizer/web/vite.config.mjs"
+    "viz:dev": "vite --config visualizer/web/vite.config.mjs",
+    "crew:watch": "node scripts/factory/crew-watch.mjs"
   },
   "devDependencies": {
     "svelte": "^5.0.0",

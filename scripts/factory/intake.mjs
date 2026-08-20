@@ -1679,6 +1679,21 @@ export function parseBoardArgument(value) {
   return { owner, projectNumber }
 }
 
+// A park has no run and therefore no candidates: parkedResult carries
+// refusals: [] (intake.mjs:866) and intakeLoop pushes run: null (:1445, :1476).
+function tickConsidered(tick) {
+  const considered = tick.run?.sweep?.considered
+  return Number.isInteger(considered) ? considered : 0
+}
+
+// The reasons here are already members of INTAKE_REFUSALS (ledger.mjs:149);
+// this only carries them out, it never invents or maps one.
+function tickRefusals(tick) {
+  const refusals = tick.run?.sweep?.refusals
+  if (!Array.isArray(refusals)) return []
+  return refusals.map(({ issue, reason, detail }) => ({ issue, reason, detail: detail ?? null }))
+}
+
 // The verb's whole body. main() is a thin shim over this: tests drive it with
 // injected deps, per the house rule that anything a test drives is a library
 // function taking deps (ci-watch.mjs:193, intake.mjs:510).
@@ -1737,6 +1752,8 @@ export function sweepCommand({
     reason: tick.reason,
     failure: tick.failure,
     picked_issue: tick.run?.sweep?.picked?.issue ?? null,
+    considered: tickConsidered(tick),
+    refusals: tickRefusals(tick),
   }))
   const picked = ticksOut.filter((tick) => tick.picked_issue != null)
   // A board fetch that threw is a FAILED ATTEMPT, not a park: its reason is
@@ -1777,7 +1794,15 @@ export function renderSweepReport(report) {
   if (!report.ok && report.reason) lines.push(`refused: ${report.reason}${report.detail ? ` (${report.detail})` : ''}`)
   for (const failure of report.failures) lines.push(`  attempt ${failure.index} FAILED: ${failure.failure} (not a sweep outcome)`)
   for (const tick of report.ticks) {
-    lines.push(`  tick ${tick.index} ${tick.started_at} swept=${tick.swept} outcome=${tick.outcome ?? 'none-recorded'} reason=${tick.reason ?? '-'}${tick.failure ? ` failure=${tick.failure}` : ''}`)
+    lines.push(`  tick ${tick.index} ${tick.started_at} swept=${tick.swept} outcome=${tick.outcome ?? 'none-recorded'} reason=${tick.reason ?? '-'} considered=${tick.considered} refused=${tick.refusals.length}${tick.failure ? ` failure=${tick.failure}` : ''}`)
+    // An empty Ready column and a column whose every candidate was refused both
+    // report outcome=none; the operator needs them to read differently.
+    if (tick.swept && tick.outcome === 'none' && tick.considered === 0) {
+      lines.push('    candidates: none — the Ready column held nothing to refuse')
+    }
+    for (const refusal of tick.refusals) {
+      lines.push(`    refused ${refusal.issue}: ${refusal.reason}${refusal.detail ? ` (${refusal.detail})` : ''}`)
+    }
   }
   lines.push(report.would_dispatch.length === 0
     ? 'would dispatch: nothing (recording only: no issue was dispatched)'

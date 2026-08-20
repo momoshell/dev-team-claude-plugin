@@ -2,9 +2,9 @@ import { acceptRows } from './panels.js'
 
 export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
 
-const EFFORT_WHY = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/realio.mjs:264-265, 285-288)'
+const EFFORT_WHY = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/seat-io.mjs:264-265, 285-288)'
 const CONTEXT_WHY = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
-const MODEL_WHY = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/realio.mjs:399-410)'
+const MODEL_WHY = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/seat-io.mjs:399-410)'
 const MUST_FIX_WHY = 'predates this measurement — the review recorded no must-fix count'
 const ARTIFACT_WHY = 'artifact bytes are not served: no endpoint serves file bytes and server.mjs is fenced this batch'
 

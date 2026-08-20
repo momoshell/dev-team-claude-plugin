@@ -829,7 +829,7 @@ export const RESEAT_REASONS = Object.freeze(['transport', 'exhausted', 'no-tier'
 // The shipped adapters' roster-cell translations, keyed by the seat's own
 // `agent` name — the same "injected wins, shipped default otherwise" shape
 // crew/headless.mjs:128 and crew/headless-rpc.mjs:122 already use for command
-// composition (#239). realIo is synchronous, so it cannot do crew.mjs's
+// composition (#239). seatIo is synchronous, so it cannot do crew.mjs's
 // dynamic import(): an agent whose adapter is not one of these two has nothing
 // here that can vouch for the translation, and reseat refuses rather than
 // writing a bare id.
@@ -939,7 +939,7 @@ function newSurfaceIds(before, after) {
 // Blueprint variants (#251): a shape's opening stage IS its own name; a bounded
 // triage is that shape's planning phase. An envelope shape's acceptance is a
 // terminal settle, not a build. A DATA map, so a new member is a data edit here
-// too — not a new branch. Duplicated rather than imported: realio must not
+// too — not a new branch. Duplicated rather than imported: seat-io must not
 // import the driver (the MODIFIER_OUTCOMES convention at :608); crew/crew.test.mjs
 // pins this map against crew/drive.mjs's enum.
 export const VARIANT_STAGE_PHASES = Object.freeze({ scout: 'planning', repair: 'planning', directed: 'planning', 'envelope-accept': 'finish' })
@@ -1126,7 +1126,7 @@ export function emitAdapter(emitter, crew = null) {
         }))
       }
     } else if (event.kind === 'heartbeat') {
-      // The ONE measured-liveness write (#297): realio's wait loop calls this
+      // The ONE measured-liveness write (#297): seat-io's wait loop calls this
       // only after a probe came back TRUE, carrying that probe's timestamp.
       // A heartbeat with no probe timestamp behind it is a wall clock, not a
       // measurement — dropped, never stamped, because heartbeat() would
@@ -1189,7 +1189,7 @@ export const PANE_SETTLE_POLLS = 4
 export const PANE_SETTLE_MS = 250
 
 // One row per seat whose recorded SURFACE this teardown attempted to close —
-// exactly the seats realIo.teardown() structurally cannot see (it builds rows
+// exactly the seats seatIo.teardown() structurally cannot see (it builds rows
 // from declared headless-rpc members only), which is why an all-pane crew
 // recorded `seats: 0`. The selection is deliberately narrow: it claims nothing
 // about a future transport that owns BOTH a surface and a place in the
@@ -1267,7 +1267,7 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
       // OBSERVED. `current` is that probe's own timestamp — the same instant
       // the miss accounting records as `lastProbeAt`. An indeterminate probe
       // (null) and a miss (false) write NOTHING: a NULL beats a value nobody
-      // measured (#297). The callback is the caller's to guard — realIo.wait
+      // measured (#297). The callback is the caller's to guard — seatIo.wait
       // owns that try/catch because it owns the emitter.
       if (alive === true) { misses = 0; if (onAlive) onAlive(current) }
       else if (alive === false) misses += 1
@@ -1309,7 +1309,7 @@ export function colorNeutralEnv(base = process.env) {
   return env
 }
 
-export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
+export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
   const sendLine = deps.sendLine || defaultSendLine
   const assignmentLine = deps.assignmentLine || defaultAssignmentLine
   const tree = deps.tree || defaultTree
@@ -1383,7 +1383,7 @@ export function realIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
-      // realIo's scope (it is runCmd's local), so leaving it out of this
+      // seatIo's scope (it is runCmd's local), so leaving it out of this
       // pattern makes it a free identifier and every pane assignment dies
       // with a bare ReferenceError before a single line is sent.
       const { role, briefFile } = spec

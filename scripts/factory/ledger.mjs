@@ -121,7 +121,7 @@ export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted
 export const REQUEST_SOURCES = Object.freeze(['dispatch', 'brief-file'])
 export const REQUEST_MAX_CHARS = 2000
 export const RETIRED_TABLES = Object.freeze({
-  envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/realio.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
+  envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/seat-io.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
 })
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
@@ -211,7 +211,7 @@ export const RUN_VARIANT_MARKERS = Object.freeze({ plan: 'full', scout: 'scout',
 export const STAGE_MARKER_CHUNK = 200
 
 // Which shape a run used, from the FIRST log row it recorded. `log` is not a
-// stage-only type — attention lines ride it too (crew/realio.mjs:270-272) — so
+// stage-only type — attention lines ride it too (crew/seat-io.mjs:270-272) — so
 // only the first row is classified: scanning on to the first RECOGNISED row would
 // let a later colliding message rewrite the answer. Anything else is null:
 // an unmeasured shape is NEVER reported as the default one, or every degraded and
@@ -285,7 +285,7 @@ export const TABLES = Object.freeze({
       { name: 'request', decl: 'TEXT' },
       { name: 'request_source', decl: 'TEXT' },
       // #297: the run's last MEASURED liveness observation — written only from
-      // a probe that came back alive (crew/realio.mjs's wait loop), UPDATEd in
+      // a probe that came back alive (crew/seat-io.mjs's wait loop), UPDATEd in
       // place per ADR-024 (a last-known-alive column, never a trace row).
       // Declared LAST so an upgraded db receives it via ADD COLUMN (#290).
       { name: 'last_heartbeat_at', decl: 'TEXT' },

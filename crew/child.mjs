@@ -1,5 +1,5 @@
 // This module is the forked child's entry point; it exists so the long-lived
-// server process never loads drive.mjs/realio.mjs, and runner imports belong
+// server process never loads drive.mjs/seat-io.mjs, and runner imports belong
 // here and nowhere else.
 import {
   readFileSync as fsReadFileSync,
@@ -14,7 +14,7 @@ import { fileURLToPath } from 'node:url'
 
 import { driveTask as defaultDriveTask, LIMITS, VARIANTS, validateScopeEntries } from './drive.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
-import { realIo as defaultRealIo, settleSeatTeardown } from './realio.mjs'
+import { seatIo as defaultSeatIo, settleSeatTeardown } from './seat-io.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { paneSeat, isObject } from './daemon.mjs'
@@ -95,7 +95,7 @@ export function runChild(argv, injected = {}) {
   // `harness` decides how a preflight failure is REPORTED — rethrown for a
   // test driving runChild directly, or written as an escalation envelope in
   // production. It deliberately no longer decides WHETHER preflight runs.
-  const harness = !!(injected.driveTask || injected.realIo)
+  const harness = !!(injected.driveTask || injected.seatIo)
   // Preflight runs UNLESS a caller opts out explicitly. Deriving this from
   // `harness` meant "I supplied a fake io" silently also meant "skip the seat,
   // brief, checkout-identity and dirty-tree guards" — and DI is the crew's
@@ -167,9 +167,9 @@ export function runChild(argv, injected = {}) {
       }
     }
     mkdir(taskDir, { recursive: true }); mkdir(returnsDir, { recursive: true })
-    const realIo = injected.realIo || defaultRealIo
+    const seatIo = injected.seatIo || defaultSeatIo
     const driveTask = injected.driveTask || defaultDriveTask
-    const noCmux = injected.realIoDeps || {
+    const noCmux = injected.seatIoDeps || {
       cmux: () => ({ ok: true }), tree: () => ({ windows: [] }), locate: () => null,
       sendLine: () => {}, closeSurface: () => {},
     }
@@ -206,7 +206,7 @@ export function runChild(argv, injected = {}) {
       err.stage = 'ledger-sidecar'
       result = failure(err)
     } else {
-      io = realIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
+      io = seatIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
       const protectedFloor = checkoutProtectedPaths({ checkout })
       ctx.protectedPaths = protectedFloor.paths
       ctx.protectedPathsBasis = protectedFloor.basis

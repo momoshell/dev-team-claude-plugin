@@ -40,13 +40,13 @@ import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateSc
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
-  realIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
-} from './realio.mjs'
+  seatIo, settleSeatTeardown, paneTeardownRows, emitAdapter, saveCrew, resolveWorkerBin, paneAlive, settleSeatRoots, reclaimDescendants, DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT,
+} from './seat-io.mjs'
 export {
   docOpenArgs, phaseForStage, emitAdapter, waitForEnvelope, resolveWorkerBin,
   DEFAULT_TRANSPORT, HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT, WAIT_POLL_MS, LIVENESS_PROBE_MS,
   LIVENESS_MISSES_TO_DIE,
-} from './realio.mjs'
+} from './seat-io.mjs'
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
@@ -925,7 +925,7 @@ export function runCmd(args, deps = {}) {
   }
   // Keep the test lane at 30 s per test: the slowest real test is ~25 ms,
   // giving ~1200× headroom even when the machine is saturated by three crews.
-  // This is well below realIo.run's 900 s kill, so a hung test is reported by
+  // This is well below seatIo.run's 900 s kill, so a hung test is reported by
   // name as timed out instead of ending as an anonymous SIGTERM.
   // --test-timeout is per-test: it bounds one hung test, not a pathological
   // whole-suite case. A wall-clock bound on the lane would be a driver change,
@@ -967,7 +967,7 @@ export function runCmd(args, deps = {}) {
     emitter.startRun()
   } catch { emitter = null }
 
-  const io = realIo(crew, paths, checkout, emitter, null, args)
+  const io = seatIo(crew, paths, checkout, emitter, null, args)
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.

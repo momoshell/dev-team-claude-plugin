@@ -11,9 +11,9 @@ import { once } from 'node:events'
 
 import {
   DESCENDANT_DIR, DESCENDANT_MAX_ANCHORS, DESCENDANT_STORE_DIRS,
-  escapedDescendants, psSnapshot, reclaimDescendants, realIo, settleSeatRoots,
+  escapedDescendants, psSnapshot, reclaimDescendants, seatIo, settleSeatRoots,
   settleSeatTeardown, statIsZombie, verifyGroup, descendantCapture,
-} from './realio.mjs'
+} from './seat-io.mjs'
 import { bootCmd, runCmd, teardownCore } from './crew.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
 
@@ -358,7 +358,7 @@ test('the run-end reclaim settles seat roots before it can stamp the record swep
     if (signal === 0 && pid === -42 && !escapedAlive) { const error = new Error('gone'); error.code = 'ESRCH'; throw error }
     return true
   }
-  const io = realIo({}, { taskDir, dir: join(taskDir, '..') }, join(taskDir, '..'), null, {}, {}, {
+  const io = seatIo({}, { taskDir, dir: join(taskDir, '..') }, join(taskDir, '..'), null, {}, {}, {
     logLine: (_path, row) => events.push(row),
     snapshot: snapshotFor, kill, sleep: () => {},
   })
@@ -794,16 +794,16 @@ test('recordSeatReclaim enforces identity and outcome vocabulary without echoing
   ])
 })
 
-test('realIo transport sleep captures and still serves the requested delay', () => {
+test('seatIo transport sleep captures and still serves the requested delay', () => {
   const root = task()
   const paths = { dir: root, taskDir: root, returnsDir: join(root, 'returns') }
   mkdirSync(paths.returnsDir, { recursive: true })
   marker(root, 'sleep-res')
   let received = null
-  // The injected headlessIo means nothing is spawned, but realIo still resolves a
+  // The injected headlessIo means nothing is spawned, but seatIo still resolves a
   // worker binary first — so name one explicitly instead of falling through to the
   // host's ~/.local/bin/claude, which does not exist on a CI runner.
-  const io = realIo({ members: { builder: { transport: 'headless-json', model: 'x' } } }, paths, root, null, null, { 'claude-bin': process.execPath }, {
+  const io = seatIo({ members: { builder: { transport: 'headless-json', model: 'x' } } }, paths, root, null, null, { 'claude-bin': process.execPath }, {
     headlessIo: (args) => { received = args; return { assign: () => ({ id: 'd1', returnPath: join(root, 'returns', 'd1.json') }) } },
     sleep: () => {},
   })
@@ -814,10 +814,10 @@ test('realIo transport sleep captures and still serves the requested delay', () 
 })
 
 test('slice-1 settle vocabulary and both entrypoint calls remain source-visible', () => {
-  const realio = readFileSync(new URL('./realio.mjs', import.meta.url), 'utf8')
+  const seatIoSrc = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   const crew = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
   const child = readFileSync(new URL('./child.mjs', import.meta.url), 'utf8')
-  assert.equal(realio.split('seat-teardown-sweep').length - 1, 1)
+  assert.equal(seatIoSrc.split('seat-teardown-sweep').length - 1, 1)
   assert.equal(crew.split('settleSeatTeardown(io)').length - 1, 1)
   assert.equal(child.split('settleSeatTeardown(io)').length - 1, 1)
 })

@@ -306,12 +306,12 @@ Everything durable is a FILE; pane chat is never the record.
 - `crew.mjs` — CLI: boot / run / handoff (legacy agent-driven mode) / wait /
   status / teardown.
 - `daemon.mjs` — the long-lived headless-run daemon, Unix-socket protocol, restart adoption, and live file projection.
-- `realio.mjs` — the io implementation: the injected-`deps` seam,
+- `seat-io.mjs` — the io implementation: the injected-`deps` seam,
   `waitForEnvelope`, `emitAdapter`, and the cmux + git wiring.
 - `drive.mjs` — the deterministic task loop (dependency-injected io; fully
   unit-tested without cmux). `io.emit(event)` is OPTIONAL: when `run` can open
   a factory ledger run, stage/assign/envelope/decision/dissent/cell-failure events are
-  mirrored through `emitAdapter` in `realio.mjs`; `gate` events go to
+  mirrored through `emitAdapter` in `seat-io.mjs`; `gate` events go to
   `gate_results`; `discrimination` events land in `gate_discriminations`, and
   review-carrying `envelope` events land in `review_outcomes`. The
   `ledger:gate-review-gap` and `ledger:eligible-tasks` recipes expose the two
@@ -335,7 +335,7 @@ Everything durable is a FILE; pane chat is never the record.
 - `roles/*.md` — seat charters, appended as system prompts at boot.
 - Tests: `drive.test.mjs` (the loop), `driver.test.mjs` (line composition),
   `reclaim.test.mjs` (reservation and transition-lock contracts),
-  `io-contract.test.mjs` (the shared io contract, run against realIo, headlessIo, and headlessRpcIo).
+  `io-contract.test.mjs` (the shared io contract, run against seatIo, headlessIo, and headlessRpcIo).
 
 State lives under `~/.crew/<repo>/<task>/` (crew.json, task dir, returns,
 journal); archives keep the durable record after teardown.

@@ -4,12 +4,12 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { cellFailureKind, emitAdapter, realIo, nextRung, nextModelRung } from './realio.mjs'
+import { cellFailureKind, emitAdapter, seatIo, nextRung, nextModelRung } from './seat-io.mjs'
 import { resolveSeatModels } from './crew.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
-import { WAIT_POLL_MS } from './realio.mjs'
+import { WAIT_POLL_MS } from './seat-io.mjs'
 import { assignmentLine } from './driver.mjs'
 
 const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'commit', 'log', 'now']
@@ -23,7 +23,7 @@ function dirs() {
   return paths
 }
 
-function makeRealIo() {
+function makeSeatIo() {
   const paths = dirs()
   let clock = 0
   let resultPath = null
@@ -51,7 +51,7 @@ function makeRealIo() {
       return fsExistsSync(path)
     },
     readFileSync: (path, ...args) => {
-      if (path === resultPath && (FAULT !== 'wait-poll' || polls >= 8)) return JSON.stringify({ status: 'done', subject: 'realIo' })
+      if (path === resultPath && (FAULT !== 'wait-poll' || polls >= 8)) return JSON.stringify({ status: 'done', subject: 'seatIo' })
       return fsReadFileSync(path, ...args)
     },
     writeFileSync: fsWriteFileSync,
@@ -84,7 +84,7 @@ function makeRealIo() {
   if (FAULT === 'assign-send') deps.sendLine = () => {}
   if (FAULT === 'assign-surface') deps.sendLine = (surface, line) => sent.push({ surface: 'wrong-surface', line })
   const crew = { workspace_id: 'ws', window_id: 'win', members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }
-  const io = realIo(crew, paths, paths.dir, null, null, {}, deps)
+  const io = seatIo(crew, paths, paths.dir, null, null, {}, deps)
   return { io, paths, sent, added, commands, clock: () => clock, setResult: (p) => { resultPath = p }, setDirty: (v) => { dirtyMode = v }, setPopFailure: (v) => { popFailure = v }, assignmentPolls: () => polls }
 }
 
@@ -103,7 +103,7 @@ function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json
   }
   const paths = dirs()
   const logs = []
-  const io = realIo(crew, paths, paths.dir, null, adapters === undefined ? { [role]: { adapter } } : adapters, {}, {
+  const io = seatIo(crew, paths, paths.dir, null, adapters === undefined ? { [role]: { adapter } } : adapters, {}, {
     readRoster: readRoster || (() => ROSTER),
     logLine: (_path, obj) => logs.push(obj),
     ...deps,
@@ -195,7 +195,7 @@ function makeHeadlessRpcIo() {
 }
 
 const SUBJECTS = [
-  { name: 'realIo', methods: [...REQUIRED, ...OPTIONAL], make: makeRealIo },
+  { name: 'seatIo', methods: [...REQUIRED, ...OPTIONAL], make: makeSeatIo },
   { name: 'headlessIo', methods: ['assign', 'wait'], make: makeHeadlessIo },
   { name: 'headlessRpcIo', methods: ['assign', 'wait'], make: makeHeadlessRpcIo },
 ]
@@ -213,7 +213,7 @@ for (const subject of SUBJECTS) {
     const out = fixture.io.assign({ role: 'builder', briefFile })
     assert.equal(typeof out.id, 'string')
     assert.ok(out.returnPath.startsWith(fixture.paths.returnsDir + '/'))
-    if (subject.name === 'realIo') {
+    if (subject.name === 'seatIo') {
       assert.equal(fixture.sent.length, 1)
       assert.equal(fixture.sent[0].surface, 'surface-builder')
       for (const value of [briefFile, out.id, 'builder', out.returnPath]) assert.ok(fixture.sent[0].line.includes(value))
@@ -242,8 +242,8 @@ for (const subject of SUBJECTS) {
   })
 }
 
-test('realIo removes stale return files and round-trips files', () => {
-  const f = makeRealIo()
+test('seatIo removes stale return files and round-trips files', () => {
+  const f = makeSeatIo()
   const stale = join(f.paths.returnsDir, 'd1.builder.json')
   fsWriteFileSync(stale, 'stale')
   const out = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
@@ -254,20 +254,20 @@ test('realIo removes stale return files and round-trips files', () => {
   assert.equal(f.io.readFile(join(f.paths.taskDir, 'missing')), null)
 })
 
-test('realIo run reports status, spawn errors, and signals', () => {
-  const f = makeRealIo()
+test('seatIo run reports status, spawn errors, and signals', () => {
+  const f = makeSeatIo()
   assert.deepEqual(f.io.run('ok'), { ok: true, output: '' })
   assert.equal(f.io.run('fail').ok, false)
   assert.match(f.io.run('signal').output, /spawn error|killed by SIGTERM/)
 })
 
-test('realIo run neutralises colour while preserving the inherited environment', () => {
+test('seatIo run neutralises colour while preserving the inherited environment', () => {
   const saved = process.env.FORCE_COLOR
   process.env.FORCE_COLOR = '3'
   try {
     let options = null
     const paths = dirs()
-    const io = realIo({ members: {} }, paths, paths.dir, null, null, {}, {
+    const io = seatIo({ members: {} }, paths, paths.dir, null, null, {}, {
       spawnSync: (_bin, _argv, opts) => { options = opts; return { status: 0, stdout: '', stderr: '' } },
     })
     io.run('anything')
@@ -281,8 +281,8 @@ test('realIo run neutralises colour while preserving the inherited environment',
   }
 })
 
-test('realIo runClean skips stash on a clean tree and restores dirty work on command failure', () => {
-  const f = makeRealIo()
+test('seatIo runClean skips stash on a clean tree and restores dirty work on command failure', () => {
+  const f = makeSeatIo()
   f.io.runClean.call(f.io, 'ok')
   assert.deepEqual(f.commands.filter((x) => x.kind === 'spawn').map((x) => x.argv), [['-c', 'ok']])
 
@@ -295,27 +295,27 @@ test('realIo runClean skips stash on a clean tree and restores dirty work on com
   f.io.run = originalRun
 })
 
-test('realIo runClean throws when restoring the stash fails', () => {
-  const f = makeRealIo()
+test('seatIo runClean throws when restoring the stash fails', () => {
+  const f = makeSeatIo()
   f.setDirty(true)
   f.setPopFailure(true)
   assert.throws(() => f.io.runClean.call(f.io, 'ok'), /stash pop FAILED/)
 })
 
-test('realIo changedFiles parses NUL porcelain and both rename paths', () => {
-  const f = makeRealIo()
+test('seatIo changedFiles parses NUL porcelain and both rename paths', () => {
+  const f = makeSeatIo()
   assert.deepEqual(f.io.changedFiles(), ['changed.txt', 'renamed.txt', 'old.txt'])
 })
 
-test('realIo commit stages changed files and returns the short hash', () => {
-  const f = makeRealIo()
+test('seatIo commit stages changed files and returns the short hash', () => {
+  const f = makeSeatIo()
   assert.equal(f.io.commit(['changed.txt', 'not-present.txt'], 'message'), 'abc123')
   assert.deepEqual(f.added, ['changed.txt'])
   assert.throws(() => f.io.commit(['not-present.txt'], 'message'), /refusing an empty commit/)
 })
 
-test('realIo log, now, status, and showDoc use injected effects best-effort', () => {
-  const f = makeRealIo()
+test('seatIo log, now, status, and showDoc use injected effects best-effort', () => {
+  const f = makeSeatIo()
   assert.equal(f.io.now(), 0)
   f.io.log({ event: 'test' })
   assert.doesNotThrow(() => f.io.status('build'))
@@ -323,11 +323,11 @@ test('realIo log, now, status, and showDoc use injected effects best-effort', ()
   assert.ok(f.commands.some((x) => x.kind === 'log'))
 })
 
-test('realIo delegates headless transport through the injected headless factory', () => {
-  const f = makeRealIo()
+test('seatIo delegates headless transport through the injected headless factory', () => {
+  const f = makeSeatIo()
   const delegated = { assign: () => ({ id: 'h1', returnPath: '/tmp/h1' }), wait: () => ({ status: 'done' }) }
   const crew = { members: { builder: { transport: 'headless-json' } } }
-  const io = realIo(crew, f.paths, f.paths.dir, null, null, {}, { headlessIo: () => delegated, resolveWorkerBin: () => '/bin/worker' })
+  const io = seatIo(crew, f.paths, f.paths.dir, null, null, {}, { headlessIo: () => delegated, resolveWorkerBin: () => '/bin/worker' })
   assert.deepEqual(io.assign({ role: 'builder' }), { id: 'h1', returnPath: '/tmp/h1' })
   assert.deepEqual(io.wait('/tmp/h1', 1), { status: 'done' })
 })
@@ -350,8 +350,8 @@ test('cellFailureKind classifies every transport stage into the closed availabil
   for (const [err, expected] of cases) assert.equal(cellFailureKind(err), expected)
 })
 
-test('realIo emits timeout and transport cell failures with the dispatch cell identity', () => {
-  const pane = makeRealIo()
+test('seatIo emits timeout and transport cell failures with the dispatch cell identity', () => {
+  const pane = makeSeatIo()
   const paneEvents = []
   pane.io.emit = (event) => paneEvents.push(event)
   const assignment = pane.io.assign({ role: 'builder', briefFile: '/brief.md' })
@@ -367,7 +367,7 @@ test('realIo emits timeout and transport cell failures with the dispatch cell id
     assign: () => ({ id: 'h1', returnPath: '/tmp/h1' }),
     wait: () => { const err = new Error('worker exited without an envelope'); err.stage = 'headless-no-envelope'; throw err },
   }
-  const io = realIo(crew, paths, paths.dir, null, null, {}, {
+  const io = seatIo(crew, paths, paths.dir, null, null, {}, {
     headlessIo: () => transport, resolveWorkerBin: () => '/bin/worker',
   })
   io.emit = (event) => transportEvents.push(event)
@@ -379,11 +379,11 @@ test('realIo emits timeout and transport cell failures with the dispatch cell id
   }])
 })
 
-test('realIo gives headless-rpc pi rather than the claude worker binary', () => {
-  const f = makeRealIo(); let args = null
+test('seatIo gives headless-rpc pi rather than the claude worker binary', () => {
+  const f = makeSeatIo(); let args = null
   const delegated = { assign: () => ({ id: 'r1', returnPath: '/tmp/r1' }), wait: () => ({ status: 'done' }) }
   const crew = { members: { builder: { transport: 'headless-rpc' } } }
-  const io = realIo(crew, f.paths, f.paths.dir, null, null, {}, {
+  const io = seatIo(crew, f.paths, f.paths.dir, null, null, {}, {
     headlessRpcIo: (received) => { args = received; return delegated },
     resolveWorkerBin: () => { throw new Error('RPC must not resolve claude-bin') },
   })
@@ -391,14 +391,14 @@ test('realIo gives headless-rpc pi rather than the claude worker binary', () => 
   assert.equal(args.bin, 'pi')
 })
 
-test('outer realIo keeps runClean available for headless-json and headless-rpc seats', () => {
-  const f = makeRealIo()
+test('outer seatIo keeps runClean available for headless-json and headless-rpc seats', () => {
+  const f = makeSeatIo()
   const executed = []
   for (const [transport, factory] of [
     ['headless-json', 'headlessIo'],
     ['headless-rpc', 'headlessRpcIo'],
   ]) {
-    const io = realIo(
+    const io = seatIo(
       { members: { builder: { transport } } }, f.paths, f.paths.dir, null, null, {},
       {
         [factory]: () => ({ assign() {}, wait() {} }),
@@ -407,9 +407,9 @@ test('outer realIo keeps runClean available for headless-json and headless-rpc s
       },
     )
     assert.equal(typeof io.runClean, 'function')
-    assert.deepEqual(io.runClean.call(io, 'outer-realio-run'), { ok: true, output: '' })
+    assert.deepEqual(io.runClean.call(io, 'outer-seat-io-run'), { ok: true, output: '' })
   }
-  assert.deepEqual(executed, [['-c', 'outer-realio-run'], ['-c', 'outer-realio-run']])
+  assert.deepEqual(executed, [['-c', 'outer-seat-io-run'], ['-c', 'outer-seat-io-run']])
 })
 
 test('emitAdapter writes usage measurements to agent_sessions with explicit null context fields', () => {
@@ -457,7 +457,7 @@ test('emitAdapter leaves billed columns NULL when usage is unmeasured', () => {
   assert.equal(starts[0].billed_input_tokens, undefined)
 })
 
-test('realIo passes a guarded transport emitter that routes through io.emit', () => {
+test('seatIo passes a guarded transport emitter that routes through io.emit', () => {
   const paths = dirs(); let received; const starts = []
   const emitter = {
     adwId: 'adw-route',
@@ -465,7 +465,7 @@ test('realIo passes a guarded transport emitter that routes through io.emit', ()
   }
   const transport = { assign: () => ({ id: 'd1', returnPath: '/tmp/d1' }), wait: () => ({ status: 'done' }) }
   const crew = { members: { builder: { model: 'sonnet', transport: 'headless-json' } } }
-  const io = realIo(crew, paths, paths.dir, emitter, null, {}, {
+  const io = seatIo(crew, paths, paths.dir, emitter, null, {}, {
     headlessIo: (args) => { received = args; return transport }, resolveWorkerBin: () => '/bin/worker',
   })
   io.assign({ role: 'builder', briefFile: '/brief.md' })
@@ -476,8 +476,8 @@ test('realIo passes a guarded transport emitter that routes through io.emit', ()
   assert.doesNotThrow(() => received.deps.emit({ kind: 'usage', usage: null }))
 })
 
-test('realIo exposes reseat and teardown as optional functions', () => {
-  const io = makeRealIo().io
+test('seatIo exposes reseat and teardown as optional functions', () => {
+  const io = makeSeatIo().io
   assert.equal(typeof io.reseat, 'function')
   assert.equal(typeof io.teardown, 'function')
 })

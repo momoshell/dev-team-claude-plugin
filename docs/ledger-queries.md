@@ -44,14 +44,14 @@ A `claimed` row with no settled row is a **stranded** dispatch — the run may o
 
 ## Retired tables
 
-`envelopes` is retired: it never held a row in any production ledger. Its only writer was the legacy `scripts/cmux/dispatch.mjs closeCmd`, deleted with the legacy runtime in 0.2.0 (`81dee7c`). `crew/realio.mjs` mirrors envelope facts into `events` / `review_outcomes` instead, while the visualizer reads envelope details from `returns/` archive files. `recordEnvelope` and the table stay declared because the schema fence is additive-only and `replayJsonl` depends on the closed `WRITERS` set. A zero row count is **retired**, not *nothing happened*; `ledger doctor` reports the reason beside `row_counts.envelopes` in `retired_tables`.
+`envelopes` is retired: it never held a row in any production ledger. Its only writer was the legacy `scripts/cmux/dispatch.mjs closeCmd`, deleted with the legacy runtime in 0.2.0 (`81dee7c`). `crew/seat-io.mjs` mirrors envelope facts into `events` / `review_outcomes` instead, while the visualizer reads envelope details from `returns/` archive files. `recordEnvelope` and the table stay declared because the schema fence is additive-only and `replayJsonl` depends on the closed `WRITERS` set. A zero row count is **retired**, not *nothing happened*; `ledger doctor` reports the reason beside `row_counts.envelopes` in `retired_tables`.
 
 ## Context occupancy
 
 | transport | `context_tokens` | `context_window` | why |
 | --- | --- | --- | --- |
-| `pane` (default, tmux/cmux) | absent — no `agent_sessions` row at all | absent | the pane io factory never receives `deps.emit` (`crew/realio.mjs:399-410`); a TUI frame carries no usage JSON |
-| `headless-json` | NULL | NULL | the row is written, but `foldUsage` (`crew/headless.mjs:51-87`) maps only `billed_*`; `crew/realio.mjs:312` writes null |
+| `pane` (default, tmux/cmux) | absent — no `agent_sessions` row at all | absent | the pane io factory never receives `deps.emit` (`crew/seat-io.mjs:399-410`); a TUI frame carries no usage JSON |
+| `headless-json` | NULL | NULL | the row is written, but `foldUsage` (`crew/headless.mjs:51-87`) maps only `billed_*`; `crew/seat-io.mjs:312` writes null |
 | `headless-rpc` | NULL | NULL | `foldRpcUsage` (`crew/headless-rpc.mjs:90-103`) sums deltas only and keeps no last-message snapshot |
 
 `scripts/factory/transcript.mjs:206-263` is the unwired reducer that could supply `context_tokens`; `context_window` is NULL by decision **U-4** because there is no verified source and a model→window table is drift-prone. No live transport populates either today — a meter reading of 0% occupancy would be a guess, so the `task` readout carries `absent.context_occupancy`.

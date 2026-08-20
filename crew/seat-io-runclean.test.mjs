@@ -7,8 +7,8 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, readEnvelopeFile, realIo, WAIT_POLL_MS, waitForEnvelope,
-} from './realio.mjs'
+  cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, readEnvelopeFile, seatIo, WAIT_POLL_MS, waitForEnvelope,
+} from './seat-io.mjs'
 
 const CONTENT = Object.freeze({
   committed: 'committed tracked content\n',
@@ -53,7 +53,7 @@ function makeRepo({ dirty = true } = {}) {
 }
 
 function makeIo({ repoDir, paths }) {
-  return realIo({ members: {} }, paths, repoDir, null, null, {}, {})
+  return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
 }
 
 function restored(fixture) {
@@ -130,7 +130,7 @@ test('runClean preserves a non-zero command result and still restores the tree',
   })
 })
 
-test('realIo teardown is a measured zero when no transport was instantiated', () => {
+test('seatIo teardown is a measured zero when no transport was instantiated', () => {
   withRepo({ dirty: false }, (fixture) => {
     assert.deepEqual(makeIo(fixture).teardown(), [])
   })
@@ -207,7 +207,7 @@ test('emitAdapter maps only finite heartbeat timestamps to the session writer', 
   assert.deepEqual(calls, [{ adw_id: 'adw-heartbeat', target: 'session', at: 12345 }])
 })
 
-test('realIo stamps a pane heartbeat from the probe timestamp before the envelope arrives', () => {
+test('seatIo stamps a pane heartbeat from the probe timestamp before the envelope arrives', () => {
   withRepo({ dirty: false }, (fixture) => {
     let clock = 0
     let returnPath = null
@@ -217,7 +217,7 @@ test('realIo stamps a pane heartbeat from the probe timestamp before the envelop
       adwId: 'adw-pane',
       emit: (fn) => fn({ heartbeat: (row) => heartbeats.push(row) }),
     }
-    const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, emitter, null, {}, {
+    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, emitter, null, {}, {
       now: () => clock,
       sleep: (ms) => { clock += ms },
       sendLine: () => {},
@@ -233,7 +233,7 @@ test('realIo stamps a pane heartbeat from the probe timestamp before the envelop
   })
 })
 
-test('realIo waits through an absent or refusing heartbeat emitter', () => {
+test('seatIo waits through an absent or refusing heartbeat emitter', () => {
   for (const emitter of [null, {
     adwId: 'adw-refusing',
     emit: (fn) => fn({ heartbeat: () => { throw new Error('ledger down') } }),
@@ -242,7 +242,7 @@ test('realIo waits through an absent or refusing heartbeat emitter', () => {
       let clock = 0
       let returnPath = null
       const envelope = { assignment_id: 'd1', role: 'builder', status: 'done' }
-      const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, emitter, null, {}, {
+      const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, emitter, null, {}, {
         now: () => clock,
         sleep: (ms) => { clock += ms },
         sendLine: () => {},
@@ -299,13 +299,13 @@ test("readEnvelopeFile throws a pane-parse-error naming the path, its existence 
   assert.equal(cellFailureKind(error), 'unusable-envelope')
 })
 
-test('realIo.wait surfaces a malformed return file immediately as an unusable-envelope cell failure', () => {
+test('seatIo.wait surfaces a malformed return file immediately as an unusable-envelope cell failure', () => {
   withRepo({ dirty: false }, (fixture) => {
     let clock = 0
     let returnPath = null
     const events = []
     const malformed = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
-    const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
       now: () => clock,
       sleep: (ms) => { clock += ms },
       sendLine: () => {},
@@ -329,12 +329,12 @@ test('realIo.wait surfaces a malformed return file immediately as an unusable-en
   })
 })
 
-test('realIo.wait keeps polling an absent return file to its deadline', () => {
+test('seatIo.wait keeps polling an absent return file to its deadline', () => {
   withRepo({ dirty: false }, (fixture) => {
     let clock = 0
     let returnPath = null
     const events = []
-    const io = realIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
       now: () => clock,
       sleep: (ms) => { clock += ms },
       sendLine: () => {},

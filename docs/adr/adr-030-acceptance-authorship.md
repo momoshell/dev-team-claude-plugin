@@ -1,6 +1,6 @@
 # ADR-030: Acceptance authorship — the seat that plans may draft the gate, but only a proof may accept it
 
-**Status:** RATIFIED 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
+**Status:** RATIFIED 2026-08-14 · **Amended:** 2026-08-19 (§10 — gate custody, #334/PR #348); 2026-08-20 (§11 — module rename, #327) · **Source:** issue #166 (from #142) · **Evidence:** #142, PR #162 (#144), #153/PR #154, #130/PR #156, PR #163/#164
 
 Ratified with three amendments to the proposal, each recorded inline at the
 decision it changes and summarised in §9: Decision 2 adopts in **two stages**
@@ -525,3 +525,20 @@ activations were gate work, and the lead is the most idle seat in the roster
 **The authorship-bias objection is answered mechanically, not by trust.** Every
 repaired gate is still re-proven by code — red at baseline and
 discrimination-proven — so a bad repair cannot bless itself.
+
+## 11. Amendment record — 2026-08-20: `crew/realio.mjs` is now `crew/seat-io.mjs`
+
+**Implemented by:** #327 · **Amends:** nothing this ADR decided. Every citation
+above is left exactly as ratified; this note is the map from the old name to the
+new one, so a reader following a §3, §7 or §8 reference lands in the right file.
+
+| Ratified name | Name from 2026-08-20 |
+| --- | --- |
+| `crew/realio.mjs` | `crew/seat-io.mjs` |
+| `crew/realio-runclean.test.mjs` | `crew/seat-io-runclean.test.mjs` |
+| the exported `realIo` | the exported `seatIo` |
+
+#327 is a PURE RENAME: no decision, threshold, routing or line of behaviour in
+§§0–10 changes, and the line numbers those sections cite inside the module are
+unmoved. `realio` named the module after what it is NOT — the real io as opposed
+to the injected test fakes — while every major export is a seat operation.

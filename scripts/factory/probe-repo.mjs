@@ -461,8 +461,8 @@ function gatherTestCommand(root) {
 }
 
 function colourNeutralEnv(base = process.env) {
-  // Copied from make-brief.mjs:409-422 (itself copied from
-  // crew/realio.mjs:344), rather than imported: that module is a consumer of
+  // Copied from make-brief.mjs:528 (itself copied from
+  // crew/seat-io.mjs:1304), rather than imported: that module is a consumer of
   // this profile and importing it would reverse the subsystem direction.
   const env = { ...base }
   delete env.FORCE_COLOR

@@ -227,3 +227,136 @@ export function logLine(file, obj) {
     appendFileSync(file, `${JSON.stringify(obj)}\n`)
   } catch { /* logging never throws */ }
 }
+
+// --- surface -> process tree (read-only observability, #149) -----------------
+// ADR-029:68 said the pane transport owns no process handle. `cmux top
+// --processes --json --all` falsifies the observability half: it attributes pids
+// to a surface and to their descendants. This resolves a retained (lowercased
+// UUID) surface id to that attributed forest -- a POINT-IN-TIME snapshot.
+//
+// `cmux top` prints positional refs only, so the retained UUID is translated
+// with `cmux tree --json --id-format both --all`, which carries id and ref on
+// one surface object. A ref is valid only inside a single invocation
+// (docs/conventions.md:78, docs/trd-cmux-execution-mode.md:199-200), so the top
+// read is BRACKETED by two tree reads and the mapping must be identical in
+// both; if it moved, this returns unknown rather than another pane's processes.
+//
+// Read-only: the three operations it performs are `cmux tree`, `cmux top`,
+// `cmux tree`. It sends nothing, closes nothing, signals nothing, mutates
+// nothing, and makes no process state authoritative for any crew decision --
+// the envelope stays the outcome.
+export function surfaceProcessTree(surfaceId, deps = {}) {
+  const id = typeof surfaceId === 'string' ? surfaceId.toLowerCase() : ''
+  const unknown = (reason) => ({
+    status: 'unknown',
+    surface_id: id,
+    surface_ref: null,
+    self: null,
+    self_by: 'none',
+    roots: [],
+    reason,
+  })
+
+  try {
+    const { cmux: cmuxFn = cmux } = deps
+    if (!id) return unknown('surfaceProcessTree: surfaceId must be a non-empty string')
+
+    const refFor = (label) => {
+      const result = cmuxFn('tree', ['--json', '--id-format', 'both', '--all'], { json: true })
+      if (!result?.ok) return { err: `tree (${label}) failed: ${result?.error?.message || 'unknown error'}` }
+      if (!Array.isArray(result.json?.windows)) return { err: `tree (${label}): unexpected shape` }
+
+      const matches = []
+      for (const window of result.json.windows) {
+        if (!window || typeof window !== 'object') continue
+        for (const workspace of Array.isArray(window.workspaces) ? window.workspaces : []) {
+          if (!workspace || typeof workspace !== 'object') continue
+          for (const pane of Array.isArray(workspace.panes) ? workspace.panes : []) {
+            if (!pane || typeof pane !== 'object') continue
+            for (const surface of Array.isArray(pane.surfaces) ? pane.surfaces : []) {
+              if (surface && typeof surface === 'object' && String(surface.id).toLowerCase() === id) matches.push(surface)
+            }
+          }
+        }
+      }
+      if (matches.length !== 1) return { err: `tree (${label}) lists ${matches.length} surfaces with id ${id}` }
+      if (typeof matches[0].ref !== 'string' || matches[0].ref.length === 0) return { err: `tree (${label}) gives no ref for ${id}` }
+      return { ref: matches[0].ref }
+    }
+
+    const first = refFor('before')
+    if (first.err) return unknown(`surfaceProcessTree: ${first.err}`)
+
+    const top = cmuxFn('top', ['--processes', '--json', '--all'], { json: true })
+    if (!top?.ok) return unknown(`surfaceProcessTree: top failed: ${top?.error?.message || 'unknown error'}`)
+    if (!Array.isArray(top.json?.windows)) return unknown('surfaceProcessTree: top: unexpected shape')
+
+    const second = refFor('after')
+    if (second.err) return unknown(`surfaceProcessTree: ${second.err}`)
+    if (second.ref !== first.ref) return unknown(`surfaceProcessTree: ${id} moved between snapshots: ${first.ref} then ${second.ref}`)
+
+    const nodes = []
+    for (const window of top.json.windows) {
+      if (!window || typeof window !== 'object') continue
+      for (const workspace of Array.isArray(window.workspaces) ? window.workspaces : []) {
+        if (!workspace || typeof workspace !== 'object') continue
+        for (const pane of Array.isArray(workspace.panes) ? workspace.panes : []) {
+          if (!pane || typeof pane !== 'object') continue
+          for (const surface of Array.isArray(pane.surfaces) ? pane.surfaces : []) {
+            if (surface && typeof surface === 'object' && surface.ref === first.ref) nodes.push(surface)
+          }
+        }
+      }
+    }
+    if (nodes.length !== 1) return unknown(`surfaceProcessTree: top lists ${nodes.length} surfaces with ref ${first.ref}`)
+    if (!Array.isArray(nodes[0].processes)) return unknown('surfaceProcessTree: top surface has unexpected processes shape')
+
+    const foreground = Array.isArray(nodes[0].foreground_pgids) ? nodes[0].foreground_pgids : []
+    const candidates = []
+    const normalize = (p) => {
+      if (!p || typeof p !== 'object') return { err: 'malformed process node' }
+      const rawId = p.cmux_surface_id
+      const own = rawId == null ? null : String(rawId).toLowerCase()
+      if (own !== null && own !== id) return { err: `pid ${p.pid} is attributed to ${rawId}, not ${id}` }
+
+      let children = []
+      if (Object.hasOwn(p, 'children') && p.children !== null) {
+        if (!Array.isArray(p.children)) return { err: `pid ${p.pid} has malformed children` }
+        children = []
+        for (const child of p.children) {
+          const normalized = normalize(child)
+          if (normalized.err) return normalized
+          children.push(normalized.node)
+        }
+      }
+
+      const node = {
+        pid: p.pid,
+        pgid: p.pgid,
+        ppid: p.ppid,
+        name: p.name,
+        reason: p.attribution_reason,
+        children,
+      }
+      if (own === id && foreground.includes(p.pgid) && p.pid === p.pgid) candidates.push(node)
+      return { node }
+    }
+
+    const roots = []
+    for (const p of nodes[0].processes) {
+      const normalized = normalize(p)
+      if (normalized.err) return unknown(`surfaceProcessTree: ${normalized.err}`)
+      roots.push(normalized.node)
+    }
+    if (roots.length === 0) return { status: 'empty', surface_id: id, surface_ref: first.ref, self: null, self_by: 'none', roots: [], reason: null }
+
+    const self = candidates.length === 1
+      ? { pid: candidates[0].pid, pgid: candidates[0].pgid, ppid: candidates[0].ppid, name: candidates[0].name, reason: candidates[0].reason }
+      : null
+    const self_by = self ? 'foreground-group-leader' : 'none'
+    return { status: 'measured', surface_id: id, surface_ref: first.ref, self, self_by, roots, reason: null }
+  } catch (error) {
+    return unknown(`surfaceProcessTree: ${error?.message || 'unexpected error'}`)
+  }
+}
+// --- end surfaceProcessTree ---

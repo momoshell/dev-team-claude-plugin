@@ -29,6 +29,7 @@ import {
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
+import { emitAdapter } from '../crew/seat-io.mjs'
 // openRun is the only production writer of sessions.tier and the compiler
 // proposal columns: it reads the boot record/brief and forwards them. The
 // forwarding is pinned here, next to the columns it writes, because
@@ -105,7 +106,202 @@ function bootBriefRun(brief, label = 'proposal', { includeBriefPath = true } = {
 }
 
 const fixture = mkdtempSync(join(tmpdir(), 'factory-ledger-'))
+
+// Drives ONE pane-seated review through emitAdapter into a real run, exactly
+// as crew/crew.mjs:1370 -> crew/seat-io.mjs:1963 wire it, and emits NO usage
+// event — a pane seat has none, which is why agent_sessions stays empty (#404).
+function paneReviewRun(cell, review = { verdict: 'changes-needed', must_fix: 2, should_fix: 1, consider: 0 }, { role = 'reviewer', dispatchId = 'd3' } = {}) {
+  const stateDir = mkdtempSync(join(fixture, 'pane-review-'))
+  writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'b84-attrib', roles: ['planner', 'builder', 'reviewer'], tier: 'build',
+  }))
+  const dbPath = join(stateDir, 'ledger', 'ledger.db')
+  const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'b84-attrib', dbPath, stderr: { write: () => {} } })
+  try {
+    emitter.startRun()
+    const crew = { task: 'b84-attrib', members: { [role]: { transport: 'pane', ...cell } } }
+    const adapter = emitAdapter(emitter, crew)
+    adapter({ kind: 'stage', label: 'review:r1' })
+    adapter({ kind: 'assign', role, id: dispatchId })
+    adapter({ kind: 'envelope', id: dispatchId, role, status: 'done', review })
+    emitter.endRun({ status: 'ok' })
+    return { dbPath, adwId: emitter.adwId }
+  } finally { emitter.dispose() }
+}
 after(() => rmSync(fixture, { recursive: true, force: true }))
+
+test("#404: a PANE-seated review is attributable to the reviewing seat's boot cell with no agent_sessions row", { skip: SKIP }, () => {
+  const cell = {
+    agent: 'pi', provider: 'openai', id: 'gpt-5.6-terra', model: 'openai-codex/gpt-5.6-terra', effort: 'max', transport: 'pane',
+  }
+  const { dbPath, adwId } = paneReviewRun(cell)
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  try {
+    const row = db.prepare('SELECT * FROM review_outcomes WHERE adw_id = ?').get(adwId)
+    assert.ok(row)
+    assert.deepEqual({
+      agent: row.agent, provider: row.provider, model_id: row.model_id, model: row.model,
+      effort: row.effort, transport: row.transport,
+    }, {
+      agent: cell.agent, provider: cell.provider, model_id: cell.id, model: cell.model,
+      effort: cell.effort, transport: cell.transport,
+    })
+    assert.equal(db.prepare('SELECT COUNT(*) AS count FROM agent_sessions').get().count, 0)
+  } finally { db.close() }
+})
+
+test('#404: a raw --model-<role> override is recorded, not the roster cell', { skip: SKIP }, () => {
+  const cell = {
+    agent: 'pi', provider: null, id: null, model: 'openai-codex/gpt-5.6-sol', effort: 'high', transport: 'pane',
+  }
+  const { dbPath, adwId } = paneReviewRun(cell)
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  try {
+    const row = db.prepare('SELECT * FROM review_outcomes WHERE adw_id = ?').get(adwId)
+    assert.ok(row)
+    assert.equal(row.agent, 'pi')
+    assert.equal(row.provider, null)
+    assert.equal(row.model_id, null)
+    assert.equal(row.model, cell.model)
+    assert.equal(row.effort, 'high')
+    assert.equal(row.transport, 'pane')
+    const rosterId = JSON.parse(readFileSync(join(ROOT, 'crew', 'roster.json'), 'utf8')).tiers.build.reviewer.id
+    assert.ok(!row.model.includes(rosterId))
+  } finally { db.close() }
+})
+
+test("#404: the headless usage writer's agent_sessions arguments are unchanged", () => {
+  const starts = []; const ends = []
+  const emitter = {
+    adwId: 'adw-404-headless',
+    emit: (fn) => fn({
+      startAgentSession: (row) => starts.push(row),
+      endAgentSession: (row) => ends.push(row),
+    }),
+  }
+  const headlessCrew = { members: { reviewer: { transport: 'headless-json', agent: 'pi', model: 'sonnet', effort: 'high' } } }
+  emitAdapter(emitter, headlessCrew)({
+    kind: 'usage', id: 'd3', role: 'reviewer', model: 'sonnet', session_id: 'session-404', transcript_path: '/tmp/session-404.jsonl',
+    usage: { billed_input_tokens: 5, billed_output_tokens: 6, billed_cache_write_tokens: 7, billed_cache_read_tokens: 8 },
+  })
+  assert.deepEqual(starts, [{
+    adw_id: 'adw-404-headless', dispatch_id: 'd3', role: 'reviewer', model: 'sonnet',
+    claude_session_id: 'session-404', transcript_path: '/tmp/session-404.jsonl',
+  }])
+  assert.deepEqual(ends, [{
+    adw_id: 'adw-404-headless', claude_session_id: 'session-404',
+    context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+    billed_input_tokens: 5, billed_output_tokens: 6, billed_cache_write_tokens: 7, billed_cache_read_tokens: 8,
+  }])
+})
+
+test('#404: an unattributed review stays NULL and reads as unattributable, and nothing backfills it', () => {
+  assert.doesNotMatch(readFileSync(SCRIPT, 'utf8'), /UPDATE\s+review_outcomes/i)
+  if (!SQLITE_OK) return
+  const ledger = openTestLedger()
+  try {
+    ledger.recordReviewOutcome({ adw_id: 'adw-404-unattributed', dispatch_id: 'direct', role: 'reviewer', verdict: 'pass' })
+    const handle = {
+      recordEvent: () => {},
+      recordReviewOutcome: (input) => ledger.recordReviewOutcome(input),
+    }
+    const emitter = {
+      adwId: 'adw-404-unattributed',
+      emit: (fn) => fn(handle, () => 1),
+    }
+    emitAdapter(emitter)({ kind: 'envelope', id: 'null-crew', role: 'reviewer', status: 'done', review: { verdict: 'pass' } })
+    emitAdapter(emitter, { members: { builder: { agent: 'pi', model: 'sonnet', effort: 'high', transport: 'pane' } } })({
+      kind: 'envelope', id: 'unseated-role', role: 'reviewer', status: 'done', review: { verdict: 'pass' },
+    })
+    const rows = ledger.dumpTable('review_outcomes').filter((row) => row.adw_id === 'adw-404-unattributed')
+    assert.equal(rows.length, 3)
+    for (const row of rows) {
+      assert.deepEqual({
+        agent: row.agent, provider: row.provider, model_id: row.model_id, model: row.model,
+        effort: row.effort, transport: row.transport,
+      }, { agent: null, provider: null, model_id: null, model: null, effort: null, transport: null })
+    }
+  } finally { ledger.close() }
+})
+
+test('#404: the four #376 measurements compute from one query over pane reviews', { skip: SKIP }, () => {
+  const cell = {
+    agent: 'pi', provider: 'openai', id: 'gpt-5.6-terra', model: 'openai-codex/gpt-5.6-terra', effort: 'max', transport: 'pane',
+  }
+  const { dbPath, adwId } = paneReviewRun(cell, { verdict: 'changes-needed', must_fix: 2, should_fix: 0, consider: 0 })
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const reviewPhase = ledger.dumpTable('phases').find((phase) => phase.name === 'review')
+    assert.ok(reviewPhase)
+    ledger.recordAcceptDecision({
+      adw_id: adwId, phase_id: reviewPhase.id, where: 'review-exhausted', outcome: 'accepted',
+      findings_total: 3, residual_count: 1, refuted_count: 2, cosmetic_count: 0, unverified_count: 0,
+    })
+    const historicalAdwId = 'adw-404-historical'
+    ledger.startSession({ adw_id: historicalAdwId, repo_slug: 'r', task_slug: 'b84-attrib' })
+    const historicalPhase = ledger.startPhase({
+      adw_id: historicalAdwId, seq: 1, name: 'review', started_at: '2024-01-01T00:00:00.000Z',
+    })
+    ledger.endPhase({
+      adw_id: historicalAdwId, seq: 1, status: 'ok', ended_at: '2024-01-01T00:00:10.000Z',
+    })
+    ledger.recordReviewOutcome({
+      adw_id: historicalAdwId, phase_id: historicalPhase, dispatch_id: 'historical-review', role: 'reviewer',
+      verdict: 'pass', must_fix: 0,
+    })
+  } finally { ledger.close() }
+
+  const MEASUREMENTS_QUERY = `
+WITH acc AS (
+  SELECT adw_id, SUM(COALESCE(residual_count, 0)) AS survived,
+         SUM(COALESCE(refuted_count, 0)) AS overturned
+  FROM accept_decisions GROUP BY adw_id
+),
+last_review AS (
+  SELECT adw_id, MAX(id) AS id FROM review_outcomes GROUP BY adw_id
+)
+SELECT
+  COALESCE(r.agent, 'unattributable')     AS agent,
+  COALESCE(r.model, 'unattributable')     AS model,
+  COALESCE(r.effort, 'unattributable')    AS effort,
+  COALESCE(r.transport, 'unattributable') AS transport,
+  COUNT(*)                                                                                AS reviews,
+  SUM(CASE WHEN r.verdict = 'changes-needed' THEN 1 ELSE 0 END)                            AS bounces,
+  ROUND(1.0 * SUM(CASE WHEN r.verdict = 'changes-needed' THEN 1 ELSE 0 END) / COUNT(*), 3) AS bounce_rate,
+  ROUND(AVG(COALESCE(r.must_fix, 0)), 3)                                                  AS must_fix_per_review,
+  SUM(CASE WHEN lr.id IS NULL THEN 0 ELSE COALESCE(acc.survived, 0) END)                   AS findings_survived,
+  SUM(CASE WHEN lr.id IS NULL THEN 0 ELSE COALESCE(acc.overturned, 0) END)                 AS findings_overturned,
+  ROUND(AVG((julianday(p.ended_at) - julianday(p.started_at)) * 86400.0), 1)               AS review_round_seconds
+FROM review_outcomes r
+JOIN phases p ON p.id = r.phase_id
+LEFT JOIN last_review lr ON lr.id = r.id
+LEFT JOIN acc ON acc.adw_id = r.adw_id
+GROUP BY 1, 2, 3, 4
+ORDER BY reviews DESC`
+  const { DatabaseSync } = require('node:sqlite')
+  const db = new DatabaseSync(dbPath)
+  try {
+    const rows = db.prepare(MEASUREMENTS_QUERY).all()
+    assert.equal(rows.length, 2)
+    const attributed = rows.find((row) => row.model === cell.model)
+    const unattributable = rows.find((row) => row.model === 'unattributable')
+    assert.ok(attributed)
+    assert.ok(unattributable)
+    for (const measure of ['reviews', 'bounce_rate', 'must_fix_per_review', 'findings_survived', 'findings_overturned', 'review_round_seconds']) {
+      assert.notEqual(attributed[measure], null)
+      assert.notEqual(attributed[measure], undefined)
+    }
+    assert.equal(attributed.reviews, 1)
+    assert.equal(attributed.bounces, 1)
+    assert.equal(attributed.bounce_rate, 1)
+    assert.equal(attributed.must_fix_per_review, 2)
+    assert.equal(attributed.findings_survived, 1)
+    assert.equal(attributed.findings_overturned, 2)
+    assert.equal(unattributable.reviews, 1)
+  } finally { db.close() }
+})
 
 // Safety-net process cleanup: every long-lived child spawned by the
 // kill/finalizer tests is tracked here so a failing assertion mid-test

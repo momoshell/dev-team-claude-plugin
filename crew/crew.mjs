@@ -436,6 +436,172 @@ export function resolveSeatModels(seats, adapters, localProviders = null) {
   return out
 }
 
+// ---- ratified tier band floors (#291) --------------------------------------
+// crew/model-ladder.json is a RATIFIED artifact (protected: crew/protected-paths.mjs:12)
+// and this slice only ENFORCES it — it authors no policy. The posture is #291's
+// and #292's: refuse, never downgrade. The ladder is the RUNTIME's policy, not
+// the target checkout's, exactly like roster.json at bootCmd's tier branch.
+export const LADDER_PATH = join(HERE, 'model-ladder.json')
+
+// The tiers the ratified ladder must floor and price. The same three the
+// artifact's own validator declares (visualizer/server/roster-ladder.mjs:12) and
+// enforces (:93-95) — mirrored, not imported: the runtime must not depend on the
+// visualizer.
+const LADDER_TIERS = Object.freeze(['mechanical', 'build', 'judge'])
+
+// A ratified band member is a full provider/id key in the ROSTER's canonical
+// namespace. A bare id is not a member, and neither is an adapter's own CLI
+// spelling of one — see bandForRaw.
+const LADDER_MEMBER = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
+
+// The closed set of band-floor refusal reasons — nothing is invented ad hoc.
+// It mirrors CAPABILITY_REFUSALS (crew/capabilities.mjs:9) rather than joining
+// it: a band floor is not a capability, and capabilities.mjs is not this lane's
+// to edit.
+export const BAND_FLOOR_REFUSALS = Object.freeze([
+  'ladder-unreadable', // the ratified ladder is missing, unparseable or malformed
+  'floor-unratified',  // the ladder ratifies no floor band for this tier
+  'band-unknown',      // the seat's model is a member of no ratified band
+  'band-below-floor',  // the seat's band ranks below its tier's ratified floor
+])
+
+export function refuseBandFloor(reason, message) {
+  if (!BAND_FLOOR_REFUSALS.includes(reason)) throw new Error(`unknown band floor refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+function ladderRecord(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function unreadableLadder(path, expected, found, where = '') {
+  return refuseBandFloor('ladder-unreadable', `the ratified model ladder expected ${expected}, found ${found}, at ${path}${where}`)
+}
+
+// THE ONE SEAM. Every band-floor read of the ladder goes through here, so an
+// unreadable or malformed ladder is a DIFFERENT refusal from a violated floor:
+// a boot must never confuse "policy says no" with "policy is unreadable". The
+// shape contract is the artifact's own (visualizer/server/roster-ladder.mjs:64-105):
+// schema version, ratification metadata, non-empty valid bands, unique band
+// names, unique members, and a floor plus a cost ceiling for every tier.
+export function loadLadder({ path = LADDER_PATH, readFile = readFileSync } = {}) {
+  let raw
+  try { raw = JSON.parse(readFile(path, 'utf8')) } catch (err) {
+    throw unreadableLadder(path, 'readable JSON', err.message)
+  }
+  if (!ladderRecord(raw) || raw.schema_version !== 1) {
+    throw unreadableLadder(path, 'a schema_version 1 object', JSON.stringify(ladderRecord(raw) ? raw.schema_version ?? null : typeof raw))
+  }
+  if (typeof raw.ratified_at !== 'string' || !raw.ratified_at || typeof raw.ratified_by !== 'string' || !raw.ratified_by) {
+    throw unreadableLadder(path, 'ratified_at and ratified_by to name the ratification', JSON.stringify({ ratified_at: raw.ratified_at ?? null, ratified_by: raw.ratified_by ?? null }))
+  }
+  if (!Array.isArray(raw.bands) || !raw.bands.length) {
+    throw unreadableLadder(path, 'a non-empty bands array', JSON.stringify(Array.isArray(raw.bands) ? raw.bands.length : raw.bands ?? null))
+  }
+  if (!ladderRecord(raw.tier_floors) || !ladderRecord(raw.cost_ceilings)) {
+    throw unreadableLadder(path, 'tier_floors and cost_ceilings objects', JSON.stringify({ tier_floors: typeof raw.tier_floors, cost_ceilings: typeof raw.cost_ceilings }))
+  }
+  const ranks = new Map()
+  const members = new Map()
+  for (const entry of raw.bands) {
+    if (!ladderRecord(entry) || typeof entry.band !== 'string' || !entry.band || !Number.isInteger(entry.rank)
+      || typeof entry.floor_reference_score !== 'number' || !Number.isFinite(entry.floor_reference_score)
+      || !Array.isArray(entry.members) || !entry.members.every((member) => typeof member === 'string' && member)) {
+      throw unreadableLadder(path, 'every bands[] entry to name a band, an integer rank, a finite floor_reference_score and a members array of non-empty strings', JSON.stringify(entry ?? null), ' bands[]')
+    }
+    if (ranks.has(entry.band)) throw unreadableLadder(path, 'each band name once', `band ${JSON.stringify(entry.band)} more than once`, ' bands[]')
+    ranks.set(entry.band, entry.rank)
+    for (const member of entry.members) {
+      if (!LADDER_MEMBER.test(member)) throw unreadableLadder(path, 'every member to be a provider/id key', JSON.stringify(member), ' bands[].members')
+      if (members.has(member)) throw unreadableLadder(path, 'each member in exactly one band', `member ${JSON.stringify(member)} in more than one band`, ' bands[].members')
+      members.set(member, entry.band)
+    }
+  }
+  for (const tier of LADDER_TIERS) {
+    const floor = raw.tier_floors[tier]
+    if (typeof floor !== 'string' || !ranks.has(floor)) {
+      throw unreadableLadder(path, `tier_floors.${tier} to name a ratified band`, JSON.stringify(floor ?? null), ` tier_floors.${tier}`)
+    }
+    const ceiling = raw.cost_ceilings[tier]
+    if (typeof ceiling !== 'number' || !Number.isFinite(ceiling) || ceiling < 0) {
+      throw unreadableLadder(path, `cost_ceilings.${tier} to be a non-negative number`, JSON.stringify(ceiling ?? null), ` cost_ceilings.${tier}`)
+    }
+  }
+  return { path, ranks, members, floors: { ...raw.tier_floors } }
+}
+
+// The text a seat names its model by. A roster cell is the canonical
+// provider/id; a raw --model-<role> override reaches here with provider AND id
+// null (see resolveSeatModels above), so its own never-translated string is all
+// there is. Used for the lookup AND for the refusal message.
+export function seatModelKey(seat) {
+  if (seat?.provider != null && seat?.id != null) return `${seat.provider}/${seat.id}`
+  return seat?.model == null ? '' : String(seat.model)
+}
+
+// A CANONICAL roster key resolves by exact membership: the roster and the
+// ladder share one namespace. Returns {member, band} or null (unknown).
+export function bandForMember(ladder, member) {
+  if (!member) return null
+  return ladder.members.has(member) ? { member, band: ladder.members.get(member) } : null
+}
+
+// A RAW --model-<role> string is the ACTIVE ADAPTER's CLI namespace, not a
+// ladder key: pi deliberately spells canonical provider "openai" as
+// "openai-codex" (crew/adapters/adapter-pi.mjs:81), so textual equality with a
+// ladder key is coincidence, not provenance. Resolution therefore runs the
+// adapter's OWN existing contract in the only direction it is defined:
+// translate every ratified member with modelString and accept the raw value
+// only when exactly ONE candidate equals it. A candidate the adapter cannot
+// express is skipped, zero or several matches is unknown, and an adapter with
+// no modelString proves nothing. The raw override itself is never translated or
+// rewritten (#161) — only the ratified members are.
+export function bandForRaw(ladder, raw, adapter, localProviders = null) {
+  if (!raw) return null
+  if (typeof adapter?.modelString !== 'function') return null
+  const matches = []
+  for (const [member, band] of ladder.members) {
+    const slash = member.indexOf('/')
+    const provider = member.slice(0, slash)
+    const id = member.slice(slash + 1)
+    let candidate
+    try { candidate = adapter.modelString({ provider, id, localProviders }) } catch { continue }
+    if (candidate !== raw) continue
+    matches.push({ member, band })
+  }
+  return matches.length === 1 ? matches[0] : null
+}
+
+// One entry point, two provenances: canonical membership for a roster cell,
+// adapter-backed translation for a raw override.
+export function seatBand(ladder, seat, { adapter = null, localProviders = null } = {}) {
+  if (seat?.provider != null && seat?.id != null) return bandForMember(ladder, seatModelKey(seat))
+  return bandForRaw(ladder, seatModelKey(seat), adapter, localProviders)
+}
+
+// Refuse any seat whose ratified band ranks BELOW its tier's ratified floor.
+// Refuse, never downgrade. PURE: the ladder and the adapter context are passed
+// in, so a boot and a test exercise one code path. `adapters` is the
+// {role: {name, adapter}} map resolveAdapters returns.
+export function assertBandFloors(seats, tier, ladder, { adapters = null, localProviders = null } = {}) {
+  const floorName = ladder?.floors?.[tier]
+  if (typeof floorName !== 'string' || !ladder.ranks.has(floorName)) {
+    throw refuseBandFloor('floor-unratified', `tier ${tier} expected a ratified floor band, found ${JSON.stringify(floorName ?? null)}, at ${ladder?.path} tier_floors.${tier}`)
+  }
+  const floorRank = ladder.ranks.get(floorName)
+  for (const [role, seat] of Object.entries(seats || {})) {
+    const key = seatModelKey(seat)
+    const found = seatBand(ladder, seat, { adapter: adapters?.[role]?.adapter, localProviders })
+    if (found === null) {
+      throw refuseBandFloor('band-unknown', `seat ${role} expected a model in a ratified band at or above "${floorName}" for tier ${tier}, found ${JSON.stringify(key || null)} proven by no ratified member, at ${ladder.path} bands[].members`)
+    }
+    const rank = ladder.ranks.get(found.band)
+    if (rank < floorRank) {
+      throw refuseBandFloor('band-below-floor', `seat ${role} expected band at or above "${floorName}" (rank ${floorRank}) for tier ${tier}, found "${found.band}" (rank ${rank}) for model ${key} (ratified member ${found.member}), at ${ladder.path} tier_floors.${tier}`)
+    }
+  }
+}
+
 // Resolve each role's agent name to its adapter module, by filename — this
 // IS the seam: adding an agent means dropping a file in crew/adapters/, not
 // editing crew.mjs. Dynamic import() is inherently async. `seats` (optional)
@@ -699,6 +865,16 @@ export async function bootCmd(args, deps = {}) {
   }
   const registry = adapters.registry || loadCapabilities()
   const seats = tierSeats ? resolveSeatModels(tierSeats, adapters, registry.local_providers) : null
+  // #291: enforce the RATIFIED tier band floors. A below-floor seat is an
+  // operator/roster decision, not evidence against a cell, so — like the breaker
+  // and host-load refusals — it is NOT recorded as a cell failure, and it fires
+  // before the state dir is read or created (existsSync/mkdirSync below) and
+  // before any cmux call, so a refusal leaves no state dir and no workspace
+  // behind. The adapter map goes in because a raw override is the adapter's own
+  // namespace and only that adapter can prove which ratified member it denotes.
+  // Only a TIER boot has a ratified floor: tier_floors is keyed by tier, and a
+  // --roles boot names none.
+  if (seats && tierName) assertBandFloors(seats, tierName, loadLadder(), { adapters, localProviders: registry.local_providers })
   // #45 Tier B: opt-in cell breaker. With no policy configured this is a
   // null and the ledger is never opened (acceptance #1). An open cell
   // refuses here, before any state dir or seat exists, and is NOT recorded

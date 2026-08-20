@@ -8,7 +8,7 @@ import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/fa
 import { openRun } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, loadLadder, assertBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
@@ -29,6 +29,7 @@ import { testCheckout } from '../test/fixtures.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
 // Hoisted: tests both above and below this point branch on it. Below the
 // ledger's Node floor the emitter degrades to JSONL and writes no database,
 // so a real-row assertion there would assert the absence of a feature.
@@ -2146,6 +2147,157 @@ test('resolveSeatModels end to end through the REAL adapters, on the real roster
   // Tracks the LIVE roster cell (planning floor, ratified 2026-08-13: the
   // planner seat is opus-grade at EVERY tier — never sonnet/haiku/luna).
   assert.equal(out.planner.model, 'claude-opus-5')
+})
+
+test('loadLadder reads the ratified bands and tier floors through the runtime seam', () => {
+  const ladder = loadLadder()
+  assert.equal(ladder.path, LADDER_PATH)
+  assert.deepEqual(Object.fromEntries(ladder.ranks), { frontier: 3, workhorse: 2, utility: 1, basement: 0 })
+  assert.deepEqual(ladder.floors, { mechanical: 'utility', build: 'utility', judge: 'utility' })
+})
+
+test('loadLadder refuses every malformed artifact shape as ladder-unreadable', () => {
+  const fixture = (mutate) => {
+    const value = structuredClone(rosterLadder)
+    mutate(value)
+    return { path: '/ignored/model-ladder.json', readFile: () => JSON.stringify(value) }
+  }
+  const cases = [
+    ['missing path', { path: '/no/such/dir/model-ladder.json' }],
+    ['unparseable JSON', { path: '/ignored', readFile: () => 'not json' }],
+    ['non-object', { path: '/ignored', readFile: () => '[]' }],
+    ['missing bands and floors', { path: '/ignored', readFile: () => '{"schema_version":1}' }],
+    ['schema version', fixture((l) => { l.schema_version = 2 })],
+    ['ratified_at', fixture((l) => { delete l.ratified_at })],
+    ['blank ratified_by', fixture((l) => { l.ratified_by = '' })],
+    ['empty bands', fixture((l) => { l.bands = [] })],
+    ['missing rank', fixture((l) => { delete l.bands[0].rank })],
+    ['missing floor reference', fixture((l) => { delete l.bands[1].floor_reference_score })],
+    ['duplicate band', fixture((l) => { l.bands[1].band = l.bands[0].band })],
+    ['null member', fixture((l) => { l.bands[0].members.push(null) })],
+    ['object member', fixture((l) => { l.bands[0].members.push({ id: 'x' }) })],
+    ['blank member', fixture((l) => { l.bands[0].members.push('') })],
+    ['bare member', fixture((l) => { l.bands[0].members.push('claude-sonnet-5') })],
+    ['duplicate member', fixture((l) => { l.bands[1].members.push(l.bands[0].members[0]) })],
+    ['missing build floor', fixture((l) => { delete l.tier_floors.build })],
+    ['unknown build floor', fixture((l) => { l.tier_floors.build = 'no-such-band' })],
+    ['missing cost ceilings', fixture((l) => { delete l.cost_ceilings })],
+    ['negative build ceiling', fixture((l) => { l.cost_ceilings.build = -1 })],
+  ]
+  for (const [name, options] of cases) {
+    assert.throws(() => loadLadder(options), (err) => err.reason === 'ladder-unreadable', name)
+  }
+})
+
+test('assertBandFloors distinguishes a violated floor from ladder-unreadable', () => {
+  const ladder = loadLadder()
+  assert.throws(
+    () => assertBandFloors({ builder: { provider: 'anthropic', id: 'claude-haiku-4-5', model: 'claude-haiku-4-5' } }, 'build', ladder),
+    (err) => err.reason === 'band-below-floor' && err.reason !== 'ladder-unreadable',
+  )
+})
+
+test('a below-floor roster seat refuses with its band and tier floor in the message', () => {
+  const ladder = loadLadder()
+  assert.throws(
+    () => assertBandFloors({ builder: { provider: 'anthropic', id: 'claude-haiku-4-5' } }, 'build', ladder),
+    (err) => err.reason === 'band-below-floor'
+      && ['builder', 'claude-haiku-4-5', 'basement', 'utility'].every((word) => err.message.includes(word)),
+  )
+})
+
+test('every ratified roster tier still passes its ratified band floor', () => {
+  const ladder = loadLadder()
+  for (const tier of Object.keys(roster.tiers)) {
+    const { seats } = resolveTier(roster, tier, {})
+    assert.doesNotThrow(() => assertBandFloors(seats, tier, ladder), tier)
+  }
+})
+
+test('raw overrides resolve through the pi adapter namespace and never by textual equality', () => {
+  const ladder = loadLadder()
+  const adapter = { modelString: piModelString }
+  const ctx = { adapters: { builder: { adapter } } }
+  const raw = (model) => ({ builder: { provider: null, id: null, model } })
+  assert.equal(seatModelKey(raw('openai-codex/gpt-5.6-luna').builder), 'openai-codex/gpt-5.6-luna')
+  assert.deepEqual(bandForMember(ladder, 'openai/gpt-5.6-luna'), { member: 'openai/gpt-5.6-luna', band: 'utility' })
+  assert.deepEqual(bandForRaw(ladder, 'openai-codex/gpt-5.6-luna', adapter), { member: 'openai/gpt-5.6-luna', band: 'utility' })
+  assert.deepEqual(seatBand(ladder, raw('openai-codex/gpt-5.6-luna').builder, { adapter }), { member: 'openai/gpt-5.6-luna', band: 'utility' })
+  assert.doesNotThrow(() => assertBandFloors(raw('openai-codex/gpt-5.6-luna'), 'build', ladder, ctx))
+  assert.throws(() => assertBandFloors(raw('anthropic/claude-haiku-4-5'), 'build', ladder, ctx), (err) => err.reason === 'band-below-floor' && err.message.includes('anthropic/claude-haiku-4-5'))
+  assert.throws(() => assertBandFloors(raw('openai/gpt-5.6-luna'), 'build', ladder, ctx), (err) => err.reason === 'band-unknown')
+})
+
+test('raw overrides use the claude adapter namespace and unknown adapters prove nothing', () => {
+  const ladder = loadLadder()
+  const claude = { modelString: claudeModelString }
+  const ctx = { adapters: { builder: { adapter: claude } } }
+  const raw = (model) => ({ builder: { provider: null, id: null, model } })
+  assert.throws(() => assertBandFloors(raw('claude-haiku-4-5'), 'build', ladder, ctx), (err) => err.reason === 'band-below-floor')
+  assert.throws(() => assertBandFloors(raw('anthropic/claude-haiku-4-5'), 'build', ladder, ctx), (err) => err.reason === 'band-unknown')
+  assert.throws(() => assertBandFloors(raw('opus'), 'build', ladder, ctx), (err) => err.reason === 'band-unknown')
+  assert.throws(() => assertBandFloors(raw('claude-haiku-4-5'), 'build', ladder, { adapters: { builder: { adapter: {} } } }), (err) => err.reason === 'band-unknown')
+})
+
+test('an unresolvable roster cell is band-unknown and never passes', () => {
+  const ladder = loadLadder()
+  assert.throws(
+    () => assertBandFloors({ builder: { provider: 'acme', id: 'no-such-model' } }, 'build', ladder),
+    (err) => err.reason === 'band-unknown' && err.message.includes('acme/no-such-model'),
+  )
+})
+
+test('a tier with no ratified floor refuses floor-unratified', () => {
+  const ladder = { path: '/hand-built', ranks: new Map([['utility', 1]]), members: new Map(), floors: {} }
+  assert.throws(() => assertBandFloors({}, 'build', ladder), (err) => err.reason === 'floor-unratified')
+})
+
+test('the band-floor refusal reason set is frozen and closed', () => {
+  assert.equal(Object.isFrozen(BAND_FLOOR_REFUSALS), true)
+  assert.throws(() => refuseBandFloor('anything-else', 'x'))
+})
+
+test('bootCmd refuses a below-floor raw override before state or driver side effects', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-band-floor-refusal-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-band-floor-refusal-checkout-')
+  const task = 'band-floor-refusal'
+  const cmux = callCounter(); const tree = callCounter(); const renameTab = callCounter()
+  try {
+    await withBreakerEnv({}, () => withHome(home, () => assert.rejects(
+      () => bootCmd({ task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'anthropic/claude-haiku-4-5' }, { cmux, tree, renameTab }),
+      (err) => {
+        assert.equal(err.reason, 'band-below-floor')
+        assert.match(err.message, /builder/)
+        return true
+      },
+    )))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(renameTab.calls.length, 0)
+    assert.equal(existsSync(testCrewDir(home, checkout, task)), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('bootCmd accepts an at-floor raw override and preserves its untranslated record', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-band-floor-accept-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-band-floor-accept-checkout-')
+  const task = 'band-floor-accepted'
+  try {
+    await withBreakerEnv({}, () => withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath, 'model-builder': 'openai-codex/gpt-5.6-luna' },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const record = JSON.parse(readFileSync(join(testCrewDir(home, checkout, task), 'crew.json'), 'utf8'))
+    assert.equal(record.members.builder.provider, null)
+    assert.equal(record.members.builder.id, null)
+    assert.equal(record.members.builder.model, 'openai-codex/gpt-5.6-luna')
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('translateDeny covers every SEAT_DEFAULTS deny value, dedupes, and drops unknown names', () => {

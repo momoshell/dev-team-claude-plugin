@@ -112,9 +112,10 @@ function cloneJson(value) {
 }
 
 // The register is runtime policy: grant paths resolve against this checkout,
-// not the target checkout. The shipped file carries the claude Task fan-out
-// grant; checkout-pinned pi assets remain reserved for a later slice, as does
-// advisor runtime behavior.
+// not the target checkout. The shipped file carries the role-level claude Task
+// fan-out grant and, adapter-scoped under the planner's by_agent.pi overlay,
+// the checkout-pinned pi subagent assets (#403); advisor runtime behavior
+// remains reserved and default-off (#294).
 export function loadCapabilities({ path = CAPABILITIES_PATH, schemaPath = CAPABILITIES_SCHEMA_PATH, register = null } = {}) {
   let schema
   try {
@@ -157,8 +158,34 @@ export function pathMessage(reason, seat, kind, expected, found, path) {
   return refuse(reason, `seat ${seat} ${kind} expected ${expected}, found ${found}, at ${path}`)
 }
 
-export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync } = {}) {
+function mergeAgents(base, overlay) {
+  const out = new Map(base.map((grant) => [grant.name, grant]))
+  for (const grant of overlay) out.set(grant.name, grant)
+  return [...out.values()]
+}
+
+// #403 — the ADAPTER dimension. A role grant may carry `by_agent`, an overlay
+// keyed by the RESOLVED adapter name (crew/crew.mjs:800), merged OVER the role
+// grant. An adapter with no entry gets the role grant and nothing else, which
+// is why the default claude planner is byte-identical after a pi-only grant
+// lands — it never receives an extension it cannot express
+// (crew/adapters/adapter-claude.mjs:65-72), rather than being filtered later.
+// tools/advisor/requires are role-level ONLY and no overlay can move them.
+function agentSpec(register, role, agent) {
   const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
+  if (!spec) return null
+  const overlay = agent && spec.by_agent && Object.hasOwn(spec.by_agent, agent) ? spec.by_agent[agent] : null
+  if (!overlay) return spec
+  return {
+    ...spec,
+    extensions: [...new Set([...spec.extensions, ...(overlay.extensions || [])])],
+    skills: [...new Set([...spec.skills, ...(overlay.skills || [])])],
+    agents: mergeAgents(spec.agents, overlay.agents || []),
+  }
+}
+
+export function grantsFor(register, role, { root = REGISTER_ROOT, exists = existsSync, readFile = readFileSync, agent = null } = {}) {
+  const spec = agentSpec(register, role, agent)
   if (!spec) throw refuse('register-invalid', `runtime capability register has no grant for unknown role ${JSON.stringify(role)} under the runtime-policy rule`)
 
   const extensions = spec.extensions.map((relativePath) => {
@@ -209,8 +236,8 @@ function relativeGrantMatches(declared, resolved) {
   return candidate === declaration || candidate.endsWith(`/${declaration}`)
 }
 
-export function assertGrantsBacked(role, grants, register) {
-  const spec = register?.roles && Object.hasOwn(register.roles, role) ? register.roles[role] : null
+export function assertGrantsBacked(role, grants, register, { agent = null } = {}) {
+  const spec = agentSpec(register, role, agent)
   if (!spec) throw refuse('unknown-grant', `seat ${role} has grants but no matching register role`)
   for (const tool of grants?.tools || []) {
     if (!spec.tools.includes(tool)) throw refuse('unknown-grant', `seat ${role} has unregistered tool grant ${JSON.stringify(tool)}`)

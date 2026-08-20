@@ -332,10 +332,15 @@ test('resolveAdapters boots headless claude and refuses the unshipped pi pair', 
   await assert.rejects(() => resolveAdapters(['builder'], { headless: 'builder', 'agent-builder': 'pi' }), /adapter-pi.*headless-json/)
 })
 
-test('seat requirements refuse pi scouts, allow a named shortfall, and reject malformed overrides', async () => {
+test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reject malformed overrides', async () => {
+  const resolvedPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi' })
+  assert.equal(resolvedPlanner.planner.name, 'pi')
+  assert.deepEqual(resolvedPlanner.planner.grants.extensions, [join(process.cwd(), 'crew/pi/extensions/subagent.ts')])
+  assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
   await assert.rejects(
-    () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }),
-    (err) => /planner/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
+    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' }),
+    (err) => err.reason === 'capability-shortfall'
+      && err.message === 'seat planner requires capability "subagents" but agent adapter "pi" declares subagents: false — refusing to boot a weaker seat (pass --allow-shortfall-planner subagents to boot it degraded on purpose)',
   )
   // The reviewer is deliberately NOT subject to this: the roster seats
   // pi/terra on review at build/mechanical under the ratified review-vendor
@@ -347,12 +352,16 @@ test('seat requirements refuse pi scouts, allow a named shortfall, and reject ma
   assert.equal(builder.builder.name, 'pi')
   const planner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': 'subagents' })
   assert.equal(planner.planner.name, 'pi')
+  const degradedPlanner = await resolveAdapters(['planner'], {
+    'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': 'subagents',
+  })
+  assert.equal(degradedPlanner.planner.name, 'pi')
   await assert.rejects(
-    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': 'tool_deny' }),
+    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': 'tool_deny' }),
     (err) => /planner/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
   )
   await assert.rejects(
-    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'allow-shortfall-planner': true }),
+    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': true }),
     /--allow-shortfall-planner needs a capability name/,
   )
   await assert.rejects(

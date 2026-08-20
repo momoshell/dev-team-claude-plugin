@@ -134,6 +134,33 @@
               "reassign"
             ]
           }
+        },
+        "by_agent": {
+          "type": "object",
+          "additionalProperties": false,
+          "patternProperties": {
+            "^[a-z0-9][a-z0-9-]*$": {
+              "$ref": "#/$defs/agentoverlay"
+            }
+          }
+        }
+      }
+    },
+    "agentoverlay": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "extensions": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relpath" }
+        },
+        "agents": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/agentgrant" }
+        },
+        "skills": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/relpath" }
         }
       }
     },

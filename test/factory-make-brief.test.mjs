@@ -696,6 +696,27 @@ test('the mutation contract states the FAIL-line separator rule', () => {
   }
 })
 
+// node --test picks its reporter by context, so the summary line's leading character is
+// a fact about the invocation and not about the suite: measured on this checkout the
+// default reporter emits `ℹ pass N` (U+2139) while --test-reporter=tap emits `# pass N`.
+// Three separate failures in one day came from that gap (#399). The shapes are asserted
+// LITERALLY, the same mechanism that closed the FAIL-separator problem above.
+test('the mutation contract states the node --test reporter rule', () => {
+  const root = fixture('reporter-rule')
+  const { brief } = compile(root)
+  const contract = section(brief, '## Per-check mutations')
+  assert.equal(contract, MUTATION_CONTRACT_BLOCK)
+  for (const form of ['ℹ pass 7', 'ℹ fail 0', '# pass 7', '# fail 0']) {
+    assert.ok(contract.includes(form), form)
+  }
+  assert.ok(contract.includes('A gate that shells out to `node --test` MUST pass `--test-reporter=tap`'))
+  for (const token of [
+    'U+2139', 'context-dependent', 'future Node release', 'tolerant regex',
+    'still silently depends on the reporter', 'LAST summary line', 'FORCE_COLOR',
+    'OVERRIDES', 'NO_COLOR', 'DELETE', 'CLICOLOR_FORCE', '#240', '#399',
+  ]) assert.ok(contract.includes(token), token)
+})
+
 test('the charter and the checklist state the contract the driver enforces', () => {
   const charter = readFileSync(join(ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
   const checklist = readFileSync(join(ROOT, 'crew', 'guidelines', 'seat-pre-return-checklist.md'), 'utf8')

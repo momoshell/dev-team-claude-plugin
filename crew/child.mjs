@@ -179,6 +179,9 @@ export function runChild(argv, injected = {}) {
     // must keep adopting its sidecar and must never become an admission refusal.
     // nodeVersion is deliberately not passed: openRun's own default is
     // process.versions.node.
+    // Pass the resolved brief so bootProposal reads its optional compiler
+    // proposal block; the daemon path held it in ctx even when crew.json lacked
+    // brief_file, and a missing or blockless brief still records null fields.
     const dbPath = spec.ledger_db || ledgerDbPath(injected.env || process.env)
     const enforceBudgetLedger = spec.budget_enabled === true
     let sidecarDbPath = ledgerSidecarDbPath(crewDir, existsChild, read)
@@ -189,6 +192,7 @@ export function runChild(argv, injected = {}) {
           repoSlug: slugOrNull(basename(checkout)) || 'repo',
           taskSlug: slugOrNull(ctx.task) || 'task',
           dbPath,
+          briefPath: ctx.briefFile,
         })
         // Re-read after openRun's own locked adopt/create decision so a sidecar
         // changed between the first read and the open cannot redirect budgeted

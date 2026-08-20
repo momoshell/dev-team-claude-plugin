@@ -991,7 +991,7 @@ test('run does not backfill historical session proposals', async () => {
   }
 })
 
-test('daemon path keeps the crew.json brief_file fallback byte-identical', () => {
+test('daemon path records the brief proposal with or without the crew.json brief_file', () => {
   const proposal = '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n'
   const daemonRun = (task, includeBriefFile) => {
     const root = mkdtempSync(join(tmpdir(), `crew-proposal-daemon-${task}-`))
@@ -1039,8 +1039,8 @@ test('daemon path keeps the crew.json brief_file fallback byte-identical', () =>
   assert.equal(withKey.proposed_shape, 'mechanical')
   assert.equal(withKey.proposed_strength, 'workhorse')
   assert.ok(withoutKey)
-  assert.equal(withoutKey.proposed_shape, null)
-  assert.equal(withoutKey.proposed_strength, null)
+  assert.equal(withoutKey.proposed_shape, 'mechanical')
+  assert.equal(withoutKey.proposed_strength, 'workhorse')
 })
 
 test('child entrypoint plumbs, journals, and refuses round budgets', () => {

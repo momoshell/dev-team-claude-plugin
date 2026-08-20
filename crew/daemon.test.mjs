@@ -1938,6 +1938,154 @@ test('runChild records to the explicit ledger and honors spec.ledger_db', () => 
   } finally { f.cleanup() }
 })
 
+test('runChild wires the resolved brief into the session proposal without a crew.json brief_file', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const task = 'child-proposal'
+  const dbPath = join(f.dir, 'proposal-ledger', 'ledger.db')
+  try {
+    writeFileSync(f.brief, '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n')
+    const result = runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, brief_file: f.brief, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      seatIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, 'mechanical')
+      assert.equal(row.proposed_strength, 'workhorse')
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('runChild records null proposal fields for a blockless brief', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const task = 'child-blockless-proposal'
+  const dbPath = join(f.dir, 'blockless-ledger', 'ledger.db')
+  try {
+    writeFileSync(f.brief, '# blockless brief\nno compiler proposal here\n')
+    runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, brief_file: f.brief, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      seatIo: () => ({}),
+    })
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, null)
+      assert.equal(row.proposed_strength, null)
+      assert.notDeepEqual(
+        { shape: row.proposed_shape, strength: row.proposed_strength },
+        { shape: 'mechanical', strength: 'workhorse' },
+      )
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('runChild records null proposal fields when no brief is supplied', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const task = 'child-no-proposal-brief'
+  const dbPath = join(f.dir, 'no-brief-ledger', 'ledger.db')
+  try {
+    rmSync(f.brief, { force: true })
+    const result = runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      seatIo: () => ({}),
+    })
+    assert.equal(result.status, 'done')
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, null)
+      assert.equal(row.proposed_strength, null)
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('runChild keeps the crew.json brief_file proposal fallback', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const task = 'child-crew-json-proposal'
+  const dbPath = join(f.dir, 'crew-json-ledger', 'ledger.db')
+  try {
+    writeFileSync(f.brief, '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n')
+    const crewPath = join(f.crewDir, 'crew.json')
+    const crew = JSON.parse(readFileSync(crewPath, 'utf8'))
+    crew.brief_file = f.brief
+    writeFileSync(crewPath, JSON.stringify(crew))
+    runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      seatIo: () => ({}),
+    })
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const row = ledger.dumpTable('sessions').find((candidate) => candidate.task_slug === task)
+      assert.ok(row)
+      assert.equal(row.proposed_shape, 'mechanical')
+      assert.equal(row.proposed_strength, 'workhorse')
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
+test('runChild does not backfill a seeded session proposal', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const f = fixture()
+  const task = 'child-fresh-proposal'
+  const historical = 'child-historical-proposal'
+  const dbPath = join(f.dir, 'seeded-ledger', 'ledger.db')
+  try {
+    writeFileSync(f.brief, '# proposal brief\n```proposal\n{"shape":"mechanical","strength":"workhorse"}\n```\n')
+    const seeded = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      seeded.startSession({ adw_id: historical, repo_slug: 'repo', task_slug: historical })
+    } finally { seeded.close() }
+    runChild({
+      crew_dir: f.crewDir, task, checkout: f.dir,
+      task_return: f.taskReturn, brief_file: f.brief, ledger_db: dbPath,
+    }, {
+      preflight: false,
+      driveTask: () => ({ status: 'done', summary: '', artifacts: [], details: {} }),
+      seatIo: () => ({}),
+    })
+    const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+    try {
+      const rows = ledger.dumpTable('sessions')
+      const oldRow = rows.find((candidate) => candidate.adw_id === historical)
+      const newRow = rows.find((candidate) => candidate.task_slug === task)
+      assert.ok(oldRow)
+      assert.ok(newRow)
+      assert.equal(oldRow.proposed_shape, null)
+      assert.equal(oldRow.proposed_strength, null)
+      assert.equal(newRow.proposed_shape, 'mechanical')
+      assert.equal(newRow.proposed_strength, 'workhorse')
+      const proposedRows = rows.filter((row) => row.proposed_shape !== null || row.proposed_strength !== null)
+      assert.equal(proposedRows.length, 1)
+      assert.equal(proposedRows[0].task_slug, task)
+    } finally { ledger.close() }
+  } finally { f.cleanup() }
+})
+
 test('runChild carries run_id into the ledger association and keeps it distinct from adw_id', () => {
   if (!LEDGER_SQLITE_OK) return
   const f = fixture()

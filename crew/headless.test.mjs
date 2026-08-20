@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyRun, foldUsage, headlessIo, shq } from './headless.mjs'
+import { classifyRun, foldUsage, headlessIo, recogniseProviderCondition, shq } from './headless.mjs'
 
 function makeFixture(overrides = {}, roles = ['builder']) {
   const dir = mkdtempSync(join(tmpdir(), 'headless-extra-'))
@@ -122,6 +122,83 @@ test('truncated stream, clean stream without envelope, and malformed stream have
       assert.throws(() => f.io.wait(run.returnPath, 1), (err) => err.stage === stage)
     } finally { f.cleanup() }
   }
+})
+
+test('a captured 529 stderr is recognised as an overloaded provider condition', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const runDir = join(f.taskDir, 'headless', run.id)
+    writeFileSync(join(runDir, 'stderr.log'), 'API Error: 529 {"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}')
+    writeFileSync(join(runDir, 'stream.jsonl'), '{"type":"result","terminal_reason":"done"}\n')
+    writeFileSync(join(runDir, 'exit'), '1')
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => {
+      assert.equal(err.stage, 'headless-no-envelope')
+      assert.equal(err.providerCondition, 'overloaded')
+      return true
+    })
+    assert.equal(recogniseProviderCondition('{"type":"rate_limit_error"}'), 'rate-limit')
+    assert.equal(recogniseProviderCondition('{"type":"authentication_error","status":401}'), 'auth')
+  } finally { f.cleanup() }
+})
+
+test('ANSI-laden stderr matches through the CSI stripper a naive matcher would miss', () => {
+  const raw = 'API Error: \x1b[1;31mrate\x1b[0m limit exceeded for this organization'
+  assert.equal(/rate limit/i.test(raw), false)
+  assert.equal(recogniseProviderCondition(raw), 'rate-limit')
+})
+
+test('an unrecognised, missing, empty or unreadable stderr carries no recognition', () => {
+  const failure = (stderr, overrides = {}) => {
+    const f = makeFixture(overrides)
+    try {
+      const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+      const runDir = join(f.taskDir, 'headless', run.id)
+      if (stderr !== undefined) writeFileSync(join(runDir, 'stderr.log'), stderr)
+      writeFileSync(join(runDir, 'stream.jsonl'), '{"type":"result","terminal_reason":"done"}\n')
+      writeFileSync(join(runDir, 'exit'), '1')
+      assert.throws(() => f.io.wait(run.returnPath, 1), (err) => {
+        assert.equal(err.stage, 'headless-no-envelope')
+        assert.equal(Object.hasOwn(err, 'providerCondition'), false)
+        return true
+      })
+    } finally { f.cleanup() }
+  }
+  failure('ordinary stderr text')
+  failure('')
+  failure(undefined)
+  const realRead = readFileSync
+  const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  failure('unreadable stderr', {
+    readFileSync: (path, ...args) => {
+      if (String(path).endsWith('/stderr.log')) throw denied
+      return realRead(path, ...args)
+    },
+  })
+})
+
+test('recognition reads only the stderr the wrapper already captured and adds no poll', () => {
+  const readPaths = []; let sleeps = 0
+  const realRead = readFileSync
+  const f = makeFixture({
+    readFileSync: (path, ...args) => { readPaths.push(String(path)); return realRead(path, ...args) },
+    sleep: () => { sleeps += 1; throw new Error('unexpected poll') },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const runDir = join(f.taskDir, 'headless', run.id)
+    const stderrPath = join(runDir, 'stderr.log')
+    writeFileSync(stderrPath, 'ordinary stderr text')
+    writeFileSync(join(runDir, 'stream.jsonl'), '{"type":"result","terminal_reason":"done"}\n')
+    writeFileSync(join(runDir, 'exit'), '1')
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => err.stage === 'headless-no-envelope')
+    assert.equal(sleeps, 0)
+    const allowed = new Set(['stream.jsonl', 'stderr.log', 'exit', 'cmd.json', 'pgid'])
+    const underRun = readPaths.filter((path) => path.startsWith(`${runDir}/`))
+    assert.ok(underRun.length > 0)
+    assert.equal(underRun.every((path) => allowed.has(path.slice(runDir.length + 1))), true)
+    assert.ok(readPaths.filter((path) => path === stderrPath).length <= 1)
+  } finally { f.cleanup() }
 })
 
 test('shq round-trips a single quote as a shell token', () => {

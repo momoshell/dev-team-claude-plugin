@@ -3020,6 +3020,16 @@ function advisorAbEpoch(value) {
 // `|` is the key separator, so both id shapes above exclude it.
 const advisorAbKey = (epoch, dispatchId, findingId) => `${epoch}|${dispatchId}|${findingId}`
 
+// An incomplete entry for a malformed adjudication has to name the FINDING it
+// concerns and not just its dispatch: two malformed adjudications for different
+// findings inside ONE dispatch are otherwise the same string, and the operator
+// cannot tell which one to go repair (#391). An id is echoed only when it is a
+// usable finding id; anything else — absent, non-string, or outside
+// FINDING_ID_RE — renders as `<none>`, which no usable id can ever be, since
+// FINDING_ID_RE excludes `<` and `>`.
+const advisorAbFindingLabel = (findingId) =>
+  typeof findingId === 'string' && FINDING_ID_RE.test(findingId) ? findingId : '<none>'
+
 export function advisorAbNotes(journalText, epoch) {
   const refs = new Map()
   const attested = new Set()
@@ -3155,7 +3165,7 @@ export function advisorAbReadout({ epoch, dispatchIds, journalText, envelopeSour
       continue
     }
     if (!ADVISOR_AB_VERDICTS.includes(entry.verdict) || !Array.isArray(entry.note_refs) || !entry.note_refs.every((ref) => typeof ref === 'string' && NOTE_REF_RE.test(ref))) {
-      addIncomplete('adjudication-malformed', `dispatch ${entry.dispatch_id}`)
+      addIncomplete('adjudication-malformed', `dispatch ${entry.dispatch_id} finding ${advisorAbFindingLabel(entry.finding_id)}`)
       continue
     }
     const key = advisorAbKey(epoch, entry.dispatch_id, entry.finding_id)

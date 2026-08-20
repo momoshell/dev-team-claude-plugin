@@ -26,7 +26,7 @@ import {
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
-  REQUEST_MAX_CHARS,
+  REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
 // openRun is the only production writer of sessions.tier and the compiler
@@ -2406,4 +2406,343 @@ test('a session heartbeat JSONL line replays into the sessions last_heartbeat_at
   const target = openTestLedger()
   assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 2, skipped: 0 })
   assert.equal(target.getSession(adwId).last_heartbeat_at, isoMs(at))
+})
+
+// ---------------------------------------------------------------------------
+// advisor A/B readout
+// ---------------------------------------------------------------------------
+
+const ADVISOR_AB_EPOCH = 1755600000000
+
+function advisorAbFixture(spec = {}) {
+  const dir = nextDir()
+  const runDir = join(dir, 'run')
+  const returns = join(runDir, 'returns')
+  mkdirSync(returns, { recursive: true })
+  const lines = []
+  for (const [id, at] of Object.entries(spec.attest || {})) {
+    lines.push(JSON.stringify({ at, envelope: id, role: 'reviewer', status: 'done' }))
+  }
+  for (const payload of spec.notes || []) {
+    lines.push(JSON.stringify({ at: ADVISOR_AB_EPOCH + 5, advisor_note: payload, role: 'builder' }))
+  }
+  writeFileSync(join(runDir, 'journal.jsonl'), lines.length ? `${lines.join('\n')}\n` : '')
+  for (const [id, envelope] of Object.entries(spec.envelopes || {})) {
+    writeFileSync(join(returns, `${id}.reviewer.json`), typeof envelope === 'string' ? envelope : JSON.stringify(envelope))
+  }
+  const adjudicationsPath = join(dir, 'adjudications.json')
+  writeFileSync(adjudicationsPath, JSON.stringify({
+    schema: 1,
+    run_started_at: spec.adjudicationsEpoch ?? ADVISOR_AB_EPOCH,
+    adjudications: spec.adjudications || [],
+  }))
+  return { dir, runDir, adjudicationsPath }
+}
+
+function advisorAbEnvelope(id, findings = [], overrides = {}) {
+  return {
+    assignment_id: id,
+    role: 'reviewer',
+    status: 'done',
+    summary: 'advisor A/B fixture',
+    artifacts: [],
+    details: { verdict: 'changes-needed', must_fix: findings.length, should_fix: 0, consider: 0, findings },
+    ...overrides,
+  }
+}
+
+function advisorAbFinding(id, overrides = {}) {
+  return { id, severity: 'must-fix', location: 'a.mjs:1', summary: 'a concrete finding', ...overrides }
+}
+
+function runAdvisorAb(fixtureData, ids) {
+  const result = run([
+    'advisor-ab',
+    '--run-dir', fixtureData.runDir,
+    '--run-started-at', String(ADVISOR_AB_EPOCH),
+    '--adjudications', fixtureData.adjudicationsPath,
+    ...ids,
+  ])
+  let payload = null
+  try { payload = JSON.parse(result.stdout.trim()) } catch { /* refusal has no JSON payload */ }
+  return { ...result, payload }
+}
+
+const advisorReasons = (payload) => payload.incomplete.map(({ reason }) => reason)
+const advisorNote = (overrides = {}) => ({
+  run_started_at: ADVISOR_AB_EPOCH,
+  tier: 0,
+  trigger: 'predicate',
+  kind: 'scope-breach',
+  target: 'a.mjs',
+  target_kind: 'file',
+  role: 'builder',
+  outcome: 'injected',
+  ...overrides,
+})
+
+test('advisor-ab counts only the dispatch ids it was given, and a stale envelope from an earlier process is never counted', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10, d2: ADVISOR_AB_EPOCH - 900000 },
+    notes: [advisorNote()],
+    envelopes: {
+      d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]),
+      d2: advisorAbEnvelope('d2', [advisorAbFinding('F1'), advisorAbFinding('F2')]),
+    },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1', 'd2'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.ratifiable, false)
+  assert.ok(advisorReasons(result.payload).includes('dispatch-not-attested'))
+  assert.equal(result.payload.findings_total, 1)
+})
+
+test('advisor-ab never lists the returns directory', () => {
+  const source = readFileSync(SCRIPT, 'utf8')
+  for (const needle of ['readdir', 'opendir', 'globSync']) assert.equal(source.includes(needle), false, needle)
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10, d9: ADVISOR_AB_EPOCH + 30 },
+    notes: [advisorNote()],
+    envelopes: {
+      d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]),
+      d9: advisorAbEnvelope('d9', ['F2', 'F3', 'F4', 'F5', 'F6'].map(advisorAbFinding)),
+    },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.findings_total, 1)
+  assert.equal(result.payload.ratifiable, true)
+})
+
+test('advisor-ab keys findings by run_started_at, dispatch_id and finding_id', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10, d2: ADVISOR_AB_EPOCH + 20 },
+    notes: [advisorNote()],
+    envelopes: {
+      d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]),
+      d2: advisorAbEnvelope('d2', [advisorAbFinding('F1')]),
+    },
+    adjudications: [
+      { dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] },
+      { dispatch_id: 'd2', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] },
+    ],
+  })
+  const result = runAdvisorAb(fx, ['d1', 'd2'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.findings_total, 2)
+  assert.equal(new Set(result.payload.findings.map(({ key }) => key)).size, 2)
+  assert.equal(advisorReasons(result.payload).includes('duplicate-key'), false)
+})
+
+test('the overlap numerator counts distinct findings and can never exceed its denominator', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote(), advisorNote({ target: 'b.mjs' })],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1', 'n2'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.overlap_findings, 1)
+  assert.equal(result.payload.findings_total, 1)
+  assert.equal(result.payload.overlap_rate, 1)
+  assert.ok(result.payload.overlap_findings <= result.payload.findings_total)
+})
+
+test('a cited note absent from this epoch\'s journal makes the readout non-ratifiable', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n99'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.ratifiable, false)
+  assert.ok(advisorReasons(result.payload).includes('note-not-in-journal'))
+  assert.equal(result.payload.overlap_findings, 0)
+})
+
+test('a note from a different epoch does not resolve', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote({ run_started_at: ADVISOR_AB_EPOCH - 600000 }), advisorNote({ target: 'b.mjs' })],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n2'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(advisorReasons(result.payload).includes('note-not-in-journal'))
+  assert.equal(result.payload.notes.total, 1)
+})
+
+test('a suppressed note is reported but never counted as delivered advice', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote({ outcome: 'suppressed' })],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(advisorReasons(result.payload).includes('note-not-injected'))
+  assert.equal(result.payload.notes.total, 1)
+  assert.equal(result.payload.overlap_findings, 0)
+})
+
+test('a skipped adjudication renders the readout incomplete', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'skipped', note_refs: [] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.skipped, 1)
+  assert.ok(advisorReasons(result.payload).includes('skipped-finding'))
+})
+
+test('an unadjudicated finding renders the readout incomplete', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1'), advisorAbFinding('F2')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.unadjudicated, 1)
+  assert.ok(advisorReasons(result.payload).includes('unadjudicated-finding'))
+})
+
+test('a duplicate finding key renders the readout incomplete', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1'), advisorAbFinding('F1')]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(advisorReasons(result.payload).includes('duplicate-key'))
+  assert.equal(result.payload.findings_total, 1)
+})
+
+test('a malformed selected finding renders the readout incomplete', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', [advisorAbFinding('F1'), { severity: 'must-fix', location: 'a.mjs:2' }]) },
+    adjudications: [{ dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] }],
+  })
+  const result = runAdvisorAb(fx, ['d1'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.ok(advisorReasons(result.payload).includes('finding-malformed'))
+})
+
+test('a complete readout is ratifiable and reports the tier shares', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10, d2: ADVISOR_AB_EPOCH + 20 },
+    notes: [advisorNote(), advisorNote({ tier: 1, kind: 'tier1-finding' })],
+    envelopes: {
+      d1: advisorAbEnvelope('d1', [advisorAbFinding('F1')]),
+      d2: advisorAbEnvelope('d2', [advisorAbFinding('F1')]),
+    },
+    adjudications: [
+      { dispatch_id: 'd1', finding_id: 'F1', verdict: 'overlap', note_refs: ['n1'] },
+      { dispatch_id: 'd2', finding_id: 'F1', verdict: 'no-overlap', note_refs: [] },
+    ],
+  })
+  const result = runAdvisorAb(fx, ['d1', 'd2'])
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(result.payload.ratifiable, true)
+  assert.deepEqual(result.payload.incomplete, [])
+  assert.deepEqual(result.payload.notes.injected_by_tier, { tier0: 1, tier1: 1, other: 0 })
+  assert.equal(result.payload.notes.tier0_share, 0.5)
+  assert.equal(result.payload.notes.tier1_share, 0.5)
+  assert.equal(result.payload.at_floor, false)
+  assert.equal(result.payload.dispatch_floor, 12)
+})
+
+test('a missing, unreadable, mis-roled or mis-ided envelope each render the readout incomplete', () => {
+  const cases = [
+    ['envelope-missing', advisorAbFixture({ attest: { d1: ADVISOR_AB_EPOCH + 10 }, notes: [advisorNote()] })],
+    ['envelope-unreadable', advisorAbFixture({ attest: { d1: ADVISOR_AB_EPOCH + 10 }, notes: [advisorNote()], envelopes: { d1: '{' } })],
+    ['envelope-role-mismatch', advisorAbFixture({ attest: { d1: ADVISOR_AB_EPOCH + 10 }, notes: [advisorNote()], envelopes: { d1: advisorAbEnvelope('d1', [], { role: 'builder' }) } })],
+    ['dispatch-id-mismatch', advisorAbFixture({ attest: { d1: ADVISOR_AB_EPOCH + 10 }, notes: [advisorNote()], envelopes: { d1: advisorAbEnvelope('other') } })],
+  ]
+  for (const [reason, fx] of cases) {
+    const result = runAdvisorAb(fx, ['d1'])
+    assert.equal(result.status, 0, `${reason}: ${result.stderr}`)
+    assert.ok(advisorReasons(result.payload).includes(reason), `${reason}: ${JSON.stringify(result.payload)}`)
+    assert.equal(result.payload.findings_total, 0)
+  }
+})
+
+test('advisor-ab refuses rather than guessing: no dispatch ids, a bad epoch, a duplicate id, a mismatched adjudication epoch, a missing journal', () => {
+  const base = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', []) },
+    adjudications: [],
+  })
+  const noIds = run([
+    'advisor-ab', '--run-dir', base.runDir, '--run-started-at', String(ADVISOR_AB_EPOCH), '--adjudications', base.adjudicationsPath,
+  ])
+  assert.equal(noIds.status, 2)
+  assert.match(noIds.stderr, /requires at least one review-dispatch id/)
+  const badEpoch = run([
+    'advisor-ab', '--run-dir', base.runDir, '--run-started-at', 'not-an-epoch', '--adjudications', base.adjudicationsPath, 'd1',
+  ])
+  assert.equal(badEpoch.status, 2)
+  assert.match(badEpoch.stderr, /--run-started-at/)
+  const duplicate = run([
+    'advisor-ab', '--run-dir', base.runDir, '--run-started-at', String(ADVISOR_AB_EPOCH), '--adjudications', base.adjudicationsPath, 'd1', 'd1',
+  ])
+  assert.equal(duplicate.status, 2)
+  assert.match(duplicate.stderr, /appear only once/)
+  const mismatched = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', []) },
+    adjudicationsEpoch: ADVISOR_AB_EPOCH + 1,
+  })
+  const mismatch = runAdvisorAb(mismatched, ['d1'])
+  assert.equal(mismatch.status, 2)
+  assert.match(mismatch.stderr, /run_started_at disagrees/)
+  rmSync(join(base.runDir, 'journal.jsonl'))
+  const missingJournal = runAdvisorAb(base, ['d1'])
+  assert.equal(missingJournal.status, 2)
+  assert.match(missingJournal.stderr, /journal\.jsonl is missing or unreadable/)
+})
+
+test('advisor-ab needs no database', () => {
+  const fx = advisorAbFixture({
+    attest: { d1: ADVISOR_AB_EPOCH + 10 },
+    notes: [advisorNote()],
+    envelopes: { d1: advisorAbEnvelope('d1', []) },
+  })
+  const dbPath = join(fx.dir, 'never-created', 'ledger.db')
+  const result = spawnSync(process.execPath, [
+    SCRIPT, 'advisor-ab', '--run-dir', fx.runDir, '--run-started-at', String(ADVISOR_AB_EPOCH), '--adjudications', fx.adjudicationsPath, 'd1',
+  ], { encoding: 'utf8', env: { ...process.env, DEVTEAM_LEDGER_DB: dbPath } })
+  assert.equal(result.status, 0, result.stderr)
+  assert.doesNotThrow(() => JSON.parse(result.stdout))
+  assert.equal(existsSync(dbPath), false)
+})
+
+test('ADVISOR_AB_INCOMPLETE_REASONS is the exact frozen vocabulary', () => {
+  assert.deepEqual([...ADVISOR_AB_INCOMPLETE_REASONS], [
+    'envelope-missing', 'envelope-unreadable', 'envelope-role-mismatch',
+    'dispatch-id-mismatch', 'dispatch-not-attested', 'findings-absent',
+    'finding-malformed', 'duplicate-key', 'unadjudicated-finding',
+    'skipped-finding', 'note-not-in-journal', 'note-not-injected',
+    'adjudication-malformed', 'adjudication-unknown-dispatch',
+    'adjudication-unknown-finding', 'duplicate-adjudication',
+    'numerator-exceeds-denominator',
+  ])
+  assert.equal(Object.isFrozen(ADVISOR_AB_INCOMPLETE_REASONS), true)
 })

@@ -49,8 +49,9 @@
 // `ci-cycles [--since <iso>] [--until <iso>]` |
 // `intake-sweeps [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
-// (spellings are a contract with package.json; see do-40-02) — plus `doctor`
-// (capability + state readout) and `kill` (operator-invoked process
+// (spellings are a contract with package.json; see do-40-02) — plus
+// `advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>…`,
+// `doctor` (capability + state readout) and `kill` (operator-invoked process
 // termination, its own refusal-gated helper).
 //
 // SQL identifiers: all values are bound with `?` placeholders, never
@@ -133,6 +134,20 @@ export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', '
 // counted as clean.
 export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
+export const ADVISOR_AB_VERDICTS = Object.freeze(['overlap', 'no-overlap', 'skipped'])
+export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
+  'envelope-missing', 'envelope-unreadable', 'envelope-role-mismatch',
+  'dispatch-id-mismatch', 'dispatch-not-attested', 'findings-absent',
+  'finding-malformed', 'duplicate-key', 'unadjudicated-finding',
+  'skipped-finding', 'note-not-in-journal', 'note-not-injected',
+  'adjudication-malformed', 'adjudication-unknown-dispatch',
+  'adjudication-unknown-finding', 'duplicate-adjudication',
+  'numerator-exceeds-denominator',
+])
+// A floor on SAMPLE SIZE, not on any one readout: an arm is usually measured
+// over several runs, so this is reported and compared by the human (see
+// docs/advisor-ab-protocol.md), never silently enforced here.
+export const ADVISOR_AB_DISPATCH_FLOOR = 12
 export const ACCEPT_DECISION_OUTCOMES = Object.freeze(['accepted', 'escalated'])
 
 // The adjudication of one watched CI check. 'green' is a MEASURED fact, not
@@ -2983,6 +2998,237 @@ function requestFromBrief(path) {
   return paragraph.join('\n').trim()
 }
 
+const DISPATCH_ID_RE = /^[A-Za-z0-9._-]{1,64}$/
+const FINDING_ID_RE = /^[A-Za-z0-9._:-]{1,64}$/
+const NOTE_REF_RE = /^n[1-9][0-9]{0,3}$/
+
+// Epoch ms from either an integer-ish value or an ISO-8601 string; null when
+// the value is not a time at all. Mirrors advisor.ts's epochMilliseconds
+// deliberately rather than importing it: crew/pi/extensions/ is another
+// module's surface and a factory script never depends on it.
+function advisorAbEpoch(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value.trim()) {
+    const numeric = Number(value)
+    if (Number.isFinite(numeric)) return numeric
+    const parsed = Date.parse(value)
+    if (Number.isFinite(parsed)) return parsed
+  }
+  return null
+}
+
+// `|` is the key separator, so both id shapes above exclude it.
+const advisorAbKey = (epoch, dispatchId, findingId) => `${epoch}|${dispatchId}|${findingId}`
+
+export function advisorAbNotes(journalText, epoch) {
+  const refs = new Map()
+  const attested = new Set()
+  const summary = {
+    total: 0,
+    injected: 0,
+    by_tier: { tier0: 0, tier1: 0, other: 0 },
+    injected_by_tier: { tier0: 0, tier1: 0, other: 0 },
+    tier0_share: null,
+    tier1_share: null,
+  }
+  let noteOrdinal = 0
+  const lines = typeof journalText === 'string' ? journalText.split(/\r?\n/) : []
+  for (const line of lines) {
+    let entry
+    try { entry = JSON.parse(line) } catch { continue }
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue
+
+    const attestedAt = advisorAbEpoch(entry.at)
+    if (epoch !== null && typeof entry.envelope === 'string' && entry.role === 'reviewer' && attestedAt !== null && attestedAt >= epoch) {
+      attested.add(entry.envelope)
+    }
+
+    const payload = entry.advisor_note
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) continue
+    if (advisorAbEpoch(payload.run_started_at) !== epoch) continue
+    const row = payload
+    const ref = `n${++noteOrdinal}`
+    refs.set(ref, payload)
+    summary.total += 1
+    const tier = row.tier === 0 ? 'tier0' : row.tier === 1 ? 'tier1' : 'other'
+    summary.by_tier[tier] += 1
+    if (row.outcome === 'injected') {
+      summary.injected += 1
+      summary.injected_by_tier[tier] += 1
+    }
+  }
+  if (summary.injected > 0) {
+    summary.tier0_share = summary.injected_by_tier.tier0 / summary.injected
+    summary.tier1_share = summary.injected_by_tier.tier1 / summary.injected
+  }
+  return { refs, attested, summary }
+}
+
+export function advisorAbReadout({ epoch, dispatchIds, journalText, envelopeSources, adjudications } = {}) {
+  const ids = Array.isArray(dispatchIds) ? [...dispatchIds] : []
+  const sources = envelopeSources && typeof envelopeSources === 'object' ? envelopeSources : Object.create(null)
+  const notes = advisorAbNotes(journalText, epoch)
+  const incomplete = []
+  const malformed = []
+  const duplicateKeys = []
+  const findings = []
+  const findingsByKey = new Map()
+  const selected = new Set(ids)
+  const adjudicated = new Map()
+  const overlapKeys = new Set()
+  const unadjudicated = []
+  let skipped = 0
+
+  const addIncomplete = (reason, detail) => {
+    incomplete.push({ reason, detail })
+  }
+
+  for (const dispatchId of ids) {
+    const source = Object.prototype.hasOwnProperty.call(sources, dispatchId) ? sources[dispatchId] : undefined
+    if (!source || source.status === 'missing') {
+      addIncomplete('envelope-missing', `dispatch ${dispatchId}`)
+      continue
+    }
+    if (source.status === 'unreadable' || source.status !== 'ok') {
+      addIncomplete('envelope-unreadable', `dispatch ${dispatchId}`)
+      continue
+    }
+    const envelope = source.envelope
+    if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+      addIncomplete('envelope-unreadable', `dispatch ${dispatchId}`)
+      continue
+    }
+    let barred = false
+    if (envelope.role !== undefined && envelope.role !== 'reviewer') {
+      addIncomplete('envelope-role-mismatch', `dispatch ${dispatchId}`)
+      barred = true
+    }
+    if (envelope.assignment_id !== undefined && envelope.assignment_id !== dispatchId) {
+      addIncomplete('dispatch-id-mismatch', `dispatch ${dispatchId}`)
+      barred = true
+    }
+    if (!notes.attested.has(dispatchId)) {
+      addIncomplete('dispatch-not-attested', `dispatch ${dispatchId}`)
+      barred = true
+    }
+    if (barred) continue
+    const rawFindings = envelope.details && typeof envelope.details === 'object' && !Array.isArray(envelope.details)
+      ? envelope.details.findings
+      : undefined
+    if (!Array.isArray(rawFindings)) {
+      addIncomplete('findings-absent', `dispatch ${dispatchId}`)
+      continue
+    }
+    for (const [index, finding] of rawFindings.entries()) {
+      if (!finding || typeof finding !== 'object' || Array.isArray(finding) || typeof finding.id !== 'string' || !FINDING_ID_RE.test(finding.id) || !['must-fix', 'should-fix', 'consider'].includes(finding.severity)) {
+        malformed.push({ dispatch_id: dispatchId, index })
+        continue
+      }
+      const key = advisorAbKey(epoch, dispatchId, finding.id)
+      if (findingsByKey.has(key)) {
+        duplicateKeys.push(key)
+        continue
+      }
+      const row = {
+        key,
+        dispatch_id: dispatchId,
+        finding_id: finding.id,
+        severity: finding.severity,
+        verdict: null,
+        note_refs: [],
+        note_tiers: [],
+      }
+      findingsByKey.set(key, row)
+      findings.push(row)
+    }
+  }
+
+  const adjudicationRows = Array.isArray(adjudications) ? adjudications : []
+  if (adjudications !== undefined && !Array.isArray(adjudications)) addIncomplete('adjudication-malformed', 'adjudications')
+  for (const entry of adjudicationRows) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      addIncomplete('adjudication-malformed', 'adjudication entry')
+      continue
+    }
+    if (!selected.has(entry.dispatch_id)) {
+      addIncomplete('adjudication-unknown-dispatch', `dispatch ${String(entry.dispatch_id)}`)
+      continue
+    }
+    if (!ADVISOR_AB_VERDICTS.includes(entry.verdict) || !Array.isArray(entry.note_refs) || !entry.note_refs.every((ref) => typeof ref === 'string' && NOTE_REF_RE.test(ref))) {
+      addIncomplete('adjudication-malformed', `dispatch ${entry.dispatch_id}`)
+      continue
+    }
+    const key = advisorAbKey(epoch, entry.dispatch_id, entry.finding_id)
+    const finding = findingsByKey.get(key)
+    if (!finding) {
+      addIncomplete('adjudication-unknown-finding', `${entry.dispatch_id}/${String(entry.finding_id)}`)
+      continue
+    }
+    if (adjudicated.has(key)) {
+      addIncomplete('duplicate-adjudication', key)
+      continue
+    }
+    adjudicated.set(key, entry)
+    finding.verdict = entry.verdict
+    finding.note_refs = [...entry.note_refs]
+    if (entry.verdict === 'skipped') {
+      skipped += 1
+      addIncomplete('skipped-finding', key)
+      continue
+    }
+    if (entry.verdict !== 'overlap') continue
+    for (const ref of entry.note_refs) {
+      const resolved = notes.refs.get(ref)
+      if (!resolved) {
+        addIncomplete('note-not-in-journal', `${key}/${ref}`)
+        continue
+      }
+      finding.note_tiers.push(resolved.tier ?? null)
+      if (resolved.outcome !== 'injected') {
+        addIncomplete('note-not-injected', `${key}/${ref}`)
+        continue
+      }
+      overlapKeys.add(key)
+    }
+  }
+
+  for (const finding of findings) {
+    if (!adjudicated.has(finding.key)) unadjudicated.push(finding.key)
+  }
+  if (unadjudicated.length > 0) {
+    for (const key of unadjudicated) addIncomplete('unadjudicated-finding', key)
+  }
+  if (duplicateKeys.length > 0) {
+    for (const key of duplicateKeys) addIncomplete('duplicate-key', key)
+  }
+  if (malformed.length > 0) {
+    for (const entry of malformed) addIncomplete('finding-malformed', `dispatch ${entry.dispatch_id} finding ${entry.index + 1}`)
+  }
+
+  const findingsTotal = findings.length
+  const overlapFindings = overlapKeys.size
+  if (overlapFindings > findingsTotal) addIncomplete('numerator-exceeds-denominator', `${overlapFindings} > ${findingsTotal}`)
+  const ratifiable = incomplete.length === 0
+  return {
+    run_started_at: epoch,
+    dispatch_ids: ids,
+    dispatch_count: ids.length,
+    dispatch_floor: ADVISOR_AB_DISPATCH_FLOOR,
+    at_floor: ids.length >= ADVISOR_AB_DISPATCH_FLOOR,
+    ratifiable,
+    incomplete,
+    findings_total: findingsTotal,
+    overlap_findings: overlapFindings,
+    overlap_rate: findingsTotal === 0 ? null : overlapFindings / findingsTotal,
+    skipped,
+    unadjudicated: unadjudicated.length,
+    duplicate_keys: duplicateKeys,
+    malformed,
+    notes: notes.summary,
+    findings,
+  }
+}
+
 // The unaudited fields this ledger records but never verifies against any
 // external source — mirrors task-cost-log.mjs's frozen `unverified` array.
 const UNVERIFIED_FIELDS = Object.freeze(['task_slug', 'repo_slug'])
@@ -2993,7 +3239,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -3007,6 +3253,95 @@ export function main(argv) {
     if (!versionAtLeast(nodeVersion, NODE_FLOOR)) {
       stderr.write(`ledger: below floor — NODE_FLOOR is ${NODE_FLOOR}, running ${nodeVersion}\n`)
       return 2
+    }
+
+    if (verb === 'advisor-ab') {
+      // Never globs: the returns directory is opened by NAME, once per supplied
+      // dispatch id. Pane sequence ids restart every process, so an unselected
+      // envelope in that directory may belong to any earlier run.
+      const runDir = flags['run-dir']
+      if (typeof runDir !== 'string' || !runDir.trim()) refuse('advisor-ab: --run-dir <dir> is required')
+      const startedAtInput = flags['run-started-at']
+      const epoch = advisorAbEpoch(startedAtInput)
+      if (epoch === null || !Number.isInteger(epoch)) {
+        refuse('advisor-ab: --run-started-at must be an epoch-ms integer or an ISO-8601 timestamp')
+      }
+      const adjudicationsPath = flags.adjudications
+      if (typeof adjudicationsPath !== 'string' || !adjudicationsPath.trim()) {
+        refuse('advisor-ab: --adjudications <path> is required')
+      }
+      let adjudicationsInput
+      try {
+        adjudicationsInput = JSON.parse(readFileSync(adjudicationsPath, 'utf8'))
+      } catch {
+        refuse('advisor-ab: --adjudications must be a JSON file with schema 1 and an adjudications array')
+      }
+      if (!adjudicationsInput || typeof adjudicationsInput !== 'object' || Array.isArray(adjudicationsInput) || adjudicationsInput.schema !== 1 || !Array.isArray(adjudicationsInput.adjudications)) {
+        refuse('advisor-ab: --adjudications must be a JSON file with schema 1 and an adjudications array')
+      }
+      if (Object.prototype.hasOwnProperty.call(adjudicationsInput, 'run_started_at') && advisorAbEpoch(adjudicationsInput.run_started_at) !== epoch) {
+        refuse('advisor-ab: --adjudications run_started_at disagrees with --run-started-at')
+      }
+
+      if (positional.length === 0) {
+        refuse('advisor-ab: requires at least one review-dispatch id positional argument — this readout never globs the returns directory')
+      }
+      const dispatchIds = []
+      const seenDispatchIds = new Set()
+      for (const dispatchId of positional) {
+        if (!DISPATCH_ID_RE.test(dispatchId) || seenDispatchIds.has(dispatchId)) {
+          refuse('advisor-ab: each review-dispatch id must match [A-Za-z0-9._-]{1,64} and appear only once')
+        }
+        seenDispatchIds.add(dispatchId)
+        dispatchIds.push(dispatchId)
+      }
+
+      let journalText
+      try {
+        journalText = readFileSync(join(runDir, 'journal.jsonl'), 'utf8')
+      } catch {
+        refuse('advisor-ab: journal.jsonl is missing or unreadable under --run-dir')
+      }
+      const envelopeSources = Object.create(null)
+      for (const dispatchId of dispatchIds) {
+        const envelopePath = join(runDir, 'returns', `${dispatchId}.reviewer.json`)
+        let present = false
+        try { present = existsSync(envelopePath) } catch { present = false }
+        if (!present) {
+          envelopeSources[dispatchId] = { status: 'missing' }
+          continue
+        }
+        try {
+          const envelope = JSON.parse(readFileSync(envelopePath, 'utf8'))
+          if (!envelope || typeof envelope !== 'object' || Array.isArray(envelope)) {
+            envelopeSources[dispatchId] = { status: 'unreadable' }
+          } else {
+            envelopeSources[dispatchId] = { status: 'ok', envelope }
+          }
+        } catch {
+          envelopeSources[dispatchId] = { status: 'unreadable' }
+        }
+      }
+      const readout = advisorAbReadout({
+        epoch, dispatchIds, journalText, envelopeSources,
+        adjudications: adjudicationsInput.adjudications,
+      })
+      const payload = {
+        schema: 1,
+        question: 'Does the advisor change what a review finds — and is this readout complete enough to ratify on?',
+        definition: {
+          finding_key: '(run_started_at, dispatch_id, finding_id)',
+          numerator: 'overlap_findings counts distinct findings with at least one resolved injected note',
+          note_refs: 'n<k> is a 1-based ordinal over this epoch\'s advisor_note rows in journal.jsonl',
+          ratifiable: 'false means the readout is incomplete, never that the advisor failed',
+        },
+        verdicts: ADVISOR_AB_VERDICTS,
+        incomplete_reasons: ADVISOR_AB_INCOMPLETE_REASONS,
+        run_dir: runDir,
+        ...readout,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
+      return 0
     }
 
     const dbPath = defaultDbPath()

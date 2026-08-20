@@ -526,7 +526,7 @@ export function discoverTripwires({ checkout, files }) {
 }
 
 function colourNeutralEnv(base = process.env) {
-  // Copied from crew/realio.mjs:344 rather than imported: crew/ is a separate
+  // Copied from crew/seat-io.mjs:1304 rather than imported: crew/ is a separate
   // lane, and this compiler must keep the #240 child-environment rule local.
   const env = { ...base }
   delete env.FORCE_COLOR

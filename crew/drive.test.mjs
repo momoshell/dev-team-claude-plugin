@@ -2261,8 +2261,8 @@ test('a repaired gate proven red on the pristine tree proceeds — and the proof
   assert.equal(io.calls.commits.length, 1)
 })
 
-// REGRESSION: realIo.runClean is a shorthand METHOD that calls `this.run(cmd)`
-// (crew/realio.mjs:241,245). #130 routed the reverify call through
+// REGRESSION: seatIo.runClean is a shorthand METHOD that calls `this.run(cmd)`
+// (crew/seat-io.mjs:241,245). #130 routed the reverify call through
 // runGate(..., io.runClean), detaching it, and every real gate-reverify
 // crashed with "Cannot read properties of undefined (reading 'run')" — caught
 // only by a live run. The fakes above cannot catch it: their runClean is an
@@ -2285,7 +2285,7 @@ test('an io whose runClean is a this-using method survives gate-reverify', () =>
     },
     changed: ['a.mjs', 'a.test.mjs'],
   })
-  // Exactly realIo's shape: a method that reaches its sibling through `this`.
+  // Exactly seatIo's shape: a method that reaches its sibling through `this`.
   const pristine = { ok: false, output: 'red on pristine\nGATE-SUMMARY {"total":3,"failed":3,"errored":0}' }
   let sawThis = false
   io.runClean = function runClean(cmd) {
@@ -4751,7 +4751,7 @@ test('the daemon child preflight accepts the same planner-less directed crew', (
   }, {
     execSync: () => '',
     env: { DEVTEAM_LEDGER_DB: join(fixture.dir, 'ledger.db') },
-    realIo: () => ({ log() {} }),
+    seatIo: () => ({ log() {} }),
     driveTask: () => ({ status: 'done', summary: 'ok', artifacts: [], details: { stages: [] } }),
   })
 

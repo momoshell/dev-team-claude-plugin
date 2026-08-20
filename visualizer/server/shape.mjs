@@ -4,9 +4,9 @@ const PALETTE_SIZE = 8
 export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
 export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 
-const EFFORT_PENDING = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/realio.mjs:264-265, 285-288)'
+const EFFORT_PENDING = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/seat-io.mjs:264-265, 285-288)'
 const CONTEXT_PENDING = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
-const MODEL_PENDING = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/realio.mjs:399-410)'
+const MODEL_PENDING = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/seat-io.mjs:399-410)'
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const SEAT_TEARDOWN_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -227,7 +227,7 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     refuted_count: row.refuted_count ?? null,
     cosmetic_count: row.cosmetic_count ?? null,
     unverified_count: row.unverified_count ?? null,
-    // realio writes '' when there were no invalid residuals; an empty string
+    // seat-io writes '' when there were no invalid residuals; an empty string
     // is not a diagnostic, so it degrades to null.
     invalid_reasons: row.invalid_reasons ? row.invalid_reasons : null,
     created_at: row.created_at ?? null,

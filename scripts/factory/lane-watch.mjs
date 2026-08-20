@@ -59,7 +59,7 @@ export function crewRoot({ home } = {}) {
 }
 
 // `at` is EITHER epoch ms (drive.mjs stage lines: io.now()) or an ISO string
-// (crew.mjs and realio.mjs events). Both are live in every real journal.
+// (crew.mjs and seat-io.mjs events). Both are live in every real journal.
 export function journalAt(value) {
   if (typeof value === 'number' && Number.isFinite(value)) return value
   if (typeof value === 'string') {

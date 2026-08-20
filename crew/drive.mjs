@@ -17,7 +17,7 @@ import { protectedHitsIn, resolveProtectedPaths } from './protected-paths.mjs'
 //
 // Dependency injection: every side effect goes through the `io` object so
 // the whole state machine is unit-testable without cmux or live panes.
-// realIo() (in crew.mjs) wires it to driver.mjs + child_process.
+// seatIo() (in crew.mjs) wires it to driver.mjs + child_process.
 
 export const LIMITS = Object.freeze({
   plan_rounds: 2, // planner attempts (initial + bounces)
@@ -1188,8 +1188,8 @@ export function driveTask(ctx, io) {
   // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
   let gateAttempt = 0
   let lastGateOutput = null
-  // `runner` is an io METHOD, so it must be invoked as one: `realIo.runClean`
-  // calls `this.run(cmd)` (crew/realio.mjs:241,245), and passing it detached
+  // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
+  // calls `this.run(cmd)` (crew/seat-io.mjs:241,245), and passing it detached
   // (`runGate(..., io.runClean)` below) made `this` undefined under ESM strict
   // mode — a live driver crash at `gate-reverify`. The fake io in
   // drive.test.mjs defines runClean as an arrow that never reads `this`, so
@@ -1559,7 +1559,7 @@ export function driveTask(ctx, io) {
     const briefPath = art(`${variant}-brief.md`)
     stage(`${variant}:r1`)
     // The brief is a FILE, not a note: the pane transport discards `note`
-    // (crew/realio.mjs:417) and the seat's charter would otherwise apply.
+    // (crew/seat-io.mjs:417) and the seat's charter would otherwise apply.
     io.writeFile(briefPath, [
       `# ${variant} assignment`, '',
       shape.assignment, '',
@@ -1994,7 +1994,7 @@ export function driveTask(ctx, io) {
   //
   // This is evidence ABOUT the gate and may NEVER become a new way to lose a
   // build (ADR-030, ratification amendment). io.runClean is optional, and
-  // realIo.runClean THROWS on a failed stash push/pop (crew/realio.mjs:261,266);
+  // seatIo.runClean THROWS on a failed stash push/pop (crew/seat-io.mjs:261,266);
   // both cases record 'unproven' and the run continues untouched. The throw's
   // message — which names the builder's work sitting in the stash — is kept on
   // details.gate and journalled, never swallowed.
@@ -2142,7 +2142,7 @@ export function driveTask(ctx, io) {
 
   // The ADDITIVE record: its own journal line and its own event kind, beside the
   // untouched whole-gate `discrimination` record. Today's ledger adapter ignores
-  // an unknown kind (crew/realio.mjs:226-232) and scripts/factory/ledger.mjs is
+  // an unknown kind (crew/seat-io.mjs:226-232) and scripts/factory/ledger.mjs is
   // fenced to lane b36, so persistence beside gate_discriminations is a follow-up
   // lane, by decision, not by omission.
   const settleCheckProof = () => {

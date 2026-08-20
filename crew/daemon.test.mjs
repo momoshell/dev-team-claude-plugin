@@ -15,7 +15,7 @@ import {
 import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
 import { runChild } from './child.mjs'
-import { DEFAULT_TRANSPORT, emitAdapter, realIo, settleSeatTeardown } from './realio.mjs'
+import { DEFAULT_TRANSPORT, emitAdapter, seatIo, settleSeatTeardown } from './seat-io.mjs'
 import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
@@ -28,7 +28,7 @@ const sourceCode = (source) => source.split('\n').filter((line) => !line.trim().
 const DAEMON_CODE = sourceCode(DAEMON_SOURCE)
 const CHILD_CODE = sourceCode(CHILD_SOURCE)
 const DRIVE_MODULE = ['drive', 'mjs'].join('.')
-const REALIO_MODULE = ['realio', 'mjs'].join('.')
+const SEAT_IO_MODULE = ['seat-io', 'mjs'].join('.')
 const require = createRequire(import.meta.url)
 function sqliteAvailable() {
   try {
@@ -217,7 +217,7 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   const variantsCode = readFileSync(new URL('./variants.mjs', import.meta.url), 'utf8')
   assert.doesNotMatch(variantsCode, /^\s*import[\s(]/m, 'crew/variants.mjs must stay import-free: the daemon allowlists it as a LEAF')
   assert.equal(DAEMON_CODE.includes(DRIVE_MODULE), false, 'daemon must not name the driver module')
-  assert.equal(DAEMON_CODE.includes(REALIO_MODULE), false, 'daemon must not name the real io module')
+  assert.equal(DAEMON_CODE.includes(SEAT_IO_MODULE), false, 'daemon must not name the real io module')
   const dynamicImports = DAEMON_CODE.match(/\bimport\s*\(/g) || []
   const adapterImport = ['import', '(pathToFileURL(file).href)'].join('')
   assert.equal(DAEMON_CODE.includes(adapterImport), true, 'daemon must retain its existing computed adapter import')
@@ -227,7 +227,7 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
 
 test('the child entry owns the runner imports', () => {
   assert.equal(CHILD_CODE.includes(`'./${DRIVE_MODULE}'`), true, 'child entry must import the driver')
-  assert.equal(CHILD_CODE.includes(`'./${REALIO_MODULE}'`), true, 'child entry must import real io')
+  assert.equal(CHILD_CODE.includes(`'./${SEAT_IO_MODULE}'`), true, 'child entry must import real io')
   assert.equal(CHILD_CODE.includes('--run-child'), true, 'child entry must own the run-child guard')
 })
 
@@ -365,7 +365,7 @@ test('a daemon-forked repair run makes the driver open the repair shape', async 
     runChild(spec, {
       preflight: false,
       driveTask: (ctx) => { seen = ctx; return { status: 'done' } },
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     const stages = stagesFor(seen)
     assert.equal(stages[0], 'repair:r1')
@@ -379,7 +379,7 @@ test('a daemon-forked repair run makes the driver open the repair shape', async 
     runChild(spec, {
       preflight: false,
       driveTask: (ctx) => { seen = ctx; return { status: 'done' } },
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     const stages = stagesFor(seen)
     assert.equal(stages[0], 'plan:r1')
@@ -472,8 +472,8 @@ test('run_id rejects path traversal and slash characters before admission', asyn
   })
 })
 
-test('the daemon pane constant does not drift from realio DEFAULT_TRANSPORT', () => {
-  assert.equal(PANE_TRANSPORT, DEFAULT_TRANSPORT, 'daemon pane transport must stay pinned to realio DEFAULT_TRANSPORT')
+test('the daemon pane constant does not drift from seat-io DEFAULT_TRANSPORT', () => {
+  assert.equal(PANE_TRANSPORT, DEFAULT_TRANSPORT, 'daemon pane transport must stay pinned to seat-io DEFAULT_TRANSPORT')
 })
 
 // 1. The byte splitter, rather than readline, owns LF framing.
@@ -1493,12 +1493,12 @@ test('the enqueue refusal carries the daemon invalid-spec code over the socket',
 test('runChild refuses pane seats and omits lead from the mechanical ctx', () => {
   const pane = fixture({ roles: ['builder'], transport: 'pane' })
   try {
-    assert.throws(() => runChild({ crew_dir: pane.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}) }), /pane.*builder/)
+    assert.throws(() => runChild({ crew_dir: pane.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), seatIo: () => ({}) }), /pane.*builder/)
   } finally { pane.cleanup() }
   const lead = fixture({ roles: ['lead', 'planner', 'builder', 'reviewer'] })
   try {
     let seen
-    runChild({ crew_dir: lead.crewDir, task: 'x' }, { driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, realIo: () => ({}), preflight: false })
+    runChild({ crew_dir: lead.crewDir, task: 'x' }, { driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, seatIo: () => ({}), preflight: false })
     assert.ok(seen); assert.equal(seen.roles.includes('lead'), false)
   } finally { lead.cleanup() }
 })
@@ -1508,12 +1508,12 @@ test('runChild copies a declared scope and refuses an inherited spec without one
   try {
     let seen
     runChild({ crew_dir: f.crewDir, task: 'x', variant: 'repair', files_in_scope: ['a.mjs'], lane: 'lane-cmd' }, {
-      driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, realIo: () => ({}), preflight: false,
+      driveTask: (ctx) => { seen = ctx; return { status: 'done' } }, seatIo: () => ({}), preflight: false,
     })
     assert.deepEqual(seen.files_in_scope, ['a.mjs'])
     assert.throws(
       () => runChild({ crew_dir: f.crewDir, task: 'x', variant: 'repair', lane: 'lane-cmd' }, {
-        driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false,
+        driveTask: () => ({ status: 'done' }), seatIo: () => ({}), preflight: false,
       }),
       /files_in_scope/,
     )
@@ -1525,8 +1525,8 @@ test('runChild threads continuation and the unfiltered seated role list into ctx
   try {
     const seen = []
     const driveTask = (ctx) => { seen.push(ctx); return { status: 'done' } }
-    runChild({ crew_dir: f.crewDir, task: 'x', continuation: true }, { driveTask, realIo: () => ({}), preflight: false })
-    runChild({ crew_dir: f.crewDir, task: 'x' }, { driveTask, realIo: () => ({}), preflight: false })
+    runChild({ crew_dir: f.crewDir, task: 'x', continuation: true }, { driveTask, seatIo: () => ({}), preflight: false })
+    runChild({ crew_dir: f.crewDir, task: 'x' }, { driveTask, seatIo: () => ({}), preflight: false })
     assert.equal(seen[0].continuation, true)
     assert.equal(seen[1].continuation, false)
     assert.deepEqual(seen[0].seatedRoles, ['lead', 'planner', 'builder', 'reviewer'])
@@ -1550,7 +1550,7 @@ test('the child entry resolves the repo protected paths and records them', () =>
   try {
     runChild({ crew_dir: f.crewDir, task: 'protected-child', checkout: f.dir, ledger_db: join(home, 'ledger.db') }, {
       driveTask: (ctx) => { seen = ctx; return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } } },
-      realIo: () => ({ log: (row) => logged.push(row) }),
+      seatIo: () => ({ log: (row) => logged.push(row) }),
       preflight: false,
     })
     assert.ok(seen.protectedPaths.includes('db/migrations/'))
@@ -1650,7 +1650,7 @@ test('the child entry rides the persisted lane fence into ctx and refuses at pla
         seen = ctx
         return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
       },
-      realIo: () => ({ log: (row) => logged.push(row) }),
+      seatIo: () => ({ log: (row) => logged.push(row) }),
       preflight: false,
     })
     assert.deepEqual(seen.laneFence, fence)
@@ -1682,7 +1682,7 @@ test("the child entry's persisted lane fence is caught again at the final scope-
         seen = ctx
         return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
       },
-      realIo: () => ({ log() {} }),
+      seatIo: () => ({ log() {} }),
       preflight: false,
     })
     const io = childFenceIo({
@@ -1709,7 +1709,7 @@ test('a crew.json with no lane_fence leaves the child entry ctx exactly as today
         seen = ctx
         return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
       },
-      realIo: () => ({ log: (row) => logged.push(row) }),
+      seatIo: () => ({ log: (row) => logged.push(row) }),
       preflight: false,
     })
     assert.equal(Object.prototype.hasOwnProperty.call(seen, 'laneFence'), false)
@@ -1874,7 +1874,7 @@ test('a fork with no pid is orphaned rather than adopted forever', async () => {
 test('runChild gives a task_return override precedence over crew.json', () => {
   const f = fixture(); const override = join(f.returnsDir, 'override.json')
   try {
-    runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
+    runChild({ crew_dir: f.crewDir, task_return: override, task: 'x' }, { driveTask: () => ({ status: 'done' }), seatIo: () => ({}), preflight: false })
     assert.equal(JSON.parse(readFileSync(override, 'utf8')).status, 'done'); assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
   } finally { f.cleanup() }
 })
@@ -1885,7 +1885,7 @@ test('runChild mirrors per-run envelopes and writes the well-known path only onc
     const own = join(f.returnsDir, 'r1.task.json')
     const writes = []
     const result = runChild({ crew_dir: f.crewDir, task_return: own, task: 'x' }, {
-      driveTask: () => ({ status: 'done', summary: 'per-run' }), realIo: () => ({}), preflight: false,
+      driveTask: () => ({ status: 'done', summary: 'per-run' }), seatIo: () => ({}), preflight: false,
       writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
     })
     assert.equal(result.status, 'done')
@@ -1898,7 +1898,7 @@ test('runChild mirrors per-run envelopes and writes the well-known path only onc
   try {
     const writes = []
     runChild({ crew_dir: wellKnown.crewDir, task_return: wellKnown.taskReturn, task: 'x' }, {
-      driveTask: () => ({ status: 'done', summary: 'well-known' }), realIo: () => ({}), preflight: false,
+      driveTask: () => ({ status: 'done', summary: 'well-known' }), seatIo: () => ({}), preflight: false,
       writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
     })
     assert.equal(writes.filter((path) => path === wellKnown.taskReturn).length, 1)
@@ -1917,7 +1917,7 @@ test('runChild records to the explicit ledger and honors spec.ledger_db', () => 
       preflight: false,
       env: { DEVTEAM_LEDGER_DB: envDb },
       driveTask: () => ({ status: 'done', summary: 'ok' }),
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     assert.equal(result.status, 'done')
     assert.equal(existsSync(envDb), false)
@@ -1950,7 +1950,7 @@ test('runChild carries run_id into the ledger association and keeps it distinct 
     }, {
       preflight: false,
       driveTask: () => ({ status: 'done', summary: 'linked' }),
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     assert.equal(result.status, 'done')
     const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
@@ -1979,7 +1979,7 @@ test('two runChild calls against one crew dir append links to the adopted sideca
       }, {
         preflight: false,
         driveTask: () => ({ status: 'done', summary: runId }),
-        realIo: () => ({}),
+        seatIo: () => ({}),
       })
     }
     const sidecar = JSON.parse(readFileSync(join(f.crewDir, 'ledger', 'run.json'), 'utf8'))
@@ -2010,7 +2010,7 @@ test('runChild without run_id writes no run_links row', () => {
     }, {
       preflight: false,
       driveTask: () => ({ status: 'done' }),
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
     try { assert.deepEqual(ledger.dumpTable('run_links'), []) } finally { ledger.close() }
@@ -2037,7 +2037,7 @@ test('runChild rejects a budget ledger that conflicts with a stale crew-local si
     }, {
       preflight: false,
       driveTask: () => { drove += 1; return { status: 'done', summary: 'must not run' } },
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     assert.equal(result.status, 'escalation')
     assert.equal(result.details.escalation.where, 'ledger-sidecar')
@@ -2071,7 +2071,7 @@ test('runChild lets no-budget instrumentation adopt a stale crew-local sidecar',
     }, {
       preflight: false,
       driveTask: () => { drove += 1; return { status: 'done', summary: 'must run' } },
-      realIo: (_crew, _dirs, _checkout, emitter) => { receivedEmitter = emitter; return {} },
+      seatIo: (_crew, _dirs, _checkout, emitter) => { receivedEmitter = emitter; return {} },
     })
     assert.equal(result.status, 'done')
     assert.equal(drove, 1, 'a no-budget stale sidecar must not refuse task execution')
@@ -2094,7 +2094,7 @@ test('a degraded child emitter never fails the run or suppresses task_return', (
     }, {
       preflight: false,
       driveTask: () => ({ status: 'done', summary: 'still ran' }),
-      realIo: () => ({}),
+      seatIo: () => ({}),
     })
     assert.equal(result.status, 'done')
     assert.equal(JSON.parse(readFileSync(taskReturn, 'utf8')).status, 'done')
@@ -2150,7 +2150,7 @@ test('real unix socket answers ping and unknown command', async () => {
 // --- review round-2 residuals, 2026-08-14 -----------------------------------
 
 // R2-S2: the preflight block had ZERO coverage — every test that reached
-// runChild injected driveTask/realIo, which under the old polarity disabled
+// runChild injected driveTask/seatIo, which under the old polarity disabled
 // the block entirely. Deleting all seven guards left the suite and the gate
 // green. These pin each branch, and would have caught R2-S1 below.
 test('child preflight refuses a missing seat, a missing brief, and a foreign checkout', () => {
@@ -2198,7 +2198,7 @@ test('a continuation child resumes on top of a dirty checkout', () => {
     const brief = join(f.crewDir, 'b.md'); writeFileSync(brief, '# brief')
     runChild(
       { crew_dir: f.crewDir, task: 'x', brief_file: brief, continuation: true },
-      { execSync: () => ' M prior-round.js', driveTask: () => ({ status: 'done' }), realIo: () => ({}) },
+      { execSync: () => ' M prior-round.js', driveTask: () => ({ status: 'done' }), seatIo: () => ({}) },
     )
     assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
   } finally { f.cleanup() }
@@ -2213,7 +2213,7 @@ test('injecting a driver does not skip preflight; only an explicit opt-out does'
   try {
     // Driver injected, NO opt-out: preflight must still refuse the missing brief.
     assert.throws(
-      () => runChild({ crew_dir: strict.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), execSync: () => '' }),
+      () => runChild({ crew_dir: strict.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), seatIo: () => ({}), execSync: () => '' }),
       /--brief-file/,
       'a caller that injects a driver must still be preflighted',
     )
@@ -2221,7 +2221,7 @@ test('injecting a driver does not skip preflight; only an explicit opt-out does'
 
   const opted = fixture()
   try {
-    runChild({ crew_dir: opted.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), realIo: () => ({}), preflight: false })
+    runChild({ crew_dir: opted.crewDir, task: 'x' }, { driveTask: () => ({ status: 'done' }), seatIo: () => ({}), preflight: false })
     assert.equal(JSON.parse(readFileSync(opted.taskReturn, 'utf8')).status, 'done', 'the explicit opt-out still runs the task')
   } finally { opted.cleanup() }
 })
@@ -2586,7 +2586,7 @@ test('run-end teardown kills a real piped seat and its recorded pgid is gone', {
   }
 })
 
-test('realIo teardown sweeps every declared headless-rpc transport', () => {
+test('seatIo teardown sweeps every declared headless-rpc transport', () => {
   const members = {
     builder: { model: 'm', transport: 'headless-rpc' },
     reviewer: { model: 'm', transport: 'headless-rpc' },
@@ -2598,7 +2598,7 @@ test('realIo teardown sweeps every declared headless-rpc transport', () => {
     mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
     const logs = []
     try {
-      const io = realIo({ task: 'settle', members }, paths, dir, null, null, {}, {
+      const io = seatIo({ task: 'settle', members }, paths, dir, null, null, {}, {
         headlessRpcIo: factory, logLine: (_path, row) => logs.push(row),
       })
       return { rows: io.teardown(), logs }
@@ -2659,12 +2659,12 @@ test('emitAdapter returns a dropped seat-teardown verdict', () => {
 test('one settle path is shared by both run entrypoints', () => {
   const child = readFileSync(join(HERE, 'child.mjs'), 'utf8')
   const crew = readFileSync(join(HERE, 'crew.mjs'), 'utf8')
-  const realio = readFileSync(join(HERE, 'realio.mjs'), 'utf8')
+  const seatIoSrc = readFileSync(join(HERE, 'seat-io.mjs'), 'utf8')
   const calls = (source) => /settleSeatTeardown\s*\(/.test(source)
   const sweeps = (source) => (source.match(/seat-teardown-sweep/g) || []).length
   assert.equal(calls(child), true)
   assert.equal(calls(crew), true)
-  assert.equal(sweeps(realio), 1)
+  assert.equal(sweeps(seatIoSrc), 1)
   assert.equal(sweeps(child), 0)
   assert.equal(sweeps(crew), 0)
 })

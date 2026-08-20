@@ -24,7 +24,7 @@ import {
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
-import { realIo, VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './realio.mjs'
+import { seatIo, VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
@@ -844,7 +844,7 @@ test('child entrypoint plumbs, journals, and refuses round budgets', () => {
     }
     const spec = { crew_dir: crewDir, task: 'child-rounds', brief_file: brief, checkout, ...budget }
     runChild(spec, {
-      preflight: false, realIo: () => io,
+      preflight: false, seatIo: () => io,
       driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
       env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
     })
@@ -873,7 +873,7 @@ test('child entrypoint plumbs, journals, and refuses round budgets', () => {
       let drove = 0
       assert.throws(() => runChild(
         { crew_dir: crewDir, task: 'child-rounds', brief_file: brief, checkout, ...budget },
-        { preflight: false, realIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
+        { preflight: false, seatIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
       ), (err) => err.reason === reason)
       assert.equal(drove, 0)
     }
@@ -908,7 +908,7 @@ test('child entrypoint resolves both validation lane spellings, journals them, a
       changedFiles: () => [], commit: () => 'abc1234', now: () => 0,
     }
     runChild({ ...base, ...laneSpec }, {
-      preflight: false, realIo: () => io,
+      preflight: false, seatIo: () => io,
       driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
       env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
     })
@@ -928,7 +928,7 @@ test('child entrypoint resolves both validation lane spellings, journals them, a
     let drove = 0
     assert.throws(() => runChild(
       { ...base, validation_lane: true },
-      { preflight: false, realIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
+      { preflight: false, seatIo: () => ({ log: () => {} }), driveTask: () => { drove += 1 }, env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') } },
     ), (err) => err.reason === 'invalid-validation-lane')
     assert.equal(drove, 0)
   } finally { rmSync(root, { recursive: true, force: true }) }
@@ -956,14 +956,14 @@ test('child preflight uses the scout shape seats and keeps the default tier guar
   const io = { log: () => {} }
   try {
     runChild({ ...base, variant: 'scout' }, {
-      realIo: () => io,
+      seatIo: () => io,
       driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
       env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
     })
     assert.deepEqual(seen.roles, ['planner'])
     assert.equal(drove, 1)
     assert.throws(() => runChild(base, {
-      realIo: () => io,
+      seatIo: () => io,
       driveTask: () => { drove += 1 },
       env: { DEVTEAM_LEDGER_DB: join(crewDir, 'ledger.db') },
     }), /requires a builder seat/)
@@ -1920,19 +1920,19 @@ test('seatLiveness reports headless and preserves pane probe values', () => {
   assert.deepEqual(probed, ['surface-lead', 'surface-planner'])
 })
 
-test('realIo status and showDoc make no cmux calls without a workspace and status still works with one', () => {
-  const parent = mkdtempSync(join(tmpdir(), 'crew-realio-'))
+test('seatIo status and showDoc make no cmux calls without a workspace and status still works with one', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-seat-io-'))
   const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
   mkdirSync(paths.returnsDir, { recursive: true })
   const cmuxHeadless = callCounter()
   try {
-    const headless = realIo({ workspace_id: null, window_id: null, members: { builder: { surface_id: null } } }, paths, parent, null, null, {}, { cmux: cmuxHeadless, tree: () => ({ windows: [] }) })
+    const headless = seatIo({ workspace_id: null, window_id: null, members: { builder: { surface_id: null } } }, paths, parent, null, null, {}, { cmux: cmuxHeadless, tree: () => ({ windows: [] }) })
     headless.status('build')
     headless.showDoc(join(parent, 'plan.md'))
     assert.equal(cmuxHeadless.calls.length, 0)
 
     const cmuxPanes = callCounter()
-    const paned = realIo({ workspace_id: 'workspace-1', window_id: 'window-1', members: { lead: { surface_id: 'surface-lead' } } }, paths, parent, null, null, {}, { cmux: cmuxPanes, tree: () => ({ windows: [] }) })
+    const paned = seatIo({ workspace_id: 'workspace-1', window_id: 'window-1', members: { lead: { surface_id: 'surface-lead' } } }, paths, parent, null, null, {}, { cmux: cmuxPanes, tree: () => ({ windows: [] }) })
     paned.status('build')
     assert.equal(cmuxPanes.calls.length, 1)
     assert.equal(cmuxPanes.calls[0][0], 'set-status')

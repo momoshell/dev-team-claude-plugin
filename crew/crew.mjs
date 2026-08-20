@@ -162,6 +162,111 @@ export async function probeLocalEndpoint(url, { fetchFn = fetch, timeoutMs = 200
   }
 }
 
+export const ADVISOR_CONFIG_VERSION = 1
+export const ADVISOR_BOOT_REFUSALS = Object.freeze([
+  'role-unsupported', 'adapter-unsupported', 'transport-unsupported',
+  'endpoint-unset', 'endpoint-not-local', 'endpoint-credentials',
+  'model-unset', 'model-unsafe', 'endpoint-dead',
+])
+export const SAFE_MODEL = /^[A-Za-z0-9][A-Za-z0-9._:\/-]{0,127}$/
+
+export function classifyAdvisorCell({ endpoint, model } = {}) {
+  if (typeof endpoint !== 'string' || endpoint === '') return { reason: 'endpoint-unset' }
+  let parsed
+  try { parsed = new URL(endpoint) } catch { return { reason: 'endpoint-not-local' } }
+  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(endpoint)?.[1] || ''
+  const hostText = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority
+  const rawHost = hostText.startsWith('[') ? hostText.slice(0, hostText.indexOf(']') + 1) : hostText.split(':')[0]
+  if (!['http:', 'https:'].includes(parsed.protocol)
+    || !['127.0.0.1', 'localhost', '[::1]'].includes(rawHost.toLowerCase())) {
+    return { reason: 'endpoint-not-local' }
+  }
+  if (parsed.username || parsed.password) return { reason: 'endpoint-credentials' }
+  if (typeof model !== 'string' || model === '') return { reason: 'model-unset' }
+  if (!SAFE_MODEL.test(model)) return { reason: 'model-unsafe' }
+  return { endpoint: parsed.href, model }
+}
+
+export function advisorBootRecord({ adapters = {}, env = process.env } = {}) {
+  const granted = Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort()
+  const rawEndpoint = env?.CREW_ADVISOR_ENDPOINT
+  let endpoint = rawEndpoint
+  try { endpoint = new URL(String(rawEndpoint || '')).href } catch { /* assertAdvisorCellLive gives the refusal */ }
+  return {
+    granted,
+    endpoint,
+    model: env?.CREW_ADVISOR_MODEL,
+    config_version: ADVISOR_CONFIG_VERSION,
+  }
+}
+
+function advisorRefusal(reason, role, record) {
+  const fix = reason === 'adapter-unsupported'
+    ? 'select --agent-builder pi'
+    : reason === 'transport-unsupported'
+      ? 'use a pane transport'
+      : reason.startsWith('endpoint-') || reason.startsWith('model-')
+        ? 'set the loopback advisor endpoint and safe model'
+        : 'use a register-granted builder advisor seat'
+  return Object.assign(new Error(`advisor seat ${role} refuses to boot: ${reason} — ${fix}`), {
+    reason, code: 'advisor-refusal', role, stage: reason === 'endpoint-dead' ? 'advisor-preflight' : undefined,
+  })
+}
+
+export async function assertAdvisorCellLive({ record, adapters = {}, taskSlug, probeEndpoint = probeLocalEndpoint, note = noteRunlessCellFailure } = {}) {
+  if (!record?.granted?.length) return
+  for (const role of record.granted) {
+    if (role !== 'builder') throw advisorRefusal('role-unsupported', role, record)
+    const adapter = adapters[role]
+    if (adapter?.name !== 'pi') throw advisorRefusal('adapter-unsupported', role, record)
+    if (adapter?.transport !== DEFAULT_TRANSPORT) throw advisorRefusal('transport-unsupported', role, record)
+    const cell = classifyAdvisorCell({ endpoint: record.endpoint, model: record.model })
+    if (cell.reason) throw advisorRefusal(cell.reason, role, record)
+    let advisorLive = false
+    try { advisorLive = await probeEndpoint(record.endpoint) } catch { advisorLive = false }
+    if (!advisorLive) {
+      const err = advisorRefusal('endpoint-dead', role, record)
+      try {
+        note({ taskSlug, role, kind: 'boot-refusal', err,
+          cell: { agent: 'advisor', provider: 'local', id: record.model,
+            model: `local/${record.model}`, effort: null },
+          member: { transport: 'loopback' } })
+      } catch { /* instrumentation is never load-bearing */ }
+      if (!advisorLive) throw advisorRefusal('endpoint-dead', role, record)
+    }
+  }
+}
+
+export function advisorManifest({ briefText, task, runStartedAt }) {
+  const lines = String(briefText || '').split(/\r?\n/)
+  const marker = lines.findIndex((line) => line.trim().toLowerCase() === 'tripwire tests:')
+  if (marker < 0) return null
+  const tripwires = []
+  for (let i = marker + 1; i < lines.length; i += 1) {
+    const line = lines[i].trim()
+    if (/^broad keys\b/i.test(line)) break
+    const match = /^-\s+(.+?)\s+·/.exec(line)
+    if (match && match[1].trim()) tripwires.push(match[1].trim())
+  }
+  if (!tripwires.length) return null
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    task: String(task || ''),
+    run_started_at: runStartedAt,
+    tripwires,
+  }
+}
+
+export function assertAdvisorManifest({ granted = [], manifest, written } = {}) {
+  if (!granted.length) return
+  if (!manifest || manifest.schema_version !== 1 || !Array.isArray(manifest.tripwires) || !manifest.tripwires.length || written !== true) {
+    const err = new Error(`advisor manifest is unavailable for a granted run — refusing to start seats without the declared tripwire surface`)
+    err.reason = 'advisor-manifest-unavailable'
+    throw err
+  }
+}
+
 // The rule itself lives in the leaf module `slug.mjs`, so daemon.mjs can share
 // it without importing this file (which pulls in drive.mjs). Re-exported here
 // because this module's own consumers already reach for it by this name.
@@ -737,7 +842,7 @@ function writeRolePrompt(role, taskDir, section = '') {
   return merged
 }
 
-function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, configDir = null }) {
+function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, configDir = null, advisorCell = null }) {
   const seat = SEAT_DEFAULTS[role]
   const merged = join(taskDir, `role-${role}.md`)
   // effort: per-seat boot flag (--effort-<role> high), OPTIONAL — or, when a
@@ -749,7 +854,7 @@ function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants
     role, model: tierSeat?.model || seatModel(role, args), promptFile: merged,
     tools: seat.tools, deny: seat.deny, taskDir, bootBrief,
     effort: tierSeat?.effort || args[`effort-${role}`] || undefined,
-    grants, configDir,
+    grants, configDir, advisorCell,
   })
 }
 
@@ -808,6 +913,7 @@ export async function bootCmd(args, deps = {}) {
     cmux: cmuxFn = cmux, tree: treeFn = tree, renameTab: renameTabFn = renameTab,
     openLedger: openLedgerDep = null, existsSync: existsSyncDep = null,
     loadavg: loadavgDep = null, cpus: cpusDep = null,
+    probeEndpoint: probeEndpointDep = null, register: registerDep = null,
   } = deps
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
@@ -858,7 +964,7 @@ export async function bootCmd(args, deps = {}) {
   // capability shortfall must fail before a workspace gets created.
   let adapters
   try {
-    adapters = await resolveAdapters(roles, args, tierSeats)
+    adapters = await resolveAdapters(roles, args, tierSeats, registerDep ? { register: registerDep } : {})
   } catch (err) {
     noteRunlessCellFailure({ taskSlug, role: err.role ?? null, kind: 'boot-refusal', err, cell: err.cell ?? null })
     throw err
@@ -891,6 +997,10 @@ export async function bootCmd(args, deps = {}) {
     } : {}),
   })
   assertCellsClosed(breaker)
+  const advisorRecord = advisorBootRecord({ adapters, env: bootEnv })
+  await assertAdvisorCellLive({ record: advisorRecord, adapters, taskSlug,
+    probeEndpoint: probeEndpointDep || probeLocalEndpoint,
+    note: noteRunlessCellFailure })
   const paneRoles = roles.filter((role) => adapters[role].transport === DEFAULT_TRANSPORT)
   const headlessOnly = paneRoles.length === 0
   // #249 / ADR-033: transport follows the MODE, never the seat. A cmux workspace
@@ -946,6 +1056,8 @@ export async function bootCmd(args, deps = {}) {
     const mk = (role) => paneCommand(role, args, {
       taskDir: paths.taskDir, bootBrief, adapter: adapters[role].adapter, tierSeat: seats?.[role],
       grants: adapters[role].grants, configDir: adapters[role].configDir,
+      advisorCell: adapters[role].grants?.advisor === true
+        ? { endpoint: advisorRecord.endpoint, model: advisorRecord.model } : null,
     })
     const layout = composeLayout(paneRoles, mk)
 
@@ -1006,6 +1118,7 @@ export async function bootCmd(args, deps = {}) {
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, lane_fence: laneFence.fence } : {}),
+    ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
   }
   // crew/daemon.mjs paneSeat() is the consumer: daemon run refuses pane transport.
   if (headlessOnly) {
@@ -1026,6 +1139,7 @@ export async function bootCmd(args, deps = {}) {
     ...(laneFence ? { lane_name: laneFence.lane, fenced_lanes: laneFence.fence.length } : {}),
     capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },
     ...(memory.record ? { memory: memory.record } : {}),
+    ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
   })
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
@@ -1093,6 +1207,32 @@ export function runCmd(args, deps = {}) {
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+  if (crew.advisor?.granted?.length) {
+    const runStartedAt = Date.now()
+    const briefText = readFileSync(briefFile, 'utf8')
+    const manifest = advisorManifest({ briefText, task: taskSlug, runStartedAt })
+    const manifestPath = join(paths.taskDir, 'advisor-manifest.json')
+    const temporaryPath = `${manifestPath}.tmp`
+    let written = false
+    let writeReason = null
+    if (manifest) {
+      try {
+        writeFileSync(temporaryPath, JSON.stringify(manifest))
+        renameSync(temporaryPath, manifestPath)
+        written = true
+      } catch (err) {
+        writeReason = 'write-failed'
+      }
+    } else {
+      try { unlinkSync(manifestPath) } catch (err) {
+        if (err?.code !== 'ENOENT') writeReason = 'remove-failed'
+      }
+      writeReason ||= 'tripwire-tests-absent'
+    }
+    logLine(journal, { at: new Date().toISOString(), event: 'advisor-manifest',
+      written, count: manifest?.tripwires?.length || 0, reason: writeReason })
+    assertAdvisorManifest({ granted: crew.advisor.granted, manifest, written })
+  }
   const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
   if (laneFence) {
     logLine(journal, { at: new Date().toISOString(), event: 'lane-fence',

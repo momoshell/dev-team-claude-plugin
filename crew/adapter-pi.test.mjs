@@ -5,7 +5,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS } from './adapters/adapter-pi.mjs'
+import { seatCommand, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
 import { SEAT_DEFAULTS, ROLE_ORDER } from './crew.mjs'
 
 const MODELS = ['sonnet', 'anthropic/claude-opus-5', 'openai-codex/gpt-5.6-luna']
@@ -202,4 +202,20 @@ test('a granted pi tool cannot widen the deny boundary', () => {
 test('modelString maps a local provider only when the register supplies its pi namespace', () => {
   assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders: { 'local-pi': { pi_provider: 'local-pi' } } }), 'local-pi/qwen3-coder')
   assert.throws(() => modelString({ provider: 'local-pi', id: 'qwen3-coder' }), /local-pi/)
+})
+
+test('advisor grant appends only its extension and safely transports its cell', () => {
+  const shape = {
+    role: 'builder', model: 'sonnet', promptFile: '/tmp/prompt.md', tools: '', deny: '',
+    taskDir: '/tmp/task', bootBrief: 'brief', grants: { tools: [], extensions: [], agents: [], skills: [], advisor: true },
+    advisorCell: { endpoint: "http://127.0.0.1/it's/v1", model: "q'wen3" },
+  }
+  const plain = seatCommand({ ...shape, grants: { ...shape.grants, advisor: false }, advisorCell: null })
+  const granted = seatCommand(shape)
+  assert.equal(granted.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], plain.match(/(?:^|\s)--tools "([^"]*)"/)?.[1])
+  assert.match(granted, new RegExp(`-e "${escapeRegex(PI_ADVISOR_EXTENSION)}"`))
+  assert.match(granted, /CREW_ADVISOR=1/)
+  assert.match(granted, /CREW_ADVISOR_ENDPOINT='http:\/\/127\.0\.0\.1\/it'"'"'s\/v1'/)
+  assert.equal(shellSingleQuote("q'wen3"), `'q'"'"'wen3'`)
+  assert.doesNotMatch(plain, /CREW_ADVISOR|advisor\.ts/)
 })

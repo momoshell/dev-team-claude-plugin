@@ -13,7 +13,8 @@ import {
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
-  effectiveTools,
+  effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
+  advisorManifest, assertAdvisorManifest,
 } from './crew.mjs'
 import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
@@ -3170,4 +3171,17 @@ test('quiet host boots and journals measured load while unconfigured boot omits 
     assert.equal(plainLoadCalls, 0)
     assert.equal(plainCpuCalls, 0)
   } finally { rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true }) }
+})
+
+test('advisor boot and manifest contracts stay closed and fail closed', () => {
+  assert.equal(ADVISOR_CONFIG_VERSION, 1)
+  assert.ok(Object.isFrozen(ADVISOR_BOOT_REFUSALS))
+  assert.ok(ADVISOR_BOOT_REFUSALS.includes('adapter-unsupported'))
+  assert.equal(String(SAFE_MODEL), '/^[A-Za-z0-9][A-Za-z0-9._:\\\/-]{0,127}$/')
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'http://127.0.0.1/v1', model: 'qwen3-coder' }), { endpoint: 'http://127.0.0.1/v1', model: 'qwen3-coder' })
+  const brief = 'tripwire tests:\n- crew/crew.mjs · bootCmd\nbroad keys (not used):\n'
+  const manifest = advisorManifest({ briefText: brief, task: 'b69', runStartedAt: 1 })
+  assert.deepEqual(manifest.tripwires, ['crew/crew.mjs'])
+  assert.throws(() => assertAdvisorManifest({ granted: ['builder'], manifest: null, written: false }), /manifest/)
+  assert.doesNotThrow(() => assertAdvisorManifest({ granted: [], manifest: null, written: false }))
 })

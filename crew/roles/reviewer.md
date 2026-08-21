@@ -55,8 +55,9 @@ When the acceptance gate keeps failing, the driver may hand you a GATE
 TRIAGE assignment: decide whether the BUILD is wrong or the GATE itself is
 defective. Read the plan, the gate command and its output, and the diff,
 then answer in details: {"defect": "build" | "gate", "reason": "..."} —
-exactly that enum; the driver branches on it. "gate" grants the planner its
-one repair; "build" sends the failure back to the builder verbatim.
+exactly that enum; the driver branches on it. "gate" grants the **lead** —
+the gate custodian (`GATE_CUSTODIAN`, `crew/drive.mjs`) — its one repair;
+"build" sends the failure back to the builder verbatim.
 
 ## Perspective assignments
 

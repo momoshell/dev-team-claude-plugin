@@ -18,7 +18,7 @@ import {
   driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
-  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX,
+  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
@@ -421,10 +421,16 @@ test('acceptContractLines lists findings and the typed residual/refutation instr
 test('the shared charter and validator agree on the findings contract', () => {
   const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
   const start = charter.indexOf('## Envelope details fields')
-  const end = charter.indexOf('## Gate triage', start)
+  const end = charter.indexOf('## Perspective assignments', start)
   assert.ok(start >= 0 && end > start)
   const block = charter.slice(start, end)
   for (const token of ['"findings"', '"id"', '"severity"']) assert.ok(block.includes(token))
+  // #457: this slice used to stop AT '## Gate triage', so the gate-repair
+  // custody sentence under that heading was pinned by nothing and survived
+  // custody moving to the lead (#334/PR #348). The slice now covers it.
+  assert.ok(block.includes('## Gate triage'), 'the charter slice must cover the gate-triage section')
+  assert.ok(block.includes(`grants the **${GATE_CUSTODIAN}**`), 'the gate verdict must grant the repair to the gate custodian')
+  assert.doesNotMatch(block, /grants the (\*\*)?planner\b/)
   const severityField = block.match(/"severity":\s*([^\n]+)/)?.[1]
   assert.ok(severityField)
   const documented = [...severityField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])

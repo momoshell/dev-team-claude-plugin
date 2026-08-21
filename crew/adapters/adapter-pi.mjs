@@ -6,7 +6,10 @@ import { fileURLToPath } from 'node:url'
 // `capabilitiesFor(...)` resolves one frozen profile per (adapter, transport)
 // pair, and `seatCommand(...)` composes the pane's command line. crew.mjs resolves the
 // adapter by seat.agent (default 'claude', overridable via --agent-<role>),
-// by filename — nothing in crew.mjs knows pi exists. pi's flag grammar
+// by filename, so no adapter name is hard-coded on the seat-resolution path.
+// One site outside it does branch on the literal 'pi': assertAdvisorCellLive
+// (crew/crew.mjs) refuses an advisor cell whose builder adapter is anything
+// else. pi's flag grammar
 // differs from claude's (see below), so there is no byte-identity bar here
 // the way there is for adapter-claude.mjs; this adapter is judged on
 // honesty of its capability claims, not on matching another agent's shape.

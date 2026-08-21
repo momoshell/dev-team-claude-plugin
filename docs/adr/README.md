@@ -80,9 +80,16 @@ design package is how a citation silently resolves to the wrong decision.
 ## Note on scope
 
 ADRs 001–022 are almost entirely about the **retired** first-generation runtime
-(pane dispatch, worker plugins, the QA-gate ladder), removed in v0.2.0. They are
-kept because their numbers are cited and their reasoning is still quoted, not
-because they describe how the crew works today — for that, read
+(pane dispatch, worker plugins, the QA-gate ladder), removed in v0.2.0 — and so
+are **023, 025 and 028**, which sit above that boundary but describe the same
+absent machinery: 023's roster-precedence layers name a `resolve.mjs` that is
+not in the checkout, 025 governs the 14 `agents/*.md` charters and the QA gate,
+and 028's guard shipped as `hooks/dispatch-guard.mjs` beside
+`scripts/cmux/dispatch.mjs`, neither of which survives. The register's live
+decisions in that range are 024 (the ledger), 026 (the emitter facade) and 027
+(seq allocation), with 029 onward describing the crew as it runs today. They are
+all kept because their numbers are cited and their reasoning is still quoted, not
+because the retired ones describe how the crew works today — for that, read
 [`crew/README.md`](../../crew/README.md).
 
 ## Entries

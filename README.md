@@ -29,9 +29,14 @@ node crew/factoryctl.mjs ls
 
 ## What's in this repo
 
-- **`crew/`** — the runtime. Self-contained: a cmux driver (verified-send,
-  context-aware ops), the deterministic task-loop driver (fully unit-tested
-  via dependency injection), the CLI, and the seat charters.
+- **`crew/`** — the runtime: a cmux driver (verified-send, context-aware ops),
+  the deterministic task-loop driver (fully unit-tested via dependency
+  injection), the CLI, and the seat charters. Self-contained apart from
+  `scripts/factory/`, which it imports from three production modules:
+  `crew/breaker.mjs` takes `NODE_FLOOR`/`openLedger` from `ledger.mjs` on the
+  boot-refusal path, `crew/child.mjs` takes `emit.mjs` and `probe-repo.mjs`, and
+  `crew/crew.mjs` takes `emit.mjs`, `probe-repo.mjs`, `make-brief.mjs` and
+  `reap-stale.mjs`.
 - **`scripts/factory/`** — the run-trace mirror: a never-throwing emitter
   facade over a SQLite WAL ledger (instrumentation is never load-bearing).
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the

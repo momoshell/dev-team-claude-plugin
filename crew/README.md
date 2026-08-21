@@ -161,9 +161,13 @@ everywhere.
 Capability declarations are enforced, not decorative: charters declare
 `requires` when they depend on a capability. **The planner alone requires
 `subagents`** — its charter is "domain lead + architect + scout-commander", and
-fan-out discovery IS the third of those, so `--agent-planner pi` refuses before
-a workspace exists rather than booting a planner that silently discovers
-serially. The reviewer does **not** require it: its charter names no fan-out,
+fan-out discovery IS the third of those. pi's binary ships no subagent tool, so
+the register grants it one: the planner's `by_agent.pi` overlay (#403) adds the
+`crew/pi/extensions/subagent.ts` extension and the `scout` agent definition, pi's
+`capabilitiesFor` flips `subagents` false→true on that grant, and
+`--agent-planner pi` boots with no shortfall waiver. A seat whose adapter and
+grant together cannot deliver `subagents` still refuses before a workspace
+exists rather than booting a planner that silently discovers serially. The reviewer does **not** require it: its charter names no fan-out,
 and the roster deliberately seats pi/terra on review at `build`/`mechanical`
 under the review-vendor rule above — the same missing capability is correctly
 fatal for one charter and irrelevant for another, which is why the requirement

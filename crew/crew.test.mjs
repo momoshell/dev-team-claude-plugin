@@ -17,7 +17,7 @@ import {
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorManifest, assertAdvisorManifest,
 } from './crew.mjs'
-import { runChild, TEARDOWN_SIGNALS, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
+import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { daemon } from './daemon.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
@@ -1484,183 +1484,175 @@ function childSignalFixture() {
   return { root, crewDir, taskReturn, brief, ledger: join(root, 'ledger.db') }
 }
 
-test('a signalled child settles its envelope before its teardown and only once', () => {
+// A real signal to a real child is the only proof that survives the 2026-08-11
+// convention: send SIGTERM while the child is blocked inside one named stretch of
+// runChild and read how it died. Default disposition is `signal: 'SIGTERM'`; a
+// handler armed across a turn-free stretch can never dispatch but still
+// suppresses that disposition, so an armed child instead runs the block out and
+// exits 0. Measured on this checkout: unarmed windows die in 1-2ms.
+const SIGNAL_BLOCK_MS = 3000
+const SIGNAL_KILL_BOUND_MS = 1000
+
+async function sigtermWhileBlocked(f, body) {
+  const harness = join(f.root, 'signal-harness.mjs')
+  writeFileSync(harness, `import { runChild } from ${JSON.stringify(new URL('./child.mjs', import.meta.url).href)}
+import { writeFileSync as realWrite } from 'node:fs'
+const taskReturn = ${JSON.stringify(f.taskReturn)}
+const spec = { crew_dir: ${JSON.stringify(f.crewDir)}, task: 'child-signal',
+  brief_file: ${JSON.stringify(f.brief)}, checkout: ${JSON.stringify(f.root)},
+  ledger_db: ${JSON.stringify(f.ledger)} }
+const env = { DEVTEAM_LEDGER_DB: ${JSON.stringify(f.ledger)} }
+const block = () => { process.stdout.write('mark\\n'); Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ${SIGNAL_BLOCK_MS}) }
+${body}
+`)
+  let child
+  try {
+    child = spawn(process.execPath, [harness], { stdio: ['ignore', 'pipe', 'pipe'] })
+    return await new Promise((resolve, reject) => {
+      let marked = false
+      let sentAt = null
+      let settled = false
+      const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch { /* already gone */ } }, 15000)
+      const finish = (value, failed = false) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (failed) reject(value)
+        else resolve(value)
+      }
+      child.once('error', (err) => finish(err, true))
+      child.stdout.on('data', (chunk) => {
+        if (marked || !String(chunk).includes('mark')) return
+        marked = true
+        sentAt = Date.now()
+        child.kill('SIGTERM')
+      })
+      child.stderr.on('data', () => {})
+      child.once('exit', (code, signal) => finish({ marked, code, signal, elapsed: sentAt == null ? null : Date.now() - sentAt }))
+    })
+  } finally {
+    if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGKILL')
+  }
+}
+
+function assertKilledBySigterm(outcome, where) {
+  assert.equal(outcome.marked, true, `the child never reached ${where}`)
+  assert.equal(outcome.signal, 'SIGTERM', `${where}: expected death by SIGTERM, got exit code ${outcome.code}`)
+  assert.ok(outcome.elapsed < SIGNAL_KILL_BOUND_MS, `${where}: expected death within ${SIGNAL_KILL_BOUND_MS}ms, took ${outcome.elapsed}ms`)
+}
+
+test('the settle path writes the envelope before its teardown and only once', () => {
   const f = childSignalFixture()
   const order = []
-  const handlers = new Map()
-  let activeDelivery = false
-  let deliver = true
-  const kills = []
-  const proc = {
-    pid: 4242,
-    on(signal, handler) {
-      handlers.set(signal, handler)
-      if (signal === 'SIGTERM' && deliver) { deliver = false; activeDelivery = true; handler() }
-      return this
-    },
-    off(signal, handler) { if (handlers.get(signal) === handler) handlers.delete(signal); return this },
-    kill(pid, signal) { kills.push([pid, signal]); return true },
-  }
-  const io = { teardown: () => { order.push('teardown'); return [] } }
-  const done = { status: 'done', summary: 'late done', artifacts: [], details: {} }
   try {
-    runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
+    const result = runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
       preflight: false,
-      proc,
       env: { DEVTEAM_LEDGER_DB: f.ledger },
       writeFileSync: (path, data, options) => {
         if (String(path) === f.taskReturn) order.push('envelope')
         writeFileSync(path, data, options)
       },
-      seatIo: () => io,
-      driveTask: () => done,
+      seatIo: () => ({ teardown: () => { order.push('teardown'); return [] } }),
+      driveTask: () => ({ status: 'done', summary: 'done', artifacts: [], details: {} }),
     })
-    const envelope = JSON.parse(readFileSync(f.taskReturn, 'utf8'))
-    assert.equal(activeDelivery, true)
+    assert.equal(result.status, 'done')
     assert.deepEqual(order, ['envelope', 'teardown'])
-    assert.equal(envelope.status, 'escalation')
-    assert.equal(envelope.details.escalation.where, 'signalled')
-    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'escalation')
-    assert.deepEqual(kills, [[4242, 'SIGTERM']])
+    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'done')
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
-test('the child arms its teardown signals outside the drive and never across it', () => {
+test('the child arms no teardown signal handler at any point in a run', () => {
   const f = childSignalFixture()
-  const handlers = new Map()
-  const seenOn = []
-  const proc = {
-    pid: 4242,
-    on(signal, handler) { seenOn.push(signal); handlers.set(signal, handler); return this },
-    off(signal, handler) { if (handlers.get(signal) === handler) handlers.delete(signal); return this },
-    kill() { return true },
-  }
-  let duringDrive = null
+  // The 2026-08-11 convention's own prescription: INSTRUMENT the OS-level
+  // listener count through the code path rather than reading that a
+  // registration happened. Every stretch a daemon reap can land in is sampled.
+  const counts = () => ['SIGTERM', 'SIGINT'].map((signal) => process.listenerCount(signal))
+  const before = counts()
+  const seen = {}
   try {
     runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
       preflight: false,
-      proc,
       env: { DEVTEAM_LEDGER_DB: f.ledger },
-      seatIo: () => ({ teardown: () => [] }),
-      driveTask: () => {
-        duringDrive = [...handlers.keys()]
-        return { status: 'done', summary: 'done', artifacts: [], details: {} }
+      // The FIRST call after seatIo and the FIRST call inside settle are both
+      // sampled: a listener armed only across one of them would be invisible to
+      // a probe that watched just the later log and teardown callbacks.
+      checkoutProtectedPaths: () => {
+        seen['protected-paths checkout'] = counts()
+        return { paths: [], used: false, reason: 'test-double', basis: 'test double' }
       },
+      writeFileSync: (path, data, options) => {
+        if (String(path) === f.taskReturn) seen['settlement envelope write'] ??= counts()
+        writeFileSync(path, data, options)
+      },
+      seatIo: () => ({
+        log: () => { seen['post-seatIo preflight'] ??= counts() },
+        teardown: () => { seen['settlement teardown'] = counts(); return [] },
+      }),
+      driveTask: () => { seen.drive = counts(); return { status: 'done', summary: 'done', artifacts: [], details: {} } },
     })
-    assert.deepEqual([...new Set(seenOn)].sort(), [...TEARDOWN_SIGNALS].sort())
-    assert.deepEqual(duringDrive, [])
-    assert.deepEqual([...handlers.keys()], [])
+    seen.after = counts()
+    for (const where of [
+      'protected-paths checkout', 'post-seatIo preflight', 'drive',
+      'settlement envelope write', 'settlement teardown', 'after',
+    ]) {
+      assert.deepEqual(seen[where], before, where)
+    }
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
 test('a real SIGTERM still kills a child mid-drive without waiting for the drive', async () => {
   const f = childSignalFixture()
-  const harness = join(f.root, 'signal-harness.mjs')
-  writeFileSync(harness, `import { runChild } from ${JSON.stringify(new URL('./child.mjs', import.meta.url).href)}
-runChild({
-  crew_dir: ${JSON.stringify(f.crewDir)}, task: 'child-signal',
-  brief_file: ${JSON.stringify(f.brief)}, checkout: ${JSON.stringify(f.root)},
-  ledger_db: ${JSON.stringify(f.ledger)},
-}, {
-  preflight: false,
-  env: { DEVTEAM_LEDGER_DB: ${JSON.stringify(f.ledger)} },
-  seatIo: () => ({ teardown: () => [] }),
-  driveTask: () => {
-    process.stdout.write('drive-start\\n')
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000)
-    return { status: 'done', summary: 'late', artifacts: [], details: {} }
-  },
-})
-`)
-  let child
   try {
-    child = spawn(process.execPath, [harness], { stdio: ['ignore', 'pipe', 'pipe'] })
-    const outcome = await new Promise((resolve, reject) => {
-      let started = false
-      let sentAt = null
-      let settled = false
-      const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000)
-      const finish = (value, failed = false) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (failed) reject(value)
-        else resolve(value)
-      }
-      child.once('error', (err) => finish(err, true))
-      child.stdout.on('data', (chunk) => {
-        if (started || !String(chunk).includes('drive-start')) return
-        started = true
-        sentAt = Date.now()
-        child.kill('SIGTERM')
-      })
-      child.stderr.on('data', () => {})
-      child.once('exit', (code, signal) => finish({ started, code, signal, elapsed: sentAt == null ? null : Date.now() - sentAt }))
-    })
-    assert.equal(outcome.started, true)
-    assert.equal(outcome.signal, 'SIGTERM')
-    assert.ok(outcome.elapsed < 5000)
-  } finally {
-    if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGKILL')
-    rmSync(f.root, { recursive: true, force: true })
-  }
+    const outcome = await sigtermWhileBlocked(f, `runChild(spec, { preflight: false, env,
+  seatIo: () => ({ teardown: () => [] }),
+  driveTask: () => { block(); return { status: 'done', summary: 'late', artifacts: [], details: {} } },
+})`)
+    assertKilledBySigterm(outcome, 'the drive')
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
 test('a real SIGTERM during synchronous preflight keeps the default disposition', async () => {
   const f = childSignalFixture()
-  const harness = join(f.root, 'preflight-signal-harness.mjs')
-  writeFileSync(harness, `import { runChild } from ${JSON.stringify(new URL('./child.mjs', import.meta.url).href)}
-runChild({
-  crew_dir: ${JSON.stringify(f.crewDir)}, task: 'child-signal',
-  brief_file: ${JSON.stringify(f.brief)}, checkout: ${JSON.stringify(f.root)},
-  ledger_db: ${JSON.stringify(f.ledger)},
-}, {
-  execSync: () => {
-    process.stdout.write('preflight-start\\n')
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)
-    return ''
-  },
-  env: { DEVTEAM_LEDGER_DB: ${JSON.stringify(f.ledger)} },
-  seatIo: () => ({ teardown: () => [] }),
-  driveTask: () => {
-    process.stdout.write('drive-start\\n')
-    return { status: 'done', summary: 'late', artifacts: [], details: {} }
-  },
-})
-`)
-  let child
   try {
-    child = spawn(process.execPath, [harness], { stdio: ['ignore', 'pipe', 'pipe'] })
-    const outcome = await new Promise((resolve, reject) => {
-      let started = false
-      let sentAt = null
-      let settled = false
-      const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000)
-      const finish = (value, failed = false) => {
-        if (settled) return
-        settled = true
-        clearTimeout(timer)
-        if (failed) reject(value)
-        else resolve(value)
-      }
-      child.once('error', (err) => finish(err, true))
-      child.stdout.on('data', (chunk) => {
-        if (started || !String(chunk).includes('preflight-start')) return
-        started = true
-        sentAt = Date.now()
-        child.kill('SIGTERM')
-      })
-      child.stderr.on('data', () => {})
-      child.once('exit', (code, signal) => finish({ started, code, signal, elapsed: sentAt == null ? null : Date.now() - sentAt }))
-    })
-    assert.equal(outcome.started, true)
-    assert.equal(outcome.signal, 'SIGTERM')
-    assert.ok(outcome.elapsed < 5000)
+    const outcome = await sigtermWhileBlocked(f, `runChild(spec, { env,
+  execSync: () => { block(); return '' },
+  seatIo: () => ({ teardown: () => [] }),
+  driveTask: () => ({ status: 'done', summary: 'late', artifacts: [], details: {} }),
+})`)
+    assertKilledBySigterm(outcome, 'preflight')
+    // A reap before settle() leaves no envelope. That residual is covered by the
+    // daemon's settleSignalled, never by the child (crew/daemon.mjs).
     assert.equal(existsSync(f.taskReturn), false)
-  } finally {
-    if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGKILL')
-    rmSync(f.root, { recursive: true, force: true })
-  }
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+test('a real SIGTERM in the post-seatIo preflight window keeps the default disposition', async () => {
+  const f = childSignalFixture()
+  try {
+    const outcome = await sigtermWhileBlocked(f, `runChild(spec, { preflight: false, env,
+  checkoutProtectedPaths: () => { block(); return { paths: [], used: false, reason: 'test-double', basis: 'test double' } },
+  seatIo: () => ({ log: () => {}, teardown: () => [] }),
+  driveTask: () => ({ status: 'done', summary: 'late', artifacts: [], details: {} }),
+})`)
+    assertKilledBySigterm(outcome, 'the post-seatIo preflight window')
+    assert.equal(existsSync(f.taskReturn), false)
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+test('a real SIGTERM during settlement keeps the default disposition', async () => {
+  const f = childSignalFixture()
+  try {
+    const outcome = await sigtermWhileBlocked(f, `runChild(spec, { preflight: false, env,
+  writeFileSync: (path, data, options) => { realWrite(path, data, options); if (String(path) === taskReturn) block() },
+  seatIo: () => ({ log: () => {}, teardown: () => [] }),
+  driveTask: () => ({ status: 'done', summary: 'ok', artifacts: [], details: {} }),
+})`)
+    assertKilledBySigterm(outcome, 'the settlement window')
+    // The signal lands inside settle's OWN envelope write, the first thing it
+    // does, and the bytes are already on disk when it does: a reap anywhere in
+    // this window loses the teardown sweep that follows, never the run's record.
+    assert.equal(existsSync(f.taskReturn), true)
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
 test('run exits 3 on an escalation, 0 on done, and 1 on anything else', () => {

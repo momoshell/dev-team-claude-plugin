@@ -21,6 +21,20 @@ import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
 
+// Ledger sandbox (#432): every ledger writer this file drives resolves its db
+// through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
+// module-scope assignment — set before any test runs, not per call — is what
+// keeps the operator's ~/.dev-team/factory/ledger.db out of reach. Restored,
+// and the directory removed, in after().
+const LEDGER_SANDBOX = mkdtempSync(join(tmpdir(), 'b117-ledger-sandbox-'))
+const LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
+process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX
+after(() => {
+  if (LEDGER_SANDBOX_PREVIOUS === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+  else process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX_PREVIOUS
+  rmSync(LEDGER_SANDBOX, { recursive: true, force: true })
+})
+
 const HERE = dirname(fileURLToPath(import.meta.url))
 const DAEMON_SOURCE = readFileSync(join(HERE, 'daemon.mjs'), 'utf8')
 const CHILD_SOURCE = readFileSync(join(HERE, 'child.mjs'), 'utf8')

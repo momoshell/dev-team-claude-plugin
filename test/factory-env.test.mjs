@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { ROOT } from './helpers.mjs'
 import { NODE_FLOOR } from '../scripts/factory/ledger.mjs'
@@ -62,4 +62,63 @@ test('config.md review_defaults section documents scripts/factory/*.mjs', () => 
   const nextHeadingIdx = rest.indexOf('\n## ')
   const section = nextHeadingIdx === -1 ? rest : rest.slice(0, nextHeadingIdx)
   assert.ok(section.includes('scripts/factory/*.mjs'), 'review_defaults section is missing scripts/factory/*.mjs')
+})
+
+// Ledger sandbox tripwire (#432). A test file that drives openRun() writes rows
+// through DEVTEAM_LEDGER_DIR || homedir()/.dev-team/factory
+// (scripts/factory/ledger.mjs:2903). crew/crew.test.mjs and crew/daemon.test.mjs
+// wrote 13 and 7 records into the operator's live register before this lane;
+// this tripwire is what stops the next such file doing it silently. The sandbox
+// must be at MODULE SCOPE — a column-0 assignment, before any test runs —
+// because per-call wrapping is precisely what leaked.
+const LEDGER_WRITER_KEY = 'openRun('
+const LEDGER_SANDBOX_ASSIGNMENT = /^process\.env\.DEVTEAM_LEDGER_(DIR|DB) = /m
+// Measured 2026-08-21 under a sentinel HOME: each of these runs openRun() with
+// an explicit dbPath under a per-test temp stateDir and creates nothing under
+// ~/.dev-team. An exemption is a deliberate, reviewed entry — never silence.
+const LEDGER_SANDBOX_EXEMPT = new Map([
+  ['test/factory-emit.test.mjs', 'passes an explicit dbPath under a per-test temp stateDir; measured to create nothing under a sentinel HOME'],
+  ['test/factory-emit-floor.test.mjs', 'passes an explicit dbPath under a per-test temp stateDir; measured to create nothing under a sentinel HOME'],
+  ['test/factory-ledger.test.mjs', 'sets DEVTEAM_LEDGER_DB per call and passes explicit db paths; measured to create nothing under a sentinel HOME'],
+])
+const TRIPWIRE_SELF = 'test/factory-env.test.mjs'
+
+function ledgerSandboxVerdict(source) {
+  if (!source.includes(LEDGER_WRITER_KEY)) return 'not-a-writer'
+  return LEDGER_SANDBOX_ASSIGNMENT.test(source) ? 'sandboxed' : 'unsandboxed'
+}
+
+function testFilesUnder(dir) {
+  return readdirSync(join(ROOT, dir), { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile() && entry.name.endsWith('.test.mjs'))
+    .map((entry) => join(entry.parentPath, entry.name).slice(ROOT.length + 1))
+}
+
+test('ledger sandbox tripwire — every test file that drives a ledger writer sandboxes it at module scope', () => {
+  const offenders = []
+  for (const file of [...testFilesUnder('crew'), ...testFilesUnder('test')]) {
+    if (file === TRIPWIRE_SELF) continue
+    if (LEDGER_SANDBOX_EXEMPT.has(file)) continue
+    if (ledgerSandboxVerdict(readFileSync(join(ROOT, file), 'utf8')) === 'unsandboxed') offenders.push(file)
+  }
+  assert.deepEqual(offenders, [], `these files drive ${LEDGER_WRITER_KEY}) with no module-scope DEVTEAM_LEDGER_DIR sandbox, so they write into the operator's ~/.dev-team/factory: ${offenders.join(', ')}`)
+})
+
+test('ledger sandbox tripwire — the verdict accepts a module-scope sandbox and rejects a per-call one', () => {
+  const writer = ['openRun({ stateDir })', ''].join('\n')
+  assert.equal(ledgerSandboxVerdict(`${writer}process.env.DEVTEAM_LEDGER_DIR = dir\n`), 'sandboxed')
+  assert.equal(ledgerSandboxVerdict(`${writer}  process.env.DEVTEAM_LEDGER_DIR = dir\n`), 'unsandboxed')
+  assert.equal(ledgerSandboxVerdict(`${writer}const dir = tmpdir()\n`), 'unsandboxed')
+  assert.equal(ledgerSandboxVerdict('const x = 1\n'), 'not-a-writer')
+})
+
+test('ledger sandbox tripwire — every exemption names a live writer file', () => {
+  for (const [file, why] of LEDGER_SANDBOX_EXEMPT) {
+    const source = readFileSync(join(ROOT, file), 'utf8')
+    assert.ok(source.includes(LEDGER_WRITER_KEY), `exemption ${file} no longer drives ${LEDGER_WRITER_KEY}) — delete it`)
+    assert.ok(why.length > 20, `exemption ${file} carries no reason`)
+  }
+  for (const file of ['crew/crew.test.mjs', 'crew/daemon.test.mjs']) {
+    assert.ok(!LEDGER_SANDBOX_EXEMPT.has(file), `${file} is the leak this tripwire exists for and may never be exempted`)
+  }
 })

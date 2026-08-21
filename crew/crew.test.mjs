@@ -18,6 +18,7 @@ import {
   advisorManifest, assertAdvisorManifest,
 } from './crew.mjs'
 import { runChild, TEARDOWN_SIGNALS, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
+import { daemon } from './daemon.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
   LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
@@ -985,6 +986,8 @@ test('resolveLaneFence takes both flags or neither', () => {
 test('attended and child entrypoints resolve validation lanes identically', () => {
   const table = [
     [{}, { lane: null, source: 'none' }],
+    [{ lane: null }, { lane: null, source: 'none' }],
+    [{ validationLane: null }, { lane: null, source: 'none' }],
     [{ validationLane: '  node --test  ' }, { lane: 'node --test', source: 'validation-lane' }],
     [{ lane: '  npm test  ' }, { lane: 'npm test', source: 'lane' }],
     [{ lane: 'fence-register-name', fences: 'register.json' }, { lane: null, source: 'none' }],
@@ -1001,6 +1004,62 @@ test('attended and child entrypoints resolve validation lanes identically', () =
       })
       assert.throws(() => resolver({ lane: raw }), (err) => err.reason === 'invalid-validation-lane')
     }
+  }
+})
+
+// The resolver's absence rule pinned against the value the DAEMON actually
+// sends: enqueue normalises a missing lane to null (crew/daemon.mjs:1091) and
+// childSpecFor forwards it unconditionally (:948). Calling the resolver
+// directly is what the shared table above does and what hid #438, so this
+// fixture goes through the fork seam instead.
+test('daemon enqueue without a lane forwards null and the child resolves it', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'crew-daemon-null-lane-'))
+  const crewDir = join(dir, 'crew')
+  const returnsDir = join(crewDir, 'returns')
+  mkdirSync(join(crewDir, 'task'), { recursive: true })
+  mkdirSync(returnsDir, { recursive: true })
+  const roles = ['planner', 'builder', 'reviewer']
+  const brief = join(dir, 'brief.md')
+  writeFileSync(brief, '# daemon null lane brief\n')
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'daemon-null-lane', checkout: dir, roles,
+    members: Object.fromEntries(roles.map((role) => [role, {
+      surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude',
+    }])),
+    task_return: join(returnsDir, 'task.json'),
+  }))
+  writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  const forks = []
+  let clock = 1
+  const d = daemon({
+    root: join(dir, 'daemon'),
+    deps: {
+      pid: 700, now: () => clock++, uuid: (() => { let n = 0; return () => `run-${++n}` })(),
+      fork(...args) { forks.push(args); return { pid: 900, on() {}, kill() {}, unref() {}, disconnect() {} } },
+      kill: () => true, setInterval: () => null, clearInterval: () => {},
+    },
+  })
+  try {
+    d.enqueue({ crew_dir: crewDir, task: 'daemon-null-lane', checkout: dir, brief_file: brief })
+    assert.equal(forks.length, 1)
+    const spec = JSON.parse(forks[0][1][1])
+    assert.equal(spec.lane, null, 'the daemon normalises an absent lane to null')
+    let seen = null
+    let drove = 0
+    const rows = []
+    runChild(spec, {
+      preflight: false,
+      seatIo: () => ({ log: (row) => rows.push(row) }),
+      driveTask: (ctx) => { drove += 1; seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
+      env: { DEVTEAM_LEDGER_DB: join(dir, 'ledger.db') },
+    })
+    assert.equal(drove, 1)
+    assert.equal(seen.lane, null)
+    const row = rows.find((entry) => entry.event === 'validation-lane')
+    assert.deepEqual(row, { at: row.at, event: 'validation-lane', lane: null, source: 'none' })
+  } finally {
+    await d.stop()
+    rmSync(dir, { recursive: true, force: true })
   }
 })
 

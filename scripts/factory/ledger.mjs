@@ -3655,8 +3655,12 @@ export function main(argv) {
       const rows = ledger.ciCycles({ since, until })
       const dispatches = ledger.ciDispatches({ since, until })
       if (ledger.stats().degraded) refuse('ci-cycles: the ledger mirror is degraded — this window is unanswerable, not empty')
-      const watched = rows.reduce((n, row) => n + Number(row.count ?? 0), 0)
-      const caught = rows.reduce((n, row) => n + (row.classification === 'reproduced' ? Number(row.count ?? 0) : 0), 0)
+      // A window with no `ci_cycles` rows was NOT WATCHED — the honesty rule
+      // seat-teardowns already follows (docs/ledger-queries.md). A window that
+      // WAS watched and reproduced nothing still reports a real measured zero.
+      const watchedWindow = rows.length > 0
+      const watched = watchedWindow ? rows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null
+      const caught = watchedWindow ? rows.reduce((n, row) => n + (row.classification === 'reproduced' ? Number(row.count ?? 0) : 0), 0) : null
       stdout.write(`${JSON.stringify({
         schema: 1,
         question: "How often does CI catch what the local lane missed, and does one repair cycle fix it?",
@@ -3664,10 +3668,16 @@ export function main(argv) {
         classifications: CI_CLASSIFICATIONS,
         decisions: CI_DECISIONS,
         dispatch_outcomes: CI_DISPATCH_OUTCOMES,
+        definition: {
+          unit: 'one watched cycle: one check, on one head, on one cycle number',
+          absent: 'null with an `absent` marker means the window was never watched — never watched-and-green',
+        },
+        measured: watchedWindow,
         watched,
         caught,
         rows,
         dispatches,
+        absent: watchedWindow ? null : { ci_cycles: 'no ci_cycles rows in this window — not watched, never watched-and-green; any ci_dispatches rows are listed unaggregated beside this marker' },
       })}\n`)
       return 0
     }
@@ -3683,9 +3693,12 @@ export function main(argv) {
       const refusalRows = ledger.intakeRefusals({ since, until })
       const dispatches = ledger.intakeDispatches({ since, until })
       if (ledger.stats().degraded) refuse('intake-sweeps: the ledger mirror is degraded — this window is unanswerable, not empty')
-      const swept = rows.reduce((n, row) => n + Number(row.count ?? 0), 0)
-      const picked = rows.reduce((n, row) => n + (row.outcome === 'picked' ? Number(row.count ?? 0) : 0), 0)
-      const parked = rows.reduce((n, row) => n + (row.outcome === 'parked' ? Number(row.count ?? 0) : 0), 0)
+      // A window with no sweep rows was NOT SWEPT (docs/ledger-queries.md); a
+      // window that WAS swept and picked nothing still reports a measured zero.
+      const sweptWindow = rows.length > 0
+      const swept = sweptWindow ? rows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null
+      const picked = sweptWindow ? rows.reduce((n, row) => n + (row.outcome === 'picked' ? Number(row.count ?? 0) : 0), 0) : null
+      const parked = sweptWindow ? rows.reduce((n, row) => n + (row.outcome === 'parked' ? Number(row.count ?? 0) : 0), 0) : null
       stdout.write(`${JSON.stringify({
         schema: 1,
         question: 'Why is the queue not moving — and what did the loop actually do?',
@@ -3694,12 +3707,18 @@ export function main(argv) {
         outcomes: INTAKE_OUTCOMES,
         refusals: INTAKE_REFUSALS,
         dispatch_outcomes: INTAKE_DISPATCH_OUTCOMES,
+        definition: {
+          unit: 'one sweep; refusal rows are candidates',
+          absent: 'null with an `absent` marker means the window was never swept — never swept-and-empty',
+        },
+        measured: sweptWindow,
         swept,
         picked,
         parked,
         rows,
         refusal_rows: refusalRows,
         dispatches,
+        absent: sweptWindow ? null : { intake_sweeps: 'no intake_sweeps rows in this window — not swept, never swept-and-empty; any refusal or dispatch rows are listed unaggregated beside this marker' },
       })}\n`)
       return 0
     }

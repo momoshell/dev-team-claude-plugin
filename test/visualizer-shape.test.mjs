@@ -1,12 +1,19 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, readdirSync } from 'node:fs'
+import { createRequire } from 'node:module'
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { INTAKE_REFUSAL_REASONS, INTAKE_WINDOW_MS, defaultCellWindow, defaultIntakeWindow, defaultRunSetWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeGateChecks, shapeIntake, shapeRunSet, shapeRun, foldAgents, laneFor, matchesFilters, ROLE_ORDER, withCells } from '../visualizer/server/shape.mjs'
+import { startServer } from '../visualizer/server/server.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
-import { INTAKE_REFUSALS } from '../scripts/factory/ledger.mjs'
+import { INTAKE_REFUSALS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
+
+const require = createRequire(import.meta.url)
+function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
+const SQLITE_SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 
 const start = '2024-01-01T00:00:00.000Z'
 const end = '2024-01-01T00:00:02.000Z'
@@ -326,6 +333,101 @@ test('shapeRunSet reports an absent readout as unanswerable, not empty', () => {
   assert.equal(result.runs, null)
   assert.deepEqual(result.rows, [])
   assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
+})
+
+test('shapeRunSet marks a degraded ledger read absent instead of a measured zero', () => {
+  const result = shapeRunSet({
+    rows: [], degraded: true, degraded_reason: 'ERR_SQLITE_ERROR',
+    since: start, until: end, label: 'last 24 hours',
+  })
+  assert.equal(result.degraded, true)
+  assert.equal(result.degraded_reason, 'ERR_SQLITE_ERROR')
+  assert.match(result.absent, /ERR_SQLITE_ERROR/)
+  assert.equal(result.runs, null)
+  assert.equal(result.settled, null)
+  assert.deepEqual(result.rows, [])
+  assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
+})
+
+test('shapeRunSet keeps a healthy zero-run window a measured zero', () => {
+  const result = shapeRunSet({
+    rows: [], degraded: false, degraded_reason: null,
+    since: start, until: end, label: 'last 24 hours',
+  })
+  assert.equal(result.absent, null)
+  assert.equal(result.degraded, false)
+  assert.equal(result.degraded_reason, null)
+  assert.equal(result.runs, 0)
+  assert.deepEqual(result.settled, { running: 0, ok: 0, fail: 0, aborted: 0 })
+})
+
+test('shapeRunSet marks a degraded ledger read absent with the flag read after the query', { skip: SQLITE_SKIP }, () => {
+  const temp = mkdtempSync(join(tmpdir(), 'degraded-run-set-'))
+  const dbPath = join(temp, 'ledger.db')
+  writeFileSync(dbPath, 'this file is not a sqlite database')
+  let ledger = null
+  try {
+    ledger = openLedger({ dbPath, stderr: { write: () => true } })
+    assert.equal(ledger.stats().degraded, false)
+    const rows = ledger.runSet({ since: start })
+    const after = ledger.stats()
+    assert.deepEqual(rows, [])
+    assert.equal(after.degraded, true)
+    assert.equal(after.degraded_reason, 'ERR_SQLITE_ERROR')
+    const result = shapeRunSet({
+      rows, degraded: after.degraded, degraded_reason: after.degraded_reason,
+      since: start, until: end, label: 'last 24 hours',
+    })
+    assert.ok(result.absent.includes(after.degraded_reason))
+    assert.equal(result.runs, null)
+    assert.doesNotMatch(JSON.stringify(result), /"runs":\s*0/)
+  } finally {
+    try { ledger?.close() } finally { rmSync(temp, { recursive: true, force: true }) }
+  }
+})
+
+test('the run-set route reads the feed degraded flag after the query it reports on', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
+  const routeStart = source.indexOf("if (url.pathname === '/api/run-set')")
+  const routeEnd = source.indexOf("if (url.pathname === '/api/", routeStart + 1)
+  assert.ok(routeStart >= 0)
+  assert.ok(routeEnd > routeStart)
+  const route = source.slice(routeStart, routeEnd)
+  assert.match(route, /degraded: runSetHealth\?\.degraded === true/)
+  assert.match(route, /degraded_reason: runSetReason/)
+  assert.ok(route.indexOf('feed.runSet(') < route.indexOf('feed.health()'))
+})
+
+test('the run-set route keeps healthy ledger rows measured when triage is degraded', async () => {
+  const calls = []
+  const feed = {
+    runSet: () => { calls.push('runSet'); return { rows: [{ status: 'ok' }] } },
+    health: () => { calls.push('health'); return { degraded: true } },
+    _reason: () => { calls.push('reason'); return null },
+    budgetWindow: () => ({ measured: false, total: null, sessions: null, absent: 'not measured in this fixture' }),
+    close: () => {},
+  }
+  const { server } = startServer({ feed, port: 0, host: '127.0.0.1' })
+  let listening = false
+  try {
+    await new Promise((resolve, reject) => {
+      server.once('error', reject)
+      server.once('listening', resolve)
+    })
+    listening = true
+    const address = server.address()
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/run-set?since=${encodeURIComponent(start)}&until=${encodeURIComponent(end)}`)
+    const result = await response.json()
+    assert.equal(response.status, 200)
+    assert.equal(result.absent, null)
+    assert.equal(result.degraded, false)
+    assert.equal(result.degraded_reason, null)
+    assert.equal(result.runs, 1)
+    assert.deepEqual(result.settled, { running: 0, ok: 1, fail: 0, aborted: 0 })
+    assert.deepEqual(calls.slice(0, 3), ['runSet', 'health', 'reason'])
+  } finally {
+    if (listening) await new Promise((resolve) => server.close(resolve))
+  }
 })
 
 test('defaultRunSetWindow states a 24-hour open-ended window', () => {

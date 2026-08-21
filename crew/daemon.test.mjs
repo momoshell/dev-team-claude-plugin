@@ -999,7 +999,7 @@ test('a post-record continuation launch reaps the child it already forked', asyn
     const originalKill = f.deps.kill
     f.deps.kill = (pid, signal) => {
       kills.push([pid, signal])
-      if (signal !== 0) f.alive.delete(pid)
+      if (signal !== 0) f.alive.delete(Math.abs(pid))
       return originalKill(pid, signal)
     }
     f.d = daemon({ root: f.root, deps: f.deps })
@@ -1015,7 +1015,8 @@ test('a post-record continuation launch reaps the child it already forked', asyn
     }))
     f.d.poll()
     const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
-    assert.equal(kills.some(([pid, signal]) => pid === 900 && signal !== 0), true)
+    assert.equal(kills.some(([pid, signal]) => pid === -900 && signal !== 0), true)
+    assert.equal(kills.some(([pid, signal]) => pid === 900 && signal !== 0), false)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'settled').length, 1)
     assert.equal(records.filter((record) => record.run_id === run && record.kind === 'orphaned').length, 0)
@@ -1032,6 +1033,53 @@ test('a post-record continuation launch reaps the child it already forked', asyn
     assert.equal(f.alive.has(900), false)
     if (f.alive.has(900)) writeFileSync(returnFor(f, run), JSON.stringify({ status: 'done', details: {} }, null, 2))
     assert.equal(f.d.result({ run }).outcome, 'escalation')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a reap never signals a pgid it must not own', async () => {
+  const f = fixture()
+  try {
+    const kills = []
+    f.deps.fork = (...args) => {
+      const handlers = {}
+      const child = {
+        pid: 1,
+        on(event, fn) { handlers[event] = fn; return this },
+        unref() {},
+      }
+      f.forks.push(args)
+      return child
+    }
+    f.alive.add(1)
+    let started = 0
+    const originalAppend = appendFileSync
+    f.deps.appendFileSync = (path, data, options) => {
+      if (String(data).includes('"kind":"started"')) {
+        started += 1
+        if (started === 2) throw new Error('started record failed')
+      }
+      return originalAppend(path, data, options)
+    }
+    const originalKill = f.deps.kill
+    f.deps.kill = (pid, signal) => {
+      kills.push([pid, signal])
+      return originalKill(pid, signal)
+    }
+    f.d = daemon({ root: f.root, deps: f.deps })
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 1, findings: [] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    writeFileSync(returnFor(f, run), JSON.stringify({
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'started record fails after fork' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+      },
+    }))
+    f.d.poll()
+    assert.deepEqual(kills.filter(([, signal]) => signal !== 0), [])
+    assert.equal(f.d.result({ run }).outcome, 'escalation')
+    assert.equal(f.d.state({ run }).state, 'done')
   } finally { await f.d.stop(); f.cleanup() }
 })
 

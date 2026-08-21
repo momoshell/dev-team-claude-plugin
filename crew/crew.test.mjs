@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
-import { execSync } from 'node:child_process'
+import { execSync, spawn } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
@@ -10,13 +10,13 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
   advisorManifest, assertAdvisorManifest,
 } from './crew.mjs'
-import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
+import { runChild, TEARDOWN_SIGNALS, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
   LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
@@ -1105,6 +1105,246 @@ test('daemon path records the brief proposal with or without the crew.json brief
   assert.ok(withoutKey)
   assert.equal(withoutKey.proposed_shape, 'mechanical')
   assert.equal(withoutKey.proposed_strength, 'workhorse')
+})
+
+function childSignalFixture() {
+  const root = mkdtempSync(join(tmpdir(), 'crew-child-signal-'))
+  const crewDir = join(root, 'crew')
+  const returnsDir = join(crewDir, 'returns')
+  mkdirSync(join(crewDir, 'task'), { recursive: true })
+  mkdirSync(returnsDir, { recursive: true })
+  const taskReturn = join(returnsDir, 'task.json')
+  const brief = join(crewDir, 'brief.md')
+  writeFileSync(brief, '# child signal brief\n')
+  writeFileSync(join(crewDir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task: 'child-signal', checkout: root,
+    roles: ['planner', 'builder', 'reviewer'],
+    members: Object.fromEntries(['planner', 'builder', 'reviewer'].map((role) => [role, {
+      surface_id: null, pane_id: null, transport: 'headless-json', model: 'sonnet', agent: 'claude',
+    }])),
+    task_return: taskReturn,
+  }))
+  writeFileSync(join(crewDir, 'journal.jsonl'), '')
+  return { root, crewDir, taskReturn, brief, ledger: join(root, 'ledger.db') }
+}
+
+test('a signalled child settles its envelope before its teardown and only once', () => {
+  const f = childSignalFixture()
+  const order = []
+  const handlers = new Map()
+  let activeDelivery = false
+  let deliver = true
+  const kills = []
+  const proc = {
+    pid: 4242,
+    on(signal, handler) {
+      handlers.set(signal, handler)
+      if (signal === 'SIGTERM' && deliver) { deliver = false; activeDelivery = true; handler() }
+      return this
+    },
+    off(signal, handler) { if (handlers.get(signal) === handler) handlers.delete(signal); return this },
+    kill(pid, signal) { kills.push([pid, signal]); return true },
+  }
+  const io = { teardown: () => { order.push('teardown'); return [] } }
+  const done = { status: 'done', summary: 'late done', artifacts: [], details: {} }
+  try {
+    runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
+      preflight: false,
+      proc,
+      env: { DEVTEAM_LEDGER_DB: f.ledger },
+      writeFileSync: (path, data, options) => {
+        if (String(path) === f.taskReturn) order.push('envelope')
+        writeFileSync(path, data, options)
+      },
+      seatIo: () => io,
+      driveTask: () => done,
+    })
+    const envelope = JSON.parse(readFileSync(f.taskReturn, 'utf8'))
+    assert.equal(activeDelivery, true)
+    assert.deepEqual(order, ['envelope', 'teardown'])
+    assert.equal(envelope.status, 'escalation')
+    assert.equal(envelope.details.escalation.where, 'signalled')
+    assert.equal(JSON.parse(readFileSync(f.taskReturn, 'utf8')).status, 'escalation')
+    assert.deepEqual(kills, [[4242, 'SIGTERM']])
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+test('the child arms its teardown signals outside the drive and never across it', () => {
+  const f = childSignalFixture()
+  const handlers = new Map()
+  const seenOn = []
+  const proc = {
+    pid: 4242,
+    on(signal, handler) { seenOn.push(signal); handlers.set(signal, handler); return this },
+    off(signal, handler) { if (handlers.get(signal) === handler) handlers.delete(signal); return this },
+    kill() { return true },
+  }
+  let duringDrive = null
+  try {
+    runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
+      preflight: false,
+      proc,
+      env: { DEVTEAM_LEDGER_DB: f.ledger },
+      seatIo: () => ({ teardown: () => [] }),
+      driveTask: () => {
+        duringDrive = [...handlers.keys()]
+        return { status: 'done', summary: 'done', artifacts: [], details: {} }
+      },
+    })
+    assert.deepEqual([...new Set(seenOn)].sort(), [...TEARDOWN_SIGNALS].sort())
+    assert.deepEqual(duringDrive, [])
+    assert.deepEqual([...handlers.keys()], [])
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+test('a real SIGTERM still kills a child mid-drive without waiting for the drive', async () => {
+  const f = childSignalFixture()
+  const harness = join(f.root, 'signal-harness.mjs')
+  writeFileSync(harness, `import { runChild } from ${JSON.stringify(new URL('./child.mjs', import.meta.url).href)}
+runChild({
+  crew_dir: ${JSON.stringify(f.crewDir)}, task: 'child-signal',
+  brief_file: ${JSON.stringify(f.brief)}, checkout: ${JSON.stringify(f.root)},
+  ledger_db: ${JSON.stringify(f.ledger)},
+}, {
+  preflight: false,
+  env: { DEVTEAM_LEDGER_DB: ${JSON.stringify(f.ledger)} },
+  seatIo: () => ({ teardown: () => [] }),
+  driveTask: () => {
+    process.stdout.write('drive-start\\n')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20000)
+    return { status: 'done', summary: 'late', artifacts: [], details: {} }
+  },
+})
+`)
+  let child
+  try {
+    child = spawn(process.execPath, [harness], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const outcome = await new Promise((resolve, reject) => {
+      let started = false
+      let sentAt = null
+      let settled = false
+      const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000)
+      const finish = (value, failed = false) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (failed) reject(value)
+        else resolve(value)
+      }
+      child.once('error', (err) => finish(err, true))
+      child.stdout.on('data', (chunk) => {
+        if (started || !String(chunk).includes('drive-start')) return
+        started = true
+        sentAt = Date.now()
+        child.kill('SIGTERM')
+      })
+      child.stderr.on('data', () => {})
+      child.once('exit', (code, signal) => finish({ started, code, signal, elapsed: sentAt == null ? null : Date.now() - sentAt }))
+    })
+    assert.equal(outcome.started, true)
+    assert.equal(outcome.signal, 'SIGTERM')
+    assert.ok(outcome.elapsed < 5000)
+  } finally {
+    if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGKILL')
+    rmSync(f.root, { recursive: true, force: true })
+  }
+})
+
+test('a real SIGTERM during synchronous preflight keeps the default disposition', async () => {
+  const f = childSignalFixture()
+  const harness = join(f.root, 'preflight-signal-harness.mjs')
+  writeFileSync(harness, `import { runChild } from ${JSON.stringify(new URL('./child.mjs', import.meta.url).href)}
+runChild({
+  crew_dir: ${JSON.stringify(f.crewDir)}, task: 'child-signal',
+  brief_file: ${JSON.stringify(f.brief)}, checkout: ${JSON.stringify(f.root)},
+  ledger_db: ${JSON.stringify(f.ledger)},
+}, {
+  execSync: () => {
+    process.stdout.write('preflight-start\\n')
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 1000)
+    return ''
+  },
+  env: { DEVTEAM_LEDGER_DB: ${JSON.stringify(f.ledger)} },
+  seatIo: () => ({ teardown: () => [] }),
+  driveTask: () => {
+    process.stdout.write('drive-start\\n')
+    return { status: 'done', summary: 'late', artifacts: [], details: {} }
+  },
+})
+`)
+  let child
+  try {
+    child = spawn(process.execPath, [harness], { stdio: ['ignore', 'pipe', 'pipe'] })
+    const outcome = await new Promise((resolve, reject) => {
+      let started = false
+      let sentAt = null
+      let settled = false
+      const timer = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 5000)
+      const finish = (value, failed = false) => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (failed) reject(value)
+        else resolve(value)
+      }
+      child.once('error', (err) => finish(err, true))
+      child.stdout.on('data', (chunk) => {
+        if (started || !String(chunk).includes('preflight-start')) return
+        started = true
+        sentAt = Date.now()
+        child.kill('SIGTERM')
+      })
+      child.stderr.on('data', () => {})
+      child.once('exit', (code, signal) => finish({ started, code, signal, elapsed: sentAt == null ? null : Date.now() - sentAt }))
+    })
+    assert.equal(outcome.started, true)
+    assert.equal(outcome.signal, 'SIGTERM')
+    assert.ok(outcome.elapsed < 5000)
+    assert.equal(existsSync(f.taskReturn), false)
+  } finally {
+    if (child && child.exitCode == null && child.signalCode == null) child.kill('SIGKILL')
+    rmSync(f.root, { recursive: true, force: true })
+  }
+})
+
+test('run exits 3 on an escalation, 0 on done, and 1 on anything else', () => {
+  for (const [result, expected] of [
+    [{ status: 'done' }, 0], [{ status: 'escalation' }, 3], [{ status: 'blocked' }, 1],
+    [{ status: 'converge' }, 1], [{}, 1], [null, 1],
+  ]) assert.equal(runExitCode(result), expected)
+})
+
+test('run derives its process exit code from the envelope status', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-exit-code-checkout-')
+  const home = mkdtempSync(join(tmpdir(), 'crew-exit-code-home-'))
+  const task = 'exit-code-run'
+  execSync('git init -q', { cwd: checkout })
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# exit code brief\n')
+  const envelopes = [
+    [{ status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }, 0],
+    [{ status: 'escalation', summary: 'needs a human', artifacts: [], details: { escalation: { why: 'review' } } }, 3],
+    [{ status: 'blocked', summary: 'blocked', artifacts: [], details: {} }, 1],
+  ]
+  try {
+    await withHome(home, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      for (const [envelope, expected] of envelopes) {
+        const previous = process.exitCode
+        try {
+          process.exitCode = undefined
+          runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => envelope })
+          assert.equal(process.exitCode, expected)
+        } finally { process.exitCode = previous }
+      }
+    })
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('child entrypoint plumbs, journals, and refuses round budgets', () => {

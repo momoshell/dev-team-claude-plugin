@@ -1244,6 +1244,22 @@ function noteRunlessCellFailure({ taskSlug, role, kind, err, cell = null, member
 }
 
 
+// Process-level exit codes for `run`, derived from the envelope status and
+// nothing else: 0 done, 3 escalation — a run of the loop that WORKED and needs
+// a human — and 1 for anything else, which is the unexpected internal error the
+// repo's convention reserves it for (scripts/factory/make-brief.mjs:10-12; 2 is
+// the usage/refusal code the CLI dispatcher owns). An escalation is not a
+// crash: collapsing the two made a preserved plan and a minted park read as
+// "failed with exit code 1".
+export const RUN_EXIT_CODES = Object.freeze({ done: 0, escalation: 3 })
+export const RUN_EXIT_UNEXPECTED = 1
+export function runExitCode(result) {
+  const status = result?.status
+  return typeof status === 'string' && Object.hasOwn(RUN_EXIT_CODES, status)
+    ? RUN_EXIT_CODES[status]
+    : RUN_EXIT_UNEXPECTED
+}
+
 export function runCmd(args, deps = {}) {
   // Refuse an unknown shape BEFORE any state is read, spawned or written —
   // the same posture as boot's assertCellsClosed and mixed-transport guards.
@@ -1429,7 +1445,7 @@ export function runCmd(args, deps = {}) {
   // After archive the envelope moves with the dir — report where it lives now.
   const taskReturn = archived ? crew.task_return.replace(paths.dir, archived) : crew.task_return
   process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
-  if (result.status !== 'done') process.exitCode = 1
+  process.exitCode = runExitCode(result)
 }
 
 // A seat's readiness, layered so it stays agent-agnostic:

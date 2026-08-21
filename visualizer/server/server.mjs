@@ -183,10 +183,20 @@ export function startServer(options = {}) {
         if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
         if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
         const result = feed.runSet({ since, until })
+        // Read AFTER the query it reports on: the feed's db open is lazy, so a
+        // handle that has answered nothing yet reports degraded false even for
+        // a database that cannot be opened.
+        const feedHealth = typeof feed.health === 'function' ? feed.health() : null
+        const runSetReason = typeof feed._reason === 'function' ? feed._reason() : null
+        // feed.health() also includes the independent triage sidecar. The
+        // ledger reason is the read-specific degradation signal for this view.
+        const runSetHealth = typeof feed._reason === 'function'
+          ? { ...(feedHealth || {}), degraded: typeof runSetReason === 'string' && runSetReason.length > 0 }
+          : feedHealth
         const burn = typeof feed.budgetWindow === 'function'
           ? feed.budgetWindow({ since, until })
           : { measured: false, total: null, sessions: null, absent: 'budget burn is unavailable from this feed' }
-        return json(res, 200, { schema, ...shapeRunSet({ ...result, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
+        return json(res, 200, { schema, ...shapeRunSet({ ...result, degraded: runSetHealth?.degraded === true, degraded_reason: runSetReason, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
       }
       if (url.pathname === '/api/intake') {
         if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })

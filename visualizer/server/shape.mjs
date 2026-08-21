@@ -609,6 +609,18 @@ const RUN_SET_BILLED_KEYS = ['billed_input_tokens', 'billed_output_tokens', 'bil
 const PARKED_NOTE = 'not measured here — a park is a per-crew-dir file in the reclaim store (crew/reclaim.mjs), which the ledger has no key to enumerate; this view reads the ledger only, so parks are unmeasured, never zero'
 const PER_RUN_UNMEASURED_NOTE = 'no `agent_sessions` rows for this run: a pane-transport seat reports no usage by design (crew/daemon.mjs:81-83), and a pre-#119 or below-NODE_FLOOR headless run records none either; the ledger persists no per-run transport, so this view cannot tell them apart — unmeasured, never a measured zero.'
 const BUDGET_PROVENANCE = 'the ceiling is declared to this view; the daemon holds its own ceiling in memory only (crew/daemon.mjs:301-328), so nothing pins these two values equal.'
+const DEGRADED_ABSENT_WHY = 'the ledger read that answered this window was degraded — the window is unanswerable, never a measured zero: a degraded reader answers no rows whether or not any run exists'
+
+// A degraded read answers an EMPTY row set, not a null one, so the absence has
+// to be carried by the flag its source reports rather than by the rows. The
+// flag must be read AFTER the query it reports on: the ledger's db open is
+// lazy, so a handle asked for stats() before its first query answers
+// `degraded: false` even for a database that cannot be opened.
+function degradedAbsence(degraded, reason) {
+  if (degraded !== true) return null
+  const named = typeof reason === 'string' && reason.length > 0 ? reason : 'the source reported no reason'
+  return `${DEGRADED_ABSENT_WHY} (${named})`
+}
 
 function finiteBudgetNumber(value) {
   const number = typeof value === 'number' ? value : Number(value)
@@ -676,13 +688,20 @@ function budgetBlock({ ceiling = null, burn = null, since = null, until = null, 
   return budget
 }
 
-export function shapeRunSet({ rows, absent, since, until, label, ceiling = null, burn = null } = {}) {
+export function shapeRunSet({ rows, absent, degraded = false, degraded_reason = null, since, until, label, ceiling = null, burn = null } = {}) {
   const window = { since: since ?? null, until: until ?? null, label: label ?? null }
-  const absentReason = typeof absent === 'string' && absent.length > 0 ? absent : null
+  const suppliedAbsent = typeof absent === 'string' && absent.length > 0 ? absent : null
+  const degradedAbsent = degradedAbsence(degraded, degraded_reason)
+  const absentReason = suppliedAbsent || degradedAbsent
+  const degradedState = {
+    degraded: degraded === true,
+    degraded_reason: degraded === true && typeof degraded_reason === 'string' && degraded_reason.length > 0 ? degraded_reason : null,
+  }
   if (absentReason) {
     return {
       window,
       absent: absentReason,
+      ...degradedState,
       runs: null,
       settled: null,
       usage: null,
@@ -759,6 +778,7 @@ export function shapeRunSet({ rows, absent, since, until, label, ceiling = null,
   return {
     window,
     absent: null,
+    ...degradedState,
     runs: source.length,
     settled,
     usage,

@@ -2316,6 +2316,13 @@ export function driveTask(ctx, io) {
       gateCmd = env2.details.gate_cmd
       const re = runGate('gate-baseline:recheck', gateCmd)
       if (re.ok) return gateEscalate('repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
+      // Red — but red HOW? (#153, #440). The repaired gate exits non-zero exactly
+      // as a gate whose every check THREW does, so without the same recheck the
+      // defective-red branch applies below, a repair may trade a vacuous green
+      // for a broken gate and the driver would build against it. Like the bounce
+      // above this is pre-build hygiene: it consumes no gateRepairs.
+      const greenRepairDefect = baselineGateDefect(re.output)
+      if (greenRepairDefect) return gateEscalate(`the gate repaired after a GREEN baseline did not RUN at baseline: ${greenRepairDefect}`)
     } else {
       // Red — but red HOW? (#153) Non-zero exit is also what a gate whose
       // every check throws produces, and at baseline everything is red, so a

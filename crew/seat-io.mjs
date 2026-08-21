@@ -1181,6 +1181,16 @@ export function settleSeatTeardown(io, deps = {}) {
     try { io?.log?.({ at: at(), event: 'seat-teardown', ...seat }) } catch { /* journal is diagnostics */ }
     // No emitter at all is an ABSENCE, not a failed write: neither counter
     // moves, and `seats` still says how many rows went unrecorded.
+    // Ownership of the ledger key: seat_teardowns is unique on (adw_id, role)
+    // with INSERT OR IGNORE (scripts/factory/ledger.mjs:702,1897), so the FIRST
+    // row for a role wins forever. A row marked record: false is a row this
+    // sweep LOOKED at but does not own — the run-end pane sweep (#426) closed
+    // no surface, and teardownCore's later proven row must be the one the
+    // ledger keeps. It is still tallied and still journalled; nothing about
+    // what counts as PROOF changes here, and an unemitted row is an ABSENCE,
+    // never a record_failed.
+    // MUTATION A7: `seat.record === true` lets an unowned row squat the key.
+    if (seat.record === false) continue
     if (typeof io?.emit !== 'function') continue
     // Only a POSITIVE verdict is a receipt. There is no boolean contract on
     // the optional io.emit (crew/io-contract.test.mjs:15-16), so `undefined`
@@ -1769,6 +1779,48 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             })
           }
         }
+      }
+      // A PANE seat is DECLARED in crew.json and is never instantiated through
+      // transportIo, so neither source above can see it: on the driver-crash
+      // path of #426 `declared` filtered to [] and transportInstances was empty,
+      // and this sweep reported `seats: 0` about four live agents. Look at every
+      // declared pane seat with a recorded surface — the same selection
+      // paneTeardownRows makes (:1288), so both paths count the same seats.
+      //
+      // OWNERSHIP. This sweep CLOSES nothing (teardownCore does, and only on the
+      // archive path), so a pane still on screen is `unproven` naming why and
+      // never `failed` — `failed` means MEASURED ALIVE AFTER a close. And
+      // seat_teardowns is unique on (adw_id, role) with INSERT OR IGNORE
+      // (scripts/factory/ledger.mjs:702,1897), so a row that is not positive
+      // death evidence must not squat that key ahead of the proven row
+      // teardownCore writes later in the same run: it is journalled and counted
+      // and carries record: false, which settleSeatTeardown never emits.
+      //
+      // MUTATION A1: `if (!covered.has(role))` and the loop covers only roles the
+      // transport sweep already rowed — the false zero of #426 is back.
+      // MUTATION A2: mapping an ALIVE pane through teardownOutcome reports a seat
+      // nobody tried to close as `failed`.
+      // MUTATION A3: seeding the entries with a ghost member makes a seatless crew
+      // report a seat it never had.
+      // MUTATION A5: seeding `covered` from crew.members drops every pane row.
+      // MUTATION A6: moving the dead arm of the reason ternary to `alive === null`
+      // stops positive death evidence being reported as probe-dead.
+      // MUTATION A8: `if (member.surface_id) continue` inverts the recorded-surface
+      // selection, so this sweep and teardownCore stop seeing the same seats.
+      const covered = new Set(rows.map((row) => row.role).filter(Boolean))
+      for (const [role, member] of Object.entries(crew.members || {})) {
+        if ((member?.transport || DEFAULT_TRANSPORT) !== DEFAULT_TRANSPORT) continue
+        if (!member.surface_id) continue
+        if (covered.has(role)) continue
+        const alive = paneAlive(member.surface_id, { tree, locate })
+        rows.push({
+          role,
+          transport: DEFAULT_TRANSPORT,
+          outcome: alive === false ? teardownOutcome(LIVENESS.DEAD) : 'unproven',
+          reason: alive === false ? 'probe-dead' : alive === true ? 'surface-open-not-closed-here' : 'probe-unknown',
+          forced: false,
+          ...(alive === false ? {} : { record: false }),
+        })
       }
       const swept = [...transportInstances.keys()]
       for (const transport of transportInstances.values()) {

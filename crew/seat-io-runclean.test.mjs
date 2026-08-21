@@ -8,9 +8,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, providerConditionDetail,
-  readEnvelopeFile, reaskDecision, samplePaneScreen, seatIo, WAIT_POLL_MS, waitForEnvelope,
+  readEnvelopeFile, reaskDecision, samplePaneScreen, seatIo, settleSeatTeardown, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
 import { recogniseProviderCondition } from './headless.mjs'
+import { teardownCore } from './crew.mjs'
 
 const CONTENT = Object.freeze({
   committed: 'committed tracked content\n',
@@ -136,6 +137,148 @@ test('seatIo teardown is a measured zero when no transport was instantiated', ()
   withRepo({ dirty: false }, (fixture) => {
     assert.deepEqual(makeIo(fixture).teardown(), [])
   })
+})
+
+test('seatIo teardown rows every declared pane seat with a recorded surface', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const roles = ['lead', 'planner', 'builder', 'reviewer']
+    const members = Object.fromEntries(roles.map((role) => [role, { transport: 'pane', surface_id: `s-${role}` }]))
+    const journal = []
+    const io = seatIo({ members }, fixture.paths, fixture.repoDir, null, null, {}, {
+      tree: () => ({ windows: [{}] }),
+      locate: (_tree, id) => ({ id }),
+      logLine: (_path, row) => journal.push(row),
+    })
+    const rows = io.teardown()
+    assert.deepEqual(rows.map((row) => row.role), roles)
+    assert.ok(rows.every((row) => row.outcome === 'unproven' && row.reason === 'surface-open-not-closed-here' && row.record === false))
+    const lines = journal.filter((row) => row.event === 'teardown-transports')
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].seats, 4)
+  })
+})
+
+test('a live unclosed pane seat is never failed by the automatic sweep', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const members = {
+      lead: { transport: 'pane', surface_id: 's-lead' },
+      planner: { transport: 'pane', surface_id: 's-planner' },
+      builder: { transport: 'pane', surface_id: 's-builder' },
+      reviewer: { transport: 'pane', surface_id: 's-reviewer' },
+    }
+    const io = seatIo({ members }, fixture.paths, fixture.repoDir, null, null, {}, {
+      tree: () => ({ windows: [{}] }), locate: () => ({ id: 'still-open' }),
+    })
+    const rows = io.teardown()
+    assert.equal(rows.some((row) => row.outcome === 'failed'), false)
+    assert.ok(rows.every((row) => row.outcome === 'unproven'))
+  })
+})
+
+test('a vanished pane surface is proven and ledger-owned by the automatic sweep', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const members = {
+      planner: { transport: 'pane', surface_id: 's-planner' },
+      builder: { transport: 'pane', surface_id: 's-builder' },
+    }
+    const io = seatIo({ members }, fixture.paths, fixture.repoDir, null, null, {}, {
+      tree: () => ({ windows: [] }), locate: () => null,
+    })
+    const rows = io.teardown()
+    assert.ok(rows.every((row) => row.outcome === 'proven' && row.reason === 'probe-dead'))
+    assert.ok(rows.every((row) => !Object.hasOwn(row, 'record')))
+  })
+})
+
+test('an indeterminate pane probe is unproven and does not own the ledger row', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const members = { builder: { transport: 'pane', surface_id: 's-builder' } }
+    const io = seatIo({ members }, fixture.paths, fixture.repoDir, null, null, {}, {
+      tree: () => ({ windows: undefined }), locate: () => { throw new Error('locate must not run') },
+    })
+    const rows = io.teardown()
+    assert.deepEqual(rows.map((row) => [row.outcome, row.reason, row.record]), [['unproven', 'probe-unknown', false]])
+  })
+})
+
+test('a seatless crew remains a measured zero in the transport journal', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const journal = []
+    const io = seatIo({ members: {} }, fixture.paths, fixture.repoDir, null, null, {}, {
+      logLine: (_path, row) => journal.push(row),
+    })
+    assert.deepEqual(io.teardown(), [])
+    const lines = journal.filter((row) => row.event === 'teardown-transports')
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].seats, 0)
+    assert.deepEqual(Object.keys(lines[0]).sort(), ['at', 'declared', 'event', 'init_failed', 'seats', 'transports'])
+  })
+})
+
+test('the headless-rpc construction guard stays separate from pane coverage', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const throwing = { headlessRpcIo: () => { throw new Error('fifo refused') } }
+    const headless = seatIo({ members: {
+      planner: { transport: 'headless-rpc' }, reviewer: { transport: 'headless-rpc' },
+    } }, fixture.paths, fixture.repoDir, null, null, {}, throwing).teardown()
+    assert.equal(headless.length, 2)
+    assert.ok(headless.every((row) => row.outcome === 'unproven' && row.reason === 'teardown-threw' && row.transport === 'headless-rpc'))
+
+    const mixed = seatIo({ members: {
+      pane: { transport: 'pane', surface_id: 's-pane' }, rpc: { transport: 'headless-rpc' },
+    } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      ...throwing,
+      tree: () => ({ windows: [{}] }), locate: () => ({ id: 's-pane' }),
+    }).teardown()
+    assert.deepEqual(mixed.map((row) => row.role).sort(), ['pane', 'rpc'])
+    assert.equal(new Set(mixed.map((row) => row.role)).size, mixed.length)
+  })
+})
+
+test('automatic and teardownCore sweeps agree on surfaced pane seats', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const baseMembers = {
+      planner: { transport: 'pane', surface_id: 's-planner' },
+      builder: { transport: 'pane', surface_id: 's-builder' },
+    }
+    const automatic = (members) => seatIo({ members }, fixture.paths, fixture.repoDir, null, null, {}, {
+      tree: () => ({ windows: [{}] }), locate: () => ({ id: 'open' }),
+    }).teardown()
+    const manual = (members) => teardownCore(fixture.paths, { members }, {
+      closeSurface: () => {}, closeWorkspace: () => {}, renameSync: () => {},
+      probe: () => false, sleep: () => {}, settleSeatRoots: () => null,
+      reclaimDescendants: () => null, io: { log: () => {}, emit: () => true },
+    })
+
+    const firstAutomatic = automatic(baseMembers)
+    const firstManual = manual(baseMembers)
+    assert.equal(firstAutomatic.length, firstManual.seats.seats)
+    assert.equal(firstManual.seats.seats, 2)
+
+    const surfacedAndSurfaceless = { ...baseMembers, watcher: { transport: 'pane' } }
+    const secondAutomatic = automatic(surfacedAndSurfaceless)
+    const secondManual = manual(surfacedAndSurfaceless)
+    assert.equal(secondAutomatic.length, secondManual.seats.seats)
+    assert.equal(secondManual.seats.seats, 2)
+    assert.equal(secondAutomatic.some((row) => row.role === 'watcher'), false)
+  })
+})
+
+test('settleSeatTeardown tallies and journals unowned rows but never emits them', () => {
+  const journal = []
+  const emitted = []
+  const summary = settleSeatTeardown({
+    teardown: () => [
+      { role: 'builder', transport: 'pane', outcome: 'unproven', reason: 'surface-open-not-closed-here', record: false },
+      { role: 'planner', transport: 'pane', outcome: 'proven', reason: 'probe-dead' },
+    ],
+    log: (row) => journal.push(row), emit: (event) => { emitted.push(event); return true },
+  })
+  assert.deepEqual({ seats: summary.seats, proven: summary.proven, unproven: summary.unproven, record_failed: summary.record_failed }, {
+    seats: 2, proven: 1, unproven: 1, record_failed: 0,
+  })
+  assert.equal(journal.filter((row) => row.event === 'seat-teardown').length, 2)
+  assert.deepEqual(emitted.map((event) => event.role), ['planner'])
 })
 
 test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {

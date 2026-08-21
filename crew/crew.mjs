@@ -50,6 +50,7 @@ export {
 import { openRun, recordCellFailure } from '../scripts/factory/emit.mjs'
 import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
+import { REAP_VERDICTS, classifyRecord } from '../scripts/factory/reap-stale.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
@@ -276,6 +277,29 @@ function pathsFor(taskSlug, checkout) {
   const repo = slug(checkout.split('/').filter(Boolean).pop() || 'repo')
   const dir = join(homedir(), '.crew', repo, taskSlug)
   return { repo, dir, taskDir: join(dir, 'task'), returnsDir: join(dir, 'returns') }
+}
+
+function descendantStampStatus(taskDir, expected = 0) {
+  const storeDir = join(taskDir, 'descendants')
+  if (!existsSync(storeDir)) {
+    return Number(expected) > 0
+      ? { pending: null, error: new Error(`descendant stamp store disappeared after sweeping ${expected} record(s)`) }
+      : { pending: 0, error: null }
+  }
+  let names
+  try { names = readdirSync(storeDir) } catch (err) { return { pending: null, error: err } }
+  let pending = 0
+  for (const name of names) {
+    if (!name.startsWith('.') || !name.endsWith('.active.json') || name.includes('.json.tmp.')) continue
+    const path = join(storeDir, name)
+    let record
+    try { record = JSON.parse(readFileSync(path, 'utf8')) } catch (err) { return { pending: null, error: err } }
+    if (!record || typeof record !== 'object' || Array.isArray(record)) {
+      return { pending: null, error: new Error(`descendant record is unreadable at ${path}`) }
+    }
+    if (record.swept_at == null) pending += 1
+  }
+  return { pending, error: null }
 }
 
 function loadCrew(paths) {
@@ -601,6 +625,51 @@ export const BAND_FLOOR_REFUSALS = Object.freeze([
 export function refuseBandFloor(reason, message) {
   if (!BAND_FLOOR_REFUSALS.includes(reason)) throw new Error(`unknown band floor refusal reason ${JSON.stringify(reason)}`)
   return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+// #419: boot's own closed refusal set. A caller branches on `err.reason`
+// rather than parsing prose, exactly as PROFILE_REFUSALS does
+// (scripts/factory/ci-watch.mjs:29).
+export const BOOT_DESCENDANT_REFUSALS = Object.freeze([
+  'descendants-alive', 'descendants-unknown', 'descendants-evidence-mismatch',
+  'descendants-unreclaimed', 'descendants-sweep-failed',
+])
+
+// The verdicts reap-stale already adjudicates (scripts/factory/reap-stale.mjs:120),
+// mapped onto boot's reasons. UNKNOWN is never treated as fine here.
+const VERDICT_REFUSALS = Object.freeze({
+  [REAP_VERDICTS.REFUSED_LIVE]: 'descendants-alive',
+  [REAP_VERDICTS.REFUSED_UNKNOWN]: 'descendants-unknown',
+  [REAP_VERDICTS.REFUSED_MISMATCH]: 'descendants-evidence-mismatch',
+})
+
+export function refuseStaleDescendants(reason, { task, detail = null } = {}) {
+  if (!BOOT_DESCENDANT_REFUSALS.includes(reason)) throw new Error(`unknown boot descendant refusal: ${reason}`)
+  const err = new Error(
+    `boot refused for task ${task}: a previous run's workers are still recorded as running or unmeasurable `
+    + `[reason: ${reason}]${detail ? ` (${detail})` : ''} — booting a second crew over them is the defect. `
+    + `Reclaim them with \`npm run crew:reap\`, or tear the task down (crew.mjs teardown --task ${task}), then boot again.`,
+  )
+  err.code = 'stale-descendants'
+  err.reason = reason
+  throw err
+}
+
+// Refusal precedence follows BOOT_DESCENDANT_REFUSALS' own order: alive first,
+// then unmeasurable, then an identity that no longer binds. A record that was
+// neither reclaimed nor refused but could not be durably stamped is still not a
+// clean sweep, so it refuses too rather than seating a crew over it.
+export function descendantRefusal(rows, summary) {
+  const reasons = new Set()
+  for (const row of rows || []) {
+    if (row?.event !== 'descendant-reclaim') continue
+    const mapped = VERDICT_REFUSALS[classifyRecord(row)]
+    if (mapped) reasons.add(mapped)
+  }
+  for (const reason of BOOT_DESCENDANT_REFUSALS) if (reasons.has(reason)) return reason
+  if (!summary) return 'descendants-unreclaimed'
+  if (summary.retryable > 0 || summary.record_failed > 0 || summary.snapshot_ok !== true) return 'descendants-unreclaimed'
+  return null
 }
 
 function ladderRecord(value) {
@@ -1112,6 +1181,40 @@ export async function bootCmd(args, deps = {}) {
   if (existing && existing.checkout !== checkout) {
     throw new Error(`a crew for task ${taskSlug} already exists for a DIFFERENT checkout (${existing.checkout}) — tear it down first or pick another task slug`)
   }
+
+  // #419: reclaim THIS task's stale descendants before any seat exists.
+  // Only this task dir: sweeping every task is `npm run crew:reap`, invoked
+  // deliberately by an operator. Composed, never reimplemented — the sweep is
+  // idempotent through each record's swept_at (crew/seat-io.mjs:679).
+  const journalPath = join(paths.dir, 'journal.jsonl')
+  const sweepRows = []
+  const sweepLog = (row) => { sweepRows.push(row); logLine(journalPath, row) }
+  const sweepFn = deps.reclaimDescendants || reclaimDescendants
+  let sweep = null
+  let sweepError = null
+  try {
+    sweep = sweepFn({ taskDir: paths.taskDir, log: sweepLog, deps: deps.descendantDeps || {} })
+  } catch (err) { sweepError = err }
+  const stamp = sweepError ? { pending: 0, error: null } : descendantStampStatus(
+    paths.taskDir, (Number(sweep?.records) || 0) + (Number(sweep?.skipped) || 0),
+  )
+  const summaryRefusal = sweepError ? 'descendants-sweep-failed' : descendantRefusal(sweepRows, sweep)
+  const refusal = summaryRefusal
+    || (stamp.error ? 'descendants-sweep-failed' : stamp.pending > 0 ? 'descendants-unreclaimed' : null)
+  const sweepFailure = sweepError || stamp.error
+  // Recorded on EVERY boot, refused or not: a boot that skipped the check and a
+  // boot that found nothing must stay distinguishable after the fact. No stdout —
+  // a clean sweep prints nothing.
+  logLine(journalPath, {
+    at: new Date().toISOString(), event: 'boot-descendant-sweep', task: taskSlug,
+    records: sweep?.records ?? null, swept: sweep?.swept ?? null, skipped: sweep?.skipped ?? null,
+    retryable: sweep?.retryable ?? null, reclaimed: sweep?.reclaimed ?? null,
+    live: sweep?.live ?? null, probe_unknown: sweep?.probe_unknown ?? null,
+    identity_refused: sweep?.identity_refused ?? null, snapshot_ok: sweep?.snapshot_ok ?? null,
+    refusal: refusal ?? null, ...(sweepFailure ? { error: sweepFailure.message } : {}),
+  })
+  if (refusal) refuseStaleDescendants(refusal, { task: taskSlug, detail: sweepFailure?.message || null })
+
   mkdirSync(paths.taskDir, { recursive: true })
   mkdirSync(paths.returnsDir, { recursive: true })
 

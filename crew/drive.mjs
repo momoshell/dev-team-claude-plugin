@@ -57,6 +57,11 @@ export { PROTECTED_PATHS, resolveProtectedPaths } from './protected-paths.mjs'
 export const EXECUTIONS = Object.freeze(['reviewed', 'envelope'])
 export const WRITE_SURFACES = Object.freeze(['planned', 'none'])
 export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
+// The CLOSED set of reasons an envelope refusal can name (#427). A refusal is a
+// {reason, why} pair whose reason is one of these; prose stays in `why`.
+export const ENVELOPE_REFUSAL_REASONS = Object.freeze([
+  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item',
+])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
 // round would have produced. Closed per key, and only values this driver
@@ -288,32 +293,61 @@ function validEnvelope(env, role, id) {
 // mis-addressed file. The required fields and their kinds come from the shape's
 // declaration, so a later member names its own without new code here.
 export function envelopeDefect(env, shape, { taskDir } = {}) {
-  if (!env || typeof env !== 'object') return 'no envelope'
-  if (typeof env.summary !== 'string' || !env.summary.trim()) return 'summary must be a non-empty string'
-  if (!Array.isArray(env.artifacts)) return 'artifacts must be an array'
+  const refuse = (reason, why) => ({ reason, why })
+  if (!env || typeof env !== 'object') return refuse('no-envelope', 'no envelope')
+  if (typeof env.summary !== 'string' || !env.summary.trim()) return refuse('summary', 'summary must be a non-empty string')
+  if (!Array.isArray(env.artifacts)) return refuse('artifacts', 'artifacts must be an array')
   for (const artifact of env.artifacts) {
-    if (typeof artifact !== 'string' || !artifact) return `artifacts must be paths, found ${JSON.stringify(artifact)}`
-    if (taskDir && !artifact.startsWith(`${taskDir}/`)) return `artifact ${JSON.stringify(artifact)} is outside the task dir`
-    if (artifact.split('/').some((segment) => segment === '.' || segment === '..')) return `artifact ${JSON.stringify(artifact)} must not contain . or .. segments`
+    if (typeof artifact !== 'string' || !artifact) return refuse('artifacts', `artifacts must be paths, found ${JSON.stringify(artifact)}`)
+    if (taskDir && !artifact.startsWith(`${taskDir}/`)) return refuse('artifacts', `artifact ${JSON.stringify(artifact)} is outside the task dir`)
+    if (artifact.split('/').some((segment) => segment === '.' || segment === '..')) return refuse('artifacts', `artifact ${JSON.stringify(artifact)} must not contain . or .. segments`)
   }
-  if (!env.details || typeof env.details !== 'object' || Array.isArray(env.details)) return 'details must be an object'
+  if (!env.details || typeof env.details !== 'object' || Array.isArray(env.details)) return refuse('details', 'details must be an object')
   const text = (v) => typeof v === 'string' && v.trim().length > 0
   for (const field of shape?.envelope_fields || []) {
+    // The declaration says the field is REQUIRED; only the envelope can say it is
+    // there. Presence is read off env.details, never off the declaration (#427).
+    // MUTATION A2: report an omitted field as 'field-kind' and the refusal stops
+    // distinguishing a field nobody returned from one returned mis-shapen.
+    if (!hasField(env.details, field.name)) return refuse('field-missing', `details.${field.name} is declared by this shape and the envelope omits it`)
     const value = env.details[field.name]
     if (field.kind === 'text') {
-      if (!text(value)) return `details.${field.name} must be a non-empty string`
+      if (!text(value)) return refuse('field-kind', `details.${field.name} must be a non-empty string`)
       continue
     }
     // 'records'
-    if (!Array.isArray(value) || value.length === 0) return `details.${field.name} must be a non-empty array`
+    // MUTATION A3: refuse a non-array records field as 'field-item' and a wrong-KIND
+    // refusal becomes indistinguishable from a bad record inside a good array.
+    if (!Array.isArray(value) || value.length === 0) return refuse('field-kind', `details.${field.name} must be a non-empty array`)
     for (const item of value) {
-      if (!item || typeof item !== 'object' || Array.isArray(item)) return `every details.${field.name} entry must be an object`
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return refuse('field-item', `every details.${field.name} entry must be an object`)
+      // MUTATION A4: append an undeclared 'id' to the required item fields and a
+      // well-formed envelope is over-refused.
       for (const key of field.item_fields || []) {
-        if (!text(item[key])) return `every details.${field.name} entry needs a non-empty ${key}`
+        if (!text(item[key])) return refuse('field-item', `every details.${field.name} entry needs a non-empty ${key}`)
       }
     }
   }
   return null
+}
+
+// One presence test, shared by the refusal and the report, so what is REFUSED as
+// absent and what is REPORTED as observed can never disagree (#427).
+function hasField(details, name) {
+  return typeof name === 'string' && Object.prototype.hasOwnProperty.call(details, name) && details[name] !== undefined
+}
+
+// What the ENVELOPE carried, not what the shape declared: the declared fields this
+// envelope actually holds, in declaration order. The accept path reports this —
+// mapping shape.envelope_fields to names reported a field as checked for an envelope
+// nobody read (#427).
+// MUTATION A5: drop hasField from the filter and the helper reports the DECLARATION's
+// names again, which is the defect itself.
+export function envelopeFieldsPresent(env, shape) {
+  const details = env && typeof env === 'object' && env.details && typeof env.details === 'object' && !Array.isArray(env.details)
+    ? env.details
+    : {}
+  return (shape?.envelope_fields || []).map((field) => field?.name).filter((name) => hasField(details, name))
 }
 
 function verdictOf(env) {
@@ -1631,10 +1665,18 @@ export function driveTask(ctx, io) {
     }
     const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
     if (defect) {
-      return escalate('envelope', `the ${variant} envelope is not the shape that accepts it: ${defect}`, Array.isArray(env.artifacts) ? env.artifacts : [])
+      // MUTATION A9: hard-code the bracketed reason here (or drop defect.reason) and the
+      // durable record stops naming the reason the validator actually produced.
+      return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${defect.reason}]: ${defect.why}`, Array.isArray(env.artifacts) ? env.artifacts : [])
     }
     stage('envelope-accept')
-    io.log({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: shape.envelope_fields.map((f) => f.name) } })
+    // Reported from the ENVELOPE, never from the declaration (#427). This is the
+    // SECOND presence read of each declared field — validation performs the first —
+    // and gate A6 counts exactly that.
+    // MUTATION A6: pass an empty declaration here and the accepted run stops
+    // reading THIS envelope to report it.
+    const observedFields = envelopeFieldsPresent(env, shape)
+    io.log({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: observedFields } })
     stage('done')
     return {
       status: 'done',
@@ -1644,7 +1686,7 @@ export function driveTask(ctx, io) {
         variant, commit: null, stages: S.stages, files_committed: [], consults: S.consults,
         dissents: S.dissents, accepted_via: shape.accepted_by, escalation: null,
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, gate: null,
-        envelope: { seat, fields: shape.envelope_fields.map((f) => f.name), files_changed: 0 },
+        envelope: { seat, fields: observedFields, files_changed: 0 },
       },
     }
   }
@@ -1699,7 +1741,7 @@ export function driveTask(ctx, io) {
     }
     const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
     if (defect) {
-      return { stop: escalate('triage', `the triage envelope is not one the driver can build from: ${defect}`, Array.isArray(env.artifacts) ? env.artifacts : []) }
+      return { stop: escalate('triage', `the triage envelope is not one the driver can build from: ${defect.why}`, Array.isArray(env.artifacts) ? env.artifacts : []) }
     }
     const planPath = env.details.plan_path
     if (typeof planPath !== 'string' || !env.artifacts.includes(planPath)) {

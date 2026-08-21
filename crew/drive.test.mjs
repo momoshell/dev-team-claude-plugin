@@ -28,7 +28,8 @@ import {
   VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, EXECUTIONS, WRITE_SURFACES, ENVELOPE_FIELD_KINDS,
   UNIVERSAL_STAGE_HEADS, SHAPE_SOURCES, REVIEWED_CORE_STAGES, TRIAGE_STAGE_HEAD, TRIAGE_SOURCES, TRIAGE_STAGES,
   DIRECTED_STAGE_HEAD, DIRECTED_SOURCES, DIRECTED_SEATS, DIRECTED_STAGES, PARTIAL_REVIEWED, parseDirectedBrief,
-  stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect,
+  stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect, envelopeFieldsPresent,
+  ENVELOPE_REFUSAL_REASONS,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -5025,7 +5026,225 @@ test('scout rejects envelopes that do not match its declared shape', () => {
     assert.equal(result.details.escalation.where, 'envelope')
   }
   assert.equal(envelopeDefect(reconEnv(), VARIANTS.scout, { taskDir: TD }), null)
-  assert.match(envelopeDefect(null, VARIANTS.scout, { taskDir: TD }), /no envelope/)
+  assert.equal(envelopeDefect(null, VARIANTS.scout, { taskDir: TD }).reason, 'no-envelope')
+  assert.match(envelopeDefect(null, VARIANTS.scout, { taskDir: TD }).why, /no envelope/)
+})
+
+test('the envelope refusal reason set is closed and frozen', () => {
+  assert.equal(Object.isFrozen(ENVELOPE_REFUSAL_REASONS), true)
+  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item'])
+  const malformed = [
+    null,
+    'not an object',
+    { ...reconEnv(), summary: '' },
+    { ...reconEnv(), artifacts: null },
+    { ...reconEnv(), artifacts: [7] },
+    { ...reconEnv(), artifacts: ['/etc/passwd'] },
+    { ...reconEnv(), artifacts: [`${TD}/../escape.md`] },
+    { ...reconEnv(), details: null },
+    { ...reconEnv(), details: {} },
+    { ...reconEnv(), details: { findings: 'not an array' } },
+    { ...reconEnv(), details: { findings: [null] } },
+    { ...reconEnv(), details: { findings: [{ summary: 's' }] } },
+  ]
+  for (const env of malformed) {
+    const defect = envelopeDefect(env, VARIANTS.scout, { taskDir: TD })
+    assert.ok(defect && typeof defect === 'object' && !Array.isArray(defect))
+    assert.ok(ENVELOPE_REFUSAL_REASONS.includes(defect.reason))
+    assert.equal(typeof defect.why, 'string')
+    assert.ok(defect.why.trim())
+  }
+})
+
+test('an envelope that omits a declared field is refused, per declared field', () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [
+      { name: 'alpha', kind: 'text' },
+      { name: 'beta', kind: 'records', item_fields: ['summary', 'evidence'] },
+    ],
+  }
+  const envelope = (details) => ({
+    status: 'done', role: 'planner', summary: 'recon complete', artifacts: [`${TD}/scout.md`], details,
+  })
+  const complete = { alpha: 'a sentence', beta: [{ summary: 's', evidence: 'e' }] }
+  for (const field of shape.envelope_fields) {
+    const details = { ...complete }
+    delete details[field.name]
+    const defect = envelopeDefect(envelope(details), shape, { taskDir: TD })
+    assert.equal(defect.reason, 'field-missing')
+    assert.ok(defect.why.includes(field.name))
+  }
+  for (const field of VARIANTS.scout.envelope_fields) {
+    const defect = envelopeDefect(reconEnv({ details: {} }), VARIANTS.scout, { taskDir: TD })
+    assert.equal(defect.reason, 'field-missing')
+    assert.ok(defect.why.includes(field.name))
+  }
+  const undefinedValue = envelopeDefect(reconEnv({ details: { findings: undefined } }), VARIANTS.scout, { taskDir: TD })
+  assert.equal(undefinedValue.reason, 'field-missing')
+  assert.ok(undefinedValue.why.includes('findings'))
+})
+
+test('a declared field of the wrong kind is refused, and the reason says which kind of wrong', () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [
+      { name: 'alpha', kind: 'text' },
+      { name: 'beta', kind: 'records', item_fields: ['summary', 'evidence'] },
+    ],
+  }
+  const envelope = (details) => ({
+    status: 'done', role: 'planner', summary: 'recon complete', artifacts: [`${TD}/scout.md`], details,
+  })
+  const record = { summary: 's', evidence: 'e' }
+  const cases = [
+    [{ alpha: 'a', beta: 'not an array' }, 'field-kind'],
+    [{ alpha: 'a', beta: { ...record } }, 'field-kind'],
+    [{ alpha: 'a', beta: [] }, 'field-kind'],
+    [{ alpha: 7, beta: [record] }, 'field-kind'],
+    [{ alpha: '   ', beta: [record] }, 'field-kind'],
+    [{ alpha: 'a', beta: [null] }, 'field-item'],
+    [{ alpha: 'a', beta: [[]] }, 'field-item'],
+    [{ alpha: 'a', beta: [{ summary: 's' }] }, 'field-item'],
+    [{ alpha: 'a', beta: [{ summary: ' ', evidence: 'e' }] }, 'field-item'],
+  ]
+  for (const [details, reason] of cases) {
+    const defect = envelopeDefect(envelope(details), shape, { taskDir: TD })
+    assert.equal(defect.reason, reason)
+    assert.ok(defect.why)
+  }
+})
+
+test('a well-formed envelope is still accepted, and extra material never over-refuses', () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [
+      { name: 'alpha', kind: 'text' },
+      { name: 'beta', kind: 'records', item_fields: ['summary', 'evidence'] },
+    ],
+  }
+  const record = { summary: 's', evidence: 'e', extra: 'ignored' }
+  const twoField = {
+    status: 'done', role: 'planner', summary: 'recon complete',
+    artifacts: [`${TD}/scout.md`, `${TD}/extra.md`],
+    details: { alpha: 'a sentence', beta: [record], unrelated: 7 },
+  }
+  assert.equal(envelopeDefect(twoField, shape, { taskDir: TD }), null)
+  assert.equal(envelopeDefect(reconEnv({
+    artifacts: [`${TD}/scout.md`, `${TD}/extra.md`],
+    details: { findings: [record], unrelated: 7 },
+  }), VARIANTS.scout, { taskDir: TD }), null)
+
+  const io = fakeIo({
+    envelopes: { 'planner:1': reconEnv({
+      artifacts: [`${TD}/scout.md`, `${TD}/extra.md`],
+      details: { findings: [record], unrelated: 7 },
+    }) },
+    changed: [],
+  })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, ['scout:r1', 'scope-gate:r1', 'envelope-accept', 'done'])
+  assert.equal(result.details.accepted_via, VARIANTS.scout.accepted_by)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test("envelopeFieldsPresent reports the envelope's fields, not the declaration's", () => {
+  const shape = {
+    ...VARIANTS.scout,
+    envelope_fields: [
+      { name: 'alpha', kind: 'text' },
+      { name: 'beta', kind: 'records', item_fields: ['summary', 'evidence'] },
+    ],
+  }
+  const observed = (details) => envelopeFieldsPresent({ details }, shape)
+  assert.deepEqual(observed({ beta: [{ summary: 's', evidence: 'e' }] }), ['beta'])
+  assert.deepEqual(observed({ alpha: 'a sentence' }), ['alpha'])
+  assert.deepEqual(observed({}), [])
+  assert.deepEqual(observed({ alpha: 'a sentence', beta: [{ summary: 's', evidence: 'e' }] }), ['alpha', 'beta'])
+  assert.deepEqual(observed({ alpha: undefined, beta: [{ summary: 's', evidence: 'e' }] }), ['beta'])
+  assert.deepEqual(envelopeFieldsPresent({ details: null }, shape), [])
+  assert.deepEqual(envelopeFieldsPresent({ details: [] }, shape), [])
+})
+
+test('an accepted envelope run READS the envelope to report its fields', () => {
+  const source = reconEnv()
+  let presenceReads = 0
+  const env = {
+    ...source,
+    details: new Proxy(source.details, {
+      getOwnPropertyDescriptor(target, property) {
+        if (property === 'findings') presenceReads += 1
+        return Reflect.getOwnPropertyDescriptor(target, property)
+      },
+    }),
+  }
+  const io = fakeIo({ envelopes: { 'planner:1': env }, changed: [] })
+  const result = driveTask({ ...CTX, variant: 'scout' }, io)
+  const expected = envelopeFieldsPresent(reconEnv(), VARIANTS.scout)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.envelope.fields, expected)
+  const line = io.calls.logs.find((entry) => entry.envelope_accepted)
+  assert.ok(line)
+  assert.deepEqual(line.envelope_accepted.fields, expected)
+  assert.equal(line.envelope_accepted.files_changed, 0)
+  assert.equal(line.envelope_accepted.seat, 'planner')
+  assert.equal(presenceReads, 2)
+})
+
+test('an envelope refusal escalates naming the reason the validator produced', () => {
+  const cases = [
+    ['summary', reconEnv({ summary: '' })],
+    ['artifacts', reconEnv({ artifacts: ['/etc/passwd'] })],
+    ['details', reconEnv({ details: null })],
+    ['field-missing', reconEnv({ details: {} })],
+    ['field-kind', reconEnv({ details: { findings: 'not an array' } })],
+    ['field-item', reconEnv({ details: { findings: [{ summary: 's' }] } })],
+  ]
+  for (const [expectedReason, env] of cases) {
+    const direct = envelopeDefect(env, VARIANTS.scout, { taskDir: TD })
+    assert.equal(direct.reason, expectedReason)
+    const io = fakeIo({ envelopes: { 'planner:1': env }, changed: [] })
+    const result = driveTask({ ...CTX, variant: 'scout' }, io)
+    assert.equal(result.status, 'escalation')
+    assert.equal(result.details.escalation.where, 'envelope')
+    assert.ok(result.details.escalation.why.includes(`[${direct.reason}]`))
+    assert.equal(result.details.stages.includes('envelope-accept'), false)
+    assert.equal(io.calls.commits.length, 0)
+  }
+})
+
+test('shapeDefect still judges the DECLARATION alone, unchanged', () => {
+  for (const [name, shape] of Object.entries(VARIANTS)) assert.equal(shapeDefect(shape, name), null)
+  const unknown = shapeDefect({ ...VARIANTS.scout, envelope_fields: [{ name: 'findings', kind: 'unknown' }] }, 'scout')
+  assert.equal(typeof unknown, 'string')
+  assert.match(unknown, /kind/)
+  const kindless = shapeDefect({ ...VARIANTS.scout, envelope_fields: [{ name: 'findings' }] }, 'scout')
+  assert.equal(typeof kindless, 'string')
+  assert.match(kindless, /kind/)
+})
+
+test("a reviewed shape's acceptance is untouched by the envelope contract", () => {
+  const planEnvelope = planEnv()
+  for (const name of ['full', 'repair', 'directed']) {
+    assert.equal(VARIANTS[name].envelope_fields.length, 0)
+    assert.equal(envelopeDefect(planEnvelope, VARIANTS[name], { taskDir: TD }), null)
+  }
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, variant: 'full' }, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.equal(io.calls.logs.some((line) => line.envelope_accepted), false)
+
+  const triageIo = fakeIo({ envelopes: { 'planner:1': triageEnv({ summary: '' }) }, changed: [] })
+  const triageResult = driveTask(CTX_REPAIR, triageIo)
+  assert.equal(triageResult.status, 'escalation')
+  assert.equal(triageResult.details.escalation.where, 'triage')
+  assert.equal(triageResult.details.escalation.why, 'the triage envelope is not one the driver can build from: summary must be a non-empty string')
 })
 
 test('scout write proof escalates at scope, including a files_in_scope claim', () => {

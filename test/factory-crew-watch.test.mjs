@@ -102,6 +102,32 @@ test('bounded report shows active and settled lane status', () => {
   ])
 })
 
+test('--all reports live lanes only', () => {
+  const root = world()
+  seedLane(root, { task: 'live', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  seedLane(root, {
+    task: 'demo-lane.archive-2026-08-20T23-25-28-377Z',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r2' }],
+  })
+
+  const report = boundedReport({ root, all: true, now: NOW, deps: deps() })
+  assert.deepEqual(report.lines, ['[live] stage=build:r1 age=5s status=active'])
+})
+
+test('a named lane that has been archived reports archived, never pending', () => {
+  const root = world()
+  seedLane(root, {
+    task: 'demo-lane.archive-2026-08-20T23-25-28-377Z',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r2' }],
+  })
+
+  const report = boundedReport({ root, names: ['demo-lane', 'never-booted'], now: NOW, deps: deps() })
+  assert.deepEqual(report.lines, [
+    '[demo-lane] stage=build:r2 age=700s status=archived',
+    '[never-booted] stage=none age=none status=pending',
+  ])
+})
+
 test('a pending lane is rediscovered after its directory appears', () => {
   const root = world()
   const state = createState({ root, names: ['not-yet'], bootPpid: 777, deps: deps() })
@@ -244,5 +270,5 @@ test('follow has no process-spawning surface and no child after one tick', async
 
 test('lane-watch remains byte-identical', () => {
   const source = readFileSync(new URL('../scripts/factory/lane-watch.mjs', import.meta.url))
-  assert.equal(createHash('sha256').update(source).digest('hex'), '31e0ed570d3509340fcd9b160a0240dd4a16374e6826e1cde09d33d7c009043f')
+  assert.equal(createHash('sha256').update(source).digest('hex'), '9fb26f904275180abea056ec32674b8e28cc629c9183fcd27f5c8ad9f4180158')
 })

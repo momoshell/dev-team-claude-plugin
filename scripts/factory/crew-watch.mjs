@@ -6,7 +6,7 @@
 import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs'
 import { loadavg, cpus } from 'node:os'
 import { join } from 'node:path'
-import { crewRoot, discoverLanes, journalAt, laneActive, readJournal, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
+import { archivedLanes, crewRoot, discoverLanes, journalAt, laneActive, readJournal, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
 import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown'])
@@ -115,20 +115,37 @@ export function resolveLane(name, lanes) {
   return lanes.find((lane) => lane.task === name) || lanes.find((lane) => lane.id === name) || null
 }
 
+// The NEWEST archive for a name: a slug can be torn down more than once and the
+// stamp sorts lexicographically (crew/crew.mjs:1623 mints an ISO-8601 stamp).
+export function resolveArchivedLane(name, archives) {
+  const matches = archives.filter((lane) => lane.task === name || lane.id === name || `${lane.repo}/${lane.task}` === name)
+  if (matches.length === 0) return null
+  return matches.slice().sort((a, b) => (a.archivedAt < b.archivedAt ? -1 : 1)).pop()
+}
+
 export function selectLanes({ root, names = [], all = false, deps = {} } = {}) {
   const d = normalDeps(deps)
   const discovered = discoverLanes(root, d)
   if (all) {
-    return { lanes: discovered.filter((lane) => laneActive(lane, readJournal(lane.journal, d))), pending: [] }
+    return { lanes: discovered.filter((lane) => laneActive(lane, readJournal(lane.journal, d))), pending: [], archived: [] }
   }
   const lanes = []
   const pending = []
+  const archived = []
+  let archives = null
   for (const name of names) {
     const lane = resolveLane(name, discovered)
-    if (lane) lanes.push(lane)
+    if (lane) { lanes.push(lane); continue }
+    // `pending` means "not created yet". A torn-down run is not that, and
+    // reporting one as pending forever is the same archive-blindness from the
+    // other direction (#417). The archive walk is lazy: a name that resolves
+    // live never pays for it.
+    if (archives === null) archives = archivedLanes(root, d)
+    const found = resolveArchivedLane(name, archives)
+    if (found) archived.push(found)
     else pending.push(name)
   }
-  return { lanes, pending }
+  return { lanes, pending, archived }
 }
 
 export function boundedReport({ root, names = [], all = false, now, deps = {} } = {}) {
@@ -142,6 +159,12 @@ export function boundedReport({ root, names = [], all = false, now, deps = {} } 
     const ageS = journal.lastActivityAt === null ? 'none' : Math.floor((at - journal.lastActivityAt) / 1000)
     const status = laneActive(lane, journal) ? 'active' : 'settled'
     lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}`)
+  }
+  for (const lane of selected.archived) {
+    const journal = readJournal(lane.journal, d)
+    const stage = journal.lastStage ?? 'none'
+    const ageS = journal.lastActivityAt === null ? 'none' : Math.floor((at - journal.lastActivityAt) / 1000)
+    lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=archived`)
   }
   for (const name of selected.pending) lines.push(`[${name}] stage=none age=none status=pending`)
   return { lines, lanes: selected.lanes, pending: selected.pending }

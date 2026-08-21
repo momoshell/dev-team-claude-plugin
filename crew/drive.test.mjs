@@ -3289,6 +3289,26 @@ test('#153: a repaired gate that comes back GREEN at baseline escalates as vacuo
   assert.match(res.details.escalation.why, /GREEN at baseline/)
 })
 
+test('#440: a vacuous-green baseline repaired into a DEFECTIVE red escalates — a repair may not trade green for broken', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-vacuous-440' } }),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-broken-440' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-vacuous-440': { ok: true, output: '' },
+      'gate-broken-440': { ok: false, output: THREW },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation?.why ?? '', /THREW instead of adjudicating/)
+  assert.equal(io.calls.assign.filter((a) => a.role === 'builder').length, 0, 'never build against a repaired gate that cannot run')
+})
+
 test('#153: an honestly-red baseline is untouched — no bounce, no extra planner round', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-ok' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },

@@ -5,8 +5,10 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { spawn, spawn as spawnProcess } from 'node:child_process'
+import { createServer } from 'node:net'
+import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, replayJsonl, WRITERS } from '../scripts/factory/ledger.mjs'
+import { parseCliArgs, ServerUsageError } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 
@@ -48,6 +50,24 @@ function announce(child) {
     child.stderr.on('data', (chunk) => { error += chunk })
     child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
   })
+}
+function announceDetails(child) {
+  return new Promise((resolve, reject) => {
+    let output = '', error = ''
+    const timer = setTimeout(() => reject(new Error(`server did not announce a port: ${error}`)), 10000)
+    child.stdout.on('data', (chunk) => {
+      output += chunk
+      for (const line of output.split('\n')) {
+        try { const value = JSON.parse(line); if (value.listening) { clearTimeout(timer); resolve(value); return } } catch {}
+      }
+    })
+    child.stderr.on('data', (chunk) => { error += chunk })
+    child.once('exit', (code) => { children.delete(child); clearTimeout(timer); reject(new Error(`server exited ${code}: ${error}`)) })
+  })
+}
+const SERVER_SCRIPT = join(process.cwd(), 'visualizer', 'server', 'server.mjs')
+function runServerCli(args, opts = {}) {
+  return spawnSync(process.execPath, [SERVER_SCRIPT, ...args], { encoding: 'utf8', ...opts })
 }
 function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = null, ladderPath = null, referencePath = null) {
   const args = ['visualizer/server/server.mjs', '--port', '0', '--ledger-db', ledgerDb, '--triage-db', triageDb]
@@ -815,6 +835,85 @@ test('/api/intake/brake attributes successful and failed transitions and its wri
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('viz-cli-unknown-flag-refusal — an unknown flag or a bad flag value refuses with exit 2 and never leaks a stack', () => {
+  const cases = [
+    { args: ['--port', '0', '--bogus', 'zzz'], error: /unknown flag --bogus/ },
+    { args: ['--port', 'definitely-not-a-port'], error: /--port must be an integer/ },
+    { args: ['--port', '70000'], error: /--port must be an integer/ },
+    { args: ['--host'], error: /--host requires a value/ },
+    { args: ['4488'], error: /unexpected argument 4488/ },
+  ]
+  for (const { args, error } of cases) {
+    const result = runServerCli(args)
+    assert.equal(result.status, 2, result.stderr || result.error?.message)
+    assert.match(result.stderr, error)
+    assert.doesNotMatch(result.stderr, /RangeError|ERR_SOCKET_BAD_PORT/)
+    assert.doesNotMatch(result.stdout, /"listening":true/)
+  }
+})
+
+test('the visualizer CLI still accepts every flag it reads', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cli-flags-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'triage.db'), crewRoot = join(dir, 'crew')
+  const checkout = join(dir, 'checkout'), roster = join(dir, 'roster.json'), ladder = join(dir, 'ladder.json'), reference = join(dir, 'reference.json')
+  const args = [
+    SERVER_SCRIPT, '--port', '0', '--host', '127.0.0.1', '--ledger-db', ledgerDb, '--triage-db', triageDb,
+    '--crew-root', crewRoot, '--checkout', checkout, '--roster', roster, '--ladder', ladder, '--model-reference', reference,
+  ]
+  let child
+  try {
+    child = spawnProcess(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+    children.add(child)
+    const announced = await announceDetails(child)
+    assert.equal(announced.listening, true)
+    assert.equal(announced.ledger_db, ledgerDb)
+    assert.equal(announced.crew_root, crewRoot)
+    assert.ok(Number.isInteger(announced.port) && announced.port > 0, `expected an ephemeral port, got ${announced.port}`)
+    await stopServer(child); child = null
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a genuine internal failure still exits 1', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cli-eaddrinuse-'))
+  const blocker = createServer()
+  await new Promise((resolve, reject) => {
+    blocker.once('error', reject)
+    blocker.listen(0, '127.0.0.1', resolve)
+  })
+  try {
+    const port = blocker.address().port
+    const result = runServerCli(['--port', String(port), '--ledger-db', join(dir, 'ledger.db'), '--triage-db', join(dir, 'triage.db')])
+    assert.equal(result.status, 1, result.stderr || result.error?.message)
+  } finally {
+    await new Promise((resolve) => blocker.close(resolve))
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('parseCliArgs maps every visualizer flag and refuses an unknown flag', () => {
+  const parsed = parseCliArgs([
+    '--port', '1234', '--host', '127.0.0.2', '--ledger-db', 'ledger.db', '--triage-db', 'triage.db',
+    '--crew-root', 'crew', '--checkout', 'checkout', '--roster', 'roster.json', '--ladder', 'ladder.json', '--model-reference', 'reference.json',
+  ])
+  assert.equal(parsed.port, 1234)
+  assert.equal(parsed.host, '127.0.0.2')
+  assert.equal(parsed.ledgerDb, 'ledger.db')
+  assert.equal(parsed.triageDb, 'triage.db')
+  assert.equal(parsed.crewRoot, 'crew')
+  assert.equal(parsed.checkout, 'checkout')
+  assert.equal(parsed.rosterPath, 'roster.json')
+  assert.equal(parsed.ladderPath, 'ladder.json')
+  assert.equal(parsed.referencePath, 'reference.json')
+  assert.throws(() => parseCliArgs(['--bogus', 'value']), (error) => {
+    assert.ok(error instanceof ServerUsageError)
+    assert.match(error.message, /unknown flag --bogus/)
+    return true
+  })
 })
 
 test('intake console keeps the stop-switch path in lockstep and has no boot or git-write surface', async () => {

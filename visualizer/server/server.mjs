@@ -25,19 +25,47 @@ function defaults() {
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
   return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
 }
-function args(argv) {
+// A refusal cause, tagged so the CLI guard can map it to exit 2 without
+// conflating it with an unexpected internal throw (mapped to 1). Exit codes
+// match the scripts/factory convention (make-brief.mjs:9-12): 0 ok,
+// 1 unexpected internal error, 2 usage/refusal.
+export class ServerUsageError extends Error {
+  constructor(message) { super(`viz-serve: ${message}`); this.name = 'ServerUsageError'; this.usage = true }
+}
+
+// The flags this CLI reads, mapped to their config keys. This is the one place
+// that decides whether the CLI knows a flag: a misspelled flag is a usage
+// refusal (exit 2), not a silently ignored default (#443).
+const CLI_FLAGS = Object.freeze({
+  '--port': 'port',
+  '--host': 'host',
+  '--ledger-db': 'ledgerDb',
+  '--triage-db': 'triageDb',
+  '--crew-root': 'crewRoot',
+  '--checkout': 'checkout',
+  '--roster': 'rosterPath',
+  '--ladder': 'ladderPath',
+  '--model-reference': 'referencePath',
+})
+
+export function parseCliArgs(argv) {
   const out = defaults()
+  const vocabulary = Object.keys(CLI_FLAGS).join(', ')
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if (arg === '--port') out.port = Number(argv[++i])
-    else if (arg === '--host') out.host = argv[++i]
-    else if (arg === '--ledger-db') out.ledgerDb = argv[++i]
-    else if (arg === '--triage-db') out.triageDb = argv[++i]
-    else if (arg === '--crew-root') out.crewRoot = argv[++i]
-    else if (arg === '--checkout') out.checkout = argv[++i]
-    else if (arg === '--roster') out.rosterPath = argv[++i]
-    else if (arg === '--ladder') out.ladderPath = argv[++i]
-    else if (arg === '--model-reference') out.referencePath = argv[++i]
+    if (!arg.startsWith('--')) throw new ServerUsageError(`unexpected argument ${arg} — this CLI reads flags only: ${vocabulary}`)
+    const key = CLI_FLAGS[arg]
+    if (!key) throw new ServerUsageError(`unknown flag ${arg} — it accepts ${vocabulary}`)
+    const value = argv[i + 1]
+    i += 1
+    if (value === undefined || value.startsWith('--')) throw new ServerUsageError(`${arg} requires a value`)
+    if (arg === '--port') {
+      if (!/^\d+$/.test(value) || Number(value) > 65535) throw new ServerUsageError(`${arg} must be an integer between 0 and 65535, found ${value}`)
+      out.port = Number(value)
+    } else {
+      if (value === '') throw new ServerUsageError(`${arg} requires a non-empty value`)
+      out[key] = value
+    }
   }
   return out
 }
@@ -350,4 +378,24 @@ export function startServer(options = {}) {
   return { server, feed }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) startServer(args(process.argv.slice(2)))
+const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+if (invokedDirectly) {
+  // process.exitCode, not process.exit: the refusal happens BEFORE
+  // startServer, so nothing is bound, no ledger is opened and no state is
+  // written on this path. A non-usage throw keeps exit 1, and an async
+  // failure (EADDRINUSE) still surfaces as the uncaught-error exit 1 it is
+  // today — exit 1 stays the code for a genuine internal error.
+  let options
+  try {
+    options = parseCliArgs(process.argv.slice(2))
+  } catch (err) {
+    if (err instanceof ServerUsageError) {
+      process.stderr.write(`${err.message}\n`)
+      process.exitCode = 2
+    } else {
+      process.stderr.write(`${err && err.stack}\n`)
+      process.exitCode = 1
+    }
+  }
+  if (options) startServer(options)
+}

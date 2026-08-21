@@ -1337,10 +1337,34 @@ function refuseUsage(message, reason = 'usage') {
 // mirrors ledger.mjs's own BOOLEAN_FLAGS/parseArgs shape (ledger.mjs:1479).
 const CLI_BOOLEAN_FLAGS = new Set(['json'])
 
+// Every verb main dispatches is listed here; an absent entry is only reachable
+// for an unknown VERB, which main already refuses. Mirrors ledger.mjs's own
+// VERB_FLAGS/refuseUnknownFlags shape exactly (#443): `emit stats --state-dir d
+// --bogus zzz` exited 0 and silently ignored --bogus before this.
+const VERB_FLAGS = Object.freeze({
+  gate: new Set(['report', 'state-dir', 'json']),
+  stats: new Set(['state-dir', 'json']),
+})
+
+// parseCliArgs collects every `--name` it sees; this is the one place that
+// decides whether the verb knows it. A misspelled flag is a usage refusal
+// (exit 2), not a default.
+function refuseUnknownFlags(verb, flags) {
+  const accepted = Object.hasOwn(VERB_FLAGS, verb) ? VERB_FLAGS[verb] : undefined
+  if (!accepted) return
+  for (const name of Object.keys(flags)) {
+    if (accepted.has(name)) continue
+    const vocabulary = accepted.size === 0
+      ? 'it accepts no flags'
+      : `it accepts ${[...accepted].map((f) => `--${f}`).join(', ')}`
+    refuseUsage(`${verb}: unknown flag --${name} — ${vocabulary}`, 'unknown_flag')
+  }
+}
+
 function parseCliArgs(argv) {
   const [verb, ...rest] = argv
   const positional = []
-  const flags = {}
+  const flags = Object.create(null)
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i]
     if (a.startsWith('--')) {
@@ -1576,6 +1600,7 @@ export function main(argv) {
     if (!verb) {
       refuseUsage('a verb is required: gate | stats')
     }
+    refuseUnknownFlags(verb, flags) // #443: a misspelled flag is a refusal, never a default
     if (verb === 'gate') {
       return gateVerb(flags, stdout, stderr)
     }

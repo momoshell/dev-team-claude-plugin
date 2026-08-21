@@ -2414,6 +2414,67 @@ test('the intake-sweeps CLI prints dispatches beside sweeps and refusals', { ski
   assert.equal(payload.dispatches[0].outcome, 'claimed')
 })
 
+test('ci-cycles CLI marks an unwatched window as not measured', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['ci-cycles', '--since', '2030-01-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.measured, false)
+  assert.equal(payload.watched, null)
+  assert.equal(payload.caught, null)
+  assert.ok(payload.absent?.ci_cycles)
+})
+
+test('ci-cycles CLI reports a measured zero for a watched window with nothing reproduced', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordCiCycle({
+    branch: 'main', head_sha: 'ci-head-1', check_name: 'test', cycle: 1,
+    conclusion: 'success', classification: 'green', decision: 'none',
+  })
+  ledger.recordCiCycle({
+    branch: 'main', head_sha: 'ci-head-2', check_name: 'test', cycle: 1,
+    conclusion: 'success', classification: 'green', decision: 'none',
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['ci-cycles'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.measured, true)
+  assert.equal(payload.watched, 2)
+  assert.equal(payload.caught, 0)
+  assert.equal(payload.absent, null)
+})
+
+test('intake-sweeps CLI marks an unswept window as not measured', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['intake-sweeps', '--since', '2030-01-01T00:00:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.measured, false)
+  for (const key of ['swept', 'picked', 'parked']) assert.equal(payload[key], null)
+  assert.ok(payload.absent?.intake_sweeps)
+})
+
+test('intake-sweeps CLI reports a measured zero for a swept window that picked nothing', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 7, outcome: 'none', considered: 0, pages: 1 })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const res = run(['intake-sweeps'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.measured, true)
+  assert.equal(payload.swept, 1)
+  assert.equal(payload.picked, 0)
+  assert.equal(payload.parked, 0)
+  assert.equal(payload.absent, null)
+})
+
 test('seat teardown outcomes mirror gate discrimination and duplicate emissions are idempotent', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   assert.deepEqual(SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS)

@@ -28,6 +28,69 @@ export function fleetCost() {
   return { usd: null, pending: 'money deferred — a subscription seat is not billed per token (#185)' }
 }
 
+const TERMINAL_STATUSES = ['ok', 'fail', 'aborted']
+const DEGRADED_FEED_WHY = 'the sessions feed answered degraded — this window is unanswerable, never a measured zero'
+const UNMEASURED_WINDOW_WHY = 'no run in this window carried a recorded outcome — an unmeasured window is never a zero'
+
+// A degraded read answers rows it cannot vouch for, and sometimes answers none at
+// all; either way the window is unanswerable. Mirrors shape.mjs's degradedAbsence.
+function feedAbsence(options = {}) {
+  if (options?.degraded === true) return { pending: DEGRADED_FEED_WHY }
+  return null
+}
+
+function envelopeFor(envelopes, adwId) {
+  if (envelopes instanceof Map) return envelopes.get(adwId) || null
+  if (envelopes && typeof envelopes === 'object') return envelopes[adwId] || null
+  return null
+}
+
+export function fleetPassRate(runs = [], options = {}) {
+  const absence = feedAbsence(options)
+  const rows = Array.isArray(runs) ? runs : []
+  const measuredRows = absence ? [] : rows.filter((run) => TERMINAL_STATUSES.includes(run?.status))
+  const measured = measuredRows.length
+  if (measured === 0) return { percent: null, measured: 0, runs: rows.length, pending: absence?.pending ?? UNMEASURED_WINDOW_WHY }
+  const passed = measuredRows.filter((run) => run?.status === 'ok').length
+  return { percent: Math.round(passed / measured * 100), measured, runs: rows.length, pending: null }
+}
+
+export function fleetMedianDuration(runs = [], options = {}) {
+  const absence = feedAbsence(options)
+  const rows = Array.isArray(runs) ? runs : []
+  const durations = absence
+    ? []
+    : rows
+      .map((run) => run?.duration_ms)
+      .filter((value) => Number.isFinite(value))
+      .sort((a, b) => a - b)
+  const measured = durations.length
+  if (measured === 0) return { ms: null, measured: 0, runs: rows.length, pending: absence?.pending ?? UNMEASURED_WINDOW_WHY }
+  const middle = Math.floor(measured / 2)
+  const ms = measured % 2 ? durations[middle] : (durations[middle - 1] + durations[middle]) / 2
+  return { ms, measured, runs: rows.length, pending: null }
+}
+
+export function fleetPhasesPerRun(runs = [], options = {}) {
+  const absence = feedAbsence(options)
+  const rows = Array.isArray(runs) ? runs : []
+  const measuredRows = absence ? [] : rows.filter((run) => Array.isArray(run?.phases))
+  const measured = measuredRows.length
+  if (measured === 0) return { average: null, measured: 0, runs: rows.length, pending: absence?.pending ?? UNMEASURED_WINDOW_WHY }
+  const total = measuredRows.reduce((sum, run) => sum + run.phases.length, 0)
+  return { average: total / measured, measured, runs: rows.length, pending: null }
+}
+
+export function fleetEscalationRate(runs = [], options = {}) {
+  const absence = feedAbsence(options)
+  const rows = Array.isArray(runs) ? runs : []
+  const measuredRows = absence ? [] : rows.filter((run) => TERMINAL_STATUSES.includes(run?.status))
+  const measured = measuredRows.length
+  if (measured === 0) return { percent: null, escalated: 0, measured: 0, runs: rows.length, pending: absence?.pending ?? UNMEASURED_WINDOW_WHY }
+  const escalated = measuredRows.filter((run) => run?.status === 'fail' || run?.status === 'aborted' || run?.agents?.some((agent) => agent?.outcome === 'escalate') || envelopeFor(options?.envelopes, run?.adw_id)?.status === 'escalation').length
+  return { percent: Math.round(escalated / measured * 100), escalated, measured, runs: rows.length, pending: null }
+}
+
 export function rosterPanel(payload = {}) {
   if (payload?.tiers == null) {
     return {

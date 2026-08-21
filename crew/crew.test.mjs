@@ -11,6 +11,7 @@ import {
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
@@ -539,6 +540,23 @@ function callCounter() {
   return fn
 }
 
+function writeDescendantRecord(taskDir, overrides = {}) {
+  const dir = join(taskDir, 'descendants')
+  mkdirSync(dir, { recursive: true })
+  const key = overrides.key || 'headless__d1__seat-1'
+  const record = {
+    reservation_id: overrides.reservation_id || 'record-seat-1', key, phase: 'running',
+    owner: { pid: process.pid, startedAt: Date.now() }, transport: 'headless-json', role: 'builder',
+    seat_id: 'd1', seat_reservation_id: 'seat-1', marker_owner_pid: process.pid,
+    captures: 3, missed_snapshots: 0, discovery_failures: 0,
+    root_pid: 999999, root_pgid: 999999, root_start: 'old-root', groups: [],
+    root_settled: null, swept_at: null, sweep_id: null, ...overrides,
+  }
+  const path = join(dir, `.${key}.active.json`)
+  writeFileSync(path, JSON.stringify(record))
+  return path
+}
+
 function breakerRow(over = {}) {
   return {
     provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'builder', kind: 'timeout',
@@ -560,6 +578,285 @@ function fakeBreakerLedger(rows, { degraded = false } = {}) {
   open.calls = calls
   return open
 }
+
+// #419: boot's own-task descendant sweep — closed-set refusals and the record it leaves.
+test('boot reclaims this task\'s provably dead descendants and proceeds', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-dead-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-dead-checkout-')
+  const task = 'descendant-dead'
+  const recordPath = writeDescendantRecord(join(testCrewDir(home, checkout, task), 'task'), {
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const kill = (pid) => {
+    if (pid === -42) {
+      const error = new Error('ESRCH')
+      error.code = 'ESRCH'
+      throw error
+    }
+    return true
+  }
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), descendantDeps: { kill, snapshot: () => ({ ok: true, rows: new Map() }), sleep: () => {} } },
+    )))
+    assert.equal(existsSync(join(testCrewDir(home, checkout, task), 'crew.json')), true)
+    assert.ok(JSON.parse(readFileSync(recordPath, 'utf8')).swept_at)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('boot refuses when a reclaimed descendant lacks a durable stamp', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-stamp-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-stamp-checkout-')
+  const task = 'descendant-stamp'
+  const recordPath = writeDescendantRecord(join(testCrewDir(home, checkout, task), 'task'), {
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const reclaimDescendants = () => ({
+    records: 1, swept: 1, skipped: 0, retryable: 0, reclaimed: 1, live: 0,
+    probe_unknown: 0, identity_refused: 0, record_failed: 0, snapshot_ok: true,
+  })
+  let error
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), reclaimDescendants },
+      ),
+      (candidate) => { error = candidate; return candidate.reason === 'descendants-unreclaimed' },
+    )))
+    assert.equal(error.code, 'stale-descendants')
+    assert.equal(existsSync(join(testCrewDir(home, checkout, task), 'crew.json')), false)
+    assert.equal(JSON.parse(readFileSync(recordPath, 'utf8')).swept_at, null)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('boot refuses when this task\'s records show a live descendant', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-live-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-live-checkout-')
+  const task = 'descendant-live'
+  const recordPath = writeDescendantRecord(join(testCrewDir(home, checkout, task), 'task'), {
+    root_pid: 5000, root_pgid: 5000, root_start: 'live-root',
+  })
+  const liveSnapshot = () => ({ ok: true, rows: new Map([[5000, { pid: 5000, pgid: 5000, start: 'live-root', stat: 'Ss' }]]) })
+  let error
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), descendantDeps: { kill: () => true, snapshot: liveSnapshot, sleep: () => {} } },
+      ),
+      (candidate) => { error = candidate; return candidate.reason === 'descendants-alive' },
+    )))
+    assert.equal(error.code, 'stale-descendants')
+    assert.match(error.message, /crew:reap/)
+    assert.equal(JSON.parse(readFileSync(recordPath, 'utf8')).swept_at, null)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('boot refuses an unmeasurable descendant probe', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-unknown-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-unknown-checkout-')
+  const task = 'descendant-unknown'
+  writeDescendantRecord(join(testCrewDir(home, checkout, task), 'task'))
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), descendantDeps: { kill: () => true, snapshot: () => ({ ok: false, rows: null }), sleep: () => {} } },
+      ),
+      (candidate) => candidate.reason === 'descendants-unknown',
+    )))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('a refused boot creates no seat, no workspace and no crew.json', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-no-state-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-no-state-checkout-')
+  const task = 'descendant-no-state'
+  const dir = testCrewDir(home, checkout, task)
+  writeDescendantRecord(join(dir, 'task'), { root_pid: 5000, root_pgid: 5000, root_start: 'live-root' })
+  const cmux = callCounter(); const tree = callCounter()
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, roles: 'lead,planner,builder,reviewer' },
+        { cmux, tree, renameTab: callCounter(), descendantDeps: { kill: () => true, snapshot: () => ({ ok: true, rows: new Map([[5000, { pid: 5000, pgid: 5000, start: 'live-root', stat: 'Ss' }]]) }), sleep: () => {} } },
+      ),
+      (error) => error.reason === 'descendants-alive',
+    )))
+    assert.equal(cmux.calls.length, 0)
+    assert.equal(tree.calls.length, 0)
+    assert.equal(existsSync(join(dir, 'crew.json')), false)
+    assert.equal(existsSync(join(dir, 'task', 'role-lead.md')), false)
+    assert.equal(existsSync(join(dir, 'returns')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('the boot sweep touches only the booting task\'s own records', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-own-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-own-checkout-')
+  const first = 'descendant-own-a'; const second = 'descendant-own-b'
+  const firstPath = writeDescendantRecord(join(testCrewDir(home, checkout, first), 'task'), {
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const secondPath = writeDescendantRecord(join(testCrewDir(home, checkout, second), 'task'), {
+    key: 'headless__d1__seat-2', reservation_id: 'record-seat-2',
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const beforeSecond = readFileSync(secondPath, 'utf8')
+  const kill = (pid) => {
+    if (pid === -42) {
+      const error = new Error('ESRCH')
+      error.code = 'ESRCH'
+      throw error
+    }
+    return true
+  }
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => bootCmd(
+      { task: first, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), descendantDeps: { kill, snapshot: () => ({ ok: true, rows: new Map() }), sleep: () => {} } },
+    )))
+    assert.ok(JSON.parse(readFileSync(firstPath, 'utf8')).swept_at)
+    assert.equal(readFileSync(secondPath, 'utf8'), beforeSecond)
+    assert.equal(JSON.parse(readFileSync(secondPath, 'utf8')).swept_at, null)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('a boot with no records is silent, proceeds, and still records the check', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-empty-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-empty-checkout-')
+  const task = 'descendant-empty'
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    )))
+    const rows = readFileSync(join(testCrewDir(home, checkout, task), 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    const sweeps = rows.filter((row) => row.event === 'boot-descendant-sweep')
+    assert.equal(sweeps.length, 1)
+    assert.equal(sweeps[0].records, 0)
+    assert.equal(sweeps[0].refusal, null)
+    assert.equal(existsSync(join(testCrewDir(home, checkout, task), 'crew.json')), true)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('a second boot over swept records reports nothing rather than erroring', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-second-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-second-checkout-')
+  const task = 'descendant-second'
+  const recordPath = writeDescendantRecord(join(testCrewDir(home, checkout, task), 'task'), {
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
+  const kill = (pid) => {
+    if (pid === -42) {
+      const error = new Error('ESRCH')
+      error.code = 'ESRCH'
+      throw error
+    }
+    return true
+  }
+  const deps = { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), descendantDeps: { kill, snapshot: () => ({ ok: true, rows: new Map() }), sleep: () => {} } }
+  try {
+    const args = { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath }
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, async () => {
+      await bootCmd(args, deps)
+      await bootCmd(args, deps)
+    }))
+    assert.ok(JSON.parse(readFileSync(recordPath, 'utf8')).swept_at)
+    const rows = readFileSync(join(testCrewDir(home, checkout, task), 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((row) => row.event === 'boot-descendant-sweep')
+    assert.equal(rows.length, 2)
+    assert.equal(rows[1].records, 0)
+    assert.equal(rows[1].skipped, 1)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('the sweep runs before any seat state exists', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-order-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-order-checkout-')
+  const task = 'descendant-order'
+  const dir = testCrewDir(home, checkout, task)
+  const calls = []
+  const reclaimDescendants = (options) => {
+    calls.push(options)
+    assert.equal(existsSync(join(dir, 'task')), false)
+    assert.equal(existsSync(join(dir, 'crew.json')), false)
+    return { records: 0, swept: 0, skipped: 0, retryable: 0, reclaimed: 0, live: 0, probe_unknown: 0, identity_refused: 0, snapshot_ok: true }
+  }
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => bootCmd(
+      { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), reclaimDescendants },
+    )))
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].taskDir, join(dir, 'task'))
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('a sweep that throws refuses rather than booting', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-boot-descendant-error-home-'))
+  const { root: checkoutRoot, checkout } = testCheckout('crew-boot-descendant-error-checkout-')
+  const task = 'descendant-error'
+  const dir = testCrewDir(home, checkout, task)
+  try {
+    await withBreakerEnv({ DEVTEAM_LEDGER_DB: undefined }, () => withHome(home, () => assert.rejects(
+      () => bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), reclaimDescendants: () => { throw new Error('ps exploded') } },
+      ),
+      (error) => error.reason === 'descendants-sweep-failed',
+    )))
+    assert.equal(existsSync(join(dir, 'crew.json')), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('the boot descendant refusal set is frozen and closed', () => {
+  assert.equal(Object.isFrozen(BOOT_DESCENDANT_REFUSALS), true)
+  assert.throws(() => refuseStaleDescendants('anything-else', { task: 't' }))
+})
+
+test('descendantRefusal applies alive before unknown before mismatch', () => {
+  const row = (overrides) => ({ event: 'descendant-reclaim', ...overrides })
+  const clean = { retryable: 0, record_failed: 0, snapshot_ok: true }
+  assert.equal(descendantRefusal([row({ reason: 'evidence-mismatch', identity_refused: 1 }), row({ reason: 'probe-unknown', probe_unknown: 1 }), row({ reason: 'root-alive' })], clean), 'descendants-alive')
+  assert.equal(descendantRefusal([row({ reason: 'evidence-mismatch', identity_refused: 1 }), row({ reason: 'probe-unknown', probe_unknown: 1 })], clean), 'descendants-unknown')
+  assert.equal(descendantRefusal([row({ reason: 'evidence-mismatch', identity_refused: 1 })], clean), 'descendants-evidence-mismatch')
+  assert.equal(descendantRefusal([], clean), null)
+  assert.equal(descendantRefusal([], { ...clean, retryable: 1 }), 'descendants-unreclaimed')
+  assert.equal(descendantRefusal([], { ...clean, snapshot_ok: false }), 'descendants-unreclaimed')
+})
 
 test('bootAllocation carries resolved transports alongside tier provenance', () => {
   assert.deepEqual(

@@ -3015,6 +3015,47 @@ function killVerb(ledger, { adwId, pid, yes }, stdout, stderr) {
 // --yes is the one boolean (no-value) flag in this CLI's vocabulary.
 const BOOLEAN_FLAGS = new Set(['yes'])
 
+// Every flag each verb accepts. A flag absent from its verb's set is REFUSED
+// (exit 2) rather than ignored: measured on 2026-08-21, `run-set --since X
+// --untill Y` answered `until: null, runs: 1978` at exit 0 while the same
+// window spelled `--until` answered 0 — a one-letter typo silently unbounded
+// the window (#443). Every verb main dispatches is listed here; an absent
+// entry is only reachable for an unknown VERB, which :3770 already refuses.
+const VERB_FLAGS = Object.freeze({
+  sessions: new Set([]),
+  phases: new Set([]),
+  procs: new Set([]),
+  tail: new Set(['after', 'limit']),
+  'gate-review-gap': new Set([]),
+  'eligible-tasks': new Set([]),
+  'run-set': new Set(['since', 'until']),
+  'cell-failures': new Set(['since', 'until']),
+  'modifier-attempts': new Set(['since', 'until']),
+  'seat-teardowns': new Set(['since', 'until']),
+  'ci-cycles': new Set(['since', 'until']),
+  'intake-sweeps': new Set(['since', 'until']),
+  task: new Set([]),
+  request: new Set(['from-brief']),
+  'advisor-ab': new Set(['run-dir', 'run-started-at', 'adjudications']),
+  doctor: new Set([]),
+  kill: new Set(['adw-id', 'pid', 'yes']),
+})
+
+// parseArgs collects every `--name` it sees; this is the one place that decides
+// whether the verb knows it. A misspelled flag is a usage refusal (exit 2), not
+// a default.
+function refuseUnknownFlags(verb, flags) {
+  const accepted = VERB_FLAGS[verb]
+  if (!accepted) return
+  for (const name of Object.keys(flags)) {
+    if (accepted.has(name)) continue
+    const vocabulary = accepted.size === 0
+      ? 'it accepts no flags'
+      : `it accepts ${[...accepted].map((f) => `--${f}`).join(', ')}`
+    refuse(`${verb}: unknown flag --${name} — ${vocabulary}`)
+  }
+}
+
 function parseArgs(argv) {
   const [verb, ...rest] = argv
   const positional = []
@@ -3346,6 +3387,8 @@ export function main(argv) {
       stderr.write(`ledger: below floor — NODE_FLOOR is ${NODE_FLOOR}, running ${nodeVersion}\n`)
       return 2
     }
+
+    refuseUnknownFlags(verb, flags) // #443: a misspelled flag is a refusal, never a default
 
     if (verb === 'advisor-ab') {
       // Never globs: the returns directory is opened by NAME, once per supplied

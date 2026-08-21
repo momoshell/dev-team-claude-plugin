@@ -409,6 +409,14 @@ export function resolveLaneFence(args = {}, deps = {}) {
 export const VALIDATION_LANE_REFUSAL = 'invalid-validation-lane'
 
 export function resolveValidationLane({ validationLane, lane, fences } = {}) {
+  // An omitted input and an explicit null are the SAME absence. The daemon
+  // normalises a missing lane to null (crew/daemon.mjs:1091) and childSpecFor
+  // forwards it unconditionally (:948), so a resolver that only knows
+  // `undefined` turns every daemon or factoryctl run booted without --lane into
+  // a child-preflight escalation. Same shape as crew/limits.mjs:30. `fences`
+  // deliberately keeps its `=== undefined` test: it is not a lane value but the
+  // PAIRING SIGNAL asking whether --fences was given at all.
+  const absent = (raw) => raw === undefined || raw === null
   const clean = (raw, flag) => {
     if (typeof raw !== 'string' || raw.trim() === '') {
       throw Object.assign(
@@ -418,8 +426,8 @@ export function resolveValidationLane({ validationLane, lane, fences } = {}) {
     }
     return raw.trim()
   }
-  if (validationLane !== undefined) return { lane: clean(validationLane, 'validation-lane'), source: 'validation-lane' }
-  if (lane !== undefined && fences === undefined) return { lane: clean(lane, 'lane'), source: 'lane' }
+  if (!absent(validationLane)) return { lane: clean(validationLane, 'validation-lane'), source: 'validation-lane' }
+  if (!absent(lane) && fences === undefined) return { lane: clean(lane, 'lane'), source: 'lane' }
   return { lane: null, source: 'none' }
 }
 

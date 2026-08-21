@@ -114,8 +114,23 @@ export function latestArtifactMs(taskDir, deps = {}) {
   return newest
 }
 
-export function discoverLanes(root, deps = {}) {
-  const d = normalDeps(deps)
+// crew/crew.mjs:1623 mints an archive as `${paths.dir}.archive-${stamp}` and
+// crew.mjs:1530 recognises one by that same marker; this is that recogniser, one
+// layer down. A live slug can never carry a dot (crew/slug.mjs:13 strips every
+// character outside [a-z0-9-]), so the marker cannot collide with a real lane.
+export const ARCHIVE_MARKER = '.archive-'
+
+// The base task slug of an archived lane directory, or null for a live one. An
+// archive is a FINISHED run: a record to read, never a watch target to write.
+export function archivedLaneName(name) {
+  const at = name.indexOf(ARCHIVE_MARKER)
+  if (at <= 0) return null
+  return { task: name.slice(0, at), archivedAt: name.slice(at + ARCHIVE_MARKER.length) }
+}
+
+// ONE walk, one meaning of "a lane": every candidate is classified here and
+// the two views below only filter it. No second discovery path, no cache.
+function walkLanes(root, d) {
   const lanes = []
   let repos
   try { repos = d.readdirSync(root, { withFileTypes: true }) } catch { return lanes }
@@ -125,18 +140,34 @@ export function discoverLanes(root, deps = {}) {
     for (const task of tasks.filter((e) => e.isDirectory()).sort((a, b) => (a.name < b.name ? -1 : 1))) {
       const dir = join(root, repo.name, task.name)
       if (!d.existsSync(join(dir, 'crew.json')) || !d.existsSync(join(dir, 'journal.jsonl'))) continue
+      const archive = archivedLaneName(task.name)
       lanes.push({
         id: `${repo.name}/${task.name}`,
         repo: repo.name,
-        task: task.name,
+        task: archive ? archive.task : task.name,
         dir,
         journal: join(dir, 'journal.jsonl'),
         taskDir: join(dir, 'task'),
         settled: d.existsSync(join(dir, 'returns', 'task.json')),
+        archived: archive !== null,
+        archivedAt: archive ? archive.archivedAt : null,
       })
     }
   }
   return lanes
+}
+
+// LIVE lanes only. An archived directory is a rename of a live one, so it still
+// holds crew.json + journal.jsonl and satisfied every predicate here — which is
+// how the watchdog came to append notes to 243 finished runs (#417).
+export function discoverLanes(root, deps = {}) {
+  return walkLanes(root, normalDeps(deps)).filter((lane) => !lane.archived)
+}
+
+// The archived counterpart, for a caller that must REPORT on a lane that has
+// since been torn down. Same walk, opposite view; nothing here writes.
+export function archivedLanes(root, deps = {}) {
+  return walkLanes(root, normalDeps(deps)).filter((lane) => lane.archived)
 }
 
 export function laneActive(lane, journal) {

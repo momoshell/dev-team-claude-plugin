@@ -4,6 +4,9 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSy
 import { tmpdir } from 'node:os'
 import { dirname, join, relative } from 'node:path'
 import {
+  ARCHIVE_MARKER,
+  archivedLaneName,
+  archivedLanes,
   discoverLanes,
   hostLoad,
   journalAt,
@@ -322,4 +325,50 @@ test('a recent lane-watch line does not reset silence or self-silence the lane',
   pass(root)
   assert.equal(notesFor(lane.journal, 'silent-lane').length, 1)
   assert.equal(notesFor(lane.journal, 'silent-lane')[0].silent_s, 645)
+})
+
+test('discovery excludes an archived lane directory and keeps the live one', () => {
+  const root = world()
+  seedLane(root, { task: 'demo-lane' })
+  seedLane(root, { task: 'demo-lane.archive-2026-08-20T23-25-28-377Z' })
+
+  assert.deepEqual(discoverLanes(root).map((lane) => lane.id), ['dt-demo/demo-lane'])
+  assert.deepEqual(archivedLanes(root).map((lane) => ({ id: lane.id, task: lane.task })), [
+    { id: 'dt-demo/demo-lane.archive-2026-08-20T23-25-28-377Z', task: 'demo-lane' },
+  ])
+})
+
+test('watchPass notes the live lane and leaves the archived journal byte-identical', () => {
+  const root = world()
+  const live = seedLane(root, {
+    task: 'demo-lane',
+    journalLines: [{ at: NOW - 700_000, stage: 'plan:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  const archived = seedLane(root, {
+    task: 'demo-lane.archive-2026-08-20T23-25-28-377Z',
+    journalLines: [{ at: NOW - 700_000, stage: 'plan:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  const before = readFileSync(archived.journal, 'utf8')
+
+  pass(root)
+
+  const liveNotes = notesFor(live.journal, 'silent-lane')
+  assert.equal(liveNotes.length, 1)
+  assert.equal(liveNotes[0].silent_s, 700)
+  assert.equal(readFileSync(archived.journal, 'utf8'), before)
+})
+
+test('the archive marker tracks the suffix crew.mjs mints', () => {
+  const source = readFileSync(new URL('../crew/crew.mjs', import.meta.url), 'utf8')
+  const marker = source.match(/\$\{paths\.dir\}([^$`]+)\$\{/)[1]
+  assert.equal(marker, ARCHIVE_MARKER)
+
+  const stamp = '2026-08-20T23-25-28-377Z'
+  assert.deepEqual(archivedLaneName(`demo-lane${ARCHIVE_MARKER}${stamp}`), {
+    task: 'demo-lane',
+    archivedAt: stamp,
+  })
+  assert.equal(archivedLaneName('demo-lane'), null)
 })

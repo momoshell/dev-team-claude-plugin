@@ -164,7 +164,9 @@ export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a No
 // The per-check mutation contract quoted from its single enforcement point,
 // `validateMutations` in crew/drive.mjs. Two lanes lost a plan round each to a
 // format documented nowhere a planner reads (#330, #345); a standing block is the
-// only delivery that does not depend on an orchestrator remembering.
+// only delivery that does not depend on an orchestrator remembering. The
+// discrimination proof asks whether a mutation reddens a check, never whether it
+// exercises what the check claims, so the author-side rule ships in the brief (#409).
 export const MUTATION_CONTRACT_BLOCK = Object.freeze(`A per-check mutation declaration is MACHINE-APPLIED: the driver find-and-replaces
 on a scratch copy of the built tree, re-runs the gate, and requires that one check
 to redden. A prose field (\`"kills": "leaving the loop unconditional"\`) cannot be
@@ -241,7 +243,39 @@ colour-neutral child must DELETE \`FORCE_COLOR\` (and \`CLICOLOR_FORCE\`) from i
 environment rather than only setting \`NO_COLOR=1\`. Under \`FORCE_COLOR=3
 NO_COLOR=1\` the measured line is \`ESC[34mℹ pass 7ESC[39m\` (ESC = 0x1b), so an
 \`^\`-anchored grep matches nothing. Strip ANSI before parsing either shape
-(#240). Rationale: #399.`)
+(#240). Rationale: #399.
+
+A declared mutation must exercise the check's NARROWEST claimed property, not
+merely redden the check. The per-check proof asks only "does this mutation redden
+this check?"; it cannot ask "does this mutation exercise what this check
+CLAIMS?", and on 2026-08-20 four checks certified \`killed\` were each weaker
+than their own prose. Read your own mutation as an adversary: what is the cheapest
+implementation that violates the sentence beside the check and still passes it?
+Two measured counter-examples, both certified \`killed\`:
+
+- A mutation landing IN A COMMENT. \`C1\` claimed "≥3 tests are named for the
+  re-ask, one naming the bound"; its declared mutation rewrote a \`re-ask\`
+  occurrence inside a COMMENT — text the check never reads — so it reddened
+  nothing the check counts and the real mutation had to be found by hand.
+  Mutate the text the check actually parses; if no such \`find\` exists, the
+  check is reading something other than what its prose claims.
+- A negative-claim fixture INDISTINGUISHABLE from what already exists. \`G15\`
+  claimed "an unknown adapter's overlay cannot silently widen another
+  adapter", and injected an overlay carrying an extension the target ALREADY
+  had, then asserted only that a third adapter stayed empty. An implementation
+  merging every overlay into the target passes it: the duplicate dedupes and
+  the third adapter is untouched. State a negative claim positively — the
+  injected fixture must be DISTINCTIVE, a value nothing else in the fixture
+  carries so its arrival is unambiguous, and the protected side must be
+  compared BEFORE-AND-AFTER, never merely observed to be empty.
+
+A COMPOUND CLAIM needs one mutation per half. \`G15\` ("cannot widen" AND
+"another adapter") and \`L11\` ("every anchor" AND "one a resolver reads") each
+had a half no declared mutation probed: \`L11\`'s check added every discovered RANGE
+citation to its own resolved set, while its mutation used the single-line form,
+so the range hole was never touched. If the sentence beside your check has two
+verbs, declare two entries or write a narrower sentence.
+Rationale: #409.`)
 
 function standingBlocks() {
   return { acceptance: ACCEPTANCE_GATE_BLOCK, mutations: MUTATION_CONTRACT_BLOCK, conventions: CONVENTIONS_BLOCK }

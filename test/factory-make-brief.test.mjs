@@ -717,6 +717,39 @@ test('the mutation contract states the node --test reporter rule', () => {
   ]) assert.ok(contract.includes(token), token)
 })
 
+// #409: the per-check proof asks whether a mutation reddens a check, never whether it
+// exercises what the check CLAIMS. Four checks certified `killed` on 2026-08-20 were
+// weaker than their own prose. The counter-examples are asserted inside the bullet that
+// carries them — the same narrowness the clause demands, so a stray keyword elsewhere in
+// the contract cannot satisfy this test.
+test('the mutation contract demands a mutation exercising the narrowest claim', () => {
+  const root = fixture('narrowest-claim')
+  const { brief } = compile(root)
+  const second = compile(root, {}, [], 'brief-second.md').brief
+  assert.equal(second, brief)
+  const contract = section(brief, '## Per-check mutations')
+  assert.equal(contract, MUTATION_CONTRACT_BLOCK)
+  const flat = (text) => text.replace(/\s+/g, ' ').trim()
+  assert.ok(flat(contract).includes(
+    "A declared mutation must exercise the check's NARROWEST claimed property, not merely redden the check.",
+  ))
+  const bullets = contract.split(/\n(?=- )/).filter((chunk) => chunk.startsWith('- ')).map(flat)
+  const comment = bullets.filter((bullet) => bullet.includes('IN A COMMENT'))
+  assert.equal(comment.length, 1)
+  for (const clause of ['`C1`', 're-ask', 'text the check never reads',
+    'Mutate the text the check actually parses']) assert.ok(comment[0].includes(clause), clause)
+  const negative = bullets.filter((bullet) => bullet.includes('INDISTINGUISHABLE'))
+  assert.equal(negative.length, 1)
+  for (const clause of ['`G15`', 'an extension the target ALREADY had', 'the duplicate dedupes',
+    'the injected fixture must be DISTINCTIVE',
+    'compared BEFORE-AND-AFTER, never merely observed to be empty',
+  ]) assert.ok(negative[0].includes(clause), clause)
+  const compound = contract.split(/\n\s*\n/).map(flat).filter((p) => p.includes('COMPOUND CLAIM'))
+  assert.equal(compound.length, 1)
+  for (const clause of ['A COMPOUND CLAIM needs one mutation per half.', '`G15`', '`L11`',
+    'two verbs', '#409']) assert.ok(compound[0].includes(clause), clause)
+})
+
 test('the charter and the checklist state the contract the driver enforces', () => {
   const charter = readFileSync(join(ROOT, 'crew', 'roles', 'planner.md'), 'utf8')
   const checklist = readFileSync(join(ROOT, 'crew', 'guidelines', 'seat-pre-return-checklist.md'), 'utf8')

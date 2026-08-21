@@ -18,13 +18,16 @@
 //                  # paired: both or neither
 //   crew.mjs run   --task <slug> --brief-file <path> [--variant <name>] [--files-in-scope <a,b>] # hand the task to the lead
 //                  [--validation-lane <command>]  # the round validation lane;
-//                  # --lane stays the fence-register NAME (see resolveValidationLane)
+//                  # bare --lane is the round validation lane; with --fences it names the fence-register lane
 //                  [--plan-rounds <n>] [--build-rounds <n>] [--review-rounds <n>]
 //                  # per-run round budgets; an absent flag = drive.mjs LIMITS
 //                  variant names come from crew/drive.mjs's VARIANTS
+//   crew.mjs handoff --task <slug> --brief-file <path> # hand the task to the LEAD
 //   crew.mjs wait  --task <slug> [--timeout-s N]       # await the LEAD's envelope
 //   crew.mjs status --task <slug>
 //   crew.mjs teardown --task <slug>
+// Each verb refuses a flag it does not read with exit 2; --fences is boot-only,
+// and a bare --lane on run is the round validation lane.
 import {
   existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync,
 } from 'node:fs'
@@ -1785,6 +1788,8 @@ export function teardownCmd(args, deps = {}) {
   return record
 }
 
+export class UsageError extends Error { constructor(message) { super(message); this.name = 'UsageError'; this.usage = true } }
+
 // A --flag followed by another --flag (or by nothing) is a BOOLEAN true —
 // otherwise `run --brief-file x --keep` silently loses --keep.
 function parseArgs(argv) {
@@ -1796,6 +1801,54 @@ function parseArgs(argv) {
     if (next === undefined || next.startsWith('--')) { out[t.slice(2)] = true } else { out[t.slice(2)] = next; i += 1 }
   }
   return out
+}
+
+export const KNOWN_FLAGS = Object.freeze({
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin']),
+  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'suite', 'keep', 'claude-bin']),
+  handoff: Object.freeze(['task', 'checkout', 'brief-file']),
+  wait: Object.freeze(['task', 'checkout', 'timeout-s']),
+  status: Object.freeze(['task', 'checkout']),
+  teardown: Object.freeze(['task', 'checkout']),
+})
+export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 'allow-shortfall-'])
+export const REQUIRED_FLAGS = Object.freeze({
+  boot: Object.freeze(['task']),
+  run: Object.freeze(['task', 'brief-file']),
+  handoff: Object.freeze(['task', 'brief-file']),
+  wait: Object.freeze(['task']),
+  status: Object.freeze(['task']),
+  teardown: Object.freeze(['task']),
+})
+export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane'])
+
+export function assertUsage(verb, args) {
+  const supplied = args && typeof args === 'object' ? args : {}
+  const known = KNOWN_FLAGS[verb] || []
+  const keys = Object.keys(supplied).filter((key) => key !== '_')
+  const misplaced = BOOT_ONLY_FLAGS.filter((flag) => Object.hasOwn(supplied, flag) && !known.includes(flag))
+  if (misplaced.length) {
+    const names = misplaced.map((flag) => `--${flag}`).join(', ')
+    const bootLabel = misplaced.length === 1 ? 'this is a BOOT-time flag' : 'these are BOOT-time flags'
+    let message = `crew.mjs ${verb} does not read ${names}: ${bootLabel} — pass it to \`crew.mjs boot\`, which persists it into crew.json (lane_name/lane_fence) and it is the run's single source of fence truth`
+    if (verb === 'run' && Object.hasOwn(supplied, 'fences') && Object.hasOwn(supplied, 'lane')) {
+      message += ' and --fences is SUPPRESSING the --lane you asked for: with both present resolveValidationLane returns no lane at all'
+    }
+    throw new UsageError(message)
+  }
+  const unknown = keys.filter((key) => !known.includes(key) && !(verb === 'boot' && ROLE_FLAG_PREFIXES.some((prefix) => key.startsWith(prefix) && key.length > prefix.length)))
+  if (unknown.length) {
+    const names = unknown.map((flag) => `--${flag}`).join(', ')
+    const knownNames = known.map((flag) => `--${flag}`).join(', ')
+    throw new UsageError(`crew.mjs ${verb} does not read ${names}; ${verb} reads: ${knownNames}`)
+  }
+  for (const flag of REQUIRED_FLAGS[verb] || []) {
+    const value = supplied[flag]
+    if (value === undefined || value === true || typeof value !== 'string' || !value.trim()) {
+      const shape = flag === 'task' ? '<slug>' : flag === 'brief-file' ? '<path to the task brief>' : '<value>'
+      throw new UsageError(`crew.mjs ${verb} requires --${flag} ${shape}`)
+    }
+  }
 }
 
 const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }
@@ -1810,10 +1863,12 @@ if (invokedDirectly) {
   const fail = (err) => {
     process.stderr.write(`error: ${err.message}\n`)
     process.stdout.write(`${JSON.stringify({ error: err.message })}\n`)
-    process.exit(1)
+    process.exit(err?.usage === true ? 2 : 1)
   }
   try {
-    const r = fn(parseArgs(rest))
+    const parsed = parseArgs(rest)
+    assertUsage(verb, parsed)
+    const r = fn(parsed)
     if (r && typeof r.then === 'function') r.catch(fail)
   } catch (err) { fail(err) }
 }

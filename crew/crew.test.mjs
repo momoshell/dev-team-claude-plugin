@@ -1,16 +1,18 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
-import { execSync, spawn } from 'node:child_process'
-import { tmpdir } from 'node:os'
+import { execSync, spawn, spawnSync } from 'node:child_process'
+import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
@@ -52,6 +54,20 @@ const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', impo
 // so a real-row assertion there would assert the absence of a feature.
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
+
+const CLI_REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const CLI_PROBE_TASK = 'b120-usage-probe'
+const CLI_PROBE_BRIEF = join(tmpdir(), 'b120-usage-probe-brief.md')
+const CLI_ENV = { ...process.env, NO_COLOR: '1' }
+delete CLI_ENV.FORCE_COLOR
+delete CLI_ENV.CLICOLOR_FORCE
+const ANSI_CODES = /\u001b\[[0-9;]*m/g
+const cliEntry = (...argv) => {
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL('./crew.mjs', import.meta.url)), ...argv], {
+    cwd: CLI_REPO_ROOT, encoding: 'utf8', env: CLI_ENV,
+  })
+  return { ...result, output: `${result.stdout || ''}${result.stderr || ''}`.replace(ANSI_CODES, '') }
+}
 
 const PARK_CREW = {
   roles: ['lead', 'planner', 'builder', 'reviewer'],
@@ -1667,6 +1683,114 @@ test('a real SIGTERM during settlement keeps the default disposition', async () 
     // this window loses the teardown sweep that follows, never the run's record.
     assert.equal(existsSync(f.taskReturn), true)
   } finally { rmSync(f.root, { recursive: true, force: true }) }
+})
+
+test('CLI refuses run fences before reading crew state', () => {
+  const result = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--fences', 'F')
+  assert.equal(result.status, 2)
+  assert.match(result.output, /--fences/)
+  assert.match(result.output, /crew\.mjs boot/)
+})
+
+test('CLI explains that paired fences suppresses the requested run lane', () => {
+  const result = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--lane', 'L', '--fences', 'F')
+  assert.equal(result.status, 2)
+  assert.match(result.output, /--fences/)
+  assert.match(result.output, /crew\.mjs boot/)
+  assert.match(result.output, /--lane/)
+  assert.match(result.output, /SUPPRESSING the --lane you asked for/)
+})
+
+test('run accepts bare lane and validation-lane flags and reaches crew state', () => {
+  const bareLane = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--lane', 'npm test')
+  assert.notEqual(bareLane.status, 2)
+  assert.match(bareLane.output, /no crew booted/)
+  const validationLane = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--validation-lane', 'npm test')
+  assert.notEqual(validationLane.status, 2)
+  assert.match(validationLane.output, /no crew booted/)
+  assert.deepEqual(resolveValidationLane({ lane: 'npm test' }), { lane: 'npm test', source: 'lane' })
+  assert.doesNotThrow(() => assertUsage('run', { task: 't', 'brief-file': 'brief.md', lane: 'npm test' }))
+})
+
+test('CLI reports missing task as usage for every task-bearing verb', () => {
+  for (const argv of [
+    ['boot'],
+    ['run', '--brief-file', CLI_PROBE_BRIEF],
+    ['handoff', '--brief-file', CLI_PROBE_BRIEF],
+    ['teardown'],
+  ]) {
+    const result = cliEntry(...argv)
+    assert.equal(result.status, 2, argv.join(' '))
+    assert.match(result.output, /--task/, argv.join(' '))
+  }
+})
+
+test('CLI reports missing run brief as usage', () => {
+  const result = cliEntry('run', '--task', CLI_PROBE_TASK)
+  assert.equal(result.status, 2)
+  assert.match(result.output, /--brief-file/)
+})
+
+test('CLI refuses unknown flags and preserves unexpected-error exit 1', () => {
+  const unknown = cliEntry('status', '--task', CLI_PROBE_TASK, '--bogus-flag')
+  assert.equal(unknown.status, 2)
+  assert.match(unknown.output, /--bogus-flag/)
+  const internal = cliEntry('status', '--task', CLI_PROBE_TASK)
+  assert.equal(internal.status, 1)
+  assert.match(internal.output, /no crew booted/)
+})
+
+test('CLI process pins retain direct spawnSync entrypoint coverage', () => {
+  const entry = fileURLToPath(new URL('./crew.mjs', import.meta.url))
+  const options = { cwd: CLI_REPO_ROOT, encoding: 'utf8', env: CLI_ENV }
+  const missingTask = spawnSync(process.execPath, [entry, 'boot'], options)
+  const unexpected = spawnSync(process.execPath, [entry, 'status', '--task', CLI_PROBE_TASK], options)
+  assert.equal(missingTask.status, 2)
+  assert.equal(unexpected.status, 1)
+})
+
+test('CLI refusal probes do not create crew state', () => {
+  const probeDir = join(homedir(), '.crew', basename(CLI_REPO_ROOT), CLI_PROBE_TASK)
+  assert.equal(existsSync(probeDir), false)
+})
+
+test('flag contracts accept known flags, role prefixes, and reject malformed usage', () => {
+  const valueFor = (flag) => flag === 'task' ? 't' : flag === 'brief-file' ? 'brief.md' : 'value'
+  for (const [verb, flags] of Object.entries(KNOWN_FLAGS)) {
+    const args = { _: [] }
+    for (const flag of flags) args[flag] = valueFor(flag)
+    assert.doesNotThrow(() => assertUsage(verb, args), `${verb} known flags`)
+  }
+  for (const prefix of ROLE_FLAG_PREFIXES) {
+    assert.doesNotThrow(() => assertUsage('boot', { task: 't', [`${prefix}planner`]: 'value' }), prefix)
+  }
+  assert.doesNotThrow(() => assertUsage('boot', { task: 't', 'allow-shortfall-nosuchrole': 'value' }))
+  assert.doesNotThrow(() => assertUsage('boot', { task: 't', fences: 'register.json' }))
+  assert.throws(
+    () => assertUsage('run', { task: 't', 'brief-file': 'brief.md', fences: 'register.json' }),
+    (err) => err instanceof UsageError && err.usage === true && /crew\.mjs boot/.test(err.message),
+  )
+  assert.throws(
+    () => assertUsage('status', { task: 't', lane: 'L' }),
+    (err) => err instanceof UsageError && err.usage === true && /BOOT-time/.test(err.message) && /crew\.mjs boot/.test(err.message),
+  )
+  for (const [verb, flags] of Object.entries(REQUIRED_FLAGS)) {
+    for (const flag of flags) {
+      const valid = { task: 't' }
+      if (flags.includes('brief-file')) valid['brief-file'] = 'brief.md'
+      valid[flag] = true
+      assert.throws(() => assertUsage(verb, valid), `${verb} valueless ${flag}`)
+      valid[flag] = '   '
+      assert.throws(() => assertUsage(verb, valid), `${verb} empty ${flag}`)
+    }
+  }
+  assert.deepEqual(BOOT_ONLY_FLAGS, ['fences', 'lane'])
+})
+
+test('run exit constants preserve done, escalation, and unexpected meanings', () => {
+  assert.deepEqual(RUN_EXIT_CODES, { done: 0, escalation: 3 })
+  assert.equal(RUN_EXIT_UNEXPECTED, 1)
+  assert.equal(runExitCode({ status: 'anything-else' }), RUN_EXIT_UNEXPECTED)
 })
 
 test('run exits 3 on an escalation, 0 on done, and 1 on anything else', () => {

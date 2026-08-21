@@ -1485,15 +1485,37 @@ test('restart adopts a live child without forking', async () => {
   } finally { f.cleanup() }
 })
 
-// 14. A dead child with no envelope is honestly orphaned.
-test('restart orphans a dead child with no envelope', async () => {
+// 14. A dead child with no envelope is settled by the daemon.
+test('restart settles an escalation for a dead child with no envelope', async () => {
   const f = fixture()
   try {
     await f.d.start(); const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir }); await f.d.stop(); f.alive.delete(900)
     const next = daemon({ root: f.root, deps: f.deps }); await next.start(); next.poll()
-    assert.equal(next.state({ run }).state, 'dead'); assert.deepEqual(next.result({ run }), { outcome: null, envelope: null, source: null, reason: 'orphaned-on-restart' }); assert.match(readFileSync(join(f.root, 'runs.jsonl'), 'utf8'), /"orphaned"/)
+    assert.equal(next.state({ run }).state, 'done')
+    assert.equal(next.result({ run }).outcome, 'escalation')
+    assert.equal(next.result({ run }).envelope.details.escalation.why, 'orphaned-on-restart')
+    assert.equal(next.result({ run }).envelope.details.escalation.where, 'signalled')
+    assert.match(readFileSync(join(f.root, 'runs.jsonl'), 'utf8'), /"orphaned"/)
     await next.stop()
   } finally { f.cleanup() }
+})
+
+test('restart settles an escalation for a run with no recorded child pid', async () => {
+  const f = fixture()
+  let next = null
+  const run = 'no-pid-restart'
+  try {
+    mkdirSync(f.root, { recursive: true })
+    writeFileSync(join(f.root, 'runs.jsonl'), [
+      JSON.stringify({ kind: 'enqueued', run_id: run, crew_dir: f.crewDir, task: 'daemon80', task_return: returnFor(f, run) }),
+      JSON.stringify({ kind: 'started', run_id: run, child_pid: null }),
+    ].join('\n') + '\n')
+    next = daemon({ root: f.root, deps: f.deps })
+    await next.start()
+    const envelope = JSON.parse(readFileSync(returnFor(f, run), 'utf8'))
+    assert.equal(envelope.details.escalation.why, 'orphaned-on-restart')
+    assert.equal(envelope.details.escalation.where, 'signalled')
+  } finally { await next?.stop(); f.cleanup() }
 })
 
 // 15. The durable envelope wins even when the driver pid is gone.
@@ -1785,7 +1807,9 @@ test('asynchronous child spawn errors orphan only their run', async () => {
     f.d = daemon({ root: f.root, deps: f.deps })
     await f.d.start(); const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir });
     assert.equal(typeof onError, 'function'); onError(Error('EAGAIN'))
-    assert.equal(f.d.state({ run }).state, 'dead'); assert.equal(f.d.result({ run }).reason.startsWith('child-spawn-error'), true)
+    assert.equal(f.d.state({ run }).state, 'done')
+    assert.equal(f.d.result({ run }).envelope.details.escalation.why.startsWith('child-spawn-error'), true)
+    assert.equal(f.d.result({ run }).envelope.details.escalation.where, 'spawn-error')
     assert.match(readFileSync(join(f.root, 'runs.jsonl'), 'utf8'), /"orphaned"/)
   })
 })
@@ -2015,8 +2039,23 @@ test('a dead child found by polling ends the live feed after died', async () => 
     const died = observations.findIndex((frame) => frame.event?.kind === 'died')
     assert.ok(died >= 0)
     assert.ok(died < observations.findIndex((frame) => frame.end))
-    assert.equal(f.d.state({ run }).state, 'dead')
+    assert.equal(f.d.state({ run }).state, 'done')
+    assert.equal(f.d.result({ run }).envelope.details.escalation.why, 'child-dead')
     socket.destroy()
+  })
+})
+
+test('a daemon-authored escalation is not a settle()', async () => {
+  await each(async (f) => {
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    f.alive.delete(900)
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+      .filter((record) => record.run_id === run)
+    assert.equal(records.some((record) => record.kind === 'orphaned'), true)
+    assert.equal(records.some((record) => record.kind === 'settled'), false)
+    assert.equal(records.some((record) => record.kind === 'regrant'), false)
   })
 })
 
@@ -2057,7 +2096,8 @@ test('a fork with no pid is orphaned rather than adopted forever', async () => {
     assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: run }), (err) => err.code === 'child-spawn-error')
     await f.d.stop()
     next = daemon({ root: f.root, deps: f.deps }); await next.start(); next.poll()
-    assert.equal(next.state({ run }).state, 'dead'); assert.equal(next.result({ run }).reason, 'child-spawn-error: fork returned no pid')
+    assert.equal(next.state({ run }).state, 'done')
+    assert.equal(next.result({ run }).envelope.details.escalation.why, 'child-spawn-error: fork returned no pid')
   } finally { await next?.stop(); f.cleanup() }
 })
 

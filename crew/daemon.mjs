@@ -414,29 +414,49 @@ export function daemon(options = {}) {
   }
 
   // A child that dies without settling still owes the run a record. The daemon
-  // holds the exit reason in a process where handlers DO run (the child cannot:
-  // a group SIGTERM kills the synchronous drive mid-Atomics.wait, and SIGKILL/OOM
-  // are not cooperative at all — #423), so it writes the same `escalation`
-  // envelope a signalled child writes for itself (crew/child.mjs:138-141).
-  // The guard is `exists`, not `runEnvelope`: bytes that do not parse are a
-  // child killed mid-write, and those bytes are still the child's.
-  // Never `settle()`: that runs regrantIfEligible, and a daemon-authored
-  // escalation must not mint a continuation the child never asked for.
+  // discharges that obligation in `orphanRun`, and nowhere else. The `exited`
+  // handler cannot be the place for adopted runs: the child was forked detached
+  // and unref'd (crew/daemon.mjs:969-972), so no handle survives a daemon restart.
+  // It writes the same `escalation` envelope a signalled child writes for itself
+  // (crew/child.mjs:145-149). The guard is `exists`, not `runEnvelope`: bytes
+  // that do not parse are a child killed mid-write, and those bytes are still
+  // the child's. Never `settle()`: that runs regrantIfEligible, and a
+  // daemon-authored escalation must not mint a continuation the child never
+  // asked for.
+  const NEVER_STARTED = 'child-spawn-error'
+
+  // The locus is DERIVED from the reason, never passed in: run.orphan_reason
+  // stays the single source of the why (R1 of #431), and a fork that never
+  // produced a child must not be recorded as a child that died.
+  function deathRecord(run, reason) {
+    const why = String(reason ?? 'unknown')
+    const started = !why.startsWith(NEVER_STARTED)
+    return {
+      why,
+      where: started ? 'signalled' : 'spawn-error',
+      summary: started
+        ? `Task ${run.task ?? run.run_id} needs a human: the child died (${why}) before the run finished`
+        : `Task ${run.task ?? run.run_id} needs a human: the child never started (${why})`,
+    }
+  }
+
   function settleSignalled(run, reason) {
     try {
       if (exists(run.task_return)) return
+      const record = deathRecord(run, reason)
       mkdir(dirname(run.task_return), { recursive: true })
       write(run.task_return, JSON.stringify({
         status: 'escalation',
-        summary: `Task ${run.task ?? run.run_id} needs a human: the child died (${reason}) before the run finished`,
+        summary: record.summary,
         artifacts: [join(run.crew_dir, 'journal.jsonl')],
-        details: { stages: null, commit: null, dissents: [], escalation: { where: 'signalled', why: reason } },
+        details: { stages: null, commit: null, dissents: [], escalation: { where: record.where, why: record.why } },
       }, null, 2))
     } catch { /* diagnostics are subordinate to daemon liveness */ }
   }
 
   function orphanRun(run, reason = 'orphaned-on-restart') {
     if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
+    settleSignalled(run, reason)
     run.lifecycle = 'orphaned'; run.orphaned = true; run.child_dead = true; run.orphan_reason = reason
     try { appendRecord({ kind: 'orphaned', run_id: run.run_id, at: now(), reason }) } catch { /* preserve daemon liveness if the registry disk is unavailable */ }
     endFeed(run, 'orphaned')
@@ -808,7 +828,7 @@ export function daemon(options = {}) {
           appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: code ?? null, signal: signal ?? null }))
           const after = runEnvelope(run)
           if (after) settle(run, after)
-          else { settleSignalled(run, run.orphan_reason); orphanRun(run, run.orphan_reason) }
+          else orphanRun(run, run.orphan_reason)
         }
       } catch { /* diagnostics are subordinate to daemon liveness */ }
     }

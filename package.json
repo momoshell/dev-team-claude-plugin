@@ -17,7 +17,8 @@
     "viz:serve": "node visualizer/server/server.mjs",
     "viz:build": "vite build --config visualizer/web/vite.config.mjs",
     "viz:dev": "vite --config visualizer/web/vite.config.mjs",
-    "crew:watch": "node scripts/factory/crew-watch.mjs"
+    "crew:watch": "node scripts/factory/crew-watch.mjs",
+    "crew:reap": "node scripts/factory/reap-stale.mjs"
   },
   "devDependencies": {
     "svelte": "^5.0.0",

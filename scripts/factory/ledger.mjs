@@ -275,6 +275,36 @@ const SOURCE_ERROR_REASONS = Object.freeze(['RecordInvalidError', 'SyntaxError',
 // strings (see the header comment on recordSourceError below).
 const VIOLATION_NAME_RE = /^[^\s]{1,200}:[^\s]{1,80}$/
 
+// The tables that record which transport actually ran a seat. `sessions` has
+// no transport column, so a run's transport is only ever inferred from the
+// rows its seats left behind — an empty result is "unrecorded", never "none".
+const TRANSPORT_TABLES = Object.freeze([
+  'review_outcomes', 'cell_failures', 'modifier_attempts', 'seat_teardowns', 'seat_reclaims',
+])
+
+// Why a run or window has no measured usage. A pane seat lands no
+// agent_sessions row AT ALL, for a reason that holds today
+// (docs/ledger-queries.md, "Context occupancy") — telling such a run it
+// "predates per-agent token measurement (#119)" is a false cause (#433). Only
+// a run with no transport evidence at all is unattributable, and only it may
+// still name #119. Exported so both emission sites draw one wording from one
+// place.
+export const USAGE_ABSENT_CAUSES = Object.freeze({
+  pane: 'every seat recorded for it ran on the pane transport, and no pane runner emits a usage frame into the ledger adapter, so no agent_sessions row is written at all (docs/ledger-queries.md, "Context occupancy") — a structural absence today, not a measured zero',
+  measured_transport: 'a non-pane transport is recorded for it, yet no agent_sessions row exists — the usage frame was never folded into the register; unmeasured, not a measured zero',
+  transport_unrecorded: 'no transport is recorded for it, so why no agent_sessions row exists is itself unmeasured — a run predating per-agent token measurement (#119) reads this way too, and neither is a measured zero',
+  unbilled_rows: 'its agent_sessions rows carry no billed token totals — unmeasured, not a measured zero',
+})
+
+// transports: an iterable of the transport strings recorded for the run(s).
+export function usageAbsentCause(transports) {
+  const seen = [...new Set([...(transports || [])].filter((t) => t != null))]
+  if (seen.length === 0) return USAGE_ABSENT_CAUSES.transport_unrecorded
+  return seen.every((t) => t === 'pane')
+    ? USAGE_ABSENT_CAUSES.pane
+    : USAGE_ABSENT_CAUSES.measured_transport
+}
+
 // review_outcomes' seat-cell columns (#404), spelled EXACTLY as cell_failures
 // spells its own (:1575-1580) so one query can read a cell out of either
 // table. Appended AFTER created_at on purpose: applyMigrations ADD COLUMNs a
@@ -2273,6 +2303,30 @@ export function openLedger({
     return out
   }
 
+  // Which transports ran a run's seats, unioned across every table that
+  // records one (TRANSPORT_TABLES). Shaped after variantsFor: dedupe, chunk,
+  // return a Map. An absent entry means "no transport recorded", never "none
+  // ran". The chunk is divided by the table count so the parameter count per
+  // statement stays inside the same bound variantsFor respects.
+  function transportsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    const chunk = Math.max(1, Math.floor(STAGE_MARKER_CHUNK / TRANSPORT_TABLES.length))
+    const out = new Map()
+    for (let i = 0; i < ids.length; i += chunk) {
+      const slice = ids.slice(i, i + chunk)
+      const holes = slice.map(() => '?').join(',')
+      const sql = TRANSPORT_TABLES
+        .map((table) => `SELECT adw_id, transport FROM ${table} WHERE transport IS NOT NULL AND adw_id IN (${holes})`)
+        .join(' UNION ')
+      const rows = queryRows(sql, TRANSPORT_TABLES.flatMap(() => slice))
+      for (const row of rows) {
+        if (!out.has(row.adw_id)) out.set(row.adw_id, new Set())
+        out.get(row.adw_id).add(row.transport)
+      }
+    }
+    return out
+  }
+
   function dumpTable(name) {
     if (!Object.prototype.hasOwnProperty.call(TABLES, name)) {
       // Never embed the raw (caller-controlled) table name in the message —
@@ -2617,7 +2671,10 @@ export function openLedger({
       absent.context_occupancy = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
     }
     if (agentSessions === 0 || everyBilledSumNull) {
-      absent.usage = 'predates per-agent token measurement (#119) — not a measured zero'
+      const taskTransports = transportsFor([adwId]).get(adwId) ?? []
+      absent.usage = agentSessions === 0
+        ? `this run has no agent_sessions rows: ${usageAbsentCause(taskTransports)}`
+        : `this run's usage is absent: ${USAGE_ABSENT_CAUSES.unbilled_rows}`
     }
     if (Number(discriminationCount) === 0) {
       absent.gate_discrimination = 'predates gate discrimination (#168)'
@@ -2696,7 +2753,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -3458,9 +3515,11 @@ export function main(argv) {
       }
       const hasUnmeasuredUsage = rows.some((row) => billedKeys.some((key) => row[key] == null))
       if (rows.length > 0 && (agentSessions === 0 || hasUnmeasuredUsage)) {
+        const windowTransports = [...ledger.transportsFor(rows.map((row) => row.adw_id)).values()]
+          .flatMap((set) => [...set])
         absent.usage = agentSessions === 0
-          ? 'no agent_sessions rows for any run in this window — predates per-agent token measurement (#119), not a measured zero'
-          : 'one or more agent_sessions rows for runs in this window have no billed token totals — unmeasured, not a measured zero'
+          ? `no run in this window has an agent_sessions row: ${usageAbsentCause(windowTransports)}`
+          : `one or more runs in this window: ${USAGE_ABSENT_CAUSES.unbilled_rows}`
       }
       if (rows.some((row) => row.variant === null)) {
         absent.variant = 'one or more runs in this window recorded no shape marker — unmeasured (#251), never a measured "full"'

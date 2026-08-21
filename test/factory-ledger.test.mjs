@@ -26,7 +26,7 @@ import {
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
-  REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS,
+  REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
 } from '../scripts/factory/ledger.mjs'
 import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
@@ -1043,7 +1043,7 @@ test('a run with no usage, discrimination or findings reads as absent, not zero'
   assert.deepEqual(readout.absent, {
     request: 'this run predates request recording (#b19) / was not dispatched by the intake loop; the request was never measured, and NULL is never an empty ask',
     context_occupancy: 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md',
-    usage: 'predates per-agent token measurement (#119) — not a measured zero',
+    usage: `this run has no agent_sessions rows: ${USAGE_ABSENT_CAUSES.transport_unrecorded}`,
     gate_discrimination: 'predates gate discrimination (#168)',
     review_outcomes: 'predates structured review outcomes (#169/#170)',
     accept_decisions: 'predates typed accept decisions (#170)',
@@ -1051,6 +1051,81 @@ test('a run with no usage, discrimination or findings reads as absent, not zero'
     phases: 'no phase rows recorded for this run',
     variant: "this run's first recorded event is not a shape marker — the run shape is unmeasured (#251), never a measured \"full\"",
   })
+  assert.match(readout.absent.usage, /per-agent token measurement \(#119\)/)
+  assert.notEqual(readout.absent.usage, `this run has no agent_sessions rows: ${USAGE_ABSENT_CAUSES.pane}`)
+})
+
+test('usageAbsentCause names pane, recorded non-pane, and unattributable states', { skip: SKIP }, () => {
+  assert.equal(usageAbsentCause(['pane']), USAGE_ABSENT_CAUSES.pane)
+  assert.equal(usageAbsentCause(['pane', 'pane']), USAGE_ABSENT_CAUSES.pane)
+  assert.equal(usageAbsentCause(['pane', 'headless-rpc']), USAGE_ABSENT_CAUSES.measured_transport)
+  assert.equal(usageAbsentCause(['headless-json']), USAGE_ABSENT_CAUSES.measured_transport)
+  assert.equal(usageAbsentCause([]), USAGE_ABSENT_CAUSES.transport_unrecorded)
+  assert.equal(usageAbsentCause(undefined), USAGE_ABSENT_CAUSES.transport_unrecorded)
+  assert.match(USAGE_ABSENT_CAUSES.pane, /no pane runner emits a usage frame into the ledger adapter/)
+  assert.doesNotMatch(USAGE_ABSENT_CAUSES.pane, /#119/)
+  assert.match(USAGE_ABSENT_CAUSES.transport_unrecorded, /per-agent token measurement \(#119\)/)
+})
+
+test('transportsFor unions every declared transport table and preserves absence', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const mixed = 'transport-map-mixed'
+  const empty = 'transport-map-empty'
+  ledger.recordSeatTeardown({ adw_id: mixed, role: 'builder', transport: 'pane', outcome: 'proven' })
+  ledger.recordModifierAttempt({ adw_id: mixed, role: 'builder', modifier: 'failure-upgrade', outcome: 'applied', transport: 'headless-rpc' })
+
+  const transports = ledger.transportsFor([mixed, empty])
+  assert.deepEqual([...transports.get(mixed)].sort(), ['headless-rpc', 'pane'])
+  assert.equal(transports.has(empty), false)
+})
+
+test('taskReadout names the pane structural cause for a pane-only run', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-pane-usage', repo_slug: 'r', task_slug: 'pane-usage' })
+  ledger.recordSeatTeardown({ adw_id: 'task-pane-usage', role: 'builder', transport: 'pane', outcome: 'proven' })
+
+  const marker = ledger.taskReadout('task-pane-usage').absent.usage
+  assert.equal(marker, `this run has no agent_sessions rows: ${USAGE_ABSENT_CAUSES.pane}`)
+  assert.match(marker, /no pane runner emits a usage frame into the ledger adapter/)
+  assert.doesNotMatch(marker, /per-agent token measurement \(#119\)/)
+})
+
+test('taskReadout names a recorded non-pane cause without naming pane or #119', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-headless-usage', repo_slug: 'r', task_slug: 'headless-usage' })
+  ledger.recordSeatTeardown({ adw_id: 'task-headless-usage', role: 'builder', transport: 'headless-rpc', outcome: 'proven' })
+
+  const marker = ledger.taskReadout('task-headless-usage').absent.usage
+  assert.equal(marker, `this run has no agent_sessions rows: ${USAGE_ABSENT_CAUSES.measured_transport}`)
+  assert.doesNotMatch(marker, /no pane runner emits a usage frame into the ledger adapter/)
+  assert.doesNotMatch(marker, /per-agent token measurement \(#119\)/)
+})
+
+test('taskReadout distinguishes rows with unbilled usage from missing rows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-unbilled-usage', repo_slug: 'r', task_slug: 'unbilled-usage' })
+  ledger.startAgentSession({
+    adw_id: 'task-unbilled-usage', dispatch_id: 'unbilled-dispatch', role: 'builder', model: 'sonnet',
+    claude_session_id: 'unbilled-claude', transcript_path: '/tmp/unbilled-claude.jsonl',
+  })
+
+  const marker = ledger.taskReadout('task-unbilled-usage').absent.usage
+  assert.equal(marker, `this run's usage is absent: ${USAGE_ABSENT_CAUSES.unbilled_rows}`)
+})
+
+test('taskReadout and run-set draw the same pane cause', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'same-pane-cause', RUNSET_SINCE)
+  ledger.recordSeatTeardown({ adw_id: 'same-pane-cause', role: 'builder', transport: 'pane', outcome: 'proven' })
+  const taskMarker = ledger.taskReadout('same-pane-cause').absent.usage
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const windowMarker = JSON.parse(res.stdout).absent.usage
+  assert.ok(taskMarker.includes(USAGE_ABSENT_CAUSES.pane))
+  assert.ok(windowMarker.includes(USAGE_ABSENT_CAUSES.pane))
 })
 
 test('taskReadout resolves an unambiguous task_slug and refuses an ambiguous one', { skip: SKIP }, () => {
@@ -1967,6 +2042,53 @@ test('runSet sums billed_* across each run\'s agent_sessions rows', { skip: SKIP
   })
   assert.notEqual(row.billed_input_tokens, 100, 'usage must not be the maximum running total')
   assert.notEqual(row.billed_input_tokens, 30, 'usage must not be the last running total')
+})
+
+test('run-set names the pane structural cause for a pane-only window', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-pane-a', RUNSET_SINCE)
+  seedRun(ledger, 'runset-pane-b', '2026-08-15T00:01:00.000Z')
+  ledger.recordSeatTeardown({ adw_id: 'runset-pane-a', role: 'builder', transport: 'pane', outcome: 'proven' })
+  ledger.recordSeatTeardown({ adw_id: 'runset-pane-b', role: 'builder', transport: 'pane', outcome: 'proven' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE, '--until', RUNSET_UNTIL], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.absent.usage, `no run in this window has an agent_sessions row: ${USAGE_ABSENT_CAUSES.pane}`)
+  assert.match(payload.absent.usage, /no pane runner emits a usage frame into the ledger adapter/)
+  assert.doesNotMatch(payload.absent.usage, /#119/)
+})
+
+test('run-set keeps no-transport windows unattributable', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-no-transport-a', RUNSET_SINCE)
+  seedRun(ledger, 'runset-no-transport-b', '2026-08-15T00:01:00.000Z')
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE, '--until', RUNSET_UNTIL], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.absent.usage, `no run in this window has an agent_sessions row: ${USAGE_ABSENT_CAUSES.transport_unrecorded}`)
+  assert.match(payload.absent.usage, /per-agent token measurement \(#119\)/)
+  assert.notEqual(payload.absent.usage, `no run in this window has an agent_sessions row: ${USAGE_ABSENT_CAUSES.pane}`)
+})
+
+test('run-set gives a mixed transport window the recorded non-pane cause', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  seedRun(ledger, 'runset-mixed-pane', RUNSET_SINCE)
+  seedRun(ledger, 'runset-mixed-headless', '2026-08-15T00:01:00.000Z')
+  ledger.recordSeatTeardown({ adw_id: 'runset-mixed-pane', role: 'builder', transport: 'pane', outcome: 'proven' })
+  ledger.recordSeatTeardown({ adw_id: 'runset-mixed-headless', role: 'builder', transport: 'headless-json', outcome: 'proven' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const res = run(['run-set', '--since', RUNSET_SINCE, '--until', RUNSET_UNTIL], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(res.status, 0, res.stderr)
+  const payload = JSON.parse(res.stdout)
+  assert.equal(payload.absent.usage, `no run in this window has an agent_sessions row: ${USAGE_ABSENT_CAUSES.measured_transport}`)
 })
 
 test('run-set keeps unmeasured billing null and marks usage absent', { skip: SKIP }, () => {

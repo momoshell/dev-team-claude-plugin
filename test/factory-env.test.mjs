@@ -38,9 +38,51 @@ test('package.json exposes the eight read-only ledger recipes pointing at the le
   }
 })
 
-test('no npm script name exposes a destructive ledger verb', () => {
-  for (const name of Object.keys(pkg.scripts)) {
-    assert.doesNotMatch(name, /kill|prune|delete|reset/i, `script name ${name} looks destructive`)
+// #439: the enforcement is an explicit allowlist of read-only recipes, not a
+// name blacklist. `/kill|prune|delete|reset/i` never saw a destructive verb
+// spelled any other way (`crew:obliterate`), and it could not see a read-only
+// NAME whose COMMAND reclaims (`crew:reap -- --reclaim`). Each entry says why
+// the recipe is read-only; a new script is refused until someone adds one.
+const READ_ONLY_RECIPES = new Map([
+  ['test', 'runs node --test over the suite; the suite writes only under per-test temp dirs'],
+  ['ledger:sessions', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:phases', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:tail', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:procs', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:gate-review-gap', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:eligible-tasks', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:run-set', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['ledger:task', 'read-only ledger query — SELECT-only recipe over the run register'],
+  ['viz:serve', 'serves the visualizer read-only over localhost; mutates no repo file'],
+  ['viz:build', 'vite build — writes only its own build output directory'],
+  ['viz:dev', 'vite dev server; mutates no repo file'],
+  ['crew:watch', 'watches lanes and prints; signals nothing'],
+  ['crew:reap', 'dry run by default — signalling requires an explicit -- --reclaim (#439)'],
+])
+const RECLAIM_FLAGS = ['--reclaim']
+
+function recipeVerdict(name, command) {
+  if (!READ_ONLY_RECIPES.has(name)) return 'unlisted'
+  if (RECLAIM_FLAGS.some((flag) => String(command).split(/\s+/).includes(flag))) return 'mutating-flag'
+  return 'read-only'
+}
+
+test('every npm script is an allowlisted read-only recipe, whatever it is called', () => {
+  const offenders = Object.entries(pkg.scripts).filter(([name, command]) => recipeVerdict(name, command) !== 'read-only')
+  assert.deepEqual(offenders, [], `these npm scripts are not allowlisted read-only recipes: ${offenders.map(([name]) => name).join(', ')}`)
+})
+
+test('the recipe verdict catches a destructive name the four-word blacklist missed', () => {
+  assert.equal(recipeVerdict('crew:obliterate', 'node scripts/factory/reap-stale.mjs --reclaim'), 'unlisted')
+  assert.doesNotMatch('crew:obliterate', /kill|prune|delete|reset/i)
+  assert.equal(recipeVerdict('crew:reap', 'node scripts/factory/reap-stale.mjs --reclaim'), 'mutating-flag')
+  assert.equal(recipeVerdict('crew:reap', pkg.scripts['crew:reap']), 'read-only')
+})
+
+test('every read-only recipe allowlist entry names a live script and a reason', () => {
+  for (const [name, why] of READ_ONLY_RECIPES) {
+    assert.ok(name in pkg.scripts, `allowlist entry ${name} is not a live npm script — delete it`)
+    assert.ok(why.length > 20, `allowlist entry ${name} carries no reason`)
   }
 })
 

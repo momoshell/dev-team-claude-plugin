@@ -206,15 +206,19 @@ export function formatReport(pass) {
   lines.push(pass.dry_run
     ? `reap: totals — tasks ${t.tasks} pending ${t.pending}`
     : `reap: totals — tasks ${t.tasks} records ${t.records} swept ${t.swept} skipped ${t.skipped} retryable ${t.retryable} refused ${t.refused} | groups ${t.groups} reclaimed ${t.reclaimed} (live ${t.verdicts[REAP_VERDICTS.REFUSED_LIVE]}, mismatch ${t.verdicts[REAP_VERDICTS.REFUSED_MISMATCH]}, unknown ${t.verdicts[REAP_VERDICTS.REFUSED_UNKNOWN]})`)
+  if (pass.dry_run) lines.push('reap: dry run — nothing was signalled; re-run with `npm run crew:reap -- --reclaim` to reclaim')
   lines.push(`reap-outcome: ${pass.outcome}`)
   return lines
 }
 
 export function parseArgs(argv) {
-  const flags = { dryRun: false, root: null, help: false }
+  const flags = { dryRun: true, root: null, help: false }
+  let reclaim = false
+  let explicitDryRun = false
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
-    if (argument === '--dry-run') { flags.dryRun = true; continue }
+    if (argument === '--dry-run') { explicitDryRun = true; continue }
+    if (argument === '--reclaim') { reclaim = true; continue }
     if (argument === '--help' || argument === '-h') { flags.help = true; continue }
     if (argument === '--root') {
       const value = argv[index + 1]
@@ -225,10 +229,13 @@ export function parseArgs(argv) {
     }
     throw new ReapUsageError(`reap: unknown option: ${argument}`, 'unknown-option')
   }
+  // Safe by construction: only --reclaim turns the sweep destructive, and an
+  // explicit --dry-run wins over it in either order (#439).
+  flags.dryRun = explicitDryRun || !reclaim
   return flags
 }
 
-export const USAGE = 'usage: npm run crew:reap -- [--dry-run] [--root <crew-root>]'
+export const USAGE = 'usage: npm run crew:reap -- [--reclaim] [--dry-run] [--root <crew-root>] (default: dry run — nothing is signalled without --reclaim)'
 
 export async function main(argv, deps = {}) {
   const d = normalDeps(deps)

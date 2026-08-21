@@ -659,7 +659,7 @@ export function refuseStaleDescendants(reason, { task, detail = null } = {}) {
   const err = new Error(
     `boot refused for task ${task}: a previous run's workers are still recorded as running or unmeasurable `
     + `[reason: ${reason}]${detail ? ` (${detail})` : ''} — booting a second crew over them is the defect. `
-    + `Reclaim them with \`npm run crew:reap\`, or tear the task down (crew.mjs teardown --task ${task}), then boot again.`,
+    + `Reclaim them with \`npm run crew:reap -- --reclaim\`, or tear the task down (crew.mjs teardown --task ${task}), then boot again.`,
   )
   err.code = 'stale-descendants'
   err.reason = reason
@@ -1194,7 +1194,7 @@ export async function bootCmd(args, deps = {}) {
   }
 
   // #419: reclaim THIS task's stale descendants before any seat exists.
-  // Only this task dir: sweeping every task is `npm run crew:reap`, invoked
+  // Only this task dir: sweeping every task is `npm run crew:reap -- --reclaim`, invoked
   // deliberately by an operator. Composed, never reimplemented — the sweep is
   // idempotent through each record's swept_at (crew/seat-io.mjs:679).
   const journalPath = join(paths.dir, 'journal.jsonl')

@@ -413,10 +413,32 @@ export function daemon(options = {}) {
     append(registryPath, `${JSON.stringify(record)}\n`, { flag: 'a' })
   }
 
+  // A child that dies without settling still owes the run a record. The daemon
+  // holds the exit reason in a process where handlers DO run (the child cannot:
+  // a group SIGTERM kills the synchronous drive mid-Atomics.wait, and SIGKILL/OOM
+  // are not cooperative at all — #423), so it writes the same `escalation`
+  // envelope a signalled child writes for itself (crew/child.mjs:138-141).
+  // The guard is `exists`, not `runEnvelope`: bytes that do not parse are a
+  // child killed mid-write, and those bytes are still the child's.
+  // Never `settle()`: that runs regrantIfEligible, and a daemon-authored
+  // escalation must not mint a continuation the child never asked for.
+  function settleSignalled(run, reason) {
+    try {
+      if (exists(run.task_return)) return
+      mkdir(dirname(run.task_return), { recursive: true })
+      write(run.task_return, JSON.stringify({
+        status: 'escalation',
+        summary: `Task ${run.task ?? run.run_id} needs a human: the child died (${reason}) before the run finished`,
+        artifacts: [join(run.crew_dir, 'journal.jsonl')],
+        details: { stages: null, commit: null, dissents: [], escalation: { where: 'signalled', why: reason } },
+      }, null, 2))
+    } catch { /* diagnostics are subordinate to daemon liveness */ }
+  }
+
   function orphanRun(run, reason = 'orphaned-on-restart') {
     if (run.lifecycle === 'orphaned' || run.lifecycle === 'settled') return
     run.lifecycle = 'orphaned'; run.orphaned = true; run.child_dead = true; run.orphan_reason = reason
-    try { appendRecord({ kind: 'orphaned', run_id: run.run_id, at: now() }) } catch { /* preserve daemon liveness if the registry disk is unavailable */ }
+    try { appendRecord({ kind: 'orphaned', run_id: run.run_id, at: now(), reason }) } catch { /* preserve daemon liveness if the registry disk is unavailable */ }
     endFeed(run, 'orphaned')
     pump()
   }
@@ -483,7 +505,7 @@ export function daemon(options = {}) {
       run.child_pid = null
       return
     }
-    if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = 'orphaned-on-restart'; run.child_dead = true; return }
+    if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = record.reason || 'orphaned-on-restart'; run.child_dead = true; return }
     if (record.kind === 'settled') {
       if (record.task_return) {
         run.task_return = record.task_return
@@ -786,7 +808,7 @@ export function daemon(options = {}) {
           appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: code ?? null, signal: signal ?? null }))
           const after = runEnvelope(run)
           if (after) settle(run, after)
-          else orphanRun(run, run.orphan_reason)
+          else { settleSignalled(run, run.orphan_reason); orphanRun(run, run.orphan_reason) }
         }
       } catch { /* diagnostics are subordinate to daemon liveness */ }
     }

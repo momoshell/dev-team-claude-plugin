@@ -1847,9 +1847,150 @@ test('a child exit without an envelope ends the live feed after died', async () 
     const died = observations.findIndex((frame) => frame.event?.kind === 'died')
     assert.ok(died >= 0)
     assert.ok(died < observations.findIndex((frame) => frame.end))
-    assert.equal(f.d.state({ run }).state, 'dead')
+    assert.equal(f.d.state({ run }).state, 'done')
+    assert.equal(f.d.result({ run }).envelope.details.escalation.why, 'child-exit:1')
     socket.destroy()
   } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a signalled child writes a SIGTERM escalation envelope', async () => {
+  await each(async (f) => {
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(typeof onExit, 'function')
+    onExit(null, 'SIGTERM')
+    const envelope = JSON.parse(readFileSync(returnFor(f, run), 'utf8'))
+    assert.equal(envelope.status, 'escalation')
+    assert.equal(envelope.details.escalation.where, 'signalled')
+    assert.equal(envelope.details.escalation.why, 'child-exit:SIGTERM')
+  })
+})
+
+test('a signalled child writes a SIGKILL escalation envelope', async () => {
+  await each(async (f) => {
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(typeof onExit, 'function')
+    onExit(null, 'SIGKILL')
+    const envelope = JSON.parse(readFileSync(returnFor(f, run), 'utf8'))
+    assert.equal(envelope.status, 'escalation')
+    assert.equal(envelope.details.escalation.where, 'signalled')
+    assert.equal(envelope.details.escalation.why, 'child-exit:SIGKILL')
+  })
+})
+
+test('a nonzero child exit writes its observed exit reason', async () => {
+  await each(async (f) => {
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(typeof onExit, 'function')
+    onExit(7, null)
+    const envelope = JSON.parse(readFileSync(returnFor(f, run), 'utf8'))
+    assert.equal(envelope.status, 'escalation')
+    assert.equal(envelope.details.escalation.where, 'signalled')
+    assert.equal(envelope.details.escalation.why, 'child-exit:7')
+  })
+})
+
+test("a child's own envelope is never overwritten, including partial bytes", async () => {
+  await each(async (f) => {
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const original = JSON.stringify({ status: 'done', summary: 'child finished' })
+    writeFileSync(returnFor(f, run), original)
+    assert.equal(typeof onExit, 'function')
+    onExit(null, 'SIGTERM')
+    assert.equal(readFileSync(returnFor(f, run), 'utf8'), original)
+    assert.equal(f.d.result({ run }).outcome, 'done')
+  })
+  await each(async (f) => {
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const partial = '{"status":"done","summary":"cut off mid-w'
+    writeFileSync(returnFor(f, run), partial)
+    assert.equal(typeof onExit, 'function')
+    onExit(null, 'SIGKILL')
+    assert.equal(readFileSync(returnFor(f, run), 'utf8'), partial)
+    assert.equal(f.d.result({ run }).reason, 'child-exit:SIGKILL')
+  })
+})
+
+test('a signalled exit reason round-trips through the registry', async () => {
+  const f = fixture()
+  let next = null
+  try {
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(typeof onExit, 'function')
+    onExit(null, 'SIGTERM')
+    const registry = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(registry.find((record) => record.kind === 'orphaned' && record.run_id === run).reason, 'child-exit:SIGTERM')
+    await f.d.stop()
+    rmSync(returnFor(f, run))
+    next = daemon({ root: f.root, deps: f.deps })
+    await next.start(); next.poll()
+    assert.equal(next.result({ run }).reason, 'child-exit:SIGTERM')
+  } finally { await next?.stop(); await f.d.stop(); f.cleanup() }
+})
+
+test('a legacy orphaned registry record keeps its fallback reason', async () => {
+  await each(async (f) => {
+    const run = 'legacy-run'
+    mkdirSync(f.root, { recursive: true })
+    writeFileSync(join(f.root, 'runs.jsonl'), [
+      JSON.stringify({ kind: 'enqueued', run_id: run, crew_dir: f.crewDir, task_return: returnFor(f, run) }),
+      JSON.stringify({ kind: 'orphaned', run_id: run, at: 1 }),
+    ].join('\n') + '\n')
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start(); f.d.poll()
+    assert.equal(f.d.result({ run }).reason, 'orphaned-on-restart')
+  })
+})
+
+test('a signalled envelope is written before its orphan registry record', async () => {
+  await each(async (f) => {
+    const operations = []
+    const originalWrite = writeFileSync
+    const originalAppend = appendFileSync
+    f.deps.writeFileSync = (path, value, options) => {
+      operations.push({ op: 'write', path: String(path) })
+      return originalWrite(path, value, options)
+    }
+    f.deps.appendFileSync = (path, value, options) => {
+      operations.push({ op: 'append', path: String(path), value: String(value) })
+      return originalAppend(path, value, options)
+    }
+    let onExit
+    f.deps.fork = () => ({ pid: 901, on(event, fn) { if (event === 'exit') onExit = fn; return this }, unref() {} })
+    f.d = daemon({ root: f.root, deps: f.deps })
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(typeof onExit, 'function')
+    onExit(null, 'SIGTERM')
+    const writeIndex = operations.findIndex(({ op, path }) => op === 'write' && path === returnFor(f, run))
+    const appendIndex = operations.findIndex(({ op, path, value }) => op === 'append' && path === join(f.root, 'runs.jsonl') && value.includes('"kind":"orphaned"'))
+    assert.ok(writeIndex >= 0)
+    assert.ok(appendIndex >= 0)
+    assert.ok(writeIndex < appendIndex)
+  })
 })
 
 test('a dead child found by polling ends the live feed after died', async () => {
@@ -1907,6 +2048,7 @@ test('settled runs ignore late child spawn errors', async () => {
 
 test('a fork with no pid is orphaned rather than adopted forever', async () => {
   const f = fixture()
+  let next = null
   try {
     f.deps.fork = () => ({ on() {}, unref() {} })
     f.d = daemon({ root: f.root, deps: f.deps })
@@ -1914,9 +2056,9 @@ test('a fork with no pid is orphaned rather than adopted forever', async () => {
     const run = 'pidless-run'
     assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: run }), (err) => err.code === 'child-spawn-error')
     await f.d.stop()
-    const next = daemon({ root: f.root, deps: f.deps }); await next.start(); next.poll()
-    assert.equal(next.state({ run }).state, 'dead'); assert.equal(next.result({ run }).reason, 'orphaned-on-restart'); await next.stop()
-  } finally { f.cleanup() }
+    next = daemon({ root: f.root, deps: f.deps }); await next.start(); next.poll()
+    assert.equal(next.state({ run }).state, 'dead'); assert.equal(next.result({ run }).reason, 'child-spawn-error: fork returned no pid')
+  } finally { await next?.stop(); f.cleanup() }
 })
 
 test('runChild gives a task_return override precedence over crew.json', () => {

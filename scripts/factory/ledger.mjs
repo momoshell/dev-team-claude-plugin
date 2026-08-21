@@ -778,6 +778,45 @@ export const WRITERS = Object.freeze([
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
+// Writer → the table its mirror INSERTs a row into. A writer whose mirror only
+// UPDATEs an existing row adds no row and is listed in UPDATE_ONLY_WRITERS
+// instead. Together the two sets classify every name in WRITERS exactly once
+// (pinned in test/factory-ledger.test.mjs); the unique key of each table is
+// never restated here — it is read from TABLES.
+export const WRITER_MIRROR_TABLES = Object.freeze({
+  startSession: 'sessions',
+  startPhase: 'phases',
+  recordEvent: 'events',
+  recordSourceError: 'events',
+  recordEnvelope: 'envelopes',
+  recordGateResult: 'gate_results',
+  recordGateDiscrimination: 'gate_discriminations',
+  recordReviewOutcome: 'review_outcomes',
+  recordAcceptDecision: 'accept_decisions',
+  linkRun: 'run_links',
+  recordCellFailure: 'cell_failures',
+  recordModifierAttempt: 'modifier_attempts',
+  recordCiCycle: 'ci_cycles',
+  recordCiDispatch: 'ci_dispatches',
+  recordIntakeSweep: 'intake_sweeps',
+  recordIntakeRefusal: 'intake_refusals',
+  recordIntakeBrake: 'intake_brakes',
+  recordIntakeDispatch: 'intake_dispatches',
+  recordSeatTeardown: 'seat_teardowns',
+  recordSeatReclaim: 'seat_reclaims',
+  startProcess: 'processes',
+  startAgentSession: 'agent_sessions',
+})
+
+// Writers whose mirror is an UPDATE of a row another writer created: they add
+// no row, so a JSONL line of one of these kinds is never a missing row.
+export const UPDATE_ONLY_WRITERS = Object.freeze([
+  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession',
+])
+
+// The doctor readout never repairs: replayJsonl is the deliberate remedy.
+export const DRIFT_REMEDY = 'drift is not repaired here — replay the JSONL authority into the mirror with replayJsonl(jsonlPath, ledger)'
+
 // ---------------------------------------------------------------------------
 // DDL generation — built from TABLES, never hand-written alongside it.
 // ---------------------------------------------------------------------------
@@ -1042,6 +1081,53 @@ function toBindable(v) {
   if (v === undefined) return null
   if (typeof v === 'boolean') return v ? 1 : 0
   return v
+}
+
+// A JSONL arg and its mirrored column can differ in JS type while naming the
+// same row: toBindable maps undefined to null and booleans to 0/1, and SQLite
+// then applies column affinity on bind (a '3' bound to an INTEGER column reads
+// back as 3). Compare the STRING form of each unique column, with an explicit
+// sentinel for absent-or-null, so a type difference never reads as drift.
+const DRIFT_NULL_SENTINEL = Object.freeze({ kind: 'null' })
+const DRIFT_NUMERIC_LITERAL = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/
+function declaredAffinity(decl) {
+  const upper = decl.toUpperCase()
+  if (upper.includes('INT')) return 'INTEGER'
+  if (upper.includes('CHAR') || upper.includes('CLOB') || upper.includes('TEXT')) return 'TEXT'
+  if (upper.includes('BLOB') || upper === '') return 'BLOB'
+  if (upper.includes('REAL') || upper.includes('FLOA') || upper.includes('DOUB')) return 'REAL'
+  return 'NUMERIC'
+}
+const DRIFT_COLUMN_AFFINITIES = new Map()
+for (const table of Object.values(TABLES)) {
+  for (const unique of table.unique) {
+    for (const column of unique) {
+      if (!DRIFT_COLUMN_AFFINITIES.has(column)) {
+        const decl = table.columns.find(({ name }) => name === column)?.decl ?? ''
+        DRIFT_COLUMN_AFFINITIES.set(column, declaredAffinity(decl))
+      }
+    }
+  }
+}
+function driftValue(column, value) {
+  const bindable = toBindable(value)
+  if (bindable === null || (typeof bindable === 'number' && Number.isNaN(bindable))) return DRIFT_NULL_SENTINEL
+  const affinity = DRIFT_COLUMN_AFFINITIES.get(column)
+  if ((affinity === 'INTEGER' || affinity === 'NUMERIC' || affinity === 'REAL') && typeof bindable === 'string') {
+    const trimmed = bindable.trim()
+    if (DRIFT_NUMERIC_LITERAL.test(trimmed)) return { kind: 'value', value: String(Number(trimmed)) }
+  }
+  return { kind: 'value', value: String(bindable) }
+}
+function driftKey(cols, source) {
+  const src = source ?? {}
+  return JSON.stringify(cols.map((c) => driftValue(c, src[c])))
+}
+
+// The honesty rule (docs/ledger-queries.md:31): an authority that cannot be
+// read is UNMEASURED, never a measured zero drift.
+function unmeasuredDrift(jsonlPath, reason) {
+  return { measured: false, unmeasured_reason: reason, jsonl_path: jsonlPath, lines: null, unparsed_lines: null, unknown_kind_lines: null, writers: [], drift_total: null, remedy: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -2715,6 +2801,98 @@ export function openLedger({
     }
   }
 
+  // Read-only drift check. The JSONL is the authority and the table is a
+  // best-effort mirror (see mirror() above), so for each writer we count the
+  // DISTINCT unique keys its JSONL lines carry and ask how many of those keys
+  // are present as rows. A repeat key is an UPSERT, not drift — the mirror
+  // inserts OR IGNORE on exactly that key — so counting raw lines would report
+  // every legitimate update as a lost row. Repairs nothing: replayJsonl is the
+  // deliberate remedy.
+  function jsonlDrift() {
+    const conn = ensureDb()
+    if (!conn) {
+      return unmeasuredDrift(jsonlPath, `the mirror could not be opened: ${stats.degraded_reason ?? 'degraded'}`)
+    }
+    let text
+    try {
+      text = readFileSync(jsonlPath, 'utf8')
+    } catch (err) {
+      return unmeasuredDrift(jsonlPath, `the JSONL authority could not be read: ${(err && (err.code || err.name)) || 'ReadError'}`)
+    }
+    let lines = 0
+    let unparsed = 0
+    let unknownKind = 0
+    const perWriter = new Map()
+    for (const raw of text.split('\n')) {
+      if (!raw) continue
+      lines += 1
+      let parsed
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        unparsed += 1
+        continue
+      }
+      const kind = parsed && parsed.kind
+      const table = typeof kind === 'string' && Object.hasOwn(WRITER_MIRROR_TABLES, kind) ? WRITER_MIRROR_TABLES[kind] : null
+      if (!table) {
+        // An update-only writer adds no row; anything else is a line this
+        // check could not attribute at all.
+        if (!UPDATE_ONLY_WRITERS.includes(kind)) unknownKind += 1
+        continue
+      }
+      const cols = TABLES[table].unique[0]
+      if (!perWriter.has(kind)) perWriter.set(kind, { table, cols, keys: new Set() })
+      const info = perWriter.get(kind)
+      info.keys.add(driftKey(cols, parsed.args))
+    }
+    const rowKeysByTable = new Map()
+    const writers = []
+    for (const kind of WRITERS) {
+      const info = perWriter.get(kind)
+      if (!info) continue
+      if (!rowKeysByTable.has(info.table)) {
+        let rowKeys = null
+        try {
+          const rows = conn.prepare(`SELECT ${info.cols.map(quoteSqlIdentifier).join(', ')} FROM ${quoteSqlIdentifier(info.table)}`).all()
+          rowKeys = new Set(rows.map((row) => driftKey(info.cols, row)))
+        } catch {
+          // An unreadable table is unmeasured, never zero drift.
+          rowKeys = null
+        }
+        rowKeysByTable.set(info.table, rowKeys)
+      }
+      const rowSet = rowKeysByTable.get(info.table)
+      if (!rowSet) {
+        writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], distinct_keys: info.keys.size, rows_present: null, drift: null })
+        continue
+      }
+      let present = 0
+      for (const key of info.keys) {
+        if (rowSet.has(key)) present += 1
+      }
+      writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present })
+    }
+    const unreadableTables = writers.filter((w) => w.drift === null).map((w) => w.table)
+    const measured = unparsed === 0 && unknownKind === 0 && unreadableTables.length === 0
+    const causes = []
+    if (unparsed > 0) causes.push(`${unparsed} unparsable JSONL line(s)`)
+    if (unknownKind > 0) causes.push(`${unknownKind} JSONL line(s) whose kind is outside WRITERS`)
+    if (unreadableTables.length > 0) causes.push(`unreadable table(s): ${[...new Set(unreadableTables)].join(', ')}`)
+    const driftTotal = measured ? writers.reduce((n, w) => n + w.drift, 0) : null
+    return {
+      measured,
+      unmeasured_reason: measured ? null : causes.join('; '),
+      jsonl_path: jsonlPath,
+      lines,
+      unparsed_lines: unparsed,
+      unknown_kind_lines: unknownKind,
+      writers,
+      drift_total: driftTotal,
+      remedy: driftTotal > 0 ? DRIFT_REMEDY : null,
+    }
+  }
+
   // ---- lifecycle / meta -----------------------------------------------------
 
   function statsFn() {
@@ -2753,7 +2931,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -3808,6 +3986,7 @@ export function main(argv) {
       }
       const pragmas = ledger._pragmas()
       const fts5 = ledger._probeFts5()
+      const drift = ledger.jsonlDrift()
       const payload = {
         schema: 1,
         node_version: process.versions.node,
@@ -3819,8 +3998,14 @@ export function main(argv) {
         retired_tables: RETIRED_TABLES,
         pragmas,
         fts5,
+        jsonl_drift: drift,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
+      if (!drift.measured) {
+        stderr.write(`ledger: JSONL/mirror drift UNMEASURED — ${drift.unmeasured_reason}\n`)
+      } else if (drift.drift_total > 0) {
+        stderr.write(`ledger: JSONL/mirror drift — ${drift.drift_total} key(s) in the JSONL authority with no mirrored row; remedy: replayJsonl\n`)
+      }
       stderr.write('ledger: doctor readout printed above\n')
       return 0
     }

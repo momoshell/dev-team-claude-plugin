@@ -94,6 +94,30 @@ export const AGENT_PARAMS = {
   },
 }
 
+// The ONE constraint that earns its place on the parameters schema: the
+// granted NAMES, so a model reading only the tool definition can make a valid
+// call first time instead of guessing and being refused (#435). Derived from
+// AGENT_PARAMS by spread rather than restated, so the permissive envelope
+// above cannot drift: `additionalProperties` stays true, there is still no
+// `required`, and `task` keeps carrying a description and nothing else. Those
+// are the keys whose absence keeps pi's unbounded pre-execute argument echo
+// (see AGENT_PARAMS) out of reach for a missing, extra or mistyped key; only a
+// WRONG AGENT NAME now diverts there, and that name is the one thing this tool
+// was already refusing on. Names are clamped with boundAgentName because the
+// register is a file: a schema is no place for an unbounded string.
+export function agentParams(allowlist: any[] = []): any {
+  const list = Array.isArray(allowlist) ? allowlist : []
+  const names = [...new Set(list.map((one) => boundAgentName(String(one?.name))))]
+  if (!names.length) return AGENT_PARAMS
+  return {
+    ...AGENT_PARAMS,
+    properties: {
+      ...AGENT_PARAMS.properties,
+      agent: { ...AGENT_PARAMS.properties.agent, enum: names },
+    },
+  }
+}
+
 export const FINDINGS_SCHEMA = {
   type: 'object',
   additionalProperties: false,
@@ -445,7 +469,7 @@ export function createAgentTool(deps: any = {}) {
     name: AGENT_TOOL_NAME,
     label: 'Agent',
     description: 'Spawn a read-only scout subagent from the crew capability register and return its schema-validated findings.',
-    parameters: AGENT_PARAMS,
+    parameters: agentParams(parseAgentAllowlist(env[AGENTS_ENV])),
     // One child at a time — the honest reading of blocking semantics. One
     // sequential call makes the whole batch sequential (agent-loop.js:289).
     executionMode: 'sequential',

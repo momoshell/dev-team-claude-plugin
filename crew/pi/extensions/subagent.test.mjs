@@ -68,6 +68,11 @@ function lineCount(value) {
   return String(value ?? '').split('\n').length
 }
 
+function paramsForGrants(grants) {
+  const env = grants.length ? { [mod.AGENTS_ENV]: JSON.stringify(grants) } : {}
+  return mod.createAgentTool({ env }).parameters
+}
+
 async function drive(extension, {
   env = {},
   params = { agent: 'scout', task: 'find the thing' },
@@ -211,6 +216,52 @@ test('the parameters schema constrains nothing and execute enforces the argument
   const extra = await driven(mod, { params: { agent: 'scout', task: 'x', extra: 'ignored' } })
   assert.equal(extra.result.details.refused, undefined)
   assert.equal(extra.calls.length, 1)
+})
+
+test('the parameters schema advertises exactly the one granted agent name', () => {
+  const params = paramsForGrants([{ name: 'scout', def: '/tmp/scout.json' }])
+  assert.deepEqual(params.properties.agent.enum, ['scout'])
+})
+
+test('the parameters schema advertises exactly the two granted agent names', () => {
+  const params = paramsForGrants([
+    { name: 'scout', def: '/tmp/scout.json' },
+    { name: 'archivist', def: '/tmp/archivist.json' },
+  ])
+  assert.deepEqual(params.properties.agent.enum, ['scout', 'archivist'])
+  assert.equal(params.additionalProperties, true)
+  assert.equal(Object.hasOwn(params, 'required'), false)
+  assert.deepEqual(params.properties.agent, {
+    description: mod.AGENT_PARAMS.properties.agent.description,
+    enum: ['scout', 'archivist'],
+  })
+  assert.deepEqual(params.properties.task, mod.AGENT_PARAMS.properties.task)
+})
+
+test('an empty allowlist keeps the permissive schema and the register refusal', async () => {
+  const params = paramsForGrants([])
+  assert.equal(params, mod.AGENT_PARAMS)
+  assert.equal(Object.hasOwn(params.properties.agent, 'enum'), false)
+  const run = await driven(mod, { env: { [mod.AGENTS_ENV]: undefined } })
+  assert.match(refusedOf(run.result), /no spawnable agents are granted to this seat/)
+  assert.equal(run.calls.length, 0)
+})
+
+test('the b33 long ungranted name stays out of the model-visible refusal', async () => {
+  const marker = 'QQMARKERQQ'
+  const run = await driven(mod, {
+    env: {
+      [mod.AGENTS_ENV]: JSON.stringify([
+        { name: 'scout', def: '/tmp/scout.json' },
+        { name: 'archivist', def: '/tmp/archivist.json' },
+      ]),
+    },
+    params: { agent: marker + 'Z'.repeat(60000), task: 'go' },
+  })
+  assert.ok(run.result.details.refused)
+  assert.equal(textOf(run.result).includes(marker), false)
+  assert.equal(byteLength(run.result.details.agent), mod.AGENT_NAME_CAP_BYTES)
+  assert.equal(run.calls.length, 0)
 })
 
 test('the findings validator returns closed payload-free codes', () => {

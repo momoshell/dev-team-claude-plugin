@@ -22,6 +22,10 @@ import { slugOrNull } from './slug.mjs'
 
 const SELF_PATH = fileURLToPath(import.meta.url)
 
+// The signals a daemon reap actually sends, and the only ones whose default
+// disposition this child ever overrides.
+export const TEARDOWN_SIGNALS = Object.freeze(['SIGTERM', 'SIGINT'])
+
 function childArguments(argv) {
   if (isObject(argv) && !Array.isArray(argv)) return argv
   const values = Array.isArray(argv) ? argv : process.argv.slice(2)
@@ -129,9 +133,63 @@ export function runChild(argv, injected = {}) {
     status: 'escalation', summary: `Task ${ctx.task} needs a human: the driver crashed (${err.message})`,
     artifacts: [ctx.journal], details: { stages: null, commit: null, dissents: [], escalation: { where: err.stage || 'child-preflight', why: err.message } },
   })
+  // A signalled child settles the same way a returning one does. `signalled`
+  // is that outcome's own envelope, so the record says why the run stopped.
+  const signalled = (signal) => ({
+    status: 'escalation', summary: `Task ${ctx.task} needs a human: the child was signalled (${signal}) before the run finished`,
+    artifacts: [ctx.journal], details: { stages: null, commit: null, dissents: [], escalation: { where: 'signalled', why: `child received ${signal}` } },
+  })
   let result
   let emitter = null
   let io = null
+  let settled = false
+  // ONE settlement path for both exits, and the FIRST settlement wins: a
+  // worker that refuses to die must never change the run's recorded outcome.
+  // Teardown runs AFTER the envelope and the mirror on purpose, on the signal
+  // path exactly as on the return path.
+  const settle = (value) => {
+    if (settled) return result
+    settled = true
+    result = value
+    write(taskReturn, JSON.stringify(result, null, 2))
+    const mirror = join(returnsDir, 'task.json')
+    if (taskReturn !== mirror) {
+      try { write(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
+    }
+    settleSeatTeardown(io)
+    try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
+    return result
+  }
+  const proc = injected.proc || process
+  // Arming is deliberately deferred until after preflight because runChild is
+  // fully synchronous from entry to the drive: a handler armed across preflight
+  // can never run and would only suppress SIGTERM and make a daemon-reaped child
+  // survive its reap (docs/conventions.md:126, measured).
+  // A reap landing in the pre-arm preflight window therefore still exits by
+  // default disposition with no envelope and no teardown — unchanged from
+  // today's behaviour, not a regression. Closing that window needs the SIGKILL
+  // backstop and the async/worker shape tracked in #419.
+  // Injected process doubles keep the settlement path directly testable.
+  const signalHandling = true
+  const armed = new Map()
+  const disarm = () => {
+    for (const [signal, handler] of armed) { try { proc.off?.(signal, handler) } catch { /* removing a handler is never load-bearing */ } }
+    armed.clear()
+  }
+  const arm = () => {
+    if (!signalHandling || armed.size) return
+    for (const signal of TEARDOWN_SIGNALS) {
+      const handler = () => {
+        // Disarm FIRST so the re-raise below meets Node's default disposition
+        // and the child dies by the signal it was sent.
+        disarm()
+        try { settle(signalled(signal)) } catch { /* a failed settlement must never turn a signal into an uncaught crash */ }
+        try { proc.kill?.(proc.pid, signal) } catch { /* death is the outcome either way */ }
+      }
+      armed.set(signal, handler)
+      try { proc.on?.(signal, handler) } catch { /* an environment without signal delivery is not a run failure */ }
+    }
+  }
   try {
     const pane = paneSeat(crew)
     if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
@@ -211,6 +269,7 @@ export function runChild(argv, injected = {}) {
       result = failure(err)
     } else {
       io = seatIo(crew, { dir: crewDir, taskDir, returnsDir }, checkout, emitter, injected.adapters || null, spec, noCmux)
+      arm()
       const protectedFloor = checkoutProtectedPaths({ checkout })
       ctx.protectedPaths = protectedFloor.paths
       ctx.protectedPathsBasis = protectedFloor.basis
@@ -242,22 +301,21 @@ export function runChild(argv, injected = {}) {
             files: laneFence.reduce((n, record) => n + (record.files?.length ?? 0), 0) })
         } catch { /* instrumentation is never load-bearing */ }
       }
-      try { result = driveTask(ctx, io) } catch (err) { result = failure(err) }
+      // The drive is ONE synchronous stretch (no await, no event-loop turn), so
+      // a handler armed across it can never run — and registering it still
+      // suppresses Node's default terminate-on-signal disposition, which would
+      // make a reaped child ignore SIGTERM for the rest of the run
+      // (docs/conventions.md, 2026-08-11, measured). Disarm for the drive,
+      // re-arm the moment it returns.
+      try { disarm(); result = driveTask(ctx, io) }
+      catch (err) { result = failure(err) }
+      finally { arm() }
     }
   } catch (err) {
-    if (harness) throw err
+    if (harness) { disarm(); throw err }
     result = failure(err)
   }
-  write(taskReturn, JSON.stringify(result, null, 2))
-  const mirror = join(returnsDir, 'task.json')
-  if (taskReturn !== mirror) {
-    try { write(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
-  }
-  // Teardown runs AFTER the envelope and the mirror on purpose: a worker that
-  // refuses to die must never change the run's recorded outcome.
-  settleSeatTeardown(io)
-  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
-  return result
+  try { return settle(result) } finally { disarm() }
 }
 
 const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === resolvePath(SELF_PATH)

@@ -695,8 +695,14 @@ export function daemon(options = {}) {
     run.child_generation += 1
     run.child_pid = null
     run.child_dead = true
-    try { kill(pid, 'SIGTERM') } catch { /* an already-exited child is the outcome we wanted */ }
-    try { appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: 'SIGTERM' })) } catch { /* the feed must never re-throw inside a recovery path */ }
+    // GROUP-kill, never a bare pid: the child is forked detached (:941) and is
+    // its own group leader, so its own descendants go with it. The guard is
+    // crew/headless-rpc.mjs:456's — kill(-0, sig) signals THIS daemon's group
+    // and kill(-1, sig) every process this user owns; neither is ever a reap.
+    const pgid = Number(pid)
+    const signalable = Number.isSafeInteger(pgid) && pgid > 1
+    if (signalable) { try { kill(-pgid, 'SIGTERM') } catch { /* an already-exited child is the outcome we wanted */ } }
+    try { appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: signalable ? 'SIGTERM' : null })) } catch { /* the feed must never re-throw inside a recovery path */ }
     return true
   }
 

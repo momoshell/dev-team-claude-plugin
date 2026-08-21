@@ -1906,6 +1906,101 @@ test('none of the four read verbs is present in WRITERS (they never reach a writ
 })
 
 // ---------------------------------------------------------------------------
+// #443: unknown CLI flags are refusals, not silent defaults
+// ---------------------------------------------------------------------------
+
+test('#443: run-set refuses an unknown flag and preserves the bounded answer for the correct spelling', { skip: SKIP }, () => {
+  const refused = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--untill', '2026-08-21T01:00:00Z'])
+  assert.equal(refused.status, 2, refused.stderr)
+  assert.equal(refused.stdout, '')
+  assert.match(refused.stderr, /unknown flag --untill/)
+
+  const accepted = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--until', '2026-08-21T01:00:00Z'])
+  assert.equal(accepted.status, 0, accepted.stderr)
+  const payload = JSON.parse(accepted.stdout)
+  assert.equal(payload.until, '2026-08-21T01:00:00.000Z')
+  assert.notEqual(payload.since, null)
+})
+
+test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
+  const since = '2026-08-21T00:00:00Z'
+  const until = '2026-08-21T01:00:00Z'
+  const dir = nextDir()
+  const runDir = join(dir, 'advisor-run')
+  mkdirSync(join(runDir, 'returns'), { recursive: true })
+  writeFileSync(join(runDir, 'journal.jsonl'), '')
+  const adjudications = join(dir, 'adjudications.json')
+  writeFileSync(adjudications, JSON.stringify({ schema: 1, adjudications: [] }))
+  const brief = join(dir, 'brief.md')
+  writeFileSync(brief, '# Task\n## The ask\n\nUse the accepted flag\n')
+
+  const cases = [
+    { verb: 'tail', flag: 'after', args: ['tail', 'cli-1', '--after', '0', '--limit', '1'] },
+    { verb: 'tail', flag: 'limit', args: ['tail', 'cli-1', '--after', '0', '--limit', '1'] },
+    { verb: 'run-set', flag: 'since', args: ['run-set', '--since', since, '--until', until] },
+    { verb: 'run-set', flag: 'until', args: ['run-set', '--since', since, '--until', until] },
+    { verb: 'cell-failures', flag: 'since', args: ['cell-failures', '--since', since, '--until', until] },
+    { verb: 'cell-failures', flag: 'until', args: ['cell-failures', '--since', since, '--until', until] },
+    { verb: 'modifier-attempts', flag: 'since', args: ['modifier-attempts', '--since', since, '--until', until] },
+    { verb: 'modifier-attempts', flag: 'until', args: ['modifier-attempts', '--since', since, '--until', until] },
+    { verb: 'seat-teardowns', flag: 'since', args: ['seat-teardowns', '--since', since, '--until', until] },
+    { verb: 'seat-teardowns', flag: 'until', args: ['seat-teardowns', '--since', since, '--until', until] },
+    { verb: 'ci-cycles', flag: 'since', args: ['ci-cycles', '--since', since, '--until', until] },
+    { verb: 'ci-cycles', flag: 'until', args: ['ci-cycles', '--since', since, '--until', until] },
+    { verb: 'intake-sweeps', flag: 'since', args: ['intake-sweeps', '--since', since, '--until', until] },
+    { verb: 'intake-sweeps', flag: 'until', args: ['intake-sweeps', '--since', since, '--until', until] },
+    { verb: 'request', flag: 'from-brief', args: ['request', 'accepted-request', '--from-brief', brief] },
+    { verb: 'advisor-ab', flag: 'run-dir', args: ['advisor-ab', '--run-dir', runDir, '--run-started-at', since, '--adjudications', adjudications, 'd1'] },
+    { verb: 'advisor-ab', flag: 'run-started-at', args: ['advisor-ab', '--run-dir', runDir, '--run-started-at', since, '--adjudications', adjudications, 'd1'] },
+    { verb: 'advisor-ab', flag: 'adjudications', args: ['advisor-ab', '--run-dir', runDir, '--run-started-at', since, '--adjudications', adjudications, 'd1'] },
+    { verb: 'kill', flag: 'adw-id', args: ['kill', '--adw-id', 'no-such-adw', '--pid', '999999', '--yes'] },
+    { verb: 'kill', flag: 'pid', args: ['kill', '--adw-id', 'no-such-adw', '--pid', '999999', '--yes'] },
+    { verb: 'kill', flag: 'yes', args: ['kill', '--adw-id', 'no-such-adw', '--pid', '999999', '--yes'] },
+  ]
+  for (const { verb, flag, args } of cases) {
+    const result = run(args)
+    assert.doesNotMatch(result.stderr, /unknown flag/, `${verb} --${flag} was refused as unknown: ${result.stderr}`)
+  }
+})
+
+test('#443: flagless subcommands refuse an unknown flag', { skip: SKIP }, () => {
+  for (const verb of ['sessions', 'phases', 'procs', 'task', 'gate-review-gap', 'eligible-tasks', 'doctor']) {
+    const result = run([verb, '--nope', 'x'])
+    assert.equal(result.status, 2, `${verb}: ${result.stderr}`)
+    assert.match(result.stderr, /unknown flag --nope/)
+  }
+})
+
+test('#443: every window subcommand refuses the misspelled flag', { skip: SKIP }, () => {
+  for (const verb of ['run-set', 'cell-failures', 'modifier-attempts', 'seat-teardowns', 'ci-cycles', 'intake-sweeps']) {
+    const result = run([verb, '--sicne', '2026-08-21T00:00:00Z'])
+    assert.equal(result.status, 2, `${verb}: ${result.stderr}`)
+    assert.match(result.stderr, /unknown flag --sicne/)
+  }
+})
+
+test('#443: success, usage refusal, and unexpected internal error retain distinct exit codes', { skip: SKIP }, () => {
+  const success = run(['sessions'])
+  assert.equal(success.status, 0, success.stderr)
+
+  const refusal = run(['sessions', '--nope', 'x'])
+  assert.equal(refusal.status, 2, refusal.stderr)
+  assert.match(refusal.stderr, /unknown flag --nope/)
+
+  const url = new URL('../scripts/factory/ledger.mjs', import.meta.url).href
+  const source = [
+    `const { main } = await import(${JSON.stringify(url)});`,
+    "process.stdout.write = () => { throw new Error('test-induced internal failure') };",
+    "process.exitCode = main(['sessions']);",
+  ].join('\n')
+  const internal = spawnSync(process.execPath, ['--input-type=module', '-e', source], {
+    encoding: 'utf8',
+    env: { ...process.env, DEVTEAM_LEDGER_DB: join(nextDir(), 'ledger.db') },
+  })
+  assert.equal(internal.status, 1, internal.stderr)
+})
+
+// ---------------------------------------------------------------------------
 // #193: one-run-set readout
 // ---------------------------------------------------------------------------
 

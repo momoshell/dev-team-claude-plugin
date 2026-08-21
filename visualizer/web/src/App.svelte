@@ -1,6 +1,6 @@
 <script>
   import { getReturns, getSessions } from './lib/api.js'
-  import { DEFAULT_FILTERS, createSemaphore, escalationProbeTargets, fleetView } from './lib/fleet.js'
+  import { DEFAULT_FILTERS, createSemaphore, fleetView } from './lib/fleet.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import Filters from './lib/Filters.svelte'
   import FleetTable from './lib/FleetTable.svelte'
@@ -21,12 +21,18 @@
   let theme = $state(themeValue)
   let runs = $state([])
   let envelopes = $state(new Map())
+  let feedDegraded = $state(false)
   let filters = $state({ mode: '', status: '', since: '', until: '' })
   let viewFilters = $state({ ...DEFAULT_FILTERS })
   let error = $state('')
   let now = $state(Date.now())
   let refreshGeneration = 0
   const returnRequestSemaphore = createSemaphore(6)
+  const envelopeCache = new Map()
+  const envelopeRuns = new Map()
+  const envelopeQueue = []
+  const envelopeQueued = new Set()
+  let envelopeWorkers = 0
 
   let anyRunning = $derived(runs.some((run) => run.running))
   let fleet = $derived(fleetView(runs, { envelopes, now, filters: viewFilters }))
@@ -44,24 +50,41 @@
     try { localStorage.setItem('dt-theme', theme) } catch {}
   })
 
-  async function probeEnvelopes(nextRuns, generation) {
-    const ids = escalationProbeTargets(nextRuns)
-    const byId = new Map(nextRuns.map((run) => [run.adw_id, run]))
-    const found = new Map()
-    let cursor = 0
-    async function worker() {
-      while (cursor < ids.length) {
-        const id = ids[cursor++]
-        const run = byId.get(id)
-        if (!run) continue
-        try {
-          const result = await returnRequestSemaphore.run(() => getReturns(run.repo_slug, run.goal, run.adw_id))
-          if (result?.task && typeof result.task === 'object') found.set(id, result.task)
-        } catch {}
+  async function fetchEnvelope(id) {
+    try {
+      const run = envelopeRuns.get(id)
+      if (!run) return
+      const result = await returnRequestSemaphore.run(() => getReturns(run.repo_slug, run.goal, run.adw_id))
+      if (result?.task && typeof result.task === 'object') {
+        envelopeCache.set(id, result.task)
+        envelopes = new Map(envelopeCache)
       }
+    } catch {} finally {
+      envelopeQueued.delete(id)
+      envelopeWorkers -= 1
+      queueMicrotask(drainEnvelopeQueue)
     }
-    await Promise.all(Array.from({ length: Math.min(6, ids.length) }, () => worker()))
-    if (generation === refreshGeneration) envelopes = found
+  }
+
+  function drainEnvelopeQueue() {
+    while (envelopeWorkers < 6 && envelopeQueue.length) {
+      const id = envelopeQueue.shift()
+      envelopeWorkers += 1
+      void fetchEnvelope(id)
+    }
+  }
+
+  function probeEnvelopes(nextRuns) {
+    envelopeRuns.clear()
+    for (const run of Array.isArray(nextRuns) ? nextRuns : []) {
+      const id = run?.adw_id
+      if (!run?.repo_slug || !(run?.goal ?? run?.task_slug) || id == null) continue
+      envelopeRuns.set(id, run)
+      if (envelopeCache.has(id) || envelopeQueued.has(id)) continue
+      envelopeQueued.add(id)
+      envelopeQueue.push(id)
+    }
+    drainEnvelopeQueue()
   }
 
   async function refresh() {
@@ -71,12 +94,15 @@
       if (generation !== refreshGeneration) return
       const nextRuns = Array.isArray(result?.runs) ? result.runs : []
       runs = nextRuns
+      feedDegraded = result?.degraded === true
       now = Date.now()
-      envelopes = new Map()
       error = ''
-      await probeEnvelopes(nextRuns, generation)
+      probeEnvelopes(nextRuns)
     } catch (err) {
-      if (generation === refreshGeneration) error = err.message || 'session request failed'
+      if (generation === refreshGeneration) {
+        error = err.message || 'session request failed'
+        feedDegraded = true
+      }
     }
   }
 
@@ -113,7 +139,7 @@
 {:else if route.view === 'ops'}
   <main class="page">
     <h1>Operations</h1>
-    <MetricsStrip runs={runs} />
+    <MetricsStrip runs={runs} envelopes={envelopes} degraded={feedDegraded} />
     <CellHealthPanel />
     <TeardownPanel />
     <IntakePanel />
@@ -150,7 +176,7 @@
         {:else}<p class="muted">No runs found.</p>{/each}
       </section>
     {/if}
-    <MetricsStrip runs={runs} />
+    <MetricsStrip runs={runs} envelopes={envelopes} degraded={feedDegraded} />
     <CellHealthPanel />
     <TeardownPanel />
     <IntakePanel />

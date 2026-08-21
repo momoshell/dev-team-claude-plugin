@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
+import { acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
@@ -34,6 +34,133 @@ test('fleetCost never derives money from token totals', () => {
   const result = fleetCost([{ metrics: { billed_input_tokens: 999999999 } }])
   assert.equal(result.usd, null)
   assert.ok(result.pending)
+})
+
+test('the sessions derivations never fabricate a zero for a degraded or unmeasured feed', () => {
+  const derivations = [
+    [fleetPassRate, 'percent'],
+    [fleetMedianDuration, 'ms'],
+    [fleetPhasesPerRun, 'average'],
+    [fleetEscalationRate, 'percent'],
+  ]
+  const measuredRows = [
+    { adw_id: 'ok', status: 'ok', duration_ms: 1000, phases: [{}], agents: [] },
+    { adw_id: 'fail', status: 'fail', duration_ms: 2000, phases: [{}, {}], agents: [] },
+  ]
+  for (const [runs, options] of [[[], { degraded: true }], [measuredRows, { degraded: true }]]) {
+    for (const [derive, key] of derivations) {
+      const result = derive(runs, options)
+      assert.equal(result[key], null)
+      assert.notEqual(result[key], 0)
+      assert.equal(typeof result.pending, 'string')
+      assert.ok(result.pending.length)
+      assert.match(result.pending, /degrad/i)
+    }
+  }
+  for (const [derive, key] of derivations) {
+    const result = derive([], { degraded: false })
+    assert.equal(result[key], null)
+    assert.notEqual(result[key], 0)
+    assert.match(result.pending, /no run in this window carried a recorded outcome/i)
+  }
+})
+
+test('the sessions derivations report a genuinely measured zero as a real zero', () => {
+  const failedRuns = [
+    { adw_id: 'fail-a', status: 'fail', phases: [], agents: [] },
+    { adw_id: 'fail-b', status: 'fail', phases: [], agents: [] },
+  ]
+  const passRate = fleetPassRate(failedRuns, { degraded: false })
+  const phases = fleetPhasesPerRun(failedRuns, { degraded: false })
+  assert.equal(passRate.percent, 0)
+  assert.equal(passRate.pending, null)
+  assert.equal(phases.average, 0)
+  assert.equal(phases.pending, null)
+
+  const doneRuns = [
+    { adw_id: 'done-a', status: 'ok', phases: [], agents: [] },
+    { adw_id: 'done-b', status: 'ok', phases: [], agents: [] },
+  ]
+  const escalation = fleetEscalationRate(doneRuns, {
+    degraded: false,
+    envelopes: new Map([['done-a', { status: 'done' }], ['done-b', { status: 'done' }]]),
+  })
+  assert.equal(escalation.percent, 0)
+  assert.equal(escalation.pending, null)
+})
+
+test('fleetEscalationRate counts aborted sessions and task-envelope escalations', () => {
+  const run = (adw_id, status = 'ok', extra = {}) => ({ adw_id, status, phases: [], agents: [], ...extra })
+  const aborted = fleetEscalationRate([run('aborted', 'aborted'), run('ok')], { degraded: false })
+  assert.equal(aborted.percent, 50)
+  assert.equal(aborted.escalated, 1)
+
+  const b52 = fleetEscalationRate([run('b52-heartbeat'), run('done')], {
+    degraded: false,
+    envelopes: new Map([
+      ['b52-heartbeat', { status: 'escalation', details: { escalation: { where: 'build:r2', why: 'scope' } } }],
+      ['done', { status: 'done' }],
+    ]),
+  })
+  assert.equal(b52.percent, 50)
+
+  const agent = fleetEscalationRate([run('agent', 'ok', { agents: [{ outcome: 'escalate' }] }), run('plain')], {
+    degraded: false,
+    envelopes: { agent: { status: 'done' }, plain: { status: 'done' } },
+  })
+  assert.equal(agent.percent, 50)
+})
+
+test('fleetEscalationRate does not count a run that did not escalate', () => {
+  const result = fleetEscalationRate([
+    { adw_id: 'a', status: 'ok', phases: [], agents: [{ outcome: 'ok' }] },
+    { adw_id: 'b', status: 'ok', phases: [], agents: [{ outcome: 'ok' }] },
+  ], {
+    degraded: false,
+    envelopes: { a: { status: 'done' }, b: { status: 'done' } },
+  })
+  assert.equal(result.escalated, 0)
+  assert.equal(result.percent, 0)
+  assert.notEqual(result.percent, null)
+})
+
+test('the metrics strip renders the sessions derivations and derives nothing', () => {
+  const root = join(process.cwd(), 'visualizer/web/src')
+  const strip = readFileSync(join(root, 'lib/MetricsStrip.svelte'), 'utf8')
+  const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const importLine = strip.split('\n').find((line) => line.includes("from './panels.js'"))
+  assert.ok(importLine)
+  for (const name of ['fleetPassRate', 'fleetMedianDuration', 'fleetPhasesPerRun', 'fleetEscalationRate']) {
+    assert.match(importLine, new RegExp(`\\b${name}\\b`))
+  }
+  assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false \} = \$props\(\)/)
+  for (const pattern of [/runs\.filter\(/, /runs\.reduce\(/, /runs\.map\(/, /\.sort\(/]) {
+    assert.doesNotMatch(strip, pattern)
+  }
+  assert.match(app, /feedDegraded = result\?\.degraded === true/)
+  const mounts = app.match(/<MetricsStrip[^>]*>/g) || []
+  assert.equal(mounts.length, 2)
+  for (const mount of mounts) {
+    assert.match(mount, /envelopes=/)
+    assert.match(mount, /degraded=/)
+  }
+})
+
+test('the metrics strip probes task envelopes for successful sessions', () => {
+  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.equal(app.includes('escalationProbeTargets(nextRuns)'), false)
+  assert.ok(app.includes(`for (const run of Array.isArray(nextRuns) ? nextRuns : []) {
+      const id = run?.adw_id
+      if (!run?.repo_slug || !(run?.goal ?? run?.task_slug) || id == null) continue`))
+})
+
+test('the metrics strip publishes task envelopes as probes finish across refreshes', () => {
+  const app = readFileSync(join(process.cwd(), 'visualizer/web/src/App.svelte'), 'utf8')
+  assert.match(app, /const envelopeCache = new Map\(\)/)
+  assert.match(app, /envelopes = new Map\(envelopeCache\)/)
+  assert.match(app, /envelopeQueued\.has\(id\)/)
+  assert.doesNotMatch(app, /if \(generation === refreshGeneration\) envelopes = found/)
+  assert.doesNotMatch(app, /envelopes = new Map\(\)/)
 })
 
 test('rosterPanel passes through a degraded reason without presenting an empty roster', () => {

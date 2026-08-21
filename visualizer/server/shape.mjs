@@ -7,6 +7,7 @@ export const CELL_HEALTH_WINDOW_MS = 7 * 24 * 60 * 60 * 1000
 const EFFORT_PENDING = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/seat-io.mjs:264-265, 285-288)'
 const CONTEXT_PENDING = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
 const MODEL_PENDING = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/seat-io.mjs:399-410)'
+const MODEL_ROLE_PENDING = "not measured — this run records an agent_sessions row for this dispatch id but none for this seat's role: the dispatch id was reused across assignments and that cell is the other row's (#461)"
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const SEAT_TEARDOWN_WINDOW_MS = 24 * 60 * 60 * 1000
@@ -56,45 +57,69 @@ function payload(event) {
   try { return event.payload_json ? JSON.parse(event.payload_json) : {} } catch { return {} }
 }
 
+// A dispatch id is not an assignment's identity: the runtime reuses it across a
+// resumed drive (#461), so b52-heartbeat's journal carries d1 twice (a re-asked
+// planner) and d2 twice (a lead that took over a timed-out builder). Pair the
+// events in id order instead — each agent_start OPENS a row; the next agent_end
+// for that id closes the row it opened — and give every row its own `key` so two
+// assignments sharing an id are two rows. A row keeps the role it was started
+// with: nothing below writes `role` after the row is created.
 export function foldAgents(events = []) {
-  const agents = new Map()
+  const rows = []
+  const open = new Map()
+  const occurrences = new Map()
+  function openRow(id, event, p) {
+    const n = (occurrences.get(id) ?? 0) + 1
+    occurrences.set(id, n)
+    const row = {
+      key: `${id}#${n}`,
+      dispatch_id: id, role: p.role || 'unknown', lane: laneFor(p.role),
+      outcome: null, started_at: event.started_at || null, ended_at: null,
+    }
+    rows.push(row)
+    return row
+  }
   for (const event of events) {
     const p = payload(event)
     if (!p.dispatch_id) continue
-    const current = agents.get(p.dispatch_id) || {
-      dispatch_id: p.dispatch_id, role: p.role || 'unknown', lane: laneFor(p.role),
-      outcome: null, started_at: event.started_at || null, ended_at: null,
-    }
+    const id = p.dispatch_id
     if (event.type === 'agent_start') {
-      current.role = p.role || current.role
-      current.lane = laneFor(current.role)
-      current.started_at = event.started_at || current.started_at
+      open.set(id, openRow(id, event, p))
     } else if (event.type === 'agent_end') {
-      current.role = p.role || current.role
-      current.lane = laneFor(current.role)
-      current.outcome = p.outcome ?? null
-      current.ended_at = event.ended_at || event.started_at || null
+      const row = open.get(id) ?? openRow(id, event, p)
+      open.delete(id)
+      row.outcome = p.outcome ?? null
+      row.ended_at = event.ended_at || event.started_at || null
     }
-    agents.set(p.dispatch_id, current)
   }
-  return [...agents.values()]
+  return rows
 }
 
 export function withCells(agents = [], agentSessions = []) {
+  // A dispatch id can be shared by two assignments (#461), so a cell is
+  // attributed by the seat's ROLE as well as its id: b52-heartbeat's d2 timed
+  // out as a builder and was then taken over by a lead, and the builder's cell
+  // is not the lead's. A session row recording no role still attributes to any
+  // row for that id, which is what this shaper did before agent_sessions.role.
   const byDispatch = new Map()
   for (const row of Array.isArray(agentSessions) ? agentSessions : []) {
     if (row?.dispatch_id == null) continue
     const key = String(row.dispatch_id)
-    if (!byDispatch.has(key)) byDispatch.set(key, row)
+    let entry = byDispatch.get(key)
+    if (!entry) { entry = { roles: new Map(), roleless: null }; byDispatch.set(key, entry) }
+    const role = row.role == null || row.role === '' ? null : String(row.role)
+    if (role == null) { if (entry.roleless == null) entry.roleless = row }
+    else if (!entry.roles.has(role)) entry.roles.set(role, row)
   }
   return (Array.isArray(agents) ? agents : []).map((agent) => {
-    const session = byDispatch.get(String(agent?.dispatch_id))
+    const entry = byDispatch.get(String(agent?.dispatch_id))
+    const session = entry ? (entry.roles.get(String(agent?.role)) ?? entry.roleless) : null
     const model = session?.model ?? null
     const modelPresent = model != null && (typeof model !== 'string' || model.length > 0)
     return {
       ...agent,
       model,
-      model_pending: modelPresent ? null : MODEL_PENDING,
+      model_pending: modelPresent ? null : (entry && entry.roles.size ? MODEL_ROLE_PENDING : MODEL_PENDING),
       effort: null,
       effort_pending: EFFORT_PENDING,
       context_tokens: null,

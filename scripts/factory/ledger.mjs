@@ -1083,11 +1083,14 @@ function toBindable(v) {
   return v
 }
 
-// A JSONL arg and its mirrored column can differ in JS type while naming the
-// same row: toBindable maps undefined to null and booleans to 0/1, and SQLite
-// then applies column affinity on bind (a '3' bound to an INTEGER column reads
-// back as 3). Compare the STRING form of each unique column, with an explicit
-// sentinel for absent-or-null, so a type difference never reads as drift.
+// SQLite's post-affinity STORAGE CLASS is half of a stored value's identity:
+// the same bytes in two classes are two different rows. Measured here, in an
+// INTEGER-affinity column, '1e400' is stored as the REAL Infinity while the
+// TEXT value 'Infinity' stays TEXT — a key carrying only the string form
+// collapsed those two rows into one and hid a missing row. So the class is
+// encoded ALONGSIDE the value, and no value-specific instance of this family
+// can exist. The equivalences that are INTENDED survive, because they are real
+// conversions: '42' and 42 both land as INTEGER 42 in an INTEGER column.
 const DRIFT_NULL_SENTINEL = Object.freeze({ kind: 'null' })
 const DRIFT_NUMERIC_LITERAL = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/
 function declaredAffinity(decl) {
@@ -1109,19 +1112,89 @@ for (const table of Object.values(TABLES)) {
     }
   }
 }
+const DRIFT_INTEGER_LITERAL = /^[+-]?\d+$/
+const DRIFT_TYPE_PREFIX = '_drift_type_'
+const DRIFT_INT64_MIN = -(2n ** 63n)
+const DRIFT_INT64_MAX = 2n ** 63n - 1n
+
+function driftEncoded(storageClass, value) {
+  return { kind: 'value', class: storageClass, value }
+}
+
+function driftHexBytes(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// The JSONL side: SQLite has not seen this value, so the class it WOULD be
+// stored in is derived from the column's declared affinity. Measured rules —
+// under INTEGER/NUMERIC affinity a numeric literal lands as INTEGER when it
+// converts to a 64-bit integer losslessly ('1e2' -> integer 100, '0042' ->
+// integer 42) and as REAL otherwise ('9223372036854775808', '.5', '1e400');
+// a non-numeric string stays TEXT ('Infinity', 'nan', '1e400x'); under REAL
+// affinity every numeric literal lands as REAL; under TEXT or BLOB affinity a
+// string is stored unchanged.
 function driftValue(column, value) {
   const bindable = toBindable(value)
   if (bindable === null || (typeof bindable === 'number' && Number.isNaN(bindable))) return DRIFT_NULL_SENTINEL
-  const affinity = DRIFT_COLUMN_AFFINITIES.get(column)
-  if ((affinity === 'INTEGER' || affinity === 'NUMERIC' || affinity === 'REAL') && typeof bindable === 'string') {
-    const trimmed = bindable.trim()
-    if (DRIFT_NUMERIC_LITERAL.test(trimmed)) return { kind: 'value', value: String(Number(trimmed)) }
+  const affinity = DRIFT_COLUMN_AFFINITIES.get(column) ?? 'BLOB'
+  if (bindable instanceof Uint8Array) {
+    // No affinity ever converts a BLOB.
+    return driftEncoded('BLOB', driftHexBytes(bindable))
   }
-  return { kind: 'value', value: String(bindable) }
+  if (typeof bindable === 'bigint') {
+    return affinity === 'TEXT' ? driftEncoded('TEXT', bindable.toString()) : driftEncoded('INTEGER', bindable.toString())
+  }
+  if (typeof bindable === 'number') {
+    // node:sqlite binds every JS number as a double; an integral double is
+    // stored as INTEGER under INTEGER/NUMERIC affinity and as REAL elsewhere.
+    if (affinity === 'TEXT') return driftEncoded('TEXT', String(bindable))
+    if (affinity === 'INTEGER' || affinity === 'NUMERIC') {
+      if (Number.isInteger(bindable)) {
+        const exact = BigInt(bindable)
+        // SQLite's REAL-to-INTEGER affinity boundary is open at -2^63:
+        // that exact double remains REAL, unlike an in-range integer literal.
+        if (exact > DRIFT_INT64_MIN && exact <= DRIFT_INT64_MAX) return driftEncoded('INTEGER', exact.toString())
+      }
+    }
+    return driftEncoded('REAL', String(bindable))
+  }
+  if (affinity === 'TEXT' || affinity === 'BLOB') return driftEncoded('TEXT', bindable)
+  const trimmed = bindable.trim()
+  if (!DRIFT_NUMERIC_LITERAL.test(trimmed)) return driftEncoded('TEXT', bindable)
+  if (affinity === 'INTEGER' || affinity === 'NUMERIC') {
+    if (DRIFT_INTEGER_LITERAL.test(trimmed)) {
+      // BigInt, not Number: an integer literal above 2^53 must not be decided
+      // by a lossy double, and the int64 range is where SQLite itself gives up
+      // on INTEGER and stores REAL.
+      const exact = BigInt(trimmed.replace(/^\+/, ''))
+      if (exact >= DRIFT_INT64_MIN && exact <= DRIFT_INT64_MAX) return driftEncoded('INTEGER', exact.toString())
+    } else {
+      const numeric = Number(trimmed)
+      if (Number.isInteger(numeric) && Number.isSafeInteger(numeric)) return driftEncoded('INTEGER', String(numeric))
+    }
+  }
+  return driftEncoded('REAL', String(Number(trimmed)))
 }
+
+// The mirror side never GUESSES its class: it is read from SQLite's own
+// typeof() selected beside the column, because node:sqlite hands back a REAL
+// 42.0 as the JS number 42, indistinguishable from an INTEGER 42 by JS type.
+function driftRowValue(sqliteType, value) {
+  if (value === null || sqliteType === 'null') return DRIFT_NULL_SENTINEL
+  if (sqliteType === 'blob') return driftEncoded('BLOB', driftHexBytes(value))
+  if (sqliteType === 'integer' || sqliteType === 'real' || sqliteType === 'text') {
+    return driftEncoded(sqliteType.toUpperCase(), typeof value === 'bigint' ? value.toString() : String(value))
+  }
+  return driftEncoded('TEXT', String(value))
+}
+
 function driftKey(cols, source) {
   const src = source ?? {}
   return JSON.stringify(cols.map((c) => driftValue(c, src[c])))
+}
+
+function driftRowKey(cols, row) {
+  return JSON.stringify(cols.map((c) => driftRowValue(row[`${DRIFT_TYPE_PREFIX}${c}`], row[c])))
 }
 
 // The honesty rule (docs/ledger-queries.md:31): an authority that cannot be
@@ -2854,8 +2927,12 @@ export function openLedger({
       if (!rowKeysByTable.has(info.table)) {
         let rowKeys = null
         try {
-          const rows = conn.prepare(`SELECT ${info.cols.map(quoteSqlIdentifier).join(', ')} FROM ${quoteSqlIdentifier(info.table)}`).all()
-          rowKeys = new Set(rows.map((row) => driftKey(info.cols, row)))
+          const selection = info.cols.flatMap((c) => [
+            quoteSqlIdentifier(c),
+            `typeof(${quoteSqlIdentifier(c)}) AS ${quoteSqlIdentifier(`${DRIFT_TYPE_PREFIX}${c}`)}`,
+          ]).join(', ')
+          const rows = conn.prepare(`SELECT ${selection} FROM ${quoteSqlIdentifier(info.table)}`).all()
+          rowKeys = new Set(rows.map((row) => driftRowKey(info.cols, row)))
         } catch {
           // An unreadable table is unmeasured, never zero drift.
           rowKeys = null

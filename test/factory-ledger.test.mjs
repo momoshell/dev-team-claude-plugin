@@ -3386,6 +3386,66 @@ test('complete mirrors normalize JSONL values through SQLite affinity', { skip: 
   } finally { ledger.close() }
 })
 
+test('complete mirrors preserve SQLite REAL for an out-of-range integral double', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startPhase({ adw_id: 'drift-range', seq: 1e20, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 1)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 0)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
+test('complete mirrors preserve SQLite REAL at the lower int64 double boundary', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startPhase({ adw_id: 'drift-lower-boundary', seq: -9223372036854776000, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 1)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 0)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
+test('drift keys preserve the post-affinity storage class', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startPhase({ adw_id: 'run', seq: 'Infinity', name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'startPhase', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'run', seq: '1e400' } })}\n`)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 2)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 1)
+    assert.equal(drift.drift_total, 1)
+  } finally { ledger.close() }
+})
+
+test('an affinity-converted JSONL string and its mirrored integer share one drift key', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startPhase({ adw_id: 'affine', seq: 7, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'startPhase', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'affine', seq: '7' } })}\n`)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 1)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 0)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
 test('null encoding keeps sentinel-like values distinct in drift', { skip: SKIP }, () => {
   const source = openTestLedger()
   source.recordSeatTeardown({ adw_id: 'drift-null', role: 'ledger-drift:null', outcome: 'proven' })

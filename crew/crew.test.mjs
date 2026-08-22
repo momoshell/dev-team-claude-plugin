@@ -29,7 +29,10 @@ import {
 import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
-import { seatIo, VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS } from './seat-io.mjs'
+import {
+  cellFailureKind, paneAlive, paneProbe, seatIo, SUBSTRATE_MISSES_TO_DIE,
+  VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
+} from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
@@ -3011,6 +3014,42 @@ test('seatIo status and showDoc make no cmux calls without a workspace and statu
   } finally { rmSync(parent, { recursive: true, force: true }) }
 })
 
+test('seatIo wait reports a dead substrate as a host transport failure and journals it', () => {
+  const parent = mkdtempSync(join(tmpdir(), 'crew-substrate-wait-'))
+  const paths = { dir: parent, taskDir: parent, returnsDir: join(parent, 'returns') }
+  mkdirSync(paths.returnsDir, { recursive: true })
+  let t = 0
+  const events = []
+  const journal = []
+  try {
+    const io = seatIo({
+      workspace_id: 'workspace-1', window_id: 'window-1',
+      members: { builder: { surface_id: 'surface-builder', transport: 'pane' } },
+    }, paths, parent, null, null, {}, {
+      now: () => t,
+      sleep: (ms) => { t += ms },
+      tree: () => { throw new Error('cmux unavailable') },
+      locate: () => ({ id: 'surface-builder' }),
+      sendLine: () => {},
+      assignmentLine: () => 'assignment',
+      cmux: () => ({ ok: false, stdout: '' }),
+      logLine: (_path, row) => journal.push(row),
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => io.wait(assignment.returnPath, 1200), (err) => err.stage === 'substrate-gone')
+    const failures = events.filter((event) => event.kind === 'cell-failure')
+    assert.equal(failures.length, 1)
+    const failure = failures[0]
+    assert.equal(failure.failure, 'transport-error')
+    assert.equal(failure.stage, 'substrate-gone')
+    assert.equal(failure.attribution, 'host')
+    const row = journal.find((entry) => entry.substrate_gone === 'builder')
+    assert.equal(row.substrate_gone, 'builder')
+    assert.equal(row.returnPath, assignment.returnPath)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
 test('parkOnOutcome escalation parks a workspace-less crew with transport-role fallback keys', () => {
   const calls = []
   const crew = { roles: ['builder'], workspace_id: null, members: { builder: { pane_id: null, surface_id: null, transport: 'headless-rpc' } } }
@@ -3467,6 +3506,123 @@ test('waitForEnvelope envelope wins at death time and liveness constants are int
   for (const value of [WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE]) assert.equal(Number.isInteger(value), true)
 })
 
+test('waitForEnvelope fails a waiting seat with substrate-gone when the pane manager stops answering', () => {
+  let t = 0
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => null,
+    probeSeat: () => ({ alive: null, substrate: 'down' }),
+    now: () => t, sleep: (ms) => { t += ms },
+  }), (err) => {
+    assert.equal(err.stage, 'substrate-gone')
+    assert.doesNotMatch(err.message, /seat died/)
+    assert.equal(err.role, 'builder')
+    assert.ok(t < 1200 * 1000)
+    return true
+  })
+})
+
+test('waitForEnvelope: a null seat probe while the substrate answers is never death', () => {
+  const run = (probe) => {
+    let t = 0
+    return waitForEnvelope({
+      returnPath: '/tmp/return.json', timeoutS: 120, role: 'builder',
+      readEnvelope: () => null, probeSeat: probe,
+      now: () => t, sleep: (ms) => { t += ms },
+    })
+  }
+  assert.equal(run(() => ({ alive: null, substrate: 'ok' })), null)
+  let t = 0
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => null, probeSeat: () => ({ alive: false, substrate: 'ok' }),
+    now: () => t, sleep: (ms) => { t += ms },
+  }), (err) => err.stage === 'seat-died')
+})
+
+test('waitForEnvelope requires consecutive substrate misses and resets when the substrate answers', () => {
+  let t = 0
+  const sequence = [
+    { alive: null, substrate: 'down' },
+    { alive: null, substrate: 'ok' },
+    { alive: null, substrate: 'down' },
+  ]
+  assert.equal(waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 120, role: 'builder',
+    readEnvelope: () => null,
+    probeSeat: () => sequence.shift() || { alive: null, substrate: 'ok' },
+    now: () => t, sleep: (ms) => { t += ms },
+  }), null)
+
+  t = 0
+  let probes = 0
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => null,
+    probeSeat: () => { probes += 1; return { alive: null, substrate: 'down' } },
+    now: () => t, sleep: (ms) => { t += ms },
+  }), (err) => err.stage === 'substrate-gone')
+  assert.equal(probes, SUBSTRATE_MISSES_TO_DIE)
+  assert.ok(SUBSTRATE_MISSES_TO_DIE >= 2)
+})
+
+test('waitForEnvelope re-reads an envelope before throwing substrate-gone', () => {
+  let t = 0
+  let probes = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => (probes >= SUBSTRATE_MISSES_TO_DIE ? { status: 'done' } : null),
+    probeSeat: () => { probes += 1; return { alive: null, substrate: 'down' } },
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+  assert.equal(probes, SUBSTRATE_MISSES_TO_DIE)
+})
+
+test('waitForEnvelope keeps legacy tri-state probes unchanged', () => {
+  const run = (probe, timeoutS = 120) => {
+    let t = 0
+    return waitForEnvelope({
+      returnPath: '/tmp/return.json', timeoutS, role: 'builder',
+      readEnvelope: () => null, probeSeat: probe,
+      now: () => t, sleep: (ms) => { t += ms },
+    })
+  }
+  assert.equal(run(() => null), null)
+  assert.equal(run(() => true), null)
+  let t = 0
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => null, probeSeat: () => false,
+    now: () => t, sleep: (ms) => { t += ms },
+  }), (err) => {
+    assert.equal(err.stage, 'seat-died')
+    assert.equal(err.message, `seat died: builder — its pane is gone (${LIVENESS_MISSES_TO_DIE} consecutive liveness probes) and no envelope arrived at /tmp/return.json`)
+    return true
+  })
+})
+
+test('paneProbe separates substrate and seat outcomes while paneAlive keeps its tri-state', () => {
+  const locatedTree = () => ({ windows: [{ id: 'window-1' }] })
+  const locate = (_tree, id) => id === 'surface-1' ? { id } : null
+  const cases = [
+    [{ tree: () => { throw new Error('cmux unavailable') }, locate }, { alive: null, substrate: 'down' }, null],
+    [{ tree: () => ({}), locate }, { alive: null, substrate: 'down' }, null],
+    [{ tree: locatedTree, locate }, { alive: true, substrate: 'ok' }, true],
+    [{ tree: locatedTree, locate: (_tree, _id) => null }, { alive: false, substrate: 'ok' }, false],
+    [{ tree: locatedTree, locate: () => { throw new Error('locate interrupted') } }, { alive: null, substrate: 'ok' }, null],
+  ]
+  for (const [deps, expected, alive] of cases) {
+    assert.deepEqual(paneProbe('surface-1', deps), expected)
+    assert.equal(paneAlive('surface-1', deps), alive)
+  }
+})
+
+test('cellFailureKind keeps substrate-gone on the transport axis', () => {
+  assert.equal(cellFailureKind({ stage: 'substrate-gone' }), 'transport-error')
+  assert.notEqual(cellFailureKind({ stage: 'substrate-gone' }), 'seat-died')
+})
+
 test('assertSeats: a lead-less crew passes; a seated-but-missing lead or missing reviewer throws', () => {
   assert.doesNotThrow(() => assertSeats({ roles: ['planner', 'builder', 'reviewer'], members: { planner: {}, builder: {}, reviewer: {} } }))
   assert.throws(() => assertSeats({ roles: ['lead', 'planner', 'builder', 'reviewer'], members: { planner: {}, builder: {}, reviewer: {} } }))
@@ -3588,6 +3744,13 @@ test('emitAdapter maps cell-failure events to the booted crew cell, with a null-
 
   emitAdapter(emitter)({ kind: 'cell-failure', role: 'builder', id: 'd5', failure: 'timeout', attribution: 'host' })
   assert.equal(calls[2].attribution, 'host')
+
+  adapter({ kind: 'cell-failure', role: 'builder', id: 'd6', failure: 'transport-error', stage: 'substrate-gone', detail: 'pane manager gone', attribution: 'host' })
+  assert.deepEqual(calls[3], {
+    adw_id: 'adw-cell', task_slug: 'measure', phase_id: 9, dispatch_id: 'd6', role: 'builder',
+    agent: 'claude', provider: 'anthropic', model_id: 'sonnet-id', model: 'sonnet', effort: 'high', transport: 'pane',
+    kind: 'transport-error', stage: 'substrate-gone', detail: 'pane manager gone', attribution: 'host',
+  })
 })
 
 test('emitAdapter maps modifier attempts with transport and from/to cells, including null crew', () => {

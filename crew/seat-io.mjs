@@ -26,6 +26,8 @@ export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
+// Bound substrate probes so a dead pane manager fails promptly without conflating per-seat liveness.
+export const SUBSTRATE_MISSES_TO_DIE = 2
 
 // #392: an unparseable envelope from a seat that is still THERE is a defect in
 // the report about the work, not in the work. Ask the one participant who can
@@ -971,6 +973,7 @@ export function phaseForStage(label) {
 // The stage strings are the transports' (crew/headless.mjs:204-212/:298,
 // crew/headless-rpc.mjs:133-138, pane read boundary, waitForEnvelope :248);
 // anything unrecognised is a transport error, never a silent drop.
+// 'substrate-gone' deliberately falls through to transport-error; never fold it into seat-died.
 export function cellFailureKind(err) {
   const stage = String((err && err.stage) || '')
   if (stage === 'seat-died') return 'seat-died'
@@ -1384,6 +1387,7 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
   const deadline = started + timeoutS * 1000
   let lastProbeAt = started
   let misses = 0
+  let substrateMisses = 0
   while (now() < deadline) {
     const env = readEnvelope()
     if (env != null) return env
@@ -1391,7 +1395,9 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
     const current = now()
     if (probeSeat && current - lastProbeAt >= LIVENESS_PROBE_MS) {
       lastProbeAt = current
-      const alive = probeSeat()
+      const raw = probeSeat()
+      const probe = (raw && typeof raw === 'object') ? raw : { alive: raw, substrate: null }
+      const alive = probe.alive
       if (sampleSeat) try { sampleSeat(current) } catch { /* a sample is never load-bearing */ }
       // A heartbeat is a MEASUREMENT: stamped only where liveness was
       // OBSERVED. `current` is that probe's own timestamp — the same instant
@@ -1401,11 +1407,21 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
       // owns that try/catch because it owns the emitter.
       if (alive === true) { misses = 0; if (onAlive) onAlive(current) }
       else if (alive === false) misses += 1
+      if (probe.substrate === 'down') substrateMisses += 1
+      else if (probe.substrate === 'ok') substrateMisses = 0
       if (misses >= LIVENESS_MISSES_TO_DIE) {
         const arrived = readEnvelope()
         if (arrived != null) return arrived
         const err = new Error(`seat died: ${role} — its pane is gone (${LIVENESS_MISSES_TO_DIE} consecutive liveness probes) and no envelope arrived at ${returnPath}`)
         err.stage = 'seat-died'
+        err.role = role
+        throw err
+      }
+      if (substrateMisses >= SUBSTRATE_MISSES_TO_DIE) {
+        const arrivedLate = readEnvelope()
+        if (arrivedLate != null) return arrivedLate
+        const err = new Error(`substrate gone: ${role} — the pane manager stopped answering (${SUBSTRATE_MISSES_TO_DIE} consecutive substrate probes), so every pane it owned is unreachable and no envelope arrived at ${returnPath}`)
+        err.stage = 'substrate-gone'
         err.role = role
         throw err
       }
@@ -1415,11 +1431,20 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
   return null
 }
 
-export function paneAlive(surfaceId, deps = {}) {          // true | false | null (indeterminate)
+const SUBSTRATE_DOWN = () => ({ alive: null, substrate: 'down' })
+
+export function paneProbe(surfaceId, deps = {}) {
   const tree = deps.tree || defaultTree
   const locate = deps.locate || defaultLocate
-  try { const t = tree(); return Array.isArray(t?.windows) ? !!locate(t, surfaceId) : null }
-  catch { return null }
+  let t
+  try { t = tree() } catch { return SUBSTRATE_DOWN() }
+  if (!Array.isArray(t?.windows)) return SUBSTRATE_DOWN()
+  try { return { alive: !!locate(t, surfaceId), substrate: 'ok' } }
+  catch { return { alive: null, substrate: 'ok' } }
+}
+
+export function paneAlive(surfaceId, deps = {}) {          // true | false | null (indeterminate)
+  return paneProbe(surfaceId, deps).alive
 }
 
 // #240: FORCE_COLOR is commonly set in the environment a crew is launched
@@ -1535,7 +1560,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       io.emit?.({
         kind: 'cell-failure', role, id: id ?? null, failure,
         stage: (err && err.stage) || null, detail: providerConditionDetail(err),
-        attribution: failure === 'timeout' ? timeoutAttribution() : null,
+        attribution: failure === 'timeout' ? timeoutAttribution() : (err && err.stage === 'substrate-gone' ? 'host' : null),
       })
     } catch { /* never load-bearing */ }
   }
@@ -1630,7 +1655,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           if (raw === staleRaw) return null
           return readEnvelopeFile(returnPath, { existsSync, readFileSync, role })
         },
-        probeSeat: () => paneAlive(surfaceId, { tree, locate }),
+        probeSeat: () => paneProbe(surfaceId, { tree, locate }),
         sampleSeat: (at) => samplePaneSeat(role, surfaceId, at),
         onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
         now,
@@ -1716,7 +1741,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           : waitForEnvelope({
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
-            probeSeat: info ? () => paneAlive(info.surface_id, { tree, locate }) : null,
+            probeSeat: info ? () => paneProbe(info.surface_id, { tree, locate }) : null,
             sampleSeat: info?.surface_id ? (at) => samplePaneSeat(info.role, info.surface_id, at) : null,
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed
@@ -1747,6 +1772,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           failure = recovery.error || err
         }
         if (failure.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
+        if (failure.stage === 'substrate-gone') io.log({ at: now(), substrate_gone: info?.role || 'unknown', returnPath })
         const sampled = sampledConditions.get(info?.role); if (sampled) failure.sampledProviderCondition = sampled.condition
         noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
         throw failure

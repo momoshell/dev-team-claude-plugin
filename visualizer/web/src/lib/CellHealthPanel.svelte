@@ -1,26 +1,34 @@
 <script>
   import { getCellHealth } from './api.js'
-  import { cellHealthPanel } from './panels.js'
+  import { PANEL_REFRESH_MS, cellHealthPanel, panelReadLoop } from './panels.js'
   let payload = $state({ absent: null, silent_unknown: null, window: null, cells: [] })
   let error = $state('')
-  let panel = $derived(cellHealthPanel(error ? { ...payload, absent: error } : payload))
+  let read_at = $state(null)
+  let now = $state(null)
+  let panel = $derived(cellHealthPanel(error ? { ...payload, absent: error } : payload, { read_at, now, refresh_ms: PANEL_REFRESH_MS }))
 
   $effect(() => {
     let active = true
-    getCellHealth().then((result) => {
-      if (!active) return
-      payload = result
-      error = ''
-    }).catch((err) => {
-      if (!active) return
-      error = err.message || 'cell health request failed'
-    })
-    return () => { active = false }
+    const stop = panelReadLoop(() => {
+      now = Date.now()
+      getCellHealth().then((result) => {
+        if (!active) return
+        payload = result
+        error = ''
+        read_at = Date.now()
+        now = read_at
+      }).catch((err) => {
+        if (!active) return
+        error = err.message || 'cell health request failed'
+      })
+    }, { refresh_ms: PANEL_REFRESH_MS })
+    return () => { active = false; stop() }
   })
 </script>
 <section class="panel">
   <h2>Cell health</h2>
   <p class="meta">{panel.window_label}</p>
+  <p class={`meta read-age ${panel.freshness.stale ? 'stale' : 'fresh'}`}>{panel.freshness.label} · {panel.freshness.refresh_label}</p>
   <p class="muted">{panel.note}</p>
   {#if panel.absent}
     <p class="muted">cell health unavailable — {panel.absent}</p>
@@ -51,4 +59,5 @@
 </section>
 <style>
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.cells { display:grid; gap:.75rem; }.cell { border-top:1px solid var(--line); padding-top:.6rem; }.cell h3 { margin:.1rem 0 .35rem; }.state { margin:.4rem 0; font-weight:600; }.state.silent { color:var(--muted); }.state.undetermined { color:#7a3e9d; }.state.run-less { color:#9a6700; }.state.recorded { color:#176b3a; }.counts, .kinds { display:flex; flex-wrap:wrap; gap:.45rem; margin:.45rem 0; }.counts span, .chip { border:1px solid var(--line); border-radius:999px; padding:.2rem .5rem; font-size:.9rem; }.cell small { display:block; }
+.read-age.stale { color:var(--status-fail); font-weight:600; }
 </style>

@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, rosterProposal, runSetPanel } from '../visualizer/web/src/lib/panels.js'
+import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
@@ -853,4 +853,83 @@ test('PhasePanel shows pending gate retries alongside valid checks', () => {
   assert.ok(source.includes('{#if panel.gate.checks_pending}'))
   assert.ok(source.includes('class="checks-pending muted"'))
   assert.equal(source.includes('{:else if panel.gate.checks_pending}'), false)
+})
+
+const PANEL_SHAPERS = { 'CellHealthPanel.svelte': cellHealthPanel, 'TeardownPanel.svelte': teardownPanel, 'RunSetPanel.svelte': runSetPanel }
+const READ_AT = 1700000000000
+
+test('the three panels date their reading and hedge only when it is old', () => {
+  assert.equal(PANEL_REFRESH_MS, 3000)
+  for (const [file, shape] of Object.entries(PANEL_SHAPERS)) {
+    const fresh = shape({}, { read_at: READ_AT, now: READ_AT + 2000, refresh_ms: PANEL_REFRESH_MS }).freshness
+    assert.equal(fresh.age_ms, 2000, file)
+    assert.equal(fresh.stale, false, file)
+    assert.equal(fresh.label, 'read 2s ago', file)
+    assert.doesNotMatch(fresh.label, /stale|may no longer|unavailable|cannot be dated/i, file)
+    assert.equal(fresh.refresh_label, 're-reads every 3s', file)
+    const old = shape({}, { read_at: READ_AT, now: READ_AT + 6600000, refresh_ms: PANEL_REFRESH_MS }).freshness
+    assert.equal(old.stale, true, file)
+    assert.match(old.label, /^read 1h50m ago — /, file)
+    assert.match(old.label, /may no longer be true/, file)
+  }
+  const absentRunSet = runSetPanel({ absent: 'sessions predates this ledger mirror' }, { read_at: READ_AT, now: READ_AT + 2000, refresh_ms: PANEL_REFRESH_MS })
+  assert.equal(absentRunSet.freshness.label, 'read 2s ago')
+})
+
+test('the staleness floor is a boundary an injected clock decides', () => {
+  assert.equal(readFreshness(READ_AT, READ_AT + PANEL_STALE_AFTER_MS, PANEL_REFRESH_MS).stale, false)
+  assert.equal(readFreshness(READ_AT, READ_AT + PANEL_STALE_AFTER_MS + 1, PANEL_REFRESH_MS).stale, true)
+  assert.deepEqual(
+    readFreshness(READ_AT, READ_AT + 5000, PANEL_REFRESH_MS),
+    readFreshness(READ_AT, READ_AT + 5000, PANEL_REFRESH_MS))
+  const undated = readFreshness(null, null, PANEL_REFRESH_MS)
+  assert.equal(undated.age_ms, null)
+  assert.equal(undated.stale, false)
+  assert.match(undated.label, /cannot be dated/)
+  assert.match(readFreshness(READ_AT, READ_AT, PANEL_REFRESH_MS).refresh_label, /re-reads every 3s/)
+  assert.match(readFreshness(READ_AT, READ_AT, null).refresh_label, /does not re-read/)
+  assert.doesNotMatch(readFreshness(READ_AT, READ_AT, null).refresh_label, /re-reads every/)
+  assert.deepEqual([panelAgeLabel(2000), panelAgeLabel(90000), panelAgeLabel(6600000)], ['2s', '1m', '1h50m'])
+})
+
+test('the panel read loop re-reads on the family cadence and stops when the panel is gone', () => {
+  const reads = []
+  const registered = []
+  const cleared = []
+  let tick = null
+  const stop = panelReadLoop(() => reads.push('read'), {
+    refresh_ms: PANEL_REFRESH_MS,
+    setInterval: (fn, ms) => { tick = fn; registered.push(ms); return 41 },
+    clearInterval: (handle) => cleared.push(handle),
+  })
+  assert.equal(reads.length, 1)
+  assert.deepEqual(registered, [PANEL_REFRESH_MS])
+  tick()
+  assert.equal(reads.length, 2)
+  stop()
+  assert.deepEqual(cleared, [41])
+})
+
+// MUTATION: this pin dies if any of the three panels stops passing its own read
+// clock to the shaper, stops rendering the dated readout, or stops clearing its
+// interval when the panel is gone. It reads comment-stripped source, so a comment
+// shaped like the wiring cannot satisfy it — a tripwire a deleted implementation
+// still passes is worse than no tripwire.
+test('each panel wires its own read clock and tears its timer down', () => {
+  const root = join(process.cwd(), 'visualizer/web/src/lib')
+  for (const [file, shape] of Object.entries(PANEL_SHAPERS)) {
+    const source = readFileSync(join(root, file), 'utf8')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/(^|[^:])\/\/.*$/gm, '$1')
+    assert.ok(source.includes(`import { PANEL_REFRESH_MS, ${shape.name}, panelReadLoop } from './panels.js'`), file)
+    assert.ok(source.includes(`$derived(${shape.name}(`), file)
+    assert.ok(source.includes('{ read_at, now, refresh_ms: PANEL_REFRESH_MS })'), file)
+    assert.equal((source.match(/read_at = Date\.now\(\)/g) || []).length, 1, file)
+    assert.ok(source.includes('const stop = panelReadLoop('), file)
+    assert.ok(source.includes('return () => { active = false; stop() }'), file)
+    assert.doesNotMatch(source, /\bsetInterval\s*\(/, file)
+    assert.ok(source.includes('{panel.freshness.label}'), file)
+    assert.ok(source.includes('{panel.freshness.refresh_label}'), file)
+  }
 })

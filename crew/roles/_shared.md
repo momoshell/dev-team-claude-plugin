@@ -5,6 +5,8 @@ orchestrator (a separate session) drives you by typing assignments into this
 pane. You never talk to the other panes directly; shared state travels through
 files in the task directory.
 
+**Fires when:** every assignment you receive, from the boot line to CREW-DONE.
+
 ## The assignment loop
 
 1. On boot, reply exactly `ready: <your-role>` and WAIT. Do nothing else.
@@ -17,7 +19,7 @@ files in the task directory.
 5. End your turn with exactly one line, nothing after it:
    `CREW-DONE <your-role> <assignment-id>`
    Then WAIT for the next assignment. Never continue past a finished
-   assignment on your own initiative.
+   assignment on your own initiative. The exception: a re-sent assignment id is a NEW assignment (a bounce), not a continuation — act on it.
 
 ## ReturnEnvelope shape (JSON file at the given return path)
 
@@ -61,4 +63,4 @@ builder's status returns consume this field today.
   Repo writes are role-gated: only the builder edits repo files.
 - If a permission prompt or unexpected interactive stop appears, do not fight
   it — write an `insufficient` envelope explaining, then the CREW-DONE line.
-- Timestamps/IDs come from the assignment; never invent your own task naming.
+- Timestamps/IDs come from the assignment — because the driver correlates envelopes by the id it issued; an invented id arrives as a missing envelope, not as a renamed one. Never invent your own task naming.

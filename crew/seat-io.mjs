@@ -1628,6 +1628,28 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     return { envelope: null, error: err }
   }
+  // The stash stack is NOT per-worktree: `git rev-parse --git-path refs/stash`
+  // resolves to the SAME file in the common git dir from every linked worktree,
+  // so `git stash pop` restores whatever lane pushed LAST (#471). The entry a
+  // push created is identified by the unique message it carries and restored by
+  // its own commit id; an entry we cannot prove is ours is a refusal, never a
+  // plausible guess.
+  const stashEntries = () => {
+    const list = spawnSync('git', ['stash', 'list', '--format=%H %gs'], { cwd: checkout, encoding: 'utf8' })
+    if (list.status !== 0) throw new Error(`runClean: git stash list failed, refusing to guess which stash entry is ours:\n${list.stderr || list.stdout || ''}`)
+    return String(list.stdout || '').split('\n').map((line) => line.trim()).filter(Boolean).map((line, index) => {
+      const sha = line.split(' ')[0]
+      return { sha, subject: line.slice(sha.length + 1).trim(), index }
+    })
+  }
+  const ownStashEntry = (tag, sha) => {
+    const entries = stashEntries()
+    const matches = entries.filter((entry) => (sha ? entry.sha === sha : entry.subject.endsWith(tag)))
+    if (matches.length !== 1) {
+      throw new Error(`runClean: refusing to restore a stash entry that is not provably ours — ${matches.length} of ${entries.length} entries match ${sha || tag}; the work this lane set aside is still in the stash (git stash list)`)
+    }
+    return matches[0]
+  }
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
@@ -1733,21 +1755,31 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
       return { ok: res.status === 0, output }
     },
-    // Prove a command red on the PRE-BUILD tree: set the working changes
-    // aside, run, restore. The pop lives in a finally so a throwing command
-    // can never leave the builder's work stashed, and a failed round-trip
-    // throws loudly rather than silently reporting a result from the wrong
-    // tree (runCmd turns the throw into an escalation envelope).
+    // Prove a command red on the PRE-BUILD tree while the stash stack is shared: set
+    // the working changes aside, run, restore. The restore lives in a finally so
+    // a throwing command can never leave the builder's work stashed, and a failed
+    // round-trip throws loudly rather than silently reporting a result from the
+    // wrong tree (runCmd turns the throw into an escalation envelope).
     runClean(cmd) {
       const dirty = execSync('git status --porcelain -uall', { cwd: checkout, encoding: 'utf8' }).trim()
       if (!dirty) return this.run(cmd) // nothing to set aside — the tree IS pristine
-      const push = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', 'crew:runClean'], { cwd: checkout, encoding: 'utf8' })
+      const tag = `crew:runClean:${typeof deps.uuid === 'function' ? deps.uuid() : randomUUID()}`
+      const push = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', tag], { cwd: checkout, encoding: 'utf8' })
       if (push.status !== 0) throw new Error(`runClean: git stash push failed, refusing to judge a gate against the wrong tree:\n${push.stderr || push.stdout || ''}`)
+      // Bind the identity NOW, while our push is still the newest thing on the
+      // stack: a sibling lane's push shifts every index but never this commit id.
+      const sha = ownStashEntry(tag, null).sha
       try {
         return this.run(cmd)
       } finally {
-        const pop = spawnSync('git', ['stash', 'pop'], { cwd: checkout, encoding: 'utf8' })
-        if (pop.status !== 0) throw new Error(`runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash (git stash list):\n${pop.stderr || pop.stdout || ''}`)
+        const own = ownStashEntry(tag, sha)
+        const apply = spawnSync('git', ['stash', 'apply', sha], { cwd: checkout, encoding: 'utf8' })
+        if (apply.status !== 0) throw new Error(`runClean: git stash apply FAILED — the checkout is half-restored and the builder's work is in stash entry ${sha} (${tag}), never popped:\n${apply.stderr || apply.stdout || ''}`)
+        const drop = spawnSync('git', ['stash', 'drop', `stash@{${own.index}}`], { cwd: checkout, encoding: 'utf8' })
+        const dropped = /\(([0-9a-f]{7,40})\)/.exec(`${drop.stdout || ''}${drop.stderr || ''}`)?.[1] || ''
+        if (drop.status !== 0 || !dropped || !(sha.startsWith(dropped) || dropped.startsWith(sha))) {
+          throw new Error(`runClean: the tree is restored but the entry dropped was ${dropped || 'none'}, not ours (${sha}, ${tag}) — read git stash list before trusting the stack:\n${drop.stderr || drop.stdout || ''}`)
+        }
       }
     },
     // Only headless-rpc is swept here. headless-json is deliberately not covered:

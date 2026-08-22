@@ -44,6 +44,7 @@
 // [--limit n]` | `procs <adw_id>` | `gate-review-gap` |
 // `eligible-tasks` | `run-set --since <iso> [--until <iso>]` |
 // `cell-failures [--since <iso>] [--until <iso>]` |
+// `cells [--since <iso>] [--until <iso>] [--prices <path>]` |
 // `modifier-attempts [--since <iso>] [--until <iso>]` |
 // `seat-teardowns [--since <iso>] [--until <iso>]` |
 // `ci-cycles [--since <iso>] [--until <iso>]` |
@@ -135,6 +136,11 @@ export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', '
 // counted as clean.
 export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
 export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
+// A floor on SAMPLE SIZE, reported beside every rate and never enforced: a
+// share over a handful of reviews is not a policy input, and the readout says
+// so rather than leaving the reader to notice the denominator.
+export const CELL_RATE_FLOOR = 12
+export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens (cost_in_per_mtok, cost_out_per_mtok); cache-read and cache-write tokens are reported but NOT priced — the catalog carries no rate for them'
 export const ADVISOR_AB_VERDICTS = Object.freeze(['overlap', 'no-overlap', 'skipped'])
 export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
   'envelope-missing', 'envelope-unreadable', 'envelope-role-mismatch',
@@ -2564,6 +2570,46 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function cellReviews({ since = null, until = null } = {}) {
+    // run_first_at is deliberately computed over the whole table rather than
+    // the requested window: clipping earlier reviews must not promote a later
+    // review to the run's first round.
+    return queryRows(`
+      WITH scoped AS (
+        SELECT ro.*, (SELECT MIN(m.created_at) FROM review_outcomes m WHERE m.adw_id = ro.adw_id) AS run_first_at
+        FROM review_outcomes ro
+        WHERE (? IS NULL OR ro.created_at >= ?) AND (? IS NULL OR ro.created_at < ?)
+      )
+      SELECT scoped.provider, scoped.model_id, scoped.agent, scoped.effort, scoped.role,
+        s.tier AS task_class,
+        COUNT(*) AS reviews,
+        SUM(CASE WHEN scoped.created_at = scoped.run_first_at THEN 1 ELSE 0 END) AS first_round_reviews,
+        SUM(CASE WHEN scoped.created_at = scoped.run_first_at AND scoped.verdict = 'pass' THEN 1 ELSE 0 END) AS first_round_passes,
+        MIN(scoped.created_at) AS first_at, MAX(scoped.created_at) AS last_at,
+        GROUP_CONCAT(DISTINCT scoped.transport) AS transports
+      FROM scoped LEFT JOIN sessions s ON s.adw_id = scoped.adw_id
+      GROUP BY scoped.provider, scoped.model_id, scoped.agent, scoped.effort, scoped.role, s.tier
+      ORDER BY scoped.provider, scoped.model_id, scoped.agent, scoped.effort, scoped.role, s.tier
+    `, [since, since, until, until])
+  }
+
+  function cellUsage({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT r.provider, r.model_id, r.agent, r.effort, r.role, sx.tier AS task_class,
+        COUNT(*) AS usage_sessions,
+        SUM(CASE WHEN a.billed_input_tokens IS NULL THEN 1 ELSE 0 END) AS unbilled_sessions,
+        SUM(a.billed_input_tokens) AS billed_input_tokens,
+        SUM(a.billed_output_tokens) AS billed_output_tokens,
+        SUM(a.billed_cache_write_tokens) AS billed_cache_write_tokens,
+        SUM(a.billed_cache_read_tokens) AS billed_cache_read_tokens
+      FROM review_outcomes r
+        JOIN agent_sessions a ON a.adw_id = r.adw_id AND a.dispatch_id = r.dispatch_id
+        LEFT JOIN sessions sx ON sx.adw_id = r.adw_id
+      WHERE (? IS NULL OR r.created_at >= ?) AND (? IS NULL OR r.created_at < ?)
+      GROUP BY r.provider, r.model_id, r.agent, r.effort, r.role, sx.tier
+    `, [since, since, until, until])
+  }
+
   function modifierAttempts({ since = null, until = null } = {}) {
     return queryRows(`
       SELECT modifier, outcome, role, transport,
@@ -3023,7 +3069,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -3300,6 +3346,7 @@ const VERB_FLAGS = Object.freeze({
   'eligible-tasks': new Set([]),
   'run-set': new Set(['since', 'until']),
   'cell-failures': new Set(['since', 'until']),
+  cells: new Set(['since', 'until', 'prices']),
   'modifier-attempts': new Set(['since', 'until']),
   'seat-teardowns': new Set(['since', 'until']),
   'ci-cycles': new Set(['since', 'until']),
@@ -3356,6 +3403,22 @@ function windowBound(value, flagName, verb = 'run-set') {
     refuse(`${verb}: --${flagName} must be an ISO-8601 timestamp, e.g. 2026-08-15T00:00:00Z`)
   }
   return isoMs(ms)
+}
+
+function catalogPrice(catalog, key) {
+  if (!catalog) return null
+  const entry = catalog.models && Object.prototype.hasOwnProperty.call(catalog.models, key) ? catalog.models[key] : null
+  return entry ?? null
+}
+
+function loadPriceCatalog(path) {
+  const catalog = JSON.parse(readFileSync(path, 'utf8'))
+  if (!catalog || typeof catalog !== 'object' || Array.isArray(catalog)
+    || !catalog.models || typeof catalog.models !== 'object' || Array.isArray(catalog.models)
+    || Object.getPrototypeOf(catalog.models) !== Object.prototype) {
+    throw new Error('price catalog models must be a plain object')
+  }
+  return catalog
 }
 
 function requestFromBrief(path) {
@@ -3642,7 +3705,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -3870,6 +3933,138 @@ export function main(argv) {
       const rows = ledger.cellFailures({ since, until })
       if (ledger.stats().degraded) refuse('cell-failures: the ledger mirror is degraded — this window is unanswerable, not empty')
       stdout.write(`${JSON.stringify({ schema: 1, question: "Which cells are failing, how often, and in what way?", since, until, kinds: CELL_FAILURE_KINDS, attributions: CELL_FAILURE_ATTRIBUTIONS, rows })}\n`)
+      return 0
+    }
+
+    if (verb === 'cells') {
+      if (positional.length > 0) refuse('cells: takes no positional arguments')
+      const hasSince = Object.prototype.hasOwnProperty.call(flags, 'since')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const since = hasSince ? windowBound(flags.since, 'since', 'cells') : null
+      const until = hasUntil ? windowBound(flags.until, 'until', 'cells') : null
+      if (until != null && since != null && until <= since) refuse('cells: --until must be later than --since')
+
+      const defaultPriceSourcePath = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
+      const hasPrices = Object.prototype.hasOwnProperty.call(flags, 'prices')
+      const priceSourcePath = hasPrices ? flags.prices : defaultPriceSourcePath
+      let catalog = null
+      let pricesAbsent = null
+      if (hasPrices) {
+        try {
+          catalog = loadPriceCatalog(priceSourcePath)
+        } catch {
+          refuse('cells: --prices must be a readable JSON price catalog with a models object')
+        }
+      } else {
+        try {
+          catalog = loadPriceCatalog(priceSourcePath)
+        } catch (err) {
+          const reason = err?.code ?? err?.name ?? 'unknown error'
+          pricesAbsent = `price catalog ${priceSourcePath} is unavailable (${reason}) — prices are UNMEASURED, never free`
+        }
+      }
+
+      const rows = ledger.cellReviews({ since, until })
+      const usage = ledger.cellUsage({ since, until })
+      if (ledger.stats().degraded) refuse('cells: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const usageByCell = new Map()
+      for (const usageRow of usage) {
+        const key = [usageRow.provider, usageRow.model_id, usageRow.agent, usageRow.effort, usageRow.role, usageRow.task_class].join('\0')
+        usageByCell.set(key, usageRow)
+      }
+      const transportsOf = (row) => row.transports == null ? [] : String(row.transports).split(',')
+      const payloadAbsent = {}
+      if (pricesAbsent !== null) payloadAbsent.prices = pricesAbsent
+      const emittedRows = rows.map((row) => {
+        const key = [row.provider, row.model_id, row.agent, row.effort, row.role, row.task_class].join('\0')
+        const usageRow = usageByCell.get(key) ?? null
+        const usageSessions = usageRow === null ? 0 : Number(usageRow.usage_sessions)
+        const unbilledSessions = usageRow === null ? 0 : Number(usageRow.unbilled_sessions)
+        const billed = (name) => usageSessions === 0 || usageRow[name] == null ? null : Number(usageRow[name])
+        const billedInputTokens = billed('billed_input_tokens')
+        const billedOutputTokens = billed('billed_output_tokens')
+        const billedCacheWriteTokens = billed('billed_cache_write_tokens')
+        const billedCacheReadTokens = billed('billed_cache_read_tokens')
+        const priceKey = row.provider == null || row.model_id == null ? null : `${row.provider}/${row.model_id}`
+        const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
+        const hasRates = price !== null
+          && typeof price.cost_in_per_mtok === 'number'
+          && Number.isFinite(price.cost_in_per_mtok)
+          && typeof price.cost_out_per_mtok === 'number'
+          && Number.isFinite(price.cost_out_per_mtok)
+        const absent = {}
+        const firstRoundPassRate = row.first_round_reviews === 0 ? null : row.first_round_passes / row.first_round_reviews
+        if (row.first_round_reviews === 0) absent.first_round_pass_rate = 'no review by this cell was its run\'s first round — UNMEASURED, never a zero rate'
+        if (row.task_class === null) absent.task_class = 'this run recorded no tier (booted with explicit --roles, or predates sessions.tier) — the class is UNMEASURED, never a class'
+        if (row.provider === null && row.model_id === null) absent.cell = 'these reviews recorded no cell (#404 landed 2026-08-20; older rows carry nothing) — unattributed, never a cell'
+        if (usageSessions === 0) {
+          absent.usage = usageAbsentCause(transportsOf(row))
+        } else if (unbilledSessions > 0) {
+          absent.usage = USAGE_ABSENT_CAUSES.unbilled_rows
+        }
+        let costUsd = null
+        if (hasRates && billedInputTokens !== null && billedOutputTokens !== null) {
+          const inTokens = billedInputTokens
+          const outTokens = billedOutputTokens
+          costUsd = (inTokens / 1e6) * price.cost_in_per_mtok + (outTokens / 1e6) * price.cost_out_per_mtok
+        }
+        if (!hasRates) {
+          absent.cost_usd = `no price for ` + `${priceKey} in ${priceSourcePath} — unpriced, never free`
+        } else if (billedInputTokens === null || billedOutputTokens === null) {
+          absent.cost_usd = 'no measured token volume for this cell — unpriced here means unmeasured, never free'
+        }
+        return {
+          provider: row.provider,
+          model_id: row.model_id,
+          agent: row.agent,
+          effort: row.effort,
+          role: row.role,
+          task_class: row.task_class,
+          reviews: Number(row.reviews),
+          first_round_reviews: Number(row.first_round_reviews),
+          first_round_passes: Number(row.first_round_passes),
+          first_round_pass_rate: firstRoundPassRate,
+          thin: row.first_round_reviews > 0 && row.first_round_reviews < CELL_RATE_FLOOR,
+          first_at: row.first_at,
+          last_at: row.last_at,
+          usage_sessions: usageSessions,
+          billed_input_tokens: billedInputTokens,
+          billed_output_tokens: billedOutputTokens,
+          billed_cache_write_tokens: billedCacheWriteTokens,
+          billed_cache_read_tokens: billedCacheReadTokens,
+          price_key: priceKey,
+          cost_usd: costUsd,
+          absent,
+        }
+      })
+      const priceSource = catalog === null ? null : {
+        path: priceSourcePath,
+        updated_at: catalog.updated_at ?? null,
+        units: CELL_PRICE_UNITS,
+        models: Object.keys(catalog.models).length,
+      }
+      const payload = {
+        schema: 1,
+        question: 'What has each provider/model/agent/effort cell actually done — how many reviews, what share passed first round, and what did a run through it cost?',
+        definition: {
+          cell: 'provider/model_id/agent/effort/role are copied from each review outcome; null cell keys stay null',
+          task_class: 'task_class is the sessions.tier value forwarded at boot; null means the class was not measured',
+          first_round: 'a run\'s first round is every review whose created_at equals MIN(created_at) over that run\'s whole review history; ties count',
+          first_round_pass_rate: 'first_round_passes divided by first_round_reviews; a null rate with its absent marker is unmeasured',
+          thin: `true iff 0 < first_round_reviews < ${CELL_RATE_FLOOR}; it is a sample-size warning, never an enforcement rule`,
+          usage: 'usage joins each review dispatch to its own agent_sessions row; pane reviews have no usage row, and absent usage is never zero',
+          cost_usd: CELL_PRICE_UNITS,
+          absent: 'a null with an absent marker is UNMEASURED, never a measured zero; a cell with no rows at all is absent from rows, never a zero',
+        },
+        since,
+        until,
+        verdicts: REVIEW_VERDICTS,
+        rate_floor: CELL_RATE_FLOOR,
+        price_source: priceSource,
+        rows: emittedRows,
+        absent: payloadAbsent,
+      }
+      stdout.write(`${JSON.stringify(payload)}\n`)
       return 0
     }
 

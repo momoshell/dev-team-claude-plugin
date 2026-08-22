@@ -124,6 +124,14 @@ outside the builder's reach. Rules the driver enforces mechanically:
 - Map every explicit requirement in the brief to a concrete check; print
   failures as `expected X, found Y, at PATH` (they feed back verbatim to
   the builder).
+- A check that needs a server MUST bind an ephemeral port — port 0, and read
+  back the port the OS assigned — never a default one. A gate is RED at
+  baseline, which is precisely when the refusal or shutdown under test does not
+  exist yet, so the server binds and keeps serving; a default port is then
+  still bound long after the invocation returns and the next `npm run
+  viz:serve` fails with EADDRINUSE against a server nobody knows about. An
+  ephemeral port collides with nothing, so a check that leaks one costs the
+  next run nothing.
 - If the gate later proves defective, the lead repairs it once (one
   `gate-repair` per task, preserving the old gate under a .r1 suffix), and
   code re-proves it; the planner is not assigned. The repair may never weaken

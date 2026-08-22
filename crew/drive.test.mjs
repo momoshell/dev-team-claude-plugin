@@ -4,7 +4,7 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -19,6 +19,7 @@ import {
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN,
+  gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
@@ -40,8 +41,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null } = {}) {
-  const calls = { assign: [], run: [], runClean: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [] } = {}) {
+  const calls = { assign: [], run: [], runClean: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], files }
   const counts = {}
   const writeCounts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
@@ -57,6 +58,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       return typeof env === 'function' ? env() : env ?? null
     },
     writeFile(path, content) {
+      if (throwWrites.includes(path)) throw new Error('writeFile: report truncation failed')
       if (path.startsWith(`${CTX.checkout}/`)) {
         writeCounts[path] = (writeCounts[path] || 0) + 1
         if (throwOn === 'apply' && writeCounts[path] % 2 === 1) throw new Error('writeFile: read-only filesystem')
@@ -68,12 +70,17 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     },
     readFile(p) {
       if (throwOn === 'read' && p.startsWith(`${CTX.checkout}/`)) throw new Error('readFile: permission denied')
-      return Object.prototype.hasOwnProperty.call(files, p) ? files[p] : null
+      if (Object.prototype.hasOwnProperty.call(files, p)) return files[p]
+      if (/gate-reap\.\d+\.json$/.test(p)) return '{"pgid":"4242","outcome":"already-dead","reason":"probe-dead","signals":0,"survivors":""}'
+      return null
     },
     run(cmd) {
-      counts[cmd] = (counts[cmd] || 0) + 1
-      calls.run.push({ cmd, n: counts[cmd] })
-      const r = runs[`${cmd}:${counts[cmd]}`] ?? runs[cmd] ?? { ok: true, output: '' }
+      if (String(cmd).includes(GATE_REAP_SWEEP_MARKER)) { calls.sweeps.push(cmd); return { ok: true, output: '' } }
+      const original = gateReapOriginal(cmd)
+      counts[original] = (counts[original] || 0) + 1
+      calls.run.push({ cmd: original, n: counts[original] })
+      calls.wrapped.push({ cmd: original, wrapped: cmd, clean: false })
+      const r = runs[`${original}:${counts[original]}`] ?? runs[original] ?? { ok: true, output: '' }
       return r
     },
     changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
@@ -84,10 +91,12 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   }
   if (cleanRuns || cleanThrows) {
     io.runClean = (cmd) => {
-      counts[`clean:${cmd}`] = (counts[`clean:${cmd}`] || 0) + 1
-      calls.runClean.push({ cmd, n: counts[`clean:${cmd}`] })
+      const original = gateReapOriginal(cmd)
+      counts[`clean:${original}`] = (counts[`clean:${original}`] || 0) + 1
+      calls.runClean.push({ cmd: original, n: counts[`clean:${original}`] })
+      calls.wrapped.push({ cmd: original, wrapped: cmd, clean: true })
       if (cleanThrows) throw new Error("runClean: git stash pop FAILED — the checkout is half-restored and the builder's work is in the stash")
-      return cleanRuns[`${cmd}:${counts[`clean:${cmd}`]}`] ?? cleanRuns[cmd] ?? { ok: false, output: '' }
+      return cleanRuns[`${original}:${counts[`clean:${original}`]}`] ?? cleanRuns[original] ?? { ok: false, output: '' }
     }
   }
   if (showDoc) io.showDoc = (p) => { calls.showDoc.push(p) }
@@ -2098,6 +2107,320 @@ test('compounding policy: agreement leaves no dissent recorded', () => {
   assert.deepEqual(res.details.dissents, [])
 })
 
+const b127GatePaths = (dir) => ({
+  cmdFile: join(dir, 'gate.cmd.sh'),
+  launchFile: join(dir, 'gate.launch.sh'),
+  pgidFile: join(dir, 'gate.pgid'),
+  report: join(dir, 'gate.reap.json'),
+})
+const b127Spy = (dir, name, body) => {
+  const path = join(dir, name)
+  writeFileSync(path, body)
+  chmodSync(path, 0o755)
+  return path
+}
+const b127InvokeGate = ({ cmd, dir = mkdtempSync(join(tmpdir(), 'b127-gate-test-')), overrides = {} }) => {
+  const paths = b127GatePaths(dir)
+  const wrapped = gateReapCommand({ cmd, ...paths, ...overrides })
+  const result = spawnSync('/bin/sh', ['-c', wrapped], { encoding: 'utf8', timeout: 120_000 })
+  const reportText = existsSync(paths.report) ? readFileSync(paths.report, 'utf8') : null
+  return {
+    dir, paths, wrapped, status: result.status, stdout: String(result.stdout || ''), stderr: String(result.stderr || ''),
+    reportText, verdict: gateReapVerdict(reportText),
+  }
+}
+const b127Lines = (path) => (existsSync(path) ? readFileSync(path, 'utf8').split('\n').filter(Boolean).length : 0)
+const b127PidAlive = (pid) => spawnSync('ps', ['-p', String(pid)], { stdio: 'ignore' }).status === 0
+const b127GroupCommand = (pgidCopy) => `ps -o pgid= -p $$ | tr -d ' ' > '${pgidCopy}'\nexit 0`
+
+test('a gate reap kills the process GROUP, and a leaked descendant is proven dead', { timeout: 20_000 }, () => {
+  const run = b127InvokeGate({ cmd: ['nohup sleep 25 >/dev/null 2>&1 &', 'echo "leaked $!"', 'exit 0'].join('\n') })
+  const pid = /leaked (\d+)/.exec(run.stdout)?.[1]
+  try {
+    assert.ok(pid, `expected the fixture to report its leaked descendant pid, found ${JSON.stringify(run.stdout)}`)
+    assert.equal(run.status, 0)
+    assert.equal(run.verdict.outcome, 'proven')
+    assert.equal(run.verdict.signals, 1)
+    const deadline = Date.now() + 10_000
+    while (b127PidAlive(pid) && Date.now() < deadline) spawnSync('sleep', ['0.05'])
+    assert.equal(b127PidAlive(pid), false, `leaked descendant ${pid} remained alive after the group reap`)
+  } finally {
+    if (pid && b127PidAlive(pid)) spawnSync('kill', ['-9', String(pid)])
+    rmSync(run.dir, { recursive: true, force: true })
+  }
+})
+
+test('a timed-out gate runner is bounded and the sweep reaps its leaked descendant', { timeout: 90_000 }, () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-timeout-'))
+  const paths = b127GatePaths(dir)
+  const cmd = `nohup sleep 40 >/dev/null 2>&1 & echo "leaked $!"; sleep 60`
+  const wrapped = gateReapCommand({ cmd, ...paths })
+  const started = Date.now()
+  const result = spawnSync('/bin/sh', ['-c', wrapped], { encoding: 'utf8', timeout: 4_000 })
+  const elapsed = Date.now() - started
+  const pid = /leaked (\d+)/.exec(String(result.stdout || ''))?.[1]
+  try {
+    assert.ok(pid, `expected the fixture to report its leaked descendant pid, found ${JSON.stringify(result.stdout)}`)
+    assert.ok(elapsed < 15_000, `expected the runner timeout to bound the invocation, elapsed ${elapsed}ms`)
+    assert.equal(result.error?.code, 'ETIMEDOUT')
+    const sweep = spawnSync('/bin/sh', ['-c', gateReapSweepCommand(paths)], { encoding: 'utf8', timeout: 120_000 })
+    assert.equal(sweep.status, 0)
+    const report = existsSync(paths.report) ? readFileSync(paths.report, 'utf8') : null
+    const verdict = gateReapVerdict(report)
+    assert.equal(verdict.outcome, 'proven')
+    assert.equal(verdict.signals, 1)
+    const deadline = Date.now() + 10_000
+    while (b127PidAlive(pid) && Date.now() < deadline) spawnSync('sleep', ['0.05'])
+    assert.equal(b127PidAlive(pid), false, `leaked descendant ${pid} remained alive after the timeout sweep`)
+  } finally {
+    if (pid && b127PidAlive(pid)) spawnSync('kill', ['-9', String(pid)])
+    const pgid = existsSync(paths.pgidFile) ? readFileSync(paths.pgidFile, 'utf8').trim() : ''
+    const ownPgid = String(spawnSync('ps', ['-o', 'pgid=', '-p', String(process.pid)], { encoding: 'utf8' }).stdout || '').trim()
+    if (/^\d+$/.test(pgid) && Number(pgid) > 1 && pgid !== ownPgid) spawnSync('kill', ['-9', `-${pgid}`])
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a normal gate reap is idempotent when its report is already proven', () => {
+  const run = b127InvokeGate({ cmd: ['nohup sleep 25 >/dev/null 2>&1 &', 'echo "leaked $!"', 'exit 0'].join('\n') })
+  const pid = /leaked (\d+)/.exec(run.stdout)?.[1]
+  try {
+    assert.ok(pid)
+    assert.equal(run.verdict.outcome, 'proven')
+    assert.equal(run.verdict.signals, 1)
+    const before = readFileSync(run.paths.report, 'utf8')
+    const sweep = spawnSync('/bin/sh', ['-c', gateReapSweepCommand(run.paths)], { encoding: 'utf8', timeout: 120_000 })
+    assert.equal(sweep.status, 0)
+    const after = readFileSync(run.paths.report, 'utf8')
+    assert.equal(after, before)
+    assert.deepEqual(gateReapVerdict(after), run.verdict)
+  } finally {
+    if (pid && b127PidAlive(pid)) spawnSync('kill', ['-9', String(pid)])
+    rmSync(run.dir, { recursive: true, force: true })
+  }
+})
+
+test('runGate sweeps each wrapped invocation without adding a sweep to calls.run', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.sweeps.length, 2)
+  assert.ok(io.calls.sweeps.every((cmd) => String(cmd).includes(GATE_REAP_SWEEP_MARKER)))
+  assert.ok(io.calls.run.every(({ cmd }) => !String(cmd).includes(GATE_REAP_SWEEP_MARKER)))
+})
+
+test('a composed gate wrapper installs no signal trap', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-signal-free-'))
+  try {
+    const wrapped = gateReapCommand({ cmd: 'true', ...b127GatePaths(dir) })
+    assert.doesNotMatch(wrapped, /\btrap\b/)
+    assert.doesNotMatch(wrapped, /__crew_forward_signal/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a gate that exits cleanly is never signalled', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-clean-'))
+  const sleepLog = join(dir, 'sleep.log')
+  try {
+    const run = b127InvokeGate({ dir, cmd: 'echo clean\nexit 0', overrides: {
+      sleepCmd: b127Spy(dir, 'sleep-spy', `#!/bin/sh\necho x >> '${sleepLog}'\nexit 0\n`),
+    } })
+    assert.equal(run.status, 0)
+    assert.equal(run.stdout, 'clean\n')
+    assert.equal(run.stderr, '')
+    assert.equal(run.verdict.outcome, 'already-dead')
+    assert.equal(run.verdict.signals, 0)
+    assert.equal(b127Lines(sleepLog), 0)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a gate reap that cannot be measured is reported unproven, never assumed dead', () => {
+  for (const report of [null, '', '{"pgid":"7","outc', '{"outcome":"assumed"}']) {
+    assert.equal(gateReapVerdict(report).outcome, 'unproven')
+    assert.equal(gateReapVerdict(report).signals, 0)
+  }
+  const gate = `gate-cmd\n${GATE_REAP_CMD_EOF}`
+  const reportPath = `${TD}/gate-reap.1.json`
+  const io = fakeIo({
+    emit: true, writeThrough: true,
+    files: { [reportPath]: '{"pgid":"9","outcome":"proven","reason":"probe-dead","signals":1,"survivors":"9"}' },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: gate } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { [`${gate}:1`]: { ok: false, output: RED(3) }, [`${gate}:2`]: { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  const event = io.calls.emits.find((entry) => entry.kind === 'gate')
+  assert.equal(result.status, 'done')
+  assert.equal(event.reap.outcome, 'unproven')
+  assert.ok(io.calls.logs.some((entry) => entry.gate_reap?.outcome === 'unproven'))
+})
+
+test('the wrapped gate command sees the same shell contract as the bare runner', () => {
+  const probe = 'echo "0=$0 #=$# 1=${1-UNSET}"'
+  const bare = spawnSync('/bin/sh', ['-c', probe], { encoding: 'utf8' })
+  for (const shell of ['/bin/bash', '/path/that/does/not/exist']) {
+    const run = b127InvokeGate({ cmd: probe, overrides: { shell } })
+    assert.equal(run.stdout, String(bare.stdout))
+    assert.equal(run.status, bare.status)
+    const bareReturn = spawnSync('/bin/sh', ['-c', 'return 0'], { encoding: 'utf8' })
+    const wrappedReturn = b127InvokeGate({ cmd: 'return 0', overrides: { shell } })
+    assert.equal(wrappedReturn.status, bareReturn.status)
+  }
+})
+
+test('a gate reap report that could not be cleared is never read', () => {
+  const stale = '{"pgid":"999","outcome":"proven","reason":"probe-dead","signals":1,"survivors":"1"}'
+  assert.equal(gateReapFresh(false, stale), null)
+  assert.equal(gateReapFresh(true, stale), stale)
+  const gate = `gate-cmd\n${GATE_REAP_CMD_EOF}`
+  const reportPath = `${TD}/gate-reap.1.json`
+  const io = fakeIo({
+    emit: true, writeThrough: true, throwWrites: [reportPath],
+    files: { [reportPath]: stale },
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: gate } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { [`${gate}:1`]: { ok: false, output: RED(3) }, [`${gate}:2`]: { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  const event = io.calls.emits.find((entry) => entry.kind === 'gate')
+  assert.equal(result.status, 'done')
+  assert.equal(event.reap.outcome, 'unproven')
+  assert.ok(io.calls.logs.some((entry) => entry.gate_reap?.outcome === 'unproven'))
+})
+
+test('a refused KILL after a delivered TERM is unproven, never failed', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-mixed-'))
+  try {
+    const pgidCopy = join(dir, 'pgid.copy')
+    const run = b127InvokeGate({ dir, cmd: b127GroupCommand(pgidCopy), overrides: {
+      psCmd: b127Spy(dir, 'ps-spy', `#!/bin/sh\np=$(cat '${pgidCopy}' 2>/dev/null || echo 0)\nprintf '%s 4242 S\\n' "$p"\n`),
+      sleepCmd: b127Spy(dir, 'sleep-spy', '#!/bin/sh\nexit 0\n'),
+      killCmd: b127Spy(dir, 'kill-spy', '#!/bin/sh\ncase "$1" in -TERM) exit 0 ;; *) exit 1 ;; esac\n'),
+    } })
+    assert.equal(run.verdict.outcome, 'unproven')
+    assert.equal(run.verdict.signals, 1)
+    assert.notEqual(run.verdict.outcome, 'failed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a refused first signal is unproven with zero signals, while a dead-after-refusal group is proven', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-refused-'))
+  try {
+    const pgidCopy = join(dir, 'pgid.copy')
+    const alive = b127InvokeGate({ dir, cmd: b127GroupCommand(pgidCopy), overrides: {
+      psCmd: b127Spy(dir, 'ps-alive', `#!/bin/sh\np=$(cat '${pgidCopy}' 2>/dev/null || echo 0)\nprintf '%s 4242 S\\n' "$p"\n`),
+      sleepCmd: b127Spy(dir, 'sleep-alive', '#!/bin/sh\nexit 0\n'),
+      killCmd: b127Spy(dir, 'kill-refused', '#!/bin/sh\nexit 1\n'),
+    } })
+    assert.equal(alive.verdict.outcome, 'unproven')
+    assert.equal(alive.verdict.signals, 0)
+    assert.notEqual(alive.verdict.outcome, 'failed')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+  const deadDir = mkdtempSync(join(tmpdir(), 'b127-gate-dead-'))
+  try {
+    const pgidCopy = join(deadDir, 'pgid.copy')
+    const deadFlag = join(deadDir, 'dead.flag')
+    const dead = b127InvokeGate({ dir: deadDir, cmd: b127GroupCommand(pgidCopy), overrides: {
+      psCmd: b127Spy(deadDir, 'ps-dead', `#!/bin/sh\np=$(cat '${pgidCopy}' 2>/dev/null || echo 0)\nif [ -f '${deadFlag}' ]; then printf '1 1 S\\n'; else printf '%s 4242 S\\n' "$p"; fi\n`),
+      sleepCmd: b127Spy(deadDir, 'sleep-dead', '#!/bin/sh\nexit 0\n'),
+      killCmd: b127Spy(deadDir, 'kill-dead', `#!/bin/sh\n: > '${deadFlag}'\nexit 1\n`),
+    } })
+    assert.equal(dead.verdict.outcome, 'proven')
+    assert.equal(dead.verdict.signals, 0)
+  } finally {
+    rmSync(deadDir, { recursive: true, force: true })
+  }
+})
+
+test('a gate reap observes a group dying during the fourth settle round', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-boundary-'))
+  try {
+    const pgidCopy = join(dir, 'pgid.copy')
+    const sleepLog = join(dir, 'sleep.log')
+    const deadFlag = join(dir, 'dead.flag')
+    const run = b127InvokeGate({ dir, cmd: b127GroupCommand(pgidCopy), overrides: {
+      psCmd: b127Spy(dir, 'ps-spy', `#!/bin/sh\np=$(cat '${pgidCopy}' 2>/dev/null || echo 0)\nif [ -f '${deadFlag}' ]; then printf '1 1 S\\n'; else printf '%s 4242 S\\n' "$p"; fi\n`),
+      sleepCmd: b127Spy(dir, 'sleep-spy', `#!/bin/sh\necho x >> '${sleepLog}'\nn=$(wc -l < '${sleepLog}' | tr -d ' ')\nif [ "$n" -ge 4 ]; then : > '${deadFlag}'; fi\nexit 0\n`),
+      killCmd: b127Spy(dir, 'kill-spy', '#!/bin/sh\nexit 0\n'),
+    } })
+    assert.equal(run.verdict.outcome, 'proven')
+    assert.equal(run.verdict.signals, 1)
+    assert.equal(b127Lines(sleepLog), 4)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('gate reap wrappers round-trip shell text and refuse a delimiter-bearing command', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-text-'))
+  try {
+    const paths = b127GatePaths(dir)
+    const command = `printf "a'b\\\" $VAR"\n# newline\necho done`
+    const wrapped = gateReapCommand({ cmd: command, ...paths })
+    assert.equal(gateReapOriginal(wrapped), command)
+    const bypass = `echo before\n${GATE_REAP_CMD_EOF}\necho after`
+    assert.equal(gateReapCommand({ cmd: bypass, ...paths }), bypass)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('gate reap guards the driver group before any signal', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-guard-'))
+  try {
+    const lines = gateReapCommand({ cmd: 'true', ...b127GatePaths(dir) }).split('\n')
+    const guardAt = lines.findIndex((line) => line.includes('"$__crew_self"') && line.includes(')'))
+    const killAt = lines.findIndex((line) => /(^|\s)\$__crew_kill\s/.test(line))
+    assert.ok(guardAt >= 0)
+    assert.ok(killAt >= 0)
+    assert.ok(guardAt < killAt)
+    assert.match(lines[guardAt], /unproven/)
+    assert.match(lines[guardAt], /root-unidentified/)
+    assert.doesNotMatch(lines[guardAt], /\$__crew_kill\s/)
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('gate invocations tally already-dead reaps and do not journal clean outcomes', () => {
+  const io = fakeIo({
+    emit: true,
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: {
+      'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' },
+      'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' },
+    },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.deepEqual(result.details.gate.reap, { invocations: 2, 'already-dead': 2, proven: 0, failed: 0, unproven: 0 })
+  assert.equal(io.calls.logs.filter((entry) => entry.gate_reap).length, 0)
+  const wrappedGates = io.calls.wrapped.filter(({ wrapped, cmd }) => wrapped !== cmd)
+  assert.deepEqual(wrappedGates.map(({ cmd }) => cmd), ['gate-cmd', 'gate-cmd'])
+  assert.ok(wrappedGates.every(({ clean }) => clean === false))
+})
+
 test('gate-first: green baseline bounces the lead; repaired gate red at baseline proceeds; gate green after build -> done', () => {
   const io = fakeIo({
     envelopes: {
@@ -2956,7 +3279,8 @@ test('a thrown mutation gate with a successful restore remains contained', () =>
     envelopes: CHECK_ENVELOPES([CHECK_MUTATION]), runs: CHECK_RUNS(), changed: ['a.mjs', 'a.test.mjs'] })
   const run = io.run
   io.run = function (cmd) {
-    if (cmd === 'gate-cmd' && this.calls.run.filter(({ cmd: name }) => name === cmd).length >= 2) throw new Error('mutation gate exploded')
+    const original = gateReapOriginal(cmd)
+    if (original === 'gate-cmd' && this.calls.run.filter(({ cmd: name }) => name === original).length >= 2) throw new Error('mutation gate exploded')
     return run.call(this, cmd)
   }
   const res = driveTask(CTX, io)

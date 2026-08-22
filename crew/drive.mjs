@@ -239,6 +239,260 @@ export function panelSeats(seated) {
 // checks that threw before they could adjudicate anything.
 export const GATE_SUMMARY_PREFIX = 'GATE-SUMMARY'
 
+export const GATE_REAP_OUTCOMES = Object.freeze(['already-dead', 'proven', 'failed', 'unproven'])
+export const GATE_REAP_CMD_EOF = '__CREW_GATE_CMD_EOF__'
+export const GATE_REAP_LAUNCH_EOF = '__CREW_GATE_LAUNCH_EOF__'
+export const GATE_REAP_SWEEP_MARKER = '__crew_gate_reap_sweep'
+// Job control is the only way a POSIX shell can put a command in a process group
+// of its own, and `set -m` REFUSES without a controlling tty under dash
+// (measured: "/bin/dash: set: can't access tty; job control turned off"), which
+// is /bin/sh on the CI runner. There is no setsid binary on darwin. So the
+// backgrounding — and only the backgrounding — is delegated to bash, present on
+// both supported platforms. If it is not executable the gate still runs, through
+// the same /bin/sh -c contract, and the reap reports `unproven` rather than
+// inventing a group to signal.
+export const GATE_REAP_SHELL = '/bin/bash'
+
+const shQuote = (value) => `'${String(value).replaceAll("'", "'\\''")}'`
+
+// Fixed text: every variable part arrives as a positional argument, so no gate
+// command is ever interpolated into it. The group-leader shim publishes the pgid
+// ps MEASURED for it — not `$$`, because if job control did not run the measured
+// value is the driver's own group and the guard below refuses it — and then EXECs
+// `/bin/sh -c "$command"` with no operands. The authored command therefore sees
+// the production contract exactly: $0=/bin/sh, $#=0, $1 unset, and a top-level
+// `return` still an error. It is NEVER sourced: sourcing gives $0=crew-gate-reap,
+// $#=2 and makes `return 0` succeed (measured).
+const GATE_REAP_LAUNCHER = [
+  'set -m',
+  `/bin/sh -c 'p=$(ps -o pgid= -p $$ 2>/dev/null | tr -d " "); printf %s "$p" > "$1"; c=$(cat "$2"); exec /bin/sh -c "$c"' crew-gate-reap "$1" "$2" &`,
+  '__crew_job=$!',
+  'set +m', // suppresses bash's "[1]+ Done ..." notice, so the gate's output is untouched
+  'wait "$__crew_job"',
+  'exit $?',
+].join('\n')
+
+// `sleepCmd`, `killCmd` and `psCmd` exist so the settle ladder and the signal
+// accounting can be pinned by injection instead of by racing real processes;
+// production uses the defaults.
+export function gateReapCommand({ cmd, cmdFile, launchFile, pgidFile, report, shell = GATE_REAP_SHELL, sleepCmd = 'sleep', killCmd = 'kill', psCmd = 'ps' }) {
+  const text = String(cmd ?? '')
+  // A command carrying the delimiter on a line of its own would close the heredoc
+  // early. Refuse to wrap rather than corrupt it: no reap, and runGate's
+  // truncation makes the absent report read `unproven`.
+  if (text.split('\n').some((line) => line === GATE_REAP_CMD_EOF)) return text
+  return [
+    `__crew_cmd_file=${shQuote(cmdFile)}`,
+    `__crew_launch_file=${shQuote(launchFile)}`,
+    `__crew_pgid_file=${shQuote(pgidFile)}`,
+    `__crew_report=${shQuote(report)}`,
+    `__crew_shell=${shQuote(shell)}`,
+    `__crew_sleep=${shQuote(sleepCmd)}`,
+    `__crew_kill=${shQuote(killCmd)}`,
+    `__crew_ps=${shQuote(psCmd)}`,
+    `cat > "$__crew_cmd_file" <<'${GATE_REAP_CMD_EOF}'`,
+    text,
+    GATE_REAP_CMD_EOF,
+    `cat > "$__crew_launch_file" <<'${GATE_REAP_LAUNCH_EOF}'`,
+    GATE_REAP_LAUNCHER,
+    GATE_REAP_LAUNCH_EOF,
+    `__crew_self=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')`,
+    `: > "$__crew_pgid_file"`,
+    // Liveness from the ps TABLE, never from kill(-pgid, 0): an unreaped member
+    // keeps signal zero positive forever (crew/seat-io.mjs:480-491). 0 = alive,
+    // 1 = dead, 2 = unknown. A table we could not read is unknown, never a death.
+    `__crew_live() {`,
+    `  __crew_rows=$($__crew_ps -A -o pgid=,pid=,stat= 2>/dev/null) || return 2`,
+    `  [ -n "$__crew_rows" ] || return 2`,
+    `  __crew_members=$(printf '%s\\n' "$__crew_rows" | awk -v g="$1" '$1==g && $3 !~ /Z/ {print $2}' | tr '\\n' ' ')`,
+    `  [ -n "$__crew_members" ] || return 1`,
+    `  return 0`,
+    `}`,
+    // Mirrors pollGroupPeersUntilGone (crew/seat-io.mjs:493-501): probe once, then
+    // up to four rounds of sleep-THEN-reprobe, so a death inside the last 250ms is
+    // still observed and never escalated past.
+    `__crew_settle() {`,
+    `  __crew_live "$1"; __crew_probe=$?`,
+    `  __crew_i=0`,
+    `  while [ "$__crew_probe" -eq 0 ] && [ "$__crew_i" -lt 4 ]; do`,
+    `    $__crew_sleep 0.25`,
+    `    __crew_i=$((__crew_i + 1))`,
+    `    __crew_live "$1"; __crew_probe=$?`,
+    `  done`,
+    `  return "$__crew_probe"`,
+    `}`,
+    `if [ -x "$__crew_shell" ]; then`,
+    `  "$__crew_shell" "$__crew_launch_file" "$__crew_pgid_file" "$__crew_cmd_file"`,
+    `else`,
+    `  __crew_fallback=$(cat "$__crew_cmd_file"); /bin/sh -c "$__crew_fallback"`,
+    `fi`,
+    `__crew_status=$?`,
+    `__crew_pgid=$(cat "$__crew_pgid_file" 2>/dev/null | tr -d ' ')`,
+    `__crew_signals=0`,
+    `__crew_members=`,
+    `case "$__crew_pgid" in`,
+    `  '' | *[!0-9]* ) __crew_outcome=unproven; __crew_reason=probe-unknown ;;`,
+    `  0 | 1 ) __crew_outcome=unproven; __crew_reason=invalid-pgid ;;`,
+    `  "$__crew_self" ) __crew_outcome=unproven; __crew_reason=root-unidentified ;;`,
+    `  * )`,
+    `    __crew_live "$__crew_pgid"; __crew_probe=$?`,
+    `    if [ "$__crew_probe" -eq 1 ]; then __crew_outcome=already-dead; __crew_reason=probe-dead`,
+    `    elif [ "$__crew_probe" -eq 2 ]; then __crew_outcome=unproven; __crew_reason=probe-unknown`,
+    `    else`,
+    // Nothing is proven yet: `failed` is reserved for a group that was
+    // successfully SIGNALLED and is still measured alive, exactly as
+    // settleZombieRootPeers reserves it.
+    `      __crew_survivors="$__crew_members"`,
+    `      __crew_outcome=unproven; __crew_reason=probe-unknown`,
+    `      for __crew_sig in TERM KILL; do`,
+    `        if $__crew_kill -"$__crew_sig" -"$__crew_pgid" 2>/dev/null; then`,
+    `          __crew_signals=$((__crew_signals + 1))`,
+    // A refused or unaddressable kill DELIVERED NOTHING, so it is not counted —
+    // and any outcome an EARLIER round left behind (a `failed` set after a
+    // delivered TERM) is no longer supported by anything measured. Reset FIRST,
+    // then reprobe, and override only a measured death. Without the reset a
+    // refused KILL after a delivered TERM inherits `failed`, which is what
+    // revision 2 got wrong (measured).
+    `        else`,
+    `          __crew_outcome=unproven; __crew_reason=probe-unknown`,
+    `          __crew_settle "$__crew_pgid"; __crew_probe=$?`,
+    `          if [ "$__crew_probe" -eq 1 ]; then __crew_outcome=proven; __crew_reason=probe-dead; fi`,
+    `          break`,
+    `        fi`,
+    `        __crew_settle "$__crew_pgid"; __crew_probe=$?`,
+    `        if [ "$__crew_probe" -eq 1 ]; then __crew_outcome=proven; __crew_reason=probe-dead; break; fi`,
+    `        if [ "$__crew_probe" -eq 2 ]; then __crew_outcome=unproven; __crew_reason=probe-unknown; break; fi`,
+    `        __crew_outcome=failed; __crew_reason=probe-alive`,
+    `      done`,
+    `      __crew_members="$__crew_survivors"`,
+    `    fi`,
+    `    ;;`,
+    `esac`,
+    `printf '{"pgid":"%s","outcome":"%s","reason":"%s","signals":%s,"survivors":"%s"}\\n' "$__crew_pgid" "$__crew_outcome" "$__crew_reason" "$__crew_signals" "$__crew_members" > "$__crew_report"`,
+    `exit "$__crew_status"`,
+  ].join('\n')
+}
+
+export function gateReapSweepCommand({ pgidFile, report, sleepCmd = 'sleep', killCmd = 'kill', psCmd = 'ps' }) {
+  return [
+    `: ${GATE_REAP_SWEEP_MARKER}`,
+    `__crew_pgid_file=${shQuote(pgidFile)}`,
+    `__crew_report=${shQuote(report)}`,
+    `__crew_sleep=${shQuote(sleepCmd)}`,
+    `__crew_kill=${shQuote(killCmd)}`,
+    `__crew_ps=${shQuote(psCmd)}`,
+    // A wrapper that finished its own reap already wrote the report; runGate
+    // truncates it before the run, so a NON-EMPTY report means the wrapper got
+    // there and this sweep must not overwrite its verdict.
+    `[ -s "$__crew_report" ] && exit 0`,
+    `__crew_self=$(ps -o pgid= -p $$ 2>/dev/null | tr -d ' ')`,
+    // Liveness from the ps TABLE, never from kill(-pgid, 0): an unreaped member
+    // keeps signal zero positive forever (crew/seat-io.mjs:480-491). 0 = alive,
+    // 1 = dead, 2 = unknown. A table we could not read is unknown, never a death.
+    `__crew_live() {`,
+    `  __crew_rows=$($__crew_ps -A -o pgid=,pid=,stat= 2>/dev/null) || return 2`,
+    `  [ -n "$__crew_rows" ] || return 2`,
+    `  __crew_members=$(printf '%s\\n' "$__crew_rows" | awk -v g="$1" '$1==g && $3 !~ /Z/ {print $2}' | tr '\\n' ' ')`,
+    `  [ -n "$__crew_members" ] || return 1`,
+    `  return 0`,
+    `}`,
+    // Mirrors pollGroupPeersUntilGone (crew/seat-io.mjs:493-501): probe once, then
+    // up to four rounds of sleep-THEN-reprobe, so a death inside the last 250ms is
+    // still observed and never escalated past.
+    `__crew_settle() {`,
+    `  __crew_live "$1"; __crew_probe=$?`,
+    `  __crew_i=0`,
+    `  while [ "$__crew_probe" -eq 0 ] && [ "$__crew_i" -lt 4 ]; do`,
+    `    $__crew_sleep 0.25`,
+    `    __crew_i=$((__crew_i + 1))`,
+    `    __crew_live "$1"; __crew_probe=$?`,
+    `  done`,
+    `  return "$__crew_probe"`,
+    `}`,
+    `__crew_pgid=$(cat "$__crew_pgid_file" 2>/dev/null | tr -d ' ')`,
+    `__crew_signals=0`,
+    `__crew_members=`,
+    `case "$__crew_pgid" in`,
+    `  '' | *[!0-9]* ) __crew_outcome=unproven; __crew_reason=probe-unknown ;;`,
+    `  0 | 1 ) __crew_outcome=unproven; __crew_reason=invalid-pgid ;;`,
+    `  "$__crew_self" ) __crew_outcome=unproven; __crew_reason=root-unidentified ;;`,
+    `  * )`,
+    `    __crew_live "$__crew_pgid"; __crew_probe=$?`,
+    `    if [ "$__crew_probe" -eq 1 ]; then __crew_outcome=already-dead; __crew_reason=probe-dead`,
+    `    elif [ "$__crew_probe" -eq 2 ]; then __crew_outcome=unproven; __crew_reason=probe-unknown`,
+    `    else`,
+    // Nothing is proven yet: `failed` is reserved for a group that was
+    // successfully SIGNALLED and is still measured alive, exactly as
+    // settleZombieRootPeers reserves it.
+    `      __crew_survivors="$__crew_members"`,
+    `      __crew_outcome=unproven; __crew_reason=probe-unknown`,
+    `      for __crew_sig in TERM KILL; do`,
+    `        if $__crew_kill -"$__crew_sig" -"$__crew_pgid" 2>/dev/null; then`,
+    `          __crew_signals=$((__crew_signals + 1))`,
+    // A refused or unaddressable kill DELIVERED NOTHING, so it is not counted —
+    // and any outcome an EARLIER round left behind (a `failed` set after a
+    // delivered TERM) is no longer supported by anything measured. Reset FIRST,
+    // then reprobe, and override only a measured death. Without the reset a
+    // refused KILL after a delivered TERM inherits `failed`, which is what
+    // revision 2 got wrong (measured).
+    `        else`,
+    `          __crew_outcome=unproven; __crew_reason=probe-unknown`,
+    `          __crew_settle "$__crew_pgid"; __crew_probe=$?`,
+    `          if [ "$__crew_probe" -eq 1 ]; then __crew_outcome=proven; __crew_reason=probe-dead; fi`,
+    `          break`,
+    `        fi`,
+    `        __crew_settle "$__crew_pgid"; __crew_probe=$?`,
+    `        if [ "$__crew_probe" -eq 1 ]; then __crew_outcome=proven; __crew_reason=probe-dead; break; fi`,
+    `        if [ "$__crew_probe" -eq 2 ]; then __crew_outcome=unproven; __crew_reason=probe-unknown; break; fi`,
+    `        __crew_outcome=failed; __crew_reason=probe-alive`,
+    `      done`,
+    `      __crew_members="$__crew_survivors"`,
+    `    fi`,
+    `    ;;`,
+    `esac`,
+    `printf '{"pgid":"%s","outcome":"%s","reason":"%s","signals":%s,"survivors":"%s"}\\n' "$__crew_pgid" "$__crew_outcome" "$__crew_reason" "$__crew_signals" "$__crew_members" > "$__crew_report"`,
+    `exit 0`,
+  ].join('\n')
+}
+
+// The wrapper carries the gate command verbatim inside a quoted heredoc, so the
+// original is recoverable. drive.test.mjs's fake runner keys on this, which is how
+// 91 existing gate call sites keep scripting the command they always did.
+export function gateReapOriginal(wrapped) {
+  const text = String(wrapped ?? '')
+  const open = `<<'${GATE_REAP_CMD_EOF}'\n`
+  const i = text.indexOf(open)
+  if (i < 0) return wrapped
+  const j = text.indexOf(`\n${GATE_REAP_CMD_EOF}\n`, i + open.length)
+  if (j < 0) return wrapped
+  return text.slice(i + open.length, j)
+}
+
+// A report we could not CLEAR cannot be attributed to this invocation: whatever is
+// readable at that path belongs to an earlier run. Fail closed — read nothing
+// rather than inherit a stale death claim.
+export function gateReapFresh(cleared, text) { return cleared ? text : null }
+
+// A report we could not read or parse measured NOTHING, and an unmeasured group is
+// `unproven` — never a death claim. Never throws.
+export function gateReapVerdict(text) {
+  const unproven = { outcome: 'unproven', reason: 'no-report', pgid: null, signals: 0, survivors: [] }
+  if (typeof text !== 'string' || !text.trim()) return unproven
+  let parsed = null
+  try { parsed = JSON.parse(text.trim().split('\n').filter(Boolean).at(-1)) } catch { return unproven }
+  if (!parsed || typeof parsed !== 'object') return unproven
+  if (!GATE_REAP_OUTCOMES.includes(parsed.outcome)) return unproven
+  const pgid = /^\d+$/.test(String(parsed.pgid ?? '')) ? Number(parsed.pgid) : null
+  const signals = Number.isSafeInteger(parsed.signals) && parsed.signals >= 0 ? parsed.signals : 0
+  return {
+    outcome: parsed.outcome,
+    reason: typeof parsed.reason === 'string' && parsed.reason ? parsed.reason : 'probe-unknown',
+    pgid,
+    signals,
+    survivors: String(parsed.survivors ?? '').split(/\s+/).filter(Boolean),
+  }
+}
+
 // Parse the LAST summary line in the gate's output, or null if there is none.
 // Last wins: a gate that re-runs a suite internally may legitimately print
 // more than one, and the final line is the one describing the whole run.
@@ -1241,6 +1495,7 @@ export function driveTask(ctx, io) {
   // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
   let gateAttempt = 0
   let lastGateOutput = null
+  const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
   // calls `this.run(cmd)` (crew/seat-io.mjs:241,245), and passing it detached
   // (`runGate(..., io.runClean)` below) made `this` undefined under ESM strict
@@ -1251,9 +1506,54 @@ export function driveTask(ctx, io) {
   // implementations: every other io call site in this file is a method call,
   // and this keeps that true for runners too.
   const runGate = (name, cmd, runner = io.run, pristine = false) => {
-    const res = runner.call(io, cmd)
     gateAttempt += 1
-    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine })
+    // The task dir, never the checkout: runClean stashes --include-untracked
+    // around this call (crew/seat-io.mjs:1741-1753) and an untracked file in
+    // the checkout would collide with the pop.
+    const reapPaths = {
+      cmdFile: art(`gate-reap.${gateAttempt}.cmd.sh`),
+      launchFile: art(`gate-reap.${gateAttempt}.launch.sh`),
+      pgidFile: art(`gate-reap.${gateAttempt}.pgid`),
+      report: art(`gate-reap.${gateAttempt}.json`),
+    }
+    // Truncate FIRST. io.readFile returns any existing file verbatim
+    // (crew/seat-io.mjs:1725-1726), and the attempt number resets with the
+    // driver, so without this a prior run's `proven` could be read as this one's.
+    // The flag is the whole point: a truncation that THREW leaves whatever is at
+    // that path attributable to an earlier run, so the path is not read at all.
+    let reportCleared = false
+    try { io.writeFile(reapPaths.report, ''); reportCleared = true } catch { /* stays false: fail closed */ }
+    const wrapped = gateReapCommand({ cmd, ...reapPaths })
+    // The production seat io has runClean, and the drive fake advertises calls;
+    // both can execute the composed wrapper. A ledger-only adapter used by the
+    // integration seam exposes neither and keys its runner on the authored
+    // command, so preserve that adapter's old contract rather than passing it a
+    // shell program it cannot execute. Production never takes this branch.
+    // Same predicate as the wrapper: an adapter that cannot execute the composed
+    // program must not be handed the sweep either.
+    const wrappable = io.calls || typeof io.runClean === 'function'
+    let res
+    try {
+      res = runner.call(io, wrappable ? wrapped : cmd)
+    } finally {
+      // Always io.run, never `runner`: runClean would stash a second time. This
+      // is the only reap that survives a runner timeout, which kills the wrapper
+      // before its own reap can run.
+      if (wrappable) {
+        try { io.run(gateReapSweepCommand(reapPaths)) } catch { /* an unswept group reads unproven */ }
+      }
+    }
+    let reap
+    try { reap = gateReapVerdict(gateReapFresh(reportCleared, io.readFile(reapPaths.report))) }
+    catch { reap = gateReapVerdict(null) } // a read that threw measured nothing
+    gateReapTally.invocations += 1
+    gateReapTally[reap.outcome] += 1
+    // `already-dead` is the nothing-happened case; the journal records the
+    // invocations that signalled something or could not prove a death.
+    if (reap.outcome !== 'already-dead') {
+      io.log({ at: io.now(), gate_reap: { name, attempt: gateAttempt, ...reap } })
+    }
+    emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, reap })
     return res
   }
   // Attention fires ONLY where the gate loop stops being self-correcting:
@@ -1393,7 +1693,7 @@ export function driveTask(ctx, io) {
         commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
         dissents: S.dissents, accepted_via: null, escalation: { where, why },
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
-        gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
+        gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
         converge: {
           pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
           gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
@@ -2859,7 +3159,7 @@ export function driveTask(ctx, io) {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
-      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
+      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
     },
   }
 }

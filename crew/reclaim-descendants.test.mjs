@@ -1,4 +1,4 @@
-import test, { afterEach } from 'node:test'
+import test, { after, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
 import {
@@ -16,6 +16,15 @@ import {
 } from './seat-io.mjs'
 import { bootCmd, runCmd, teardownCore } from './crew.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
+
+const LEDGER_SANDBOX = mkdtempSync(join(tmpdir(), 'b136-ledger-sandbox-'))
+const LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
+process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX // #477: module scope, before any test runs
+after(() => {
+  if (LEDGER_SANDBOX_PREVIOUS === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+  else process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX_PREVIOUS
+  rmSync(LEDGER_SANDBOX, { recursive: true, force: true })
+})
 
 const tempDirs = []
 const task = () => {

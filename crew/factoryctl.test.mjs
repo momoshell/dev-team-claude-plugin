@@ -1,4 +1,4 @@
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -6,6 +6,15 @@ import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
 import { attachVerb, connect, formatRows, main, parseArgs, runVerb } from './factoryctl.mjs'
+
+const LEDGER_SANDBOX = mkdtempSync(join(tmpdir(), 'b136-factoryctl-ledger-'))
+const LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
+process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX // #477: module scope, before any test runs
+after(() => {
+  if (LEDGER_SANDBOX_PREVIOUS === undefined) delete process.env.DEVTEAM_LEDGER_DIR
+  else process.env.DEVTEAM_LEDGER_DIR = LEDGER_SANDBOX_PREVIOUS
+  rmSync(LEDGER_SANDBOX, { recursive: true, force: true })
+})
 
 function mintCrew(root, name) {
   const crewDir = join(root, name)

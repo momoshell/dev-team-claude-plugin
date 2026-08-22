@@ -12,7 +12,7 @@ import {
 } from '../crew/seat-io.mjs'
 import {
   REAP_OUTCOMES, REAP_VERDICTS, candidateTasks, classifyRecord, formatReport,
-  guardedKill, parseArgs, reapPass,
+  guardedKill, main, parseArgs, reapPass,
 } from '../scripts/factory/reap-stale.mjs'
 
 const tempDirs = []
@@ -85,7 +85,7 @@ const depsFor = (spy, snapshot = () => snapshotOf([])) => ({ kill: spy.kill, sna
 // Node's default reporter emits U+2139 instead of TAP's "# pass N" summary.
 // Emit a summary only after a successful lane so this compatibility line cannot
 // make a failing suite look green.
-const LANE_TEST_COUNT = 12
+const LANE_TEST_COUNT = 14
 process.once('exit', (code) => {
   if (code === 0 && !String(process.env.NODE_OPTIONS || '').includes('--test-reporter=tap')) {
     process.stdout.write(`# pass ${LANE_TEST_COUNT}\n`)
@@ -242,10 +242,48 @@ test('CLI exits 2 for usage and absent roots, and 0 for an empty dry run', () =>
   assert.equal(absent.status, 2)
 })
 
+test('a bare invocation is a dry run: nothing is signalled and nothing is stamped', async () => {
+  const root = newRoot()
+  const taskDir = deadRun(root)
+  const spy = killSpy({ esrch: [-42] })
+  const reclaimCalls = []
+  const out = []
+  const code = await main(['--root', root], {
+    ...depsFor(spy),
+    reclaim: (args) => {
+      reclaimCalls.push(args)
+      return { records: 0, swept: 0, skipped: 0, retryable: 0, groups: 0, reclaimed: 0 }
+    },
+    stdout: (text) => out.push(text),
+  })
+  assert.equal(code, 0)
+  assert.deepEqual(reclaimCalls, [])
+  assert.equal(spy.calls.length, 0)
+  assert.equal(readRecords(taskDir).some((record) => record.swept_at != null), false)
+  assert.match(out.join(''), /\(dry-run\)/)
+  assert.match(out.join(''), /-- --reclaim/)
+})
+
+test('--reclaim reclaims exactly what the default used to reclaim', async () => {
+  const root = newRoot()
+  const taskDir = deadRun(root)
+  const spy = killSpy({ esrch: [-42] })
+  const out = []
+  const code = await main(['--reclaim', '--root', root], { ...depsFor(spy), stdout: (text) => out.push(text) })
+  assert.equal(code, 0)
+  assert.equal(readRecords(taskDir).every((record) => record.swept_at != null), true)
+  assert.equal(spy.calls.some(([pid, signal]) => pid === -42 && signal === 0), true)
+  assert.match(out.join(''), /reap-outcome: reclaimed/)
+})
+
 test('parseArgs rejects missing values and positional arguments', () => {
   assert.throws(() => parseArgs(['--root']), { name: 'ReapUsageError', reason: 'missing-value' })
   assert.throws(() => parseArgs(['lane-name']), { name: 'ReapUsageError', reason: 'unknown-option' })
   assert.deepEqual(parseArgs(['--dry-run']), { dryRun: true, root: null, help: false })
+  assert.deepEqual(parseArgs([]), { dryRun: true, root: null, help: false })
+  assert.equal(parseArgs(['--reclaim']).dryRun, false)
+  assert.equal(parseArgs(['--reclaim', '--dry-run']).dryRun, true)
+  assert.equal(parseArgs(['--dry-run', '--reclaim']).dryRun, true)
 })
 
 test('classifyRecord applies refusal precedence before unknown and reclaimed', () => {

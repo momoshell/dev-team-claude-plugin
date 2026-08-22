@@ -58,6 +58,7 @@ import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { REAP_VERDICTS, classifyRecord } from '../scripts/factory/reap-stale.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
+import { CELL_RATE_FLOOR, USAGE_ABSENT_CAUSES, openLedger as realOpenLedger } from '../scripts/factory/ledger.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
 } from './memory.mjs'
@@ -862,6 +863,320 @@ export function assertDefBandFloors(defs, tier, ladder, { adapters = null, local
   }
 }
 
+// ---- shadow seat pick (#291 L2) --------------------------------------------
+export const SHADOW_PICK_SCHEMA = 1
+export const SHADOW_RATE_FLOOR = CELL_RATE_FLOOR
+export const SHADOW_OUTCOMES = Object.freeze(['picked', 'stands', 'abstained', 'no-candidate', 'not-consulted'])
+export const SHADOW_EXCLUSIONS = Object.freeze([
+  'band-unknown', 'band-below-floor', 'capability-shortfall',
+  'agent-unresolved', 'breaker-open', 'vendor-collision',
+])
+export const SHADOW_ABSENT = Object.freeze({
+  cost: USAGE_ABSENT_CAUSES.pane,
+  pass_rate: 'no review by this cell was its run\'s first round — UNMEASURED, never a zero rate',
+  breaker: 'no breaker policy is configured (CREW_BREAKER_THRESHOLD unset) — candidate cell health is UNMEASURED, never healthy',
+  reviews: 'the ledger mirror is degraded or unreadable — first-round pass rates are UNMEASURED, never zero',
+})
+
+export function shadowExclusion(reason, detail = null) {
+  if (!SHADOW_EXCLUSIONS.includes(reason)) throw new Error(`unknown shadow exclusion reason ${JSON.stringify(reason)}`)
+  return { reason, detail }
+}
+
+function compareShadowCell(a, b) {
+  return `${a.provider}/${a.id}/${a.agent}/${a.effort}`.localeCompare(`${b.provider}/${b.id}/${b.agent}/${b.effort}`)
+}
+
+function shadowCell(cell) {
+  return {
+    provider: cell?.provider ?? null,
+    id: cell?.id ?? null,
+    agent: cell?.agent ?? null,
+    effort: cell?.effort ?? null,
+  }
+}
+
+function sameShadowCell(a, b) {
+  return a?.provider === b?.provider && a?.id === b?.id
+    && a?.agent === b?.agent && a?.effort === b?.effort
+}
+
+export function shadowCandidates(roster, role) {
+  const tiers = roster?.tiers
+  if (!tiers || typeof tiers !== 'object' || Array.isArray(tiers)) return []
+  const byKey = new Map()
+  for (const [tierName, cells] of Object.entries(tiers)) {
+    if (!cells || typeof cells !== 'object' || Array.isArray(cells)) continue
+    const cell = cells[role]
+    if (!cell || typeof cell !== 'object' || Array.isArray(cell)) continue
+    const fields = ['provider', 'id', 'agent', 'effort']
+    if (fields.some((field) => cell[field] == null)) continue
+    const key = `${cell.provider}/${cell.id}/${cell.agent}/${cell.effort}`
+    let candidate = byKey.get(key)
+    if (!candidate) {
+      candidate = {
+        provider: cell.provider, id: cell.id, agent: cell.agent, effort: cell.effort,
+        tiers: [],
+      }
+      byKey.set(key, candidate)
+    }
+    if (!candidate.tiers.includes(tierName)) candidate.tiers.push(tierName)
+  }
+  return [...byKey.values()].sort(compareShadowCell)
+}
+
+function shadowNumber(value) {
+  const number = Number(value)
+  return Number.isFinite(number) ? number : 0
+}
+
+function shadowReviewRow(candidate, role, reviewRows) {
+  const row = { reviews: 0, first_round_reviews: 0, first_round_passes: 0 }
+  for (const review of Array.isArray(reviewRows) ? reviewRows : []) {
+    if (!review
+      || review.provider !== candidate.provider
+      || review.model_id !== candidate.id
+      || review.agent !== candidate.agent
+      || review.effort !== candidate.effort
+      || review.role !== role) continue
+    row.reviews += shadowNumber(review.reviews)
+    row.first_round_reviews += shadowNumber(review.first_round_reviews)
+    row.first_round_passes += shadowNumber(review.first_round_passes)
+  }
+  row.first_round_pass_rate = row.first_round_reviews === 0
+    ? null : row.first_round_passes / row.first_round_reviews
+  return row
+}
+
+export function shadowPick({ roster, tier, seats, sources = {}, ladder,
+  capabilityFit = () => ({ ok: true }), breaker = null, reviewRows = null,
+  reviewsAbsent = null }) {
+  const absent = { cost: SHADOW_ABSENT.cost }
+  if (breaker === null) absent.breaker = SHADOW_ABSENT.breaker
+  if (reviewsAbsent) absent.reviews = SHADOW_ABSENT.reviews
+  const record = {
+    schema_version: SHADOW_PICK_SCHEMA,
+    tier,
+    decides: false,
+    rate_floor: SHADOW_RATE_FLOOR,
+    absent,
+    seats: {},
+  }
+
+  for (const [role, seat] of Object.entries(seats || {})) {
+    const seated = sources?.[role]?.model === 'override'
+      ? { ...shadowCell(seat), provider: null, id: null }
+      : shadowCell(seat)
+    if (sources?.[role]?.model === 'override') { /* outcome 'not-consulted' */
+      const notConsulted = `--model-${role} names the operator's own model; the picker is not consulted`
+      record.seats[role] = {
+        outcome: 'not-consulted', seated, picked: null, changes_seat: false,
+        why: notConsulted, empty_reason: null,
+        not_consulted_reason: notConsulted, candidates: [],
+      }
+      continue
+    }
+
+    const partner = seats['tech-lead'] ?? seats.planner
+    const candidates = []
+    for (const candidate of shadowCandidates(roster, role)) {
+      let band = null
+      let excludedBy = null
+      const found = bandForMember(ladder, `${candidate.provider}/${candidate.id}`)
+      if (found === null) {
+        excludedBy = shadowExclusion('band-unknown', `${candidate.provider}/${candidate.id} is not in the ratified model ladder`)
+      } else {
+        band = found
+        const floorRank = ladder.ranks.get(ladder.floors[tier])
+        if (ladder.ranks.get(band.band) < floorRank) { /* band-below-floor */
+          excludedBy = shadowExclusion('band-below-floor', `${candidate.provider}/${candidate.id} is below the ${tier} floor`)
+        }
+      }
+
+      if (excludedBy === null) {
+        const fit = capabilityFit(role, candidate)
+        if (fit?.ok === false) {
+          const reason = fit.reason === 'agent-unresolved' ? 'agent-unresolved' : 'capability-shortfall'
+          excludedBy = shadowExclusion(reason, fit.detail ?? `candidate ${candidate.agent} cannot satisfy seat ${role}`)
+        }
+      }
+
+      const cell = (breaker?.cells || []).find((row) => row
+        && row.provider === candidate.provider
+        && row.model_id === candidate.id
+        && row.agent === candidate.agent
+        && row.effort === candidate.effort)
+      if (excludedBy === null) {
+        if (cell && cell.verdict === 'open') { /* breaker-open */
+          excludedBy = shadowExclusion('breaker-open', `${candidate.provider}/${candidate.id}/${candidate.agent}/${candidate.effort} is open in the breaker`)
+        }
+      }
+      if (excludedBy === null) {
+        if (role === 'reviewer' && partner && candidate.provider === partner.provider) { /* vendor-collision */
+          excludedBy = shadowExclusion('vendor-collision', `reviewer ${candidate.provider}/${candidate.id} shares the vendor of the seated review partner`)
+        }
+      }
+
+      const row = shadowReviewRow(candidate, role, reviewRows)
+      const candidateAbsent = { cost_usd: SHADOW_ABSENT.cost }
+      if (row.first_round_pass_rate === null) candidateAbsent.first_round_pass_rate = SHADOW_ABSENT.pass_rate
+      candidates.push({
+        provider: candidate.provider, id: candidate.id, agent: candidate.agent, effort: candidate.effort,
+        tiers: [...candidate.tiers], band: band?.band ?? null, eligible: excludedBy === null, excluded_by: excludedBy,
+        reviews: row.reviews, first_round_reviews: row.first_round_reviews,
+        first_round_passes: row.first_round_passes,
+        first_round_pass_rate: row.first_round_pass_rate,
+        thin: row.first_round_reviews > 0 && row.first_round_reviews < SHADOW_RATE_FLOOR,
+        breaker_verdict: cell?.verdict ?? null,
+        cost_usd: null, absent: candidateAbsent,
+      })
+    }
+
+    const eligible = candidates.filter((candidate) => candidate.excluded_by === null)
+    let outcome
+    let picked = null
+    let why
+    let emptyReason = null
+    if (eligible.length === 0) {
+      outcome = 'no-candidate'
+      if (candidates.length === 0) {
+        emptyReason = `the roster seats no cell for role ${role} at any tier`
+      } else {
+        const counts = new Map()
+        for (const candidate of candidates) {
+          const reason = candidate.excluded_by?.reason
+          if (reason) counts.set(reason, (counts.get(reason) || 0) + 1)
+        }
+        const constraints = SHADOW_EXCLUSIONS
+          .filter((reason) => counts.has(reason))
+          .map((reason) => `${reason} (${counts.get(reason)})`)
+        emptyReason = `no candidate was pickable: ${constraints.join(', ')}`
+      }
+      why = `${emptyReason}.`
+    } else {
+      const measured = eligible.filter((candidate) => candidate.first_round_pass_rate !== null && !candidate.thin)
+      if (measured.length) {
+        measured.sort((a, b) => (b.first_round_pass_rate - a.first_round_pass_rate) || compareShadowCell(a, b))
+        const winner = measured[0]
+        picked = shadowCell(winner)
+        outcome = 'picked'
+        why = `the picker ranks ${shadowCellKey(winner)} first on a ${winner.first_round_pass_rate} first-round pass rate across ${winner.first_round_reviews} first-round reviews.`
+      } else {
+        const seatedCandidate = eligible.find((candidate) => sameShadowCell(candidate, seated))
+        if (seatedCandidate) {
+          outcome = 'stands'
+          picked = shadowCell(seated)
+          why = 'no candidate carries a measured non-thin first-round pass rate, so the seated cell stands — a thin or absent sample is not a verdict.'
+        } else {
+          outcome = 'abstained'
+          why = 'the seated cell is itself ineligible and no measured evidence exists, so the picker ranks on nothing rather than guessing.'
+        }
+      }
+    }
+    const changesSeat = picked !== null && !sameShadowCell(picked, seated)
+    record.seats[role] = {
+      outcome, seated, picked, changes_seat: changesSeat, why,
+      empty_reason: outcome === 'no-candidate' ? emptyReason : null,
+      not_consulted_reason: null, candidates,
+    }
+  }
+  return record
+}
+
+function shadowCellKey(cell) {
+  return `${cell.provider}/${cell.id}/${cell.agent}/${cell.effort}`
+}
+
+function shadowError(err) {
+  return { schema_version: SHADOW_PICK_SCHEMA, error: err?.message || String(err) }
+}
+
+export async function shadowPickBoot({ roster, tier, seats, sources,
+  adapters, registry, ladder, env = process.env, dbPath,
+  openLedger = realOpenLedger, existsSync: existsSyncDep = existsSync,
+  root = REGISTER_ROOT, pick = shadowPick }) {
+  try {
+    const candidateAdapters = new Map()
+    const agentNames = new Set()
+    for (const [role] of Object.entries(seats || {})) {
+      if (sources?.[role]?.model === 'override') continue
+      for (const candidate of shadowCandidates(roster, role)) agentNames.add(candidate.agent)
+    }
+    for (const name of agentNames) {
+      const file = join(HERE, 'adapters', `adapter-${name}.mjs`)
+      try {
+        if (!existsSyncDep(file)) {
+          candidateAdapters.set(name, { adapter: null, detail: `agent adapter ${name} does not resolve at ${file}` })
+          continue
+        }
+        candidateAdapters.set(name, { adapter: await import(pathToFileURL(file).href), detail: null })
+      } catch (err) {
+        candidateAdapters.set(name, { adapter: null, detail: `agent adapter ${name} could not be resolved: ${err?.message || String(err)}` })
+      }
+    }
+
+    const capabilityFit = (role, candidate) => {
+      const loaded = candidateAdapters.get(candidate.agent)
+      if (!loaded?.adapter) {
+        return { ok: false, reason: 'agent-unresolved', detail: loaded?.detail || `agent adapter ${candidate.agent} could not be resolved` }
+      }
+      try {
+        const adapter = loaded.adapter
+        const transport = adapters?.[role]?.transport ?? DEFAULT_TRANSPORT
+        const grants = grantsFor(registry, role, { root, exists: existsSyncDep, agent: candidate.agent })
+        const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...(grants.requires || [])])]
+        const bare = adapter.capabilitiesFor({ transport, grants: EMPTY_GRANTS })
+        const declared = adapter.capabilitiesFor({ transport, grants })
+        const effective = effectiveCapabilities({ declared, bare, grants })
+        const withheld = Object.keys(CAPABILITY_DELIVERY).filter((cap) => declared[cap] === true && effective[cap] !== true)
+        assertCapabilities(role, candidate.agent, effective, [], requires, { withheld })
+        return { ok: true }
+      } catch (err) {
+        return { ok: false, reason: 'capability-shortfall', detail: err?.message || String(err) }
+      }
+    }
+
+    const syntheticSeats = {}
+    for (const [role] of Object.entries(seats || {})) {
+      if (sources?.[role]?.model === 'override') continue
+      for (const [index, candidate] of shadowCandidates(roster, role).entries()) {
+        syntheticSeats[`${role}:${index}`] = shadowCell(candidate)
+      }
+    }
+    const breaker = cellHealth({
+      policy: breakerPolicy(env), seats: syntheticSeats, dbPath, openLedger,
+      existsSync: existsSyncDep,
+    })
+
+    let reviewRows = []
+    let reviewsAbsent = null
+    try {
+      const present = dbPath ? existsSyncDep(dbPath) : false
+      if (present) {
+        let handle = null
+        try {
+          handle = openLedger({ dbPath, stderr: { write() {} } })
+          const rows = handle.cellReviews({})
+          const degraded = handle.degraded || Number(handle.stats()?.mirror_errors || 0) > 0
+          if (degraded) {
+            reviewRows = []
+            reviewsAbsent = SHADOW_ABSENT.reviews
+          } else {
+            reviewRows = Array.isArray(rows) ? rows : []
+          }
+        } finally {
+          try { handle?.close?.() } catch { /* an unreadable mirror stays unreadable */ }
+        }
+      }
+    } catch (err) {
+      reviewRows = []
+      reviewsAbsent = SHADOW_ABSENT.reviews
+    }
+
+    return pick({ roster, tier, seats, sources, ladder, capabilityFit, breaker, reviewRows, reviewsAbsent })
+  } catch (err) { return shadowError(err) }
+}
+
 // Resolve each role's agent name to its adapter module, by filename — this
 // IS the seam: adding an agent means dropping a file in crew/adapters/, not
 // editing crew.mjs. Dynamic import() is inherently async. `seats` (optional)
@@ -1076,14 +1391,13 @@ export async function bootCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const laneFence = resolveLaneFence(args)
-  let roles, tierName = null, tierSeats = null, sources = null
+  let roles, tierName = null, tierSeats = null, sources = null, roster = null
   if (args.tier) {
     if (args.roles) throw new Error('--tier and --roles are mutually exclusive: the tier defines the seating')
     // The roster is the RUNTIME's policy, not the target checkout's. A
     // corrupt/missing roster must name the file and that rule, not throw a
     // bare "Unexpected token".
     const rosterPath = join(HERE, 'roster.json')
-    let roster
     try { roster = JSON.parse(readFileSync(rosterPath, 'utf8')) } catch (err) {
       throw new Error(`--tier needs the crew runtime's own roster at ${rosterPath} (not the target checkout's): ${err.message}`)
     }
@@ -1135,8 +1449,9 @@ export async function bootCmd(args, deps = {}) {
   // namespace and only that adapter can prove which ratified member it denotes.
   // Only a TIER boot has a ratified floor: tier_floors is keyed by tier, and a
   // --roles boot names none.
+  let ladder = null
   if (seats && tierName) {
-    const ladder = loadLadder()
+    ladder = loadLadder()
     assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers })
     // #377: the same floor over the models granted agent DEFINITIONS pin.
     assertDefBandFloors(grantedDefModels(adapters), tierName, ladder, { adapters, localProviders: registry.local_providers })
@@ -1321,6 +1636,9 @@ export async function bootCmd(args, deps = {}) {
   }
   saveCrew(paths, crew)
   const allocation = bootAllocation(roles, args, sources, Object.fromEntries(roles.map((r) => [r, members[r].transport])))
+  const shadow = tierName && seats
+    ? await shadowPickBoot({ roster, tier: tierName, seats: tierSeats, sources, adapters, registry, ladder, env: bootEnv, dbPath: ledgerDbPath() })
+    : null
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles,
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
@@ -1330,6 +1648,7 @@ export async function bootCmd(args, deps = {}) {
     ...(allocation ? { allocation } : {}),
     ...(breaker ? { breaker } : {}),
     ...(load ? { load } : {}),
+    ...(shadow ? { shadow_pick: shadow } : {}),
     ...(laneFence ? { lane_name: laneFence.lane, fenced_lanes: laneFence.fence.length } : {}),
     capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },
     ...(memory.record ? { memory: memory.record } : {}),

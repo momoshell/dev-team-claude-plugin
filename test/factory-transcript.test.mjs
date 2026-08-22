@@ -665,3 +665,50 @@ test('S3 NO WRITES: the module\'s node:fs import specifiers are a subset of an e
   assert.doesNotMatch(transcriptSrc, /from ['"]node:fs\/promises['"]/, 'transcript.mjs must never import node:fs/promises')
   assert.doesNotMatch(transcriptSrc, /writeFileSync|appendFileSync|mkdirSync|createWriteStream|writeFile\(|writeSync|openSync|renameSync|rmSync|copyFileSync/, 'transcript.mjs must never write — it only reads and returns plain objects')
 })
+
+// ---------------------------------------------------------------------------
+// THE SEAT'S DENY HALF SHIPS AS A DRIFT-GUARD TEST TOO.
+// ---------------------------------------------------------------------------
+// The guard above reads the builder's `tools` literal and is proven to redden
+// when it drifts; it never reads `deny`, so the seat's ENFORCED no-fan-out
+// boundary could be deleted with a green suite (#476 sweep, V4). These guards
+// read the seat table's real values instead of its source text.
+// Covers: which FANOUT_TOOLS names each seat in SEAT_DEFAULTS actually        // LITERAL "Covers:"
+// withholds through its `deny` string, and that every seat in the table
+// declares a boundary here — so a NEW seat, or a silently emptied deny set,
+// reddens.
+// Does not cover: the non-fan-out deny names (Edit, NotebookEdit), the seats'  // LITERAL "Does not cover:"
+// models, prompts, agents or `requires`, the `tools` allowlist (guarded
+// above), and runtime register grants from crew/capabilities.json.
+//
+// MUTATION (deny half): change `deny: NO_FANOUT` to `deny: ''` on the builder  // LITERAL "MUTATION (deny half)"
+// seat line in crew/crew.mjs and WITHHELD_FANOUT reddens; the tools guard
+// above stays green, which is exactly the blind half this pins.
+//
+// A legitimate, intentional change to a seat's fan-out boundary is a one-line
+// edit to this table.
+const { SEAT_DEFAULTS, FANOUT_TOOLS, deniedFanout } = await import(join(CREW_DIR, 'crew.mjs'))
+
+const WITHHELD_FANOUT = Object.freeze({
+  lead: ['Task', 'Agent', 'Workflow'],
+  planner: [],
+  builder: ['Task', 'Agent', 'Workflow'],
+  reviewer: [],
+  'tech-lead': ['Task', 'Agent', 'Workflow'],
+})
+
+test('DRIFT GUARD (deny half): every seat withholds exactly the fan-out tools this table declares', () => {
+  for (const [role, expected] of Object.entries(WITHHELD_FANOUT)) {
+    assert.deepEqual(deniedFanout(role), expected, `seat ${role}'s fan-out deny boundary drifted from the one declared here`)  // LITERAL "deniedFanout(role), expected"
+  }
+})
+
+test('DRIFT GUARD (deny half, roster completeness): every seat in SEAT_DEFAULTS declares its fan-out boundary here', () => {
+  for (const role of Object.keys(SEAT_DEFAULTS)) {
+    assert.ok(role in WITHHELD_FANOUT, `seat ${role} is in SEAT_DEFAULTS but declares no fan-out boundary in this guard`)  // LITERAL "role in WITHHELD_FANOUT,"
+  }
+})
+
+test('DRIFT GUARD (deny half): the fan-out tool roster itself has not drifted', () => {
+  assert.deepEqual([...FANOUT_TOOLS], ['Task', 'Agent', 'Workflow'])
+})

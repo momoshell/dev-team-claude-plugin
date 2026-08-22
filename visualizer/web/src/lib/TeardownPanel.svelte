@@ -1,26 +1,34 @@
 <script>
   import { getSeatTeardowns } from './api.js'
-  import { teardownPanel } from './panels.js'
+  import { PANEL_REFRESH_MS, teardownPanel, panelReadLoop } from './panels.js'
   let payload = $state({ absent: null, measured: false, window: null, runs: [], totals: null })
   let error = $state('')
-  let panel = $derived(teardownPanel(error ? { ...payload, absent: error } : payload))
+  let read_at = $state(null)
+  let now = $state(null)
+  let panel = $derived(teardownPanel(error ? { ...payload, absent: error } : payload, { read_at, now, refresh_ms: PANEL_REFRESH_MS }))
 
   $effect(() => {
     let active = true
-    getSeatTeardowns().then((result) => {
-      if (!active) return
-      payload = result
-      error = ''
-    }).catch((err) => {
-      if (!active) return
-      error = err.message || 'seat teardown request failed'
-    })
-    return () => { active = false }
+    const stop = panelReadLoop(() => {
+      now = Date.now()
+      getSeatTeardowns().then((result) => {
+        if (!active) return
+        payload = result
+        error = ''
+        read_at = Date.now()
+        now = read_at
+      }).catch((err) => {
+        if (!active) return
+        error = err.message || 'seat teardown request failed'
+      })
+    }, { refresh_ms: PANEL_REFRESH_MS })
+    return () => { active = false; stop() }
   })
 </script>
 <section class="panel">
   <h2 class={`headline ${panel.tone}`}>{panel.headline}</h2>
   <p class="meta">{panel.window_label}</p>
+  <p class={`meta read-age ${panel.freshness.stale ? 'stale' : 'fresh'}`}>{panel.freshness.label} · {panel.freshness.refresh_label}</p>
   <p class="muted">{panel.note}</p>
   {#if panel.absent}<p class="muted">seat teardown unavailable — {panel.absent}</p>{/if}
   <p class="counts">{panel.totals_label}</p>
@@ -44,4 +52,5 @@
 </section>
 <style>
 .panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.headline, .state { font-weight:600; }.counts { font-weight:600; }.runs { display:grid; gap:.65rem; }.run { border-top:1px solid var(--line); padding-top:.6rem; }.run h3 { margin:.1rem 0 .35rem; }.state { margin:.4rem 0; }.seats { display:flex; flex-wrap:wrap; gap:.45rem; }.chip { border:1px solid currentColor; border-radius:999px; padding:.2rem .5rem; font-size:.9rem; }.proven { color:var(--status-ok); }.failed, .leak { color:var(--status-fail); }.unproven { color:var(--status-running); }.not-measured, .undetermined, .unrecognised { color:var(--muted); }.run.not-measured, .run.undetermined { border-color:var(--muted); }
+.read-age.stale { color:var(--status-fail); font-weight:600; }
 </style>

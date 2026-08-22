@@ -5,6 +5,50 @@ const UNPROVEN_TITLE = 'no evidence was obtainable — a direct DI caller withou
 const ACCEPTED_TITLE = 'typed accept held — residuals were accepted'
 const REFUSED_TITLE = 'typed accept refused — loop failed closed to escalate'
 
+// #442 residue: these three panels read once at mount, so what they show is a
+// fact about their read, not about now. The reading is dated at the shaping hop
+// from a clock the caller injects — never a live Date read in here, or no test
+// could pin the boundary.
+export const PANEL_REFRESH_MS = 3000
+export const PANEL_STALE_AFTER_MS = 30000
+
+export function panelAgeLabel(age_ms) {
+  if (typeof age_ms !== 'number' || !Number.isFinite(age_ms) || age_ms < 0) return null
+  if (age_ms < 60000) return `${Math.round(age_ms / 1000)}s`
+  if (age_ms < 3600000) return `${Math.floor(age_ms / 60000)}m`
+  return `${Math.floor(age_ms / 3600000)}h${Math.floor((age_ms % 3600000) / 60000)}m`
+}
+
+export function readFreshness(read_at = null, now = null, refresh_ms = null) {
+  const refresh = typeof refresh_ms === 'number' && Number.isFinite(refresh_ms) && refresh_ms > 0 ? refresh_ms : null
+  const refresh_label = refresh == null
+    ? 'this panel does not re-read — reload to take a new reading'
+    : `re-reads every ${panelAgeLabel(refresh)}`
+  const dated = typeof read_at === 'number' && Number.isFinite(read_at) && typeof now === 'number' && Number.isFinite(now) && now >= read_at
+  if (!dated) return { read_at: null, age_ms: null, stale: false, dated: false, label: 'read time unavailable — this reading cannot be dated', refresh_label }
+  const age_ms = now - read_at
+  const stale = age_ms > PANEL_STALE_AFTER_MS
+  return {
+    read_at,
+    age_ms,
+    stale,
+    dated: true,
+    label: stale
+      ? `read ${panelAgeLabel(age_ms)} ago — older than the ${panelAgeLabel(PANEL_STALE_AFTER_MS)} staleness floor, so this may no longer be true`
+      : `read ${panelAgeLabel(age_ms)} ago`,
+    refresh_label,
+  }
+}
+
+export function panelReadLoop(read, options = {}) {
+  const refresh_ms = typeof options.refresh_ms === 'number' && Number.isFinite(options.refresh_ms) && options.refresh_ms > 0 ? options.refresh_ms : PANEL_REFRESH_MS
+  const start = typeof options.setInterval === 'function' ? options.setInterval : setInterval
+  const end = typeof options.clearInterval === 'function' ? options.clearInterval : clearInterval
+  read()
+  const timer = start(read, refresh_ms)
+  return () => end(timer)
+}
+
 export function fleetTokens(runs = []) {
   const source = Array.isArray(runs) ? runs : []
   let total = null
@@ -243,7 +287,7 @@ function panelNumber(value) {
   return Number.isFinite(number) ? number.toLocaleString('en-US', { maximumFractionDigits: 6 }) : null
 }
 
-export function cellHealthPanel(payload = {}) {
+export function cellHealthPanel(payload = {}, clock = {}) {
   const absent = payload?.absent ?? null
   const window = payload?.window
   const window_label = window && typeof window === 'object'
@@ -251,6 +295,7 @@ export function cellHealthPanel(payload = {}) {
     : 'window unavailable'
   const view = {
     absent,
+    freshness: readFreshness(clock?.read_at ?? null, clock?.now ?? null, clock?.refresh_ms ?? null),
     silent_unknown: payload?.silent_unknown ?? null,
     window_label,
     note: CELL_HEALTH_NOTE,
@@ -334,7 +379,7 @@ function teardownRunTone(state, seats) {
   return 'proven'
 }
 
-export function teardownPanel(payload = {}) {
+export function teardownPanel(payload = {}, clock = {}) {
   const absent = payload?.absent ?? null
   const measured = payload?.measured === true
   const window = payload?.window
@@ -399,6 +444,7 @@ export function teardownPanel(payload = {}) {
           : 'proven'
   return {
     absent,
+    freshness: readFreshness(clock?.read_at ?? null, clock?.now ?? null, clock?.refresh_ms ?? null),
     measured,
     window_label,
     headline,
@@ -463,7 +509,8 @@ function budgetPanelFields(budget = null) {
   }
 }
 
-export function runSetPanel(payload = {}) {
+export function runSetPanel(payload = {}, clock = {}) {
+  const freshness = readFreshness(clock?.read_at ?? null, clock?.now ?? null, clock?.refresh_ms ?? null)
   const absent = payload?.absent ?? null
   const window = payload?.window
   const window_label = window && typeof window === 'object'
@@ -474,6 +521,7 @@ export function runSetPanel(payload = {}) {
   const unmeasuredNote = unmeasured?.per_run || 'per-run usage is unmeasured — no agent_sessions evidence can distinguish the possible causes'
   if (absent) return {
     absent,
+    freshness,
     window_label,
     rows: [],
     empty: false,
@@ -490,6 +538,7 @@ export function runSetPanel(payload = {}) {
   const coverage = payload?.coverage ?? null
   return {
     absent: null,
+    freshness,
     window_label,
     empty,
     runs_label: runs == null ? '— runs' : `${runs} run${runs === 1 ? '' : 's'}`,

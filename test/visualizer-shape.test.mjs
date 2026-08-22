@@ -10,6 +10,7 @@ import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.j
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
 import { INTAKE_REFUSALS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
+import { emitAdapter } from '../crew/seat-io.mjs'
 
 const require = createRequire(import.meta.url)
 function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
@@ -20,6 +21,18 @@ const end = '2024-01-01T00:00:02.000Z'
 const base = { adw_id: 'x', task_slug: 'task', repo_slug: 'repo', status: 'running', started_at: start, ended_at: null,
   billed_cost_usd: null, billed_input_tokens: null, billed_output_tokens: null, billed_cache_write_tokens: null, billed_cache_read_tokens: null }
 const missingProbe = { missing: ['mode', 'engineer'], latched: false, probes: 1 }
+// The pending floor is a LITERAL here, never Object.keys(run.pending): a loop over
+// the implementation's own output cannot notice that output shrinking (#476 V8).
+// MUTATION V8: derive this set from shapeRun's own output and a removed marker is
+// invisible again.
+const PENDING_FIELDS = ['accept_decisions', 'billed_cache_read_tokens', 'billed_cache_write_tokens', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'engineer', 'gate_checks', 'gate_discrimination', 'gate_generations', 'last_heartbeat_at', 'mode', 'phase_lanes', 'read_tokens', 'reviews', 'tier', 'written_tokens']
+// Deliberately NEWEST-FIRST: the generation sort is load-bearing only when input
+// order and generation order disagree (#476 V9).
+// MUTATION V9: pre-sort this fixture ascending and the sort stops being exercised.
+const GATE_GENERATIONS_NEWEST_FIRST = [
+  { gate_generation: 2, verdict: 'proven', checks_total: 2 },
+  { gate_generation: 1, verdict: 'failed', checks_total: 2 },
+]
 const b52Events = [
   ['agent_start', { role: 'planner', dispatch_id: 'd1' }],
   ['agent_end', { role: 'planner', outcome: 'done', dispatch_id: 'd1' }],
@@ -63,6 +76,7 @@ test('every unmeasured field is null and has a non-empty pending reason', () => 
     assert.ok(run.pending[field].length > 0)
     assert.notEqual(run.pending[field], 0)
   }
+  for (const field of PENDING_FIELDS) assert.ok(field in run.pending, `${field} lost its pending reason`)
   assert.equal(run.metrics.read_tokens, null)
   assert.equal(run.metrics.written_tokens, null)
 })
@@ -105,14 +119,11 @@ test('shapeRun never derives a billed money value', () => {
 
 test('shapeRun keeps gate generations and selects the newest verdict', () => {
   const run = shapeRun(base, [], [], null, {}, Date.parse(end), {
-    gateDiscriminations: [
-      { gate_generation: 1, verdict: 'failed', checks_total: 2 },
-      { gate_generation: 2, verdict: 'proven', checks_total: 2 },
-    ],
+    gateDiscriminations: [...GATE_GENERATIONS_NEWEST_FIRST],
   })
   assert.equal(run.gate_generations.length, 2)
   assert.equal(run.gate_discrimination, 'proven')
-  assert.equal(run.gate_generations[0].gate_generation, 1)
+  assert.deepEqual(run.gate_generations.map((row) => row.gate_generation), [1, 2])
 })
 
 test('shapeRun leaves absent gate measurements null and pending', () => {
@@ -546,10 +557,36 @@ test('final drain is queued behind an in-flight periodic drain', async () => {
   assert.equal(calls, 2)
 })
 
-test('crew emitter tripwire confirms phase linkage and honest unavailable wording', () => {
-  const seatIoSrc = readFileSync(join(process.cwd(), 'crew/seat-io.mjs'), 'utf8')
+test('crew-emitted agent events carry the phase linkage shapeRun folds into lanes', () => {
+  // Was a source grep over crew/seat-io.mjs, which a comment could satisfy and which
+  // a `/s` wildcard let any other phase_id occurrence satisfy (#476 V2). This drives
+  // the real emitter instead and reads the visualizer-side consequence.
+  // MUTATION V2: take the expected triple from the observed output and a null phase
+  // cursor is invisible again.
+  let seq = 0
+  const events = []
+  const emitter = {
+    adwId: 'adw-shape-phase',
+    phaseTransition: () => ({ phase_id: 7 }),
+    emit: (fn) => fn({ recordEvent: (event) => events.push(event) }, () => ++seq),
+  }
+  const adapter = emitAdapter(emitter)
+  adapter({ kind: 'stage', label: 'build:r1' })
+  adapter({ kind: 'assign', id: 'd1', role: 'builder' })
+  const rows = events.map((event, index) => ({ id: index + 1, type: event.type, phase_id: event.phase_id,
+    payload_json: JSON.stringify(event.payload), started_at: null, ended_at: null }))
+  const phases = [{ id: 7, seq: 1, name: 'build', status: 'ok', started_at: start, ended_at: end }]
+  const run = shapeRun(base, phases, rows, null, {}, Date.parse(end))
+  assert.deepEqual({ phases: events.map((event) => event.phase_id), lane: run.phases[0].lane, source: run.phase_lanes },
+                   { phases: [7, 7], lane: laneFor('builder'), source: 'agent' })
+})
+
+test('shape.mjs carries no stale claim that crew agent events lack phase linkage', () => {
+  // Textual on purpose: what it forbids IS a sentence, so there is no behaviour to
+  // drive -- and the comment-shaped-to-match-the-regex trick cannot satisfy a
+  // doesNotMatch, which a comment can only ever break.
+  // MUTATION V2b: widen the forbidden pattern and the stale claim slips back in.
   const shape = readFileSync(join(process.cwd(), 'visualizer/server/shape.mjs'), 'utf8')
-  assert.match(seatIoSrc, /const record = \(type, payload\).*phase_id: phaseId/s)
   assert.doesNotMatch(shape, /crew agent events carry no phase_id/)
 })
 

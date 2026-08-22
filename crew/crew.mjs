@@ -20,6 +20,9 @@
 //                  [--validation-lane <command>]  # the round validation lane;
 //                  # bare --lane is the round validation lane; with --fences it names the fence-register lane
 //                  [--plan-rounds <n>] [--build-rounds <n>] [--review-rounds <n>]
+//                  [--wait-planner <s>] [--wait-tech-lead <s>] [--wait-builder <s>]
+//                  [--wait-reviewer <s>] [--wait-lead <s>]
+//                  # per-role seat wait budgets in seconds; an absent flag = drive.mjs WAITS_S
 //                  # per-run round budgets; an absent flag = drive.mjs LIMITS
 //                  variant names come from crew/drive.mjs's VARIANTS
 //   crew.mjs handoff --task <slug> --brief-file <path> # hand the task to the LEAD
@@ -39,7 +42,7 @@ import { execSync } from 'node:child_process'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
-import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries } from './drive.mjs'
+import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord } from './drive.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
@@ -1383,6 +1386,11 @@ export function runCmd(args, deps = {}) {
   // default (a silently defaulted budget is the ambiguity this flag removes).
   const limits = resolveLimits({ plan_rounds: args['plan-rounds'], build_rounds: args['build-rounds'], review_rounds: args['review-rounds'] })
   const limitsOverlay = limitsCtx(limits)
+  // Same posture, same breath: a malformed seat wait budget refuses before any
+  // state is read, spawned or written. The deadline a seat is judged against is
+  // an orchestrator decision made at dispatch, never one a crew grants itself.
+  const waits = resolveWaits({ planner: args['wait-planner'], 'tech-lead': args['wait-tech-lead'], builder: args['wait-builder'], reviewer: args['wait-reviewer'], lead: args['wait-lead'] })
+  const waitsOverlay = waitsCtx(waits)
   // Same posture, same breath: a malformed validation lane refuses before any
   // state is read, spawned or written.
   const validationLane = resolveValidationLane({ validationLane: args['validation-lane'], lane: args.lane, fences: args.fences })
@@ -1415,6 +1423,10 @@ export function runCmd(args, deps = {}) {
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
   logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
+  // The EFFECTIVE per-role seat wait budget and its source, recorded on every
+  // run: an expiry escalation reads differently against a budget the operator
+  // set than against the default.
+  logLine(journal, { at: new Date().toISOString(), event: 'waits', ...waitsRecord(waits, WAITS_S) })
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
@@ -1466,6 +1478,7 @@ export function runCmd(args, deps = {}) {
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || 'node --test --test-timeout=30000', variant,
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
+    ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
   // Seats are TUI processes and the first assignment must not race their
@@ -1805,7 +1818,7 @@ function parseArgs(argv) {
 
 export const KNOWN_FLAGS = Object.freeze({
   boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin']),
-  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', 'suite', 'keep', 'claude-bin']),
+  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
   status: Object.freeze(['task', 'checkout']),

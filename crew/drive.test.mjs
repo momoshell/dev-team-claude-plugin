@@ -11,11 +11,12 @@ import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { regrantVerdict } from './escalation-policy.mjs'
 
-import { assertSeats } from './crew.mjs'
+import { assertSeats, runCmd } from './crew.mjs'
 import { runChild } from './child.mjs'
 
 import {
-  driveTask, LIMITS, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
+  driveTask, LIMITS, WAITS_S, WAIT_ROLES, WAIT_FLAGS, WAIT_REFUSALS, WAIT_SECONDS_MIN, WAIT_SECONDS_MAX,
+  refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN,
@@ -42,7 +43,7 @@ const CTX = Object.freeze({
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
 function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [] } = {}) {
-  const calls = { assign: [], run: [], runClean: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], files }
+  const calls = { assign: [], run: [], runClean: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], files }
   const counts = {}
   const writeCounts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
@@ -53,7 +54,8 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       calls.assign.push({ role, briefFile, note, n: counts[role] })
       return { id: `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
     },
-    wait(returnPath) {
+    wait(returnPath, timeoutS) {
+      calls.waits.push({ returnPath, timeoutS })
       const env = envelopes[returnPath]
       return typeof env === 'function' ? env() : env ?? null
     },
@@ -129,6 +131,61 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
   return io
 }
 
+// Drive `crew.mjs run` for real without a booted workspace: a throwaway HOME, a
+// throwaway git checkout and a hand-written crew.json. `drive` is stubbed, so
+// the ctx handed to the driver and the journal rows beside it are observable.
+function runCmdFixture(flags = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'crew-waits-run-home-'))
+  const checkoutRoot = mkdtempSync(join(tmpdir(), 'crew-waits-run-checkout-'))
+  const checkout = join(checkoutRoot, 'checkout')
+  const task = 'waits-run'
+  const previousHome = process.env.HOME
+  const previousWrite = process.stdout.write
+  try {
+    mkdirSync(checkout)
+    for (const args of [
+      ['init', '-q'],
+      ['config', 'user.email', 'crew-tests@example.invalid'],
+      ['config', 'user.name', 'crew tests'],
+      ['commit', '-q', '--allow-empty', '-m', 'init'],
+    ]) {
+      const result = spawnSync('git', args, { cwd: checkout, encoding: 'utf8' })
+      assert.equal(result.status, 0, result.stderr || `git ${args.join(' ')} failed`)
+    }
+    process.env.HOME = home
+    const dir = join(home, '.crew', 'checkout', task)
+    const returnsDir = join(dir, 'returns')
+    mkdirSync(join(dir, 'task'), { recursive: true })
+    mkdirSync(returnsDir, { recursive: true })
+    const roles = ['lead', 'planner', 'builder', 'reviewer']
+    const taskReturn = join(returnsDir, 'task.json')
+    writeFileSync(join(dir, 'crew.json'), JSON.stringify({
+      schema_version: 3, task, checkout, roles, task_return: taskReturn,
+      members: Object.fromEntries(roles.map((role) => [role, { transport: 'headless-json' }])),
+    }))
+    writeFileSync(taskReturn, JSON.stringify({ status: 'done' }))
+    const brief = join(home, 'brief.md')
+    writeFileSync(brief, '# wait budget fixture\n')
+    let ctx = null
+    process.stdout.write = () => true
+    try {
+      runCmd({ task, checkout, 'brief-file': brief, keep: true, ...flags }, {
+        drive: (seen) => {
+          ctx = seen
+          return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+        },
+      })
+    } finally { process.stdout.write = previousWrite }
+    const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    return { ctx, rows }
+  } finally {
+    process.stdout.write = previousWrite
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+}
+
 const CTX_REPAIR = Object.freeze({ ...CTX, variant: 'repair', lane: 'lane-cmd', files_in_scope: ['a.mjs', 'a.test.mjs'] })
 const DIRECTED_BRIEF_PATH = `${TD}/directed-brief.md`
 const DIRECTED_BRIEF_TEXT = [
@@ -180,6 +237,102 @@ const checkEnv = (verdict) => ({
 const CTX_TL = Object.freeze({ ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'] })
 const leadEnv = (decision, guidance = 'do X then Y in a.mjs', details = {}) => ({
   status: 'done', role: 'lead', details: { decision, reason: 'because', guidance, ...details },
+})
+
+test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': null } })
+  assert.throws(
+    () => driveTask({ ...CTX, waits: { planner: 42 } }, io),
+    /planner: no valid envelope .* within 42s/,
+  )
+  assert.deepEqual(io.calls.waits[0], { returnPath: 'planner:1', timeoutS: 42 })
+})
+
+test('an absent wait budget resolves to the recorded WAITS_S value', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': null } })
+  assert.throws(
+    () => driveTask(CTX, io),
+    /planner: no valid envelope .* within 1800s/,
+  )
+  assert.equal(io.calls.waits[0].timeoutS, WAITS_S.planner)
+})
+
+test('a malformed wait budget refuses at the boundary instead of defaulting', () => {
+  for (const raw of [0, '0', -1, '2.5', 'abc', '1e3', 21601, true, {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+    assert.throws(
+      () => resolveWaits({ planner: raw }),
+      (err) => err.reason === 'invalid-wait-planner',
+    )
+  }
+  assert.throws(() => resolveWaits(true), (err) => err.reason === WAIT_REFUSALS[0])
+  assert.throws(() => resolveWaits([]), (err) => err.reason === WAIT_REFUSALS[0])
+  assert.deepEqual(resolveWaits({}), Object.fromEntries(WAIT_ROLES.map((role) => [role, null])))
+  assert.equal(resolveWaits({ planner: '   ' }).planner, null)
+})
+
+test('the wait flag, refusal and record surfaces are derived from WAITS_S', () => {
+  assert.deepEqual(WAIT_ROLES, Object.keys(WAITS_S))
+  assert.deepEqual(WAIT_FLAGS, ['wait-planner', 'wait-tech-lead', 'wait-builder', 'wait-reviewer', 'wait-lead'])
+  assert.deepEqual(WAIT_REFUSALS, ['invalid-wait-planner', 'invalid-wait-tech-lead', 'invalid-wait-builder', 'invalid-wait-reviewer', 'invalid-wait-lead'])
+  assert.throws(() => refuseWait('nope', 'x'), /unknown wait refusal reason/)
+  assert.equal(WAIT_SECONDS_MIN, 1)
+  assert.equal(WAIT_SECONDS_MAX, 21600)
+  assert.equal(waitsCtx(resolveWaits({})), null)
+  assert.deepEqual(waitsCtx(resolveWaits({ reviewer: '600' })), { reviewer: 600 })
+  assert.deepEqual(waitsRecord(resolveWaits({ planner: '2400' }), WAITS_S), {
+    planner: 2400, 'tech-lead': 1500, builder: 2400, reviewer: 1800, lead: 900,
+    source: { planner: 'flag', 'tech-lead': 'default', builder: 'default', reviewer: 'default', lead: 'default' },
+  })
+})
+
+test('run refuses an invalid wait budget before reading crew state', () => {
+  const home = mkdtempSync(join(tmpdir(), 'crew-waits-refusal-home-'))
+  const previousHome = process.env.HOME
+  let drove = 0
+  process.env.HOME = home
+  try {
+    for (const role of ['planner', 'tech-lead', 'builder', 'reviewer', 'lead']) {
+      const flag = `wait-${role}`
+      assert.throws(
+        () => runCmd({ task: 'invalid-wait-run', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), [flag]: '2.5' }, { drive: () => { drove += 1 } }),
+        (err) => err.reason === `invalid-wait-${role}`,
+      )
+    }
+    assert.equal(drove, 0)
+    assert.equal(existsSync(join(home, '.crew')), false)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome
+    rmSync(home, { recursive: true, force: true })
+  }
+})
+
+test('run plumbs flagged wait budgets to the driver and records defaults when absent', () => {
+  const flagged = runCmdFixture({ 'wait-planner': '2700', 'wait-lead': '1200' })
+  assert.deepEqual(flagged.ctx.waits, { planner: 2700, lead: 1200 })
+  const flaggedRow = flagged.rows.find((row) => row.event === 'waits')
+  assert.ok(flaggedRow)
+  assert.equal(flaggedRow.planner, 2700)
+  assert.equal(flaggedRow.lead, 1200)
+  assert.deepEqual(flaggedRow.source, {
+    planner: 'flag', 'tech-lead': 'default', builder: 'default', reviewer: 'default', lead: 'flag',
+  })
+
+  const absent = runCmdFixture()
+  assert.equal(Object.hasOwn(absent.ctx, 'waits'), false)
+  const absentRow = absent.rows.find((row) => row.event === 'waits')
+  assert.ok(absentRow)
+  assert.deepEqual(absentRow.source, {
+    planner: 'default', 'tech-lead': 'default', builder: 'default', reviewer: 'default', lead: 'default',
+  })
+})
+
+test('crew CLI usage documents the per-role seat wait budget flags', () => {
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.match(source, /--wait-planner/)
+  assert.match(source, /--wait-tech-lead/)
+  assert.match(source, /--wait-builder/)
+  assert.match(source, /--wait-reviewer/)
+  assert.match(source, /--wait-lead/)
 })
 
 test('parseQuestions normalizes survivors, reports malformed entries, and is total', () => {

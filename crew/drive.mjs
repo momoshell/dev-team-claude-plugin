@@ -29,9 +29,94 @@ export const LIMITS = Object.freeze({
   gate_repairs: 1, // the gate's author may repair it at most once per task
 })
 
+// --- the per-role seat wait budget ---------------------------------------------
+// The measured bases for these numbers, kept as the answer to "why these values"
+// (#445). b106's complete envelope landed 92 SECONDS after its deadline and the
+// run escalated anyway. On 2026-08-22 a judge-tier planner used 1459s of its
+// 1800s planner budget, clearing by 341s — 19% headroom on the tier whose
+// planning share is ~94% of a run. --plan-rounds buys more ROUNDS, never more
+// time per round, so it cannot help a planner that needs one long round; and an
+// expiry writes a cell_failures row the breaker counts against the
+// provider/model cell (#472), so a budget too small for a legitimately slow
+// round is otherwise recorded as a fact about the model.
+// Measured seconds: 1459 / 1800.
 export const WAITS_S = Object.freeze({
   planner: 1800, 'tech-lead': 1500, builder: 2400, reviewer: 1800, lead: 900,
 })
+
+// The dispatch flag that makes the table above reachable per run, in the style
+// of crew/limits.mjs's round budgets: validate at the boundary, refuse rather
+// than silently default, and record the EFFECTIVE value on every run. Hosted
+// HERE rather than in crew/limits.mjs so the role set is DERIVED from WAITS_S —
+// a role added to the table gets its flag, its refusal reason and its record
+// slot with no second list to keep in sync.
+export const WAIT_ROLES = Object.freeze(Object.keys(WAITS_S))
+export const WAIT_FLAGS = Object.freeze(WAIT_ROLES.map((role) => `wait-${role}`))
+export const WAIT_REFUSALS = Object.freeze(WAIT_ROLES.map((role) => `invalid-wait-${role}`))
+// A floor and a ceiling, not policy: they turn a typo (`--wait-planner 0`,
+// `--wait-planner 999999`) into a refusal instead of a run that ends instantly
+// or one that cannot end. Raising a DEFAULT is not what this flag is for.
+export const WAIT_SECONDS_MIN = 1
+export const WAIT_SECONDS_MAX = 21600
+
+export function refuseWait(reason, message) {
+  if (!WAIT_REFUSALS.includes(reason)) throw new Error(`unknown wait refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+// Absent (no flag) -> null, which is what keeps an unflagged run identical to
+// today. A blank string reads as absent, exactly as the round budgets do
+// (crew/limits.mjs:31). Anything else present must be a whole number of seconds
+// in [WAIT_SECONDS_MIN, WAIT_SECONDS_MAX]; anything else REFUSES with a
+// closed-set reason rather than silently defaulting.
+function resolveWait(raw, role) {
+  if (raw === undefined || raw === null) return null
+  if (typeof raw === 'string' && raw.trim() === '') return null
+  const badWait = () => refuseWait(
+    `invalid-wait-${role}`,
+    `--wait-${role} must be a whole number of seconds between ${WAIT_SECONDS_MIN} and ${WAIT_SECONDS_MAX}, got ${JSON.stringify(raw)}`,
+  )
+  if (typeof raw !== 'number' && typeof raw !== 'string') throw badWait()
+  const text = typeof raw === 'number' ? String(raw) : raw.trim()
+  if (!/^[0-9]+$/.test(text)) throw badWait()
+  const value = Number(text)
+  if (!Number.isInteger(value) || value < WAIT_SECONDS_MIN || value > WAIT_SECONDS_MAX) throw badWait()
+  return value
+}
+
+// raw: { <role>: <seconds> } — already read from argv. Validation order is
+// WAIT_ROLES order, so two bad flags always refuse on the same one. A raw that
+// is not an object at all is itself a malformed budget.
+export function resolveWaits(raw = {}) {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw refuseWait(WAIT_REFUSALS[0], `wait budgets must be an object of role -> seconds, got ${JSON.stringify(raw)}`)
+  }
+  const out = {}
+  for (const role of WAIT_ROLES) out[role] = resolveWait(raw[role], role)
+  return out
+}
+
+// The ctx overlay: only the roles actually flagged, or null when none were — an
+// unflagged run must leave ctx without a `waits` key at all.
+export function waitsCtx(resolved) {
+  const out = {}
+  for (const role of WAIT_ROLES) if (resolved[role] !== null) out[role] = resolved[role]
+  return Object.keys(out).length === 0 ? null : out
+}
+
+// The journal record. The EFFECTIVE per-role budget is recorded on every run,
+// flagged or not: an expiry at 1800s means one thing against a default and
+// another against a budget the operator chose, and a reader cannot tell the two
+// apart from an absent line. `defaults` is WAITS_S, passed in so the record
+// helper stays a pure function of what it is handed.
+export function waitsRecord(resolved, defaults) {
+  const record = { source: {} }
+  for (const role of WAIT_ROLES) {
+    record[role] = resolved[role] === null ? defaults[role] : resolved[role]
+    record.source[role] = resolved[role] === null ? 'default' : 'flag'
+  }
+  return record
+}
 
 // The decision enum the lead may return. The driver offers a SUBSET as
 // options in each consult; any answer outside the offered set is treated as
@@ -1359,7 +1444,7 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 //        laneFence?: [{lane, files:[..]}] — OTHER lanes' write surfaces; absent = unfenced,
 //        protectedPathsBasis: <why those paths are in force>,
 //        journal: <real journal.jsonl path (lives in the CREW dir)>,
-//        limits?, waits? }
+//        limits?, waits?: {<role>: <seconds>} — the per-role seat wait budget overlay (resolveWaits/waitsCtx above) }
 // io:  { assign({role, briefFile, note}) -> {id, returnPath},
 //        wait(returnPath, timeoutS) -> envelope|null,
 //        writeFile(path, content) -> void, readFile(path) -> string|null,

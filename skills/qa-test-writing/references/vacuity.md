@@ -12,19 +12,29 @@ on purpose; "several tests are weak" is not a finding.
 
 You cannot see vacuity by reading. Neutralise the behaviour and re-run.
 
-Do it in a **disposable archive, never the working checkout**:
+Do it in a **disposable scratch tree, never the working checkout**:
 
 ```bash
-mkdir -p /tmp/vac && cd /tmp/vac
-git -C <repo> archive HEAD | tar -x
-ln -s <repo>/node_modules node_modules   # only if the suite needs it
+git worktree add --detach /tmp/vac HEAD          # see the warning below
+cd /tmp/vac
 FORCE_COLOR=0 node --test <the affected test file>   # confirm GREEN first
 # ...apply the mutation...
 FORCE_COLOR=0 node --test <the affected test file>   # did it go red?
+cd - && git worktree remove /tmp/vac              # it is a real worktree: remove it
 ```
 
+**Use a detached worktree, not `git archive`.** Measured over seven scratch
+strategies (`b150-permprobe`, 2026-08-22): `git archive HEAD | tar -x` produces
+a tree that is **not a git repo**, so repo identity resolves to the scratch
+directory's name and the profile tests fail — **2051 pass / 33 fail** on an
+unmutated tree. Every other strategy leaves at least one failure too. Only
+`git worktree add --detach` reproduces the real baseline, **2084/0**, and it is
+also the fastest to create (52 ms, 7.11 MiB). A detached worktree shares the
+object store and **must be removed**, unlike an archive you can `rm -rf`.
+
 Confirm green **before** mutating. A scratch that was already red proves
-nothing, and this is the step people skip.
+nothing, and this is the step people skip — it is also what catches a bad
+scratch strategy before it wastes an afternoon.
 
 Two independent scratches beat one: the b131 sweep ran every candidate twice,
 which is what makes its ratio quotable rather than anecdotal.

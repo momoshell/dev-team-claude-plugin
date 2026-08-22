@@ -31,19 +31,39 @@ green run reads as red (#240).
   otherwise — check before concluding the thing you grepped for is absent.
 - A gate that shells out to the suite strips ANSI before parsing.
 
-## Scratch archives
+## Scratch trees
 
 To test against a mutated tree without touching the checkout:
 
 ```bash
-mkdir -p /tmp/scratch && cd /tmp/scratch
-git -C <repo> archive HEAD | tar -x
-ln -s <repo>/node_modules node_modules    # scratch only — never a worktree
+git worktree add --detach /tmp/scratch HEAD
+cd /tmp/scratch
 FORCE_COLOR=0 node --test <file>          # confirm GREEN before mutating
+# ...work...
+cd - && git worktree remove /tmp/scratch
 ```
 
-`git archive HEAD` gives a committed tree, so the scratch cannot contain
-uncommitted state you forgot about.
+**Only a detached worktree reproduces the real baseline.** Seven strategies were
+measured on this repo (`b150-permprobe`, 2026-08-22), each created and then run
+unmutated:
+
+| strategy | create | disk | git repo? | suite |
+|---|---|---|---|---|
+| `git worktree add --detach` | **52 ms** | 7.11 MiB | yes | **2084 / 0** |
+| `git archive HEAD \| tar -x` | 59 ms | 7.11 MiB | **no** | 2051 / **33** |
+| `git clone --local --shared` | 59 ms | 7.25 MiB | yes | 2083 / 1 |
+| `cp -R` (incl. `.git`) | 105 ms | 7.11 MiB | yes | 2083 / 1 |
+| archive + `git init` + commit | 249 ms | 10.28 MiB | yes | 2083 / 1 |
+| `git clone --local --no-hardlinks` | 215 ms | 17.71 MiB | yes | 2083 / 1 |
+| `git clone --local` | 285 ms | 17.71 MiB | yes | 2083 / 1 |
+
+The archive tree is not a git repo, so repo identity resolves to the scratch
+directory's own name and every profile-keyed test fails. The clone and copy
+strategies each leave one failure. The fastest strategy is also the only clean
+one.
+
+A detached worktree **shares the object store and must be removed** with
+`git worktree remove` — you cannot simply `rm -rf` it and forget.
 
 ## Timeouts
 

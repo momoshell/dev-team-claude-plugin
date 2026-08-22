@@ -96,6 +96,7 @@ function finishCell(cell, threshold) {
     effort: cell.effort,
     failures: cell.failures,
     run_less: cell.run_less,
+    host_attributed: cell.host_attributed,
     counted,
     by_kind,
     verdict: counted >= threshold ? 'open' : counted > 0 ? 'degraded' : 'closed',
@@ -164,7 +165,7 @@ export function cellHealth({
       cell = {
         roles: [], provider: seat.provider, model_id: seat.id,
         agent: seat.agent, effort: seat.effort,
-        failures: 0, run_less: 0, countedRaw: 0, byKind: {},
+        failures: 0, run_less: 0, host_attributed: 0, countedRaw: 0, byKind: {},
       }
       seated.set(key, cell)
     }
@@ -177,9 +178,13 @@ export function cellHealth({
     if (!cell) continue
     const failures = numberValue(row.failures)
     const runLess = numberValue(row.run_less)
-    const counted = failures - runLess
+    const hostAttributed = numberValue(row.host_attributed)
+    // Run-less rows and host-attributed rows are disjoint by the aggregate's
+    // own AND adw_id IS NOT NULL, so subtracting both never double-counts a row.
+    const counted = failures - runLess - hostAttributed
     cell.failures += failures
     cell.run_less += runLess
+    cell.host_attributed += hostAttributed
     cell.countedRaw += counted
     const kind = String(row.kind)
     cell.byKind[kind] = (cell.byKind[kind] || 0) + counted
@@ -225,7 +230,7 @@ export function assertCellsClosed(record) {
   const details = openCells.map((cell) =>
     `${cell.provider}/${cell.model_id} agent=${cell.agent} effort=${cell.effort} roles=${cell.roles.join(',')} `
     + `counted=${cell.counted} threshold=${record.threshold} window_ms=${record.window_ms} (${windowLabel(record.window_ms)}) `
-    + `since=${record.since} by_kind=${JSON.stringify(cell.by_kind)} run_less=${cell.run_less} (run-less rows are excluded from the count)`
+    + `since=${record.since} by_kind=${JSON.stringify(cell.by_kind)} run_less=${cell.run_less} (run-less rows are excluded from the count) host_attributed=${cell.host_attributed} (host-attributed rows are excluded from the count)`
   ).join('; ')
   throw breakerError(
     'breaker-open',

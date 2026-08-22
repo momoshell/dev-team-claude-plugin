@@ -126,6 +126,28 @@ test('cellHealth excludes run-less failures from opening while reporting them', 
   assert.equal(mixed.cells[0].counted, 2)
 })
 
+test('cellHealth excludes host-attributed failures while keeping genuine failures open', () => {
+  const onlyHost = health([row({ failures: 3, host_attributed: 3 })], { threshold: 3 }).record
+  assert.equal(onlyHost.verdict, 'closed')
+  assert.equal(onlyHost.cells[0].host_attributed, 3)
+  assert.equal(onlyHost.cells[0].counted, 0)
+
+  const genuine = health([row({ failures: 3, host_attributed: 0 })], { threshold: 3 }).record
+  assert.equal(genuine.verdict, 'open')
+  assert.equal(genuine.cells[0].counted, 3)
+
+  const mixed = health([row({ failures: 4, host_attributed: 1 })], { threshold: 3 }).record
+  assert.equal(mixed.verdict, 'open')
+  assert.equal(mixed.cells[0].counted, 3)
+  let refusal
+  assert.doesNotThrow(() => assertCellsClosed(onlyHost))
+  assert.throws(() => assertCellsClosed(mixed), (error) => {
+    refusal = error
+    return error.code === 'breaker-open'
+  })
+  assert.match(refusal.message, /host_attributed=1/)
+})
+
 test('cellHealth groups rows by provider/model/agent/effort, not role', () => {
   const seats = {
     builder: { ...CELL }, reviewer: { ...CELL },
@@ -288,6 +310,7 @@ test('cellHealth survives a null row and a non-array cellFailures result', () =>
   })
   assert.equal(withUndefinedRows.verdict, 'closed')
   assert.equal(withUndefinedRows.cells[0].counted, 0)
+  assert.equal(withUndefinedRows.cells[0].host_attributed, 0)
 })
 
 // kills: counted-floor-removed — leaves a negative counted value when run_less exceeds failures.
@@ -296,9 +319,15 @@ test('cellHealth floors a negative count and ignores a non-numeric failure count
   const negative = health([row({ failures: 1, run_less: 3 })]).record
   assert.equal(negative.cells[0].counted, 0)
 
-  const nonNumeric = health([row({ failures: 'lots' })]).record
+  const nonNumeric = health([row({ failures: 'lots', host_attributed: 'unknown' })]).record
   assert.equal(nonNumeric.cells[0].failures, 0)
+  assert.equal(nonNumeric.cells[0].host_attributed, 0)
   assert.equal(nonNumeric.cells[0].counted, 0)
+
+  const olderAggregate = health([row({ failures: 2, host_attributed: 'not-a-number' })], { threshold: 2 }).record
+  assert.equal(olderAggregate.cells[0].host_attributed, 0)
+  assert.equal(olderAggregate.cells[0].counted, 2)
+  assert.equal(olderAggregate.verdict, 'open')
 })
 
 // kills: cellkey-no-separator — concatenates cell identity fields without a separator.

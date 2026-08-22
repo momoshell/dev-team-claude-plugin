@@ -3576,15 +3576,18 @@ test('emitAdapter maps cell-failure events to the booted crew cell, with a null-
   assert.deepEqual(calls[0], {
     adw_id: 'adw-cell', task_slug: 'measure', phase_id: 9, dispatch_id: 'd4', role: 'builder',
     agent: 'claude', provider: 'anthropic', model_id: 'sonnet-id', model: 'sonnet', effort: 'high', transport: 'pane',
-    kind: 'seat-died', stage: 'seat-died', detail: 'pane gone',
+    kind: 'seat-died', stage: 'seat-died', detail: 'pane gone', attribution: null,
   })
 
   emitAdapter(emitter)({ kind: 'cell-failure', role: 'reviewer', failure: 'timeout' })
   assert.deepEqual(calls[1], {
     adw_id: 'adw-cell', task_slug: null, phase_id: null, dispatch_id: null, role: 'reviewer',
     agent: null, provider: null, model_id: null, model: null, effort: null, transport: null,
-    kind: 'timeout', stage: null, detail: null,
+    kind: 'timeout', stage: null, detail: null, attribution: null,
   })
+
+  emitAdapter(emitter)({ kind: 'cell-failure', role: 'builder', id: 'd5', failure: 'timeout', attribution: 'host' })
+  assert.equal(calls[2].attribution, 'host')
 })
 
 test('emitAdapter maps modifier attempts with transport and from/to cells, including null crew', () => {

@@ -28,7 +28,7 @@ import {
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
 } from '../scripts/factory/ledger.mjs'
-import { MODIFIER_OUTCOMES, VARIANT_NAMES } from '../crew/drive.mjs'
+import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES } from '../crew/drive.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
 // openRun is the only production writer of sessions.tier and the compiler
 // proposal columns: it reads the boot record/brief and forwards them. The
@@ -787,8 +787,19 @@ test('modifier-attempts CLI prints the schema-1 readout and refuses bad argument
   assert.equal(ok.status, 0, ok.stderr)
   const payload = JSON.parse(ok.stdout.trim())
   assert.deepEqual({ schema: payload.schema, since: payload.since, until: payload.until }, { schema: 1, since: null, until: null })
-  assert.deepEqual(payload.modifiers, [...MODIFIER_KINDS])
-  assert.deepEqual(payload.outcomes, [...MODIFIER_ATTEMPT_OUTCOMES])
+  // The readout is BUILT from MODIFIER_KINDS/MODIFIER_ATTEMPT_OUTCOMES, so
+  // comparing the payload to those exports is a mirror against itself and sees
+  // no drift. Both expected sides come from somewhere ledger.mjs cannot edit:
+  // the ratified #45 literal below (two of whose four kinds are crew/drive.mjs
+  // constants) and drive.mjs's MODIFIER_OUTCOMES.
+  // MUTATION C2: point the expected side back at [...MODIFIER_KINDS] and
+  // deleting 'sensitivity-floor' from ledger.mjs goes unseen again.
+  const ratifiedKinds = [FAILURE_UPGRADE, SENSITIVITY_FLOOR, 'vendor-diversity', 'budget-ceiling']
+  assert.deepEqual(
+    { payload: payload.modifiers, exported: [...MODIFIER_KINDS] },
+    { payload: ratifiedKinds, exported: ratifiedKinds },
+  )
+  assert.deepEqual(payload.outcomes, [...MODIFIER_OUTCOMES])
   assert.equal(payload.rows[0].attempts, 1)
   const positional = run(['modifier-attempts', 'oops'], { DEVTEAM_LEDGER_DB: dbPath })
   assert.equal(positional.status, 2)
@@ -2623,7 +2634,7 @@ test('taskReadout marks an unrecorded request absent and drops the marker after 
   assert.equal(after.absent.request, undefined)
 })
 
-test('taskReadout marks context occupancy absent when no agent row measures context_tokens', { skip: SKIP }, () => {
+test('taskReadout marks context occupancy absent only while no agent row measures context_tokens', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'occupancy-absent', repo_slug: 'r', task_slug: 't' })
   ledger.startAgentSession({
@@ -2632,6 +2643,15 @@ test('taskReadout marks context occupancy absent when no agent row measures cont
   })
   const readout = ledger.taskReadout('occupancy-absent')
   assert.ok(readout.absent.context_occupancy)
+  // The absence half above is satisfied by occupancy hardcoded absent, because
+  // the FIXTURE never gave the readout a measured row to see. A second run
+  // whose agent row does measure context_tokens is what makes the mark's
+  // ARRIVAL and DEPARTURE both observable.
+  // MUTATION C1: replace ledger.mjs's measuredContextOccupancy expression with
+  // `false` and the assertion below reddens.
+  ledger.startSession({ adw_id: 'occupancy-measured', repo_slug: 'r', task_slug: 't' })
+  seedTaskAgentSession(ledger, 'occupancy-measured', 'occupancy', [1, 2, 3, 4])
+  assert.equal(ledger.taskReadout('occupancy-measured').absent.context_occupancy, undefined)
 })
 
 test('a recordSessionRequest JSONL line replays through the closed writer set', { skip: SKIP }, () => {

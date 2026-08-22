@@ -792,8 +792,35 @@ test('dispatch rows carry the body digest on claimed and settled steps, and chan
 })
 
 test('adjudicated dispatch verdicts are a strict subset of dispatch outcomes', () => {
+  // A subset property survives ANY deletion, so it cannot see a verdict being
+  // dropped; the set itself is stated here, where ledger.mjs cannot edit it.
+  // MUTATION C3: widen the expected side back to [...INTAKE_DISPATCH_VERDICTS]
+  // and deleting 'unreadable' from ledger.mjs goes unseen again.
+  assert.deepEqual([...INTAKE_DISPATCH_VERDICTS], ['done', 'escalation', 'converge', 'unreadable'])
   assert.equal(INTAKE_DISPATCH_VERDICTS.every((outcome) => INTAKE_DISPATCH_OUTCOMES.includes(outcome)), true)
   for (const excluded of ['claimed', 'promoted', 'refused']) assert.equal(INTAKE_DISPATCH_VERDICTS.includes(excluded), false)
+})
+
+test('an unreadable dispatch stays in the adjudicated verdict history', () => {
+  const path = dbPath()
+  const ledger = openLedger({ dbPath: path, stderr: { write: () => {} } })
+  const issue = { board_owner: 'example-owner', board_project: 7, issue: 91 }
+  ledger.recordIntakeDispatch({
+    ...issue, outcome: 'claimed', task_slug: 'intake-91', created_at: '2026-01-01T00:00:00.000Z',
+  })
+  ledger.recordIntakeDispatch({
+    ...issue, outcome: 'unreadable', task_slug: 'intake-91', created_at: '2026-01-02T00:00:00.000Z',
+  })
+  // The harm the constant prevents, stated where it lands: issueDispatchVerdicts
+  // is the breaker's evidence, and an unreadable dispatch that is not a verdict
+  // disappears from it while the claimed STEP stays excluded.
+  // MUTATION C4: delete 'unreadable' from INTAKE_DISPATCH_VERDICTS in
+  // ledger.mjs and this history comes back empty.
+  assert.deepEqual(
+    ledger.issueDispatchVerdicts({ ...issue, limit: 5 }).map(({ outcome }) => outcome),
+    ['unreadable'],
+  )
+  ledger.close()
 })
 
 test('intake source never names updatedAt as rescope evidence', () => {

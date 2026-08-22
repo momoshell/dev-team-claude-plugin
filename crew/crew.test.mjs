@@ -5,11 +5,11 @@ import { execSync, spawn, spawnSync } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
+import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
@@ -4290,4 +4290,186 @@ test('advisor boot and manifest contracts stay closed and fail closed', () => {
   assert.deepEqual(manifest.tripwires, ['crew/crew.mjs'])
   assert.throws(() => assertAdvisorManifest({ granted: ['builder'], manifest: null, written: false }), /manifest/)
   assert.doesNotThrow(() => assertAdvisorManifest({ granted: [], manifest: null, written: false }))
+})
+
+test('shadowCandidates deduplicates roster cells and retains their tiers', () => {
+  const candidate = { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' }
+  const found = shadowCandidates({ tiers: {
+    mechanical: { builder: candidate, lead: null },
+    build: { builder: { ...candidate } },
+    judge: { builder: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh' } },
+  } }, 'builder')
+  assert.deepEqual(found, [
+    { ...candidate, tiers: ['mechanical', 'build'] },
+    { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh', tiers: ['judge'] },
+  ])
+  assert.deepEqual(shadowCandidates(null, 'builder'), [])
+})
+
+test('shadow exclusion and outcome vocabularies are frozen and closed', () => {
+  assert.ok(Object.isFrozen(SHADOW_EXCLUSIONS))
+  assert.ok(Object.isFrozen(SHADOW_OUTCOMES))
+  assert.throws(() => shadowExclusion('invented'))
+  assert.deepEqual(shadowExclusion('band-unknown', 'detail'), { reason: 'band-unknown', detail: 'detail' })
+})
+
+test('shadowPick ranks measured non-thin rates and leaves thin samples behind', () => {
+  const localRoster = { schema_version: 1, tiers: {
+    build: {
+      planner: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'medium' },
+      reviewer: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+    },
+    judge: { reviewer: { provider: 'openai', id: 'gpt-5.6-terra', agent: 'pi', effort: 'max' } },
+  } }
+  const record = shadowPick({
+    roster: localRoster, tier: 'build', seats: { planner: localRoster.tiers.build.planner, reviewer: localRoster.tiers.build.reviewer },
+    sources: { planner: { model: 'roster' }, reviewer: { model: 'roster' } }, ladder: loadLadder(), breaker: null,
+    reviewRows: [
+      { provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', role: 'reviewer', reviews: 20, first_round_reviews: 20, first_round_passes: 4 },
+      { provider: 'openai', model_id: 'gpt-5.6-terra', agent: 'pi', effort: 'max', role: 'reviewer', reviews: 3, first_round_reviews: 3, first_round_passes: 3 },
+    ],
+  })
+  const reviewer = record.seats.reviewer
+  const terra = reviewer.candidates.find((candidate) => candidate.id === 'gpt-5.6-terra')
+  assert.equal(terra.thin, true)
+  assert.deepEqual(reviewer.picked, { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' })
+})
+
+test('shadowPick stands without evidence and abstains when the seated cell is ineligible', () => {
+  const localRoster = { tiers: {
+    build: {
+      builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' },
+    },
+    judge: {
+      builder: { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh' },
+    },
+  } }
+  const base = {
+    roster: localRoster, tier: 'build', seats: { builder: localRoster.tiers.build.builder },
+    sources: { builder: { model: 'roster' } }, ladder: loadLadder(), breaker: null, reviewRows: [],
+  }
+  assert.equal(shadowPick(base).seats.builder.outcome, 'stands')
+  const abstained = shadowPick({ ...base, capabilityFit: (_role, candidate) => ({ ok: candidate.id !== 'gpt-5.6-luna' }) })
+  assert.equal(abstained.seats.builder.outcome, 'abstained')
+  assert.equal(abstained.seats.builder.picked, null)
+})
+
+test('shadowPick records a floor-empty no-candidate result without a fallback', () => {
+  const localRoster = { tiers: {
+    build: { reviewer: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+  } }
+  const baseLadder = loadLadder()
+  const ladder = { ...baseLadder, floors: { ...baseLadder.floors, build: 'frontier' } }
+  const entry = shadowPick({
+    roster: localRoster, tier: 'build', seats: localRoster.tiers.build, sources: { reviewer: { model: 'roster' } },
+    ladder, breaker: null,
+  }).seats.reviewer
+  assert.equal(entry.outcome, 'no-candidate')
+  assert.equal(entry.picked, null)
+  assert.match(entry.empty_reason, /band-below-floor/)
+})
+
+test('shadowPick applies the ratified reviewer vendor partner for build and judge', () => {
+  const ladder = loadLadder()
+  const build = resolveTier(roster, 'build', {})
+  const judge = resolveTier(roster, 'judge', {})
+  const buildEntry = shadowPick({ roster, tier: 'build', seats: build.seats, sources: build.sources, ladder, breaker: null }).seats.reviewer
+  const judgeEntry = shadowPick({ roster, tier: 'judge', seats: judge.seats, sources: judge.sources, ladder, breaker: null }).seats.reviewer
+  const buildOpus = buildEntry.candidates.find((candidate) => candidate.provider === 'anthropic')
+  const judgeTerra = judgeEntry.candidates.find((candidate) => candidate.provider === 'openai' && candidate.id === 'gpt-5.6-terra')
+  assert.equal(buildOpus.excluded_by.reason, 'vendor-collision')
+  assert.equal(judgeTerra.excluded_by.reason, 'vendor-collision')
+})
+
+test('shadowPick excludes open breaker cells and marks absent breaker health as unmeasured', () => {
+  const localRoster = { tiers: {
+    build: { builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+  } }
+  const args = {
+    roster: localRoster, tier: 'build', seats: localRoster.tiers.build, sources: { builder: { model: 'roster' } },
+    ladder: loadLadder(), reviewRows: [],
+  }
+  const open = shadowPick({ ...args, breaker: { cells: [{ provider: 'openai', model_id: 'gpt-5.6-luna', agent: 'pi', effort: 'max', verdict: 'open' }] } })
+  assert.equal(open.seats.builder.candidates[0].excluded_by.reason, 'breaker-open')
+  const absent = shadowPick({ ...args, breaker: null })
+  assert.equal(absent.absent.breaker, SHADOW_ABSENT.breaker)
+  assert.equal(absent.seats.builder.candidates[0].excluded_by, null)
+})
+
+test('shadowPick keeps the ledger-owned pane absence beside null cost', () => {
+  const localRoster = { tiers: {
+    build: { builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+  } }
+  const record = shadowPick({
+    roster: localRoster, tier: 'build', seats: localRoster.tiers.build, sources: { builder: { model: 'roster' } },
+    ladder: loadLadder(), breaker: null,
+  })
+  const candidate = record.seats.builder.candidates[0]
+  assert.equal(record.absent.cost, USAGE_ABSENT_CAUSES.pane)
+  assert.equal(candidate.cost_usd, null)
+  assert.equal(candidate.absent.cost_usd, USAGE_ABSENT_CAUSES.pane)
+})
+
+test('shadowPick does not consult ladder or facts for an explicit model override', () => {
+  let consulted = 0
+  const record = shadowPick({
+    roster: {}, tier: 'build', seats: { builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+    sources: { builder: { model: 'override' } }, ladder: null,
+    capabilityFit: () => { consulted += 1; throw new Error('capability consulted') }, breaker: null,
+  })
+  assert.equal(consulted, 0)
+  assert.equal(record.seats.builder.outcome, 'not-consulted')
+  assert.deepEqual(record.seats.builder.seated, { provider: null, id: null, agent: 'pi', effort: 'max' })
+})
+
+test('shadowPickBoot reports picker errors and unreadable reviews without throwing', async () => {
+  const localRoster = { tiers: {
+    build: { builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+  } }
+  const seats = localRoster.tiers.build
+  const sources = { builder: { model: 'roster' } }
+  const error = await shadowPickBoot({ roster: localRoster, tier: 'build', seats, sources, adapters: { builder: { transport: 'headless-json' } }, registry: loadCapabilities(), ladder: loadLadder(), env: {}, dbPath: join(tmpdir(), 'shadow-no-ledger.db'), existsSync: () => false, pick: () => { throw new Error('forced picker error') } })
+  assert.equal(error.schema_version, 1)
+  assert.match(error.error, /forced picker error/)
+
+  const dbPath = join(mkdtempSync(join(tmpdir(), 'shadow-unreadable-')), 'ledger.db')
+  writeFileSync(dbPath, 'present')
+  try {
+    const unreadable = await shadowPickBoot({ roster: localRoster, tier: 'build', seats, sources, adapters: { builder: { transport: 'headless-json' } }, registry: loadCapabilities(), ladder: loadLadder(), env: {}, dbPath, openLedger: () => { throw new Error('unreadable') } })
+    assert.equal(unreadable.absent.reviews, SHADOW_ABSENT.reviews)
+  } finally { rmSync(dirname(dbPath), { recursive: true, force: true }) }
+})
+
+test('shadowPickBoot never creates a missing ledger database', async () => {
+  const parent = mkdtempSync(join(tmpdir(), 'shadow-no-create-'))
+  const dbPath = join(parent, 'ledger.db')
+  const localRoster = { tiers: {
+    build: { builder: { provider: 'openai', id: 'gpt-5.6-luna', agent: 'pi', effort: 'max' } },
+  } }
+  try {
+    await shadowPickBoot({
+      roster: localRoster, tier: 'build', seats: localRoster.tiers.build, sources: { builder: { model: 'roster' } },
+      adapters: { builder: { transport: 'headless-json' } }, registry: loadCapabilities(), ladder: loadLadder(),
+      env: { CREW_BREAKER_THRESHOLD: '1' }, dbPath,
+    })
+    assert.equal(existsSync(dbPath), false)
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('tier headless boot journals an inert shadow pick beside roster seats', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'shadow-e2e-home-'))
+  const checkoutFixture = testCheckout('shadow-e2e-checkout-')
+  try {
+    await withHome(home, () => bootCmd(
+      { task: 'shadow-e2e', checkout: checkoutFixture.checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+      { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+    ))
+    const boot = bootRecord(testCrewDir(home, checkoutFixture.checkout, 'shadow-e2e'))
+    assert.equal(boot.shadow_pick.decides, false)
+    assert.equal(boot.shadow_pick.error, undefined)
+    for (const role of Object.keys(roster.tiers.build)) assert.ok(boot.shadow_pick.seats[role])
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutFixture.root, { recursive: true, force: true })
+  }
 })

@@ -45,7 +45,7 @@ The `crew-stage` labels are selected lifecycle facts: stage → phase transition
 
 Interjection is asymmetric per agent. Claude cannot promise stdin mid-turn: text stdin is read to EOF before the turn starts (`spike-findings.md:215-225`), while pi's `steer` is live-verified boundary delivery: it queues while a tool runs, leaves that tool undisturbed, and arrives before the next LLM call (`pi-spike-findings.md:109-125`). It is also asymmetric per transport. `adapter-pi.mjs:11-31` exports one static object, but its `seatCommand` (`:74-113`) launches interactive pi, not `--mode rpc`; `:85-88` deliberately omits `--print`/`--no-session` to preserve pane persistence. A top-level `interjection: boundary` would describe a transport the adapter does not run. Capability is a property of the `(adapter, transport)` pair, not of the adapter.
 
-The first table is the normative profile matrix. Every cell must be pinned exactly by test (§7); today none of these per-transport cells exists or is test-pinned. The evidence is headless evidence and is not silently transferred to a pane.
+The first table is the normative profile matrix. Every cell must be pinned exactly by test (§7); today none of these per-transport cells exists or is test-pinned. [deprecated 2026-08-21 — superseded by §10: the cells exist and are pinned] The evidence is headless evidence and is not silently transferred to a pane.
 
 | Flag | Values | claude · pane | claude · headless-json | pi · pane | pi · headless-rpc | Evidence to cite |
 |---|---|---|---|---|---|---|
@@ -63,7 +63,7 @@ export function capabilitiesFor({ transport })
 
 `transport` is a closed set: `'pane' | 'headless-json' | 'headless-rpc'`. The frozen result carries every key: transport-invariant `prompt_file`, `tool_deny`, `unattended`, and `effort`, plus transport-scoped `interjection`, `abort`, `session_resume`, and `durable_cursor`. Consumers read exactly one object and never merge profiles. An adapter that does not implement a requested transport throws while naming the adapter and transport; it never guesses a passthrough or silently defaults, following `adapter-pi.mjs:38-42`'s refusal of an unknown provider.
 
-Today `crew/crew.mjs:186` calls `assertCapabilities(role, name, adapter.capabilities)` with a flat adapter-wide object and no transport input. That is current behavior, not the design. #83 must replace that call: resolve the seat's transport, then pass the resolved profile to `assertCapabilities` (`crew/crew.mjs:100-104`). #45 filters factory eligibility on the same resolved profile. A request for an unsupported adapter/transport fails at boot, just as `tool_deny` does today. Shipped profiles, and only shipped profiles, are claude → `pane`, `headless-json`; pi → `pane`, `headless-rpc`. Pi deliberately has no `headless-json` profile: one-shot `--mode json` is not a ratified crew transport (`pi-spike-findings.md:183-185`). #83 replaces the current pi-only deep equality (`crew/crew.test.mjs:133-138`) and claude frozenness-plus-`tool_deny` assertion (`:105-109`) with exact assertions for every shipped profile.
+Today `crew/crew.mjs:186` calls `assertCapabilities(role, name, adapter.capabilities)` with a flat adapter-wide object and no transport input. That is current behavior, not the design. [deprecated 2026-08-21 — superseded by §10: the resolver replaced the flat call] #83 must replace that call: resolve the seat's transport, then pass the resolved profile to `assertCapabilities` (`crew/crew.mjs:100-104`). #45 filters factory eligibility on the same resolved profile. A request for an unsupported adapter/transport fails at boot, just as `tool_deny` does today. Shipped profiles, and only shipped profiles, are claude → `pane`, `headless-json`; pi → `pane`, `headless-rpc`. Pi deliberately has no `headless-json` profile: one-shot `--mode json` is not a ratified crew transport (`pi-spike-findings.md:183-185`). #83 replaces the current pi-only deep equality (`crew/crew.test.mjs:133-138`) and claude frozenness-plus-`tool_deny` assertion (`:105-109`) with exact assertions for every shipped profile.
 
 The pane columns are conservative. Every capture in both spikes was headless; neither exercised an interactive pane. The pane transport owns neither a session nor a process handle. Crew retains a cmux `pane_id`/`surface_id` (`crew/crew.mjs:301, 309`), never a PID; termination is `close-surface`, and cmux has no per-surface process-exit event (`tasks/cmux-mode/spike-findings.md:31`). Thus `abort: none`: `signal` requires supervisor termination plus independent EOF/process evidence. `session_resume: false`: neither pane command supplies `--session-id` (`adapter-pi.mjs:24`; the claude byte-identity pin is `crew/crew.test.mjs:101`), and sending another assignment to a live TUI is not persisted-session resume. `interjection: none`: `sendLine()` throws rather than typing into a dirty echo baseline (`crew/driver.mjs:147-202`), and no pane capture establishes mid-assignment behavior. A pane profile may declare `abort: signal` or `session_resume: true` only once that transport owns an explicit handle and the behavior is captured. Amendment note (2026-08-20, #149): the first half of this paragraph is falsified. `cmux top --processes --json --all` attributes pids to a surface and to their descendants — verified live 2026-08-20, `surface:27` returning pid 7433 plus the chain 32052 → 32061 → 32080 under one `cmux_surface_id` — so a pane seat's process tree IS resolvable from the `surface_id` the crew already retains, and both the sentence above and the §6 row at line 123 are superseded on the no-handle point (that row is left as written, per the record's structure). `crew/driver.mjs`'s `surfaceProcessTree()` is that handle: read-only, performing exactly the three calls `cmux tree` → `cmux top` → `cmux tree`, because `top` prints per-invocation refs and the retained UUID is translated through `tree --id-format both`, whose mapping must be identical in both bracketing reads or the result is unknown. What it reports is a point-in-time attribution snapshot naming the surface's foreground process-group leader, with the attributed forest beside it. `abort: none` nevertheless stands for every pane profile, because this ADR conditions `abort: signal` on a handle AND captured behaviour: captured termination behaviour remains unproven, and capturing it means signalling a live seat — destructive, and a separate ratification. The unproven remainder is target selection and snapshot freshness (including PID reuse), signal delivery, EOF/process evidence, and settle behaviour under termination. Placement was chosen to keep this record true: `surfaceProcessTree()` is appended at end of file, so `sendLine()`'s cited range `crew/driver.mjs:147-202` was verified unchanged by this change and the three citations of it in this ADR (lines 33, 68 and 124) were checked rather than left unexamined.
 
@@ -141,7 +141,7 @@ This ADR changes no code.
 | Factory eligibility filters on the resolved capability profile | #45 |
 | Driver checkpoint/resume (§8 q6) stays unowned; per-gate result emission/mirroring (§8 q5) is owned and landed by #130 | #130 / Unowned |
 
-The exact capability assertions are a consequence, not a suggestion: #83 must name every shipped `(adapter, transport, flag)` cell in `crew/crew.test.mjs`, for both adapters, and assert the frozen resolved object exactly. Today only pi's complete flat object is deep-equalled (`crew/crew.test.mjs:133-138`), while claude checks frozenness and `tool_deny` (`:105-109`).
+The exact capability assertions are a consequence, not a suggestion: #83 must name every shipped `(adapter, transport, flag)` cell in `crew/crew.test.mjs`, for both adapters, and assert the frozen resolved object exactly. Today only pi's complete flat object is deep-equalled (`crew/crew.test.mjs:133-138`), while claude checks frozenness and `tool_deny` (`:105-109`). [deprecated 2026-08-21 — superseded by §10: every shipped profile is deep-equalled]
 
 **`idle ≠ success`** (`crew/README.md:143-144`). Nothing here makes screen or process state authoritative for outcome; envelopes and files remain authoritative.
 
@@ -168,3 +168,26 @@ All seven §8 questions answered by the user. The answers below are the decision
 7. **`reassign` is minted as its own capability — ratified.** The runtime already sends a still-live pane seat repeated assignments — every bounce brief is one — while the pane profile declares `interjection: none`, `session_resume: false`, `abort: none`. Nothing in the matrix names that ability, so the table implies something false about the transport the crew uses daily. The distinction is closed: **`interjection` acts on a seat mid-turn; `reassign` gives a new assignment to a seat that has settled.** Per-transport values are NOT set here: pane is established by the driver's own bounce path (`crew/drive.mjs` build/review bounces, exercised continuously), and the headless values require capture like every other cell in §3 — the implementing slice pins them with evidence, and an uncaptured cell stays `false`. Owner: **#131**, paired with the slice that lands `capabilitiesFor({transport})`.
 
 Nothing else in this record changes. Questions 5 and 7 create work; 1–4 and 6 are confirmations of what is written above.
+
+## 10. Amendment record — 2026-08-21: the per-transport capability cell shipped
+
+**Implemented by:** #131 · **Amends:** nothing this ADR decided. Decision 2 (§3)
+and §7 are recorded as ratified; this note records that what §3 called absent is
+now the shipped runtime, so a reader does not build it twice (#457).
+
+`capabilitiesFor({ transport })` is exported by both adapters
+(`capabilitiesFor` in `crew/adapters/adapter-claude.mjs` and
+`crew/adapters/adapter-pi.mjs`), and `crew/crew.mjs` resolves the seat's
+transport and passes the resolved profile — the flat adapter-wide `capabilities`
+export §3 rejected no longer exists on either adapter. Every shipped cell is
+pinned exactly: `crew/crew.test.mjs`'s test *"every shipped capability profile is
+exact, complete, and frozen"* deep-equals all four profiles (claude → `pane`,
+`headless-json`; pi → `pane`, `headless-rpc`), asserts each is frozen, and
+asserts the flat export is `undefined` on both adapters; its neighbour
+*"unshipped capability pairs and absent transports throw naming adapter and
+transport"* pins the refusals. `reassign` was minted and captured as §9's item 7
+required.
+
+Citations here name files and symbols rather than lines: this lane measured
+42–87% rot across four line-numbered citation populations, and zero rot in the
+two documents that cite without line numbers (#457).

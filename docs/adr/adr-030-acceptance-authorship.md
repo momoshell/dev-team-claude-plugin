@@ -186,7 +186,7 @@ and uses one predicate everywhere.
 - **The measurement must be built before it can be read.** #130 makes gate
   verdicts durable but has no discrimination outcome and no durable review
   verdict or must-fix count (`scripts/factory/ledger.mjs:187-200`,
-  `crew/realio.mjs:91-108`). Decision 2 commissions #169 to add a durable
+  `crew/realio.mjs:91-108`). [deprecated 2026-08-21 — superseded by §12: both outcomes are durable] Decision 2 commissions #169 to add a durable
   discrimination outcome keyed by `{run, gate_generation}` and a durable review
   outcome carrying at least a normalized verdict and `must_fix` count. Each has
   a named journal line, emitter call, ledger column, and DI tests.
@@ -226,7 +226,7 @@ gate, and #153's incident shows that misrouting a gate defect burns nine stages;
 keying identity on the command string or its hash—identical commands are
 explicitly permitted on repair (`crew/drive.mjs:583-588`); and mutation-testing
 the gate now—stronger proof would require a harness that does not exist and
-would spend build budget on that harness.
+would spend build budget on that harness. [deprecated 2026-08-21 — superseded by §12: the mutation harness shipped in #420]
 
 ## 4. Decision 3 — growth as a plan-check input
 
@@ -422,7 +422,7 @@ while type is the lead's claim about the risk of not fixing it; and removing
 
 | Gap | Evidence | How this ADR decides around it |
 |---|---|---|
-| No observations exist today | Neither a discrimination outcome nor a review outcome is durable today (`scripts/factory/ledger.mjs:187-200`, `crew/realio.mjs:91-108`) | The Decision 2 horizon has not started and cannot start until #168 and #169 land. The first denominator is then the next 20 eligible tasks, not ratification or historical anecdotes. |
+| No observations exist today | Neither a discrimination outcome nor a review outcome is durable today (`scripts/factory/ledger.mjs:187-200`, `crew/realio.mjs:91-108`) [deprecated 2026-08-21 — superseded by §12: both outcomes accrue] | The Decision 2 horizon has not started and cannot start until #168 and #169 land. The first denominator is then the next 20 eligible tasks, not ratification or historical anecdotes. |
 | `runClean` stash isolation has not been tested against writes outside git's view | `crew/realio.mjs:252-268` stashes `--include-untracked`; no cited test covers ignored paths or `node_modules` | A DI test is commissioned; a direct caller omitting `runClean` records `discrimination: 'unproven'`. Production uses outer `realIo`. |
 | Per-check and omitted-check adequacy are unmeasured | The commissioned proof is whole-gate only; G61 in #142 is an example of a check that could not fail, and omitted coverage has no check to flip | The ADR does not claim per-check discrimination. The #168/#169 horizon and `must_fix > 0` trigger are the re-entry condition for stronger work. |
 | The `cosmetic` / `correctness-unverified` split has only one data point | #144/PR #162 supplies the residual-accepted incident; the reviewer currently records severity counts only (`crew/roles/reviewer.md:31-33`) | #170 first creates stable finding IDs and severity, then validates typed residuals and refutations. No correctness category is inferred from severity. |
@@ -436,7 +436,7 @@ coverage before its proof can block, #170 phase 1 (structured findings) before
 any typed-residual enforcement, and #169 free to proceed as soon as phase 1
 lands. Per-check discrimination is deliberately
 absent from this table: its start condition, denominator, and trigger live in
-Decision 2 and the evidence-gap table, but it is not commissioned now.
+Decision 2 and the evidence-gap table, but it is not commissioned now. [deprecated 2026-08-21 — superseded by §12: per-check discrimination shipped in #420]
 
 | Consequence | Owner |
 |---|---|
@@ -552,3 +552,45 @@ new one, so a reader following a §3, §7 or §8 reference lands in the right fi
 §§0–10 changes, and the line numbers those sections cite inside the module are
 unmoved. `realio` named the module after what it is NOT — the real io as opposed
 to the injected test fakes — while every major export is a seat operation.
+
+## 12. Amendment record — 2026-08-21: the durable outcomes and the mutation harness exist
+
+**Implemented by:** #169 (durable outcomes) and #420 (per-check mutations) ·
+**Amends:** nothing this ADR decided. Decision 2 (§3), §7 and §8 are recorded as
+ratified; this note records that the three absences they assert have since been
+filled, so a lane reading them does not build what is already there (#457).
+
+**The two durable outcomes exist.** `gate_discriminations` and `review_outcomes`
+are declared in the ledger schema (`scripts/factory/ledger.mjs`), written in
+production by `recordGateDiscrimination` and `recordReviewOutcome` in
+`crew/seat-io.mjs`, and read back by `taskReadout` and `eligibleTasks` in that
+same ledger module. Both carried rows when this note was written — measured
+2026-08-21 against the local ledger, 186 discrimination rows and 238 review
+rows; that count is a machine-local observation, not a property of the repo. The
+Decision 2 horizon therefore has a start, and `review_outcomes` is the
+instrument #376's reviewer-tier experiment reads.
+
+**The mutation harness exists and can stop a run.** #420 made per-check
+mutations a declared, machine-applied contract. `validateMutations` and
+`MUTATIONS_MAX` in `crew/drive.mjs` validate the planner's `details.mutations`,
+and the driver then takes each entry down exactly one of three paths. An
+exemption entry carries no find/replace and is recorded `exempt` without a
+write. A non-exempt declaration whose file is missing from the built tree, or
+whose declared find text is not present in it, is recorded `unapplied` — also
+without a write. Only an applicable non-exempt declaration is written into the
+BUILT CHECKOUT itself, re-run against the gate, and restored to its exact
+original bytes in a `finally`, its outcome then `killed` or `survived`
+(`MUTATION_OUTCOMES`). A `survived` or `unapplied` proof failure is routed by
+`settleFailedProof` to the one gate repair a task is allowed, and stops the run
+with an escalation when the restore was unsafe, when that repair is spent or has
+no custodian, or when the repair itself does not resolve it. Per-check
+discrimination is therefore commissioned and shipped, not deferred — §8's "not
+commissioned now" and §3's rejection of "a harness that does not exist" are both
+retired by it.
+
+What is NOT amended: the decisions themselves, the 20-task denominator, the
+`must_fix > 0` trigger, and every other citation in §§0–11.
+
+Citations here name files and symbols rather than lines: this lane measured
+42–87% rot across four line-numbered citation populations, and zero rot in the
+two documents that cite without line numbers (#457).

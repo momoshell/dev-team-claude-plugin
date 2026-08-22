@@ -414,12 +414,26 @@ const LEDGER_SANDBOX_EXEMPT = new Map([
     },
   }],
   ['test/visualizer-server.test.mjs', {
-    why: 'visualizer-server.test.mjs:11 imports parseCliArgs only; server.mjs:51 returns a flag config and the test never reaches startServer',
+    why: 'visualizer-server.test.mjs:87 injects a feed into its only startServer call, so server.mjs:174 takes config.feed and never builds the default ledger feed; its 13 openLedger calls all name an explicit dbPath, and parseCliArgs only returns a config. The warranty reads doors and their call arguments, not the import list, so a newly imported door must prove its own containment.',
     warranty: (source, dir) => {
-      const doors = doorsUsed(source, dir)
-      const parseDoor = 'visualizer/server/server.mjs#parseCliArgs'
-      const prefix = 'visualizer/server/server.mjs#'
-      return doors.has(parseDoor) && [...doors].every((door) => !door.startsWith(prefix) || door === parseDoor)
+      // Per-door containment: an imported door with no entry here fails the warranty,
+      // so widening the import list cannot silently widen the exemption.
+      const contained = new Map([
+        ['visualizer/server/server.mjs#startServer', /\bfeed\b/],
+        ['visualizer/server/server.mjs#parseCliArgs', null],
+        ['scripts/factory/ledger.mjs#openLedger', /\bdbPath\b/],
+      ])
+      let homeDoors = 0
+      for (const { door, local } of importBindings(source, dir)) {
+        if (!contained.has(door)) return false
+        if (LEDGER_DOORS.get(door)?.kind === 'home-default') homeDoors += 1
+        const predicate = contained.get(door)
+        if (!predicate) continue
+        const spans = callArgs(source, local)
+        if (spans.length === 0 || !spans.every((args) => predicate.test(args))) return false
+      }
+      // No home-default door left means the exemption is spent, not warranted.
+      return homeDoors > 0
     },
   }],
   ['test/visualizer-shape.test.mjs', {

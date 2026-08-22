@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
 import * as adapter from '../../adapters/adapter-pi.mjs'
 import * as capabilities from '../../capabilities.mjs'
+import * as rpc from '../../headless-rpc.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
 const EXTENSION = fileURLToPath(new URL('./subagent.ts', import.meta.url))
@@ -593,4 +594,46 @@ test('the register resolves the shipped bundle end to end', () => {
   const effective = capabilities.effectiveCapabilities({ declared, bare, grants })
   assert.equal(effective.subagents, true)
   assert.equal(basename(grants.agents[0].def), 'scout.json')
+})
+
+// ONE table, both reducers. The rule about which pi frame carries a seat's own
+// spend is held in two files that cannot import each other (subagent.ts is
+// zero-dep by hard constraint, and crew/headless-rpc.mjs must not take a
+// type-stripped .ts module into the crew runtime), so the coupling is enforced
+// HERE, where a test file may import both: every row is asserted against BOTH
+// exported rules AND against what the two reducers actually fold. Make either
+// side disagree and this goes red.
+//
+// Usage values are plain non-negative integers on purpose: the rule under test
+// is which frame is admitted, not how each reducer coerces a scalar.
+const OWN_SPEND_TABLE = [
+  { name: "an assistant message_end is the seat's own spend", frame: { type: 'message_end', message: { role: 'assistant', usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } }, own: true },
+  { name: 'a nested tool result message_end is not', frame: { type: 'message_end', message: { role: 'toolResult', toolName: 'agent', usage: { input: 500, output: 400, cacheRead: 300, cacheWrite: 200 } } }, own: false },
+  { name: 'a user message_end is not', frame: { type: 'message_end', message: { role: 'user' } }, own: false },
+  { name: 'a message_end stating no role is not', frame: { type: 'message_end', message: { usage: { input: 5, output: 6 } } }, own: false },
+  { name: 'a message_end with no message is not', frame: { type: 'message_end' }, own: false },
+  { name: 'a turn_end replay is not', frame: { type: 'turn_end', message: { role: 'assistant', usage: { input: 7, output: 8 } } }, own: false },
+  { name: 'an agent_end replay is not', frame: { type: 'agent_end', message: { role: 'assistant', usage: { input: 9, output: 10 } } }, own: false },
+  { name: 'a non-frame is not', frame: null, own: false },
+]
+
+test("the two reducers agree on which pi frame carries a seat's own spend", () => {
+  for (const row of OWN_SPEND_TABLE) {
+    assert.equal(mod.carriesOwnSpend(row.frame), row.own, `subagent.ts rule: ${row.name}`)
+    assert.equal(rpc.carriesOwnSpend(row.frame), row.own, `headless-rpc.mjs rule: ${row.name}`)
+  }
+})
+
+test('the two reducers agree in what they fold, not only in what they claim', () => {
+  for (const row of OWN_SPEND_TABLE) {
+    const usage = row.frame?.message?.usage
+    const want = row.own && usage
+      ? {
+        billed_input_tokens: usage.input ?? 0, billed_output_tokens: usage.output ?? 0,
+        billed_cache_write_tokens: usage.cacheWrite ?? 0, billed_cache_read_tokens: usage.cacheRead ?? 0,
+      }
+      : null
+    assert.deepEqual(rpc.foldRpcUsage([row.frame]), want, `headless-rpc.mjs folded: ${row.name}`)
+    assert.deepEqual(mod.foldUsage([row.frame]), want, `subagent.ts folded: ${row.name}`)
+  }
 })

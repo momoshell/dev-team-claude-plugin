@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process'
 import { once } from 'node:events'
 import { EVIDENCE_KINDS, LIVENESS, reclaimStore } from './reclaim.mjs'
 import {
-  emptyTurnEnvelope, foldRpcUsage, headlessRpcIo, isBusyRefusal, PROMPT_REFUSAL_RETRIES,
+  carriesOwnSpend, emptyTurnEnvelope, foldRpcUsage, headlessRpcIo, isBusyRefusal, PROMPT_REFUSAL_RETRIES,
   rpcCommand, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
 
@@ -384,7 +384,7 @@ test('timeout drains usage written during abort or kill before emitting', () => 
     kill: (_pid, signal) => {
       if (signal === 'SIGTERM' && !appended) {
         appended = true
-        writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { usage: { input: 6, output: 7, cacheRead: 8, cacheWrite: 9 } } })}\n`)
+        writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', usage: { input: 6, output: 7, cacheRead: 8, cacheWrite: 9 } } })}\n`)
         writeFileSync(exitPath, '137')
       }
     },
@@ -410,7 +410,36 @@ test('foldRpcUsage sums pi message_end deltas and excludes replay frames', () =>
     billed_input_tokens: 2443, billed_output_tokens: 54,
     billed_cache_write_tokens: 0, billed_cache_read_tokens: 0,
   })
-  assert.equal(foldRpcUsage([{ type: 'turn_end', message: { usage: { input: 1, output: 2 } } }]), null)
+  assert.equal(foldRpcUsage([{ type: 'turn_end', message: { role: 'assistant', usage: { input: 1, output: 2 } } }]), null)
+})
+
+// pi emits a message_end for a nested TOOL RESULT carrying that tool's own usage
+// (agent-loop.js createToolResultMessage/emitToolResultMessage), and the crew's
+// subagent tool returns a non-null usage on exactly that path. Folding it would
+// bill a seat twice for one nested call.
+const NO_ROLE_USAGE_FRAME = { type: 'message_end', message: { usage: { input: 9, output: 9 } } }
+
+test('foldRpcUsage bills the assistant turn and excludes a nested tool result', () => {
+  const own = { type: 'message_end', message: { role: 'assistant', usage: { input: 10, output: 1, cacheRead: 2, cacheWrite: 3 } } }
+  const nested = { type: 'message_end', message: { role: 'toolResult', toolName: 'agent', usage: { input: 5000, output: 4000, cacheRead: 3000, cacheWrite: 2000 } } }
+  const billed = {
+    billed_input_tokens: 10, billed_output_tokens: 1,
+    billed_cache_write_tokens: 3, billed_cache_read_tokens: 2,
+  }
+  // Both directions: the nested frame is excluded AND the assistant frame is
+  // still folded, so this cannot be satisfied by refusing everything.
+  assert.deepEqual(foldRpcUsage([own, nested]), billed)
+  assert.deepEqual(foldRpcUsage([own]), billed)
+  assert.equal(foldRpcUsage([nested]), null)
+})
+
+test('foldRpcUsage refuses a message_end that states no role at all', () => {
+  // DECIDED, not incidental: both of pi's emitters set a role, so a role-less
+  // message_end is an unrecognised frame and must never inflate a billed total
+  // that prices into cost_usd. This is also the rule subagent.ts already applied,
+  // which makes the two reducers identical rather than merely compatible.
+  assert.equal(foldRpcUsage([NO_ROLE_USAGE_FRAME]), null)
+  assert.equal(carriesOwnSpend(NO_ROLE_USAGE_FRAME), false)
 })
 
 test('rpc usage accumulates across polls and emits null when unmeasured', () => {
@@ -418,13 +447,13 @@ test('rpc usage accumulates across polls and emits null when unmeasured', () => 
   const f = fixture({ emit: (event) => seen.push(event), sleep: () => {
     if (appended) return
     appended = true
-    writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5 } } })}\n${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
+    writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', usage: { input: 2, output: 3, cacheRead: 4, cacheWrite: 5 } } })}\n${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
     writeFileSync(returnPath, JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done' }))
   } })
   try {
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     streamPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'); returnPath = run.returnPath
-    writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } })}\n`)
+    writeFileSync(streamPath, `${JSON.stringify({ type: 'message_end', message: { role: 'assistant', usage: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 } } })}\n`)
     assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
     assert.deepEqual(seen.map((event) => event.usage), [{
       billed_input_tokens: 3, billed_output_tokens: 5,
@@ -497,7 +526,7 @@ test('rpc crashed and settled turns emit partial usage without changing stage or
   const make = (emit, settled) => {
     const f = fixture({ emit })
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    const frames = [{ type: 'message_end', message: { usage: { input: 7, output: 8 } } }]
+    const frames = [{ type: 'message_end', message: { role: 'assistant', usage: { input: 7, output: 8 } } }]
     if (settled) frames.push({ type: 'agent_settled' })
     const seat = join(f.paths.taskDir, 'headless-rpc', 'builder')
     writeFileSync(join(seat, 'stream.jsonl'), `${frames.map((frame) => JSON.stringify(frame)).join('\n')}\n`)

@@ -97,6 +97,34 @@ function usageObject(value) {
   return value && typeof value === 'object' && !Array.isArray(value) ? value : null
 }
 
+// THE shared rule: which pi frame carries a SEAT'S OWN spend. It lives here and,
+// character for character, in crew/pi/extensions/subagent.ts, and the two are
+// pinned equal over one fixture table by the cross-file test in
+// crew/pi/extensions/subagent.test.mjs. Make either side disagree and that test
+// goes red: a comment in a third place is not a coupling.
+//
+// pi's agent loop emits a message_end for a NESTED TOOL RESULT too:
+// createToolResultMessage sets role 'toolResult' and carries
+// usage: finalized.result.usage, and emitToolResultMessage emits message_start
+// and message_end for it (@earendil-works/pi-agent-core dist/agent-loop.js:536,
+// :543, :549). The crew's own subagent tool returns a non-null usage on exactly
+// that path. Folding it adds a nested tool's spend on top of the assistant turn
+// that already accounts for it: a systematic OVER-count of what a seat cost.
+//
+// A message_end with NO role at all is REFUSED, deliberately. Both of pi's own
+// emitters set one, so a role-less frame is not a shape pi produces. An absent
+// role is an unrecognised frame, and an unrecognised frame must never inflate a
+// billed total that prices into cost_usd. Refusing is also what subagent.ts's
+// strict test already did, so the two reducers are IDENTICAL rather than merely
+// compatible -- there is no property of either transport that wants them to
+// differ here, and identical is the only agreement a table can pin.
+export function carriesOwnSpend(frame) {
+  if (!frame || frame.type !== 'message_end') return false
+  const message = frame.message
+  if (!message || typeof message !== 'object') return false
+  return message.role === 'assistant'
+}
+
 // pi has no aggregate event: message_end carries a per-message delta, while
 // turn_end and agent_end.messages[] replay that same usage. Counting either
 // replay would double- or triple-count the billed tokens.
@@ -104,7 +132,8 @@ export function foldRpcUsage(frames) {
   const total = { billed_input_tokens: 0, billed_output_tokens: 0, billed_cache_write_tokens: 0, billed_cache_read_tokens: 0 }
   let measured = false
   for (const frame of Array.isArray(frames) ? frames : []) {
-    const usage = usageObject(frame?.type === 'message_end' ? frame.message?.usage : null)
+    if (!carriesOwnSpend(frame)) continue
+    const usage = usageObject(frame.message.usage)
     if (!usage) continue
     measured = true
     total.billed_input_tokens += usageInt(usage.input)

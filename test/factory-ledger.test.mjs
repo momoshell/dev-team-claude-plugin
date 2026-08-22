@@ -27,6 +27,7 @@ import {
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
+  CELL_RATE_FLOOR, CELL_PRICE_UNITS, REVIEW_VERDICTS,
 } from '../scripts/factory/ledger.mjs'
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES } from '../crew/drive.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
@@ -907,6 +908,292 @@ test('cell-failures CLI prints rows and refuses an inverted optional window', { 
   ], { DEVTEAM_LEDGER_DB: dbPath })
   assert.equal(inverted.status, 2)
   assert.match(inverted.stderr, /cell-failures: --until must be later than --since/)
+})
+
+test('cellReviews aggregates by cell and task class and counts only a run\'s first round', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const cellA = { agent: 'claude', provider: 'anthropic', model_id: 'cell-a', model: 'model-a', effort: 'high' }
+  const cellB = { agent: 'pi', provider: 'openai', model_id: 'cell-b', model: 'model-b', effort: 'max' }
+  const review = (adw_id, dispatch_id, cell, verdict, created_at) => ledger.recordReviewOutcome({
+    adw_id, dispatch_id, role: 'reviewer', verdict, created_at, ...cell,
+  })
+
+  ledger.startSession({ adw_id: 'reviews-a', repo_slug: 'r', task_slug: 'a', tier: 'build' })
+  review('reviews-a', 'a-r1', cellA, 'pass', '2024-01-01T00:00:00.000Z')
+  review('reviews-a', 'a-r2', cellB, 'changes-needed', '2024-01-02T00:00:00.000Z')
+  ledger.startSession({ adw_id: 'reviews-b', repo_slug: 'r', task_slug: 'b', tier: 'build' })
+  review('reviews-b', 'b-r1', cellA, 'pass', '2024-01-03T00:00:00.000Z')
+  ledger.startSession({ adw_id: 'reviews-c', repo_slug: 'r', task_slug: 'c', tier: 'judge' })
+  review('reviews-c', 'c-r1', cellA, 'changes-needed', '2024-01-01T00:00:00.000Z')
+  ledger.startSession({ adw_id: 'reviews-d', repo_slug: 'r', task_slug: 'd' })
+  review('reviews-d', 'd-r1', cellA, 'pass', '2024-01-01T00:00:00.000Z')
+
+  const rows = ledger.cellReviews()
+  const find = (model_id, task_class) => rows.find((row) => row.model_id === model_id && row.task_class === task_class)
+  assert.deepEqual(
+    find('cell-a', 'build') && {
+      reviews: find('cell-a', 'build').reviews,
+      first_round_reviews: find('cell-a', 'build').first_round_reviews,
+      first_round_passes: find('cell-a', 'build').first_round_passes,
+    },
+    { reviews: 2, first_round_reviews: 2, first_round_passes: 2 },
+  )
+  assert.deepEqual(
+    find('cell-b', 'build') && {
+      reviews: find('cell-b', 'build').reviews,
+      first_round_reviews: find('cell-b', 'build').first_round_reviews,
+      first_round_passes: find('cell-b', 'build').first_round_passes,
+    },
+    { reviews: 1, first_round_reviews: 0, first_round_passes: 0 },
+  )
+  assert.deepEqual(
+    find('cell-a', 'judge') && {
+      reviews: find('cell-a', 'judge').reviews,
+      first_round_reviews: find('cell-a', 'judge').first_round_reviews,
+      first_round_passes: find('cell-a', 'judge').first_round_passes,
+    },
+    { reviews: 1, first_round_reviews: 1, first_round_passes: 0 },
+  )
+  assert.deepEqual(
+    find('cell-a', null) && {
+      reviews: find('cell-a', null).reviews,
+      first_round_reviews: find('cell-a', null).first_round_reviews,
+      first_round_passes: find('cell-a', null).first_round_passes,
+    },
+    { reviews: 1, first_round_reviews: 1, first_round_passes: 1 },
+  )
+  ledger.close()
+})
+
+test('cells CLI reports a measured rate, a measured zero, and an unmeasured denominator', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const cell = (model_id) => ({ agent: 'claude', provider: 'anthropic', model_id, model: model_id, effort: 'high' })
+  const review = (adw_id, dispatch_id, value, verdict, created_at) => ledger.recordReviewOutcome({
+    adw_id, dispatch_id, role: 'reviewer', verdict, created_at, ...value,
+  })
+  ledger.startSession({ adw_id: 'rate-one', repo_slug: 'r', task_slug: 'rate-one', tier: 'build' })
+  review('rate-one', 'rate-one-r1', cell('rate'), 'pass', '2024-01-01T00:00:00.000Z')
+  ledger.startSession({ adw_id: 'rate-two', repo_slug: 'r', task_slug: 'rate-two', tier: 'build' })
+  review('rate-two', 'rate-two-r1', cell('rate'), 'changes-needed', '2024-01-01T00:00:00.000Z')
+  ledger.startSession({ adw_id: 'zero-one', repo_slug: 'r', task_slug: 'zero-one', tier: 'judge' })
+  review('zero-one', 'zero-one-r1', cell('zero'), 'changes-needed', '2024-01-01T00:00:00.000Z')
+  ledger.startSession({ adw_id: 'unknown-one', repo_slug: 'r', task_slug: 'unknown-one', tier: 'build' })
+  review('unknown-one', 'unknown-one-r1', cell('other'), 'pass', '2024-01-01T00:00:00.000Z')
+  review('unknown-one', 'unknown-one-r2', cell('unknown'), 'pass', '2024-01-02T00:00:00.000Z')
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout.trim())
+  assert.deepEqual(payload.verdicts, [...REVIEW_VERDICTS])
+  const row = (model_id, task_class) => payload.rows.find((candidate) => candidate.model_id === model_id && candidate.task_class === task_class)
+  const measured = row('rate', 'build')
+  assert.equal(measured.first_round_reviews, 2)
+  assert.equal(measured.first_round_passes, 1)
+  assert.equal(measured.first_round_pass_rate, 0.5)
+  const zero = row('zero', 'judge')
+  assert.equal(zero.first_round_pass_rate, 0)
+  assert.ok(!Object.prototype.hasOwnProperty.call(zero.absent, 'first_round_pass_rate'))
+  const unknown = row('unknown', 'build')
+  assert.equal(unknown.first_round_reviews, 0)
+  assert.equal(unknown.first_round_pass_rate, null)
+  assert.match(unknown.absent.first_round_pass_rate, /UNMEASURED/)
+})
+
+test('cells CLI prices a cell from the named catalog and names the units', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'priced-cell'
+  const dispatchId = 'priced-cell-r1'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'priced', tier: 'build' })
+  ledger.recordReviewOutcome({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', verdict: 'pass',
+    provider: 'anthropic', model_id: 'priced-model', agent: 'claude', model: 'priced', effort: 'high',
+    transport: 'headless-json', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.startAgentSession({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', model: 'priced',
+    claude_session_id: 'priced-session', transcript_path: null,
+  })
+  ledger.endAgentSession({
+    adw_id: adwId, claude_session_id: 'priced-session',
+    context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+    billed_input_tokens: 2_000_000, billed_output_tokens: 3_000_000,
+    billed_cache_write_tokens: 4, billed_cache_read_tokens: 5,
+  })
+  const pricePath = join(nextDir(), 'prices.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'anthropic/priced-model': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout.trim())
+  assert.equal(payload.price_source.path, pricePath)
+  assert.equal(payload.price_source.updated_at, '2024-02-01')
+  assert.equal(payload.price_source.units, CELL_PRICE_UNITS)
+  const row = payload.rows.find((candidate) => candidate.model_id === 'priced-model')
+  assert.equal(row.cost_usd, 34)
+})
+
+test('cells CLI reads an unpriced model as unpriced, never as free', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'unpriced-cell'
+  const dispatchId = 'unpriced-cell-r1'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'unpriced', tier: 'build' })
+  ledger.recordReviewOutcome({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', verdict: 'pass',
+    provider: 'anthropic', model_id: 'missing-model', agent: 'claude', model: 'missing', effort: 'high',
+    transport: 'headless-json', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.startAgentSession({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', model: 'missing',
+    claude_session_id: 'unpriced-session', transcript_path: null,
+  })
+  ledger.endAgentSession({
+    adw_id: adwId, claude_session_id: 'unpriced-session',
+    context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+    billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000,
+    billed_cache_write_tokens: null, billed_cache_read_tokens: null,
+  })
+  const pricePath = join(nextDir(), 'empty-prices.json')
+  writeFileSync(pricePath, JSON.stringify({ schema_version: 1, updated_at: '2024-02-01', models: {} }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'missing-model')
+  assert.equal(row.cost_usd, null)
+  assert.match(row.absent.cost_usd, /unpriced/)
+
+  const missing = run(['cells', '--prices', join(nextDir(), 'does-not-exist.json')], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(missing.status, 2)
+  assert.match(missing.stderr, /cells: --prices must be a readable JSON price catalog with a models object/)
+})
+
+test('cells CLI treats null catalog rates as unpriced, never free', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'null-rate-cell'
+  const dispatchId = 'null-rate-cell-r1'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'null-rate', tier: 'build' })
+  ledger.recordReviewOutcome({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', verdict: 'pass',
+    provider: 'anthropic', model_id: 'null-rate-model', agent: 'claude', model: 'null-rate', effort: 'high',
+    transport: 'headless-json', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.startAgentSession({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', model: 'null-rate',
+    claude_session_id: 'null-rate-session', transcript_path: null,
+  })
+  ledger.endAgentSession({
+    adw_id: adwId, claude_session_id: 'null-rate-session',
+    context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+    billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000,
+    billed_cache_write_tokens: null, billed_cache_read_tokens: null,
+  })
+  const pricePath = join(nextDir(), 'null-rates.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'anthropic/null-rate-model': { cost_in_per_mtok: null, cost_out_per_mtok: null } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'null-rate-model')
+  assert.equal(row.cost_usd, null)
+  assert.match(row.absent.cost_usd, /unpriced/)
+})
+
+test('cells CLI carries the denominator and the sample floor with every rate', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (model_id, count) => {
+    for (let i = 0; i < count; i++) {
+      const adwId = `floor-${model_id}-${i}`
+      ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, tier: 'build' })
+      ledger.recordReviewOutcome({
+        adw_id: adwId, dispatch_id: `${adwId}-r1`, role: 'reviewer', verdict: 'pass',
+        provider: 'anthropic', model_id, agent: 'claude', model: model_id, effort: 'high',
+        transport: 'headless-json', created_at: '2024-01-01T00:00:00.000Z',
+      })
+    }
+  }
+  seed('under-floor', CELL_RATE_FLOOR - 1)
+  seed('at-floor', CELL_RATE_FLOOR)
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout.trim())
+  assert.equal(payload.rate_floor, CELL_RATE_FLOOR)
+  for (const row of payload.rows) assert.ok(Number.isInteger(row.first_round_reviews))
+  assert.equal(payload.rows.find((row) => row.model_id === 'under-floor').thin, true)
+  assert.equal(payload.rows.find((row) => row.model_id === 'at-floor').thin, false)
+})
+
+test("cells CLI leaves a pane-only cell's usage unmeasured, never zero", { skip: SKIP }, () => {
+  const cell = { agent: 'pi', provider: 'openai', id: 'pane-model', model: 'pane', effort: 'high', transport: 'pane' }
+  const { dbPath } = paneReviewRun(cell)
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'pane-model')
+  assert.equal(row.usage_sessions, 0)
+  for (const key of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) {
+    assert.equal(row[key], null)
+  }
+  assert.equal(row.absent.usage, USAGE_ABSENT_CAUSES.pane)
+})
+
+test('cells CLI reads an unattributed review as no cell', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'no-cell', repo_slug: 'r', task_slug: 'no-cell', tier: 'build' })
+  ledger.recordReviewOutcome({
+    adw_id: 'no-cell', dispatch_id: 'no-cell-r1', verdict: 'pass', created_at: '2024-01-01T00:00:00.000Z',
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.provider === null && candidate.model_id === null)
+  assert.ok(row)
+  assert.equal(row.agent, null)
+  assert.equal(row.effort, null)
+  assert.equal(row.role, null)
+  assert.match(row.absent.cell, /unattributed/)
+})
+
+test('cells CLI is read-only', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'read-only', repo_slug: 'r', task_slug: 'read-only', tier: 'build' })
+  ledger.recordReviewOutcome({ adw_id: 'read-only', dispatch_id: 'read-only-r1', verdict: 'pass' })
+  const before = Object.fromEntries(Object.keys(TABLES).map((name) => [name, ledger.dumpTable(name).length]))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const afterLedger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const after = Object.fromEntries(Object.keys(TABLES).map((name) => [name, afterLedger.dumpTable(name).length]))
+    assert.deepEqual(after, before)
+  } finally { afterLedger.close() }
+})
+
+test('cells CLI refuses a positional, an inverted window and an unknown flag', { skip: SKIP }, () => {
+  const positional = run(['cells', 'oops'])
+  assert.equal(positional.status, 2)
+  assert.match(positional.stderr, /cells: takes no positional arguments/)
+  const inverted = run(['cells', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-01T00:00:00Z'])
+  assert.equal(inverted.status, 2)
+  assert.match(inverted.stderr, /cells: --until must be later than --since/)
+  const unknown = run(['cells', '--nope', 'x'])
+  assert.equal(unknown.status, 2)
+  assert.match(unknown.stderr, /unknown flag --nope/)
 })
 
 test('gateReviewGap counts only non-pristine green gate rows and must-fix reviews', { skip: SKIP }, () => {
@@ -1990,6 +2277,7 @@ test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
   const runDir = join(dir, 'advisor-run')
   mkdirSync(join(runDir, 'returns'), { recursive: true })
   writeFileSync(join(runDir, 'journal.jsonl'), '')
+  writeFileSync(join(dir, 'prices.json'), JSON.stringify({ schema_version: 1, updated_at: since, models: {} }))
   const adjudications = join(dir, 'adjudications.json')
   writeFileSync(adjudications, JSON.stringify({ schema: 1, adjudications: [] }))
   const brief = join(dir, 'brief.md')
@@ -2002,6 +2290,9 @@ test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
     { verb: 'run-set', flag: 'until', args: ['run-set', '--since', since, '--until', until] },
     { verb: 'cell-failures', flag: 'since', args: ['cell-failures', '--since', since, '--until', until] },
     { verb: 'cell-failures', flag: 'until', args: ['cell-failures', '--since', since, '--until', until] },
+    { verb: 'cells', flag: 'since', args: ['cells', '--since', since, '--until', until] },
+    { verb: 'cells', flag: 'until', args: ['cells', '--since', since, '--until', until] },
+    { verb: 'cells', flag: 'prices', args: ['cells', '--prices', join(dir, 'prices.json')] },
     { verb: 'modifier-attempts', flag: 'since', args: ['modifier-attempts', '--since', since, '--until', until] },
     { verb: 'modifier-attempts', flag: 'until', args: ['modifier-attempts', '--since', since, '--until', until] },
     { verb: 'seat-teardowns', flag: 'since', args: ['seat-teardowns', '--since', since, '--until', until] },
@@ -2033,7 +2324,7 @@ test('#443: flagless subcommands refuse an unknown flag', { skip: SKIP }, () => 
 })
 
 test('#443: every window subcommand refuses the misspelled flag', { skip: SKIP }, () => {
-  for (const verb of ['run-set', 'cell-failures', 'modifier-attempts', 'seat-teardowns', 'ci-cycles', 'intake-sweeps']) {
+  for (const verb of ['run-set', 'cell-failures', 'cells', 'modifier-attempts', 'seat-teardowns', 'ci-cycles', 'intake-sweeps']) {
     const result = run([verb, '--sicne', '2026-08-21T00:00:00Z'])
     assert.equal(result.status, 2, `${verb}: ${result.stderr}`)
     assert.match(result.stderr, /unknown flag --sicne/)

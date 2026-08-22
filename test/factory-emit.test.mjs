@@ -1400,6 +1400,65 @@ test('CLI: --state-dir is required for both verbs, and an unknown verb refuses',
   assert.equal(badVerb.status, 2)
 })
 
+test('CLI: emit-cli-unknown-flag-refusal — an unknown flag refuses with exit 2 and names it, on both verbs', () => {
+  const dir = freshDir('cli-unknown-flag')
+  seedRun(dir)
+  const stats = runCli(['stats', '--state-dir', dir, '--bogus', 'zzz'])
+  assert.equal(stats.status, 2)
+  assert.match(stats.stderr, /unknown flag --bogus/)
+  assert.match(stats.stderr, /reason: unknown_flag/)
+
+  const missingValue = runCli(['stats', '--state-dir', dir, '--bogus'])
+  assert.equal(missingValue.status, 2)
+
+  const prototypeFlag = runCli(['stats', '--state-dir', dir, '--__proto__', 'zzz'])
+  assert.equal(prototypeFlag.status, 2)
+  assert.match(prototypeFlag.stderr, /unknown flag --__proto__/)
+  assert.match(prototypeFlag.stderr, /reason: unknown_flag/)
+
+  const prototypeVerb = runCli(['__proto__', '--bogus', 'zzz'])
+  assert.equal(prototypeVerb.status, 2)
+  assert.match(prototypeVerb.stderr, /unknown verb: __proto__/)
+
+  const reportPath = writeReport(dir, sampleReport())
+  const gate = runCli(['gate', '--report', reportPath, '--state-dir', dir, '--nope', 'zzz'])
+  assert.equal(gate.status, 2)
+  assert.match(gate.stderr, /unknown flag --nope/)
+  assert.doesNotMatch(gate.stderr, /no_run/)
+})
+
+test('CLI: every flag both verbs legitimately accept still works', () => {
+  const dir = freshDir('cli-legitimate-flags')
+  seedRun(dir)
+
+  const statsJson = runCli(['stats', '--state-dir', dir, '--json'])
+  assert.equal(statsJson.status, 0, statsJson.stderr)
+  assert.deepEqual(JSON.parse(statsJson.stdout.trim()), {
+    emitted: 0, dropped: 0, lock_giveups: 0, resolution_ambiguous: 0, resolution_missing: 0, payload_keys_dropped: 0,
+  })
+
+  const statsHuman = runCli(['stats', '--state-dir', dir])
+  assert.equal(statsHuman.status, 0, statsHuman.stderr)
+  assert.match(statsHuman.stdout, /emit stats: emitted=0 dropped=0 lock_giveups=0/)
+
+  const reportPath = writeReport(dir, sampleReport())
+  const gate = runCli(['gate', '--report', reportPath, '--state-dir', dir, '--json'])
+  assert.equal(gate.status, 0, gate.stderr)
+  assert.deepEqual(Object.keys(JSON.parse(gate.stdout.trim())).sort(), ['adw_id', 'phase_id', 'gate_name', 'attempt', 'ok', 'mirrored'].sort())
+})
+
+test('in-process main(): a genuine internal error still returns 1, not 2', () => {
+  const dir = freshDir('cli-internal-error')
+  seedRun(dir)
+  const originalWrite = process.stdout.write
+  try {
+    process.stdout.write = () => { throw new Error('stdout write failure') }
+    assert.equal(main(['stats', '--state-dir', dir]), 1)
+  } finally {
+    process.stdout.write = originalWrite
+  }
+})
+
 test('symlinked invocation: emit.mjs still runs its CLI body when invoked through a symlinked path component', { skip: SKIP }, () => {
   const dir = freshDir('cli-symlink')
   seedRun(dir)

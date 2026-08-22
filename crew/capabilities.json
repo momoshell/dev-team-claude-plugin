@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-20",
+  "updated_at": "2026-08-22",
   "roles": {
     "lead": {
       "tools": [],
@@ -19,7 +19,7 @@
       "requires": ["subagents"],
       "by_agent": {
         "pi": {
-          "extensions": ["crew/pi/extensions/subagent.ts"],
+          "extensions": ["crew/pi/extensions/subagent.ts", "crew/pi/extensions/lab.ts"],
           "agents": [{ "name": "scout", "def": "crew/pi/agents/scout.json" }]
         }
       }

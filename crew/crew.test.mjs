@@ -305,7 +305,7 @@ test('the granted pi planner pane command is pinned byte for byte so by_agent de
   // CREW_PI_AGENTS allowlist, and the `agent` activator in --tools.
   assert.equal(
     piSeatCommand({ ...PIN_SEAT, model: 'openai-codex/gpt-5.6', grants: pinnedGrants(register, 'pi') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" CREW_PI_AGENTS=\'[{"name":"scout","def":"/repo/crew/pi/agents/scout.json"}]\' pi --model openai-codex/gpt-5.6 --tools "read,bash,edit,write,grep,find,ls,Task,agent" --exclude-tools "edit" --no-extensions -e "/repo/crew/pi/extensions/subagent.ts" -e "/repo/crew/pi/extensions/lab.ts" --no-skills --append-system-prompt "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
   )
   // Ungranted: the same pi seat with no grants loses exactly the delivery.
   assert.equal(
@@ -422,7 +422,10 @@ test('resolveAdapters boots headless claude and refuses the unshipped pi pair', 
 test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reject malformed overrides', async () => {
   const resolvedPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi' })
   assert.equal(resolvedPlanner.planner.name, 'pi')
-  assert.deepEqual(resolvedPlanner.planner.grants.extensions, [join(process.cwd(), 'crew/pi/extensions/subagent.ts')])
+  assert.deepEqual(resolvedPlanner.planner.grants.extensions, [
+    join(process.cwd(), 'crew/pi/extensions/subagent.ts'),
+    join(process.cwd(), 'crew/pi/extensions/lab.ts'),
+  ])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
   await assert.rejects(
     () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' }),

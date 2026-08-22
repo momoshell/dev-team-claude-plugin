@@ -629,6 +629,8 @@ test('fleet surfaces pin honest cost, heartbeat, and escalated status tone', () 
   assert.match(table, /\.status\.serious\s*\{\s*color:var\(--status-escalated\)/)
   const card = readFileSync(join(root, 'RunCard.svelte'), 'utf8')
   assert.match(card, /status-dot[\s\S]*status\.word/)
+  assert.match(card, /\{#each run\.agents as agent \(agent\.key\)\}/)
+  assert.doesNotMatch(card, /\{#each run\.agents as agent \(agent\.dispatch_id\)\}/)
 })
 
 test('return probing shares one six-request semaphore across refresh generations', async () => {

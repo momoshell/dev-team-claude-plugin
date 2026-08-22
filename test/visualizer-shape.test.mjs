@@ -20,6 +20,20 @@ const end = '2024-01-01T00:00:02.000Z'
 const base = { adw_id: 'x', task_slug: 'task', repo_slug: 'repo', status: 'running', started_at: start, ended_at: null,
   billed_cost_usd: null, billed_input_tokens: null, billed_output_tokens: null, billed_cache_write_tokens: null, billed_cache_read_tokens: null }
 const missingProbe = { missing: ['mode', 'engineer'], latched: false, probes: 1 }
+const b52Events = [
+  ['agent_start', { role: 'planner', dispatch_id: 'd1' }],
+  ['agent_end', { role: 'planner', outcome: 'done', dispatch_id: 'd1' }],
+  ['agent_start', { role: 'builder', dispatch_id: 'd2' }],
+  ['agent_end', { role: 'builder', outcome: 'no-envelope', dispatch_id: 'd2' }],
+  ['agent_start', { role: 'planner', dispatch_id: 'd1' }],
+  ['agent_end', { role: 'planner', outcome: 'insufficient', dispatch_id: 'd1' }],
+  ['agent_start', { role: 'lead', dispatch_id: 'd2' }],
+  ['agent_end', { role: 'lead', outcome: 'done', dispatch_id: 'd2' }],
+  ['agent_start', { role: 'planner', dispatch_id: 'd3' }],
+  ['agent_end', { role: 'planner', outcome: 'done', dispatch_id: 'd3' }],
+  ['agent_start', { role: 'lead', dispatch_id: 'd4' }],
+  ['agent_end', { role: 'lead', outcome: 'insufficient', dispatch_id: 'd4' }],
+].map(([type, payload], index) => ({ id: 4488 + index, type, payload_json: JSON.stringify(payload), started_at: null, ended_at: null }))
 
 function allFiles(path, output = []) {
   for (const entry of readdirSync(path, { withFileTypes: true })) {
@@ -171,10 +185,56 @@ test('real emitted events leave phase lanes honestly unavailable, while linked e
 
 test('foldAgents gap-fills starts and closes lanes on end', () => {
   const started = [{ type: 'agent_start', payload_json: JSON.stringify({ role: 'builder', dispatch_id: 'open' }), started_at: start }]
-  assert.deepEqual(foldAgents(started)[0], { dispatch_id: 'open', role: 'builder', lane: laneFor('builder'), outcome: null, started_at: start, ended_at: null })
+  assert.deepEqual(foldAgents(started)[0], { key: 'open#1', dispatch_id: 'open', role: 'builder', lane: laneFor('builder'), outcome: null, started_at: start, ended_at: null })
   const closed = foldAgents([...started, { type: 'agent_end', payload_json: JSON.stringify({ role: 'builder', dispatch_id: 'open', outcome: 'done' }), started_at: end }])[0]
   assert.equal(closed.outcome, 'done')
   assert.equal(closed.ended_at, end)
+})
+
+test('foldAgents splits two assignments that share a dispatch id and never relabels a row', () => {
+  const rows = foldAgents(b52Events)
+  assert.equal(rows.length, 6)
+  assert.deepEqual(rows.map((row) => `${row.dispatch_id}/${row.role}/${row.outcome}`), [
+    'd1/planner/done', 'd2/builder/no-envelope', 'd1/planner/insufficient',
+    'd2/lead/done', 'd3/planner/done', 'd4/lead/insufficient',
+  ])
+  assert.equal(new Set(rows.map((row) => row.key)).size, 6)
+  assert.ok(rows.every((row) => typeof row.key === 'string' && row.key.length > 0))
+})
+
+test('foldAgents keeps unique ids together and preserves the start role and lane', () => {
+  const unique = foldAgents([
+    { type: 'agent_start', payload_json: JSON.stringify({ role: 'planner', dispatch_id: 'u1' }), started_at: start },
+    { type: 'agent_end', payload_json: JSON.stringify({ role: 'planner', outcome: 'done', dispatch_id: 'u1' }), ended_at: end },
+    { type: 'agent_start', payload_json: JSON.stringify({ role: 'builder', dispatch_id: 'u2' }), started_at: start },
+    { type: 'agent_end', payload_json: JSON.stringify({ role: 'builder', outcome: 'done', dispatch_id: 'u2' }), ended_at: end },
+    { type: 'agent_start', payload_json: JSON.stringify({ role: 'reviewer', dispatch_id: 'u3' }), started_at: start },
+    { type: 'agent_end', payload_json: JSON.stringify({ role: 'reviewer', outcome: 'done', dispatch_id: 'u3' }), ended_at: end },
+  ])
+  assert.equal(unique.length, 3)
+  assert.deepEqual(unique.map((row) => row.dispatch_id), ['u1', 'u2', 'u3'])
+  const mismatch = foldAgents([
+    { type: 'agent_start', payload_json: JSON.stringify({ role: 'builder', dispatch_id: 'mismatch' }), started_at: start },
+    { type: 'agent_end', payload_json: JSON.stringify({ role: 'lead', outcome: 'done', dispatch_id: 'mismatch' }), ended_at: end },
+  ])[0]
+  assert.equal(mismatch.role, 'builder')
+  assert.equal(mismatch.lane, laneFor('builder'))
+})
+
+test('withCells attributes reused dispatch cells by role and keeps roleless fallback', () => {
+  const rows = withCells(foldAgents(b52Events), [
+    { dispatch_id: 'd2', role: 'builder', model: 'openai-codex/gpt-5.6-luna' },
+    { dispatch_id: 'd3', model: 'model/live' },
+  ])
+  const builder = rows.find((row) => row.dispatch_id === 'd2' && row.role === 'builder')
+  const lead = rows.find((row) => row.dispatch_id === 'd2' && row.role === 'lead')
+  const roleless = rows.find((row) => row.dispatch_id === 'd3')
+  assert.equal(builder.model, 'openai-codex/gpt-5.6-luna')
+  assert.equal(builder.model_pending, null)
+  assert.equal(lead.model, null)
+  assert.match(lead.model_pending, /role/)
+  assert.equal(roleless.model, 'model/live')
+  assert.equal(roleless.model_pending, null)
 })
 
 test('laneFor follows the ratified role order and folds unknown roles into stable spare lanes', () => {
@@ -787,7 +847,7 @@ test('shapeRun carries model cells while effort and context stay explicitly pend
   assert.equal(agent.context_window, null)
   assert.ok(agent.effort_pending)
   assert.ok(agent.context_pending)
-  assert.deepEqual(Object.keys(foldAgents(events)[0]).sort(), ['dispatch_id', 'ended_at', 'lane', 'outcome', 'role', 'started_at'].sort())
+  assert.deepEqual(Object.keys(foldAgents(events)[0]).sort(), ['dispatch_id', 'ended_at', 'key', 'lane', 'outcome', 'role', 'started_at'].sort())
   assert.deepEqual(withCells([], []), [])
 })
 

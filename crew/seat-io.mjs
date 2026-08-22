@@ -18,6 +18,7 @@ import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headle
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
+import { hostLoad, loadPolicy } from './host-load.mjs'
 
 export const DEFAULT_TRANSPORT = 'pane'
 export const HEADLESS_TRANSPORT = 'headless-json'
@@ -1099,6 +1100,7 @@ export function emitAdapter(emitter, crew = null) {
         agent: m?.agent ?? null, provider: m?.provider ?? null, model_id: m?.id ?? null,
         model: m?.model ?? null, effort: m?.effort ?? null, transport: m?.transport ?? null,
         kind: event.failure, stage: event.stage ?? null, detail: event.detail ?? null,
+        attribution: event.attribution ?? null,
       }))
     } else if (event.kind === 'modifier') {
       // MEASUREMENT, not policy (#238): every ATTEMPT lands a row, applied or not.
@@ -1438,6 +1440,10 @@ export function colorNeutralEnv(base = process.env) {
 }
 
 export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
+  const env = deps.env || process.env
+  const hostLoadDeps = {}
+  if (deps.loadavg) hostLoadDeps.loadavg = deps.loadavg
+  if (deps.cpus) hostLoadDeps.cpus = deps.cpus
   const sendLine = deps.sendLine || defaultSendLine
   const assignmentLine = deps.assignmentLine || defaultAssignmentLine
   const tree = deps.tree || defaultTree
@@ -1507,11 +1513,29 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // drop the whole row rather than enrich it. The prefix LEADS the string
   // because the ledger truncates detail at 500 chars (:1558). Only a member of
   // the closed condition set is ever recorded, and nothing branches on it.
+  // A wait-budget expiry is evidence about the CELL only when the HOST was
+  // measurably able to deliver. Same probe and same opt-in policy as the boot
+  // refusal (crew/host-load.mjs, kept outside noteRunlessCellFailure at
+  // crew/crew.mjs:1105 for exactly this reason): saturated at the instant the
+  // budget expired attributes the row to the host, measurably quiet attributes
+  // it to the cell, and an unmeasured host attributes NOTHING (null) rather
+  // than guessing — host-load.mjs declares no default threshold on purpose.
+  // Never load-bearing for the wait.
+  const timeoutAttribution = () => {
+    try {
+      const record = hostLoad({ policy: loadPolicy(env), ...hostLoadDeps })
+      if (!record) return null
+      if (record.verdict === 'saturated') return 'host'
+      if (record.verdict === 'quiet') return 'cell'
+      return null
+    } catch { return null }
+  }
   const noteCellFailure = (role, id, failure, err) => {
     try {
       io.emit?.({
         kind: 'cell-failure', role, id: id ?? null, failure,
         stage: (err && err.stage) || null, detail: providerConditionDetail(err),
+        attribution: failure === 'timeout' ? timeoutAttribution() : null,
       })
     } catch { /* never load-bearing */ }
   }

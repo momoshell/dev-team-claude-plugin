@@ -24,7 +24,7 @@ import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
   SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
-  SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
+  SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
   REQUEST_MAX_CHARS, ADVISOR_AB_INCOMPLETE_REASONS, USAGE_ABSENT_CAUSES, usageAbsentCause,
 } from '../scripts/factory/ledger.mjs'
@@ -464,6 +464,25 @@ test('AC-4: a db created by an earlier migration prefix opens cleanly under the 
   db.close()
 })
 
+test('AC-4: an earlier cell_failures schema gains attribution without backfilling existing rows', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dbPath = join(nextDir(), 'mig-cell-prefix.db')
+  const db = new DatabaseSync(dbPath)
+  db.exec(`CREATE TABLE cell_failures (
+    id INTEGER PRIMARY KEY, adw_id TEXT, task_slug TEXT, phase_id INTEGER,
+    dispatch_id TEXT, role TEXT, agent TEXT, provider TEXT, model_id TEXT,
+    model TEXT, effort TEXT, transport TEXT, kind TEXT, stage TEXT,
+    detail TEXT, created_at TEXT
+  )`)
+  db.prepare('INSERT INTO cell_failures (role, kind, created_at) VALUES (?, ?, ?)')
+    .run('builder', 'timeout', '2024-01-01T00:00:00.000Z')
+  applyMigrations(db)
+  const columns = db.prepare('PRAGMA table_info(cell_failures)').all().map((row) => row.name)
+  assert.ok(columns.includes('attribution'))
+  assert.equal(db.prepare('SELECT attribution FROM cell_failures').get().attribution, null)
+  db.close()
+})
+
 // ---------------------------------------------------------------------------
 // AC-5: reconstructability via replayJsonl
 // ---------------------------------------------------------------------------
@@ -595,12 +614,19 @@ test('AC-5: replaying the JSONL through the public write API into a fresh db rep
   assert.deepEqual(replayedAgain, replayed)
 })
 
+test('cell failure attributions are a frozen axis separate from failure kinds', () => {
+  assert.equal(Object.isFrozen(CELL_FAILURE_ATTRIBUTIONS), true)
+  assert.deepEqual([...CELL_FAILURE_ATTRIBUTIONS], ['cell', 'host'])
+  assert.equal([...CELL_FAILURE_ATTRIBUTIONS].some((value) => CELL_FAILURE_KINDS.includes(value)), false)
+})
+
 test('new outcome writers refuse out-of-enum verdicts without echoing the offending value', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const badGate = 'gate-verdict-secret'
   const badReview = 'review-verdict-secret'
   const badAccept = 'accept-outcome-secret'
   const badCell = 'cell-kind-secret'
+  const badAttribution = 'cell-attribution-secret'
   assert.throws(
     () => ledger.recordGateDiscrimination({ adw_id: 'enum-1', gate_generation: 1, verdict: badGate }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badGate),
@@ -617,6 +643,19 @@ test('new outcome writers refuse out-of-enum verdicts without echoing the offend
     () => ledger.recordCellFailure({ role: 'builder', kind: badCell }),
     (err) => err instanceof LedgerUsageError && !err.message.includes(badCell),
   )
+  assert.throws(
+    () => ledger.recordCellFailure({ role: 'builder', kind: 'timeout', attribution: badAttribution }),
+    (err) => err instanceof LedgerUsageError
+      && err.message.includes("field 'attribution'")
+      && err.message.includes('cell|host')
+      && !err.message.includes(badAttribution),
+  )
+  for (const attribution of CELL_FAILURE_ATTRIBUTIONS) {
+    assert.doesNotThrow(() => ledger.recordCellFailure({
+      role: 'builder', kind: 'timeout', attribution,
+      created_at: `2024-01-01T00:00:0${attribution === 'cell' ? 1 : 2}.000Z`,
+    }))
+  }
 })
 
 test('intake writers refuse out-of-enum values without echoing the offending value', { skip: SKIP }, () => {
@@ -699,10 +738,12 @@ test('cell_failures stores run-less and in-run rows with the complete cell shape
   assert.deepEqual({ role: runless.role, provider: runless.provider, model_id: runless.model_id, transport: runless.transport }, {
     role: 'reviewer', provider: 'pi', model_id: 'terra', transport: 'headless-rpc',
   })
+  assert.equal(runless.attribution, null)
   const inRun = rows.find((row) => row.kind === 'seat-died')
   assert.deepEqual({ adw_id: inRun.adw_id, phase_id: inRun.phase_id, dispatch_id: inRun.dispatch_id, detail: inRun.detail }, {
     adw_id: 'run-cell', phase_id: 4, dispatch_id: 'd1', detail: 'mid-run',
   })
+  assert.equal(inRun.attribution, null)
 })
 
 test('modifier attempt writer stores applied and refused rows with the complete cell shapes', { skip: SKIP }, () => {
@@ -818,21 +859,24 @@ test('modifier attempt outcome register stays equal to the driver enum', () => {
 test('cellFailures aggregates by cell and kind, counts run-less rows, and honors bounds', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const common = { task_slug: 'measure', role: 'builder', agent: 'claude', provider: 'anthropic', model_id: 'sonnet', effort: 'high' }
-  ledger.recordCellFailure({ ...common, kind: 'boot-refusal', created_at: '2024-01-01T00:00:00.000Z' })
+  ledger.recordCellFailure({ ...common, kind: 'boot-refusal', attribution: 'host', created_at: '2024-01-01T00:00:00.000Z' })
   ledger.recordCellFailure({ ...common, kind: 'boot-refusal', created_at: '2024-01-02T00:00:00.000Z' })
   ledger.recordCellFailure({ ...common, adw_id: 'run-1', kind: 'boot-refusal', created_at: '2024-01-03T00:00:00.000Z' })
-  ledger.recordCellFailure({ ...common, adw_id: 'run-1', kind: 'timeout', created_at: '2024-01-04T00:00:00.000Z' })
+  ledger.recordCellFailure({ ...common, adw_id: 'run-1', kind: 'timeout', attribution: 'host', created_at: '2024-01-04T00:00:00.000Z' })
 
   const all = ledger.cellFailures()
   const boots = all.find((row) => row.kind === 'boot-refusal')
   assert.equal(boots.failures, 3)
   assert.equal(boots.run_less, 2)
+  assert.equal(boots.host_attributed, 0)
   assert.equal(boots.first_at, '2024-01-01T00:00:00.000Z')
   assert.equal(boots.last_at, '2024-01-03T00:00:00.000Z')
+  const timeouts = all.find((row) => row.kind === 'timeout')
+  assert.equal(timeouts.host_attributed, 1)
 
   const bounded = ledger.cellFailures({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-04T00:00:00.000Z' })
-  assert.deepEqual(bounded.map(({ kind, failures, run_less }) => ({ kind, failures, run_less })), [
-    { kind: 'boot-refusal', failures: 2, run_less: 1 },
+  assert.deepEqual(bounded.map(({ kind, failures, run_less, host_attributed }) => ({ kind, failures, run_less, host_attributed })), [
+    { kind: 'boot-refusal', failures: 2, run_less: 1, host_attributed: 0 },
   ])
 })
 
@@ -842,6 +886,10 @@ test('cell-failures CLI prints rows and refuses an inverted optional window', { 
     task_slug: 'cli-failures', role: 'builder', provider: 'anthropic', model_id: 'sonnet', agent: 'claude', effort: 'high',
     kind: 'boot-refusal', created_at: '2024-01-01T00:00:00.000Z',
   })
+  ledger.recordCellFailure({
+    adw_id: 'run-cli', task_slug: 'cli-failures', role: 'builder', provider: 'anthropic', model_id: 'sonnet', agent: 'claude', effort: 'high',
+    kind: 'boot-refusal', attribution: 'host', created_at: '2024-01-01T00:00:01.000Z',
+  })
   const dbPath = ledger._dbPath
   ledger.close()
 
@@ -849,8 +897,10 @@ test('cell-failures CLI prints rows and refuses an inverted optional window', { 
   assert.equal(ok.status, 0, ok.stderr)
   const payload = JSON.parse(ok.stdout.trim())
   assert.deepEqual({ schema: payload.schema, since: payload.since, until: payload.until }, { schema: 1, since: null, until: null })
+  assert.deepEqual(payload.attributions, ['cell', 'host'])
   assert.equal(payload.rows[0].kind, 'boot-refusal')
   assert.equal(payload.rows[0].run_less, 1)
+  assert.equal(payload.rows[0].host_attributed, 1)
 
   const inverted = run([
     'cell-failures', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-01T00:00:00Z',

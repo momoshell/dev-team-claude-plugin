@@ -98,6 +98,24 @@ function makeSeatIo() {
   return { io, paths, sent, added, commands, stashSha: STASH_SHA, clock: () => clock, setResult: (p) => { resultPath = p }, setDirty: (v) => { dirtyMode = v }, setApplyFailure: (v) => { applyFailure = v }, assignmentPolls: () => polls }
 }
 
+function timeoutAttributionFixture({ env = {}, load = 1, cores = 4 } = {}) {
+  const paths = dirs()
+  const events = []
+  const crew = { members: { builder: {
+    transport: 'pane', agent: 'claude', provider: 'anthropic', id: 'sonnet', model: 'sonnet', effort: 'high',
+  } } }
+  const io = seatIo(crew, paths, paths.dir, null, null, {}, {
+    now: () => 0, sleep: () => {}, tree: () => ({}), locate: () => true,
+    sendLine: () => {}, assignmentLine: () => 'assignment', logLine: () => {},
+    cmux: () => ({ ok: false }), closeSurface: () => {}, existsSync: () => false,
+    env, loadavg: () => [load, load, load], cpus: () => new Array(cores).fill({}),
+  })
+  io.emit = (event) => events.push(event)
+  const assignment = io.assign({ role: 'builder', briefFile: '/brief.md' })
+  io.wait(assignment.returnPath, 0)
+  return events.find((event) => event.kind === 'cell-failure')
+}
+
 const ROSTER = JSON.parse(fsReadFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 
 function makeTierFixture({ role, tier = 'mechanical', transport = 'headless-json', agent, cell, adapter = {}, adapters, readRoster, ...deps } = {}) {
@@ -384,7 +402,7 @@ test('seatIo emits timeout and transport cell failures with the dispatch cell id
   assert.equal(pane.io.wait(assignment.returnPath, 0), null)
   assert.deepEqual(paneEvents, [{
     kind: 'cell-failure', role: 'builder', id: assignment.id, failure: 'timeout',
-    stage: null, detail: `no envelope at ${assignment.returnPath} within 0s`,
+    stage: null, detail: `no envelope at ${assignment.returnPath} within 0s`, attribution: null,
   }])
 
   const paths = dirs(); const transportEvents = []
@@ -401,8 +419,29 @@ test('seatIo emits timeout and transport cell failures with the dispatch cell id
   assert.throws(() => io.wait(headless.returnPath, 1), /worker exited without an envelope/)
   assert.deepEqual(transportEvents, [{
     kind: 'cell-failure', role: 'builder', id: 'h1', failure: 'no-envelope',
-    stage: 'headless-no-envelope', detail: 'worker exited without an envelope',
+    stage: 'headless-no-envelope', detail: 'worker exited without an envelope', attribution: null,
   }])
+})
+
+test('seatIo attributes timeout evidence from the injected host-load probe and leaves other failures null', () => {
+  assert.equal(timeoutAttributionFixture({ env: { CREW_LOAD_THRESHOLD: '1' }, load: 100 }).attribution, 'host')
+  assert.equal(timeoutAttributionFixture({ env: { CREW_LOAD_THRESHOLD: '8' }, load: 1 }).attribution, 'cell')
+  assert.equal(timeoutAttributionFixture({ env: {}, load: 100 }).attribution, null)
+
+  const paths = dirs(); const events = []
+  const crew = { members: { builder: { transport: 'headless-json' } } }
+  const transport = {
+    assign: () => ({ id: 'h1', returnPath: '/tmp/h1' }),
+    wait: () => { const err = new Error('worker exited without an envelope'); err.stage = 'headless-no-envelope'; throw err },
+  }
+  const io = seatIo(crew, paths, paths.dir, null, null, {}, {
+    headlessIo: () => transport, resolveWorkerBin: () => '/bin/worker',
+    env: { CREW_LOAD_THRESHOLD: '1' }, loadavg: () => [100, 100, 100], cpus: () => new Array(4).fill({}),
+  })
+  io.emit = (event) => events.push(event)
+  const assignment = io.assign({ role: 'builder', briefFile: '/brief.md' })
+  assert.throws(() => io.wait(assignment.returnPath, 1), /worker exited without an envelope/)
+  assert.equal(events.find((event) => event.kind === 'cell-failure').attribution, null)
 })
 
 test('seatIo gives headless-rpc pi rather than the claude worker binary', () => {

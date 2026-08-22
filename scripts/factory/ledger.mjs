@@ -207,6 +207,15 @@ export const CELL_FAILURE_KINDS = Object.freeze([
   'transport-error',    // spawn/session/reservation/adapter failure
 ])
 
+// WHOSE failure a cell_failures row is evidence of. Recorded ON THE ROW so no
+// reader re-derives it: 'cell' = the cell misbehaved, 'host' = this host could
+// not deliver the answer in time (a wait-budget expiry under contention, #472).
+// NULL is a THIRD state and never a synonym for either — it means nothing
+// measured the difference: every row written before #472, and every writer that
+// does not classify. Deliberately a separate axis from CELL_FAILURE_KINDS: the
+// kind says WHAT happened, the attribution says whose fact it is.
+export const CELL_FAILURE_ATTRIBUTIONS = Object.freeze(['cell', 'host'])
+
 // The four modifiers ratified in #45. A modifier that is not in this set
 // refuses at the writer rather than being stored under a typo'd name.
 export const MODIFIER_KINDS = Object.freeze([
@@ -545,6 +554,7 @@ export const TABLES = Object.freeze({
       { name: 'kind', decl: 'TEXT' },
       { name: 'stage', decl: 'TEXT' },         // the transport's own err.stage, verbatim
       { name: 'detail', decl: 'TEXT' },
+      { name: 'attribution', decl: 'TEXT' },   // NULL = unclassified (#472)
       { name: 'created_at', decl: 'TEXT' },
     ],
     unique: [['adw_id', 'dispatch_id', 'kind', 'created_at']],
@@ -1780,6 +1790,9 @@ export function openLedger({
   function recordCellFailure(input = {}) {
     requireFields(input, ['role', 'kind'], 'recordCellFailure')
     requireEnum(input.kind, CELL_FAILURE_KINDS, 'recordCellFailure', 'kind')
+    if (input.attribution != null) {
+      requireEnum(input.attribution, CELL_FAILURE_ATTRIBUTIONS, 'recordCellFailure', 'attribution')
+    }
     const args = redact({
       adw_id: input.adw_id ?? null,          // NULL is a FACT here, not a gap:
       task_slug: input.task_slug ?? null,    // bootCmd opens no run (crew.mjs:449)
@@ -1795,6 +1808,7 @@ export function openLedger({
       kind: input.kind,
       stage: input.stage == null ? null : String(input.stage),
       detail: input.detail == null ? null : String(input.detail),
+      attribution: input.attribution ?? null,
       created_at: isoMs(input.created_at ?? now()),
     }, stats)
     if (args.stage != null) args.stage = args.stage.slice(0, 120)
@@ -2541,7 +2555,8 @@ export function openLedger({
     return queryRows(`
       SELECT provider, model_id, agent, effort, role, kind,
         COUNT(*) AS failures, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
-        SUM(CASE WHEN adw_id IS NULL THEN 1 ELSE 0 END) AS run_less
+        SUM(CASE WHEN adw_id IS NULL THEN 1 ELSE 0 END) AS run_less,
+        SUM(CASE WHEN attribution = 'host' AND adw_id IS NOT NULL THEN 1 ELSE 0 END) AS host_attributed
       FROM cell_failures
       WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
       GROUP BY provider, model_id, agent, effort, role, kind
@@ -3854,7 +3869,7 @@ export function main(argv) {
       if (until != null && since != null && until <= since) refuse('cell-failures: --until must be later than --since')
       const rows = ledger.cellFailures({ since, until })
       if (ledger.stats().degraded) refuse('cell-failures: the ledger mirror is degraded — this window is unanswerable, not empty')
-      stdout.write(`${JSON.stringify({ schema: 1, question: "Which cells are failing, how often, and in what way?", since, until, kinds: CELL_FAILURE_KINDS, rows })}\n`)
+      stdout.write(`${JSON.stringify({ schema: 1, question: "Which cells are failing, how often, and in what way?", since, until, kinds: CELL_FAILURE_KINDS, attributions: CELL_FAILURE_ATTRIBUTIONS, rows })}\n`)
       return 0
     }
 

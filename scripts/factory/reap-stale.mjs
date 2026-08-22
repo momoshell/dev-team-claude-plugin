@@ -68,6 +68,18 @@ export function isArchived(name) {
   return ARCHIVE_RE.test(String(name))
 }
 
+// The proven/failed/unproven accounting reclaimDescendants already adjudicates
+// per record (crew/seat-io.mjs, `outcome`). Carried through the sweep so a
+// process that could not be PROVEN dead is reported unproven, never assumed
+// dead (#473).
+export const REAP_ACCOUNTING = Object.freeze(['proven', 'failed', 'unproven'])
+
+function zeroOutcomes() {
+  const out = {}
+  for (const name of REAP_ACCOUNTING) out[name] = 0
+  return out
+}
+
 function reclaimDeps(d) {
   const out = {}
   const base = d.kill || ((pid, signal) => process.kill(pid, signal))
@@ -88,11 +100,14 @@ export function candidateTasks(root, deps = {}) {
     let tasks
     try { tasks = d.readdirSync(join(root, repo.name), { withFileTypes: true }) } catch { continue }
     for (const task of tasks.filter((e) => e.isDirectory()).sort((a, b) => (a.name < b.name ? -1 : 1))) {
-      if (isArchived(task.name)) continue
+      // An archived dir is ENUMERATED, not excluded: leaking and then archiving
+      // is the normal order of events, so the excluded dirs were exactly the
+      // ones most likely to hold a leak (#473). Archived still means finished —
+      // the row says which it is and nothing downstream reads it as active.
       const dir = join(root, repo.name, task.name)
       const taskDir = join(dir, 'task')
       if (!d.existsSync(join(taskDir, DESCENDANT_DIR))) continue
-      out.push({ id: `${repo.name}/${task.name}`, repo: repo.name, task: task.name, dir, taskDir })
+      out.push({ id: `${repo.name}/${task.name}`, repo: repo.name, task: task.name, dir, taskDir, archived: isArchived(task.name) })
     }
   }
   return out
@@ -136,7 +151,8 @@ export function reapTask(task, { dryRun = false, deps = {} } = {}) {
   const pending = pendingRecords(task.taskDir, d)
   const base = {
     id: task.id, repo: task.repo, task: task.task, taskDir: task.taskDir,
-    dry_run: dryRun === true, pending: pending.length, verdicts: zeroVerdicts(),
+    archived: task.archived === true,
+    dry_run: dryRun === true, pending: pending.length, verdicts: zeroVerdicts(), outcomes: zeroOutcomes(),
     records: 0, swept: 0, skipped: 0, retryable: 0, groups: 0, reclaimed: 0, refused: 0,
   }
   if (dryRun) {
@@ -162,6 +178,7 @@ export function reapTask(task, { dryRun = false, deps = {} } = {}) {
     if (row.event !== 'descendant-reclaim') continue
     const verdict = classifyRecord(row)
     base.verdicts[verdict] += 1
+    if (REAP_ACCOUNTING.includes(row.outcome)) base.outcomes[row.outcome] += 1
     if (verdict !== REAP_VERDICTS.RECLAIMED && verdict !== REAP_VERDICTS.EMPTY) base.refused += 1
   }
   return base
@@ -182,12 +199,14 @@ export function reapPass({ root, dryRun = false, deps = {} } = {}) {
   const sweepRoot = root || crewRoot({ home: d.home })
   const tasks = candidateTasks(sweepRoot, d).map((task) => reapTask(task, { dryRun, deps: d }))
   const totals = {
-    tasks: tasks.length, pending: 0, records: 0, swept: 0, skipped: 0,
-    retryable: 0, groups: 0, reclaimed: 0, refused: 0, verdicts: zeroVerdicts(),
+    tasks: tasks.length, active_tasks: 0, archived_tasks: 0, pending: 0, records: 0, swept: 0, skipped: 0,
+    retryable: 0, groups: 0, reclaimed: 0, refused: 0, verdicts: zeroVerdicts(), outcomes: zeroOutcomes(),
   }
   for (const task of tasks) {
+    totals[task.archived ? 'archived_tasks' : 'active_tasks'] += 1
     for (const key of ['pending', 'records', 'swept', 'skipped', 'retryable', 'groups', 'reclaimed', 'refused']) totals[key] += task[key]
     for (const [verdict, count] of Object.entries(task.verdicts)) totals.verdicts[verdict] += count
+    for (const [name, count] of Object.entries(task.outcomes)) totals.outcomes[name] += count
   }
   return { root: sweepRoot, dry_run: dryRun === true, tasks, totals, outcome: reapOutcome(totals, dryRun === true) }
 }
@@ -197,15 +216,15 @@ export function formatReport(pass) {
   for (const task of pass.tasks) {
     if (pass.dry_run) {
       const detail = (task.candidates || []).map((c) => `${c.transport}/${c.seat_id} root=${c.root_pid} groups=${c.groups}`).join('; ')
-      lines.push(`reap: ${task.id} — pending ${task.pending}${detail ? ` (${detail})` : ''}`)
+      lines.push(`reap: ${task.id}${task.archived ? ' [archived]' : ''} — pending ${task.pending}${detail ? ` (${detail})` : ''}`)
       continue
     }
-    lines.push(`reap: ${task.id} — records ${task.records} swept ${task.swept} skipped ${task.skipped} retryable ${task.retryable} refused ${task.refused} | groups ${task.groups} reclaimed ${task.reclaimed}`)
+    lines.push(`reap: ${task.id}${task.archived ? ' [archived]' : ''} — records ${task.records} swept ${task.swept} skipped ${task.skipped} retryable ${task.retryable} refused ${task.refused} | groups ${task.groups} reclaimed ${task.reclaimed}`)
   }
   const t = pass.totals
   lines.push(pass.dry_run
-    ? `reap: totals — tasks ${t.tasks} pending ${t.pending}`
-    : `reap: totals — tasks ${t.tasks} records ${t.records} swept ${t.swept} skipped ${t.skipped} retryable ${t.retryable} refused ${t.refused} | groups ${t.groups} reclaimed ${t.reclaimed} (live ${t.verdicts[REAP_VERDICTS.REFUSED_LIVE]}, mismatch ${t.verdicts[REAP_VERDICTS.REFUSED_MISMATCH]}, unknown ${t.verdicts[REAP_VERDICTS.REFUSED_UNKNOWN]})`)
+    ? `reap: totals — tasks ${t.tasks} (active ${t.active_tasks}, archived ${t.archived_tasks}) pending ${t.pending}`
+    : `reap: totals — tasks ${t.tasks} (active ${t.active_tasks}, archived ${t.archived_tasks}) records ${t.records} swept ${t.swept} skipped ${t.skipped} retryable ${t.retryable} refused ${t.refused} | groups ${t.groups} reclaimed ${t.reclaimed} (live ${t.verdicts[REAP_VERDICTS.REFUSED_LIVE]}, mismatch ${t.verdicts[REAP_VERDICTS.REFUSED_MISMATCH]}, unknown ${t.verdicts[REAP_VERDICTS.REFUSED_UNKNOWN]}) | proven ${t.outcomes.proven} failed ${t.outcomes.failed} unproven ${t.outcomes.unproven}`)
   if (pass.dry_run) lines.push('reap: dry run — nothing was signalled; re-run with `npm run crew:reap -- --reclaim` to reclaim')
   lines.push(`reap-outcome: ${pass.outcome}`)
   return lines

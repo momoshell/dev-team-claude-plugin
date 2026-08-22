@@ -86,6 +86,15 @@ export function parseArgs(argv) {
   }
   const silenceS = threshold('silence-s')
   const loadPerCore = threshold('load-per-core')
+  // A threshold the watchdog can never consult must be REFUSED, not discarded: a
+  // single-pass readout returns from main() before any watchPass, so accepting one
+  // here is the same "looks like it works" defect the watchdog work was about. The
+  // message names the MODE the flag belongs to, so it says what to do and not only
+  // what went wrong; exit 2 comes from WatchUsageError (crew/crew.mjs:32).
+  const followOnly = ['silence-s', 'load-per-core'].filter((name) => flags[name] !== undefined)
+  if (flags.follow !== true && followOnly.length > 0) {
+    throw new WatchUsageError(`watch: --${followOnly[0]} applies to --follow only; a single-pass readout runs no watchdog`)
+  }
   return {
     names,
     all: flags.all === true,

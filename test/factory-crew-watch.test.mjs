@@ -14,6 +14,7 @@ import {
   createState,
   formatEvent,
   lineLabels,
+  main,
   orphaned,
   parseArgs,
   resolveLane,
@@ -264,6 +265,74 @@ test('parseArgs is bounded by default and validates options', () => {
   ]) {
     assert.throws(() => parseArgs(argv), { name: 'WatchUsageError' })
   }
+})
+
+test('a threshold flag is refused in the single-pass readout it cannot reach', () => {
+  assert.throws(() => parseArgs(['--all', '--silence-s', '600']), (err) => err.name === 'WatchUsageError' && err.message.includes('--silence-s') && err.message.includes('applies to --follow only'))
+  assert.throws(() => parseArgs(['demo', '--load-per-core', '2']), (err) => err.name === 'WatchUsageError' && err.message.includes('--load-per-core') && err.message.includes('applies to --follow only'))
+})
+
+test('the refusal exits 2 through main', async () => {
+  const stdout = []
+  const stderr = []
+  const status = await main(['--all', '--silence-s', '600'], {
+    ...deps(),
+    stderr: (text) => stderr.push(text),
+    stdout: (text) => stdout.push(text),
+  })
+  assert.equal(status, 2)
+  assert.match(stderr.join(''), /--silence-s/)
+  assert.match(stderr.join(''), /--follow/)
+  assert.equal(stdout.join(''), '')
+})
+
+test('the follow arm still accepts a threshold and still reaches the pass', () => {
+  const operatorRoot = world()
+  const operatorLane = seedLane(operatorRoot, {
+    task: 'thresholded',
+    journalLines: [{ at: NOW - 120_000, stage: 'plan:r1' }],
+  })
+  const operatorDeps = deps()
+  const operatorState = createState({ root: operatorRoot, names: ['thresholded'], bootPpid: 777, silenceS: 60, deps: operatorDeps })
+  const operatorResult = tick(operatorState, operatorDeps)
+  const operatorNote = operatorResult.notes.find((note) => note.note === 'silent-lane')
+  assert.ok(operatorNote)
+  assert.equal(operatorNote.threshold_s, 60)
+  assert.equal(journalObjects(operatorLane.journal).filter((line) => line.note === 'silent-lane').length, 1)
+
+  const defaultRoot = world()
+  const defaultLane = seedLane(defaultRoot, {
+    task: 'thresholded',
+    journalLines: [{ at: NOW - 120_000, stage: 'plan:r1' }],
+  })
+  const defaultDeps = deps()
+  const defaultState = createState({ root: defaultRoot, names: ['thresholded'], bootPpid: 777, deps: defaultDeps })
+  const defaultResult = tick(defaultState, defaultDeps)
+  assert.deepEqual(defaultResult.notes.filter((note) => note.note === 'silent-lane'), [])
+  assert.deepEqual(journalObjects(defaultLane.journal).filter((line) => line.note === 'silent-lane'), [])
+})
+
+test('a single pass with no threshold flags is unchanged', async () => {
+  const home = world()
+  seedLane(join(home, '.crew'), { task: 'wedged', journalLines: [{ at: NOW, stage: 'plan:r1' }] })
+  const stdout = []
+  const stderr = []
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const status = await main(['wedged'], {
+      ...deps(),
+      stderr: (text) => stderr.push(text),
+      stdout: (text) => stdout.push(text),
+    })
+    assert.equal(status, 0)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+  }
+  assert.match(stdout.join(''), /\[wedged\] stage=plan:r1 .*status=active/)
+  assert.doesNotMatch(stdout.join(''), /\[watchdog\]/)
+  assert.doesNotMatch(stderr.join(''), /\[watchdog\]/)
 })
 
 test('CLI thresholds reach the watchdog pass through createState and tick', () => {

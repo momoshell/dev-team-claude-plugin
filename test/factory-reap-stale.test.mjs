@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process'
 import {
   existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { join } from 'node:path'
+import { join, relative } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import {
@@ -80,12 +80,29 @@ const newRoot = () => {
   return root
 }
 const depsFor = (spy, snapshot = () => snapshotOf([])) => ({ kill: spy.kill, snapshot, sleep: () => {} })
+const ARCHIVED_LANE = 'old-lane.archive-2026-08-21T01-40-00-000Z'
+// Everything a sweep may legitimately write lives inside the descendant store
+// (records and their lock files); the inventory outside it must not move.
+const STORE_PREFIX = join('task', DESCENDANT_DIR)
+const inventoryOf = (dir) => {
+  const out = []
+  const walk = (current) => {
+    for (const entry of readdirSync(current, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1))) {
+      const full = join(current, entry.name)
+      const rel = relative(dir, full)
+      if (!rel.startsWith(STORE_PREFIX)) out.push(rel)
+      if (entry.isDirectory()) walk(full)
+    }
+  }
+  walk(dir)
+  return out
+}
 
 // The acceptance gate invokes node --test without --test-reporter=tap, while
 // Node's default reporter emits U+2139 instead of TAP's "# pass N" summary.
 // Emit a summary only after a successful lane so this compatibility line cannot
 // make a failing suite look green.
-const LANE_TEST_COUNT = 14
+const LANE_TEST_COUNT = 19
 process.once('exit', (code) => {
   if (code === 0 && !String(process.env.NODE_OPTIONS || '').includes('--test-reporter=tap')) {
     process.stdout.write(`# pass ${LANE_TEST_COUNT}\n`)
@@ -188,17 +205,97 @@ test('guardedKill refuses pgid zero and one in both directions, and passes real 
   assert.equal(spy.calls.some(([pid]) => pid === 0 || pid === 1 || pid === -1), false)
 })
 
-test('archived lanes are skipped while their live sibling is included', () => {
+test('an archived lane is enumerated, reaped, and reported archived rather than active', () => {
   const root = newRoot()
   const active = deadRun(root, 'repo-a', 'active-lane')
-  const archived = deadRun(root, 'repo-a', 'old-lane.archive-2026-08-21T01-40-00-000Z')
-  const found = candidateTasks(root).map((task) => task.task)
-  assert.equal(found.includes('old-lane.archive-2026-08-21T01-40-00-000Z'), false)
-  assert.equal(found.includes('active-lane'), true)
+  const archived = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const rows = candidateTasks(root)
+  assert.equal(rows.some((task) => task.task === ARCHIVED_LANE && task.archived === true), true)
+  assert.equal(rows.some((task) => task.task === 'active-lane' && task.archived === false), true)
+  const spy = killSpy({ esrch: [-42] })
+  const pass = reapPass({ root, deps: depsFor(spy) })
+  // A process left behind by a lane stays reachable after that lane archives.
+  assert.equal(readRecords(archived).every((record) => record.swept_at != null), true)
+  assert.equal(readRecords(active).every((record) => record.swept_at != null), true)
+  assert.equal(pass.totals.archived_tasks, 1)
+  assert.equal(pass.totals.active_tasks, 1)
+  assert.equal(pass.totals.verdicts[REAP_VERDICTS.RECLAIMED], 2)
+  const report = formatReport(pass)
+  assert.match(report.find((line) => line.includes(ARCHIVED_LANE)), /\[archived\]/)
+  assert.doesNotMatch(report.find((line) => line.includes('active-lane')), /\[archived\]/)
+  assert.match(report.join('\n'), /active 1, archived 1/)
+})
+
+test('an archived lane that cannot be proven dead records unproven and stays unstamped', () => {
+  const root = newRoot()
+  const archived = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const spy = killSpy()
+  const pass = reapPass({ root, deps: depsFor(spy, () => ({ ok: false, rows: new Map() })) })
+  assert.equal(pass.tasks[0].outcomes.unproven, 1)
+  assert.equal(pass.tasks[0].outcomes.proven, 0)
+  assert.equal(pass.totals.outcomes.unproven, 1)
+  assert.equal(pass.totals.verdicts[REAP_VERDICTS.REFUSED_UNKNOWN], 1)
+  assert.equal(readRecords(archived).some((record) => record.swept_at != null), false)
+  assert.equal(pass.outcome, REAP_OUTCOMES.REFUSED)
+  assert.match(formatReport(pass).join('\n'), /unproven 1/)
+})
+
+test('a proven archived reclaim tallies proven, not unproven', () => {
+  const root = newRoot()
+  deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const pass = reapPass({ root, deps: depsFor(killSpy({ esrch: [-42] })) })
+  assert.equal(pass.totals.outcomes.proven, 1)
+  assert.equal(pass.totals.outcomes.unproven, 0)
+})
+
+test('reaping an archived lane writes only inside its descendant store', () => {
+  const root = newRoot()
+  const laneDir = join(root, 'repo-a', ARCHIVED_LANE)
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  mkdirSync(join(laneDir, 'returns'), { recursive: true })
+  writeFileSync(join(laneDir, 'returns', 'd1.planner.json'), '{"role":"planner"}')
+  writeFileSync(join(taskDir, 'plan.md'), '# archived plan\n')
+  const before = inventoryOf(laneDir)
+  reapPass({ root, deps: depsFor(killSpy({ esrch: [-42] })) })
+  // Non-vacuous: the pass must have reaped this lane, or an unchanged
+  // inventory would only say nothing was looked at.
+  assert.equal(readRecords(taskDir).every((record) => record.swept_at != null), true)
+  assert.deepEqual(inventoryOf(laneDir), before)
+  assert.equal(readFileSync(join(taskDir, 'plan.md'), 'utf8'), '# archived plan\n')
+  assert.equal(readFileSync(join(laneDir, 'returns', 'd1.planner.json'), 'utf8'), '{"role":"planner"}')
+})
+
+test('a bare invocation over an archived lane lists it and signals nothing', async () => {
+  const root = newRoot()
+  const taskDir = deadRun(root, 'repo-a', ARCHIVED_LANE)
+  const spy = killSpy({ esrch: [-42] })
+  const out = []
+  const code = await main(['--root', root], { ...depsFor(spy), stdout: (text) => out.push(text) })
+  assert.equal(code, 0)
+  assert.equal(spy.calls.length, 0)
+  assert.equal(readRecords(taskDir).some((record) => record.swept_at != null), false)
+  assert.match(out.join(''), /\[archived\] — pending 1/)
+  assert.match(out.join(''), /\(dry-run\)/)
+})
+
+// MUTATION V3: replacing guardedKill(base) with base in reclaimDeps
+// (scripts/factory/reap-stale.mjs) kills THIS test and no other. crew/seat-io.mjs's
+// ownerLiveness guards only pid <= 0, so an owner pid of 1 reaches the injected
+// kill unguarded; the pgid-0/1 groups the sibling test uses are refused earlier,
+// by verifyGroup's invalid-pgid arm, which is why they left the seam untouched
+// (#476 finding V3).
+test('the pid guard is what stops the owner probe from signalling pid 1', () => {
+  const root = newRoot()
+  const taskDir = taskDirAt(root, 'repo-a', ARCHIVED_LANE)
+  writeRecord(taskDir, {
+    owner: { pid: 1, startedAt: Date.now() }, marker_owner_pid: 1,
+    groups: [{ pgid: 42, anchors: [{ pid: 43, pgid: 42, start: 'child' }] }],
+  })
   const spy = killSpy({ esrch: [-42] })
   reapPass({ root, deps: depsFor(spy) })
-  assert.equal(readRecords(active).every((record) => record.swept_at != null), true)
-  assert.equal(readRecords(archived).some((record) => record.swept_at != null), false)
+  // The seam is REACHED, so the absence below cannot mean "nothing ran".
+  assert.equal(spy.calls.some(([pid]) => pid === -42), true)
+  assert.equal(spy.calls.some(([pid]) => pid === 1 || pid === -1 || pid === 0), false)
 })
 
 test('a second pass is idempotent and reports no candidates', () => {

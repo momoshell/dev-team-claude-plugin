@@ -9,7 +9,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, existsSync,
+  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync,
   readdirSync, statSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -22,7 +22,7 @@ import { ROOT } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
-  SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, LedgerUsageError,
+  SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
@@ -3320,4 +3320,233 @@ test('ADVISOR_AB_INCOMPLETE_REASONS is the exact frozen vocabulary', () => {
     'numerator-exceeds-denominator',
   ])
   assert.equal(Object.isFrozen(ADVISOR_AB_INCOMPLETE_REASONS), true)
+})
+
+test('WRITER_MIRROR_TABLES and UPDATE_ONLY_WRITERS classify every WRITERS name exactly once, and every mapped table declares a unique key', () => {
+  const mapped = Object.keys(WRITER_MIRROR_TABLES)
+  const updateOnly = [...UPDATE_ONLY_WRITERS]
+  assert.equal(new Set(mapped).size, mapped.length)
+  assert.equal(new Set(updateOnly).size, updateOnly.length)
+  assert.deepEqual(mapped.filter((writer) => updateOnly.includes(writer)), [])
+  assert.deepEqual([...new Set([...mapped, ...updateOnly])].sort(), [...WRITERS].sort())
+  for (const table of Object.values(WRITER_MIRROR_TABLES)) {
+    assert.ok(TABLES[table])
+    assert.ok(Array.isArray(TABLES[table].unique) && TABLES[table].unique.length > 0)
+  }
+})
+
+test('doctor reports per-writer JSONL/mirror drift naming the writer and the count', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({ adw_id: 'drift-present', repo_slug: 'r', task_slug: 't' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'startSession', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'drift-missing' } })}\n`)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.measured, true)
+    assert.deepEqual(drift.writers.find((writer) => writer.writer === 'startSession'), {
+      writer: 'startSession', table: 'sessions', unique_key: ['adw_id'],
+      distinct_keys: 2, rows_present: 1, drift: 1,
+    })
+    assert.equal(drift.drift_total, 1)
+  } finally { ledger.close() }
+})
+
+test('a complete mirror reports no drift', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startSession({ adw_id: 'drift-complete', repo_slug: 'r', task_slug: 't' })
+    ledger.startPhase({ adw_id: 'drift-complete', seq: 1, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+    ledger.recordEvent({ adw_id: 'drift-complete', seq: 1, type: 'log', payload: {} })
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.measured, true)
+    assert.equal(drift.drift_total, 0)
+    assert.equal(drift.remedy, null)
+    assert.ok(drift.writers.length >= 3)
+    assert.ok(drift.writers.every((writer) => writer.drift === 0))
+  } finally { ledger.close() }
+})
+
+test('complete mirrors normalize JSONL values through SQLite affinity', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startPhase({ adw_id: 'drift-affinity', seq: '03', name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+    ledger.recordGateResult({
+      adw_id: 'drift-affinity', phase_id: null, gate_name: 'g', attempt: true, ok: true,
+      gate_generation: 1, pristine: false,
+    })
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.measured, true)
+    assert.equal(drift.drift_total, 0)
+    assert.deepEqual(drift.writers.filter(({ writer }) => ['startPhase', 'recordGateResult'].includes(writer)).map(({ writer, rows_present, drift: count }) => ({ writer, rows_present, drift: count })), [
+      { writer: 'startPhase', rows_present: 1, drift: 0 },
+      { writer: 'recordGateResult', rows_present: 1, drift: 0 },
+    ])
+  } finally { ledger.close() }
+})
+
+test('complete mirrors preserve SQLite REAL for an out-of-range integral double', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startPhase({ adw_id: 'drift-range', seq: 1e20, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 1)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 0)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
+test('complete mirrors preserve SQLite REAL at the lower int64 double boundary', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startPhase({ adw_id: 'drift-lower-boundary', seq: -9223372036854776000, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 1)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 0)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
+test('drift keys preserve the post-affinity storage class', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startPhase({ adw_id: 'run', seq: 'Infinity', name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'startPhase', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'run', seq: '1e400' } })}\n`)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 2)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 1)
+    assert.equal(drift.drift_total, 1)
+  } finally { ledger.close() }
+})
+
+test('an affinity-converted JSONL string and its mirrored integer share one drift key', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startPhase({ adw_id: 'affine', seq: 7, name: 'build', started_at: '2026-08-22T00:00:00.000Z' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'startPhase', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'affine', seq: '7' } })}\n`)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'startPhase')
+    assert.equal(writer.distinct_keys, 1)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 0)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
+test('null encoding keeps sentinel-like values distinct in drift', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.recordSeatTeardown({ adw_id: 'drift-null', role: 'ledger-drift:null', outcome: 'proven' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'recordSeatTeardown', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'drift-null', role: null, outcome: 'proven' } })}\n`)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find(({ writer }) => writer === 'recordSeatTeardown')
+    assert.equal(writer.distinct_keys, 2)
+    assert.equal(writer.rows_present, 1)
+    assert.equal(writer.drift, 1)
+    assert.equal(drift.drift_total, 1)
+  } finally { ledger.close() }
+})
+
+test('repeat unique keys are upserts, not drift', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      ledger.startSession({ adw_id: 'drift-repeat', repo_slug: 'r', task_slug: 't' })
+    }
+    const drift = ledger.jsonlDrift()
+    const writer = drift.writers.find((entry) => entry.writer === 'startSession')
+    assert.equal(drift.lines, 3)
+    assert.deepEqual({ distinct_keys: writer.distinct_keys, rows_present: writer.rows_present, drift: writer.drift }, {
+      distinct_keys: 1, rows_present: 1, drift: 0,
+    })
+  } finally { ledger.close() }
+})
+
+test('an absent or unreadable JSONL authority reports drift as unmeasured, never zero', { skip: SKIP }, () => {
+  const absent = openTestLedger()
+  try {
+    const drift = absent.jsonlDrift()
+    assert.equal(drift.measured, false)
+    assert.equal(drift.drift_total, null)
+    assert.ok(drift.unmeasured_reason)
+  } finally { absent.close() }
+
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  mkdirSync(jsonlPath)
+  const unreadable = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+  try {
+    const drift = unreadable.jsonlDrift()
+    assert.equal(drift.measured, false)
+    assert.equal(drift.drift_total, null)
+    assert.ok(drift.unmeasured_reason)
+  } finally { unreadable.close() }
+  const cli = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(cli.status, 0, cli.stderr)
+  assert.match(cli.stderr, /UNMEASURED/)
+})
+
+test('an unparsable JSONL line makes the drift readout unmeasured', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    appendFileSync(ledger._jsonlPath, 'not json\n')
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.measured, false)
+    assert.equal(drift.unparsed_lines, 1)
+    assert.equal(drift.drift_total, null)
+  } finally { ledger.close() }
+})
+
+test('a below-floor (degraded) handle reports drift as unmeasured rather than throwing', { skip: SKIP }, () => {
+  const ledger = openTestLedger({ nodeVersion: '20.0.0' })
+  assert.doesNotThrow(() => {
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.measured, false)
+    assert.deepEqual(drift.writers, [])
+  })
+  ledger.close()
+})
+
+test('the doctor CLI names replayJsonl as the drift remedy', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({ adw_id: 'drift-cli-present', repo_slug: 'r', task_slug: 't' })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'startSession', at: '2026-08-22T00:00:00.000Z', args: { adw_id: 'drift-cli-missing' } })}\n`)
+  const result = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.jsonl_drift.remedy, DRIFT_REMEDY)
+  assert.match(payload.jsonl_drift.remedy, /replayJsonl/)
+  assert.match(result.stderr, /replayJsonl/)
+})
+
+test('an update-only writer line is not counted as a missing row', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startSession({ adw_id: 'drift-update-only', repo_slug: 'r', task_slug: 't' })
+    ledger.endSession({ adw_id: 'drift-update-only', status: 'ok' })
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.lines, 2)
+    assert.equal(drift.measured, true)
+    assert.equal(drift.drift_total, 0)
+    assert.equal(drift.writers.some((writer) => writer.writer === 'endSession'), false)
+  } finally { ledger.close() }
 })

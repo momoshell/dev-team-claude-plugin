@@ -778,6 +778,45 @@ export const WRITERS = Object.freeze([
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
 
+// Writer → the table its mirror INSERTs a row into. A writer whose mirror only
+// UPDATEs an existing row adds no row and is listed in UPDATE_ONLY_WRITERS
+// instead. Together the two sets classify every name in WRITERS exactly once
+// (pinned in test/factory-ledger.test.mjs); the unique key of each table is
+// never restated here — it is read from TABLES.
+export const WRITER_MIRROR_TABLES = Object.freeze({
+  startSession: 'sessions',
+  startPhase: 'phases',
+  recordEvent: 'events',
+  recordSourceError: 'events',
+  recordEnvelope: 'envelopes',
+  recordGateResult: 'gate_results',
+  recordGateDiscrimination: 'gate_discriminations',
+  recordReviewOutcome: 'review_outcomes',
+  recordAcceptDecision: 'accept_decisions',
+  linkRun: 'run_links',
+  recordCellFailure: 'cell_failures',
+  recordModifierAttempt: 'modifier_attempts',
+  recordCiCycle: 'ci_cycles',
+  recordCiDispatch: 'ci_dispatches',
+  recordIntakeSweep: 'intake_sweeps',
+  recordIntakeRefusal: 'intake_refusals',
+  recordIntakeBrake: 'intake_brakes',
+  recordIntakeDispatch: 'intake_dispatches',
+  recordSeatTeardown: 'seat_teardowns',
+  recordSeatReclaim: 'seat_reclaims',
+  startProcess: 'processes',
+  startAgentSession: 'agent_sessions',
+})
+
+// Writers whose mirror is an UPDATE of a row another writer created: they add
+// no row, so a JSONL line of one of these kinds is never a missing row.
+export const UPDATE_ONLY_WRITERS = Object.freeze([
+  'recordSessionRequest', 'endSession', 'endPhase', 'endProcess', 'heartbeat', 'endAgentSession',
+])
+
+// The doctor readout never repairs: replayJsonl is the deliberate remedy.
+export const DRIFT_REMEDY = 'drift is not repaired here — replay the JSONL authority into the mirror with replayJsonl(jsonlPath, ledger)'
+
 // ---------------------------------------------------------------------------
 // DDL generation — built from TABLES, never hand-written alongside it.
 // ---------------------------------------------------------------------------
@@ -1042,6 +1081,126 @@ function toBindable(v) {
   if (v === undefined) return null
   if (typeof v === 'boolean') return v ? 1 : 0
   return v
+}
+
+// SQLite's post-affinity STORAGE CLASS is half of a stored value's identity:
+// the same bytes in two classes are two different rows. Measured here, in an
+// INTEGER-affinity column, '1e400' is stored as the REAL Infinity while the
+// TEXT value 'Infinity' stays TEXT — a key carrying only the string form
+// collapsed those two rows into one and hid a missing row. So the class is
+// encoded ALONGSIDE the value, and no value-specific instance of this family
+// can exist. The equivalences that are INTENDED survive, because they are real
+// conversions: '42' and 42 both land as INTEGER 42 in an INTEGER column.
+const DRIFT_NULL_SENTINEL = Object.freeze({ kind: 'null' })
+const DRIFT_NUMERIC_LITERAL = /^[+-]?(?:(?:\d+(?:\.\d*)?)|(?:\.\d+))(?:[eE][+-]?\d+)?$/
+function declaredAffinity(decl) {
+  const upper = decl.toUpperCase()
+  if (upper.includes('INT')) return 'INTEGER'
+  if (upper.includes('CHAR') || upper.includes('CLOB') || upper.includes('TEXT')) return 'TEXT'
+  if (upper.includes('BLOB') || upper === '') return 'BLOB'
+  if (upper.includes('REAL') || upper.includes('FLOA') || upper.includes('DOUB')) return 'REAL'
+  return 'NUMERIC'
+}
+const DRIFT_COLUMN_AFFINITIES = new Map()
+for (const table of Object.values(TABLES)) {
+  for (const unique of table.unique) {
+    for (const column of unique) {
+      if (!DRIFT_COLUMN_AFFINITIES.has(column)) {
+        const decl = table.columns.find(({ name }) => name === column)?.decl ?? ''
+        DRIFT_COLUMN_AFFINITIES.set(column, declaredAffinity(decl))
+      }
+    }
+  }
+}
+const DRIFT_INTEGER_LITERAL = /^[+-]?\d+$/
+const DRIFT_TYPE_PREFIX = '_drift_type_'
+const DRIFT_INT64_MIN = -(2n ** 63n)
+const DRIFT_INT64_MAX = 2n ** 63n - 1n
+
+function driftEncoded(storageClass, value) {
+  return { kind: 'value', class: storageClass, value }
+}
+
+function driftHexBytes(bytes) {
+  return [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+// The JSONL side: SQLite has not seen this value, so the class it WOULD be
+// stored in is derived from the column's declared affinity. Measured rules —
+// under INTEGER/NUMERIC affinity a numeric literal lands as INTEGER when it
+// converts to a 64-bit integer losslessly ('1e2' -> integer 100, '0042' ->
+// integer 42) and as REAL otherwise ('9223372036854775808', '.5', '1e400');
+// a non-numeric string stays TEXT ('Infinity', 'nan', '1e400x'); under REAL
+// affinity every numeric literal lands as REAL; under TEXT or BLOB affinity a
+// string is stored unchanged.
+function driftValue(column, value) {
+  const bindable = toBindable(value)
+  if (bindable === null || (typeof bindable === 'number' && Number.isNaN(bindable))) return DRIFT_NULL_SENTINEL
+  const affinity = DRIFT_COLUMN_AFFINITIES.get(column) ?? 'BLOB'
+  if (bindable instanceof Uint8Array) {
+    // No affinity ever converts a BLOB.
+    return driftEncoded('BLOB', driftHexBytes(bindable))
+  }
+  if (typeof bindable === 'bigint') {
+    return affinity === 'TEXT' ? driftEncoded('TEXT', bindable.toString()) : driftEncoded('INTEGER', bindable.toString())
+  }
+  if (typeof bindable === 'number') {
+    // node:sqlite binds every JS number as a double; an integral double is
+    // stored as INTEGER under INTEGER/NUMERIC affinity and as REAL elsewhere.
+    if (affinity === 'TEXT') return driftEncoded('TEXT', String(bindable))
+    if (affinity === 'INTEGER' || affinity === 'NUMERIC') {
+      if (Number.isInteger(bindable)) {
+        const exact = BigInt(bindable)
+        // SQLite's REAL-to-INTEGER affinity boundary is open at -2^63:
+        // that exact double remains REAL, unlike an in-range integer literal.
+        if (exact > DRIFT_INT64_MIN && exact <= DRIFT_INT64_MAX) return driftEncoded('INTEGER', exact.toString())
+      }
+    }
+    return driftEncoded('REAL', String(bindable))
+  }
+  if (affinity === 'TEXT' || affinity === 'BLOB') return driftEncoded('TEXT', bindable)
+  const trimmed = bindable.trim()
+  if (!DRIFT_NUMERIC_LITERAL.test(trimmed)) return driftEncoded('TEXT', bindable)
+  if (affinity === 'INTEGER' || affinity === 'NUMERIC') {
+    if (DRIFT_INTEGER_LITERAL.test(trimmed)) {
+      // BigInt, not Number: an integer literal above 2^53 must not be decided
+      // by a lossy double, and the int64 range is where SQLite itself gives up
+      // on INTEGER and stores REAL.
+      const exact = BigInt(trimmed.replace(/^\+/, ''))
+      if (exact >= DRIFT_INT64_MIN && exact <= DRIFT_INT64_MAX) return driftEncoded('INTEGER', exact.toString())
+    } else {
+      const numeric = Number(trimmed)
+      if (Number.isInteger(numeric) && Number.isSafeInteger(numeric)) return driftEncoded('INTEGER', String(numeric))
+    }
+  }
+  return driftEncoded('REAL', String(Number(trimmed)))
+}
+
+// The mirror side never GUESSES its class: it is read from SQLite's own
+// typeof() selected beside the column, because node:sqlite hands back a REAL
+// 42.0 as the JS number 42, indistinguishable from an INTEGER 42 by JS type.
+function driftRowValue(sqliteType, value) {
+  if (value === null || sqliteType === 'null') return DRIFT_NULL_SENTINEL
+  if (sqliteType === 'blob') return driftEncoded('BLOB', driftHexBytes(value))
+  if (sqliteType === 'integer' || sqliteType === 'real' || sqliteType === 'text') {
+    return driftEncoded(sqliteType.toUpperCase(), typeof value === 'bigint' ? value.toString() : String(value))
+  }
+  return driftEncoded('TEXT', String(value))
+}
+
+function driftKey(cols, source) {
+  const src = source ?? {}
+  return JSON.stringify(cols.map((c) => driftValue(c, src[c])))
+}
+
+function driftRowKey(cols, row) {
+  return JSON.stringify(cols.map((c) => driftRowValue(row[`${DRIFT_TYPE_PREFIX}${c}`], row[c])))
+}
+
+// The honesty rule (docs/ledger-queries.md:31): an authority that cannot be
+// read is UNMEASURED, never a measured zero drift.
+function unmeasuredDrift(jsonlPath, reason) {
+  return { measured: false, unmeasured_reason: reason, jsonl_path: jsonlPath, lines: null, unparsed_lines: null, unknown_kind_lines: null, writers: [], drift_total: null, remedy: null }
 }
 
 // ---------------------------------------------------------------------------
@@ -2715,6 +2874,102 @@ export function openLedger({
     }
   }
 
+  // Read-only drift check. The JSONL is the authority and the table is a
+  // best-effort mirror (see mirror() above), so for each writer we count the
+  // DISTINCT unique keys its JSONL lines carry and ask how many of those keys
+  // are present as rows. A repeat key is an UPSERT, not drift — the mirror
+  // inserts OR IGNORE on exactly that key — so counting raw lines would report
+  // every legitimate update as a lost row. Repairs nothing: replayJsonl is the
+  // deliberate remedy.
+  function jsonlDrift() {
+    const conn = ensureDb()
+    if (!conn) {
+      return unmeasuredDrift(jsonlPath, `the mirror could not be opened: ${stats.degraded_reason ?? 'degraded'}`)
+    }
+    let text
+    try {
+      text = readFileSync(jsonlPath, 'utf8')
+    } catch (err) {
+      return unmeasuredDrift(jsonlPath, `the JSONL authority could not be read: ${(err && (err.code || err.name)) || 'ReadError'}`)
+    }
+    let lines = 0
+    let unparsed = 0
+    let unknownKind = 0
+    const perWriter = new Map()
+    for (const raw of text.split('\n')) {
+      if (!raw) continue
+      lines += 1
+      let parsed
+      try {
+        parsed = JSON.parse(raw)
+      } catch {
+        unparsed += 1
+        continue
+      }
+      const kind = parsed && parsed.kind
+      const table = typeof kind === 'string' && Object.hasOwn(WRITER_MIRROR_TABLES, kind) ? WRITER_MIRROR_TABLES[kind] : null
+      if (!table) {
+        // An update-only writer adds no row; anything else is a line this
+        // check could not attribute at all.
+        if (!UPDATE_ONLY_WRITERS.includes(kind)) unknownKind += 1
+        continue
+      }
+      const cols = TABLES[table].unique[0]
+      if (!perWriter.has(kind)) perWriter.set(kind, { table, cols, keys: new Set() })
+      const info = perWriter.get(kind)
+      info.keys.add(driftKey(cols, parsed.args))
+    }
+    const rowKeysByTable = new Map()
+    const writers = []
+    for (const kind of WRITERS) {
+      const info = perWriter.get(kind)
+      if (!info) continue
+      if (!rowKeysByTable.has(info.table)) {
+        let rowKeys = null
+        try {
+          const selection = info.cols.flatMap((c) => [
+            quoteSqlIdentifier(c),
+            `typeof(${quoteSqlIdentifier(c)}) AS ${quoteSqlIdentifier(`${DRIFT_TYPE_PREFIX}${c}`)}`,
+          ]).join(', ')
+          const rows = conn.prepare(`SELECT ${selection} FROM ${quoteSqlIdentifier(info.table)}`).all()
+          rowKeys = new Set(rows.map((row) => driftRowKey(info.cols, row)))
+        } catch {
+          // An unreadable table is unmeasured, never zero drift.
+          rowKeys = null
+        }
+        rowKeysByTable.set(info.table, rowKeys)
+      }
+      const rowSet = rowKeysByTable.get(info.table)
+      if (!rowSet) {
+        writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], distinct_keys: info.keys.size, rows_present: null, drift: null })
+        continue
+      }
+      let present = 0
+      for (const key of info.keys) {
+        if (rowSet.has(key)) present += 1
+      }
+      writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present })
+    }
+    const unreadableTables = writers.filter((w) => w.drift === null).map((w) => w.table)
+    const measured = unparsed === 0 && unknownKind === 0 && unreadableTables.length === 0
+    const causes = []
+    if (unparsed > 0) causes.push(`${unparsed} unparsable JSONL line(s)`)
+    if (unknownKind > 0) causes.push(`${unknownKind} JSONL line(s) whose kind is outside WRITERS`)
+    if (unreadableTables.length > 0) causes.push(`unreadable table(s): ${[...new Set(unreadableTables)].join(', ')}`)
+    const driftTotal = measured ? writers.reduce((n, w) => n + w.drift, 0) : null
+    return {
+      measured,
+      unmeasured_reason: measured ? null : causes.join('; '),
+      jsonl_path: jsonlPath,
+      lines,
+      unparsed_lines: unparsed,
+      unknown_kind_lines: unknownKind,
+      writers,
+      drift_total: driftTotal,
+      remedy: driftTotal > 0 ? DRIFT_REMEDY : null,
+    }
+  }
+
   // ---- lifecycle / meta -----------------------------------------------------
 
   function statsFn() {
@@ -2753,7 +3008,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout,
+    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     close,
     installFinalizer: installFinalizerOn,
@@ -3808,6 +4063,7 @@ export function main(argv) {
       }
       const pragmas = ledger._pragmas()
       const fts5 = ledger._probeFts5()
+      const drift = ledger.jsonlDrift()
       const payload = {
         schema: 1,
         node_version: process.versions.node,
@@ -3819,8 +4075,14 @@ export function main(argv) {
         retired_tables: RETIRED_TABLES,
         pragmas,
         fts5,
+        jsonl_drift: drift,
       }
       stdout.write(`${JSON.stringify(payload)}\n`)
+      if (!drift.measured) {
+        stderr.write(`ledger: JSONL/mirror drift UNMEASURED — ${drift.unmeasured_reason}\n`)
+      } else if (drift.drift_total > 0) {
+        stderr.write(`ledger: JSONL/mirror drift — ${drift.drift_total} key(s) in the JSONL authority with no mirrored row; remedy: replayJsonl\n`)
+      }
       stderr.write('ledger: doctor readout printed above\n')
       return 0
     }

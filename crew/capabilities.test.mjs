@@ -54,7 +54,10 @@ test('a grant not present in the register refuses to reach an adapter', () => {
 
 test('the shipped planner pi overlay resolves its checkout-pinned bundle', () => {
   const grants = grantsFor(loadCapabilities(), 'planner', { agent: 'pi' })
-  assert.deepEqual(grants.extensions, [join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts')])
+  assert.deepEqual(grants.extensions, [
+    join(REGISTER_ROOT, 'crew/pi/extensions/subagent.ts'),
+    join(REGISTER_ROOT, 'crew/pi/extensions/lab.ts'),
+  ])
   assert.deepEqual(grants.agents, [{ name: 'scout', def: join(REGISTER_ROOT, 'crew/pi/agents/scout.json') }])
 })
 

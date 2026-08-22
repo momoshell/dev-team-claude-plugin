@@ -11,7 +11,9 @@ import {
   hostLoad,
   journalAt,
   readJournal,
+  resolveTunables,
   watchPass,
+  WATCH_DEFAULTS,
 } from '../scripts/factory/lane-watch.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-lane-watch-'))
@@ -146,6 +148,54 @@ test('both journal at formats resolve the newer epoch and reject invalid values'
   assert.equal(journalAt(0), 0)
   pass(root)
   assert.equal(notesFor(lane.journal, 'silent-lane')[0].silent_s, 645)
+})
+
+test('resolveTunables names measured defaults and operator origins', () => {
+  const defaults = {
+    silence_s: { value: WATCH_DEFAULTS.silence_s, origin: 'default' },
+    load_per_core: { value: WATCH_DEFAULTS.load_per_core, origin: 'default' },
+  }
+  assert.deepEqual(resolveTunables(), defaults)
+  assert.deepEqual(resolveTunables({ silenceS: 600, loadThreshold: 2 }), {
+    silence_s: { value: 600, origin: 'operator' },
+    load_per_core: { value: 2, origin: 'operator' },
+  })
+  for (const value of [NaN, 0, -1, '600', undefined]) {
+    assert.deepEqual(resolveTunables({ silenceS: value, loadThreshold: value }), defaults)
+  }
+})
+
+test('operator thresholds change notes and are reported by watchPass', () => {
+  const defaultRoot = world()
+  const defaultLane = seedLane(defaultRoot, {
+    journalLines: [{ at: NOW - 400_000, stage: 'plan:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 400 }],
+  })
+  const defaultPass = watchPass({ root: defaultRoot, now: NOW, deps: QUIET })
+  assert.equal(notesFor(defaultLane.journal, 'silent-lane').length, 1)
+  assert.deepEqual(defaultPass.tunables.silence_s, { value: WATCH_DEFAULTS.silence_s, origin: 'default' })
+
+  const operatorRoot = world()
+  const operatorLane = seedLane(operatorRoot, {
+    journalLines: [{ at: NOW - 400_000, stage: 'plan:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 400 }],
+  })
+  const operatorPass = watchPass({ root: operatorRoot, now: NOW, silenceS: 600, deps: QUIET })
+  assert.deepEqual(notesFor(operatorLane.journal, 'silent-lane'), [])
+  assert.deepEqual(operatorPass.tunables.silence_s, { value: 600, origin: 'operator' })
+
+  const loadRoot = world()
+  const loadLane = seedLane(loadRoot, {
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'a.txt', ageS: 5 }],
+  })
+  const loadDeps = { ...QUIET, loadavg: () => [25, 25, 25] }
+  const quietPass = watchPass({ root: loadRoot, now: NOW, deps: loadDeps })
+  assert.deepEqual(notesFor(loadLane.journal, 'host-load'), [])
+  assert.deepEqual(quietPass.tunables.load_per_core, { value: WATCH_DEFAULTS.load_per_core, origin: 'default' })
+  const loadPass = watchPass({ root: loadRoot, now: NOW, loadThreshold: 1, deps: loadDeps })
+  assert.equal(notesFor(loadLane.journal, 'host-load').length, 1)
+  assert.deepEqual(loadPass.tunables.load_per_core, { value: 1, origin: 'operator' })
 })
 
 test('host load reports only measurable load over threshold', () => {

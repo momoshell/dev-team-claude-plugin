@@ -19,6 +19,7 @@ import {
   resolveLane,
   selectEvent,
   tick,
+  watchdogLine,
 } from '../scripts/factory/crew-watch.mjs'
 import { discoverLanes, watchPass } from '../scripts/factory/lane-watch.mjs'
 
@@ -240,13 +241,80 @@ test('parseArgs is bounded by default and validates options', () => {
   assert.equal(base.watchdog, true)
   assert.equal(base.intervalS, 2)
   assert.deepEqual(base.events, [...DEFAULT_EVENTS])
-  const flagged = parseArgs(['--all', '--follow', '--no-watchdog', '--interval', '7', '--events', 'commit, done'])
+  assert.equal(base.silenceS, undefined)
+  assert.equal(base.loadPerCore, undefined)
+  const flagged = parseArgs(['--all', '--follow', '--no-watchdog', '--interval', '7', '--events', 'commit, done', '--silence-s', '600', '--load-per-core', '2'])
   assert.deepEqual(flagged, {
-    names: [], all: true, follow: true, watchdog: false, events: ['commit', 'done'], intervalS: 7,
+    names: [], all: true, follow: true, watchdog: false, events: ['commit', 'done'], intervalS: 7, silenceS: 600, loadPerCore: 2,
   })
-  for (const argv of [['--nope'], [], ['--interval', '0'], ['--events', ' , '], ['demo', '--events', ''], ['--follow', '--follow']]) {
+  for (const argv of [
+    ['--nope'],
+    [],
+    ['--interval', '0'],
+    ['--events', ' , '],
+    ['demo', '--events', ''],
+    ['--follow', '--follow'],
+    ['--all', '--silence-s', '0'],
+    ['--all', '--silence-s', 'abc'],
+    ['--all', '--silence-s', '-1'],
+    ['--all', '--load-per-core', '0'],
+    ['--all', '--load-per-core', '-1'],
+    ['--all', '--load-per-core', 'abc'],
+    ['--all', '--silence-s', '600', '--silence-s', '600'],
+  ]) {
     assert.throws(() => parseArgs(argv), { name: 'WatchUsageError' })
   }
+})
+
+test('CLI thresholds reach the watchdog pass through createState and tick', () => {
+  const defaultSilenceRoot = world()
+  const defaultSilenceLane = seedLane(defaultSilenceRoot, {
+    journalLines: [{ at: NOW - 400_000, stage: 'plan:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 400 }],
+  })
+  const defaultSilenceDeps = deps()
+  const defaultSilenceState = createState({ root: defaultSilenceRoot, all: true, bootPpid: 777, deps: defaultSilenceDeps })
+  const defaultSilence = tick(defaultSilenceState, defaultSilenceDeps)
+  assert.ok(defaultSilence.notes.some((note) => note.note === 'silent-lane'))
+
+  const operatorSilenceRoot = world()
+  const operatorSilenceLane = seedLane(operatorSilenceRoot, {
+    journalLines: [{ at: NOW - 400_000, stage: 'plan:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 400 }],
+  })
+  const operatorSilenceDeps = deps()
+  const operatorSilenceState = createState({ root: operatorSilenceRoot, all: true, bootPpid: 777, silenceS: 600, deps: operatorSilenceDeps })
+  const operatorSilence = tick(operatorSilenceState, operatorSilenceDeps)
+  assert.deepEqual(operatorSilence.notes.filter((note) => note.note === 'silent-lane'), [])
+  assert.deepEqual(journalObjects(operatorSilenceLane.journal).filter((line) => line.note === 'silent-lane'), [])
+  assert.equal(journalObjects(defaultSilenceLane.journal).filter((line) => line.note === 'silent-lane').length, 1)
+
+  const defaultLoadRoot = world()
+  const defaultLoadLane = seedLane(defaultLoadRoot, {
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'a.txt', ageS: 5 }],
+  })
+  const loadDeps = deps(NOW, { loadavg: () => [25, 25, 25] })
+  const defaultLoadState = createState({ root: defaultLoadRoot, all: true, bootPpid: 777, deps: loadDeps })
+  const defaultLoad = tick(defaultLoadState, loadDeps)
+  assert.deepEqual(defaultLoad.notes.filter((note) => note.note === 'host-load'), [])
+  assert.deepEqual(journalObjects(defaultLoadLane.journal).filter((line) => line.note === 'host-load'), [])
+
+  const operatorLoadRoot = world()
+  const operatorLoadLane = seedLane(operatorLoadRoot, {
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'a.txt', ageS: 5 }],
+  })
+  const operatorLoadState = createState({ root: operatorLoadRoot, all: true, bootPpid: 777, loadPerCore: 1, deps: loadDeps })
+  const operatorLoad = tick(operatorLoadState, loadDeps)
+  assert.ok(operatorLoad.notes.some((note) => note.note === 'host-load'))
+  assert.equal(journalObjects(operatorLoadLane.journal).filter((line) => line.note === 'host-load').length, 1)
+})
+
+test('watchdogLine states each threshold value and origin', () => {
+  assert.equal(watchdogLine(), '[watchdog] silence_s=300 (default) load_per_core=4 (default)')
+  assert.equal(watchdogLine({ silenceS: 600 }), '[watchdog] silence_s=600 (operator) load_per_core=4 (default)')
+  assert.equal(watchdogLine({ watchdog: false }), '[watchdog] off')
 })
 
 test('follow has no process-spawning surface and no child after one tick', async () => {
@@ -270,5 +338,5 @@ test('follow has no process-spawning surface and no child after one tick', async
 
 test('lane-watch remains byte-identical', () => {
   const source = readFileSync(new URL('../scripts/factory/lane-watch.mjs', import.meta.url))
-  assert.equal(createHash('sha256').update(source).digest('hex'), '9fb26f904275180abea056ec32674b8e28cc629c9183fcd27f5c8ad9f4180158')
+  assert.equal(createHash('sha256').update(source).digest('hex'), 'aea054f933f4618663d8205dda12e093893155630818d2740e8fa6e53086ef06')
 })

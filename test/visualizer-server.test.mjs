@@ -1080,6 +1080,128 @@ test('/api/intake/brake attributes successful and failed transitions and its wri
   }
 })
 
+test('operator brake chain: engaging through the operator path stops a real sweep, clearing releases it, and a mid-flight arm stops the next tick', { skip: SKIP }, async () => {
+  // SEAM: the browser is stubbed, nothing else. This test issues the exact request
+  // visualizer/web/src/lib/api.js:21 setIntakeBrake issues, against the real server
+  // child on a real socket, so what stays unproven is only the Svelte toggle's own
+  // wiring to setIntakeBrake -- not the endpoint, the write, the audit row, or the
+  // sweep's read of it. The mid-flight arm is posted from a child process because
+  // intakeLoop is synchronous and cannot await inside its sleep dep; the request it
+  // makes is byte-identical to the one the in-process halves make.
+  const boardField = (name, value) => ({ name: value, field: { name } })
+  const readyItem = (number) => ({ id: `ITEM-${number}`, content: { number, title: `Issue ${number}`, url: `https://example.test/issues/${number}`, body: 'ask: Prove the brake chain end to end\nwhere: scripts/factory/intake.mjs\ndone-means: The chain is proven\nout-of-scope: Dispatching policy', createdAt: '2025-12-01T00:00:00Z' }, fieldValues: { nodes: [boardField('Status', 'Ready'), boardField('Priority', 'P1')] } })
+  const boardPage = (nodes) => ({ data: { user: { projectV2: { items: { nodes, pageInfo: { hasNextPage: false, endCursor: null } } } } }, rateLimit: { remaining: 900, resetAt: '2026-01-02T01:00:00Z' } })
+
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-brake-chain-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const checkout = join(dir, 'checkout'), crewRoot = join(dir, 'crew')
+  mkdirSync(join(checkout, 'scripts', 'factory'), { recursive: true })
+  writeFileSync(join(checkout, 'scripts', 'factory', 'intake.mjs'), 'export const marker = 1\n')
+  mkdirSync(crewRoot, { recursive: true })
+  spawnSync('git', ['init', '-q', checkout], { encoding: 'utf8' })
+  const switchPath = join(checkout, '.factory', 'STOP')
+
+  let boardCalls = 0, moveCalls = 0, nowCalls = 0
+  const chainDeps = {
+    now: () => Date.parse('2026-01-02T00:01:00.000Z') + nowCalls++,
+    runsInWindow: () => 0,
+    github: () => { boardCalls += 1; return boardPage([readyItem(4440)]) },
+    branchFor: () => 'intake-4440',
+    // A failed board write refuses the dispatch at intake.mjs:1244 BEFORE crewBoot,
+    // so reaching dispatch is measurable without booting anything.
+    boardMove: () => { moveCalls += 1; return { ok: false, status: null } },
+    crewBoot: () => { throw new Error('the crossing test must never boot a crew') },
+    crewRun: () => { throw new Error('the crossing test must never run a crew') },
+  }
+  const board = { owner: 'example-owner', projectNumber: 7 }
+  const config = { windowCap: 99, protectedPaths: [] }
+
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot, null, { DEVTEAM_INTAKE_CHECKOUT: checkout }))
+    const { intakeRun, intakeLoop } = await import('../scripts/factory/intake.mjs')
+
+    // CHAIN-ENGAGE-HOOK
+    const engaged = await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: true, actor: 'ops-engage' }) })
+    assert.equal(engaged.status, 200)
+    assert.equal(engaged.json.ok, true)
+    assert.equal(engaged.json.state, 'engaged')
+    assert.equal(engaged.json.path, switchPath)
+    assert.equal(JSON.parse(readFileSync(switchPath, 'utf8')).actor, 'ops-engage')
+
+    const braked = intakeRun({ board, checkout, dbPath: ledgerDb, config, deps: chainDeps })
+    assert.equal(braked.sweep.outcome, 'parked')
+    assert.equal(braked.sweep.reason, 'stop-switch')
+    assert.equal(braked.dispatch, null)
+    assert.equal(braked.promotions.length, 0)
+    assert.equal(boardCalls, 0)
+    assert.equal(moveCalls, 0)
+
+    const cleared = await json(base, '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: false, actor: 'ops-release' }) })
+    assert.equal(cleared.json.ok, true)
+    assert.equal(cleared.json.state, 'clear')
+    assert.equal(existsSync(switchPath), false)
+
+    const released = intakeRun({ board, checkout, dbPath: ledgerDb, config, deps: chainDeps })
+    assert.equal(released.sweep.ok, true)
+    assert.notEqual(released.sweep.reason, 'stop-switch')
+    assert.equal(released.sweep.outcome, 'picked')
+    assert.equal(released.sweep.picked.issue, 4440)
+    assert.equal(boardCalls, 1)
+    assert.equal(moveCalls, 1)
+    assert.equal(released.dispatch.outcome, 'refused')
+    assert.equal(released.dispatch.reason, 'board-write-failed')
+
+    // sleep: the injected dep arms the brake between loop ticks.
+    let arms = 0
+    const sleep = () => {
+      arms += 1
+      if (arms > 1) return
+      const armed = spawnSync(process.execPath, ['-e', `
+        (async () => {
+          const res = await fetch(process.argv[1] + '/api/intake/brake', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ engaged: true, actor: 'ops-midflight' }) })
+          const value = await res.json()
+          if (value.ok !== true || value.state !== 'engaged') { console.error(JSON.stringify(value)); process.exit(1) }
+        })().catch((err) => { console.error(err); process.exit(1) })
+      `.replace(/^\s*/gm, ''), base], { encoding: 'utf8' })
+      assert.equal(armed.status, 0, armed.stderr)
+    }
+    const loop = intakeLoop({ board, checkout, dbPath: ledgerDb, config, deps: { ...chainDeps, sleep: sleep }, maxTicks: 3 })
+    assert.equal(loop.ok, true)
+    assert.equal(loop.stopped, true)
+    assert.equal(loop.ticks.length, 2)
+    assert.equal(loop.ticks[0].swept, true)
+    assert.equal(loop.ticks[0].run.sweep.ok, true)
+    assert.equal(loop.ticks[0].outcome, 'picked')
+    assert.equal(loop.ticks[0].reason, null)
+    assert.ok(Number.isFinite(Date.parse(loop.ticks[0].started_at)))
+    assert.equal(loop.ticks[1].swept, false)
+    assert.equal(loop.ticks[1].outcome, 'parked')
+    assert.equal(loop.ticks[1].reason, 'stop-switch')
+    assert.equal(loop.ticks[1].run, null)
+    assert.equal(boardCalls, 2)
+
+    await stopServer(child); child = null
+    let ledger
+    try {
+      ledger = openLedger({ dbPath: ledgerDb })
+      const brakes = ledger.dumpTable('intake_brakes').sort((a, b) => a.id - b.id)
+      assert.deepEqual(brakes.map((row) => row.actor), ['ops-engage', 'ops-release', 'ops-midflight'])
+      assert.deepEqual(brakes.map((row) => row.transition), ['engaged', 'cleared', 'engaged'])
+      assert.ok(brakes.every((row) => row.outcome === 'ok'))
+      assert.ok(brakes.every((row) => row.path === switchPath))
+      const sweeps = ledger.dumpTable('intake_sweeps')
+      assert.ok(sweeps.filter((row) => row.reason === 'stop-switch' && row.outcome === 'parked').length >= 2)
+      assert.ok(sweeps.some((row) => row.outcome === 'picked'))
+    } finally {
+      ledger?.close()
+    }
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('viz-cli-unknown-flag-refusal — an unknown flag or a bad flag value refuses with exit 2 and never leaks a stack', () => {
   const cases = [
     { args: ['--port', '0', '--bogus', 'zzz'], error: /unknown flag --bogus/ },

@@ -20,10 +20,11 @@ export const STOP_SWITCH_PATH = '.factory/STOP'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = resolve(ROOT, 'web', 'dist')
 const schema = 1
+const DEFAULT_PORT = 4488
 
 function defaults() {
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return { port: Number(process.env.DEVTEAM_VIZ_PORT) || 4488, host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
+  return { port: portFromEnv(), host: '127.0.0.1', ledgerDb: process.env.DEVTEAM_LEDGER_DB || join(dir, 'ledger.db'), triageDb: undefined, crewRoot: process.env.DEVTEAM_CREW_ROOT || join(homedir(), '.crew'), checkout: resolve(process.env.DEVTEAM_INTAKE_CHECKOUT || process.cwd()), rosterPath: process.env.DEVTEAM_ROSTER_PATH || undefined, ladderPath: process.env.DEVTEAM_LADDER_PATH || undefined, referencePath: process.env.DEVTEAM_MODEL_REFERENCE || join(dir, 'model-reference.json') }
 }
 // A refusal cause, tagged so the CLI guard can map it to exit 2 without
 // conflating it with an unexpected internal throw (mapped to 1). Exit codes
@@ -31,6 +32,21 @@ function defaults() {
 // 1 unexpected internal error, 2 usage/refusal.
 export class ServerUsageError extends Error {
   constructor(message) { super(`viz-serve: ${message}`); this.name = 'ServerUsageError'; this.usage = true }
+}
+
+// One port contract, whichever door supplies it (#474). `Number(x) || 4488`
+// cannot express "an absent value defaults" without also swallowing 0 — the one
+// port a spawned descendant can ask for (#466) — and it let the env door bypass
+// the refusal table the flag door has carried since #467.
+export function parsePort(label, value) {
+  const text = value == null ? '' : String(value)
+  if (!/^\d+$/.test(text) || Number(text) > 65535) throw new ServerUsageError(`${label} must be an integer between 0 and 65535, found ${text}`)
+  return Number(text)
+}
+export function portFromEnv(env = process.env, fallback = DEFAULT_PORT) {
+  const raw = env?.DEVTEAM_VIZ_PORT
+  if (raw == null || raw === '') return fallback
+  return parsePort('DEVTEAM_VIZ_PORT', raw)
 }
 
 // The flags this CLI reads, mapped to their config keys. This is the one place
@@ -60,8 +76,7 @@ export function parseCliArgs(argv) {
     i += 1
     if (value === undefined || value.startsWith('--')) throw new ServerUsageError(`${arg} requires a value`)
     if (arg === '--port') {
-      if (!/^\d+$/.test(value) || Number(value) > 65535) throw new ServerUsageError(`${arg} must be an integer between 0 and 65535, found ${value}`)
-      out.port = Number(value)
+      out.port = parsePort(arg, value)
     } else {
       if (value === '') throw new ServerUsageError(`${arg} requires a non-empty value`)
       out[key] = value
@@ -215,12 +230,21 @@ export function startServer(options = {}) {
         // handle that has answered nothing yet reports degraded false even for
         // a database that cannot be opened.
         const feedHealth = typeof feed.health === 'function' ? feed.health() : null
-        const runSetReason = typeof feed._reason === 'function' ? feed._reason() : null
-        // feed.health() also includes the independent triage sidecar. The
-        // ledger reason is the read-specific degradation signal for this view.
-        const runSetHealth = typeof feed._reason === 'function'
-          ? { ...(feedHealth || {}), degraded: typeof runSetReason === 'string' && runSetReason.length > 0 }
-          : feedHealth
+        // The feed's reason LATCHES for the life of the process (#475):
+        // probeColumns() records a momentary fault and nothing ever clears it,
+        // so it can only ever answer "has anything ever gone wrong", never
+        // "did this read work". It stays a fallback and never the gate.
+        const latchedReason = typeof feed._reason === 'function' ? feed._reason() : null
+        // This read's own verdict. The feed states an absence per call, so a
+        // read that answered rows is healthy however bad the process history is.
+        const readReason = typeof result?.absent === 'string' && result.absent.length > 0 ? result.absent : null
+        // A read that answered no rows stays unanswerable even if it named no
+        // reason — never a measured zero (#451) — and borrows the latched reason
+        // only to describe it.
+        const runSetReason = readReason ?? (result?.rows == null
+          ? (latchedReason || 'the ledger read that answered this window failed without naming a reason')
+          : null)
+        const runSetHealth = { ...(feedHealth || {}), degraded: typeof runSetReason === 'string' && runSetReason.length > 0 }
         const burn = typeof feed.budgetWindow === 'function'
           ? feed.budgetWindow({ since, until })
           : { measured: false, total: null, sessions: null, absent: 'budget burn is unavailable from this feed' }

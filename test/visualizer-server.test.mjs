@@ -8,7 +8,7 @@ import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, replayJsonl, WRITERS } from '../scripts/factory/ledger.mjs'
-import { parseCliArgs, ServerUsageError } from '../visualizer/server/server.mjs'
+import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 
@@ -82,6 +82,17 @@ function startServer(ledgerDb, triageDb, crewRoot, rosterPath, environment = nul
 async function stopServer(child) {
   child.kill('SIGTERM')
   await new Promise((resolve) => child.once('exit', resolve))
+}
+async function startInProcess(feed, options) {
+  const handles = startVisualizerServer({ port: 0, host: '127.0.0.1', feed, ...options })
+  await new Promise((resolve, reject) => {
+    handles.server.once('error', reject)
+    handles.server.once('listening', resolve)
+  })
+  return { ...handles, base: `http://127.0.0.1:${handles.server.address().port}` }
+}
+async function stopInProcess(server) {
+  if (server?.listening) await new Promise((resolve) => server.close(resolve))
 }
 function returnsFixture(root, adwId) {
   const dir = join(root, 'repo', 'finished'), returns = join(dir, 'returns'), ledger = join(dir, 'ledger')
@@ -324,6 +335,73 @@ test('run-set refuses a malformed or inverted window and rejects non-GET', { ski
     assert.equal((await json(base, '/api/run-set', { method: 'POST' })).status, 405)
   } finally {
     if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('viz-run-set-latch — a transient fault degrades only the request it broke', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-latch-transient-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb)
+  let calls = 0, server
+  const feed = {
+    runSet() {
+      calls += 1
+      return calls === 1
+        ? { rows: null, absent: 'database is locked' }
+        : { rows: [{ adw_id: done, status: 'ok' }], absent: null }
+    },
+    health: () => ({ degraded: false }),
+    _reason: () => 'database is locked',
+    close: () => {},
+  }
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const during = await json(started.base, '/api/run-set')
+    assert.equal(during.status, 200)
+    assert.equal(during.json.degraded, true)
+    assert.equal(during.json.runs, null)
+    assert.match(during.json.degraded_reason, /database is locked/)
+    const after = [await json(started.base, '/api/run-set'), await json(started.base, '/api/run-set')]
+    for (const response of after) {
+      assert.equal(response.status, 200)
+      assert.equal(response.json.degraded, false)
+      assert.equal(response.json.degraded_reason, null)
+      assert.equal(response.json.absent, null)
+      assert.ok(response.json.runs >= 1)
+    }
+    assert.equal(calls, 3)
+  } finally {
+    await stopInProcess(server)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('viz-run-set-latch — a sustained fault stays unanswerable while it lasts', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-latch-sustained-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let server
+  const feed = {
+    runSet: () => ({ rows: null, absent: 'database is locked' }),
+    health: () => ({ degraded: false }),
+    _reason: () => 'database is locked',
+    close: () => {},
+  }
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const responses = [await json(started.base, '/api/run-set'), await json(started.base, '/api/run-set'), await json(started.base, '/api/run-set')]
+    for (const response of responses) {
+      assert.equal(response.status, 200)
+      assert.equal(response.json.degraded, true)
+      assert.equal(response.json.runs, null)
+      assert.ok(typeof response.json.absent === 'string' && response.json.absent.length > 0)
+      assert.doesNotMatch(JSON.stringify(response.json), /"runs":0/)
+    }
+  } finally {
+    await stopInProcess(server)
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -875,6 +953,53 @@ test('the visualizer CLI still accepts every flag it reads', async () => {
   } finally {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('viz-port-env-door — DEVTEAM_VIZ_PORT=0 binds an ephemeral port and an absent value keeps 4488', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-port-env-'))
+  const ledgerDb = join(dir, 'ledger.db')
+  let child
+  try {
+    child = spawnProcess(process.execPath, [SERVER_SCRIPT], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, DEVTEAM_VIZ_PORT: '0', DEVTEAM_LEDGER_DB: ledgerDb },
+    })
+    children.add(child)
+    const announced = await announceDetails(child)
+    assert.equal(announced.listening, true)
+    assert.ok(Number.isInteger(announced.port) && announced.port > 0)
+    assert.notEqual(announced.port, 4488)
+    await stopServer(child); child = null
+
+    const env = { ...process.env }
+    delete env.DEVTEAM_VIZ_PORT
+    const script = `import(${JSON.stringify(new URL('../visualizer/server/server.mjs', import.meta.url).href)}).then((m) => process.stdout.write(String(m.parseCliArgs([]).port)))`
+    const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { encoding: 'utf8', env, timeout: 20000, killSignal: 'SIGKILL' })
+    assert.equal(result.status, 0, result.stderr || result.error?.message)
+    assert.equal(result.stdout.trim(), '4488')
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('viz-port-env-door — a bad DEVTEAM_VIZ_PORT refuses like the flag does', () => {
+  const env = { ...process.env }
+  delete env.DEVTEAM_VIZ_PORT
+  for (const value of ['70000', 'definitely-not-a-port']) {
+    const result = runServerCli([], { env: { ...env, DEVTEAM_VIZ_PORT: value }, timeout: 20000, killSignal: 'SIGKILL' })
+    assert.equal(result.status, 2, result.stderr || result.error?.message)
+    assert.match(result.stderr, new RegExp(`DEVTEAM_VIZ_PORT must be an integer between 0 and 65535, found ${value}`))
+    assert.doesNotMatch(result.stderr, /RangeError|ERR_SOCKET_BAD_PORT/)
+    assert.doesNotMatch(result.stdout, /"listening":true/)
+  }
+  for (const value of ['70000', 'definitely-not-a-port', '']) {
+    const result = runServerCli(['--port', value], { env, timeout: 20000, killSignal: 'SIGKILL' })
+    assert.equal(result.status, 2, result.stderr || result.error?.message)
+    assert.match(result.stderr, /--port must be an integer between 0 and 65535, found/)
+    assert.doesNotMatch(result.stderr, /RangeError|ERR_SOCKET_BAD_PORT/)
+    assert.doesNotMatch(result.stdout, /"listening":true/)
   }
 })
 

@@ -34,6 +34,20 @@ export const WATCH_EVENT = 'lane-watch'
 //   between the two measurements.
 export const WATCH_DEFAULTS = Object.freeze({ silence_s: 300, load_per_core: 4 })
 
+// The ONE place either threshold resolves. An operator value wins; absent, the
+// measured default above stands — and the ORIGIN is NAMED rather than inferred,
+// so a second fallback one layer up would have to lie about it (#469). A value
+// that is not a finite positive number is not a value.
+export function resolveTunables({ silenceS, loadThreshold } = {}) {
+  const pick = (value, fallback) => (Number.isFinite(value) && value > 0
+    ? { value, origin: 'operator' }
+    : { value: fallback, origin: 'default' })
+  return {
+    silence_s: pick(silenceS, WATCH_DEFAULTS.silence_s),
+    load_per_core: pick(loadThreshold, WATCH_DEFAULTS.load_per_core),
+  }
+}
+
 // A lane past these is finished, not wedged: it will be silent forever and a
 // note every pass would be a guaranteed false positive.
 export const TERMINAL_STAGES = Object.freeze(['done', 'converge'])
@@ -249,8 +263,9 @@ function appendNote(lane, note, deps) {
 export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}) {
   const d = normalDeps(deps)
   const at = typeof now === 'number' ? now : d.now()
-  const silence = typeof silenceS === 'number' ? silenceS : WATCH_DEFAULTS.silence_s
-  const threshold = typeof loadThreshold === 'number' ? loadThreshold : WATCH_DEFAULTS.load_per_core
+  const tunables = resolveTunables({ silenceS, loadThreshold })
+  const silence = tunables.silence_s.value
+  const threshold = tunables.load_per_core.value
   const watchRoot = root || crewRoot()
   const lanes = discoverLanes(watchRoot, d)
   const load = hostLoad({ threshold, deps: d })
@@ -277,5 +292,5 @@ export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}
       written.push(appendNote(lane, { ...note, __at: at }, d))
     }
   }
-  return { at: new Date(at).toISOString(), root: watchRoot, lanes: watched, notes: written }
+  return { at: new Date(at).toISOString(), root: watchRoot, lanes: watched, notes: written, tunables }
 }

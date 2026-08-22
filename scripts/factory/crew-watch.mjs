@@ -6,7 +6,7 @@
 import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs'
 import { loadavg, cpus } from 'node:os'
 import { join } from 'node:path'
-import { archivedLanes, crewRoot, discoverLanes, journalAt, laneActive, readJournal, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
+import { archivedLanes, crewRoot, discoverLanes, journalAt, laneActive, readJournal, resolveTunables, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
 import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown'])
@@ -48,7 +48,7 @@ export function parseArgs(argv) {
   const flags = {}
   const names = []
   const booleanFlags = new Set(['follow', 'all', 'no-watchdog'])
-  const valueFlags = new Set(['events', 'interval'])
+  const valueFlags = new Set(['events', 'interval', 'silence-s', 'load-per-core'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (!argument.startsWith('--')) {
@@ -75,6 +75,17 @@ export function parseArgs(argv) {
   if (events.length === 0) throw new WatchUsageError('watch: --events requires at least one event')
   const intervalS = flags.interval === undefined ? READOUT_INTERVAL_S : Number(flags.interval)
   if (!Number.isFinite(intervalS) || intervalS <= 0) throw new WatchUsageError('watch: --interval must be finite and positive')
+  // Same refusal as --interval: a threshold coerced to NaN would be a worse
+  // defect than the untunable one #469 fixes. Absent stays undefined so
+  // lane-watch's resolveTunables remains the only place a default is named.
+  const threshold = (name) => {
+    if (flags[name] === undefined) return undefined
+    const value = Number(flags[name])
+    if (!Number.isFinite(value) || value <= 0) throw new WatchUsageError(`watch: --${name} must be finite and positive`)
+    return value
+  }
+  const silenceS = threshold('silence-s')
+  const loadPerCore = threshold('load-per-core')
   return {
     names,
     all: flags.all === true,
@@ -82,6 +93,8 @@ export function parseArgs(argv) {
     watchdog: !flags['no-watchdog'],
     events,
     intervalS,
+    silenceS,
+    loadPerCore,
   }
 }
 
@@ -109,6 +122,16 @@ export function formatEvent(task, line) {
     .map((key) => ` ${key}=${String(line[key])}`)
     .join('')
   return `[${task}] ${clock} ${labels[0]}${detail}`
+}
+
+// The readout must ADMIT which numbers the watchdog used and where each came
+// from: a watchdog that is quiet because its threshold cannot fire on this host
+// is otherwise indistinguishable from a host with nothing wedged (#469).
+export function watchdogLine({ watchdog = true, silenceS, loadThreshold } = {}) {
+  if (!watchdog) return '[watchdog] off'
+  const inForce = resolveTunables({ silenceS, loadThreshold })
+  const say = (key) => `${key}=${inForce[key].value} (${inForce[key].origin})`
+  return `[watchdog] ${say('silence_s')} ${say('load_per_core')}`
 }
 
 export function resolveLane(name, lanes) {
@@ -207,7 +230,7 @@ export function orphaned(bootPpid, ppid) {
   return Number.isInteger(bootPpid) && Number.isInteger(ppid) && ppid !== bootPpid
 }
 
-export function createState({ root, names = [], all = false, events = [...DEFAULT_EVENTS], intervalS = READOUT_INTERVAL_S, watchdog = true, bootPpid, deps = {} } = {}) {
+export function createState({ root, names = [], all = false, events = [...DEFAULT_EVENTS], intervalS = READOUT_INTERVAL_S, watchdog = true, silenceS, loadPerCore, bootPpid, deps = {} } = {}) {
   return {
     root,
     names,
@@ -215,6 +238,8 @@ export function createState({ root, names = [], all = false, events = [...DEFAUL
     events,
     intervalMs: intervalS * 1000,
     watchdog,
+    silenceS,
+    loadPerCore,
     bootPpid: bootPpid ?? normalDeps(deps).ppid(),
     offsets: new Map(),
     lastWatchdogAt: null,
@@ -241,7 +266,7 @@ export function tick(state, deps = {}) {
   }
   let notes = []
   if (state.watchdog && (state.lastWatchdogAt === null || now - state.lastWatchdogAt >= WATCHDOG_INTERVAL_S * 1000)) {
-    const pass = watchPass({ root: state.root, now, deps: d })
+    const pass = watchPass({ root: state.root, now, silenceS: state.silenceS, loadThreshold: state.loadPerCore, deps: d })
     state.lastWatchdogAt = now
     notes = pass.notes
   }
@@ -272,7 +297,8 @@ export async function main(argv, deps = {}) {
       for (const line of report.lines) d.stdout(`${line}\n`)
       return 0
     }
-    const state = createState({ root, names: flags.names, all: flags.all, events: flags.events, intervalS: flags.intervalS, watchdog: flags.watchdog, deps: d })
+    const state = createState({ root, names: flags.names, all: flags.all, events: flags.events, intervalS: flags.intervalS, watchdog: flags.watchdog, silenceS: flags.silenceS, loadPerCore: flags.loadPerCore, deps: d })
+    d.stdout(`${watchdogLine({ watchdog: flags.watchdog, silenceS: flags.silenceS, loadThreshold: flags.loadPerCore })}\n`)
     const stop = () => { state.stopped = true }
     d.onSignal('SIGINT', stop)
     d.onSignal('SIGTERM', stop)

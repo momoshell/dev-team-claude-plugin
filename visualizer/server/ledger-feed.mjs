@@ -136,6 +136,45 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
       return { rows: null, absent: err?.message || String(err) }
     }
   }
+  function cellAttribution({ since = null, until = null } = {}) {
+    probeColumns()
+    const handle = open()
+    if (!handle) return { runs: null, rows: null, unattributable: null, absent: degradedReason || 'the ledger could not be opened' }
+    if (probe.missing_tables.includes('cell_failures')) return { runs: null, rows: null, unattributable: null, absent: 'cell_failures predates this ledger mirror' }
+    try {
+      const runs = handle.prepare(`
+        SELECT adw_id, task_slug, repo_slug, status, started_at, ended_at
+        FROM sessions
+        WHERE started_at >= ? AND (? IS NULL OR started_at < ?)
+        ORDER BY started_at DESC, adw_id
+      `).all(since, until, until)
+      const ids = runs.map((row) => row.adw_id)
+      // Rows are keyed by run, not by created_at: a seat's failure belongs to the
+      // run that dispatched it however late the row landed. Same reasoning as
+      // seatTeardowns (:151-153).
+      const rows = ids.length
+        ? handle.prepare(`
+          SELECT adw_id, phase_id, dispatch_id, role, agent, provider, model_id, effort, transport, kind, stage, detail, created_at
+          FROM cell_failures
+          WHERE adw_id IN (${ids.map(() => '?').join(',')})
+          ORDER BY adw_id, created_at, id
+        `).all(...ids)
+        : []
+      // A row with no run, and a row naming a run this ledger does not register,
+      // are both unattributable FACTS — never dropped, never reassigned.
+      const unattributable = handle.prepare(`
+        SELECT adw_id, phase_id, dispatch_id, role, agent, provider, model_id, effort, transport, kind, stage, detail, created_at
+        FROM cell_failures
+        WHERE created_at >= ? AND (? IS NULL OR created_at < ?)
+          AND (adw_id IS NULL OR adw_id NOT IN (SELECT adw_id FROM sessions))
+        ORDER BY created_at, id
+      `).all(since, until, until)
+      return { runs, rows, unattributable, absent: null }
+    } catch (err) {
+      if (!probe.missing_tables.includes('cell_failures')) probe.missing_tables.push('cell_failures')
+      return { runs: null, rows: null, unattributable: null, absent: err?.message || String(err) }
+    }
+  }
   function seatTeardowns({ since = null, until = null } = {}) {
     probeColumns()
     const handle = open()
@@ -334,6 +373,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     listRuns,
     listEvents,
     cellFailures,
+    cellAttribution,
     seatTeardowns,
     intake,
     runSet,

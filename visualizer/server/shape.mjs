@@ -923,6 +923,94 @@ export function shapeSeatTeardowns({ runs, rows, absent, since, until, label } =
   }
 }
 
+const CELL_ATTRIBUTION_CLEAN_STATE = 'clean'
+const CELL_ATTRIBUTION_CLEAN_WHY = 'no `cell_failures` row for this run in this window — a MEASURED zero: the table was read and this run recorded no cell failure'
+const CELL_ATTRIBUTION_RUN_LESS_WHY = 'recorded with no adw_id — there was no run to attribute it to: a boot refusal happens before a run exists (scripts/factory/ledger.mjs:534)'
+const CELL_ATTRIBUTION_ORPHAN_WHY = 'the row names a run this ledger does not register — it cannot be placed, and is never reassigned to another run'
+const CELL_ATTRIBUTION_READONLY_NOTE = 'this view reads the ledger; nothing here can dispatch, retry or re-seat a cell'
+const CELL_ATTRIBUTION_WINDOW_NOTE = 'runs are those started in this window; a failure recorded against a run outside it is not shown here'
+
+function cellAttributionAbsence({ absent, runs, rows } = {}) {
+  const supplied = typeof absent === 'string' && absent.length > 0 ? absent : null
+  return supplied || (runs == null || rows == null ? 'cell attribution readout is unavailable' : null)
+}
+
+function cellAttributionSeat(row = {}) {
+  return {
+    role: row?.role ?? null,
+    dispatch_id: row?.dispatch_id ?? null,
+    phase_id: row?.phase_id ?? null,
+    provider: row?.provider ?? null,
+    model_id: row?.model_id ?? null,
+    agent: row?.agent ?? null,
+    effort: row?.effort ?? null,
+    transport: row?.transport ?? null,
+    kind: row?.kind ?? null,
+    stage: row?.stage ?? null,
+    detail: row?.detail ?? null,
+    at: row?.created_at ?? null,
+    key: cellKey(row?.provider, row?.model_id, row?.agent, row?.effort),
+  }
+}
+
+function sortCellAttributionSeats(a, b) {
+  const rank = teardownRoleRank(a?.role) - teardownRoleRank(b?.role)
+  if (rank !== 0) return rank
+  const aAt = dateValue(a?.at), bAt = dateValue(b?.at)
+  if (aAt != null && bAt != null && aAt !== bAt) return aAt - bAt
+  return String(a?.at ?? '').localeCompare(String(b?.at ?? ''))
+}
+
+export function shapeCellAttribution({ runs, rows, unattributable, absent, since, until, label } = {}) {
+  const window = { since: since ?? null, until: until ?? null, label: label ?? null }
+  const absentReason = cellAttributionAbsence({ absent, runs, rows })
+  const attributedRuns = new Map()   // adw_id -> rows, built only when !absentReason
+  if (!absentReason) {
+    for (const row of Array.isArray(rows) ? rows : []) {
+      if (row?.adw_id == null) continue
+      const key = String(row.adw_id)
+      const grouped = attributedRuns.get(key) || []
+      grouped.push(row)
+      attributedRuns.set(key, grouped)
+    }
+  }
+  const shapedRuns = (Array.isArray(runs) ? runs : []).map((run) => {
+    const seatRows = attributedRuns.get(String(run?.adw_id)) || []
+    // A cell failure is recorded per seat: when the table was READ, no row for a
+    // run is a measured zero, not an unmeasured silence. This is the one place
+    // this shaper deliberately differs from shapeSeatTeardowns.
+    const runMeasured = absentReason == null
+    return {
+      adw_id: run?.adw_id ?? null,
+      task_slug: run?.task_slug ?? null,
+      repo_slug: run?.repo_slug ?? null,
+      run_status: run?.status ?? null,
+      started_at: run?.started_at ?? null,
+      ended_at: run?.ended_at ?? null,
+      measured: runMeasured,
+      state: absentReason ? 'undetermined' : (seatRows.length ? 'recorded' : CELL_ATTRIBUTION_CLEAN_STATE),
+      failures: runMeasured ? seatRows.length : null,
+      why: absentReason || (seatRows.length ? null : CELL_ATTRIBUTION_CLEAN_WHY),
+      seats: absentReason ? [] : seatRows.map(cellAttributionSeat).sort(sortCellAttributionSeats),
+    }
+  })
+  const orphans = absentReason ? [] : (Array.isArray(unattributable) ? unattributable : []).map((row) => ({
+    ...cellAttributionSeat(row),
+    adw_id: row?.adw_id ?? null,
+    why: row?.adw_id == null ? CELL_ATTRIBUTION_RUN_LESS_WHY : CELL_ATTRIBUTION_ORPHAN_WHY,
+  }))
+  const attributed = shapedRuns.reduce((sum, run) => sum + (run.failures ?? 0), 0)
+  return {
+    window, absent: absentReason, measured: absentReason == null,
+    note: CELL_ATTRIBUTION_READONLY_NOTE, window_note: CELL_ATTRIBUTION_WINDOW_NOTE,
+    totals: absentReason
+      ? { runs: null, failures: null, attributed: null, unattributable: null }
+      : { runs: shapedRuns.length, failures: attributed + orphans.length, attributed, unattributable: orphans.length },
+    runs: shapedRuns,
+    unattributable: orphans,
+  }
+}
+
 export function shapeCellHealth({ rows, absent, roster, since, until, label } = {}) {
   const window = { since: since ?? null, until: until ?? null, label: label ?? null }
   const absentReason = typeof absent === 'string' && absent.length > 0 ? absent : null

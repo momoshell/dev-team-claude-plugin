@@ -299,6 +299,171 @@ test('cell health reports a stated window, run-less rows and kinds without a ver
   }
 })
 
+test('cell attribution names a run\'s failed seats', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-attribution-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let server
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const response = await json(started.base, '/api/cell-attribution')
+    assert.equal(response.status, 200)
+    const run = response.json.runs.find((candidate) => candidate.adw_id === done)
+    assert.ok(run)
+    assert.equal(run.state, 'recorded')
+    assert.equal(run.failures, 2)
+    const timeout = run.seats.find((seat) => seat.role === 'planner' && seat.kind === 'timeout')
+    const died = run.seats.find((seat) => seat.role === 'builder' && seat.kind === 'seat-died')
+    assert.ok(timeout); assert.ok(died)
+    for (const seat of [timeout, died]) {
+      assert.equal(seat.provider, 'anthropic')
+      assert.equal(seat.model_id, 'viz-cell-a')
+      assert.equal(seat.agent, 'claude')
+      assert.equal(seat.effort, 'high')
+      assert.match(seat.key, /^anthropic\/viz-cell-a/)
+    }
+  } finally {
+    await stopInProcess(server)
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a run with no cell failure is a measured zero', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-attribution-clean-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { pane } = fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let server
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const response = await json(started.base, '/api/cell-attribution')
+    assert.equal(response.status, 200)
+    const run = response.json.runs.find((candidate) => candidate.adw_id === pane)
+    assert.ok(run)
+    assert.equal(run.measured, true)
+    assert.equal(run.state, 'clean')
+    assert.equal(run.failures, 0)
+    assert.deepEqual(run.seats, [])
+    assert.ok(run.why)
+    assert.notDeepEqual({ measured: run.measured, state: run.state, failures: run.failures, seats: run.seats }, { measured: false, state: 'undetermined', failures: null, seats: [] })
+  } finally {
+    await stopInProcess(server)
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('run-less and unregistered-run failures are surfaced, never reassigned', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-attribution-orphans-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const ledger = openLedger({ dbPath: ledgerDb })
+  const ghost = 'test-ghost-0000-0000-000000000009'
+  ledger.recordCellFailure({ provider: 'anthropic', model_id: 'orphan-cell', agent: 'claude', effort: 'high', role: 'reviewer', kind: 'no-envelope', dispatch_id: 'ghost-d1', adw_id: ghost, created_at: new Date().toISOString() })
+  ledger.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let server
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const response = await json(started.base, '/api/cell-attribution')
+    assert.equal(response.status, 200)
+    const rows = response.json.unattributable
+    const runless = rows.filter((row) => row.adw_id == null)
+    assert.equal(runless.length, 2)
+    assert.ok(runless.every((row) => row.why.includes('no adw_id')))
+    const orphan = rows.find((row) => row.adw_id === ghost)
+    assert.ok(orphan)
+    assert.match(orphan.why, /does not register/)
+    const seats = response.json.runs.flatMap((run) => run.seats)
+    assert.equal(seats.some((seat) => seat.model_id === 'orphan-cell'), false)
+    assert.equal(seats.some((seat) => seat.kind === 'boot-refusal'), false)
+  } finally {
+    await stopInProcess(server)
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a mirror without cell_failures answers unanswerable, not zero', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-attribution-absent-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE cell_failures')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let server
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const response = await json(started.base, '/api/cell-attribution')
+    assert.equal(response.status, 200)
+    assert.ok(response.json.absent)
+    for (const run of response.json.runs) {
+      assert.equal(run.measured, false)
+      assert.equal(run.state, 'undetermined')
+      assert.equal(run.failures, null)
+      assert.deepEqual(run.seats, [])
+    }
+    assert.deepEqual(response.json.unattributable, [])
+    assert.deepEqual(response.json.totals, { runs: null, failures: null, attributed: null, unattributable: null })
+    assert.doesNotMatch(JSON.stringify(response.json), /"(failures|attributed|unattributable)":\s*0/)
+  } finally {
+    await stopInProcess(server)
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the window-wide cell readout is unchanged', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-attribution-health-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let server
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    const response = await json(started.base, '/api/cell-health')
+    assert.equal(response.status, 200)
+    const cellA = response.json.cells.find((cell) => cell.model_id === 'viz-cell-a')
+    assert.ok(cellA)
+    assert.equal(cellA.failures, 2)
+    assert.equal(cellA.run_less, 1)
+    const cellB = response.json.cells.find((cell) => cell.model_id === 'viz-cell-b')
+    assert.equal(cellB.state, 'run-less-only')
+  } finally {
+    await stopInProcess(server)
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the cell attribution route refuses a non-GET and a bad window', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cell-attribution-window-'))
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let server
+  try {
+    const started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir, checkout: dir })
+    server = started.server
+    assert.equal((await json(started.base, '/api/cell-attribution', { method: 'POST' })).status, 405)
+    assert.equal((await json(started.base, '/api/cell-attribution?since=not-a-date')).status, 400)
+    const since = encodeURIComponent('2024-01-02T00:00:00.000Z'), until = encodeURIComponent('2024-01-01T00:00:00.000Z')
+    assert.equal((await json(started.base, `/api/cell-attribution?since=${since}&until=${until}`)).status, 400)
+  } finally {
+    await stopInProcess(server)
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('run-set states its window and lists every run in it', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-run-set-'))
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')

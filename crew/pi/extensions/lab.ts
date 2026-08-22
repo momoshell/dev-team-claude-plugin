@@ -14,6 +14,13 @@
 // The lab is granted to the scout/planner seat only. The builder and lead seats
 // are NEVER granted lab: a builder composing host operations is a fence bypass.
 // This bounds ACCIDENTS. Adversarial containment is #72's work.
+// The --permission child reads process.allowedNodeEnvironmentFlags rather than
+// process.permission.has('net'): measured node v24.15.0 reports the flag absent
+// while still allowing a bind, whereas node v26.5.1 reports it present and
+// denies the bind. Because permission.has('net') reads false when ungranted on
+// both runtimes (and for an unknown scope), the flag-table read is the
+// discriminating check; the lab refuses with net-unenforceable instead of
+// serving under a boundary the runtime cannot enforce.
 //
 // runSuite is the declared carve-out. The PROGRAM itself runs with no
 // filesystem write, no child process and no network. runSuite() is the one
@@ -41,6 +48,10 @@ export const LAB_ORIGIN_HEAD_REF = 'refs/remotes/origin/HEAD'
 export const LAB_AUDIT_UNGRANTED = Object.freeze(['fs.write', 'child', 'net', 'worker'])
 export const LAB_AUDIT_WRITE_PROBES = Object.freeze(['/', '/tmp'])
 export const LAB_AUDIT_FORBIDDEN_ARGV = Object.freeze(['--allow-fs-write'])
+// The flag exists only where the Net permission scope does: measured false on
+// node v24.15.0 and true on v26.5.1. process.permission.has('net') reads false
+// on BOTH when ungranted, so only the flag table discriminates.
+export const LAB_AUDIT_NET_FLAG = '--allow-net'
 export const LAB_GREP_OPTIONS = Object.freeze(['ignoreCase', 'fixedString', 'maxHits', 'pathspec'])
 // Dot-prefixed names are ADMITTED — .gitignore, .github/workflows/test.yml and
 // .claude/** are ordinary tracked files a seat must be able to read, grep, mutate
@@ -75,7 +86,7 @@ export const LAB_REFUSALS = Object.freeze([
   'path-escapes-scratch', 'file-missing',
   'find-absent', 'find-equals-replace', 'op-args-invalid',
   'op-timeout', 'op-oversize', 'unknown-op',
-  'child-denied', 'child-timeout', 'child-unreaped', 'child-failed',
+  'child-denied', 'child-timeout', 'child-unreaped', 'child-failed', 'net-unenforceable',
   'suite-failed', 'output-oversize',
 ])
 
@@ -86,7 +97,7 @@ export interface LabGrepOptions { ignoreCase?: boolean; fixedString?: boolean; m
 export interface LabGrepResult { pattern: string; hits: LabGrepHit[]; truncated: boolean }
 export interface LabMutateResult { file: string; count: number }
 export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean }
-export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null }
+export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null; net_enforceable: boolean }
 export interface LabApi {
   scratchCheckout(): Promise<LabScratch>
   read(file: string): Promise<LabReadResult>
@@ -191,6 +202,7 @@ export function auditGrants(deps: any = {}): any {
   const has = typeof deps.has === 'function' ? deps.has : () => false
   const execArgv = deps.execArgv || []
   const nodeOptions = deps.nodeOptions || ''
+  const flags = deps.flags || new Set()
   const audit: any = { runner: false, program: false, granted: [], execargv: [], node_options: nodeOptions || null }
   const probe = (key: string, path?: string): boolean => {
     try { return Boolean(has(key, path)) } catch { return false }
@@ -205,7 +217,9 @@ export function auditGrants(deps: any = {}): any {
   for (const arg of execArgv) {
     for (const forbidden of LAB_AUDIT_FORBIDDEN_ARGV) if (String(arg).startsWith(forbidden)) audit.execargv.push(String(arg))
   }
-  audit.ok = audit.runner && audit.program && !audit.granted.length && !audit.execargv.length && !nodeOptions
+  const netEnforceable = flags.has(LAB_AUDIT_NET_FLAG)
+  audit.net_enforceable = netEnforceable
+  audit.ok = audit.runner && audit.program && !audit.granted.length && !audit.execargv.length && !nodeOptions && netEnforceable
   return audit
 }
 
@@ -341,6 +355,7 @@ const programReal = resolveReal(programRaw)
 const ungranted = ${JSON.stringify(LAB_AUDIT_UNGRANTED)}
 const writeProbes = ${JSON.stringify(LAB_AUDIT_WRITE_PROBES)}
 const forbiddenArgv = ${JSON.stringify(LAB_AUDIT_FORBIDDEN_ARGV)}
+const netFlag = ${JSON.stringify(LAB_AUDIT_NET_FLAG)}
 const has = (key, path) => { try { return Boolean(process.permission.has(key, path)) } catch { return false } }
 const auditGrants = () => {
   const audit = { runner: has('fs.read', runnerRaw) && has('fs.read', runnerReal), program: has('fs.read', programRaw) && has('fs.read', programReal), granted: [], execargv: [], node_options: process.env.NODE_OPTIONS || null }
@@ -350,7 +365,9 @@ const auditGrants = () => {
     } else if (has(key)) audit.granted.push(key)
   }
   for (const arg of process.execArgv || []) for (const forbidden of forbiddenArgv) if (String(arg).startsWith(forbidden)) audit.execargv.push(String(arg))
-  audit.ok = audit.runner && audit.program && !audit.granted.length && !audit.execargv.length && !audit.node_options
+  const netEnforceable = process.allowedNodeEnvironmentFlags.has(netFlag)
+  audit.net_enforceable = netEnforceable
+  audit.ok = audit.runner && audit.program && !audit.granted.length && !audit.execargv.length && !audit.node_options && netEnforceable
   return audit
 }
 const classifyDenial = (err) => {
@@ -417,6 +434,7 @@ process.stdin.on('end', () => {
 
 const main = async () => {
   const audit = auditGrants()
+  if (!audit.net_enforceable) { emit({ done: true, refused: 'net-unenforceable', audit }); return }
   if (!audit.ok) { emit({ done: true, refused: 'child-denied', audit }); return }
   const lab = {}
   for (const name of ['scratchCheckout', 'read', 'grep', 'mutate', 'runSuite']) lab[name] = (...args) => rpc(name, args)
@@ -725,7 +743,7 @@ export function createLabTool(deps: any = {}) {
   return {
     name: LAB_TOOL_NAME,
     label: 'Lab',
-    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. The five lab.* operations are scratchCheckout, read, grep, mutate and runSuite; runSuite is the declared host authority carve-out and its suite child runs with host authority.',
+    description: 'Run a seat-authored PROGRAM in a node --permission child against a clone of the committed HEAD. The five lab.* operations are scratchCheckout, read, grep, mutate and runSuite; runSuite is the declared host authority carve-out and its suite child runs with host authority. The lab refuses with net-unenforceable on a runtime that cannot enforce the network boundary.',
     parameters: LAB_PARAMS,
     executionMode: 'sequential',
     async execute(_toolCallId: string, params: any, signal: any, _onUpdate: any, ctx: any) {

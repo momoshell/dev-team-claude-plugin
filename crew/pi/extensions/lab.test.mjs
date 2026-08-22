@@ -384,7 +384,7 @@ test('the exported API has exactly five operation names', () => {
 })
 
 test('refusal codes remain a closed set', () => {
-  for (const code of ['path-option-shaped', 'path-traversal', 'output-oversize', 'suite-failed']) assert.ok(mod.LAB_REFUSALS.includes(code))
+  for (const code of ['path-option-shaped', 'path-traversal', 'output-oversize', 'suite-failed', 'net-unenforceable']) assert.ok(mod.LAB_REFUSALS.includes(code))
   assert.equal(mod.LAB_REFUSALS.includes('arbitrary-user-text'), false)
 })
 
@@ -396,32 +396,49 @@ test('read and mutate argument validation is host-side', async () => {
   assert.equal(calls.length, 1)
 })
 
+// Where the network boundary is unenforceable the lab refuses every program
+// before it runs, so no escape is attempted at all. Both branches assert a
+// real refusal and neither admits an outcome of 'ok'.
+function assertEscapeRefused(result, assertDenial) {
+  assert.equal(result.details.outcome, 'refused')
+  if (result.details.refused === 'net-unenforceable') {
+    assert.equal(result.details.audit.net_enforceable, false)
+    return
+  }
+  assertDenial(result.details)
+}
+
 test('escape: a program that writes outside the scratch dir is denied', async () => {
   const root = temp()
   const target = join(root, 'outside-write.txt')
   const result = await realTool(`import { writeFileSync } from 'node:fs'\nwriteFileSync(${JSON.stringify(target)}, 'escape')\n`)
-  assert.equal(result.details.outcome, 'refused')
-  assert.equal(result.details.denial.permission, 'FileSystemWrite')
+  assertEscapeRefused(result, (details) => {
+    assert.equal(details.denial.permission, 'FileSystemWrite')
+  })
   assert.equal(existsSync(target), false)
   rmSync(root, { recursive: true, force: true })
 })
 
 test('escape: a program that spawns a child process is denied', async () => {
   const result = await realTool("import { spawnSync } from 'node:child_process'\nspawnSync('/bin/echo', ['escape'])\n")
-  assert.equal(result.details.outcome, 'refused')
-  assert.equal(result.details.denial.permission, 'ChildProcess')
+  assertEscapeRefused(result, (details) => {
+    assert.equal(details.denial.permission, 'ChildProcess')
+  })
 })
 
 test('escape: a program that reaches the network is denied', async () => {
   const result = await realTool("import { createServer } from 'node:net'\nawait new Promise((resolve, reject) => { const server = createServer(); server.on('error', reject); server.listen(0, () => { server.close(); resolve() }) })\n")
-  assert.equal(result.details.outcome, 'refused')
-  assert.equal(result.details.denial.code, 'ERR_ACCESS_DENIED')
-  assert.match(JSON.stringify(result), /--allow-net/)
+  assertEscapeRefused(result, (details) => {
+    assert.equal(details.denial.code, 'ERR_ACCESS_DENIED')
+    assert.match(JSON.stringify(details), /--allow-net/)
+  })
 })
 
 test('auditGrants detects unreadable paths and every widening layer', () => {
-  const base = { runnerRaw: '/r', runnerReal: '/rr', programRaw: '/p', programReal: '/pp', execArgv: [], nodeOptions: '', has: (key) => key === 'fs.read' }
+  const base = { runnerRaw: '/r', runnerReal: '/rr', programRaw: '/p', programReal: '/pp', execArgv: [], nodeOptions: '', flags: new Set([mod.LAB_AUDIT_NET_FLAG]), has: (key) => key === 'fs.read' }
   assert.equal(mod.auditGrants(base).ok, true)
+  assert.equal(mod.auditGrants({ ...base, flags: new Set() }).net_enforceable, false)
+  assert.equal(mod.auditGrants({ ...base, flags: new Set() }).ok, false)
   assert.equal(mod.auditGrants({ ...base, has: (key, path) => path !== '/r' }).runner, false)
   assert.equal(mod.auditGrants({ ...base, has: (key, path) => path !== '/p' }).program, false)
   assert.ok(mod.auditGrants({ ...base, has: (key, path) => key === 'fs.write' && path === '/' }).granted.includes('fs.write:/'))
@@ -444,6 +461,61 @@ test('runnerSource emits a startup audit and five RPC stubs', () => {
   assert.match(source, /scratchCheckout/)
   assert.match(source, /unhandledRejection/)
   assert.match(source, /process\.permission\.has/)
+  assert.match(source, /net-unenforceable/)
+  assert.match(source, /allowedNodeEnvironmentFlags/)
+})
+
+test('the host surfaces the child\'s typed refusal', async () => {
+  const tool = mod.createLabTool({
+    env: {},
+    isDirectory: () => true,
+    mkTempDir: () => temp(),
+    spawn: () => {
+      const child = fakeChild()
+      queueMicrotask(() => {
+        const audit = { runner: true, program: true, granted: [], execargv: [], node_options: null, net_enforceable: false, ok: false }
+        child.stdout.emit('data', Buffer.from(`${JSON.stringify({ done: true, refused: 'net-unenforceable', audit })}\n`))
+        child.emit('close', 0, null)
+      })
+      return child
+    },
+  })
+  const result = await tool.execute('x', { program: 'export default 1' }, null, null, { cwd: '/tmp/repo' })
+  const details = result.details
+  assert.equal(details.outcome, 'refused')
+  assert.equal(details.refused, 'net-unenforceable')
+  assert.equal(details.audit.net_enforceable, false)
+  assert.equal(mod.toolResultPatch({ toolName: 'lab', details }).isError, true)
+})
+
+test('the verdict tracks the real boundary', async () => {
+  const dir = temp('lab-net-oracle-')
+  const file = join(dir, 'bind.mjs')
+  const source = [
+    "import { createServer } from 'node:net'",
+    'const server = createServer()',
+    "server.on('error', (err) => { console.log('DENIED:' + err.code); process.exit(0) })",
+    "process.on('uncaughtException', (err) => { console.log('DENIED:' + err.code); process.exit(0) })",
+    "server.listen(0, '127.0.0.1', () => { console.log('BOUND'); server.close(); process.exit(0) })",
+    '',
+  ].join('\n')
+  writeFileSync(file, source)
+  try {
+    const env = { ...process.env, NO_COLOR: '1' }
+    delete env.NODE_OPTIONS
+    delete env.FORCE_COLOR
+    delete env.CLICOLOR_FORCE
+    const oracle = nodeSpawnSync(process.execPath, ['--permission', `--allow-fs-read=${dir}`, '--no-warnings', file], { encoding: 'utf8', timeout: 60000, env })
+    const text = `${oracle.stdout || ''}${oracle.stderr || ''}`
+    const bound = text.includes('BOUND')
+    const denied = text.includes('DENIED:')
+    assert.equal(bound !== denied, true, text)
+    const result = await realTool('export default 1')
+    if (bound) assert.equal(result.details.refused, 'net-unenforceable')
+    else assert.equal(result.details.outcome, 'ok')
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
 })
 
 test('runSuite argv inserts -- and rejects an over-long path array', async () => {
@@ -773,7 +845,7 @@ test('the widened runner startup audit refuses a fs-write grant', () => {
   delete env.NODE_OPTIONS
   const child = nodeSpawnSync(process.execPath, args, { cwd: dir, env, encoding: 'utf8' })
   const frame = String(child.stdout || '').split('\n').filter(Boolean).map((line) => { try { return JSON.parse(line) } catch { return null } }).find((one) => one?.done)
-  assert.equal(frame.refused, 'child-denied')
+  assert.equal(frame.refused, frame.audit.net_enforceable ? 'child-denied' : 'net-unenforceable')
   assert.ok(frame.audit.granted.some((one) => one.startsWith('fs.write:')))
   rmSync(dir, { recursive: true, force: true })
 })

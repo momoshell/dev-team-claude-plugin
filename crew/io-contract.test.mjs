@@ -29,7 +29,8 @@ function makeSeatIo() {
   let resultPath = null
   let polls = 0
   let dirtyMode = false
-  let popFailure = false
+  const STASH_SHA = '0123456789abcdef0123456789abcdef01234567'
+  let applyFailure = false
   const sent = []
   const added = []
   const commands = []
@@ -72,7 +73,16 @@ function makeSeatIo() {
     },
     spawnSync: (cmd, argv) => {
       commands.push({ kind: 'spawn', argv })
-      if (cmd === 'git' && argv?.[0] === 'stash' && argv?.[1] === 'pop' && popFailure) return { status: 1, stdout: '', stderr: 'pop failed' }
+      if (cmd === 'git' && argv?.[0] === 'stash') {
+        if (argv[1] === 'list') {
+          const pushes = commands.filter((x) => x.argv?.[0] === 'stash' && x.argv?.[1] === 'push')
+          const last = pushes.at(-1)
+          const tag = last ? last.argv[last.argv.length - 1] : 'crew:runClean:none-pushed'
+          return { status: 0, stdout: `${STASH_SHA} On main: ${tag}\n`, stderr: '' }
+        }
+        if (argv[1] === 'apply' && applyFailure) return { status: 1, stdout: '', stderr: 'apply failed' }
+        if (argv[1] === 'drop') return { status: 0, stdout: `Dropped stash@{0} (${STASH_SHA})\n`, stderr: '' }
+      }
       if (argv?.[0] === '-c') {
         const command = argv[1]
         if (command === 'fail') return { status: 3, stdout: 'bad\n', stderr: 'err\n' }
@@ -85,7 +95,7 @@ function makeSeatIo() {
   if (FAULT === 'assign-surface') deps.sendLine = (surface, line) => sent.push({ surface: 'wrong-surface', line })
   const crew = { workspace_id: 'ws', window_id: 'win', members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }
   const io = seatIo(crew, paths, paths.dir, null, null, {}, deps)
-  return { io, paths, sent, added, commands, clock: () => clock, setResult: (p) => { resultPath = p }, setDirty: (v) => { dirtyMode = v }, setPopFailure: (v) => { popFailure = v }, assignmentPolls: () => polls }
+  return { io, paths, sent, added, commands, stashSha: STASH_SHA, clock: () => clock, setResult: (p) => { resultPath = p }, setDirty: (v) => { dirtyMode = v }, setApplyFailure: (v) => { applyFailure = v }, assignmentPolls: () => polls }
 }
 
 const ROSTER = JSON.parse(fsReadFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
@@ -290,16 +300,32 @@ test('seatIo runClean skips stash on a clean tree and restores dirty work on com
   const originalRun = f.io.run
   f.io.run = () => { throw new Error('command failed') }
   assert.throws(() => f.io.runClean.call(f.io, 'boom'), /command failed/)
-  const stash = f.commands.filter((x) => x.kind === 'spawn' && x.argv?.[0] === 'stash').map((x) => ['git', ...(x.argv || [])].join(' '))
-  assert.deepEqual(stash, ['git stash push --include-untracked -m crew:runClean', 'git stash pop'])
+  const stash = f.commands.filter((x) => x.kind === 'spawn' && x.argv?.[0] === 'stash')
+  assert.deepEqual(stash.map((x) => x.argv[1]), ['push', 'list', 'list', 'apply', 'drop'])
+  assert.deepEqual(stash[0].argv.slice(0, 4), ['stash', 'push', '--include-untracked', '-m'])
+  assert.match(stash[0].argv[4], /^crew:runClean:.+/)   // a per-call identity, never a fixed label
+  assert.equal(stash[3].argv[2], f.stashSha)             // restored BY IDENTITY, not by position
+  assert.equal(stash[4].argv[2], 'stash@{0}')           // dropped by the index resolved for that sha
   f.io.run = originalRun
 })
 
 test('seatIo runClean throws when restoring the stash fails', () => {
   const f = makeSeatIo()
   f.setDirty(true)
-  f.setPopFailure(true)
-  assert.throws(() => f.io.runClean.call(f.io, 'ok'), /stash pop FAILED/)
+  f.setApplyFailure(true)
+  assert.throws(() => f.io.runClean.call(f.io, 'ok'), /stash apply FAILED/)
+})
+
+test('seatIo runClean tags every push uniquely', () => {
+  const f = makeSeatIo()
+  f.setDirty(true)
+  f.io.runClean.call(f.io, 'first')
+  f.io.runClean.call(f.io, 'second')
+  const tags = f.commands
+    .filter((x) => x.kind === 'spawn' && x.argv?.[0] === 'stash' && x.argv?.[1] === 'push')
+    .map((x) => x.argv[4])
+  assert.equal(tags.length, 2)
+  assert.notEqual(tags[0], tags[1])
 })
 
 test('seatIo changedFiles parses NUL porcelain and both rename paths', () => {

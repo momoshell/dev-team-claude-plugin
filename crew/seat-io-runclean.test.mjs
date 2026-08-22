@@ -55,6 +55,14 @@ function makeRepo({ dirty = true } = {}) {
   return { root, repoDir, paths }
 }
 
+function addLane(fixture, name, tracked) {
+  const dir = join(fixture.root, name)
+  git(fixture.repoDir, 'worktree', 'add', '-q', '-b', name, dir)
+  writeFileSync(join(dir, 'tracked.txt'), tracked)
+  writeFileSync(join(dir, `${name}-untracked.txt`), `${name} untracked\n`)
+  return dir
+}
+
 function makeIo({ repoDir, paths }) {
   return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
 }
@@ -75,6 +83,27 @@ function withRepo(options, fn) {
   } finally {
     rmSync(fixture.root, { recursive: true, force: true })
   }
+}
+
+function interleavedRun() {
+  return withRepo({}, (fixture) => {
+    const laneB = addLane(fixture, 'laneB', 'LANE-B dirty tracked\n')
+    const io = makeIo(fixture)
+    const run = io.run.bind(io)
+    io.run = (cmd) => {
+      git(laneB, 'stash', 'push', '--include-untracked', '-q', '-m', 'sibling-lane-work')
+      return run(cmd)
+    }
+    io.runClean('printf clean')
+    return {
+      tracked: readFileSync(join(fixture.repoDir, 'tracked.txt'), 'utf8'),
+      untracked: existsSync(join(fixture.repoDir, 'untracked.txt'))
+        ? readFileSync(join(fixture.repoDir, 'untracked.txt'), 'utf8') : null,
+      foreignFile: existsSync(join(fixture.repoDir, 'laneB-untracked.txt')),
+      subjects: git(fixture.repoDir, 'stash', 'list', '--format=%gs').split('\n').map((line) => line.trim()).filter(Boolean),
+      laneBTracked: readFileSync(join(laneB, 'tracked.txt'), 'utf8'),
+    }
+  })
 }
 
 const treeCommand = [
@@ -130,6 +159,43 @@ test('runClean preserves a non-zero command result and still restores the tree',
     assert.equal(result.ok, false)
     assert.equal(result.output, 'command output')
     restored(fixture)
+  })
+})
+
+test('runClean restores its own entry when a sibling lane stashes in between', () => {
+  const result = interleavedRun()
+  assert.equal(result.tracked, CONTENT.dirty)
+  assert.equal(result.untracked, CONTENT.untracked)
+  assert.equal(result.foreignFile, false)
+})
+
+test("runClean leaves the sibling lane's entry for its owner", () => {
+  const result = interleavedRun()
+  assert.equal(result.subjects.length, 1)
+  assert.match(result.subjects[0], /sibling-lane-work/)
+  assert.equal(result.laneBTracked, CONTENT.committed)
+})
+
+test('runClean refuses loudly when its own entry is gone', () => {
+  withRepo({}, (fixture) => {
+    const io = makeIo(fixture)
+    const run = io.run.bind(io)
+    const decoy = 'decoy tracked content\n'
+    io.run = (cmd) => {
+      const own = git(fixture.repoDir, 'stash', 'list', '--format=%H %gs').split('\n')
+        .filter((line) => line.includes('crew:runClean'))
+      assert.equal(own.length, 1)
+      git(fixture.repoDir, 'stash', 'drop', 'stash@{0}')
+      writeFileSync(join(fixture.repoDir, 'tracked.txt'), decoy)
+      git(fixture.repoDir, 'stash', 'push', '-q', '-m', 'decoy-entry')
+      return run(cmd)
+    }
+    let error = null
+    try { io.runClean('printf clean') } catch (err) { error = err }
+    assert.ok(error)
+    assert.match(error.message, /refus/i)
+    assert.notEqual(readFileSync(join(fixture.repoDir, 'tracked.txt'), 'utf8'), decoy)
+    assert.ok(git(fixture.repoDir, 'stash', 'list', '--format=%gs').includes('decoy-entry'))
   })
 })
 

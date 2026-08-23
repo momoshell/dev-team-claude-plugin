@@ -7,10 +7,12 @@
 // the JSONL file is the run's true, permanent record. The SQLite database is
 // a REBUILDABLE PROJECTION of that record — it may be deleted at any time
 // and rebuilt in full via replayJsonl(). A caller must never be able to
-// observe a mirror failure: every public writer appends its JSONL line
-// FIRST (this append may throw — losing the raw record is fatal to the
-// caller), then attempts the database mirror inside a try/catch that never
-// rethrows (a mirror failure only increments stats().mirror_errors).
+// observe a mirror failure: public writers append their JSONL line (this
+// append may throw — losing the raw record is fatal to the caller), then
+// attempt the database mirror inside a try/catch that never rethrows (a
+// mirror failure only increments stats().mirror_errors). The three writers
+// that allocate a sequence settle their mirror row first, then append the
+// line, so a unique-key refusal can be re-numbered before authority write.
 //
 // SCOPED FLOOR: this module owns the repository's Node floor (`NODE_FLOOR`,
 // currently `'26.0.0'`). `node:sqlite`, which this module depends on, is
@@ -117,6 +119,11 @@ export function mkdirpBounded(dir, mode = 0o700) {
 export const LEDGER_VERSION = 1
 export const NODE_FLOOR = '26.0.0'
 export const TERM_TO_KILL_MS = 5000
+
+// A refused (changes === 0) mirror insert means another process owns that seq;
+// the record is re-numbered and re-offered. TOTAL attempts per record, not
+// retries-after-the-first: 1 disables re-numbering entirely.
+const SEQ_COLLISION_RETRY_BUDGET = 8
 
 export const EVENT_TYPES = Object.freeze([
   'phase_start', 'phase_end', 'agent_start', 'agent_end', 'tool_call',
@@ -838,6 +845,10 @@ export const UPDATE_ONLY_WRITERS = Object.freeze([
 // The doctor readout never repairs: replayJsonl is the deliberate remedy.
 export const DRIFT_REMEDY = 'drift is not repaired here — replay the JSONL authority into the mirror with replayJsonl(jsonlPath, ledger)'
 
+// A collapse is NOT drift and replay does not repair it: two JSONL lines share
+// one unique key, so the mirror can only ever hold one of them.
+export const DRIFT_COLLAPSE_REMEDY = 'a collapsed key is not repaired by replay — two or more JSONL lines carry the same unique key with different content, so the mirror can hold only one of them; the JSONL authority is the only complete record'
+
 // ---------------------------------------------------------------------------
 // DDL generation — built from TABLES, never hand-written alongside it.
 // ---------------------------------------------------------------------------
@@ -1124,12 +1135,9 @@ function declaredAffinity(decl) {
 }
 const DRIFT_COLUMN_AFFINITIES = new Map()
 for (const table of Object.values(TABLES)) {
-  for (const unique of table.unique) {
-    for (const column of unique) {
-      if (!DRIFT_COLUMN_AFFINITIES.has(column)) {
-        const decl = table.columns.find(({ name }) => name === column)?.decl ?? ''
-        DRIFT_COLUMN_AFFINITIES.set(column, declaredAffinity(decl))
-      }
+  for (const { name, decl } of table.columns) {
+    if (!DRIFT_COLUMN_AFFINITIES.has(name)) {
+      DRIFT_COLUMN_AFFINITIES.set(name, declaredAffinity(decl))
     }
   }
 }
@@ -1218,10 +1226,30 @@ function driftRowKey(cols, row) {
   return JSON.stringify(cols.map((c) => driftRowValue(row[`${DRIFT_TYPE_PREFIX}${c}`], row[c])))
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) return `[${value.map((item) => stableJson(item)).join(',')}]`
+  if (value !== null && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
 // The honesty rule (docs/ledger-queries.md:31): an authority that cannot be
 // read is UNMEASURED, never a measured zero drift.
 function unmeasuredDrift(jsonlPath, reason) {
-  return { measured: false, unmeasured_reason: reason, jsonl_path: jsonlPath, lines: null, unparsed_lines: null, unknown_kind_lines: null, writers: [], drift_total: null, remedy: null }
+  return {
+    measured: false,
+    unmeasured_reason: reason,
+    jsonl_path: jsonlPath,
+    lines: null,
+    unparsed_lines: null,
+    unknown_kind_lines: null,
+    writers: [],
+    drift_total: null,
+    remedy: null,
+    collapsed_lines_total: null,
+    collapse_remedy: null,
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1245,6 +1273,10 @@ export function openLedger({
     mirror_first_code: null,
     dropped_payload_keys: 0,
     redacted_values: 0,
+    // #541: a record whose seq could NOT be re-numbered (a caller-supplied
+    // seq) and whose key is already held by DIFFERENT content — the mirror
+    // keeps the first and this record exists only in the JSONL authority.
+    seq_collisions: 0,
     // Distinguishes WHY a handle is degraded — 'below_floor' (the version
     // check) vs an open-time failure's error code/name (e.g. a build
     // without sqlite support, or a permission/lock failure the one retry
@@ -1252,6 +1284,7 @@ export function openLedger({
     degraded_reason: null,
   }
   const seqAllocators = new Map() // `${adw_id}:${kind}` -> next seq
+  const seqFloors = new Map() // `${adw_id}:${kind}` -> JSONL authority floor
 
   // IN-PROCESS REGISTRY — the finalizer's ONLY source of truth. It must
   // never gate on the mirror (getSession/dumpTable), because the mirror is
@@ -1382,25 +1415,147 @@ export function openLedger({
     }
   }
 
-  function nextSeq(adwId, kind) {
-    const key = `${adwId}:${kind}`
-    if (!seqAllocators.has(key)) {
-      let max = 0
-      const conn = ensureDb()
-      if (conn) {
-        try {
-          const table = kind === 'phase' ? 'phases' : 'events'
-          const row = conn.prepare(`SELECT MAX(seq) AS m FROM ${table} WHERE adw_id = ?`).get(adwId)
-          max = row && row.m != null ? Number(row.m) : 0
-        } catch {
-          max = 0
-        }
-      }
-      seqAllocators.set(key, max)
+  // #541: the mirror is NOT the authority. A handle that was degraded (below
+  // NODE_FLOOR, or an open failure) mirrored nothing, so seeding from
+  // MAX(seq) alone re-issues sequence numbers the JSONL already spent. The
+  // floor is therefore max(this process's high-water, the JSONL authority,
+  // the mirror). The mirror side is re-read on EVERY allocation — an indexed
+  // MAX over UNIQUE(adw_id, seq) — because a memoised seed cannot see the row
+  // another process committed one millisecond ago.
+  function mirrorMaxSeq(conn, seqKind, adwId) {
+    const table = seqKind === 'phase' ? 'phases' : 'events'
+    try {
+      const row = conn.prepare(`SELECT MAX(seq) AS m FROM ${table} WHERE adw_id = ?`).get(adwId)
+      return row && row.m != null ? Number(row.m) : 0
+    } catch {
+      return 0
     }
-    const next = seqAllocators.get(key) + 1
+  }
+
+  function jsonlSeqFloor(adwId, seqKind) {
+    const key = `${adwId}:${seqKind}`
+    if (seqFloors.has(key)) return seqFloors.get(key)
+    const table = seqKind === 'phase' ? 'phases' : 'events'
+    let max = 0
+    try {
+      const text = readFileSync(jsonlPath, 'utf8')
+      for (const raw of text.split('\n')) {
+        if (!raw) continue
+        let parsed
+        try {
+          parsed = JSON.parse(raw)
+        } catch {
+          continue
+        }
+        const kind = parsed && parsed.kind
+        if (typeof kind !== 'string' || WRITER_MIRROR_TABLES[kind] !== table) continue
+        const args = parsed.args
+        if (!args || args.adw_id !== adwId) continue
+        const rawSeq = args.seq
+        if (typeof rawSeq !== 'number' && (typeof rawSeq !== 'string' || rawSeq.trim() === '')) continue
+        const seq = Number(rawSeq)
+        if (Number.isFinite(seq)) max = Math.max(max, seq)
+      }
+    } catch {
+      max = 0
+    }
+    seqFloors.set(key, max)
+    return max
+  }
+
+  function advanceJsonlSeqFloor(adwId, seqKind, seq) {
+    if (typeof seq !== 'number' && (typeof seq !== 'string' || seq.trim() === '')) return
+    const numericSeq = Number(seq)
+    if (!Number.isFinite(numericSeq)) return
+    const key = `${adwId}:${seqKind}`
+    const currentFloor = seqFloors.has(key) ? seqFloors.get(key) : jsonlSeqFloor(adwId, seqKind)
+    seqFloors.set(key, Math.max(currentFloor, numericSeq))
+  }
+
+  function nextSeq(adwId, seqKind, conn) {
+    const key = `${adwId}:${seqKind}`
+    let max = seqAllocators.get(key) ?? 0
+    max = Math.max(max, jsonlSeqFloor(adwId, seqKind))
+    if (conn) max = Math.max(max, mirrorMaxSeq(conn, seqKind, adwId))
+    const next = max + 1
     seqAllocators.set(key, next)
     return next
+  }
+
+  function noteSeqCollision() {
+    stats.mirror_errors += 1
+    stats.seq_collisions += 1
+  }
+
+  // #541: allocate-then-CONFIRM for the three writers that ISSUE a seq.
+  // `build(seq)` returns { args, row } — args is the writer's public-parameter
+  // shape (what goes to the JSONL and what replayJsonl re-applies), row is the
+  // table row. `insert(conn, row)` performs the INSERT OR IGNORE and returns
+  // its result. The JSONL line is appended exactly once, after the seq is
+  // settled, whether or not the mirror is reachable. This ordering deliberately
+  // closes the permanent authority loss caused by appending before a refused
+  // unique-key insert; a crash after the committed row but before its line is
+  // a rebuildable mirror-row gap instead.
+  function insertSequenced({ jsonlKind, adwId, seqKind, explicitSeq, build, insert }) {
+    const conn = ensureDb()
+    if (!conn) {
+      const seq = explicitSeq ?? nextSeq(adwId, seqKind, null)
+      const { args } = build(seq)
+      appendJsonl(jsonlKind, args)
+      if (explicitSeq !== undefined) advanceJsonlSeqFloor(adwId, seqKind, explicitSeq)
+      return { args, res: null }
+    }
+
+    const table = seqKind === 'phase' ? 'phases' : 'events'
+    const keyCols = TABLES[table].unique[0]
+    const compareCols = TABLES[table].columns.filter(({ name }) => name !== 'id').map(({ name }) => name)
+    let args = null
+    let res = null
+    let settled = false
+    for (let attempt = 0; attempt < SEQ_COLLISION_RETRY_BUDGET; attempt += 1) {
+      const seq = explicitSeq ?? nextSeq(adwId, seqKind, conn)
+      const built = build(seq)
+      args = built.args
+      try {
+        res = insert(conn, built.row)
+      } catch (err) {
+        stats.mirror_errors += 1
+        if (!stats.mirror_first_code) {
+          stats.mirror_first_code = err.code ?? err.name ?? 'UnknownMirrorError'
+        }
+        break
+      }
+      if (res.changes === 1) {
+        settled = true
+        break
+      }
+      if (res.changes === 0 && explicitSeq === undefined) continue
+      if (res.changes === 0 && explicitSeq !== undefined) {
+        let identical = false
+        try {
+          const selection = compareCols.flatMap((c) => [
+            quoteSqlIdentifier(c),
+            `typeof(${quoteSqlIdentifier(c)}) AS ${quoteSqlIdentifier(`${DRIFT_TYPE_PREFIX}${c}`)}`,
+          ]).join(', ')
+          const where = keyCols.map((c) => `${quoteSqlIdentifier(c)} = ?`).join(' AND ')
+          const existing = conn.prepare(`SELECT ${selection} FROM ${quoteSqlIdentifier(table)} WHERE ${where}`)
+            .get(...keyCols.map((c) => toBindable(built.row[c])))
+          identical = existing != null && driftKey(compareCols, built.row) === driftRowKey(compareCols, existing)
+        } catch {
+          // A refused insert with an unreadable incumbent is not provably
+          // idempotent; preserve the collision signal rather than guessing.
+        }
+        if (!identical) {
+          noteSeqCollision()
+        }
+        break
+      }
+      break
+    }
+    if (!settled && explicitSeq === undefined && res?.changes === 0) noteSeqCollision()
+    appendJsonl(jsonlKind, args)
+    if (explicitSeq !== undefined) advanceJsonlSeqFloor(adwId, seqKind, explicitSeq)
+    return { args, res }
   }
 
   // Only `undefined` (key absent or explicitly undefined) counts as
@@ -1552,21 +1707,33 @@ export function openLedger({
 
   function startPhase(input = {}) {
     requireFields(input, ['adw_id', 'name'], 'startPhase')
-    const seq = input.seq ?? nextSeq(input.adw_id, 'phase')
-    const args = redact({
-      adw_id: input.adw_id,
-      seq,
-      name: input.name,
-      started_at: isoMs(input.started_at ?? now()),
-      ended_at: null,
-      status: 'running',
-    }, stats)
-    appendJsonl('startPhase', args)
+    const explicitSeq = input.seq ?? undefined
+    const startedAt = isoMs(input.started_at ?? now())
+    const inserted = insertSequenced({
+      jsonlKind: 'startPhase',
+      adwId: input.adw_id,
+      seqKind: 'phase',
+      explicitSeq,
+      build: (seq) => {
+        const args = redact({
+          adw_id: input.adw_id,
+          seq,
+          name: input.name,
+          started_at: startedAt,
+          ended_at: null,
+          status: 'running',
+        }, stats)
+        return { args, row: args }
+      },
+      insert: (conn, row) => {
+        const cols = tableColumnNames('phases').filter((c) => c !== 'id')
+        return conn.prepare(`INSERT OR IGNORE INTO phases (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+          .run(...cols.map((c) => toBindable(row[c])))
+      },
+    })
+    const { args, res } = inserted
     let phaseId = null
-    mirror((conn) => {
-      const cols = tableColumnNames('phases').filter((c) => c !== 'id')
-      const res = conn.prepare(`INSERT OR IGNORE INTO phases (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-        .run(...cols.map((c) => toBindable(args[c])))
+    if (res) {
       // lastInsertRowid is CONNECTION-GLOBAL, not statement-scoped — when
       // the INSERT OR IGNORE is ignored (a natural-key collision), it still
       // reads back the id of whatever row this connection inserted LAST
@@ -1577,10 +1744,17 @@ export function openLedger({
       if (res.changes === 1) {
         phaseId = Number(res.lastInsertRowid)
       } else {
-        const row = conn.prepare('SELECT id FROM phases WHERE adw_id = ? AND seq = ?').get(args.adw_id, args.seq)
-        phaseId = row ? Number(row.id) : null
+        const conn = ensureDb()
+        if (conn) {
+          try {
+            const row = conn.prepare('SELECT id FROM phases WHERE adw_id = ? AND seq = ?').get(args.adw_id, args.seq)
+            phaseId = row ? Number(row.id) : null
+          } catch {
+            phaseId = null
+          }
+        }
       }
-    })
+    }
     return phaseId
   }
 
@@ -1610,7 +1784,6 @@ export function openLedger({
       refuse('recordEvent: heartbeat is not an event type — use the heartbeat() writer', 'heartbeat_is_not_an_event')
     }
     requireEnum(input.type, EVENT_TYPES, 'recordEvent', 'type')
-    const seq = input.seq ?? nextSeq(input.adw_id, 'event')
     // Redact BEFORE stringifying: once payload is JSON text, a nested
     // DEVTEAM_*-shaped key is no longer a real object key the key-based
     // scan below can see — only value-substring scanning still applies.
@@ -1619,24 +1792,33 @@ export function openLedger({
     // so replayJsonl's `ledger.recordEvent(args)` dispatch round-trips
     // exactly; payload_json is derived from it only at mirror-insert time.
     const payload = redact(applyPayloadAllowlist(input.type, input.payload, stats), stats)
-    const args = redact({
-      adw_id: input.adw_id,
-      seq,
-      type: input.type,
-      phase_id: input.phase_id ?? null,
-      parent_id: input.parent_id ?? null,
-      started_at: input.started_at != null ? isoMs(input.started_at) : (input.type === 'tool_call' ? isoMs(now()) : null),
-      ended_at: input.ended_at != null ? isoMs(input.ended_at) : (input.type === 'tool_call' ? isoMs(now()) : null),
-      payload,
-    }, stats)
-    appendJsonl('recordEvent', args)
-    mirror((conn) => {
-      const eventRow = { ...args, payload_json: JSON.stringify(args.payload) }
-      const cols = tableColumnNames('events').filter((c) => c !== 'id')
-      conn.prepare(`INSERT OR IGNORE INTO events (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-        .run(...cols.map((c) => toBindable(eventRow[c])))
+    const startedAt = input.started_at != null ? isoMs(input.started_at) : (input.type === 'tool_call' ? isoMs(now()) : null)
+    const endedAt = input.ended_at != null ? isoMs(input.ended_at) : (input.type === 'tool_call' ? isoMs(now()) : null)
+    const inserted = insertSequenced({
+      jsonlKind: 'recordEvent',
+      adwId: input.adw_id,
+      seqKind: 'event',
+      explicitSeq: input.seq ?? undefined,
+      build: (seq) => {
+        const args = redact({
+          adw_id: input.adw_id,
+          seq,
+          type: input.type,
+          phase_id: input.phase_id ?? null,
+          parent_id: input.parent_id ?? null,
+          started_at: startedAt,
+          ended_at: endedAt,
+          payload,
+        }, stats)
+        return { args, row: { ...args, payload_json: JSON.stringify(args.payload) } }
+      },
+      insert: (conn, row) => {
+        const cols = tableColumnNames('events').filter((c) => c !== 'id')
+        return conn.prepare(`INSERT OR IGNORE INTO events (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+          .run(...cols.map((c) => toBindable(row[c])))
+      },
     })
-    return args
+    return inserted.args
   }
 
   function recordEnvelope(input = {}) {
@@ -2382,48 +2564,55 @@ export function openLedger({
       return ok
     })
     stats.dropped_payload_keys += dropped
-    const seq = input.seq ?? nextSeq(input.adw_id, 'event')
     // args is stored to JSONL in recordSourceError's OWN public-parameter
     // shape (not the events-table row shape) — replayJsonl dispatches
     // `ledger[kind](args)`, so args must be exactly what this method itself
     // accepts as input, already-normalized (a re-application on replay is
     // then a deterministic no-op: reason/violation_names are idempotent to
     // re-validate, seq is already resolved).
-    const args = redact({
-      adw_id: input.adw_id,
-      seq,
-      source_path: input.source_path,
-      source_kind: input.source_kind,
-      byte_size: input.byte_size,
-      violation_names: violationNames,
-      reason,
-      phase_id: input.phase_id ?? null,
-      parent_id: input.parent_id ?? null,
-    }, stats)
-    appendJsonl('recordSourceError', args)
-    mirror((conn) => {
-      const payload = applyPayloadAllowlist('error', {
-        reason: args.reason,
-        source_path: args.source_path,
-        source_kind: args.source_kind,
-        byte_size: args.byte_size,
-        violation_names: args.violation_names,
-      }, stats)
-      const eventRow = {
-        adw_id: args.adw_id,
-        seq: args.seq,
-        type: 'error',
-        phase_id: args.phase_id,
-        parent_id: args.parent_id,
-        started_at: null,
-        ended_at: null,
-        payload_json: JSON.stringify(payload),
-      }
-      const cols = tableColumnNames('events').filter((c) => c !== 'id')
-      conn.prepare(`INSERT OR IGNORE INTO events (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
-        .run(...cols.map((c) => toBindable(eventRow[c])))
+    const inserted = insertSequenced({
+      jsonlKind: 'recordSourceError',
+      adwId: input.adw_id,
+      seqKind: 'event',
+      explicitSeq: input.seq ?? undefined,
+      build: (seq) => {
+        const args = redact({
+          adw_id: input.adw_id,
+          seq,
+          source_path: input.source_path,
+          source_kind: input.source_kind,
+          byte_size: input.byte_size,
+          violation_names: violationNames,
+          reason,
+          phase_id: input.phase_id ?? null,
+          parent_id: input.parent_id ?? null,
+        }, stats)
+        const payload = applyPayloadAllowlist('error', {
+          reason: args.reason,
+          source_path: args.source_path,
+          source_kind: args.source_kind,
+          byte_size: args.byte_size,
+          violation_names: args.violation_names,
+        }, stats)
+        const eventRow = {
+          adw_id: args.adw_id,
+          seq: args.seq,
+          type: 'error',
+          phase_id: args.phase_id,
+          parent_id: args.parent_id,
+          started_at: null,
+          ended_at: null,
+          payload_json: JSON.stringify(payload),
+        }
+        return { args, row: eventRow }
+      },
+      insert: (conn, row) => {
+        const cols = tableColumnNames('events').filter((c) => c !== 'id')
+        return conn.prepare(`INSERT OR IGNORE INTO events (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+          .run(...cols.map((c) => toBindable(row[c])))
+      },
     })
-    return args
+    return inserted.args
   }
 
   // ---- readers --------------------------------------------------------------
@@ -2968,6 +3157,7 @@ export function openLedger({
     let unparsed = 0
     let unknownKind = 0
     const perWriter = new Map()
+    const groups = new Map()
     for (const raw of text.split('\n')) {
       if (!raw) continue
       lines += 1
@@ -2987,15 +3177,37 @@ export function openLedger({
         continue
       }
       const cols = TABLES[table].unique[0]
-      if (!perWriter.has(kind)) perWriter.set(kind, { table, cols, keys: new Set() })
+      if (!perWriter.has(kind)) perWriter.set(kind, { table, cols, keys: new Set(), lines: 0, groups: new Set() })
       const info = perWriter.get(kind)
-      info.keys.add(driftKey(cols, parsed.args))
+      const key = driftKey(cols, parsed.args)
+      info.keys.add(key)
+      info.lines += 1
+      const groupKey = `${table}\u0000${key}`
+      if (!groups.has(groupKey)) groups.set(groupKey, { contents: new Set(), writers: new Set() })
+      const group = groups.get(groupKey)
+      group.contents.add(`${kind}\u0000${stableJson(parsed.args)}`)
+      group.writers.add(kind)
+      info.groups.add(groupKey)
+    }
+    let collapsedLines = 0
+    for (const group of groups.values()) {
+      const { contents } = group
+      if (contents.size < 2) continue
+      collapsedLines += contents.size - 1
+    }
+    const collapsedKeysFor = (info) => {
+      let count = 0
+      for (const groupKey of info.groups) {
+        if (groups.get(groupKey)?.contents.size > 1) count += 1
+      }
+      return count
     }
     const rowKeysByTable = new Map()
     const writers = []
     for (const kind of WRITERS) {
       const info = perWriter.get(kind)
       if (!info) continue
+      const collapsedKeys = collapsedKeysFor(info)
       if (!rowKeysByTable.has(info.table)) {
         let rowKeys = null
         try {
@@ -3013,14 +3225,14 @@ export function openLedger({
       }
       const rowSet = rowKeysByTable.get(info.table)
       if (!rowSet) {
-        writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], distinct_keys: info.keys.size, rows_present: null, drift: null })
+        writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: null, drift: null, collapsed_keys: collapsedKeys })
         continue
       }
       let present = 0
       for (const key of info.keys) {
         if (rowSet.has(key)) present += 1
       }
-      writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present })
+      writers.push({ writer: kind, table: info.table, unique_key: [...info.cols], lines: info.lines, distinct_keys: info.keys.size, rows_present: present, drift: info.keys.size - present, collapsed_keys: collapsedKeys })
     }
     const unreadableTables = writers.filter((w) => w.drift === null).map((w) => w.table)
     const measured = unparsed === 0 && unknownKind === 0 && unreadableTables.length === 0
@@ -3039,6 +3251,8 @@ export function openLedger({
       writers,
       drift_total: driftTotal,
       remedy: driftTotal > 0 ? DRIFT_REMEDY : null,
+      collapsed_lines_total: measured ? collapsedLines : null,
+      collapse_remedy: collapsedLines > 0 ? DRIFT_COLLAPSE_REMEDY : null,
     }
   }
 
@@ -4353,6 +4567,9 @@ export function main(argv) {
         stderr.write(`ledger: JSONL/mirror drift UNMEASURED — ${drift.unmeasured_reason}\n`)
       } else if (drift.drift_total > 0) {
         stderr.write(`ledger: JSONL/mirror drift — ${drift.drift_total} key(s) in the JSONL authority with no mirrored row; remedy: replayJsonl\n`)
+      }
+      if (drift.measured && drift.collapsed_lines_total > 0) {
+        stderr.write(`ledger: JSONL/mirror key collapse — ${drift.collapsed_lines_total} JSONL line(s) share a unique key with different content and are NOT in the mirror; replay does not repair this\n`)
       }
       stderr.write('ledger: doctor readout printed above\n')
       return 0

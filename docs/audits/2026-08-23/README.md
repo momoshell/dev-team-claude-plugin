@@ -63,3 +63,19 @@ Findings promoted to issues are tracked from #534 (audit) and #536 (hunt); the
 correctness work is programmed in epic #546. A finding that is not yet an issue is
 **not** rejected — the standing rule on both index issues is to re-read the relevant
 register when compiling any batch that touches its surface.
+
+## briefs/ — how each lane was asked
+
+The ten requests (`*.request.json`, the four ratified lines: ask / where /
+done-means / out-of-scope) and the briefs compiled from them
+(`*.compiled.md`). A register is only as good as the question that produced it,
+and two of these questions were wrong in instructive ways: `s3-prose` demanded
+all 66 prose files in one lane and its planner lost a subagent fan-out to the
+session limit, returning `insufficient` rather than calling nine-of-sixty-six
+done — `s3b-skills` is the re-scoped retry that forbids fan-out. Preserve the
+briefs so a later sweep re-asks the good questions and does not repeat that one.
+
+`h2` and `h3` escalated the same way for a different reason: their measurement
+finished and the write-up did not fit the seat wait budget. `h2`'s register
+survived in full; `h3`'s did not, which is why its findings live in the headers
+of its reproduction programs.

@@ -6,13 +6,14 @@ import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync,
   openSync as fsOpenSync, writeSync as fsWriteSync, closeSync as fsCloseSync,
+  renameSync as fsRenameSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentLine } from './driver.mjs'
-import { shq, classifyRun } from './headless.mjs'
+import { shq, classifyRun, updateCrewJson } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { translateDeny } from './adapters/adapter-pi.mjs'
 
@@ -176,10 +177,22 @@ function adapterFor(adapters, role) {
   return entry?.adapter || entry || null
 }
 
-function persistCrew(crew, paths, write) {
-  if (!paths?.dir) return
-  const file = join(paths.dir, 'crew.json')
-  try { if (fsExistsSync(file)) write(file, JSON.stringify(crew, null, 2)) } catch { /* diagnostics only */ }
+// The same ONE durability contract crew/headless.mjs owns (#539): this
+// transport keeps its own persist entry point (the import firewall between the
+// two transports is deliberate) but publishes through the single owner, so
+// there is one atomic, locked writer of crew.json rather than two contracts.
+function persistCrew(paths, role, patch, deps) {
+  return updateCrewJson(paths, (disk) => {
+    const member = disk?.members?.[role]
+    if (!member) return false
+    Object.assign(member, patch)
+    return true
+  }, deps)
+}
+
+function notePersist(log, now, role, result) {
+  if (result?.ok || result?.reason === 'absent' || result?.reason === 'no-dir') return
+  log({ at: now(), event: 'crew-json-persist-failed', role, reason: result?.reason ?? 'unknown', error: result?.error ?? null })
 }
 
 function staged(stage, message, role) {
@@ -217,6 +230,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   const unlink = deps.unlinkSync || fsUnlinkSync
   const mkdir = deps.mkdirSync || fsMkdirSync
   const readdir = deps.readdirSync || fsReaddirSync
+  const rename = deps.renameSync || fsRenameSync
   const kill = deps.kill || ((p, signal) => process.kill(p, signal))
   const uuid = deps.uuid || randomUUID
   const now = deps.now || (() => Date.now())
@@ -226,6 +240,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   })
   const pid = deps.pid ?? process.pid
   const injectedLog = deps.log
+  const crewDeps = { existsSync: exists, readFileSync: read, writeFileSync: write, renameSync: rename, unlinkSync: unlink, mkdirSync: mkdir, readdirSync: readdir, uuid, now, sleep, pid }
   const emit = deps.emit
   function emitUsage(turn, seat, usage) {
     try {
@@ -395,7 +410,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
       if (fd == null) throw staged('rpc-spawn-failed', `rpc fifo did not appear for seat ${role}`, role)
       member.session_id = sessionId; member.started = true
-      persistCrew(crew, paths, write)
+      notePersist(log, now, role, persistCrew(paths, role, { session_id: sessionId, started: true }, crewDeps))
       saveSession(role, { sessionId, pid: child.pid, startedAt: now(), lastAssignmentId: assignmentId })
       seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, handle }
       seats.set(role, seat)

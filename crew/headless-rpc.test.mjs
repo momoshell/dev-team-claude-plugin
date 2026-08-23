@@ -26,7 +26,7 @@ function fixture(options = {}) {
     spawn: () => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }, openSync: options.openSync || (() => 10),
     writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
     existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
-    writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: () => {}, sleep: options.sleep || (() => {}),
+    writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep: options.sleep || (() => {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
   }
@@ -800,4 +800,42 @@ test('a real process resolves through the real pgid probe: alive is failed, exit
     try { process.kill(-child.pid, 'SIGKILL') } catch { /* already gone */ }
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+function rpcDurabilityDocument(model = 'model') {
+  return { members: { builder: { model, transport: 'headless-rpc' } }, reseated: { role: 'builder' } }
+}
+
+test('T6 rpc transport persists session state without erasing a disk reseat', () => {
+  const f = fixture()
+  try {
+    const disk = rpcDurabilityDocument('operator-reseated-model')
+    writeFileSync(join(f.dir, 'crew.json'), JSON.stringify(disk, null, 2))
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const after = JSON.parse(readFileSync(join(f.dir, 'crew.json'), 'utf8'))
+    assert.equal(after.members.builder.model, 'operator-reseated-model')
+    assert.deepEqual(after.reseated, { role: 'builder' })
+    assert.equal(after.members.builder.session_id, 'session-1')
+    assert.equal(after.members.builder.started, true)
+    void run
+  } finally { f.cleanup() }
+})
+
+test('T7 rpc transport journals a failed crew.json persist', () => {
+  const events = []
+  const realWrite = writeFileSync
+  const f = fixture({
+    log: (event) => events.push(event),
+    writeFileSync: (path, data, options) => {
+      if (String(path).includes('crew.json.tmp.')) throw new Error('simulated crew.json write failure')
+      return realWrite(path, data, options)
+    },
+  })
+  try {
+    writeFileSync(join(f.dir, 'crew.json'), JSON.stringify(rpcDurabilityDocument(), null, 2))
+    assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }))
+    const failures = events.filter((event) => event.event === 'crew-json-persist-failed')
+    assert.ok(failures.length >= 1)
+    assert.ok(failures.every((event) => event.role === 'builder' && event.reason === 'write-failed'))
+  } finally { f.cleanup() }
 })

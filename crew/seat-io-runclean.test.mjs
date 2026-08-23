@@ -2,15 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, providerConditionDetail,
-  readEnvelopeFile, reaskDecision, samplePaneScreen, seatIo, settleSeatTeardown, WAIT_POLL_MS, waitForEnvelope,
+  readEnvelopeFile, reaskDecision, samplePaneScreen, saveCrew, seatIo, settleSeatTeardown, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
-import { recogniseProviderCondition } from './headless.mjs'
+import { headlessIo, recogniseProviderCondition } from './headless.mjs'
+import { startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 
 const CONTENT = Object.freeze({
@@ -1028,4 +1029,138 @@ test('seatIo.wait keeps polling an absent return file to its deadline', () => {
     assert.equal(failures.length, 1)
     assert.equal(failures[0].failure, 'timeout')
   })
+})
+
+const DURABILITY_ROSTER = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
+
+function makeCrewJsonSeatFixture({ writeCrew = writeFileSync, logLine, extraDeps = {} } = {}) {
+  const root = mkdtempSync(join(tmpdir(), 'crew-json-seat-'))
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const source = DURABILITY_ROSTER.tiers.mechanical.reviewer
+  const member = {
+    transport: 'headless-json', agent: 'pi', model: source.id, effort: source.effort,
+    provider: source.provider, id: source.id,
+  }
+  const crew = { members: { reviewer: member }, tier: 'mechanical', seats: { reviewer: { ...member } } }
+  const logs = []
+  const io = seatIo(crew, paths, root, null, { reviewer: { adapter: { modelString: ({ id }) => `model:${id}` } } }, {}, {
+    readRoster: () => DURABILITY_ROSTER,
+    logLine: logLine || ((_path, value) => logs.push(value)),
+    writeFileSync: writeCrew,
+    ...extraDeps,
+  })
+  return { root, paths, crew, io, logs, source, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+}
+
+test('reseat uses locked RMW: another member survives and a stale transport persist keeps the new cell', async () => {
+  const f = makeCrewJsonSeatFixture()
+  const file = join(f.paths.dir, 'crew.json')
+  const stale = JSON.parse(JSON.stringify(f.crew))
+  const onDisk = {
+    ...f.crew,
+    members: { ...f.crew.members, builder: { role: 'builder', model: 'concurrent-member' } },
+    seats: { ...f.crew.seats, builder: { model: 'concurrent-member' } },
+  }
+  writeFileSync(file, JSON.stringify(onDisk, null, 2))
+  let writer = null
+  try {
+    // The second process publishes the concurrent member change through the
+    // real harness; stop after its first atomic write so the RMW seam below is
+    // deterministic while still exercising a process boundary.
+    writer = await startFileWriter({ file, text: JSON.stringify({ ...onDisk, writer: '%N%' }), mode: 'atomic', maxMs: 1000 })
+    const stopped = await writer.stop(); writer = null
+    assert.ok(stopped.writes >= 1)
+    rmSync(`${file}.stop`, { force: true })
+    const result = f.io.reseat('reviewer', { reason: 'lane' })
+    assert.equal(result.applied, true)
+    const afterReseat = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(afterReseat.members.builder.model, 'concurrent-member')
+    assert.equal(afterReseat.members.reviewer.id, result.to.id)
+    const transport = headlessIo({
+      crew: stale, paths: f.paths, taskDir: f.paths.taskDir, checkout: f.paths.dir,
+      adapters: { reviewer: { headlessCommand: () => ({ bin: '/bin/worker', args: [] }) } }, bin: '/bin/worker',
+      deps: { spawn: () => ({ pid: 8121, unref() {} }), uuid: () => 'stale-seat-session', now: () => 0, sleep: () => {}, pid: 8120, log() {} },
+    })
+    transport.assign({ role: 'reviewer', briefFile: join(f.paths.taskDir, 'brief.md') })
+    const afterPersist = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(afterPersist.members.builder.model, 'concurrent-member')
+    assert.equal(afterPersist.members.reviewer.id, result.to.id)
+    assert.equal(afterPersist.members.reviewer.session_id, 'stale-seat-session')
+  } finally {
+    if (writer) await writer.stop()
+    f.cleanup()
+  }
+})
+
+test('a failed reseat persist records persisted:false and warns with crew.json', () => {
+  const realWrite = writeFileSync
+  const f = makeCrewJsonSeatFixture({
+    writeCrew: (path, data, options) => {
+      if (String(path).includes('crew.json.tmp.')) throw new Error('simulated crew.json write failure')
+      return realWrite(path, data, options)
+    },
+  })
+  const file = join(f.paths.dir, 'crew.json')
+  writeFileSync(file, JSON.stringify(f.crew, null, 2))
+  const errors = []; const original = process.stderr.write
+  process.stderr.write = (chunk) => { errors.push(String(chunk)); return true }
+  let result
+  try { result = f.io.reseat('reviewer', { reason: 'lane' }) } finally {
+    process.stderr.write = original
+    f.cleanup()
+  }
+  assert.equal(result.applied, true)
+  assert.equal(result.persisted, false)
+  assert.match(result.why, /write-failed/)
+  const record = f.logs.map((entry) => entry.reseat).find(Boolean)
+  assert.equal(record.persisted, false)
+  assert.match(record.persist_error, /write-failed/)
+  assert.match(errors.join(''), /warning: reseat of .*crew\.json/)
+})
+
+test('saveCrew publishes a whole crew atomically for boot', () => {
+  const root = mkdtempSync(join(tmpdir(), 'crew-json-save-'))
+  const paths = { dir: root }
+  const file = join(root, 'crew.json')
+  const crew = { boot: true, members: { builder: { model: 'boot-model' } } }
+  try {
+    writeFileSync(file, JSON.stringify({ old: true }))
+    const before = statSync(file).ino
+    saveCrew(paths, crew, { uuid: () => 'boot-save' })
+    assert.notEqual(statSync(file).ino, before)
+    assert.deepEqual(JSON.parse(readFileSync(file, 'utf8')), crew)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('showDoc updates doc_viewer without clobbering a concurrent member change', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'crew-json-doc-'))
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
+  const crew = { workspace_id: 'ws', window_id: 'win', members: { reviewer: { model: 'stale' } } }
+  const file = join(root, 'crew.json')
+  const onDisk = { members: { reviewer: { model: 'stale' }, builder: { model: 'concurrent-builder' } } }
+  writeFileSync(file, JSON.stringify(onDisk, null, 2))
+  const before = { windows: [] }
+  const after = { windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'doc-surface' }] }] }] }] }
+  let trees = 0; let writer = null
+  try {
+    writer = await startFileWriter({ file, text: JSON.stringify({ ...onDisk, writer: '%N%' }), mode: 'atomic', maxMs: 1000 })
+    const stopped = await writer.stop(); writer = null
+    assert.ok(stopped.writes >= 1)
+    rmSync(`${file}.stop`, { force: true })
+    const io = seatIo(crew, paths, root, null, null, {}, {
+      tree: () => trees++ === 0 ? before : after,
+      cmux: (verb) => { assert.equal(verb, 'markdown'); return { ok: true } },
+      closeSurface: () => {},
+      logLine: () => {},
+    })
+    io.showDoc('/plan.md')
+    const disk = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(disk.members.builder.model, 'concurrent-builder')
+    assert.deepEqual(disk.doc_viewer, { path: '/plan.md', surface_id: 'doc-surface' })
+  } finally {
+    if (writer) await writer.stop()
+    rmSync(root, { recursive: true, force: true })
+  }
 })

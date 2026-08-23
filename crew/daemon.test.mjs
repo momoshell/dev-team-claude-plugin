@@ -172,6 +172,24 @@ function request(socketPath, requestLine, expected = 1) {
   })
 }
 
+// A wait observes the condition it asserts. A fixed sleep standing in for "the
+// socket delivered, the poll ran, the feed emitted" turns host load into a
+// wrong value: measured 2026-08-22 at load 20.6, the polling test below read
+// `expected 'orphaned', actual undefined`. On the deadline this throws naming
+// the elapsed time, so the failure reads as a timeout and not as a bad value.
+async function waitFor(condition, what, { timeout = 5_000, interval = 2 } = {}) {
+  const started = Date.now()
+  for (;;) {
+    const value = condition()
+    if (value) return value
+    const elapsed = Date.now() - started
+    if (elapsed >= timeout) throw new Error(`timed out after ${elapsed}ms waiting for ${what}`)
+    // FIXED SLEEP: the poll cadence of this waiter itself, not a stand-in for a
+    // condition — the condition is re-read on every tick.
+    await new Promise((resolve) => setTimeout(resolve, interval))
+  }
+}
+
 function jsonFrame(frame) { return JSON.parse(frame) }
 function appendJournal(f, row) { writeFileSync(join(f.crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`, { flag: 'a' }) }
 function stageRpcSeat(f, role) {
@@ -523,7 +541,7 @@ test('socket framing reassembles three chunks and a split multibyte character', 
     socket.write(payload.subarray(0, at + 1))
     socket.write(payload.subarray(at + 1, at + 2))
     socket.write(payload.subarray(at + 2))
-    await new Promise((resolve) => setTimeout(resolve, 30))
+    await waitFor(() => frames.length >= 1, 'the reassembled frame')
     socket.destroy()
     assert.equal(frames.length, 1)
     assert.equal(jsonFrame(frames[0]).id, 'split')
@@ -1479,7 +1497,7 @@ test('subscriber disconnect does not mutate registry and tail replays', async ()
     const registry = join(f.root, 'runs.jsonl'); const before = readFileSync(registry, 'utf8')
     const socket = net.connect(f.d.socketPath); await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'tail-a', cmd: 'tail', params: { run, since: 0 } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20)); socket.destroy(); await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().length === 1, 'the tail-a subscription'); socket.destroy(); await waitFor(() => f.d.subscribers().length === 0, 'the daemon to drop the disconnected subscriber')
     f.d.poll(); assert.equal(readFileSync(registry, 'utf8'), before); assert.equal(f.d.state({ run }).state, 'working')
     const feed = f.d.feed(run, 0); assert.ok(feed.length >= 1)
     const frames = await request(f.d.socketPath, `${JSON.stringify({ id: 'tail-b', cmd: 'tail', params: { run, since: 0 } })}\n`, feed.length)
@@ -1846,10 +1864,10 @@ test('spawn errors send the died event before the terminal feed frame', async ()
     })
     await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'spawn-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().some((s) => s.id === 'spawn-end'), 'the spawn-end subscription')
     assert.equal(typeof onError, 'function')
     onError(Error('EAGAIN'))
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => frames.some((frame) => frame.end), 'the terminal feed frame')
     const observations = frames.filter((frame) => frame.event || frame.end)
     assert.equal(observations.at(-1)?.end?.reason, 'orphaned')
     assert.ok(observations.findIndex((frame) => frame.event?.kind === 'died') >= 0)
@@ -1876,10 +1894,10 @@ test('a child exit without an envelope ends the live feed after died', async () 
     })
     await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'exit-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().some((s) => s.id === 'exit-end'), 'the exit-end subscription')
     assert.equal(typeof onExit, 'function')
     onExit(1, null)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => frames.some((frame) => frame.end), 'the terminal feed frame')
     const observations = frames.filter((frame) => frame.event || frame.end)
     assert.equal(observations.at(-1)?.end?.reason, 'orphaned')
     const died = observations.findIndex((frame) => frame.event?.kind === 'died')
@@ -2044,10 +2062,10 @@ test('a dead child found by polling ends the live feed after died', async () => 
     })
     await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'poll-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().some((s) => s.id === 'poll-end'), 'the poll-end subscription')
     f.alive.delete(900)
     f.d.poll()
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => frames.some((frame) => frame.end), 'the terminal feed frame')
     const observations = frames.filter((frame) => frame.event || frame.end)
     assert.equal(observations.at(-1)?.end?.reason, 'orphaned')
     const died = observations.findIndex((frame) => frame.event?.kind === 'died')
@@ -2055,6 +2073,32 @@ test('a dead child found by polling ends the live feed after died', async () => 
     assert.ok(died < observations.findIndex((frame) => frame.end))
     assert.equal(f.d.state({ run }).state, 'done')
     assert.equal(f.d.result({ run }).envelope.details.escalation.why, 'child-dead')
+    socket.destroy()
+  })
+})
+
+// The converted waits are only an improvement if they still FAIL when the feed
+// never ends. This is that arm: a live tail whose run never settles.
+test('a bounded wait fails with its elapsed time when the condition never holds', async () => {
+  await each(async (f) => {
+    await f.d.start()
+    const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+    const socket = net.connect(f.d.socketPath)
+    const frames = []
+    let rest = Buffer.alloc(0)
+    socket.on('data', (chunk) => {
+      const split = splitFrames(Buffer.concat([rest, chunk])); rest = split.rest
+      frames.push(...split.lines.map(jsonFrame))
+    })
+    await new Promise((resolve) => socket.on('connect', resolve))
+    socket.write(`${JSON.stringify({ id: 'never-end', cmd: 'tail', params: { run, since: 0 } })}\n`)
+    await waitFor(() => f.d.subscribers().some((s) => s.id === 'never-end'), 'the never-end subscription')
+    const started = Date.now()
+    await assert.rejects(
+      () => waitFor(() => frames.some((frame) => frame.end), 'a terminal frame that never arrives', { timeout: 120 }),
+      (err) => /^timed out after \d+ms waiting for a terminal frame that never arrives$/.test(err.message),
+    )
+    assert.ok(Date.now() - started >= 120)
     socket.destroy()
   })
 })
@@ -2689,10 +2733,10 @@ test('settle sends a subscriber an end frame that claims no outcome', async () =
     })
     await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'end', cmd: 'tail', params: { run, since: 0 } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().some((s) => s.id === 'end'), 'the end subscription')
     writeFileSync(returnFor(f, run), JSON.stringify({ status: 'done' }))
     f.d.poll()
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => frames.some((frame) => frame.end), 'the terminal feed frame')
     const end = frames.find((frame) => frame.end)
     assert.deepEqual(end?.end, { run_id: run, reason: 'settled' })
     assert.doesNotMatch(JSON.stringify(end), /status|outcome|success|escalation/)
@@ -2707,10 +2751,10 @@ test('subscribers projects the daemon subscriber set', async () => {
     const socket = net.connect(f.d.socketPath)
     await new Promise((resolve) => socket.on('connect', resolve))
     socket.write(`${JSON.stringify({ id: 'inspect', cmd: 'tail', params: { run, since: 0 } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().length === 1, 'the inspect subscription')
     assert.deepEqual(f.d.subscribers(), [{ id: 'inspect', run_id: run }])
     socket.write(`${JSON.stringify({ id: 'untail', cmd: 'untail', params: { run } })}\n`)
-    await new Promise((resolve) => setTimeout(resolve, 20))
+    await waitFor(() => f.d.subscribers().length === 0, 'the untail to drop the subscriber')
     assert.deepEqual(f.d.subscribers(), [])
     socket.destroy()
   })
@@ -2953,6 +2997,8 @@ test('run-end teardown kills a real piped seat and its recorded pgid is gone', {
       try { process.kill(-pgid, 0) } catch (err) {
         if (err?.code === 'ESRCH') { gone = true; break }
       }
+      // FIXED SLEEP: poll cadence of a bounded while (Date.now() < deadline)
+      // wait, not a stand-in for a condition.
       await new Promise((resolve) => setTimeout(resolve, 50))
     }
     assert.equal(gone, true, `recorded process group ${pgid} remained live`)

@@ -13,6 +13,8 @@ import {
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
+  parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
+  resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
   BOOT_DESCENDANT_REFUSALS, descendantRefusal, refuseStaleDescendants,
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
@@ -1001,6 +1003,7 @@ test('resolveLaneFence takes both flags or neither', () => {
   assert.throws(() => resolveLaneFence({ fences: '/missing/fences.json' }), /given together or not at all/)
   const dir = mkdtempSync(join(tmpdir(), 'crew-fence-resolver-'))
   const register = join(dir, 'fences.json')
+  execSync('git init -q', { cwd: dir })
   try {
     writeFileSync(register, JSON.stringify({ lanes: [
       { lane: 'b', files: ['z.mjs', 'y.mjs'] },
@@ -1008,6 +1011,22 @@ test('resolveLaneFence takes both flags or neither', () => {
     ] }))
     assert.deepEqual(resolveLaneFence({ fences: register, lane: 'a' }), {
       lane: 'a', fence: [{ lane: 'b', files: ['y.mjs', 'z.mjs'] }],
+    })
+    mkdirSync(join(dir, 'config'))
+    writeFileSync(register, JSON.stringify({ lanes: [
+      { lane: 'b', files: ['config'] },
+      { lane: 'a', files: ['x.mjs'] },
+    ] }))
+    assert.throws(
+      () => resolveLaneFence({ fences: register, lane: 'a', checkout: dir }),
+      (err) => err.reason === 'scope-directory-unslashed',
+    )
+    writeFileSync(register, JSON.stringify({ lanes: [
+      { lane: 'b', files: ['config/'] },
+      { lane: 'a', files: ['x.mjs'] },
+    ] }))
+    assert.deepEqual(resolveLaneFence({ fences: register, lane: 'a', checkout: dir }), {
+      lane: 'a', fence: [{ lane: 'b', files: ['config/'] }],
     })
     assert.throws(() => resolveLaneFence({ fences: register, lane: 'unknown' }), (err) => err.reason === 'unknown-lane')
     writeFileSync(register, '{not json')
@@ -1761,7 +1780,7 @@ test('CLI refusal probes do not create crew state', () => {
 })
 
 test('flag contracts accept known flags, role prefixes, and reject malformed usage', () => {
-  const valueFor = (flag) => flag === 'task' ? 't' : flag === 'brief-file' ? 'brief.md' : 'value'
+  const valueFor = (flag) => BOOLEAN_FLAGS.includes(flag) ? true : flag === 'task' ? 't' : flag === 'brief-file' ? 'brief.md' : 'value'
   for (const [verb, flags] of Object.entries(KNOWN_FLAGS)) {
     const args = { _: [] }
     for (const flag of flags) args[flag] = valueFor(flag)
@@ -1791,6 +1810,83 @@ test('flag contracts accept known flags, role prefixes, and reject malformed usa
     }
   }
   assert.deepEqual(BOOT_ONLY_FLAGS, ['fences', 'lane'])
+})
+
+test('argv value contracts cover every known flag and every hostile shape', () => {
+  const union = new Set()
+  for (const flags of Object.values(KNOWN_FLAGS)) for (const flag of flags) union.add(flag)
+  assert.deepEqual([...Object.keys(FLAG_VALUE_CONTRACT)].sort(), [...union].sort())
+  assert.ok(Object.values(FLAG_VALUE_CONTRACT).every((contract) => contract === 'value' || contract === 'boolean'))
+  assert.deepEqual(BOOLEAN_FLAGS, ['headless-all', 'keep'])
+
+  const requiredPrefix = (verb) => {
+    const prefix = ['--task', 't']
+    if (verb === 'run' || verb === 'handoff') prefix.push('--brief-file', 'brief.md')
+    return prefix
+  }
+  const nextFlag = (flag) => flag === 'task' ? ['--checkout', 'checkout'] : ['--task', 't']
+  const forms = {
+    valueless: (flag) => [`--${flag}`],
+    'empty-string': (flag) => [`--${flag}`, ''],
+    whitespace: (flag) => [`--${flag}`, '   '],
+    'flag-as-next-token': (flag) => [`--${flag}`, ...nextFlag(flag)],
+  }
+  for (const [verb, flags] of Object.entries(KNOWN_FLAGS)) {
+    for (const flag of flags) {
+      const contract = FLAG_VALUE_CONTRACT[flag]
+      for (const [label, makeForm] of Object.entries(forms)) {
+        const args = parseArgs([...requiredPrefix(verb), ...makeForm(flag)])
+        if (contract === 'value' || (label !== 'valueless' && label !== 'flag-as-next-token')) {
+          assert.throws(() => assertUsage(verb, args), (err) => (
+            err.usage === true && err.reason === FLAG_VALUE_REFUSAL && err.message.includes(`--${flag}`)
+          ), `${verb} --${flag} ${label}`)
+        } else {
+          assert.doesNotThrow(() => assertUsage(verb, args), `${verb} --${flag} ${label}`)
+        }
+      }
+    }
+  }
+})
+
+// The canonical dispatch line in skills/crew-dispatch/references/flags.md:42
+// ends with --suite, so these are the reachable valueless argv shapes.
+test('CLI refuses valueless suite forms before a run can reach the suite stage', () => {
+  for (const suffix of [['--suite'], ['--suite', ''], ['--suite', '   '], ['--suite', '--checkout', CLI_REPO_ROOT]]) {
+    const result = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, ...suffix)
+    assert.equal(result.status, 2, suffix.join(' '))
+    assert.match(result.output, /--suite/, suffix.join(' '))
+  }
+  const good = cliEntry('run', '--task', CLI_PROBE_TASK, '--brief-file', CLI_PROBE_BRIEF, '--suite', 'npm test')
+  assert.notEqual(good.status, 2)
+  assert.match(good.output, /no crew booted/)
+})
+
+test('resolveTimeoutS refuses coercive values and accepts the closed numeric range', () => {
+  const hostile = ['abc', '8080abc', '0x10', '1e3', 'Infinity', 'NaN', '-1', '0', '1.5', true, '', '   ', '21601']
+  for (const raw of hostile) {
+    assert.throws(() => resolveTimeoutS(raw), (err) => err.reason === TIMEOUT_S_REFUSAL, JSON.stringify(raw))
+  }
+  for (const raw of [undefined, null]) assert.equal(resolveTimeoutS(raw), TIMEOUT_S_DEFAULT)
+  for (const [raw, expected] of [['1', 1], [5, 5], ['3600', 3600], ['21600', 21600]]) {
+    assert.equal(resolveTimeoutS(raw), expected)
+  }
+
+  const home = mkdtempSync(join(tmpdir(), 'crew-timeout-cli-home-'))
+  const task = 'timeout-cli'
+  const repoSlug = basename(CLI_REPO_ROOT).toLowerCase().replace(/[^a-z0-9]+/g, '-')
+  const returns = join(home, '.crew', repoSlug, task, 'returns')
+  mkdirSync(returns, { recursive: true })
+  writeFileSync(join(returns, 'task.json'), JSON.stringify({ status: 'done', summary: 'settled', artifacts: [], details: {} }))
+  const entry = fileURLToPath(new URL('./crew.mjs', import.meta.url))
+  const options = { cwd: CLI_REPO_ROOT, encoding: 'utf8', env: { ...CLI_ENV, HOME: home } }
+  try {
+    const settled = spawnSync(process.execPath, [entry, 'wait', '--task', task, '--checkout', CLI_REPO_ROOT, '--timeout-s', '5'], options)
+    assert.equal(settled.status, 0, settled.stderr)
+    assert.match(settled.stdout, /"status":"done"/)
+    const invalid = spawnSync(process.execPath, [entry, 'wait', '--task', task, '--checkout', CLI_REPO_ROOT, '--timeout-s', 'abc'], options)
+    assert.notEqual(invalid.status, 0)
+    assert.match(`${invalid.stdout}${invalid.stderr}`, /invalid-timeout-s/)
+  } finally { rmSync(home, { recursive: true, force: true }) }
 })
 
 test('run exit constants preserve done, escalation, and unexpected meanings', () => {

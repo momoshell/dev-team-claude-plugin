@@ -4873,7 +4873,7 @@ test('gateless review convergence parks instead of claiming a green acceptance g
 
 test('the converge seam exposes only issue creation and draft PR creation', () => {
   const { io } = convergeRun()
-  assert.ok(io.calls.gh.every((call) => ['createIssue', 'createDraftPr'].includes(call.method)))
+  assert.deepEqual(io.calls.gh.map((call) => call.method).sort(), ['createDraftPr', 'createIssue'])
   const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   for (const banned of [/ready-for-review/, /ready_for_review/, /['\"]gh (pr|issue)/, /node:child_process/, /\bexecSync\s*\(/, /\bspawnSync\s*\(/]) {
     assert.equal(banned.test(source), false, `unexpected direct seam path ${banned}`)
@@ -6036,7 +6036,7 @@ test('a child-shaped ctx (lead only in seatedRoles) takes the gate repair on the
   assert.equal(attendedIo.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-fix').length, 1)
 })
 
-test('the panel is skipped without a tech-lead, and the planner is never a panel partner', () => {
+test('the panel is skipped without a tech-lead, and PANEL_PARTNERS excludes the planner', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },

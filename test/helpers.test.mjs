@@ -53,7 +53,15 @@ test('rawRequest reports a socket closed without a response', async () => {
     const res = await rawRequest({ port, requestLine: 'GET / HTTP/1.1', headers: ['Host: x'] })
     assert.equal(res.closedWithoutResponse, true)
     assert.equal(res.raw.length, 0)
-    assert.equal(res.errorCode, 'ECONNRESET')
+    // The errno is platform-dependent: an immediate server-side destroy() reaches
+    // the client as ECONNRESET on darwin and as a clean FIN (no error event, so
+    // null) on linux. Reaching this line at all already proves the peer was
+    // REACHABLE, because rawRequest rejects on the UNREACHABLE set. So pin the
+    // closed set rather than one platform's spelling — a stray errno still fails.
+    assert.ok(
+      [null, 'ECONNRESET', 'EPIPE'].includes(res.errorCode),
+      `expected a reset-or-clean close, got ${res.errorCode}`,
+    )
   } finally {
     await new Promise((r) => server.close(r))
   }

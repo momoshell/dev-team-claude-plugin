@@ -72,6 +72,8 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createRequire } from 'node:module'
 import { spawnSync } from 'node:child_process'
+import { modelString as claudeModelString } from '../../crew/adapters/adapter-claude.mjs'
+import { modelString as piModelString } from '../../crew/adapters/adapter-pi.mjs'
 // NONCE_PREFIX was imported from the legacy runtime's contract
 // (scripts/cmux/contract.mjs, retired with that runtime). The ledger's
 // sweep guard still honors nonce-prefixed sidecars, so the constant's
@@ -2582,7 +2584,11 @@ export function openLedger({
         FROM review_outcomes ro
         WHERE (? IS NULL OR ro.created_at >= ?) AND (? IS NULL OR ro.created_at < ?)
       )
-      SELECT scoped.provider, scoped.model_id, scoped.agent, scoped.effort, scoped.role,
+      SELECT scoped.provider, scoped.model_id,
+        -- Guard this CASE: a roster-keyed cell must never split by model spelling,
+        -- because crew/crew.mjs:933 sums over provider/model_id.
+        CASE WHEN scoped.provider IS NULL AND scoped.model_id IS NULL THEN scoped.model ELSE NULL END AS model_key,
+        scoped.agent, scoped.effort, scoped.role,
         s.tier AS task_class,
         COUNT(*) AS reviews,
         SUM(CASE WHEN scoped.created_at = scoped.run_first_at THEN 1 ELSE 0 END) AS first_round_reviews,
@@ -2590,14 +2596,16 @@ export function openLedger({
         MIN(scoped.created_at) AS first_at, MAX(scoped.created_at) AS last_at,
         GROUP_CONCAT(DISTINCT scoped.transport) AS transports
       FROM scoped LEFT JOIN sessions s ON s.adw_id = scoped.adw_id
-      GROUP BY scoped.provider, scoped.model_id, scoped.agent, scoped.effort, scoped.role, s.tier
-      ORDER BY scoped.provider, scoped.model_id, scoped.agent, scoped.effort, scoped.role, s.tier
+      GROUP BY scoped.provider, scoped.model_id, model_key, scoped.agent, scoped.effort, scoped.role, s.tier
+      ORDER BY scoped.provider, scoped.model_id, model_key, scoped.agent, scoped.effort, scoped.role, s.tier
     `, [since, since, until, until])
   }
 
   function cellUsage({ since = null, until = null } = {}) {
     return queryRows(`
-      SELECT r.provider, r.model_id, r.agent, r.effort, r.role, sx.tier AS task_class,
+      SELECT r.provider, r.model_id,
+        CASE WHEN r.provider IS NULL AND r.model_id IS NULL THEN r.model ELSE NULL END AS model_key,
+        r.agent, r.effort, r.role, sx.tier AS task_class,
         COUNT(*) AS usage_sessions,
         SUM(CASE WHEN a.billed_input_tokens IS NULL THEN 1 ELSE 0 END) AS unbilled_sessions,
         SUM(a.billed_input_tokens) AS billed_input_tokens,
@@ -2608,7 +2616,7 @@ export function openLedger({
         JOIN agent_sessions a ON a.adw_id = r.adw_id AND a.dispatch_id = r.dispatch_id
         LEFT JOIN sessions sx ON sx.adw_id = r.adw_id
       WHERE (? IS NULL OR r.created_at >= ?) AND (? IS NULL OR r.created_at < ?)
-      GROUP BY r.provider, r.model_id, r.agent, r.effort, r.role, sx.tier
+      GROUP BY r.provider, r.model_id, model_key, r.agent, r.effort, r.role, sx.tier
     `, [since, since, until, until])
   }
 
@@ -3407,6 +3415,33 @@ function windowBound(value, flagName, verb = 'run-set') {
   return isoMs(ms)
 }
 
+// The two shipped adapters' roster-cell translations, keyed by the seat's own
+// `agent` — the same map crew/seat-io.mjs:848 keys, imported rather than
+// mirrored so the openai→openai-codex namespace lives on ONE surface
+// (crew/adapters/adapter-pi.mjs:91).
+const CELL_MODEL_TRANSLATORS = Object.freeze({ claude: claudeModelString, pi: piModelString })
+
+// Map a recorded `model` string back to a provider/id price-catalog key, the
+// way crew/crew.mjs:776 (bandForRaw) resolves a raw override: translate every
+// catalog key FORWARD through the adapter the review says ran it, and accept
+// only a UNIQUE match. It ASSUMES the recorded `agent` is the adapter that
+// produced the string. A prefix is never stripped and a provider is never
+// guessed: an unmatched or ambiguous string is unmapped, and an unmapped cell
+// is unpriced — never another model's price.
+export function priceKeyForModel(catalog, model, agent) {
+  const translate = CELL_MODEL_TRANSLATORS[agent]
+  if (typeof translate !== 'function' || model == null || !catalog?.models) return null
+  const matches = []
+  for (const key of Object.keys(catalog.models)) {
+    const slash = key.indexOf('/')
+    if (slash < 0) continue
+    let candidate
+    try { candidate = translate({ provider: key.slice(0, slash), id: key.slice(slash + 1) }) } catch { continue }
+    if (candidate === model) matches.push(key)
+  }
+  return matches.length === 1 ? matches[0] : null
+}
+
 function catalogPrice(catalog, key) {
   if (!catalog) return null
   const entry = catalog.models && Object.prototype.hasOwnProperty.call(catalog.models, key) ? catalog.models[key] : null
@@ -3971,14 +4006,14 @@ export function main(argv) {
       if (ledger.stats().degraded) refuse('cells: the ledger mirror is degraded — this window is unanswerable, not empty')
       const usageByCell = new Map()
       for (const usageRow of usage) {
-        const key = [usageRow.provider, usageRow.model_id, usageRow.agent, usageRow.effort, usageRow.role, usageRow.task_class].join('\0')
+        const key = [usageRow.provider, usageRow.model_id, usageRow.model_key, usageRow.agent, usageRow.effort, usageRow.role, usageRow.task_class].join('\0')
         usageByCell.set(key, usageRow)
       }
       const transportsOf = (row) => row.transports == null ? [] : String(row.transports).split(',')
       const payloadAbsent = {}
       if (pricesAbsent !== null) payloadAbsent.prices = pricesAbsent
       const emittedRows = rows.map((row) => {
-        const key = [row.provider, row.model_id, row.agent, row.effort, row.role, row.task_class].join('\0')
+        const key = [row.provider, row.model_id, row.model_key, row.agent, row.effort, row.role, row.task_class].join('\0')
         const usageRow = usageByCell.get(key) ?? null
         const usageSessions = usageRow === null ? 0 : Number(usageRow.usage_sessions)
         const unbilledSessions = usageRow === null ? 0 : Number(usageRow.unbilled_sessions)
@@ -3987,7 +4022,9 @@ export function main(argv) {
         const billedOutputTokens = billed('billed_output_tokens')
         const billedCacheWriteTokens = billed('billed_cache_write_tokens')
         const billedCacheReadTokens = billed('billed_cache_read_tokens')
-        const priceKey = row.provider == null || row.model_id == null ? null : `${row.provider}/${row.model_id}`
+        const priceKey = row.provider != null && row.model_id != null
+          ? `${row.provider}/${row.model_id}`
+          : priceKeyForModel(catalog, row.model_key, row.agent)
         const price = priceKey === null ? null : catalogPrice(catalog, priceKey)
         const hasRates = price !== null
           && typeof price.cost_in_per_mtok === 'number'
@@ -3998,7 +4035,8 @@ export function main(argv) {
         const firstRoundPassRate = row.first_round_reviews === 0 ? null : row.first_round_passes / row.first_round_reviews
         if (row.first_round_reviews === 0) absent.first_round_pass_rate = 'no review by this cell was its run\'s first round — UNMEASURED, never a zero rate'
         if (row.task_class === null) absent.task_class = 'this run recorded no tier (booted with explicit --roles, or predates sessions.tier) — the class is UNMEASURED, never a class'
-        if (row.provider === null && row.model_id === null) absent.cell = 'these reviews recorded no cell (#404 landed 2026-08-20; older rows carry nothing) — unattributed, never a cell'
+        if (row.provider === null && row.model_id === null && row.model_key === null) absent.cell = 'these reviews recorded no cell (#404 landed 2026-08-20; older rows carry nothing) — unattributed, never a cell'
+        if (row.model_key !== null) absent.roster_cell = `these reviews were booted with a dispatch-time --model-<role> override, which nulls the roster cell it replaced so it is never mislabelled (crew/crew.mjs:591) — the roster provider/model_id is UNRECORDED, and this cell is identified by its model string, never unattributed`
         if (usageSessions === 0) {
           absent.usage = usageAbsentCause(transportsOf(row))
         } else if (unbilledSessions > 0) {
@@ -4010,6 +4048,7 @@ export function main(argv) {
           const outTokens = billedOutputTokens
           costUsd = (inTokens / 1e6) * price.cost_in_per_mtok + (outTokens / 1e6) * price.cost_out_per_mtok
         }
+        if (row.model_key !== null && priceKey === null) absent.price_key = `the model string ${row.model_key} is translated to no single ${row.agent === null ? 'adapter' : row.agent}-catalog key, and a prefix is never stripped to guess one — unmapped, so this cell is unpriced, never free`
         if (!hasRates) {
           absent.cost_usd = `no price for ` + `${priceKey} in ${priceSourcePath} — unpriced, never free`
         } else if (billedInputTokens === null || billedOutputTokens === null) {
@@ -4018,6 +4057,7 @@ export function main(argv) {
         return {
           provider: row.provider,
           model_id: row.model_id,
+          model: row.model_key,
           agent: row.agent,
           effort: row.effort,
           role: row.role,
@@ -4049,7 +4089,9 @@ export function main(argv) {
         schema: 1,
         question: 'What has each provider/model/agent/effort cell actually done — how many reviews, what share passed first round, and what did a run through it cost?',
         definition: {
-          cell: 'provider/model_id/agent/effort/role are copied from each review outcome; null cell keys stay null',
+          cell: 'provider/model_id/agent/effort/role are copied from each review outcome; null cell keys stay null; when a review recorded no provider/model_id but DID record a model (a dispatch-time --model-<role> override) the cell is keyed on that model string instead, and a review that recorded none of the three stays unattributed in a row of its own — the two are never merged',
+          model: 'the raw override model string this cell is keyed by, or null for a roster-keyed cell; a roster-keyed cell is never split by the model spelling its reviews recorded',
+          price_key: 'provider/model_id for a roster-keyed cell; for a model-keyed one, the single catalog key whose translation under the review\'s own agent adapter equals the model string — never a stripped prefix, and an unmatched or ambiguous string is unmapped and therefore unpriced, never free',
           task_class: 'task_class is the sessions.tier value forwarded at boot; null means the class was not measured',
           first_round: 'a run\'s first round is every review whose created_at equals MIN(created_at) over that run\'s whole review history; ties count',
           first_round_pass_rate: 'first_round_passes divided by first_round_reviews; a null rate with its absent marker is unmeasured',

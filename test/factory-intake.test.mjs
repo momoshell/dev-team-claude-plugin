@@ -445,6 +445,44 @@ test('protected paths refuse a candidate with the protected hits as detail', () 
   ])
 })
 
+test('a malformed protectedPaths is refused rather than swallowed', () => {
+  for (const [index, protectedPaths] of ['crew/', { paths: ['crew/'] }, null, 7, true].entries()) {
+    const { result } = runSweep([issue({ number: 35 + index, body: intakeBody() })], {
+      config: { protectedPaths },
+    })
+    assert.equal(result.picked, null)
+    assert.equal(result.refusals[0]?.detail, 'bad-protected')
+    assert.deepEqual(result.refusals.map(({ reason, detail }) => ({ reason, detail })), [
+      { reason: 'brief-uncompilable', detail: 'bad-protected' },
+    ])
+  }
+})
+
+test('a blank or non-string protectedPaths entry keeps refusing', () => {
+  for (const [index, protectedPaths] of [['crew/', '   '], ['crew/', 7]].entries()) {
+    const { result } = runSweep([issue({ number: 37 + index, body: intakeBody() })], {
+      config: { protectedPaths },
+    })
+    assert.equal(result.picked, null)
+    assert.deepEqual(result.refusals.map(({ reason, detail }) => ({ reason, detail })), [
+      { reason: 'brief-uncompilable', detail: 'bad-protected' },
+    ])
+  }
+})
+
+test('an absent protectedPaths leaves the authored floor in force', () => {
+  const config = { protectedPaths: undefined }
+  const picked = runSweep([issue({ number: 39, body: intakeBody() })], { config }).result
+  assert.equal(picked.picked?.issue, 39)
+  assert.deepEqual(picked.refusals, [])
+
+  const blocked = runSweep([issue({ number: 40, body: intakeBody({ where: 'crew/drive.mjs' }) })], { config }).result
+  assert.equal(blocked.picked, null)
+  assert.deepEqual(blocked.refusals.map(({ reason, detail }) => ({ reason, detail })), [
+    { reason: 'protected-path', detail: 'crew/drive.mjs' },
+  ])
+})
+
 test('window cap parks before the runner is called', () => {
   let calls = 0
   const { result } = runSweep([issue({ number: 32, body: intakeBody() })], {

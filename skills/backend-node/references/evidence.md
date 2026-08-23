@@ -47,7 +47,7 @@ No dedicated local test distinguishes an interrupted daemon source read from an
 empty import list while checking an allowlisted leaf.
 
 The firewall test does pin the leaf's normal import-free state at
-`crew/daemon.test.mjs:246`; the interrupted-read edge remains unbacked.
+`crew/daemon.test.mjs:247`; the interrupted-read edge remains unbacked.
 
 Keep that edge marked unbacked in `import-firewall.md` until a mutation pins it.
 
@@ -68,7 +68,7 @@ No dedicated local test or source exhibit was found for an interrupted flag pars
 or for a flag whose value is missing at the end of argv.
 
 The refusal and accepted-window directions are measured in
-`test/factory-ledger.test.mjs:2261` and `:2266`; these two edges remain separate.
+`test/factory-ledger.test.mjs:2813` and `:2620`; these two edges remain separate.
 
 Keep those two CLI edge rules in `cli-flags.md` marked unbacked until a test
 pins interrupted parsing and missing-value behavior.

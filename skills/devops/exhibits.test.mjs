@@ -1,6 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -45,26 +46,9 @@ test('daemon paths agree with the default root', () => {
   for (const token of ['.crew', 'daemon.sock', 'daemon.json']) assert.ok(doc.includes(token), `daemon.md must name ${token}`)
 })
 
-// Mutation killed: changing any documented path:line to a nonexistent line
-// must make the devops exhibit index fail instead of silently drifting.
-test('every devops path:line anchor resolves', () => {
-  const files = [join(HERE, 'SKILL.md')]
-  for (const name of ['worktrees.md', 'gh.md', 'lane-branches.md', 'processes.md', 'daemon.md', 'evidence.md']) {
-    files.push(join(DOC_ROOT, name))
-  }
-  const roots = new Set(['crew', 'scripts', 'test', 'docs', 'skills', 'visualizer', 'tasks', '.github'])
-  let anchors = 0
-  for (const file of files) {
-    const text = readFileSync(file, 'utf8')
-    for (const [, rel, number] of text.matchAll(/([A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.(?:mjs|ts|js|json|md|sh|yml)):(\d+)/g)) {
-      if (!roots.has(rel.split('/')[0])) continue
-      anchors += 1
-      const target = join(ROOT, rel)
-      assert.ok(existsSync(target), `${file}: missing ${rel}`)
-      assert.equal(statSync(target).isDirectory(), false, `${file}: ${rel} is a directory`)
-      const lines = readFileSync(target, 'utf8').split('\n').length
-      assert.ok(Number(number) >= 1 && Number(number) <= lines, `${file}: ${rel}:${number} has ${lines} lines`)
-    }
-  }
-  assert.ok(anchors >= 12, `expected at least 12 devops anchors, found ${anchors}`)
+// Mutation killed: move any anchored line, or weaken a declared substring to
+// something the target repeats, and this test reddens — the old pin passed
+// while the line said something else entirely (#550).
+test('every devops path:line anchor carries what the prose claims', () => {
+  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: join(HERE, 'anchors.json'), minAnchors: 85 }), 85)
 })

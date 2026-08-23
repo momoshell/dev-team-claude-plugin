@@ -89,6 +89,11 @@ independent angles is a strong signal; treat it as one.
 **The fix pins the detector itself**, or replaces the key with something drift
 cannot rename.
 
+This repository's own documentation had the same shape: the anchor pin was the
+only guard on 220 prose citations, and it read existence and range, never
+content. `anchor-pin.mjs` is the fix; see `references/citations.md` for the
+citation rule it enforces.
+
 ## The three verified negatives
 
 Recorded so no later sweep re-spends them — these **do** discriminate:

@@ -26,12 +26,12 @@ safe mechanics from rules whose evidence is explicitly absent in this checkout.
 
 ## Critical rules
 
-- Create worktrees with Git's registration command, remove them with `git worktree remove`, and gate teardown on the run outcome. Exhibit: `crew/arms.mjs:661` and `crew/crew.mjs:1879`. Cost: deleting a directory alone leaves Git's registration behind.
-- Treat a linked checkout as shared Git state: detect it with `--git-common-dir`, and never assume its stash or object metadata is lane-local. Exhibit: `scripts/factory/ci-watch.mjs:237` and `crew/seat-io.mjs:1655`. Cost: a lane can restore another lane's stash entry (#471).
+- Create worktrees with Git's registration command, remove them with `git worktree remove`, and gate teardown on the run outcome. Exhibit: `crew/arms.mjs:661` and `crew/crew.mjs:1881`. Cost: deleting a directory alone leaves Git's registration behind.
+- Treat a linked checkout as shared Git state: detect it with `--git-common-dir`, and never assume its stash or object metadata is lane-local. Exhibit: `scripts/factory/ci-watch.mjs:237` and `crew/seat-io.mjs:1735`. Cost: a lane can restore another lane's stash entry (#471).
 - Give `gh` an absolute `--body-file` and an explicit cwd, then list the output; never a relative path. Exhibit: `scripts/factory/intake.mjs:533` and `scripts/factory/probe-repo.mjs:739`. Cost: a compound `cd` changed the meaning of a relative file twice.
-- Keep an open lane PR intact and refuse publishing from a worker path; do not run `git push origin --delete` against a live lane branch. Exhibit: `scripts/factory/ci-watch.mjs:262`. Cost: the deletion behavior is recorded as unbacked in `references/evidence.md`.
+- Keep an open lane PR intact and refuse publishing from a worker path; do not run `git push origin --delete` against a live lane branch. Exhibit: `scripts/factory/ci-watch.mjs:265`. Cost: the deletion behavior is recorded as unbacked in `references/evidence.md`.
 - Offer a reclaim command but never kill or signal unasked; default orphan work to a dry run and report `proven`, `failed`, or `unproven`. Exhibit: `scripts/factory/reap-stale.mjs:251` and `crew/crew.mjs:664`. Cost: an unknown process is not evidence of death (#473).
-- Operate the daemon from its measured Unix-socket surface, and record that this repository has no launchd service rather than inventing one. Exhibit: `crew/daemon.mjs:113` and `crew/daemon.mjs:371`. Cost: a control command aimed at an assumed service can target nothing or the wrong process.
+- Operate the daemon from its measured Unix-socket surface, and record that this repository has no launchd service rather than inventing one. Exhibit: `crew/daemon.mjs:113` and `crew/daemon.mjs:388`. Cost: a control command aimed at an assumed service can target nothing or the wrong process.
 
 ## Key references
 

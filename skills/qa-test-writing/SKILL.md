@@ -33,6 +33,7 @@ can trust.
 | Parsing a suite summary in a script | Strip ANSI; `FORCE_COLOR=0` | `references/tooling.md` |
 | Asserting on a value nobody measured | Absent with a reason, never zero | `references/absence.md` |
 | Writing a test for a malformed or hostile input | If you cannot express the malformed input, you have not tested the guard | `references/affordances.md` |
+| Citing a file from prose or from a comment | Prose citations are pinned by content; comments name the symbol | `references/citations.md` |
 
 Read the reference before writing the check. The rules below are the
 irreducible ones; the references carry the exhibits and the failure modes.
@@ -110,3 +111,4 @@ something, because the first one is trusted.
 - `references/tooling.md` — running the suite, ANSI, scratch archives, timeouts
 - `references/absence.md` — absent vs zero, and pinning it
 - `references/affordances.md` — expressing malformed and hostile inputs before testing their guards
+- `references/citations.md` — content-pinned prose citations and symbol-named cross-file comments

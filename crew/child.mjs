@@ -6,6 +6,7 @@ import {
   writeFileSync as fsWriteFileSync,
   existsSync as fsExistsSync,
   mkdirSync as fsMkdirSync,
+  renameSync as fsRenameSync,
 } from 'node:fs'
 import { execSync as cpExecSync } from 'node:child_process'
 import { basename, join, resolve as resolvePath } from 'node:path'
@@ -100,6 +101,7 @@ export function runChild(argv, injected = {}) {
   const write = injected.writeFileSync || fsWriteFileSync
   const existsChild = injected.existsSync || fsExistsSync
   const mkdir = injected.mkdirSync || fsMkdirSync
+  const rename = injected.renameSync || fsRenameSync
   const exec = injected.execSync || cpExecSync
   // Same seam as read/write/exec: the protected-paths probe is the first thing
   // the run does after seatIo, and a test that cannot get inside it cannot prove
@@ -150,14 +152,24 @@ export function runChild(argv, injected = {}) {
   // worker that refuses to die must never change the run's recorded outcome.
   // Teardown runs AFTER the envelope and the mirror on purpose, on the signal
   // path exactly as on the return path.
+  // The envelope is the one file carrying the run's OUTCOME and the daemon reads it
+  // from another process: publish it the way saveCrew publishes crew.json — write a
+  // sibling, then rename — so a reader can never see a prefix (#540). The `.tmp`
+  // sibling is per-path and lives for one rename.
+  const publish = (path, text) => {
+    const tmp = `${path}.tmp`
+    write(tmp, text)
+    rename(tmp, path)
+  }
+
   const settle = (value) => {
     if (settled) return result
     settled = true
     result = value
-    write(taskReturn, JSON.stringify(result, null, 2))
+    publish(taskReturn, JSON.stringify(result, null, 2))
     const mirror = join(returnsDir, 'task.json')
     if (taskReturn !== mirror) {
-      try { write(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
+      try { publish(mirror, JSON.stringify(result, null, 2)) } catch { /* the run's own envelope is the record; the mirror is a convenience for wait/status/visualizer */ }
     }
     settleSeatTeardown(io)
     try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }

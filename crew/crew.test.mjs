@@ -1,6 +1,6 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync } from 'node:fs'
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, existsSync, mkdirSync, renameSync } from 'node:fs'
 import { execSync, spawn, spawnSync } from 'node:child_process'
 import { tmpdir, homedir } from 'node:os'
 import { join, basename, dirname } from 'node:path'
@@ -1603,9 +1603,10 @@ test('the settle path writes the envelope before its teardown and only once', ()
     const result = runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
       preflight: false,
       env: { DEVTEAM_LEDGER_DB: f.ledger },
-      writeFileSync: (path, data, options) => {
-        if (String(path) === f.taskReturn) order.push('envelope')
-        writeFileSync(path, data, options)
+      writeFileSync: (path, data, options) => writeFileSync(path, data, options),
+      renameSync: (from, to) => {
+        if (String(to) === f.taskReturn) order.push('envelope')
+        renameSync(from, to)
       },
       seatIo: () => ({ teardown: () => { order.push('teardown'); return [] } }),
       driveTask: () => ({ status: 'done', summary: 'done', artifacts: [], details: {} }),
@@ -1636,7 +1637,7 @@ test('the child arms no teardown signal handler at any point in a run', () => {
         return { paths: [], used: false, reason: 'test-double', basis: 'test double' }
       },
       writeFileSync: (path, data, options) => {
-        if (String(path) === f.taskReturn) seen['settlement envelope write'] ??= counts()
+        if (String(path) === `${f.taskReturn}.tmp`) seen['settlement envelope write'] ??= counts()
         writeFileSync(path, data, options)
       },
       seatIo: () => ({
@@ -1698,15 +1699,16 @@ test('a real SIGTERM during settlement keeps the default disposition', async () 
   const f = childSignalFixture()
   try {
     const outcome = await sigtermWhileBlocked(f, `runChild(spec, { preflight: false, env,
-  writeFileSync: (path, data, options) => { realWrite(path, data, options); if (String(path) === taskReturn) block() },
+  writeFileSync: (path, data, options) => { realWrite(path, data, options); if (String(path) === taskReturn + '.tmp') block() },
   seatIo: () => ({ log: () => {}, teardown: () => [] }),
   driveTask: () => ({ status: 'done', summary: 'ok', artifacts: [], details: {} }),
 })`)
     assertKilledBySigterm(outcome, 'the settlement window')
-    // The signal lands inside settle's OWN envelope write, the first thing it
-    // does, and the bytes are already on disk when it does: a reap anywhere in
-    // this window loses the teardown sweep that follows, never the run's record.
-    assert.equal(existsSync(f.taskReturn), true)
+    // The signal lands inside settle's OWN temporary publish write, before the
+    // rename, so the final path is empty and the daemon's settleSignalled records
+    // the run when the reap lands inside this window.
+    assert.equal(existsSync(f.taskReturn), false)
+    assert.equal(existsSync(`${f.taskReturn}.tmp`), true)
   } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 

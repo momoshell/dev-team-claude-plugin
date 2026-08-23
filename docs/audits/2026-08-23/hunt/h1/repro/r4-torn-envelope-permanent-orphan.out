@@ -1,0 +1,14 @@
+tick 1 (envelope torn)   : state={"state":"dead"}  records=[enqueued, started, orphaned]
+tick 1 result()          : {"outcome":null,"envelope":null,"source":null,"reason":"orphaned-on-restart"}
+envelope on disk now     : status=done commit=abc1234
+tick 2 (envelope valid)  : state={"state":"done"}  records=[enqueued, started, orphaned]
+tick 2 list()            : [{"run_id":"r-1","task":"h1-r4","crew_dir":"/tmp/h1r4-vpolDO/crew","state":"done"}]
+after restart            : state={"state":"done"}  records=[enqueued, started, orphaned]
+after restart list()     : [{"run_id":"r-1","task":"h1-r4","crew_dir":"/tmp/h1r4-vpolDO/crew","state":"done"}]
+
+EXPECTED: an envelope that cannot be parsed is UNMEASURED, not absent — the next tick
+          re-reads it and the run settles as done (a `settled` record, the feed closed
+          with the real outcome, regrant eligibility evaluated).
+OBSERVED: registry holds orphaned=true, settled=false. The successful run is recorded
+          as orphaned forever, across a restart, while its own `done` envelope sits on disk.
+R4 REPRODUCED — a single torn read is a permanent, restart-proof wrong verdict

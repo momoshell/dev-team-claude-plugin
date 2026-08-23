@@ -1,0 +1,13 @@
+registry 'started' record  : {"child_pid":885}   <- no start time, no pgid, no cmdline
+that pid is really         : an unrelated node process this run never forked
+after start(): lifecycle   : [{"run_id":"r-1","task":"h1-r2","crew_dir":"/tmp/h1r2-rWcAMI/crew","state":"working"}]
+registry now contains      : enqueued, started, adopted
+state({run:'r-1'})         : {"state":"working"}
+enqueue of a NEW run       : {"message":"run r-1 is already active for /tmp/h1r2-rWcAMI/crew"}
+envelope the daemon wrote  : {"status":"escalation","summary":"Task h1-r2 needs a human: the child died (child-dead) before the run finished","escalation":{"where":"signalled","why":"child-dead"}}
+
+EXPECTED: the daemon cannot identify the pid as its child, so the run is orphaned on restart
+          ('orphaned-on-restart', crew/daemon.mjs:1220) and the crew dir is free.
+OBSERVED: lifecycle 'adopted'=true; state="working (above)"; a new run for that crew dir is refused;
+          and the run's terminal record is a fabricated "the child died" escalation.
+R2 REPRODUCED — an unrelated live pid is adopted as the run child

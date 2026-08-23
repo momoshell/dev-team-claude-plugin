@@ -1,0 +1,14 @@
+root pid=728 pgid=728 start="Sun Aug 23 12:23:06 2026" alive=true
+sweep1 summary   : {"records":1,"settled":0,"already_dead":0,"unidentified":0,"failed":0,"unproven":1}
+sweep1 stamp     : root_settled="unproven"
+sweep1 root alive: true
+sweep2 summary   : {"records":0,"settled":0,"already_dead":0,"unidentified":0,"failed":0,"unproven":0}
+sweep2 journal   : ["seat-root-settle-sweep"]
+sweep2 root alive: true
+reap  outcome    : {"outcome":"unproven","reason":"root-alive","root_liveness":"alive","root_settled":"unproven"}
+reap  summary    : {"swept":0,"retryable":1,"live":0,"reclaimed":0}
+reap  root alive : true
+
+EXPECTED: sweep2 measures the bound, live root and settles it (records>=1, root alive=false).
+OBSERVED: sweep2 records=0 (it skipped the record on the root_settled stamp); root still alive=true.
+R1 REPRODUCED — the seat root leaked past every sweep

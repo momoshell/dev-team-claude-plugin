@@ -1,0 +1,15 @@
+N1 tail replay backlog=4001 events; client destroyed 2ms into the replay
+   daemon still answering : true  reply={"id":"b","ok":true,"result":{"pid":1842,"socket":"/tmp/h1n1-RcCUyc/daemon.sock"}}
+   subscribers left       : []
+   VERDICT: SURVIVED — the write is guarded (crew/daemon.mjs:1294-1297) and close/error unsubscribe (:1381-1382)
+
+N2 record bound to pid=1848 pgid=1848 with a stale start string
+   settleSeatRoots        : {"records":1,"settled":0,"already_dead":0,"unidentified":1,"failed":0,"unproven":0} stamp="root-unidentified"
+   reclaimDescendants     : reason="no-candidates"
+   innocent process alive : true
+   VERDICT: SURVIVED — the pgid+start binding refuses the row (crew/seat-io.mjs:531) and signals nothing
+
+N3 first settle : {"records":1,"settled":0,"already_dead":0,"unidentified":0,"failed":0,"unproven":1} -> root dead=true
+   second settle  : {"records":0,"settled":0,"already_dead":0,"unidentified":0,"failed":0,"unproven":0} (skipped on the stamp)
+   reclaim x2     : swept=1/0 signalled=0/0 skipped=0/1
+   VERDICT: SURVIVED (idempotence only) — the second settle is skipped and nothing is re-signalled; note the FIRST settle stamped root_settled=unproven for a kill that worked -- finding F3, see r7

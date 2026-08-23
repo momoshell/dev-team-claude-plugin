@@ -1,0 +1,13 @@
+import { readFileSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
+import { homedir } from 'node:os'; import { join } from 'node:path';
+const E = JSON.parse(readFileSync('envelopes.json','utf8')).filter(e=>e.verdict);
+const disk = new Set(E.map(e=>e.lane));
+const db = new DatabaseSync(join(homedir(),'.dev-team/factory/ledger.db'),{readOnly:true});
+const led = new Set(db.prepare(`select distinct s.task_slug t from sessions s where exists(select 1 from review_outcomes r where r.adw_id=s.adw_id)`).all().map(r=>r.t));
+const onlyDisk=[...disk].filter(x=>!led.has(x)), onlyLed=[...led].filter(x=>!disk.has(x));
+console.log(`disk lanes(slug) with a verdict: ${disk.size}; ledger slugs with a review: ${led.size}`);
+console.log(`in both: ${[...disk].filter(x=>led.has(x)).length}`);
+console.log(`disk-only (${onlyDisk.length}): ${onlyDisk.join(', ')}`);
+console.log(`ledger-only (${onlyLed.length}): ${onlyLed.join(', ')}`);
+db.close();

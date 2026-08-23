@@ -1,0 +1,139 @@
+{
+  "assignment_id": "d1",
+  "role": "planner",
+  "status": "done",
+  "summary": "Read theme.css and all 21 Svelte components in full, plus two scout sweeps (test/ enforcement, docs+history). Wrote a conventions register: a two-tier token vocabulary (30 raw, theme-specific tokens that no component may name; 25 component-facing aliases), the theming contract as four checkable rules, the layout/spacing/typography conventions with adherence counts, the role/lane/status colour-selection rules, 12 numbered leaks and 11 numbered divergences (each with file:line, both behaviours and the majority named). Headline: chrome is a real system with 100% token adherence across 21 components; state colour has no system at all -- 34 hard-coded hex literals in 10 components, theme-blind, and nothing in the 2084-test suite forbids them. Also corrected the brief: theme.css holds 105 custom-property declarations, not 113. The checkout is unchanged (git status --porcelain is empty).",
+  "artifacts": [
+    "/Users/x/.crew/dt-b151-viztokens/b151-viztokens/task/conventions-register.md",
+    "/Users/x/.crew/dt-b151-viztokens/b151-viztokens/task/contrast-evidence.mjs"
+  ],
+  "details": {
+    "findings": [
+      {
+        "id": "F1",
+        "summary": "Measurement correction: theme.css holds 105 custom-property declarations, not the 113 the brief states. 30 raw + (25 alias names x 3 theme blocks) = 105; 55 unique names.",
+        "evidence": "grep -c -E '\\-\\-[a-z0-9-]+\\s*:' visualizer/web/src/lib/theme.css -> 105; raw block visualizer/web/src/lib/theme.css:2-32; alias blocks :36-65, :67-95, :97-127. VERIFIED. A gate check written as 'theme.css declares 113 properties' is red at baseline."
+      },
+      {
+        "id": "F2",
+        "summary": "The token vocabulary is strictly two-tier. Tier 1 = 30 raw, theme-specific literals no component may name (ink/paper five-step ramps, spot accent pair, six roles x two themes, --serious, four --status-*-raw, --mono). Tier 2 = 25 component-facing aliases, redeclared identically in all three theme blocks. Only Tier 2 is the real vocabulary; Tier 1 is source material.",
+        "evidence": "Raw: visualizer/web/src/lib/theme.css:2-32. Aliases: :36-65 (paper), :67-95 (ink), :97-127 (media-dark). A var(--) census across all 21 .svelte files returns only alias names plus --mono, --serious and four component-locals -- so 21/21 components obey the tier rule today. VERIFIED."
+      },
+      {
+        "id": "F3",
+        "summary": "The two ramps are positionally parallel five-step scales with fixed semantics: ground (page) -> panel (raised surface) -> hairline (separator) -> text -> muted. That mapping is what makes the alias layer a 1:1 substitution rather than a lookup.",
+        "evidence": "visualizer/web/src/lib/theme.css:2-6 (ink), :7-11 (paper), consumed 1:1 at :40-45 and :70-75. VERIFIED."
+      },
+      {
+        "id": "F4",
+        "summary": "Theming contract, stated as a rule a component obeys or violates: (T1) name only Tier-2 aliases -- 21/21 obey; (T2) every painted colour comes from a token -- 10/21 violate, 34 times; (T3) --serious is raw, --status-escalated is the alias -- violated in one file that obeys it three lines later; (T4) only App.svelte:46-51 writes data-theme -- obeyed repo-wide.",
+        "evidence": "Switch mechanism: visualizer/web/src/App.svelte:17-21 (localStorage 'dt-theme'), :44-51 ($effect writes/deletes documentElement.dataset.theme), :130 (os|paper|ink control). Cascade: theme.css:36-37 (bare :root = paper default, specificity 0-1-0), :67 (ink, 0-2-0), :97-98 (media-dark guarded by :not([data-theme='paper'])). grep for data-theme repo-wide returns only theme.css:37,67,98 and App.svelte:48-49. VERIFIED."
+      },
+      {
+        "id": "F5",
+        "summary": "LEAK L1 (the big one): 34 hard-coded colour literals across 10 of 21 components, all of them state colour, all theme-blind. Chrome never leaks -- 19 background:var(--panel) sites and 45 var(--line) sites with zero hard-coded surfaces or separators. The leak boundary is exactly state-vs-chrome.",
+        "evidence": "GateChips.svelte:13 (#166534 #dcfce7 #991b1b #fee2e2); AcceptPanel.svelte:36 (same four); PhasePanel.svelte:62 (those four plus #92400e #fef3c7); PhaseGantt.svelte:59 (#fff #d8ffd9 #ffd1d1 #ffe4a3); IntakePanel.svelte:122 (#9b1c1c x3, #7a3e9d x3); CellHealthPanel.svelte:61 (#7a3e9d #9a6700 #176b3a); RunSetPanel.svelte:61 (#176b3a #9b1c1c #7a3e9d); RunDetail.svelte:33 (#b42318); EnvelopeInspector.svelte:48 (#b42318 and the keyword `white`); RosterEditor.svelte:71 (#b42318). VERIFIED. Grep trap for the checker: EventStream.svelte:29 contains '#123' and MetricsStrip.svelte:19 contains '#83' -- issue references in body copy, not colours."
+      },
+      {
+        "id": "F6",
+        "summary": "Role colour is chosen by NAME CONCATENATION into a token, through an inline-style indirection local -- there is no map and no lookup. The role string in the data IS the token suffix. Lane colour uses the same idiom with an index.",
+        "evidence": "RoleTag.svelte:4 style={`--role-color: var(--role-${role})`} consumed at :9 .swatch{background:var(--role-color)}. PhaseDots.svelte:5 `--lane-color: var(--lane-${phase.lane})` consumed at :8. PhaseGantt.svelte:48 `--lane-color:var(--lane-${block.lane ?? 0})` consumed at :59. ROLE_ORDER = ['planner','builder','reviewer','tech-lead','lead','driver'] at visualizer/web/src/lib/trace.js:3. VERIFIED."
+      },
+      {
+        "id": "F7",
+        "summary": "Status colour is never decided by a component: a shaper returns a `tone` string, the component interpolates it into a class, and CSS maps class -> token. No component reads run.status to pick a colour. This is the codebase's cleanest colour rule and it should be the skill's model for the others.",
+        "evidence": "fleet.js:53-61 deriveStatus returns tone in {serious, ok, fail, quiet, busy}; RunCard.svelte:52 and FleetTable.svelte:14 render class={`status ${status.tone}`}; mapping at RunCard.svelte:65-68 and FleetTable.svelte:37-40. VERIFIED."
+      },
+      {
+        "id": "F8",
+        "summary": "The role/lane isolation rule is a hand-maintained allowlist of six filenames, not a principle -- so it does not generalise to a component written tomorrow. PhaseGantt names --lane- directly and is simply not on the forbidden list.",
+        "evidence": "test/visualizer-panels.test.mjs:660-662 forbids /--role-|--lane-\\d/ in App.svelte, FleetTable.svelte, RunCard.svelte, Filters.svelte; :664-665 requires it in RoleTag.svelte; test/visualizer-teardown.test.mjs:201 adds TeardownPanel.svelte; test/visualizer-server.test.mjs:1396 adds RosterPanel.svelte. PhaseGantt.svelte:48 uses --lane- and is unlisted. RunCard obeys by composition (RunCard.svelte:53-54 renders PhaseDots and RoleTag). VERIFIED via scout."
+      },
+      {
+        "id": "F9",
+        "summary": "LEAK L9/L10: the identity palette under-covers its own domain. --neutral and --muted resolve to the identical colour in both themes, so --lane-6 and --lane-7 are indistinguishable (8 advertised slots, 7 distinct colours). And `scout` (32 uses) and `advisor` (3) are live crew roles with no --role-* token, while PhaseGantt passes the literal 'unlinked' into RoleTag.",
+        "evidence": "theme.css:43+45 and :73+75 (--neutral and --muted both alias the same *-muted raw); theme.css:63-64, :93-94 (--lane-6: var(--neutral), --lane-7: var(--muted)); computed contrast ratio between them = 1.00 in both themes. Role census over crew/*.mjs: builder 480, reviewer 217, planner 182, lead 156, tech-lead 52, scout 32, advisor 3, driver 2. PhaseGantt.svelte:40 role={identity.role || 'unlinked'}. VERIFIED on the token absence; ASSUMED on the painted result (no node_modules in this worktree, nothing was built or run)."
+      },
+      {
+        "id": "F10",
+        "summary": "Fallback discipline is inconsistent across the three consumers of the indirection idiom: PhaseGantt supplies one, PhaseDots and RoleTag supply none. With no fallback an unresolved custom property makes the declaration invalid at computed-value time, so an unknown role or out-of-range lane paints nothing -- silently.",
+        "evidence": "PhaseGantt.svelte:59 background:var(--lane-color, var(--lane-0)); PhaseDots.svelte:8 background:var(--lane-color); RoleTag.svelte:9 background:var(--role-color). VERIFIED on the missing fallback and on CSS's specified IACVT behaviour; ASSUMED on the rendered result."
+      },
+      {
+        "id": "F11",
+        "summary": "MEASURED COST of the ratified decision to keep status colour theme-invariant (theme.css:27-31): all four status steps plus --serious fall below 4.5:1 on the paper ground, while every theme-PAIRED token clears it on its own ground. The status palette was evidently tuned against ink and paper inherits it.",
+        "evidence": "Computed from the literals in theme.css:2-31 (script: task/contrast-evidence.mjs). --status-escalated/--serious #ec835a: 6.78 on ink-ground, 2.24 on paper-ground. --status-running #c38b18: 5.99 ink / 2.53 paper. --status-ok #2f9e62: 5.27 / 2.88. --status-fail #c94f58: 4.04 / 3.75. --status-skipped #77747d: 3.90 / 3.89. By contrast --ink-text 14.72, --ink-muted 6.37, --spot-dark 8.81, --paper-text 15.63, --paper-muted 6.54, --spot-light 4.59 -- all on their own ground. Separately PhaseGantt.svelte:59 paints .block{color:#fff} on lane colours: only 1 of 12 role/theme combinations clears 4.5:1 (driver-light 8.56; tech-lead-light 2.17 is the worst). VERIFIED (arithmetic on declared literals; needs no browser)."
+      },
+      {
+        "id": "F12",
+        "summary": "DIVERGENCE D10, the largest: theme.css declares a global border-radius:0 reset on everything and repeats it twice more, yet 20 border-radius declarations in 11 components re-introduce corners. An agent reading theme.css alone concludes 'square corners' and is wrong about every panel it writes.",
+        "evidence": "Reset: theme.css:129 (*, *::before, *::after), :131 (button,input,select,textarea), restated App.svelte:192. Against it: .6rem x11 (the panel chassis), 1rem x3 (GateChips:13, AcceptPanel:36, PhasePanel:62), 999px x3 (CellHealthPanel:61, RunSetPanel:61, TeardownPanel:54), .25rem and .2rem (PhaseGantt:59), 50% (PhaseDots:8). No majority to name -- one declared rule loses to twenty. VERIFIED."
+      },
+      {
+        "id": "F13",
+        "summary": "DIVERGENCE D1/D2: the panel chassis has three forms (7 / 4 / 1), and the split over who owns inter-panel spacing tracks the mount container -- RunDetail is a grid with gap:1rem so its panels carry no margin; App's .page is not a grid so panels mounted there carry margin:1rem 0. Two panels are under .page and carry neither, so they abut.",
+        "evidence": "Majority form (7): AcceptPanel:36, CellHealthPanel:61, EnvelopeInspector:48, EventStream:33, PhaseGantt:59, PhasePanel:62, ReviewPanel:23. Plus margin:1rem 0 (4): IntakePanel:122, RosterEditor:71, RunSetPanel:61, TeardownPanel:54. Minus border-radius (1): RosterPanel:187. Containers: RunDetail.svelte:33 (.detail display:grid gap:1rem) vs App.svelte:196 (.page -- no display, no gap). The two that fall through: CellHealthPanel (mounted App.svelte:143, 180) and RosterPanel (mounted App.svelte:151). VERIFIED on the CSS and the mount sites; ASSUMED on the visual result."
+      },
+      {
+        "id": "F14",
+        "summary": "DIVERGENCE D4: for .error the token-correct form is the MINORITY, 2 to 3. 'Follow the majority' is the wrong instruction here -- which is exactly why the skill must encode the rule rather than the prevailing habit.",
+        "evidence": "Hard-coded #b42318: RunDetail.svelte:33, EnvelopeInspector.svelte:48, RosterEditor.svelte:71 (3). var(--status-fail): App.svelte:200, RosterPanel.svelte:187 (2). VERIFIED."
+      },
+      {
+        "id": "F15",
+        "summary": "DIVERGENCE D5: one tone name gets four different colour policies. `unproven` renders as an amber hex chip, as muted+color-mix, as pale #ffe4a3 text, and as var(--status-running) -- 1/1/1/1, no majority. GateChips uses tokens for one tone and hex for two others inside a single rule block, so the leak is a per-tone decision, not a per-component one.",
+        "evidence": "PhasePanel.svelte:62 (#92400e on #fef3c7); GateChips.svelte:13 (var(--muted) on color-mix(in srgb, var(--muted) 16%, transparent)); PhaseGantt.svelte:59 (#ffe4a3); TeardownPanel.svelte:54 (var(--status-running)). Same three-way split for proven (hex pair x3 majority) and failed (hex pair x3 majority). VERIFIED."
+      },
+      {
+        "id": "F16",
+        "summary": "DIVERGENCE D6: the `quiet` tone that deriveStatus emits for queued and unknown runs has a CSS rule in only 1 of the 3 components that render tones -- so a queued run's status word renders at inherited body colour in RunCard and FleetTable. Checkable form for a skill: every tone a shaper can emit must have a rule in every component that renders it.",
+        "evidence": "fleet.js:58 and :60 return tone:'quiet'. Only App.svelte:209 defines .chip.quiet{color:var(--muted)}. RunCard.svelte:65-68 and FleetTable.svelte:37-40 define ok/fail/busy/serious and not quiet. VERIFIED."
+      },
+      {
+        "id": "F17",
+        "summary": "Typography is a font pair plus two utility classes and no ramp. Monospace is semantic (machine identifiers and aligned numerals, always via .mono with tabular-nums); .micro is the only label style. Sizes are nine ad-hoc values; weight is the one genuinely checkable rule -- exactly two weights exist in the whole app.",
+        "evidence": "theme.css:32-33 (--mono stack, font-family system-ui), :133 (.mono), :134 (.micro -- uppercase, .12em, .7rem). .micro consumers: App.svelte:160 and every th in FleetTable.svelte:9 (pinned including the class name by test/visualizer-panels.test.mjs:623). Sizes: .75rem x5, .8rem x4, .9rem x3, 1.2rem, .95rem, .7rem, .78rem, .68rem, 18px. Weights: 600 x9, 700 x1 (App.svelte:190). index.html:2 has no font link. VERIFIED. Note 18px at PhaseGantt.svelte:59 is inside an SVG viewBox user-unit space (PhaseGantt.svelte:52), not a CSS pixel -- a naive no-px checker false-positives on it."
+      },
+      {
+        "id": "F18",
+        "summary": "Spacing: rem everywhere, px reserved. Every gap/padding/margin is rem without exception; px appears only as the 1px hairline (x52), 999px pill radius (x3), 720/640px chart minimums, 1200px page width (x2) and SVG user units. 'No px in a spacing property' is directly checkable. The sub-1rem scale itself is not -- fourteen distinct values on a .05rem grid with no preferred steps.",
+        "evidence": "px census across all .svelte: 1px x52, 999px x3, 720px x2, 640px x2, 1200px x2, 18px x1, 5px x1. Gap census: 1rem x10, .25rem x6, .4rem x5, .45rem x5, .35rem x5, .5rem x4, .3rem x4, .75rem x3, .6rem x2, .65rem x2, .2rem x2, 1.2rem, .8rem, .7rem. Panel padding is 1rem in 12/12. VERIFIED."
+      },
+      {
+        "id": "F19",
+        "summary": "The honest-blank idiom is a genuine visual convention and the one place a ratified WRITTEN decision and a design convention line up: an unmeasured value renders as an em-dash or a '<thing> unavailable -- <why>' sentence, muted, dashed-underlined, with the reason in a title attribute. Never 0, never blank.",
+        "evidence": "Declared at RunCard.svelte:73, FleetTable.svelte:43-44, AcceptPanel.svelte:36, PhasePanel.svelte:62, PhaseGantt.svelte:59 (.dashed/.mark = border-bottom:1px dashed currentColor + color:var(--muted)); applied at FleetTable.svelte:15-21 (6 columns) and RunCard.svelte:53 (3 cells). Ratified in ADR-029 section 2, docs/adr/adr-029-headless-observability-interjection.md:23: 'The screen is never the record ... must not turn screen text into an outcome.' VERIFIED (ADR line via scout)."
+      },
+      {
+        "id": "F20",
+        "summary": "Minor leaks worth a checker line each: --serious read directly where the alias exists (in the same file that uses the alias correctly six lines later); a hairline token used as a surface fill; a dead duplicated rule; the global reset restated inside a component; and .mono redeclared locally in 2 of 3 consumers though FleetTable proves the global copy suffices.",
+        "evidence": "L2: App.svelte:201-202 var(--serious) vs App.svelte:208 var(--status-escalated). L3: RosterEditor.svelte:71 pre{background:var(--line)} -- every other pre uses var(--bg) (RosterPanel.svelte:187). L6: FleetTable.svelte:36 .status-dot{background:var(--neutral)} then :42 .status-dot{background:currentColor} -- same specificity, later wins, the --neutral reference never paints. L7: App.svelte:187-188 restate theme.css:129-130. L8: .mono redeclared at App.svelte:211 and RunCard.svelte:72 vs theme.css:133; FleetTable uses .mono x16 and .micro x9 with no local copy. VERIFIED."
+      },
+      {
+        "id": "F21",
+        "summary": "The enforcement floor is thin and specific: ONE test reads theme.css at all, and it checks 12 name-presence regexes with no value ever inspected. Nothing forbids a hex colour, nothing requires var() as a general rule, nothing asserts --status-* is defined -- even though a test REQUIRES a consumer to reference --status-escalated. Deleting that token from theme.css leaves the suite green at 2084/0.",
+        "evidence": "test/visualizer-shape.test.mjs:286-292 (the sole theme.css reader: --role-<role>: declared, --lane-<i>: var(--role-<role>) per ROLE_ORDER index). The only three literal var() requirements in the whole suite: test/visualizer-panels.test.mjs:627, :629 (two exact FleetTable rules, whitespace included) and :847 (PhaseGantt's calc). Blanket rules: test/visualizer-shape.test.mjs:750-751 (no `export let`, no `$:` in any visualizer .svelte -- runes only) and test/visualizer-panels.test.mjs:752-754 (no {@html} in six named files). Absent repo-wide: any hex ban, any data-theme or prefers-color-scheme assertion, any typography or spacing-scale assertion. VERIFIED via scout."
+      },
+      {
+        "id": "F22",
+        "summary": "There is NO written design document for the visualizer anywhere in the repo. theme.css:27 asserts a 'ratified role palette' exists, but the ratification is recorded nowhere -- no doc, no ADR, no commit body, and `git log --all --grep` for palette/theme/typography/design system returns nothing. The de facto spec is theme.css itself plus one test. There is no .claude/skills/ directory and nothing named ui-design.",
+        "evidence": "Zero hits for App.svelte|PhaseGantt.svelte|RunCard.svelte|theme.css|visualizer/web/src outside test/ across crew/ scripts/ docs/ .claude/ README.md. theme.css has three commits (da8a217, 78a5d7a, 3e7367a); the only design-adjacent phrase in any subject or body is 3e7367a's 'un-inverted spot accent'. The only ratified rules touching the visualizer are epistemic, not visual: docs/adr/adr-029-headless-observability-interjection.md:23 and docs/adr/README.md:136 ('health display is the visualizer's job and health policy is the breaker's'). Skills live at .agents/skills/ and there are two, neither UI-related. VERIFIED via scout; ASSUMED that the palette ratification happened in issue #287 (the Refs trailer on 3e7367a) or in conversation -- I did not query GitHub."
+      },
+      {
+        "id": "F23",
+        "summary": "Which conventions resist mechanical enforcement (the brief asks explicitly): the sub-1rem spacing scale, the type-size ramp, corner radius, the pill-radius idiom, and who owns inter-panel spacing. Each is enforceable only after a DECISION creates something to check against -- a checker for radius today must contradict either theme.css:129 or eleven components.",
+        "evidence": "Spacing: 14 distinct sub-1rem values, no scale (F18). Type: 9 ad-hoc sizes, no tokens (F17). Radius: reset-vs-practice contradiction (F12). Pill radius: 1rem x3 vs 999px x3 -- a genuine tie with no principle (GateChips:13/AcceptPanel:36/PhasePanel:62 vs CellHealthPanel:61/RunSetPanel:61/TeardownPanel:54). Panel spacing: the rule depends on the mount site, which a per-file grep cannot see (F13). By contrast these ARE grep-checkable today: no raw token named, no hex in a colour property (with the #123 copy trap handled), --serious only in theme.css, the .panel chassis text, no px in a spacing property, the two-weight rule, no {@html}, runes-only, and :global only inside .evidence. VERIFIED."
+      },
+      {
+        "id": "F24",
+        "summary": "Not established, named explicitly: where the role palette was ratified; why those six colours; anything needing a rendered page (this worktree has no node_modules, so nothing was built or run); whether the ledger's role column can actually carry scout/advisor (that needs visualizer/server, out of scope); and whether --status-skipped is ever reached at all.",
+        "evidence": "F22 covers the ratification. Rendering claims marked ASSUMED throughout the register are F9, F10, F13 and the consequences (not the ratios) of F11. --status-skipped has exactly one consumer, PhaseDots.svelte:8, applied only when phase.lane == null && phase.status === 'skipped' (PhaseDots.svelte:5); whether that condition ever holds was not traced. VERIFIED that these are the gaps."
+      },
+      {
+        "id": "F25",
+        "summary": "Read-only compliance: the checkout was not modified. `git status --porcelain` in /Users/x/Development/dt-b151-viztokens returns empty. Both artifacts are inside the task dir; the two throwaway computation scripts were written to the session scratchpad and their content concatenated into task/contrast-evidence.mjs so the contrast numbers are reproducible.",
+        "evidence": "git status --porcelain -> (empty output). Artifacts: task/conventions-register.md, task/contrast-evidence.mjs. VERIFIED."
+      }
+    ]
+  }
+}

@@ -1,0 +1,228 @@
+{
+  "assignment_id": "d1",
+  "role": "planner",
+  "status": "done",
+  "summary": "Mined the ledger (274 review_outcomes, 220 gate_discriminations, 187 modifier_attempts, 21 cell_failures, 8 accept_decisions, 569 seat_teardowns, 1879 gate_results) plus the 104,982-line JSONL and, because neither records finding kinds, the 339 reviewer ReturnEnvelopes on disk (254 typed findings). Headline: must_fix >= 1 is equivalent to changes-needed on 273/274 rows, so the counts restate the verdict and carry no defect kind; 35.1% of 194 lanes bounce at review round 1 (68/194), 52% of reviews with a findings array find nothing (140/269), and the gate is green while review still finds a must-fix in 65 of 188 runs (34.6%). Strongest rubric discriminator measured: a finding that opens by naming a concrete triggering state is must-fix 95/129 (74%) vs 25/125 (20%); doc/prose, out-of-plan and carried-forward findings are 0 must-fix in 23, 5 and 10 respectively; the highest-VOLUME class (vacuous tests / surviving mutations, 46/254) is below baseline at 24% must-fix. gate_discriminations has exactly one unproven row in 220 and it is an infra refusal with NULL check counts, so the brief's 'what does a discrimination failure look like' is an honest gap; the proof that actually fires is the per-check mutation pass (1102 applied, 9 survivors). modifier_attempts: 187 attempts produced 3 real cell changes (155 refused as pane-transport). Register at task/findings.md with every query, denominator and confound named; 12 queries preserved under task/queries/. Zero files changed in the checkout (git status --porcelain empty); the ledger was opened readOnly throughout and the CLI verbs were re-implemented rather than invoked, to avoid openLedger's read-write open.",
+  "artifacts": [
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/findings.md",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/q.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/rounds.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/extract-findings.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/classify.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/discriminators.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/recurrence.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/yield.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/gate-review-gap.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/drift-review.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/nonconverge.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/laneoverlap.mjs",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/envelopes.json",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/findings.json",
+    "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/queries/classified.json"
+  ],
+  "details": {
+    "findings_path": "/Users/x/.crew/dt-b152-reviewmine/b152-reviewmine/task/findings.md",
+    "corpora_opened": {
+      "ledger_db": "~/.dev-team/factory/ledger.db (node:sqlite, readOnly: true)",
+      "ledger_jsonl": "~/.dev-team/factory/ledger.jsonl, 104982 lines, 0 unparseable",
+      "reviewer_envelopes": "~/.crew/**/returns/d*.reviewer.json, 339 files, 0 unparseable, 228 lanes",
+      "review_md": "562 review*.md files found under ~/.crew, NOT mined (prose)"
+    },
+    "checkout_unchanged": true,
+    "ledger_written": false,
+    "findings": [
+      {
+        "id": "F1",
+        "mark": "verified",
+        "summary": "review_outcomes verdict distribution is binary and lopsided: pass 177/274 (64.6%), changes-needed 97/274 (35.4%). No third verdict, no nulls.",
+        "evidence": "select verdict, count(*) n from review_outcomes group by verdict -> pass|177, changes-needed|97. n=274."
+      },
+      {
+        "id": "F2",
+        "mark": "verified",
+        "summary": "must_fix is not independent evidence, it is the verdict restated: must_fix>=1 <=> changes-needed on 273 of 274 rows (99.6%). All 177 pass rows have must_fix exactly 0. Memory's '0% null' is confirmed (0/274 null on all three count columns); the counts' only extra information is magnitude (72 bounces carry exactly 1 must-fix, only 4 carry >=3) and the tails on passing reviews (22 should_fix, 64 consider across the 177 pass rows).",
+        "evidence": "select verdict, must_fix, count(*) from review_outcomes group by verdict, must_fix -> pass/0=177; changes-needed/0=1, /1=72, /2=20, /3=3, /5=1. Sole exception id 250, adw 0f8e8cf2-508a-46dd-a536-02d52959bd19, 2026-08-22T08:01:16.784Z, must_fix=0 should_fix=1."
+      },
+      {
+        "id": "F3",
+        "mark": "verified",
+        "summary": "First-round pass vs bounce: 126/194 lanes (64.9%) pass at review round 1; 68/194 (35.1%) bounce. Of the 68, 42 (61.8%) pass at round 2. Round 2 n=65 (42 pass / 23 cn), round 3 n=14 (8/6), round 4 n=1 (1/0).",
+        "evidence": "task/queries/rounds.mjs: review_outcomes grouped by adw_id, ordered by created_at,id. 194 distinct adw_id."
+      },
+      {
+        "id": "F4",
+        "mark": "verified",
+        "summary": "In the ledger, pass is absorbing: trajectories P=126, CP=42, CC=9, CCP=8, CCC=5, C=3, CCCP=1 -- no lane has a pass followed by anything. 17/194 ledger lanes (8.8%) never reached a pass. On disk 19/227 (8.4%) never passed, and 6 disk lanes DO show P-then-C, which is assumed (safe) to be re-runs sharing a workspace directory, since the disk key cannot separate two runs of one slug.",
+        "evidence": "task/queries/rounds.mjs (ledger) and recurrence.mjs (disk). Disk trajectories include PCC=2, PC=1, CPP=1, CPCC=1, CPC=1."
+      },
+      {
+        "id": "F5",
+        "mark": "verified",
+        "summary": "Half of all reviews catch nothing: 140 of 269 envelopes carrying a details.findings array (52%) carry an EMPTY array, and all 140 are pass. Mean 0.94 findings per review. Distribution 0->140, 1->63, 2->31, 3->21, 4->9, 5->2, 6->2, 8->1.",
+        "evidence": "task/queries/yield.mjs over the 339-file reviewer envelope corpus."
+      },
+      {
+        "id": "F6",
+        "mark": "verified",
+        "summary": "The measured value of review over the gate: of 188 runs with at least one green non-pristine gate_results row AND at least one review, 65 (34.6%) had a review round with must_fix>0. The gate was green and the reviewer still found a must-fix in one run in three. This is the number a rubric should be ordered against.",
+        "evidence": "task/queries/gate-review-gap.mjs -- read-only re-implementation of gateReviewGap() at scripts/factory/ledger.mjs:2547 (the CLI verb was NOT invoked because openLedger() opens read-write). denominator 188, numerator 65, complement 123."
+      },
+      {
+        "id": "F7",
+        "mark": "verified",
+        "summary": "STRUCTURAL: the ledger records review VOLUME, never review CONTENT -- and the JSONL is not richer. A recordReviewOutcome JSONL record carries exactly the db row's fields {adw_id, phase_id, dispatch_id, role, verdict, must_fix, should_fix, consider, created_at} and no finding text. No query over ledger.db or ledger.jsonl can say what a review found; any rubric ordered by defect kind must be built from the ReturnEnvelope corpus.",
+        "evidence": "grep -m3 '\"recordReviewOutcome\"' ~/.dev-team/factory/ledger.jsonl -- three consecutive records, identical field set to the table schema. review_outcomes.role='reviewer' on 274/274; dispatch_id 0 null, 14 distinct (d3 x125, d5 x47, d4 x30, d6 x21 ... d15 x1)."
+      },
+      {
+        "id": "F8",
+        "mark": "verified",
+        "summary": "The only corpus with finding kinds is the reviewer envelopes, and it has a 32-envelope hole. 269 of 339 files (79%) carry details.findings -> 254 findings. 70 (21%) carry none, and 32 of those 70 declared must_fix>0, so their findings exist only as review.md prose. The machine-readable corpus therefore covers 92 of 124 (74%) of the disk's changes-needed envelopes. Direct consequence of crew/roles/reviewer.md:49 making `findings` optional.",
+        "evidence": "task/queries/extract-findings.mjs: 339 files, 0 unparseable, 228 lanes; severity spellings clean (must-fix 120, should-fix 51, consider 83); verdicts changes-needed 124, pass 209, null 6."
+      },
+      {
+        "id": "F9",
+        "mark": "verified",
+        "summary": "Defect-domain category x severity over 254 findings (deterministic regex classifier, fixed priority): degraded-path 10/13 must-fix (77%), render-join 10/14 (71%), lifecycle-clobber 20/32 (63%), indeterminate-as-definite 30/50 (60%), input-boundary 12/21 (57%), contract-literal 4/7 (57%), false-green 11/46 (24%), out-of-plan 0/5 (0%), stale-prose 0/18 (0%), unclassified 23/48 (48%). CAVEAT STATED IN THE REGISTER: 94 of 254 match >1 category and 48 match none, so the ORDERING is the evidence and the absolute counts are approximate -- except the two 0% rows, which are exact.",
+        "evidence": "task/queries/classify.mjs, table reproduced in findings.md Part 2 F9."
+      },
+      {
+        "id": "F10",
+        "mark": "verified",
+        "summary": "Strongest single discriminator found: a finding whose summary OPENS by naming a concrete triggering state ('A ...', 'With ...', 'When ...', 'Passing/Omitting/Deleting ...') is must-fix 95/129 (74%) versus 25/125 (20%) for one that does not -- a 3.7x separation. Runner-up arms: indeterminate-collapsed-to-definite 57% (n=44), test/gate-file location 36% (n=53), cites own measurement 33% (n=21), proves a mutation survives 28% (n=25), names a plan divergence 25% (n=20).",
+        "evidence": "task/queries/discriminators.mjs, one regex per arm, both arms' denominators printed."
+      },
+      {
+        "id": "F11",
+        "mark": "verified",
+        "summary": "Severity is INVERSELY correlated with length, so F10 is not a verbosity proxy: must-fix median 143 chars (mean 158, n=120), should-fix 284 (257, n=51), consider 273 (273, n=83). A real defect states itself in one short sentence; a consider takes a hedged paragraph. Mechanically checkable as a rubric rule.",
+        "evidence": "task/queries/yield.mjs, median and mean summary length by severity."
+      },
+      {
+        "id": "F12",
+        "mark": "verified",
+        "summary": "Prose, conformance and carried-forward findings have NEVER bounced a lane. Four disjoint instruments all return zero must-fix: location is a .md/README file 0/16; summary is about a stale comment/prose claim 0/7; explicitly carried forward from a prior round 0/10; classifier stale-prose + out-of-plan 0/23; docs/ + docs/adr/ 0/8. crew/roles/reviewer.md:14 instructs the seat that out-of-plan edits are findings even when harmless -- the data does not contradict that (5 were produced) but not one has ever bounced a lane.",
+        "evidence": "task/queries/discriminators.mjs and classify.mjs; anchor verified: grep -n 'Out-of-plan edits are findings' crew/roles/reviewer.md -> line 14."
+      },
+      {
+        "id": "F13",
+        "mark": "verified",
+        "summary": "COUNTER-INTUITIVE, and the most important single result for rubric ORDERING: the class reviewers produce MOST is not the class that bounces. false-green (vacuous test / plan-required test absent / surviving mutation) is the largest category at 46/254 (18%) and the largest should-fix category at 19/51 (37%), but its must-fix share is 24% -- below the 47% corpus baseline. The narrower instrument (summary explicitly proves a mutation survives) gives 7/25 = 28%, also below baseline. Reading the 46: the reviewer proves the protection is missing while the shipped behaviour is correct.",
+        "evidence": "task/queries/classify.mjs (46 findings) and discriminators.mjs (25 findings); corpus baseline 120/254 = 47%."
+      },
+      {
+        "id": "F14",
+        "mark": "verified",
+        "summary": "Where findings land, must-fix share (n>=4 only): visualizer/server 6/7 (86%), scripts/factory 31/40 (78%), visualizer/web 16/21 (76%), crew 58/147 (39%), test 6/17 (35%), docs 0/4, docs/adr 0/4. CONFOUND NAMED: this is not a defect-density map -- crew/ is where most lanes work so it dominates and dilutes the denominator. Read the ordering, not the rates.",
+        "evidence": "task/queries/yield.mjs, top-of-path bucketing of finding.location."
+      },
+      {
+        "id": "F15",
+        "mark": "verified",
+        "summary": "19 of 227 disk lanes never reached a pass. They carry 54 findings, 38 (70%) must-fix, versus the 47% corpus baseline; mix is indeterminate-as-definite 14, lifecycle-clobber 10, render-join 8, unclassified 7, false-green 6. CONFOUND NAMED AND SEVERE: 6 of the 19 (headless-spike, pi-spike, herdr-spike, charter, realio, headless-io) look like exploratory lanes rather than build lanes, so with n=19 this is 'consistent with' F9's ordering, not independent support.",
+        "evidence": "task/queries/nonconverge.mjs; lane list printed in full."
+      },
+      {
+        "id": "F16",
+        "mark": "verified",
+        "summary": "Finding recurrence across rounds is confounded and MUST NOT be used as a 'was it fixed' measure. Of 85 findings with a later round to compare against, 66 (78%) had their file named again next round (must-fix 36/47, should-fix 14/21, consider 16/17). A lane's scope is fixed, so the same files are re-reviewed by construction, and finding ids are minted fresh per round so they cannot be joined. The only reliable carry-forward signal is the reviewer's own prose marker (F12: 10 findings, 0 must-fix).",
+        "evidence": "task/queries/recurrence.mjs."
+      },
+      {
+        "id": "F17",
+        "mark": "verified",
+        "summary": "HONEST GAP -- the brief's question 'what does a gate discrimination failure look like' cannot be answered. gate_discriminations is 219 proven / 1 unproven in 220 rows, and the single unproven row (id 54, adw 9037c981-752d-4ec4-8025-6f353f74a63f, 2026-08-16T15:37:25.427Z) is an INFRASTRUCTURE refusal, not a gate defect: note='runClean: git stash push failed, refusing to judge a gate against the wrong tree: error: Entry src/greet.mjs not uptodate. Cannot merge.' -- and it carries NULL in checks_total, checks_failed AND checks_errored, so even that one row does not record the shape of a failure. note is non-null on exactly 1 of 220 rows.",
+        "evidence": "select * from gate_discriminations where verdict='unproven' (full row in findings.md F17); select verdict, count(*), sum(note is not null) from gate_discriminations group by verdict."
+      },
+      {
+        "id": "F18",
+        "mark": "verified",
+        "summary": "The 33 gate REGENERATIONS are invisible to gate_discriminations: 33 lanes have a gate_generation=2 row, 29 of them had a gen-1 verdict of 'proven' and 4 have no gen-1 row at all -- ZERO had a gen-1 'unproven'. All 33 gen-2 rows are proven. Whatever caused a gate to be rebuilt is recorded elsewhere; the 4 with no gen-1 row (772d16ee, eca6556d, d3acbaba, 762944c2) are exactly among the lanes with a red gate:r1/gate:r2 in gate_results.",
+        "evidence": "select g2.adw_id, (select verdict from gate_discriminations g1 where g1.adw_id=g2.adw_id and g1.gate_generation=1), count(*) from gate_discriminations g2 where g2.gate_generation=2 group by g2.adw_id -- 33 rows, listed in findings.md."
+      },
+      {
+        "id": "F19",
+        "mark": "verified",
+        "summary": "The proof that actually FIRES is the per-check mutation pass, and the gate is a floor rather than a filter. gate_results by name family (1879 rows, 210 lanes): gate-baseline 210 runs of which 209 correctly RED (99.5%, 1 green); gate-proof:1 rollup 187/187 red; gate-proof:1:checks:m* 1102 mutations applied across 84 lanes with 9 SURVIVORS (0.8% -- ok=1 means the gate stayed green under the mutation, i.e. the check failed to kill it); gate:r1 196/203 green (only 3.4% caught), gate:r2 66/71, gate:r3 25/25, gate:r4 13/13. Contrast F3 (review bounces 35% of first rounds) and F6 (gate green + review must-fix in 34.6% of runs): the gate is a floor, review is the filter.",
+        "evidence": "select gate_name, count(*), sum(ok) from gate_results grouped per family; the 9 survivors are ids 927, 1053, 1054, 1273, 1274, 1422, 1447, 1759, 1797 in lanes a0e35cf2, 1ca1ba45 x2, c4d852a3 x2, 81ca3b88, 1e170414, a8060a98, 5e40778e."
+      },
+      {
+        "id": "F20",
+        "mark": "verified",
+        "summary": "gate_results records no failure KIND either: violations_json is the literal string '[]' on ALL 1879 rows with no exceptions, and checks_json is only ever a one-element array of counts such as [{\"total\":34,\"failed\":2,\"errored\":0}] -- only three distinct string lengths (36, 37, 38 bytes) exist across the whole table. WHICH check failed is recorded nowhere.",
+        "evidence": "select coalesce(violations_json,'NULL') v, count(*) from gate_results group by v -> single row '[]'|1879; select length(coalesce(checks_json,'')) len, count(*) from gate_results group by len -> 37|1018, 36|670, 38|191."
+      },
+      {
+        "id": "F21",
+        "mark": "verified",
+        "summary": "modifier_attempts DOES show a pattern, and the pattern is futility: 187 attempts produced 3 real cell changes (1.6%). failure-upgrade x transport(refused) 155, sensitivity-floor x applied 25, failure-upgrade x applied 3, failure-upgrade x spent 3, sensitivity-floor x transport 1. 155 of 161 failure-upgrade attempts (96.3%) were refused with one verbatim reason on all 155 rows ('a pane seat bakes model and effort into its launch command at boot (crew/crew.mjs:265) ...'), and the refusal is entirely a pane property (pane 181 rows/156 refused; headless-rpc 5/0; headless-json 1/0). All 25 sensitivity-floor 'applied' rows are rung judge->judge with from_model = to_model = claude-opus-5 -- the modifier applied and changed nothing because the reviewer cell was already at the floor (15 say so in `why`). The 3 real changes: one build->judge planner upgrade (b19-pi-light-charters) and two model:gpt-5.6-luna->gpt-5.6-terra builder upgrades (b19-shopfloor-ledger, b19-shopfloor-skeleton), all on 2026-08-17.",
+        "evidence": "select modifier, outcome, count(*) from modifier_attempts group by modifier, outcome; select substr(why,1,90), count(*) ... group by; select ... where outcome in ('applied','spent') -- 31 rows listed in findings.md."
+      },
+      {
+        "id": "F22",
+        "mark": "verified",
+        "summary": "What gets retried is PLANNING, then review -- not building. bounce distribution across 187 rows: plan 86, review 68, plan-accept 26, build 3, gate 2, scope 1, lane 1. By role: planner 86, builder 75, reviewer 26. Attempts per lane across 91 lanes: 1->38, 2->29, 3->13, 4->6, 5->2, 6->3.",
+        "evidence": "select bounce, count(*) from modifier_attempts group by bounce; select role, count(*) ... ; per-lane histogram."
+      },
+      {
+        "id": "F23",
+        "mark": "verified",
+        "summary": "seat_teardowns has ZERO discriminating power: 569 rows with outcome='proven' on all 569, reason='probe-dead' on all 569, forced=0 on all 569, evidence_kind NULL on all 569. SEAT_TEARDOWN_OUTCOMES enumerates more than one value and exactly one has ever been written. By role: planner 142, lead 141, builder 126, reviewer 125, tech-lead 35. Any rubric rule about seat teardown must stay judgement -- this table cannot check it.",
+        "evidence": "select outcome/evidence_kind/reason/role, count(*) from seat_teardowns group by each -- single-valued in every case except role."
+      },
+      {
+        "id": "F24",
+        "mark": "verified",
+        "summary": "accept_decisions (n=8) contains an EXACT counter-example to its own schema: rows 3, 6, 7 and 8 are identical on every recorded column (where_at=review-exhausted, findings_total=1, residual=0, refuted=1, cosmetic=0, unverified=0, invalid_reasons empty) and split 2 accepted / 2 escalated. The accept/escalate outcome is provably NOT a function of what the table records. n=8 is far too small for a rate, but this is a counter-example rather than a statistic and needs no n. The 8 rows adjudicate 12 findings in total, 11 refuted -- a tiny slice against a corpus of 120 must-fix findings.",
+        "evidence": "select id, outcome, where_at, findings_total, residual_count, refuted_count, cosmetic_count, unverified_count, invalid_reasons from accept_decisions order by outcome, id -- all 8 rows reproduced in findings.md F24."
+      },
+      {
+        "id": "F25",
+        "mark": "verified",
+        "summary": "cell_failures attribution is 100% NULL: 21/21 rows, so CELL_FAILURE_ATTRIBUTIONS has never been written; stage is NULL on 14/21. Kinds: timeout 8, unusable-envelope(pane-parse-error) 5, boot-refusal 2, seat-died 2, seat-not-ready 2, no-envelope(rpc) 1, transport-error 1. NO cell-quality conclusion is drawn and none can be: n=21, attribution 0% filled, and the per-cell exposure denominators are not in this table. The brief forbids the inference and the data would not support it anyway.",
+        "evidence": "select kind, stage, attribution, count(*) from cell_failures group by kind, stage, attribution; select role, agent, model, count(*) ... group by."
+      },
+      {
+        "id": "F26",
+        "mark": "verified",
+        "summary": "CONFOUND, quantified as the brief requires: review attribution is filled on 64 of 274 rows (agent, effort, transport all NULL on 210) and 34 of 274 (provider, model_id NULL on 240). By day: 08-14..08-19 = 185 rows with ZERO attribution; 08-20 = 30 rows, 5 with agent; 08-21 = 33 rows, 33 with agent, 13 with provider; 08-22 = 26 rows, 26 with agent, 16 with provider. Any per-cell claim about reviews is confined to 64 rows (agent) or 34 rows (provider), all from 2026-08-20 onward -- a different and much smaller population than the 274 rows every other finding here is drawn from. I make no per-cell claim.",
+        "evidence": "select sum(agent is null), sum(provider is null), sum(model_id is null), sum(effort is null), sum(transport is null), count(*) from review_outcomes; and the same split by substr(created_at,1,10)."
+      },
+      {
+        "id": "F27",
+        "mark": "verified",
+        "summary": "JSONL->DB drift measured per table: sessions 20894/20800 (94), phases 22116/22022 (94), gate_results 1891/1879 (12), review_outcomes 278/274 (4), gate_discriminations 223/220 (3); modifier_attempts, seat_teardowns, cell_failures, accept_decisions, events and intake_brakes all zero. 207 records total present in JSONL and absent from the db (the doctor's '188 keys' is a different unit and I do not claim they are comparable). 104,982 JSONL lines, 0 unparseable. The 4 drifted review rows are exactly: 193-queue d3 pass; b126-driftcheck d3 changes-needed mf=1, d5 changes-needed mf=1, d9 pass -- so b126-driftcheck is missing ENTIRELY from review_outcomes. The drift is not per-row noise; it drops whole lanes. Net effect on F1/F3 is under one percentage point, and the F2 invariant holds in the drifted rows too.",
+        "evidence": "full JSONL kind census + per-table count comparison; task/queries/drift-review.mjs identifies the 4 rows by (adw_id, created_at)."
+      },
+      {
+        "id": "F28",
+        "mark": "verified",
+        "summary": "THE DEEPEST CONFOUND, and it limits every correlational claim in Part 2. The brief asks which findings correlate with a lane actually bouncing -- but the bounce IS the reviewer's verdict, and the verdict is a deterministic function of the same reviewer's own must-fix grade (F2, 273/274). So 'which findings correlate with a bounce' collapses to 'which findings did the reviewer grade must-fix', a single author's judgement rather than an outcome. Nothing downstream re-adjudicates that grade at scale: accept_decisions is the only re-adjudication record and it has 8 rows. There is no post-merge defect record, no revert record and no incident log in the ledger, so a must-fix that was wrong and one that was right look identical. F10/F11/F12/F13 are therefore claims about what a must-fix GRADE looks like, not validated defect-catching rates -- still the best available basis for ordering a rubric, but a rubric author must not present them as validated.",
+        "evidence": "F2 (273/274 determinism) + F24 (accept_decisions n=8) + absence of any outcome table in sqlite_master (22 tables enumerated; none records post-merge defects)."
+      },
+      {
+        "id": "F29",
+        "mark": "verified",
+        "summary": "Seven questions the data CANNOT answer -- each attempted and failed on evidence, so these rubric rules must stay judgement rather than becoming checks: (1) which finding KINDS the gate catches (violations_json '[]' on all 1879 rows, checks_json counts only); (2) what a gate discrimination failure looks like (one row in 220, an infra refusal with NULL counts); (3) whether a must-fix was correct (no independent adjudication beyond 8 rows); (4) whether a bounce improved the work (round-2 pass is the same author's later verdict; recurrence confounded by fixed lane scope); (5) anything per-cell about reviews (64/274 attribution, all post-08-20, and forbidden by the brief); (6) what the 32 changes-needed envelopes with no findings array contained (recoverable only by parsing 562 review.md prose files, not attempted -- so every Part 2 count is a count over the 74% that opted in); (7) whether seat teardown ever went badly (one value in every column of 569 rows).",
+        "evidence": "F20, F17, F24/F28, F3/F16, F26, F8, F23 respectively."
+      },
+      {
+        "id": "F30",
+        "mark": "verified",
+        "summary": "RUBRIC ORDERING implied by the evidence, ranked by measured must-fix yield with denominators (ordering is the evidence; absolute rates carry F28): (1) demand a counterexample -- state -> wrong observable in one short sentence [74% vs 20%, n=254; must-fix median 143 chars vs consider 273]; (2) an indeterminate state collapsed into a definite one -- EPERM/EINVAL/unknown read as dead, absent read as zero [60%, n=50]; (3) lifecycle and clobber -- terminal envelope overwritten, orphaned fork, settled seat re-settled [63%, n=32]; (4) the degradation path and optional instrumentation becoming load-bearing [77%, n=13]; (5) hostile CLI/API input -- empty flag, trailing flag, __proto__, Symbol, giant int, URL userinfo, prefix slicing [57%, n=21]; (6) rendering that joins by array position or drops rows on duplicate keys [71%, n=14]; (7) vacuous tests / surviving mutations -- KEEP the rule but rank it should-fix by default [24-28%, n=46, below the 47% baseline]; (8) plan conformance and out-of-plan edits [25% n=20; out-of-plan specifically 0 of 5]; (9) stale comments/docs/READMEs/charters [0 of 23]; (10) carried-forward findings [0 of 10]. Two framing facts: the gate does NOT pre-clear mechanical defects (gate:r1 green 96.6% yet review finds a must-fix in 34.6% of green-gate runs), and half of reviews correctly find nothing (140/269) -- so pressuring the seat toward a minimum finding count would optimise against the measured baseline.",
+        "evidence": "Composite of F5, F6, F9, F10, F11, F12, F13, F19; the full table with denominators is findings.md Part 7."
+      },
+      {
+        "id": "F31",
+        "mark": "verified",
+        "summary": "CORRECTION TO STANDING MEMORY. Memory records that review_outcomes' must_fix/should_fix/consider are '0% null and read by NOTHING'. The first half is confirmed exactly. The second half is FALSE as of this commit -- three live readers: (a) crew/escalation-policy.mjs:180-181, regrantVerdict() filters review rows on Number.isInteger(row.must_fix) then requires the count sequence to be monotonically non-increasing with a last value <= 1 (condition 'must-fix-converging', line 200), so the count drives whether an escalated run is granted extra rounds -- load-bearing; (b) scripts/factory/ledger.mjs:2553 and :3843, gateReviewGap()/the gate-review-gap verb compute MAX(must_fix) per run, which is the ADR-030 gate-adequacy metric and exactly the number in F6; (c) the visualizer renders it per round -- ReviewPanel.svelte:13, trace.js:139, panels.js:246, shape.mjs:249, ledger-feed.mjs:80. Corrected form: the counts are 0% null, are read by the regrant policy, the gate-adequacy readout and the visualizer, and carry almost no information beyond the verdict itself (F2) -- the finding KINDS are what nothing reads, because nothing records them (F7).",
+        "evidence": "grep -rn 'must_fix' crew scripts visualizer docs (excluding tests); anchors re-verified individually: grep -n 'must-fix-converging' crew/escalation-policy.mjs -> 4, 200; grep -n 'function gateReviewGap' scripts/factory/ledger.mjs -> 2547."
+      },
+      {
+        "id": "F32",
+        "mark": "verified",
+        "summary": "The disk envelope corpus is a STRICT SUPERSET of the ledger's review history, which explains the 194-vs-227 lane gap without any sampling assumption: all 191 ledger slugs carrying a review appear on disk, and 36 disk slugs have no ledger review row at all (crew-hygiene, plan-viewer, alloc, realio, herdr-spike, pi-spike, headless-spike, ...). Spot-checked file mtimes put those at 2026-08-13/14, before review_outcomes' first row at 2026-08-14T23:15:59.978Z -- they predate the table. Use the ledger from 08-15 onward and the disk for the whole history.",
+        "evidence": "task/queries/laneoverlap.mjs -- in both 191, disk-only 36 (full list printed), ledger-only 0; stat -f %Sm on one envelope per spot-checked lane."
+      }
+    ]
+  }
+}

@@ -1,0 +1,3 @@
+#!/bin/sh
+# bounded exec: ./to <seconds> <cmd...>   (stand-in for coreutils timeout, absent on this mac)
+S=$1; shift; exec perl -e 'alarm shift @ARGV; exec @ARGV or die "exec: $!"' "$S" "$@"

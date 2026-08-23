@@ -1,0 +1,2542 @@
+[
+ {
+  "lane": "43-ignore",
+  "workspace": "dev-team-wt43",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.test.mjs:381",
+  "summary": "Renaming the heading to `## Do not flags` leaves the prefix lookup, entry count, and Defense assertions green although the required exact heading is gone."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d14",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:313",
+  "summary": "The outer shell's TERM trap is deferred by POSIX until the foreground bash supervisor returns, so spawnSync's timeout: 900_000 kill (crew/seat-io.mjs:1727-1737) never terminates a hung gate — measured: a 4s timeout returned at 60s, the command's full duration, where the bare runner returned at 4.0s with signal SIGTERM."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d14",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:300-315",
+  "summary": "The entire RV1-1 signal-forwarding fix is untested: deleting __crew_forward_signal and all three trap lines from a scratch copy leaves crew/drive.test.mjs at 310/310 and the acceptance gate at 16/0/0, so a later edit can silently reopen RV1-1; routing the forward through the injected $__crew_kill instead of the literal kill builtin is the cheap enabler for a deterministic test."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d14",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:1449",
+  "summary": "Carried forward unchanged: production still branches on `io.calls`, a test-fake-only property absent from the io contract (crew/io-contract.test.mjs:15-16), so an io that legitimately omits runClean skips the reap yet still tallies `unproven` and journals a gate_reap line for a measurement that never happened; the real fix needs crew/crew.test.mjs, outside files_in_scope."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d14",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:2191",
+  "summary": "Carried forward unchanged: 'the wrapped gate command sees the same shell contract as the bare runner' calls b127InvokeGate four times without a `dir`, leaking four mkdtemp directories per suite run while every other new test cleans up in a finally."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV3-1",
+  "severity": "consider",
+  "location": "crew/drive.mjs:1532",
+  "summary": "The finally sweep is unconditional over runner outcomes but not over driver liveness, so Ctrl-C on a foreground `crew run` (crew/crew.mjs:1393, no SIGINT handler) or the daemon's kill(-pgid) at crew/daemon.mjs:734-747 leaves the isolated gate group running with no sweep to reap it — measured: the gate's descendant survives a group SIGTERM (psExit=0) where the bare runner's is reaped (psExit=1); deferred because the failure brief forbids the trap mechanism by name and scopes half (1) to 'after the invocation returns'."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV3-2",
+  "severity": "consider",
+  "location": "crew/drive.mjs:376",
+  "summary": "gateReapSweepCommand carries its own full copy of the probe/settle/kill ladder and only its happy path and idempotence guard are tested — the refusal arms, settle boundary and self-group guard are exercised for the wrapper and not at all for the sweep, and `grep -c sweep` over the acceptance gate is 0, so an edit missed in the sweep's copy is caught by nothing on the one path that runs when the wrapper was killed."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:1531",
+  "summary": "Carried forward with widened consequence: the `io.calls || typeof io.runClean === 'function'` predicate (a test-fake-only property, absent from crew/io-contract.test.mjs:15-16) now also gates the last-resort sweep, so an io that legitimately omits runClean gets neither wrapper nor sweep while still tallying `unproven` and journalling a gate_reap line; the triage told the builder to preserve it exactly and the real fix needs crew/crew.test.mjs, outside files_in_scope."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:2276",
+  "summary": "Carried forward unchanged: 'the wrapped gate command sees the same shell contract as the bare runner' calls b127InvokeGate four times without a `dir`, leaking four mkdtemp directories per suite run while every other test in the block cleans up in a finally."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d12",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:265-271",
+  "summary": "The gate's own process group no longer receives signals sent to the driver's group, so Ctrl-C on a foreground `crew run` mid-gate (or the daemon's kill(-pgid) at crew/daemon.mjs:734-747) leaves the whole gate command running with the reaping shell dead — measured: gate child reaped before the change (ps exit 1), alive after it (stat S)."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d12",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:1449",
+  "summary": "Out-of-plan branch `(io.calls || typeof io.runClean === 'function') ? wrapped : cmd` keys production behaviour on `calls`, a test-fake-only property absent from the io contract (crew/io-contract.test.mjs:15-16), so an io that legitimately omits runClean silently skips the reap yet still tallies `unproven` and journals a gate_reap line for a measurement that never happened."
+ },
+ {
+  "lane": "b127-gatereap",
+  "workspace": "dt-b127-gatereap",
+  "dispatch": "d12",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:2191",
+  "summary": "'the wrapped gate command sees the same shell contract as the bare runner' calls b127InvokeGate four times without a `dir`, so four mkdtemp directories leak into /tmp on every suite run while every other new test cleans up in a finally."
+ },
+ {
+  "lane": "b114-gaterecheck",
+  "workspace": "dt-b114-gaterecheck",
+  "dispatch": "d4",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/drive.mjs:2308",
+  "summary": "A vacuous-green gate repaired into a genuinely-red gate that omits the GATE-SUMMARY line now escalates pre-build with zero builder rounds spent, even though the vacuous-green bounce brief — unlike the defective-red one at :2334 — never told the custodian to print that line and the green branch grants no second bounce."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d13",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/headless-rpc.mjs:316",
+  "summary": "Unchanged from round 1: the undeclared `trap ':' TERM INT` in the spawn wrapper is the only reason the exit marker exists in the SIGTERM path (measured), yet no plan section declares it and no test pins it, so removing it keeps the suite green while the documented top proof silently degrades."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d13",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "crew/realio.mjs:684",
+  "summary": "Unchanged from round 1: reseat accepts `retired: true` as a free seat although retire no longer clears an unproven reservation, so a pi that outlives the 2s SIGTERM settle leaves the marker, the next ensureProcess adopts the old session at crew/headless-rpc.mjs:298-303, and the run keeps the old model while modifier_attempts records the swap as applied."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d13",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "crew/headless-rpc.mjs:415",
+  "summary": "The `reservation-mismatch` and `no-kill-target` reasons are still produced by no test; both map to unproven, so a regression there cannot falsely claim clean."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d13",
+  "verdict": "pass",
+  "id": "RV1-6",
+  "severity": "consider",
+  "location": "test/factory-ledger.test.mjs:1937",
+  "summary": "The Object.keys mapping over an already-asserted-empty dumpTable is still vacuous; it reads as a column-shape assertion and pins nothing."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/headless-rpc.test.mjs:352",
+  "summary": "The plan-mandated EPERM-to-ALIVE test is missing and no test produces outcome 'failed' from teardown(); collapsing the probe-alive branch into UNKNOWN keeps the whole suite and the gate green while `ledger.mjs seat-teardowns` reports leaked: 0 over a window that is genuinely leaking."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/headless-rpc.mjs:316",
+  "summary": "An undeclared `trap ':' TERM INT` was added to the spawn wrapper; measured directly, it is the only reason the exit marker exists in the SIGTERM path, yet no test pins it and no plan section declares it, so deleting it degrades the documented top proof to signal-esrch or an intermittent zombie-driven 'failed' with every test still passing."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "crew/realio.mjs:684",
+  "summary": "reseat still accepts `retired: true` as a free seat although retire no longer clears an unproven reservation, so a pi that outlives the 2s SIGTERM settle leaves the marker, the next ensureProcess adopts the old session at crew/headless-rpc.mjs:298-303, and the run keeps the old model while modifier_attempts records the swap as applied."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "crew/headless-rpc.mjs:415",
+  "summary": "The `reservation-mismatch` and `no-kill-target` reasons are produced by no test, so a regression in either would go unnoticed; both map to unproven, so a regression cannot falsely claim clean."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-5",
+  "severity": "consider",
+  "location": "crew/headless-rpc.test.mjs:364",
+  "summary": "The EAGAIN kill mock in acceptance test C2 never runs: the fixture writes no pgid file, so probeMap returns UNKNOWN at the readFileSync throw in crew/reclaim.mjs:968, making the test's stated mechanism different from the one actually exercised."
+ },
+ {
+  "lane": "worker-teardown",
+  "workspace": "dt-b18-worker-teardown",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-6",
+  "severity": "consider",
+  "location": "test/factory-ledger.test.mjs:1937",
+  "summary": "The Object.keys mapping over an already-asserted-empty dumpTable is vacuous; it reads as a column-shape assertion and pins nothing."
+ },
+ {
+  "lane": "b64-pi-directed",
+  "workspace": "dt-b64-pi-directed",
+  "dispatch": "d2",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/adapters/adapter-pi.mjs:79",
+  "summary": "Deleting the new `transport === 'pane' &&` guard leaves the full 1705-test suite green, so a later revert would let a pi planner seat on headless-rpc claim subagents:true, satisfy requires:['subagents'] with no shortfall, and boot via rpcCommand's --no-extensions with no agent tool at all."
+ },
+ {
+  "lane": "b64-pi-directed",
+  "workspace": "dt-b64-pi-directed",
+  "dispatch": "d2",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/pi/extensions/subagent.test.mjs:278",
+  "summary": "The pre-spawn arm feeds a 55KB agent name but asserts bounds only on content and details.refused, so making boundAgentName a no-op keeps all 23 arms green and b33's 52,287-byte details.agent regression (subagent.ts:471, :753) would land undetected."
+ },
+ {
+  "lane": "b64-pi-directed",
+  "workspace": "dt-b64-pi-directed",
+  "dispatch": "d2",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/pi/extensions/subagent.ts:315",
+  "summary": "Dropping the message.role !== 'assistant' filter survives the suite, so a regression would fold a nested tool's message_end into the child's spend and double-count the journal usage row and pi's own /session totals with no second source to catch it."
+ },
+ {
+  "lane": "b64-pi-directed",
+  "workspace": "dt-b64-pi-directed",
+  "dispatch": "d2",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "crew/pi/extensions/subagent.ts:514",
+  "summary": "Interpolating the model-supplied agentName into the not-granted refusal keeps the suite green because the arm asserts byte bounds but never the absence of its own REQUEST_MARKER, so the payload-free property gate check G2 pins has no repo-side test."
+ },
+ {
+  "lane": "b64-pi-directed",
+  "workspace": "dt-b64-pi-directed",
+  "dispatch": "d2",
+  "verdict": "pass",
+  "id": "RV1-5",
+  "severity": "consider",
+  "location": "docs/conventions.md:42",
+  "summary": "The new entry claims [supersedes: 2026-08-01 — no lint or typecheck tooling exists] while its own Why reaffirms that entry and line 44 is left unmarked, so a reader hits a live, accurate entry that a newer entry claims to have replaced, against the file's own line-3 rule and its :43/:114 precedent."
+ },
+ {
+  "lane": "b57-intake-caller",
+  "workspace": "dt-b56-intake",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "scripts/factory/intake.mjs:1755",
+  "summary": "The --checkout guard is fsExistsSync only, so `--checkout package.json` is accepted and the run reports a green exit-0 'would dispatch: nothing' instead of refusing missing-checkout, hiding a typo'd path as an empty board."
+ },
+ {
+  "lane": "b20-roster-ladder",
+  "workspace": "dt-b20-roster-ladder",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/server/roster-ladder.mjs:392",
+  "summary": "A valid optional lead unseat with cell:null is rejected by invented band and cost failures, so it cannot stage or compose."
+ },
+ {
+  "lane": "b20-roster-ladder",
+  "workspace": "dt-b20-roster-ladder",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "visualizer/web/src/lib/RosterPanel.svelte:52",
+  "summary": "A successful staged drop updates only staged and the diff, while the seats rail keeps rendering the original payload seat."
+ },
+ {
+  "lane": "b20-roster-ladder",
+  "workspace": "dt-b20-roster-ladder",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "visualizer/server/roster-ladder.mjs:384",
+  "summary": "A degraded ladder still permits an optional cell:null move to stage and compose because null applicability is checked before ladder degradation."
+ },
+ {
+  "lane": "b20-roster-ladder",
+  "workspace": "dt-b20-roster-ladder",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/RosterPanel.svelte:79",
+  "summary": "A rejected later drop disables Compose for the unchanged prior valid staged set by overwriting stagedResult with the failed attempt."
+ },
+ {
+  "lane": "45-cihang",
+  "workspace": "45-cihang",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:92",
+  "summary": "A final target that is an existing regular file is swallowed as EEXIST, so openRun chmods state/ledger from 0644 to 0700 before degrading instead of failing without modifying it."
+ },
+ {
+  "lane": "45-cihang",
+  "workspace": "45-cihang",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "test/factory-ledger.test.mjs:83",
+  "summary": "Replacing the helper body with recursive mkdirSync still passes the deep-path and nested-file test, so the procfs spin can return with repository CI green."
+ },
+ {
+  "lane": "runset-view",
+  "workspace": "dev-team-wtrunset",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/server/shape.mjs:260-279",
+  "summary": "An active agent_sessions row with NULL billed fields is reported as no agent_sessions rows, falsely hiding its session count and diverging from the CLI."
+ },
+ {
+  "lane": "193-queue",
+  "workspace": "dev-team-wt193",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV3-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:664",
+  "summary": "A second run sharing a settled predecessor's task-return is forked, then falsely settled from that predecessor's envelope, allowing concurrent children on one checkout."
+ },
+ {
+  "lane": "193-queue",
+  "workspace": "dev-team-wt193",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:662",
+  "summary": "Enqueueing another run for a settled crew deletes the shared task-return envelope, making the first run lose its result and terminal state."
+ },
+ {
+  "lane": "b62-band-floors",
+  "workspace": "dt-b62-band-floors",
+  "dispatch": "d9",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/README.md:59",
+  "summary": "An operator following README:60 runs `--tier build --model-builder gpt-5.6-luna` and now gets band-unknown, because pi spells that ratified utility member `openai-codex/gpt-5.6-luna`; README:59-65 and :146 document the --tier passthrough and say nothing about provability, and README is outside files_in_scope so only a follow-up can fix it."
+ },
+ {
+  "lane": "b62-band-floors",
+  "workspace": "dt-b62-band-floors",
+  "dispatch": "d9",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/crew.mjs:572",
+  "summary": "Mutating the ambiguity guard `matches.length === 1` to `>= 1` leaves crew/crew.test.mjs 161/161 green, so the design's safe direction (several matches is unknown) is unpinned — no collision is producible with today's seven members under adapter-pi or adapter-claude, hence a consider, but a colliding-stub fixture would pin it inside the file this lane owns."
+ },
+ {
+  "lane": "b27-fence-slice1",
+  "workspace": "dt-b27-fence-slice1",
+  "dispatch": "d4",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:682",
+  "summary": "Test 5 asserts only that the fenced and unfenced runs are equal to each other and never pins the expected outcome, so a mutation that breaks both branches identically (e.g. making the plan check unconditional) still passes it; killed only by its neighbours, not by itself."
+ },
+ {
+  "lane": "b27-fence-slice1",
+  "workspace": "dt-b27-fence-slice1",
+  "dispatch": "d4",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/child.mjs:132",
+  "summary": "A crew booted --fences/--lane and then run through the daemon reaches driveTask via child.mjs with no laneFence in ctx, so it is silently unfenced with no refusal and no journal row saying the fence was dropped — the plan's declared slice-2 gap, confirmed real; the remedy needs a file this lane's register does not grant."
+ },
+ {
+  "lane": "b58-seat-io",
+  "workspace": "dt-b58-seat-io",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/realio.mjs:1",
+  "summary": "The old paths' deletions are unstaged while the new paths are staged (git ls-files still holds blobs 21bd010/7acc168), so a default index-only `git commit` lands a commit carrying BOTH crew/realio.mjs and crew/seat-io.mjs — B1/A1 red on that commit and a duplicated io module shipped; `git add -A crew/` before committing fixes it."
+ },
+ {
+  "lane": "b58-seat-io",
+  "workspace": "dt-b58-seat-io",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "docs/ledger-queries.md:53",
+  "summary": "Five pre-existing line-pinned citations into the renamed module are still wrong (ledger-queries.md:47,53; shape.mjs:7,9; trace.js:5,7 — e.g. crew/seat-io.mjs:312 is `return writes`), so a reader who sees C1/C2 derive two citations in this diff reads the rest as verified; plan-deferred per #327's file-it-and-leave-it rule, worth one follow-up issue."
+ },
+ {
+  "lane": "b43-intake-premise",
+  "workspace": "dt-b43-intake-premise",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:1324",
+  "summary": "A later promoted row has no synthetic premise, so it records NULL fields despite belonging to the already-checked original sweep."
+ },
+ {
+  "lane": "b43-intake-premise",
+  "workspace": "dt-b43-intake-premise",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:249",
+  "summary": "Clean, unresolved, and unknown notes omit the mandated verdict prefixes, so persisted notes do not match the specified shapes."
+ },
+ {
+  "lane": "b43-intake-premise",
+  "workspace": "dt-b43-intake-premise",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:83",
+  "summary": "A URL with userinfo is mis-extracted as a relative path (and @-named path segments are mangled), causing false premise failures instead of URL exclusion."
+ },
+ {
+  "lane": "207-converge",
+  "workspace": "207-converge",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/converge.mjs:106-108",
+  "summary": "With no gate_cmd, review-exhaustion convergence calls gateRed:false and opens a PR claiming the acceptance gate is green even though no gate ran."
+ },
+ {
+  "lane": "b23-settle-path",
+  "workspace": "dt-b23-settle-path",
+  "dispatch": "d10",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.test.mjs:2516",
+  "summary": "Plan test T8 is missing: replacing settleSeatTeardown(io) in crew/crew.mjs:1094 with an inlined copy of the old child.mjs block leaves the full suite unchanged (1238 pass both runs), so nothing in the repo stops the settle path being forked back into an entrypoint once task/gate.mjs C7 is gone."
+ },
+ {
+  "lane": "b23-settle-path",
+  "workspace": "dt-b23-settle-path",
+  "dispatch": "d10",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/crew.mjs:1097",
+  "summary": "The 'escalation -> NEVER teardown' lifecycle comment now sits below an unconditional settleSeatTeardown(io), so a reader concludes an escalated run leaves its rpc workers alive when it now SIGKILLs them; behaviour is fine (parkSeats records warm panes only and session_id survives), the comment is not."
+ },
+ {
+  "lane": "b23-settle-path",
+  "workspace": "dt-b23-settle-path",
+  "dispatch": "d12",
+  "verdict": "pass",
+  "id": "RV2-1",
+  "severity": "consider",
+  "location": "crew/crew.mjs:1097",
+  "summary": "Carried over from RV1-2 and still unchanged: the 'escalation -> NEVER teardown' lifecycle comment sits below an unconditional settleSeatTeardown(io), so a reader concludes an escalated run leaves its rpc workers alive when it now kills them; behaviour is correct (parkOnOutcome runs earlier, parkSeats records warm panes only, session_id survives), the comment is not."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:1972",
+  "summary": "Plan tests 21/22 absent: swapping the survivor/checkProofNote precedence leaves both npm test and the acceptance gate green, so a run with a PROVEN gate survivor plus a later io throw records non-blocking 'unproven', never spends the gate repair, and commits behind a gate that does not discriminate."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:1953-1958",
+  "summary": "Plan test 7's errored/no-summary survivor variants absent: deleting `baselineGateDefect(res.output) ||` from the why chain leaves suite and gate green, so a mutated run that CRASHES a check while printing `FAIL <check>` (the test file's own THREW fixture shape) is recorded outcome:'killed' and check_discrimination:'proven'."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "crew/drive.test.mjs:2593-2605",
+  "summary": "All 14 rejection cases assert `errors.every(e => e.why)`, which is true for an empty array, so the test asserts nothing; measured, widening CHECK_LABEL (drive.mjs:865) to /^.+$/ keeps drive.test.mjs green and admits a space-bearing label that collides with the `FAIL <check>` matcher."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-4",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:2102",
+  "summary": "Plan test 24's two pre-build briefs are untested: dropping the stable-identifier note from gate-vacuous-bounce.md or gate-defect-bounce.md individually keeps the suite green, so a planner repairing a vacuously-green gate can rename checks and manufacture a generation-2 survivor with the sole gate repair already spent."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-5",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:1936-1940",
+  "summary": "Plan test 10's missing-file case is absent, so the `original === null` unapplied branch never executes under suite or gate; a regression there sends the planner — on its one repair — to fix a find string when the file itself is missing."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-6",
+  "severity": "consider",
+  "location": "crew/drive.mjs:1963",
+  "summary": "Measured by driving driveTask with a readFile that throws new Error(''): check_discrimination reads 'proven' with checks:[] and the commit is taken — a pass that ran zero mutations claims proof; `throw null` instead raises a TypeError that escapes driveTask with no escalation envelope."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-7",
+  "severity": "consider",
+  "location": "crew/drive.mjs:2067",
+  "summary": "Plan test 25's stated requirement that the no-declaration gate-discrimination-bounce.md stay byte-identical is false: measured 943 bytes at HEAD vs 945 now, because the two new array entries evaluate to '' and each contributes a blank line through join('\\n')."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d13",
+  "verdict": "changes-needed",
+  "id": "RV1-8",
+  "severity": "consider",
+  "location": "crew/drive.mjs:1997-2004",
+  "summary": "The FAIL <check> convention and label grammar reach the planner only through a replacement-gate bounce, so a first declaration is authored blind and a gate printing another failure format yields all survivors on first green, spending the sole gate_repairs on teaching an output format."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d15",
+  "verdict": "pass",
+  "id": "RV2-1",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:2884",
+  "summary": "The test named 'stays byte-stable when no mutations are declared' asserts only that the two markers are absent, so reverting the guard at drive.mjs:2075 to the round-1 template form reintroduces a blank line in the planner brief while the test and the gate stay green; the behaviour itself is correct (measured byte-identical to HEAD)."
+ },
+ {
+  "lane": "b37-percheck-proof",
+  "workspace": "dt-b37-percheck-proof",
+  "dispatch": "d15",
+  "verdict": "pass",
+  "id": "RV1-8",
+  "severity": "consider",
+  "location": "crew/drive.mjs:1997-2004",
+  "summary": "Carried forward: the FAIL <check> convention and label grammar reach the planner only through a replacement-gate bounce, so a first declaration is authored blind and a gate printing another failure format yields all survivors on first green, spending the sole gate_repairs on teaching an output format; the planner-brief text is outside this lane's files_in_scope."
+ },
+ {
+  "lane": "intake-board-profile",
+  "workspace": "dt-b18-intake-board-profile",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:1046",
+  "summary": "With config.readyColumn empty and a non-null dbPath, intakeRun unconditionally observes dispatches and creates/opens the ledger after intakeSweep's pre-I/O refusal."
+ },
+ {
+  "lane": "b120-flagcontract",
+  "workspace": "dt-b120-flagcontract",
+  "dispatch": "d4",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/crew.mjs:21",
+  "summary": "The run header implies paired --lane/--fences support, so an operator can follow the prose and hit the new exit-2 refusal."
+ },
+ {
+  "lane": "b122-falseabsence",
+  "workspace": "dt-b122-falseabsence",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/README.md:168",
+  "summary": "The new claim that `--agent-planner pi` boots with no shortfall waiver is unqualified, but adapter-pi.mjs:85 delivers subagents only on transport 'pane' — an operator adding --headless-all (or --transport-planner headless-rpc) on that promise gets a boot refusal because the planner charter requires subagents and the grant cannot flip it on rpc."
+ },
+ {
+  "lane": "b122-falseabsence",
+  "workspace": "dt-b122-falseabsence",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "docs/adr/README.md:84",
+  "summary": "Grouping 025 with the retired runtime is true of its machinery (handover-spec.md, orchestration.md, agents/, role-boundaries.test.mjs all absent) but its decision — test ownership read off files_in_scope, not a spec field — is live in crew/drive.mjs:1663-1673 and docs/conventions.md:113, so a lane could read the note as retiring a convention the scope gate still enforces."
+ },
+ {
+  "lane": "b122-falseabsence",
+  "workspace": "dt-b122-falseabsence",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "README.md:34",
+  "summary": "The crossing enumeration is import-only: crew/memory.mjs:11-13 also crosses into scripts/factory/ by subprocess (node scripts/factory/ledger.mjs task|sessions|run-set), which neither the bullet nor the gate's R1 import regex sees, so a reader counting crossings gets three files where four is honest."
+ },
+ {
+  "lane": "b122-falseabsence",
+  "workspace": "dt-b122-falseabsence",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "docs/adr/adr-030-acceptance-authorship.md:556",
+  "summary": "Both amendment records and all seven markers are dated 2026-08-21 while the change lands on 2026-08-22 — the quoted ledger measurement really was taken on 08-21, so the record is a day behind its own commit rather than false, and the dates are gate literals (K1-K7, S1-S7) so changing them would be a gate repair, not a build fix."
+ },
+ {
+  "lane": "253-ci-watch",
+  "workspace": "wt-253-ci-watch",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1274",
+  "summary": "A nonce-bearing reason is redacted after the unknown guard, so replaying that JSONL row throws for a missing reason."
+ },
+ {
+  "lane": "b113-childarm",
+  "workspace": "dt-b113-childarm",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/child.mjs:149-155",
+  "summary": "settle's comment still claims \"ONE settlement path for both exits\" and teardown ordering \"on the signal path exactly as on the return path\", but there is no signal path and settle now has one call site (:300), so the `if (settled) return result` guard is unreachable — a future reader treats that guard as load-bearing for the very shape the new conventions entry exists to forbid, and restores it."
+ },
+ {
+  "lane": "b113-childarm",
+  "workspace": "dt-b113-childarm",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/crew.test.mjs:1541",
+  "summary": "SIGNAL_KILL_BOUND_MS (1000ms, :1494) is compared against an `elapsed` measured entirely in the PARENT (:1527 to :1531), so parent event-loop starvation under npm test's parallel file execution can red a correct tree; the plan's \"500x the measured 1-2ms\" defense bounds child slowness, not that — margin is nonetheless ~20x against the whole 35-57ms test, measured over three runs."
+ },
+ {
+  "lane": "b113-childarm",
+  "workspace": "dt-b113-childarm",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/daemon.mjs:420",
+  "summary": "The comment cites crew/child.mjs:138-141 for \"the same escalation envelope a signalled child writes for itself\"; that factory is now deleted outright, so the pointer dangles and no child writes that envelope — unfixable in this slice because crew/daemon.mjs is fenced to sibling lane b115-settlepaths, so it belongs to that lane or its own issue."
+ },
+ {
+  "lane": "b126-driftcheck",
+  "workspace": "dt-b126-driftcheck",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1151",
+  "summary": "A complete startPhase mirror with seq 1e20 is tagged INTEGER on the JSONL side but stored REAL by SQLite, producing false drift_total 1."
+ },
+ {
+  "lane": "b126-driftcheck",
+  "workspace": "dt-b126-driftcheck",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1154",
+  "summary": "A complete startPhase mirror at JS number -2^63 is tagged INTEGER in JSONL but stored REAL by SQLite, producing false drift_total 1."
+ },
+ {
+  "lane": "b44-seat-domains",
+  "workspace": "dt-b44-seat-domains",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/drive.test.mjs:4893-4901",
+  "summary": "The charter test omits the plan-prescribed doesNotMatch for 'consulted ONLY' / 'your ONLY loop', so restoring either claim to crew/roles/lead.md leaves the lead with two mutually exclusive return contracts and npm test still green — only the ephemeral task-dir gate.mjs:308 rejects them."
+ },
+ {
+  "lane": "b44-seat-domains",
+  "workspace": "dt-b44-seat-domains",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.test.mjs:4835-4845",
+  "summary": "The lead-less failed-proof test matches the diagnosis with /acceptance gate|discriminat/i, which the guard's own boilerplate ('the acceptance gate needs a repair this crew cannot make') already satisfies — verified true against a message built with an empty diagnosis — so dropping proofNote() at crew/drive.mjs:2097 would ship a reasonless mechanical-tier escalation with the suite green."
+ },
+ {
+  "lane": "b44-seat-domains",
+  "workspace": "dt-b44-seat-domains",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/roles/reviewer.md:58",
+  "summary": "The reviewer charter still tells the seat that issues the gate-defect verdict that 'gate' grants the planner its one repair (as does docs/adr/adr-030:141); both are outside files_in_scope, so this is deferred follow-up rather than a fix for this build."
+ },
+ {
+  "lane": "b19-pi-capability-register",
+  "workspace": "dt-b19-pi-capability-register",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/headless-rpc.mjs:57-74",
+  "summary": "A local-pi pi seat on headless-rpc can pass boot but starts without checkout config/grants, so ambient pi configuration can silently replace the declared endpoint; defer RPC plumbing or a transport-specific refusal."
+ },
+ {
+  "lane": "b140-waitbudget",
+  "workspace": "dt-b140-waitbudget",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:42",
+  "summary": "Out-of-plan line `// Measured seconds: 1459 / 1800.` restates digits the prescribed sentence already carries, and is what kept the gate green under its own declared W10 mutation, costing the crew its one gate repair."
+ },
+ {
+  "lane": "b140-waitbudget",
+  "workspace": "dt-b140-waitbudget",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/crew.mjs:1392",
+  "summary": "The argv read is a hand-written five-role literal beside a derived role set, so adding a role to WAITS_S yields a flag assertUsage accepts but runCmd never reads — the operator's value is silently dropped instead of refused; the fix would delete mutation W9's declared anchor, so it cannot land in this slice."
+ },
+ {
+  "lane": "b140-waitbudget",
+  "workspace": "dt-b140-waitbudget",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/crew.mjs:1821",
+  "summary": "Acceptance criterion 1 is pinned only by the task-scoped gate — I measured that mutating `...WAIT_FLAGS,` to `...[],` leaves the whole repo suite green, so after close-out the wait flags can be dropped from KNOWN_FLAGS.run with no test failing."
+ },
+ {
+  "lane": "b140-waitbudget",
+  "workspace": "dt-b140-waitbudget",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "crew/crew.mjs:23",
+  "summary": "The plan-prescribed insertion point leaves `# per-run round budgets` trailing the wait-flag lines, so an operator skimming usage sees two stacked explainers and must match the second back to flags three lines above it."
+ },
+ {
+  "lane": "b46-directed",
+  "workspace": "dt-b46-directed",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:1752",
+  "summary": "driveDirectedRound's summary carries ctx.briefFile and no commit_subject, so every directed run commits the subject \"crew(<task>): directed by the task brief at <absolute machine-local path>\" into permanent git history and demotes the builder's commit_message to the body; verified by calling composeCommitMessage with the exact envelope the round returns."
+ },
+ {
+  "lane": "b46-directed",
+  "workspace": "dt-b46-directed",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/drive.mjs:2785",
+  "summary": "The conditional details.variant spread is a production edit absent from the plan's Changes list (gate check B1 requires it): details.variant exists for directed but not full/repair so nothing can rely on it, and the literal `variant === DIRECTED_STAGE_HEAD` now appears twice so the declared B1 mutation replaceAll-perturbs two sites instead of the one anchored."
+ },
+ {
+  "lane": "b46-directed",
+  "workspace": "dt-b46-directed",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/drive.mjs:158",
+  "summary": "The new array-seats refusal branch in shapeDefect is untested — replacing its condition with `if (false)` leaves drive/crew/daemon tests at 569 pass / 0 fail — so the guard that would refuse the next array-seat partial shape with mismatched required_seats is unproven (the shipped declaration itself is still pinned by the snapshot test)."
+ },
+ {
+  "lane": "b80-handle-r3",
+  "workspace": "dt-b80-handle",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/driver.test.mjs:651",
+  "summary": "Criterion 4's 'failing first tree read' is covered by no test: deleting crew/driver.mjs:288 (if (first.err) return unknown(...)) keeps all 22 tests green, and in that mutant first.ref is undefined so a top surface with no ref key is returned as a measured forest for the requested id."
+ },
+ {
+  "lane": "b80-handle-r3",
+  "workspace": "dt-b80-handle",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/driver.mjs:341",
+  "summary": "The mandated literal p.pid === p.pgid is written as process.pid === process.pgid (normalize's parameter is named process), so the preserved C3 mutation's find-and-replace matches nothing and reports green without ever mutating the predicate; the same rename also shadows the global process used at crew/driver.mjs:11."
+ },
+ {
+  "lane": "b80-handle-r3",
+  "workspace": "dt-b80-handle",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/driver.test.mjs:101",
+  "summary": "The provenance header drops the plan's explicit enumeration of retained fields, leaving 'pruned mechanically to the fields the helper reads' unfalsifiable by a reader of the inlined capture."
+ },
+ {
+  "lane": "b80-handle-r3",
+  "workspace": "dt-b80-handle",
+  "dispatch": "d5",
+  "verdict": "pass",
+  "id": "RV2-1",
+  "severity": "consider",
+  "location": "crew/driver.test.mjs:534",
+  "summary": "assertCompleteUnknown only checks reason is a non-empty string, so deleting crew/driver.mjs:288 keeps the suite green while a failing first tree read reports 'moved between snapshots: undefined then surface:27' instead of 'tree (before) failed: exit 1' — a journal diagnostic naming the wrong cause."
+ },
+ {
+  "lane": "b79-reask",
+  "workspace": "dt-b79-reask",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/seat-io-runclean.test.mjs:15-18",
+  "summary": "With NO_COLOR on Node 24+, injected '# fail 0' is the gate's first match, so a later real nonzero failure summary still passes C1."
+ },
+ {
+  "lane": "viz-budget-cards",
+  "workspace": "wt-viz-budget-cards",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/server/server.mjs:60",
+  "summary": "With only DEVTEAM_BUDGET_MAX_TOKENS set, the required default window references an unimported RUN_SET_WINDOW_MS and GET /api/run-set returns 500."
+ },
+ {
+  "lane": "viz-budget-cards",
+  "workspace": "wt-viz-budget-cards",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/CellHealthPanel.svelte:25",
+  "summary": "An absent cell_failures readout with roster seats produces undetermined rows, but the absent branch hides every card so the required evidence is never rendered."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV3-1",
+  "severity": "must-fix",
+  "location": "crew/realio.mjs:483",
+  "summary": "A failed root snapshot is incorrectly recorded as root-unidentified instead of unproven."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV3-2",
+  "severity": "must-fix",
+  "location": "crew/realio.mjs:638",
+  "summary": "An unknown or permission post-SIGTERM probe can trigger SIGKILL and falsely produce a proven reclaim."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV3-3",
+  "severity": "must-fix",
+  "location": "crew/realio.mjs:651",
+  "summary": "A final EPERM group probe is counted live/failed rather than probe-unknown/unproven."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV3-4",
+  "severity": "consider",
+  "location": "crew/realio.mjs:60",
+  "summary": "The out-of-plan global process.kill shim can forge ESRCH for a group with an unsignalable foreign-uid member."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/realio.mjs:428",
+  "summary": "An EPERM/unknown root group probe marks a snapshot-bound live root dead and can then authorize signals to its descendant groups."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/realio.mjs:611",
+  "summary": "An EINVAL/unknown post-SIGKILL probe is counted as live/failed instead of probe_unknown/unproven."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "must-fix",
+  "location": "crew/reclaim-descendants.test.mjs:45",
+  "summary": "Only nine committed tests exist, leaving the plan-required fresh-snapshot, signal-race, root, run-entrypoint, and ledger retry regressions unprotected."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/realio.mjs:509",
+  "summary": "An unknown final root-group probe after SIGKILL is recorded as failed/alive instead of unproven."
+ },
+ {
+  "lane": "b34-reclaim",
+  "workspace": "dt-b34-reclaim",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "consider",
+  "location": "crew/realio.mjs:60",
+  "summary": "The out-of-plan zombie workaround temporarily replaces global process.kill and can forge ESRCH for synchronous callback probes."
+ },
+ {
+  "lane": "protected-paths-profile",
+  "workspace": "wt-protected-paths-profile",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "test/factory-make-brief.test.mjs:695",
+  "summary": "The regex-escape character class is malformed so the replace is a no-op (verified empirically); the assertion builds a RegExp from the raw path, so a TMPDIR containing a metacharacter (e.g. /var/folders/q+/) makes this test fail red even though the brief holds the exact path, and an unbalanced [ makes new RegExp throw."
+ },
+ {
+  "lane": "protected-paths-profile",
+  "workspace": "wt-protected-paths-profile",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "scripts/factory/make-brief.mjs:784",
+  "summary": "formatCountBasis's `used` branch is now unreachable for its only caller — baseline is commit_scoped, so profileField('baseline') can only return used:false with `recorded` — leaving dead wording that reads as live coverage to the next editor."
+ },
+ {
+  "lane": "protected-paths-profile",
+  "workspace": "wt-protected-paths-profile",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "scripts/factory/make-brief.mjs:663",
+  "summary": "The `protected paths in force: N · <basis>` line carries only the profile basis, so a brief compiled with --protected as well counts those entries in N but names no file, leaving a reader unable to tell where the extra paths came from."
+ },
+ {
+  "lane": "250-floors",
+  "workspace": "dev-team-wt250",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:674",
+  "summary": "Literal protected-file prefixes misclassify legal paths such as crew/drive.mjs.bak, causing a pane run to escalate before any build despite no protected path in scope."
+ },
+ {
+  "lane": "46-headless-boot",
+  "workspace": "dev-team-wt46d",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "/Users/x/.crew/dev-team-wt46d/46-headless-boot/task/gate.mjs:408",
+  "summary": "C13 trims porcelain status prefixes before slicing them, so valid in-scope crew paths become rew/... and the required gate exits 1."
+ },
+ {
+  "lane": "193-budget",
+  "workspace": "dev-team-claude-plugin",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/child.mjs:99",
+  "summary": "An existing emitter sidecar can redirect daemon child usage to an old DB, leaving the configured budget ledger blind."
+ },
+ {
+  "lane": "193-budget",
+  "workspace": "dev-team-claude-plugin",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/daemon.test.mjs:671",
+  "summary": "The Node 20 CI lane fails the new SQLite tests (including :1028) because node:sqlite is unavailable below the ledger floor."
+ },
+ {
+  "lane": "193-budget",
+  "workspace": "dev-team-claude-plugin",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "crew/daemon.mjs:794",
+  "summary": "A giant but accepted integer window_ms throws a raw RangeError at enqueue instead of producing a readable budget outcome."
+ },
+ {
+  "lane": "193-budget",
+  "workspace": "dev-team-claude-plugin",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:188",
+  "summary": "On Node 20, a fresh configured ledger stays absent after JSONL-only emitter degradation, so every budget admission is incorrectly measured as zero."
+ },
+ {
+  "lane": "193-budget",
+  "workspace": "dev-team-claude-plugin",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "must-fix",
+  "location": "crew/child.mjs:126",
+  "summary": "A stale sidecar mismatch escalates and suppresses driveTask even when the daemon has no budget, making optional instrumentation load-bearing."
+ },
+ {
+  "lane": "193-budget",
+  "workspace": "dev-team-claude-plugin",
+  "dispatch": "d8",
+  "verdict": "changes-needed",
+  "id": "RV3-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:191",
+  "summary": "Node 22 can require node:sqlite but is below the emitter's Node 24 floor, so fresh budgeted work writes no DB while usageWindow repeatedly admits it as zero."
+ },
+ {
+  "lane": "b19-pi-light-charters",
+  "workspace": "dt-b19-pi-light-charters",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": ".agents/skills/ast-grep-codemod/scripts/codemod.mjs:48,69,93,97",
+  "summary": "A launched ast-grep binary that exits nonzero is staged/logged as a successful proposal or apply, so a failed rewrite can be falsely reported as complete."
+ },
+ {
+  "lane": "b28-denyhole",
+  "workspace": "dt-b28-denyhole",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/adapters/adapter-pi.mjs:157",
+  "summary": "The comment still cites the builder's deny as \"Task,Agent\", so a maintainer grepping that string lands on it and concludes the builder is not denied Workflow; the file is outside files_in_scope, so the fix is deferred work."
+ },
+ {
+  "lane": "b28-denyhole",
+  "workspace": "dt-b28-denyhole",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/crew.mjs:73-89",
+  "summary": "The FANOUT_TOOLS paragraph is appended with no blank line to the 27-line SEAT_DEFAULTS block comment, so a reader going top-down reads the declaration's docstring as a continuation of the seat docs rather than as the doc for the one edit point this change exists to create."
+ },
+ {
+  "lane": "b28-denyhole",
+  "workspace": "dt-b28-denyhole",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/crew.mjs:1055",
+  "summary": "A crew booted before this lands keeps deny: 'Task,Agent' in its crew.json and crew/headless.mjs:235 rebuilds --disallowedTools from that stored value, so an already-live builder can still fan out until re-boot; the defense (crew.json is written fresh at boot, crews are per-task) holds, so this is recorded, not work."
+ },
+ {
+  "lane": "b86-docs-r2",
+  "workspace": "dt-b86-docs",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "/Users/x/.crew/dt-b86-docs/b86-docs-r2/task/plan.md:13",
+  "summary": "Acceptance criterion 13 demands git diff --numstat 21/11 for the ADR, but the plan's own byte-identical reference measures 20/10, so criteria 13 and 14 cannot both hold — the lead could bounce a correct build on it."
+ },
+ {
+  "lane": "b86-docs-r2",
+  "workspace": "dt-b86-docs",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "docs/adr/adr-030-acceptance-authorship.md:143",
+  "summary": "Deferred work the plan itself flagged: ADR-030's citations outside section 10 stay falsified — crew/drive.mjs:595-603, cited as the gate-reverify path, now resolves to re-ask id-rejection code, so a reader auditing Decision 2 lands on unrelated code."
+ },
+ {
+  "lane": "46-tier-boot",
+  "workspace": "dev-team-wt46e",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:616",
+  "summary": "A duplicate tier request overwrites the active crew's crew.json before the later run-active refusal."
+ },
+ {
+  "lane": "46-tier-boot",
+  "workspace": "dev-team-wt46e",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:614",
+  "summary": "Raw task equality misses slug aliases, allowing a duplicate tier boot to overwrite an active crew before run-active is raised."
+ },
+ {
+  "lane": "251-variants",
+  "workspace": "dev-team-wt251",
+  "dispatch": "d10",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:1331",
+  "summary": "The scout brief is joined with a literal backslash-n instead of a newline, so a real scout run hands the planner seat a single run-on line in which the heading, the no-write prohibition and the itemised envelope contract are fused together; drive.test.mjs:3489 and gate C12 only do substring includes(), so the mangling is invisible to the suite."
+ },
+ {
+  "lane": "251-variants",
+  "workspace": "dev-team-wt251",
+  "dispatch": "d10",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/crew.test.mjs:1235",
+  "summary": "The drift tripwire's first loop asserts its own guard condition and can never fail, so removing a variant from VARIANTS while leaving its stale key in VARIANT_STAGE_PHASES keeps the test green and leaves realio mapping a stage head no shape can emit."
+ },
+ {
+  "lane": "251-variants",
+  "workspace": "dev-team-wt251",
+  "dispatch": "d10",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/realio.mjs:154",
+  "summary": "VARIANT_STAGE_PHASES[head] is an unguarded property read, so phaseForStage('toString:r1') returns a function that would flow into emitter.phaseTransition — unreachable today only because stage() now refuses undeclared heads; hasOwnProperty guards it in one line, the convention ledger.mjs:171 already uses."
+ },
+ {
+  "lane": "45-breaker",
+  "workspace": "dev-team-wt45c",
+  "dispatch": "d7",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/crew.mjs:481",
+  "summary": "An injected opener defaults existsSync to true, so a fresh nonexistent DB is opened/created instead of using the required closed no-open path."
+ },
+ {
+  "lane": "45-breaker",
+  "workspace": "dev-team-wt45c",
+  "dispatch": "d7",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/crew.mjs:430",
+  "summary": "The unplanned environment snapshot can apply stale breaker configuration while bootCmd awaits adapter resolution."
+ },
+ {
+  "lane": "45-breaker",
+  "workspace": "dev-team-wt45c",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/crew.mjs:470",
+  "summary": "An injected opener forces existsSync true, so a nonexistent ledger with failed fake rows wrongly rejects instead of taking the required fresh-install closed path."
+ },
+ {
+  "lane": "45-breaker",
+  "workspace": "dev-team-wt45c",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/breaker.mjs:119",
+  "summary": "A date-unrepresentable but Number.isInteger window reaches toISOString and throws raw RangeError without naming CREW_BREAKER_WINDOW_MS."
+ },
+ {
+  "lane": "45-breaker",
+  "workspace": "dev-team-wt45c",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/crew.mjs:425",
+  "summary": "The unplanned environment snapshot can apply stale breaker configuration if an embedding changes env while bootCmd awaits adapter resolution."
+ },
+ {
+  "lane": "b101-envaccept",
+  "workspace": "dt-b101-envaccept",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/drive.mjs:60",
+  "summary": "ENVELOPE_REFUSAL_REASONS is frozen but nothing enforces membership at the refuse() site, so a later refusal branch minting an off-set reason ships [field-order] into escalation.why unnoticed and the frozen export stops being the set of reasons that occur."
+ },
+ {
+  "lane": "b61-sweep-refusals",
+  "workspace": "dt-b61-refusals",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:1800",
+  "summary": "A board-fetch failure defaults considered to 0 and renders the false claim that the Ready column held nothing to refuse."
+ },
+ {
+  "lane": "142-growth",
+  "workspace": "dev-team-wt142",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:558",
+  "summary": "An omitted gate_path is undefined, so JSON journal serialization drops gate_path_rejected and loses the required rejection evidence."
+ },
+ {
+  "lane": "60-memory-seam",
+  "workspace": "dev-team-wt60",
+  "dispatch": "d6",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/crew.mjs:291-297",
+  "summary": "A bare --memory-budget-bytes flag becomes true and Number(true) yields a one-byte budget rather than the required invalid-budget fallback."
+ },
+ {
+  "lane": "60-memory-seam",
+  "workspace": "dev-team-wt60",
+  "dispatch": "d8",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/crew.mjs:318-324",
+  "summary": "When a valid tiny budget leaves no rendered section, the journal skips all over-budget drops and falsely records dropped: 0."
+ },
+ {
+  "lane": "b125-entryrefusal",
+  "workspace": "dt-b125-entryrefusal",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/emit.mjs:1375",
+  "summary": "The unknown flag --__proto__ is lost through the plain-object setter, so stats succeeds at exit 0 instead of refusing it."
+ },
+ {
+  "lane": "b125-entryrefusal",
+  "workspace": "dt-b125-entryrefusal",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "scripts/factory/emit.mjs:1352",
+  "summary": "A prototype-named unknown verb with a flag calls accepted.has on an inherited non-Set, leaks a TypeError stack, and exits 1 rather than 2."
+ },
+ {
+  "lane": "253-repair-dispatch",
+  "workspace": "wt-253-repair",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ci-repair.mjs:274-308",
+  "summary": "A preflight-failed crew subprocess leaves the prior returns/task.json in place, and dispatchRepair records that stale status:done envelope as a successful repair instead of unreadable."
+ },
+ {
+  "lane": "205-regrant",
+  "workspace": "205-regrant",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV3-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:865",
+  "summary": "If the started-record append fails after the continuation forks, the untracked detached child can later overwrite restored task.json despite terminal fallback settlement."
+ },
+ {
+  "lane": "205-regrant",
+  "workspace": "205-regrant",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:656",
+  "summary": "A prior child exit/error callback can orphan the newly forked continuation when poll observes the eligible envelope before the old child exits."
+ },
+ {
+  "lane": "205-regrant",
+  "workspace": "205-regrant",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:624",
+  "summary": "A regrant registry append failure after unlinking task.json loses the terminal envelope, leaving the fallback settlement unreadable as pending."
+ },
+ {
+  "lane": "205-regrant",
+  "workspace": "205-regrant",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:648",
+  "summary": "A failed continuation fork is returned by pump rather than thrown, so regrant reports success after deleting task.json and leaves the task orphaned without a terminal result."
+ },
+ {
+  "lane": "205-regrant",
+  "workspace": "205-regrant",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/daemon.test.mjs:779",
+  "summary": "A SIGCONT/SIGSTOP mutant passes because every nonzero signal is treated as death, while a live continuation could later overwrite the restored escalation."
+ },
+ {
+  "lane": "b146-shadowpick",
+  "workspace": "dt-b146-shadowpick",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/crew.mjs:967",
+  "summary": "With --model-reviewer openai-codex/gpt-5.6-luna, the actual boot seat is raw/null while shadow.seated falsely reports the displaced openai/gpt-5.6-terra roster cell."
+ },
+ {
+  "lane": "71-arms",
+  "workspace": "dev-team-wt71b",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/arms.mjs:186",
+  "summary": "A post-crash append joins a torn no-LF tail, losing that valid arm and making a later append refuse the whole manifest."
+ },
+ {
+  "lane": "71-arms",
+  "workspace": "dev-team-wt71b",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/arms.mjs:247",
+  "summary": "A minimally truncated tail such as `{` becomes an interior manifest-unreadable line after a later successful append, so collection still fails."
+ },
+ {
+  "lane": "b72-readout",
+  "workspace": "dt-b72-readout",
+  "dispatch": "d4",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "scripts/factory/ledger.mjs:3158",
+  "summary": "Two malformed adjudications for different findings in one dispatch both emit only 'dispatch d1', so the operator cannot identify which finding/ref each incomplete entry concerns."
+ },
+ {
+  "lane": "b75-diag",
+  "workspace": "dt-b75-diag",
+  "dispatch": "d9",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/drive.mjs:967-973",
+  "summary": "A gate printing `FAIL cache:why` (colon, no following space) is rejected by checkFailureLine and by the new detector, so the reader still gets `printed no \"FAIL cache\" line` although the label is on a line — the plan's deliberate seam; CHECK_LABEL forbids a colon in a declared label, and widening the detector would re-open the D3/D4 contract, so the remedy is out of this slice."
+ },
+ {
+  "lane": "b75-diag",
+  "workspace": "dt-b75-diag",
+  "dispatch": "d9",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/drive.mjs:959-960",
+  "summary": "The byte-prescribed comment block was re-wrapped by one word (`match` / `a \\`FAIL cache-v2\\` line` instead of `match a` / `\\`FAIL cache-v2\\` line`); no consequence — D2's find is the code line `!/^[A-Za-z0-9._:-]/.test(rest)` and it still applies and reddens D2, and D6's seven literals all live in the test file."
+ },
+ {
+  "lane": "intake-dispatch",
+  "workspace": "wt-intake-dispatch",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:165",
+  "summary": "A stale fetched Ready item can already be In review or Done; the tautological option check still mutates it to In progress and boots a duplicate crew."
+ },
+ {
+  "lane": "47-compiler",
+  "workspace": "dev-team-wt47",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/make-brief.mjs:646-650",
+  "summary": "A nested --checkout/default cwd is accepted but analyzes only that subtree, yielding an unknown baseline and missing root-level tripwire tests."
+ },
+ {
+  "lane": "47-compiler",
+  "workspace": "dev-team-wt47",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "scripts/factory/make-brief.mjs:632-637",
+  "summary": "--out on an existing directory with --force throws EISDIR and returns exit 1 instead of a tagged exit-2 usage refusal."
+ },
+ {
+  "lane": "47-compiler",
+  "workspace": "dev-team-wt47",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "test/factory-make-brief.test.mjs:166-180",
+  "summary": "The combined code-key fixture can pass when non-path keys no longer contribute tripwire hits, because its test already matches the module path."
+ },
+ {
+  "lane": "47-compiler",
+  "workspace": "dev-team-wt47",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-4",
+  "severity": "should-fix",
+  "location": "test/factory-make-brief.test.mjs:209-223",
+  "summary": "The fences test never asserts ordering, so removing the required sort still leaves all of its assertions green."
+ },
+ {
+  "lane": "47-compiler",
+  "workspace": "dev-team-wt47",
+  "dispatch": "d5",
+  "verdict": "pass",
+  "id": "RV2-1",
+  "severity": "consider",
+  "location": "scripts/factory/make-brief.mjs:365",
+  "summary": "Direct discoverTripwires() calls with a nested Git directory still miss root-level tripwires, although main() normalizes the public CLI path."
+ },
+ {
+  "lane": "b25-grant-and-load",
+  "workspace": "dt-b25-grant-and-load",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/crew.mjs:599",
+  "summary": "A pi planner granted an agent definition but no extension is refused with 'crew/capabilities.json grants seat planner nothing that delivers it (tools: [...], agents: [...])' — a fixed string whose 'nothing' claim contradicts the non-empty agents grant the operator sees in the file, and which never names the missing extension or what to grant."
+ },
+ {
+  "lane": "b25-grant-and-load",
+  "workspace": "dt-b25-grant-and-load",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "test/visualizer-roster-edit.test.mjs:166",
+  "summary": "With roles.planner.tools withheld, the propose-only roster editor accepts a claude planner cell (grant-free 3-arg assertCapabilities) while boot refuses it via effectiveCapabilities, and the test named for propose/boot agreement compares roster-edit only against the same grant-free path, so it stays green; deliberate per crew/crew.mjs:344-348, unreachable with the shipped register, and the remedy needs visualizer/ which is out of fence."
+ },
+ {
+  "lane": "b25-grant-and-load",
+  "workspace": "dt-b25-grant-and-load",
+  "dispatch": "d10",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/crew.test.mjs:2357",
+  "summary": "The regex escape in the loadPolicy test builds a character class that closes early and a replacement with one backslash too many, so it is inert for today's metacharacter-free values but would silently produce a loose regex (e.g. new RegExp('1.5.2') matching '1x5y2') if a value with a metacharacter were ever added."
+ },
+ {
+  "lane": "b19-shopfloor-skeleton",
+  "workspace": "dt-b19-shopfloor-skeleton",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/App.svelte:135",
+  "summary": "Escalated rail rows show only where; an escalation why is hidden in a hover title instead of visibly pinned above the fleet."
+ },
+ {
+  "lane": "b19-shopfloor-skeleton",
+  "workspace": "dt-b19-shopfloor-skeleton",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/App.svelte:45",
+  "summary": "Overlapping refresh generations each launch six workers, so slow return probes can exceed the required global six-request concurrency bound."
+ },
+ {
+  "lane": "b19-shopfloor-skeleton",
+  "workspace": "dt-b19-shopfloor-skeleton",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "test/visualizer-shape.test.mjs:173; test/visualizer-panels.test.mjs:359",
+  "summary": "Required in-repo theme/RoleTag source tripwires and route #/trailing-slash cases are absent, leaving later regressions able to pass npm test."
+ },
+ {
+  "lane": "b48-mutation-contract",
+  "workspace": "dt-b48-mutation-contract",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/make-brief.mjs:148-149",
+  "summary": "The rendered standing block uses a different newline than the plan's required verbatim literal, so a byte-for-byte contract/snapshot comparison fails."
+ },
+ {
+  "lane": "193-runset",
+  "workspace": "193-runset",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1883-1893",
+  "summary": "An active agent with no measured billed fields is reported in top-level usage as four zero token totals rather than unmeasured."
+ },
+ {
+  "lane": "193-runset",
+  "workspace": "193-runset",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1871",
+  "summary": "A trailing --until has no value but is accepted as an open-ended window, silently including runs after the intended cutoff."
+ },
+ {
+  "lane": "193-runset",
+  "workspace": "193-runset",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "docs/ledger-queries.md:18",
+  "summary": "The generic placeholder instruction incorrectly directs users to replace the new <iso> placeholders with an adw_id or task slug."
+ },
+ {
+  "lane": "b136-sandboxtrip",
+  "workspace": "dt-b136-sandboxtrip",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "test/factory-env.test.mjs:449",
+  "summary": "The regression fixture joins statements with a literal backslash-n, leaving an invalid one-line pseudo-module instead of the required valid two-line bypass source."
+ },
+ {
+  "lane": "b136-sandboxtrip",
+  "workspace": "dt-b136-sandboxtrip",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "test/factory-env.test.mjs:313,321",
+  "summary": "A temp marker present only in an assignment comment or string is restored from original source and can falsely credit an arbitrary ledger path as sandboxed."
+ },
+ {
+  "lane": "b136-sandboxtrip",
+  "workspace": "dt-b136-sandboxtrip",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "test/factory-env.test.mjs:329-335",
+  "summary": "Passing daemon a variable whose object contains budget removes the home-default door because the call span does not literally contain the word budget."
+ },
+ {
+  "lane": "variant-daemon",
+  "workspace": "wt-variant-daemon",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/daemon.mjs:286-287",
+  "summary": "Out-of-plan, unforced comment rewrite dropped the 'realio.mjs:16' pointer from PANE_TRANSPORT's deliberate-duplication note, so the next reader auditing that the two copies still agree has no file:line to jump to; the firewall check runs on comment-stripped source and no criterion greps for realio, so the original text was already passing."
+ },
+ {
+  "lane": "variant-daemon",
+  "workspace": "wt-variant-daemon",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/daemon.mjs:821-822",
+  "summary": "The bootTierCrew comment lost the words 'drive.mjs' — an out-of-plan edit the builder could not avoid, since plan criterion 4's raw grep and Changes section 3's 'Nothing else' contradict each other; recorded so the deviation is on the record, and the builder's resolution toward the measurable criterion looks right."
+ },
+ {
+  "lane": "variant-daemon",
+  "workspace": "wt-variant-daemon",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/drive.mjs:1459-1470",
+  "summary": "A daemon-dispatched 'repair' run reaches the driver with ctx.variant set and then escalates at escalate:triage because ctx.files_in_scope still does not travel the daemon, so the selector ships complete while the shape it selects cannot yet finish from a dispatch; the remedy needs the field's source decided, which the brief defers to #253."
+ },
+ {
+  "lane": "variant-daemon",
+  "workspace": "wt-variant-daemon",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "scripts/factory/ledger.mjs:146-150",
+  "summary": "The RUN_VARIANTS mirror comment still names crew/drive.mjs as the source of truth after the declarations moved to crew/variants.mjs — imprecise, not wrong; the live deepEqual pin at test/factory-ledger.test.mjs:1352-1355 stays green, and the file is sibling-owned and outside files_in_scope."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d7",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/PhaseGantt.svelte:23",
+  "summary": "Bounce paths use track-relative block coordinates in an SVG spanning the identity column, shifting every connector left so it does not attach to its blocks."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d7",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/PhasePanel.svelte:46",
+  "summary": "A valid gate retry suppresses checks_pending for a malformed retry on the same phase, silently hiding recorded malformed gate evidence."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d7",
+  "verdict": "changes-needed",
+  "id": "RV1-6",
+  "severity": "consider",
+  "location": "visualizer/web/src/App.svelte:108",
+  "summary": "App still omits onphase, so click-selected phases do not update the hash; an out-of-scope routing follow-up remains necessary for copyable links."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/PhaseGantt.svelte:19",
+  "summary": "A lane-1 phase followed by lane-0 is rendered under swapped role/model headers because geometry and identities are joined by array position."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/PhaseGantt.svelte:12",
+  "summary": "When two gate generations map to one phase, markerFor(...).find renders only the first marker and hides later gate proof."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/trace.js:266",
+  "summary": "A retried gate loses all earlier checks_json items because phasePanel keeps only the last gate-results row for its phase."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-4",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/trace.js:204",
+  "summary": "Lead evidence is unfiltered and reused for every accept decision without joining against reviewer finding IDs, so stale evidence is falsely attributed."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-5",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/PhaseGantt.svelte:36",
+  "summary": "Bounces render as a detached text list rather than connectors between their named review and build blocks."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-6",
+  "severity": "consider",
+  "location": "visualizer/web/src/App.svelte:108",
+  "summary": "App omits onphase, so click-selected phases do not update the hash; the out-of-scope routing follow-up remains necessary for copyable links."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV3-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/trace.js:192",
+  "summary": "Plain-string lead residuals lose their text (and are filtered out when reviewer finding IDs exist), so real return-envelope evidence is not rendered."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV3-2",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/trace.js:230",
+  "summary": "cosmetic_count is excluded from evidence_pending, leaving a recorded nonzero cosmetic count with an unexplained empty evidence area."
+ },
+ {
+  "lane": "b20-shopfloor-trace",
+  "workspace": "dt-b20-shopfloor-trace",
+  "dispatch": "d11",
+  "verdict": "changes-needed",
+  "id": "RV1-6",
+  "severity": "consider",
+  "location": "visualizer/web/src/App.svelte:108",
+  "summary": "App still omits onphase, so click-selected phases do not update the hash; an out-of-scope routing follow-up remains necessary for copyable links."
+ },
+ {
+  "lane": "206-panel",
+  "workspace": "206-panel",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:1215",
+  "summary": "A valid changes-needed reviewer envelope with omitted optional findings is fused as empty; a passing partner and closes_class:true then produce pass/commit instead of the single-review bounce."
+ },
+ {
+  "lane": "206-panel",
+  "workspace": "206-panel",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.test.mjs:2776",
+  "summary": "No repository regression test covers dismissed divergence dissent propagation or closes_class:false, so either acceptance behavior can regress while npm test remains green."
+ },
+ {
+  "lane": "206-panel",
+  "workspace": "206-panel",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:1296",
+  "summary": "A changes-needed reviewer A without optional typed findings is still upgraded to pass when an upheld partner should-fix makes the fused set nonempty, dropping A's reported must-fix."
+ },
+ {
+  "lane": "206-panel",
+  "workspace": "206-panel",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "should-fix",
+  "location": "crew/drive.test.mjs:2766",
+  "summary": "No repository test pins the required non-continuation assignment and written-brief set against the ordinary path, so that acceptance behavior can regress while npm test stays green."
+ },
+ {
+  "lane": "47-tier",
+  "workspace": "dev-team-wt47b",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/make-brief.mjs:570",
+  "summary": "With a file-only verified where and empty candidates, directoryWhere incorrectly contains that file path, falsely reporting it as a directory."
+ },
+ {
+  "lane": "241-refresh",
+  "workspace": "dev-team-wt241",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/roster-refresh.mjs:126",
+  "summary": "Calling renderReport without seatedCount on a diff with removed models filters that category out, silently hiding it despite the promised compatible old call shape."
+ },
+ {
+  "lane": "fence-crosscheck",
+  "workspace": "dt-b18-fence-crosscheck",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/make-brief.mjs:793",
+  "summary": "Acknowledging ci-repair.mjs lets the real ci-watch lane return with ledger.mjs still unfenced, so one acknowledgement mutes another excluded coupled source."
+ },
+ {
+  "lane": "fence-crosscheck",
+  "workspace": "dt-b18-fence-crosscheck",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "test/factory-make-brief.test.mjs:85-92,923-929",
+  "summary": "broadSources creates test files and runs without a fence, so a pre-cutoff coupling regression for non-test callers would still pass."
+ },
+ {
+  "lane": "b38-reclaim",
+  "workspace": "dt-b38-reclaim",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "scripts/factory/ledger.mjs:1810",
+  "summary": "recordSeatReclaim coerces phase_id/owner_pid/root_pid/root_pgid with `Number(x) || 0`, so the teardown verb (which opens no phase, phase_id null) writes seat_teardowns.phase_id NULL and seat_reclaims.phase_id 0 for the same event, and a marker with no owner.pid is stored as owner_pid 0 — `WHERE ... IS NULL` can never find the unmeasured rows, unlike the sibling writer recordSeatTeardown at :1779,1784."
+ },
+ {
+  "lane": "b38-reclaim",
+  "workspace": "dt-b38-reclaim",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/realio.mjs:655",
+  "summary": "The post-SIGTERM re-verify tests `!rebound.signalable` before the reason, and every non-DEAD refuse() in verifyGroup sets signalable false, so line 656 is unreachable and an unmeasured re-verify would be booked as identity_refused/'evidence-mismatch' — unreachable today (beforeKill.ok asserted at :652, invalid-pgid already filtered at :639, real process.kill throws only ESRCH/EPERM) but observable once a test injects deps.kill throwing another errno."
+ },
+ {
+  "lane": "b38-reclaim",
+  "workspace": "dt-b38-reclaim",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/realio.mjs:60",
+  "summary": "RV3-4 carried forward deliberately: markLocallySettledGroup swaps process.kill process-wide to forge ESRCH for one settled root pgid, so a same-pgid foreign-uid member still running reads as gone; bounded to one synchronous stack, one pgid, gated on processIsZombie and the exact bound row, and unable to touch descendant groups since escapedDescendants excludes row.pgid === root.pgid — the honest fix (a ps-proved single-member group) needs its own slice."
+ },
+ {
+  "lane": "viz-intake",
+  "workspace": "wt-viz-intake",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/server/shape.mjs:341",
+  "summary": "A normal stop-switch parked sweep is shown as a zero-count refusal while its reason, including a redacted one, is absent from the rendered board."
+ },
+ {
+  "lane": "viz-intake",
+  "workspace": "wt-viz-intake",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "visualizer/web/src/lib/IntakePanel.svelte:31",
+  "summary": "Two different boards may validly pick at the same timestamp, producing duplicate Svelte keys and hiding or breaking one pick row."
+ },
+ {
+  "lane": "viz-intake",
+  "workspace": "wt-viz-intake",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/lib/IntakePanel.svelte:48",
+  "summary": "A redacted sweep plus a redacted refusal intentionally produce two unmerged rows with the same reason, but the keyed each rejects that valid duplicate key."
+ },
+ {
+  "lane": "b129-watchtunables",
+  "workspace": "dt-b129-watchtunables",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "test/factory-crew-watch.test.mjs:260",
+  "summary": "A regression accepting negative --load-per-core values would pass the committed in-scope tests because the plan-required -1 case is omitted."
+ },
+ {
+  "lane": "b119-metrics",
+  "workspace": "dt-b119-metrics",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/App.svelte:49",
+  "summary": "An archived ok run with an escalation task envelope is never probed, so the mounted strip reports 0% instead of 50%."
+ },
+ {
+  "lane": "b119-metrics",
+  "workspace": "dt-b119-metrics",
+  "dispatch": "d6",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "visualizer/web/src/App.svelte:49-67",
+  "summary": "With 20,654 addressable sessions and active polling, each all-session envelope probe is superseded before completion and discarded, leaving the strip at 0%."
+ },
+ {
+  "lane": "b45-zombie-liveness",
+  "workspace": "dt-b45-zombie-liveness",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/realio.mjs:166",
+  "summary": "An escaped descendant that dies unreaped is no longer captured, so its live grandchild — re-parented to init and therefore unreachable by the ppid walk — leaves pgid 42 with no anchor, no group and no sweep, surviving past run end; measured: escapedDescendants returns [] on this tree and [{pid:11,pgid:42}] pre-change."
+ },
+ {
+  "lane": "b45-zombie-liveness",
+  "workspace": "dt-b45-zombie-liveness",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/realio.mjs:508",
+  "summary": "settleZombieRootPeers escalates SIGTERM to SIGKILL with no root re-binding, so if a SIGTERM-trapping peer exhausts the poll and the driver reaps zombie root pid 41 in that window, a recycled pgid 41 reads as a surviving peer and SIGKILL lands on an unrelated process group — both sibling ladders (:607-613, :749-751) re-verify identity before this rung."
+ },
+ {
+  "lane": "b45-zombie-liveness",
+  "workspace": "dt-b45-zombie-liveness",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "crew/realio.mjs:528",
+  "summary": "The Darwin EPERM reaping shim returns DEAD without zombie:true, so settleSeatRoots:565 records already-dead and silently skips the new peer ladder; the defense I think could fail is the unstated assumption that EPERM only fires for a zombie-only group."
+ },
+ {
+  "lane": "b45-zombie-liveness",
+  "workspace": "dt-b45-zombie-liveness",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "crew/reclaim-descendants.test.mjs:288",
+  "summary": "T8 assumes psSnapshot's spawnSync will not reap the killed child through its nested libuv loop; on a slower CI box the row disappears before ps runs and the test reds with 'disappeared before its zombie row was measured'."
+ },
+ {
+  "lane": "b45-zombie-liveness",
+  "workspace": "dt-b45-zombie-liveness",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-5",
+  "severity": "consider",
+  "location": "crew/realio.mjs:1400",
+  "summary": "Change 9 also advances live-root group TERM/KILL from teardownCore (done && !keep) to every run end, so an escalation or --keep run now kills a still-running seat root's group; defensible because those roots are detached headless shells rather than panes, but undiscussed in the plan."
+ },
+ {
+  "lane": "b39-review-economics",
+  "workspace": "dt-b39-review-economics",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/drive.mjs:25",
+  "summary": "The LIMITS gloss still reads `review_rounds: 2, // reviewer verdicts` while the budget now counts charged revise verdicts, so an operator cannot reconcile a journal showing two review_round rows and charged 1 — weak because a pass is terminal and unreadable rounds were already refunded, leaving the implied dispatch bound unchanged."
+ },
+ {
+  "lane": "b39-review-economics",
+  "workspace": "dt-b39-review-economics",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/drive.mjs:2560",
+  "summary": "`const roundNo = reviews + 1` derives the round label from the charge counter, so any future non-terminal free round would reuse `review:rN` and overwrite review-brief-N.md; unreachable today because pass breaks out at :2607 and the unreadable re-ask is measured byte-identical to HEAD."
+ },
+ {
+  "lane": "b91-watch",
+  "workspace": "dt-b91-watch",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/crew-watch.mjs:72",
+  "summary": "Passing --events as an explicit empty argument silently enables DEFAULT_EVENTS instead of refusing the required empty event list."
+ },
+ {
+  "lane": "b94-daemon-r2",
+  "workspace": "dt-b94-daemon",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/child.mjs:183",
+  "summary": "A real SIGTERM during synchronous preflight is suppressed until normal done settlement, so daemon reap never records the required signalled teardown envelope."
+ },
+ {
+  "lane": "b94-daemon-r2",
+  "workspace": "dt-b94-daemon",
+  "dispatch": "d6",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/child.mjs:267",
+  "summary": "A reaped continuation can receive SIGTERM before arm(), exit without settlement, and leave no signalled envelope or seat teardown."
+ },
+ {
+  "lane": "profile-compiler",
+  "workspace": "wt-prof-compiler",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "test/factory-make-brief.test.mjs:539",
+  "summary": "The nested-checkout compiler spawn omits DEVTEAM_FACTORY_DIR, so a host local__26-nested-checkout profile can change the fixture lane and make the test host-dependent."
+ },
+ {
+  "lane": "refutation-substance",
+  "workspace": "dt-b18-refutation-substance",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.test.mjs:1279",
+  "summary": "The gh/commits assertions in 'the build-exhaustion must-fix refusal bypasses convergence' (:1279) and 'the converge seam does not swallow a refuted must-fix' (:1355) are vacuous — exhaustionAcceptIo's planEnv declares no gate_cmd, so convergeSettle returns null at crew/drive.mjs:1055 regardless of the guard; a later change routing the refusal through the !ok converge path while keeping a distinct `where` would file the wrongly-refuted must-fix as an issue and COMMIT the build with the whole suite and the gate still green (measured: gate-carrying fixture gives gh=2 commits=1 under that mutation, the test fixture gives gh=0 commits=0)."
+ },
+ {
+  "lane": "refutation-substance",
+  "workspace": "dt-b18-refutation-substance",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:1382",
+  "summary": "Three existing fail-closed tests (:1382, :1394, :1408) had RV1-1's refutation evidence rewritten from 'not real' to '   ' — forced by the new behaviour and each test still pins its own error, but it is three more touched tests than the plan named and the builder's return does not disclose it."
+ },
+ {
+  "lane": "refutation-substance",
+  "workspace": "dt-b18-refutation-substance",
+  "dispatch": "d11",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/drive.test.mjs:1391",
+  "summary": "Three existing fail-closed tests (:1391, :1403, :1418) still have RV1-1's refutation evidence rewritten from 'not real' to '   ' — forced by the new behaviour and each test still pins its own error, but it is three more touched tests than the plan named and neither builder return discloses it."
+ },
+ {
+  "lane": "174-runner-imports",
+  "workspace": "dev-team-wt174b",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.test.mjs:106-115",
+  "summary": "A future enqueue() can add void import('./crew.mjs'); the firewall passes even though that runtime path loads the runner through the barrel."
+ },
+ {
+  "lane": "174-runner-imports",
+  "workspace": "dev-team-wt174b",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.test.mjs:106",
+  "summary": "Adding import './crew.mjs' is omitted by the matcher, so the test passes while daemon startup loads drive.mjs and realio.mjs through the barrel."
+ },
+ {
+  "lane": "65-questions",
+  "workspace": "65-questions",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:401",
+  "summary": "An empty first q1 answer makes a later usable q1 answer a duplicate, so the member receives UNANSWERED and loses an avoidable round."
+ },
+ {
+  "lane": "65-questions",
+  "workspace": "65-questions",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:297",
+  "summary": "A Proxy array with a throwing length coercion makes the promised total helpers throw rather than reject or return empty lines."
+ },
+ {
+  "lane": "intake-select",
+  "workspace": "wt-intake-select",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:176",
+  "summary": "A raw GraphQL response puts rateLimit under data, but the normalizer reads only response.rateLimit, so a below-floor first page can be selected from instead of parked."
+ },
+ {
+  "lane": "252-probe",
+  "workspace": "dev-team-wt252",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/probe-repo.mjs:863",
+  "summary": "Omitting checkout from exported writeProfile bypasses containment and writes an explicit out path into the probed checkout."
+ },
+ {
+  "lane": "252-probe",
+  "workspace": "dev-team-wt252",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "test/factory-probe-repo.test.mjs:199",
+  "summary": "The required two-test baseline unit fixture is only one test, so a hard-coded count of 1 passes the unit lane."
+ },
+ {
+  "lane": "252-probe",
+  "workspace": "dev-team-wt252",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "test/factory-probe-repo.test.mjs:398",
+  "summary": "The CLI test never invokes --save alone, so a no-op save branch would remain untested."
+ },
+ {
+  "lane": "252-probe",
+  "workspace": "dev-team-wt252",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/probe-repo.mjs:778",
+  "summary": "An invalid human-edited ratified cell, including a null value, is accepted by requireField and can be preserved through re-probing."
+ },
+ {
+  "lane": "252-probe",
+  "workspace": "dev-team-wt252",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-2",
+  "severity": "should-fix",
+  "location": "scripts/factory/probe-repo.mjs:912",
+  "summary": "An explicit empty --out bypasses validation, returns success, and prints or saves instead of refusing invalid CLI usage."
+ },
+ {
+  "lane": "b26-intake-loop",
+  "workspace": "dt-b26-intake-loop",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:1174",
+  "summary": "A STOP created after the loop check but before intakeRun's inner intakeSweep check yields stopped:false and a swept:true parked tick with no fetch, interrupting an admitted sweep."
+ },
+ {
+  "lane": "199-returns",
+  "workspace": "199-returns",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:655",
+  "summary": "After a recorded regrant's continuation fork fails, restart folds the a2 path and reports the already-settled escalation as pending/working."
+ },
+ {
+  "lane": "199-returns",
+  "workspace": "199-returns",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:974",
+  "summary": "A settled run using the allowed task.json override lets a later run overwrite its only envelope, so result(firstRun) returns the later run."
+ },
+ {
+  "lane": "199-returns",
+  "workspace": "199-returns",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "task/plan-round2.md:108",
+  "summary": "The plan requires a five-check gate summary, but the repaired gate has six checks and emits total:6 even when green."
+ },
+ {
+  "lane": "199-returns",
+  "workspace": "199-returns",
+  "dispatch": "d6",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "crew/daemon.mjs:982",
+  "summary": "A case-variant or symlink task_return alias passes the string-only mirror check, so a later run can overwrite the first run's only envelope."
+ },
+ {
+  "lane": "199-returns",
+  "workspace": "199-returns",
+  "dispatch": "d6",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "task/plan-round2.md:108",
+  "summary": "The plan requires a five-check gate summary, but the repaired gate has six checks and emits total:6 even when green."
+ },
+ {
+  "lane": "nodefloor",
+  "workspace": "nodefloor",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": ".github/workflows/test.yml:13",
+  "summary": "A fake matrix token in a YAML comment makes the obsolete matrix test pass; removing only that nonfunctional comment makes npm test fail although the intended plain Node 24 job remains."
+ },
+ {
+  "lane": "nodefloor",
+  "workspace": "nodefloor",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/crew.test.mjs:1265",
+  "summary": "Adding a raw `node --test --test-timeout=30000` CI step alongside npm test passes this anchored guard even though it violates the required no-raw-lane rule."
+ },
+ {
+  "lane": "71-harvest",
+  "workspace": "71-harvest",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/harvest.mjs:144",
+  "summary": "A valid +run branch is parsed as a forced fetch of run, so an unrelated run ref can be written under refs/factory despite the checked pin."
+ },
+ {
+  "lane": "71-harvest",
+  "workspace": "71-harvest",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "crew/harvest.mjs:69",
+  "summary": "A Symbol adwId throws during template coercion before validation instead of returning adw-id-invalid."
+ },
+ {
+  "lane": "b29-pane-teardown",
+  "workspace": "dt-b29-pane-teardown",
+  "dispatch": "d9",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/crew.mjs:1303",
+  "summary": "No test or gate check holds the run path's auto-teardown wiring: dropping the { io } argument leaves teardownCore probing but journaling and recording nothing, and gate.mjs plus all 1506 tests stay green because every runCmd test passes keep: true on a headless-only crew."
+ },
+ {
+  "lane": "b29-pane-teardown",
+  "workspace": "dt-b29-pane-teardown",
+  "dispatch": "d9",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "docs/ledger-queries.md:33",
+  "summary": "The readout's prose still says a crew with no piped seats records its sweep in the journal rather than in seat_teardowns, so an operator reading it dismisses the new pane rows as impossible or reads a failed pane row as a leaked worker."
+ },
+ {
+  "lane": "b19-shopfloor-ledger",
+  "workspace": "dt-b19-shopfloor-ledger",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1114",
+  "summary": "A nonce-prefixed valid request is redacted out of JSONL args, so replayJsonl later refuses the missing required request and the live write can retain source without text."
+ },
+ {
+  "lane": "b19-shopfloor-ledger",
+  "workspace": "dt-b19-shopfloor-ledger",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1122",
+  "summary": "A crafted redacted recordSessionRequest JSONL entry bypasses redact() and is replayed into target JSONL with a nonce-prefixed adw_id."
+ },
+ {
+  "lane": "b118-flagrefusal",
+  "workspace": "dt-b118-flagrefusal",
+  "dispatch": "d3",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "scripts/factory/ledger.mjs:3062",
+  "summary": "sessions --__proto__ x exits 0 because the plain-object prototype setter hides the unknown flag from Object.keys."
+ },
+ {
+  "lane": "b116-degradedzero",
+  "workspace": "dt-b116-degradedzero",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "visualizer/server/server.mjs:189",
+  "summary": "After a corrupt triage sidecar latches aggregate feed health degraded, a healthy run-set row is incorrectly replaced by runs:null and a ledger-degraded absence marker."
+ },
+ {
+  "lane": "b49-adr-custody",
+  "workspace": "dt-b49-adr-custody",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "consider",
+  "location": "crew/README.md:283",
+  "summary": "crew/README.md:283 and :266 still say a failed proof bounces the planner for the single gate repair, so after this amendment the runtime README and ADR-030 disagree about gate custody; the file is outside files_in_scope so the fix is deferred work alongside the stale crew/drive.mjs:29 LIMITS comment."
+ },
+ {
+  "lane": "b49-adr-custody",
+  "workspace": "dt-b49-adr-custody",
+  "dispatch": "d8",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "docs/adr/adr-030-acceptance-authorship.md:128",
+  "summary": "Edit 3's find-block ended mid-line, leaving the one new prose line (111 chars) that breaks the file's ~78-column wrap; no gate or correctness consequence, noted only so a later editor knows the anomaly is a plan artifact and that reflowing this line alone is safe."
+ },
+ {
+  "lane": "b96-bootsweep",
+  "workspace": "dt-b96-bootsweep",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/crew.mjs:648",
+  "summary": "A failed final swept_at stamp leaves an active record but an optimistic clean summary, so boot writes crew.json instead of refusing."
+ },
+ {
+  "lane": "b87-grants-r2",
+  "workspace": "dt-b87-grants",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-1",
+  "severity": "should-fix",
+  "location": "crew/crew.test.mjs:3378",
+  "summary": "Plan T9 was not written: a later change to adapter-claude's grant handling could move the default claude planner's composed pane command with npm test still green, because the byte-for-byte pin exists only as gate check G6 in the task dir."
+ },
+ {
+  "lane": "b87-grants-r2",
+  "workspace": "dt-b87-grants",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "consider",
+  "location": "crew/capabilities.test.mjs:52",
+  "summary": "Plan T6 was not written: nothing composes bare-vs-granted subagent delivery over the shipped register in one place, so an effectiveCapabilities regression that ignored grants.extensions would be caught only indirectly by a crew-level test."
+ },
+ {
+  "lane": "b87-grants-r2",
+  "workspace": "dt-b87-grants",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-3",
+  "severity": "consider",
+  "location": "visualizer/server/roster-edit.mjs:210",
+  "summary": "The grant-blind roster pre-flight now refuses (ok:false) a proposal seating the planner on pi even though boot accepts it — fail-safe drift introduced by this change, remedy out of fence."
+ },
+ {
+  "lane": "b87-grants-r2",
+  "workspace": "dt-b87-grants",
+  "dispatch": "d6",
+  "verdict": "pass",
+  "id": "RV1-4",
+  "severity": "consider",
+  "location": "crew/adapters/adapter-pi.mjs:224",
+  "summary": "A granted pi planner composes --tools \"…,Task,agent\" carrying a Claude tool name pi does not implement; if pi rejects unknown --tools names the seat dies at launch and every pin asserts only the composed string."
+ },
+ {
+  "lane": "b36-repeat-escalation",
+  "workspace": "dt-b36-repeat-escalation",
+  "dispatch": "d3",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/intake.mjs:88",
+  "summary": "A valid 200-character task_slug is blindly sliced so a repeat-escalation refusal omits the second slug/timestamp, violating required evidence."
+ },
+ {
+  "lane": "repair-v2",
+  "workspace": "dev-team-wt-repair2",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "crew/drive.mjs:1496",
+  "summary": "The triage brief lines are joined with '\\\\n' (escaped backslash), so <taskDir>/repair-brief.md is written as one line of literal backslash-n text — the triage seat gets no heading, no inherited-scope bullet list and no return-contract block; the two assert.match pins match substrings inside that single line, so nothing catches it."
+ },
+ {
+  "lane": "repair-v2",
+  "workspace": "dev-team-wt-repair2",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:2137",
+  "summary": "if (finalRound()) became if (!plans || finalRound()), so a repair run whose builder leaves one stray out-of-scope file escalates at build round 1 with its remaining rounds unused, where a full run would bounce and recover — an edit plan.md 1(e) says does not happen, silently required by gate.mjs:308 and drive.test.mjs:3439-3448 (both script only builder:1), so the remedy needs the gate too."
+ },
+ {
+  "lane": "repair-v2",
+  "workspace": "dev-team-wt-repair2",
+  "dispatch": "d9",
+  "verdict": "changes-needed",
+  "id": "RV1-3",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:1533",
+  "summary": "Deleting `scope = asked` leaves the whole suite and all 20 gate checks green: both narrowing checks drive changed:['a.mjs'] and assert the commit is ['a.mjs'], which holds under the inherited scope too — the plan's Tests §6 second sub-case (narrowed scope with changed:['a.mjs','a.test.mjs'] escalating at scope) is missing and is what would kill the mutation."
+ },
+ {
+  "lane": "repair-v2",
+  "workspace": "dev-team-wt-repair2",
+  "dispatch": "d11",
+  "verdict": "pass",
+  "id": "RV1-2",
+  "severity": "should-fix",
+  "location": "crew/drive.mjs:2137",
+  "summary": "Still open from round 1: if (!plans || finalRound()) makes the shared scope gate variant-aware, so a repair run whose builder leaves one stray out-of-scope file escalates at build round 1 with its rounds unused while the lane gate below still bounces it three times — a divergence from plan.md 1(e) that is undocumented in both plan and code, and whose remedy needs the planner-owned gate.mjs:308 edited too, so it is the lead's decision rather than a defect the builder can close here."
+ },
+ {
+  "lane": "b25-intake-console",
+  "workspace": "dt-b25-intake-console",
+  "dispatch": "d7",
+  "verdict": "changes-needed",
+  "id": "RV2-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1657",
+  "summary": "A configured checkout containing the nonce marker is redacted out of a brake JSONL record, so replay rejects the missing required checkout/path fields."
+ },
+ {
+  "lane": "b25-intake-console",
+  "workspace": "dt-b25-intake-console",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:1661",
+  "summary": "A permitted nonce-prefixed actor is redacted out of JSONL, so replay fails and the brake record loses attribution."
+ },
+ {
+  "lane": "b25-intake-console",
+  "workspace": "dt-b25-intake-console",
+  "dispatch": "d5",
+  "verdict": "changes-needed",
+  "id": "RV1-2",
+  "severity": "must-fix",
+  "location": "test/visualizer-server.test.mjs:677",
+  "summary": "No planned T1–T3 tests landed, so the new candidate, brake, attribution, and replay paths have no in-repo regression coverage."
+ },
+ {
+  "lane": "b143-ledgercells",
+  "workspace": "dt-b143-ledgercells",
+  "dispatch": "d4",
+  "verdict": "changes-needed",
+  "id": "RV1-1",
+  "severity": "must-fix",
+  "location": "scripts/factory/ledger.mjs:3990",
+  "summary": "A --prices catalog with a model entry whose input/output rates are null is accepted, then Number(null) makes both rates zero and emits cost_usd: 0 with no absent marker for measured tokens."
+ }
+]

@@ -29,7 +29,7 @@ import {
   limitsCtx, limitsRecord, resolveBuildRounds, resolveLimits, resolvePlanRounds, resolveReviewRounds,
 } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
-import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString } from './adapters/adapter-claude.mjs'
+import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, paneUsageRecords } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import {
   cellFailureKind, paneAlive, paneProbe, seatIo, SUBSTRATE_MISSES_TO_DIE,
@@ -54,6 +54,7 @@ after(() => {
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
+const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
 // Hoisted: tests both above and below this point branch on it. Below the
 // ledger's Node floor the emitter degrades to JSONL and writes no database,
 // so a real-row assertion there would assert the absence of a feature.
@@ -252,16 +253,50 @@ test('FANOUT_TOOLS names every fan-out path once, and every denying seat withhol
   for (const role of ['planner', 'reviewer']) assert.equal(SEAT_DEFAULTS[role].deny, 'Edit,NotebookEdit')
 })
 
-test('adapter-claude.seatCommand is byte-identical to the pre-refactor paneCommand output', () => {
+test('adapter-claude.seatCommand pins the pane command with the per-seat usage settings path', () => {
   const SAMPLE = {
     role: 'builder', model: 'sonnet', promptFile: '/tmp/crew-task/role-builder.md',
     tools: 'Read,Edit,Write,Glob,Grep,Bash', deny: 'Task,Agent', taskDir: '/tmp/crew-task',
     bootBrief: 'Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait.',
   }
   // Captured from main BEFORE the adapter refactor — do not regenerate this
-  // from the new code; it is the compatibility bar.
-  const EXPECTED = 'env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" claude --model sonnet --permission-mode bypassPermissions --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."'
+  // from the new code; it is the compatibility bar, now including the
+  // independently derived per-seat usage settings path.
+  const EXPECTED = `env DEVTEAM_WORKER=1 CREW_ROLE=builder CREW_TASK_DIR="/tmp/crew-task" claude --model sonnet --permission-mode bypassPermissions --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Edit,Write,Glob,Grep,Bash" --disallowedTools "Task,Agent" --append-system-prompt-file "/tmp/crew-task/role-builder.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`
   assert.equal(seatCommand(SAMPLE), EXPECTED)
+})
+
+test('claude pane usage settings and reader stay pinned to the same side-channel path', () => {
+  const settings = JSON.parse(readFileSync(CLAUDE_USAGE_SETTINGS, 'utf8'))
+  assert.ok(settings.hooks && Array.isArray(settings.hooks.SessionStart))
+  assert.ok(settings.hooks && Array.isArray(settings.hooks.Stop))
+  const commandFor = (event) => settings.hooks[event][0]?.hooks?.[0]?.command || ''
+  for (const event of ['SessionStart', 'Stop']) {
+    assert.match(commandFor(event), /\$CREW_TASK_DIR\/usage\/\$CREW_ROLE\.jsonl/)
+  }
+  const taskDir = mkdtempSync(join(tmpdir(), 'claude-pane-usage-'))
+  try {
+    const usageDir = join(taskDir, 'usage')
+    mkdirSync(usageDir, { recursive: true })
+    const first = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
+    const second = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'
+    writeFileSync(join(usageDir, 'planner.jsonl'), [
+      JSON.stringify({ session_id: first, transcript_path: '/tmp/first.jsonl', hook_event_name: 'SessionStart' }),
+      '',
+      '{truncated',
+      JSON.stringify({ session_id: 'd1', transcript_path: '/tmp/bad.jsonl' }),
+      JSON.stringify({ session_id: second, transcript_path: 'relative.jsonl' }),
+      JSON.stringify({ session_id: second, transcript_path: '/tmp/second.jsonl' }),
+      JSON.stringify({ session_id: first, transcript_path: '/tmp/first-again.jsonl' }),
+    ].join('\n'))
+    assert.deepEqual(paneUsageRecords({ taskDir, role: 'planner' }), [
+      { session_id: first, transcript_path: '/tmp/first.jsonl' },
+      { session_id: second, transcript_path: '/tmp/second.jsonl' },
+    ])
+    assert.deepEqual(paneUsageRecords({ taskDir, role: 'missing' }), [])
+  } finally {
+    rmSync(taskDir, { recursive: true, force: true })
+  }
 })
 
 // #412 — the PERMANENT pin for the guarantee #403/#411 rests on. The task gate
@@ -286,13 +321,13 @@ test('the default claude planner pane command is pinned byte for byte across the
   // through adapter-claude's allowedTools() merge. Byte-for-byte, no exceptions.
   assert.equal(
     seatCommand({ ...PIN_SEAT, model: 'opus', grants: pinnedGrants(register, 'claude') }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write,Task" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
   )
   // UNGRANTED: the same seat with no grants at all composes a DIFFERENT command
   // (no Task), so the granted assertion above is not vacuous.
   assert.equal(
     seatCommand({ ...PIN_SEAT, model: 'opus', grants: EMPTY_GRANTS }),
-    'env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."',
+    `env DEVTEAM_WORKER=1 CREW_ROLE=planner CREW_TASK_DIR="/tmp/crew-task" claude --model opus --permission-mode bypassPermissions --settings "${CLAUDE_USAGE_SETTINGS}" --allowedTools "Read,Glob,Grep,Bash,Write" --disallowedTools "Edit,NotebookEdit" --append-system-prompt-file "/tmp/crew-task/role-planner.md" "Crew for task demo. Task dir /tmp/crew-task. Read your role in the system prompt, reply exactly ready: your-role, then wait."`,
   )
   // The load-bearing constraint of #403: the by_agent overlay never reaches the
   // claude planner, so stripping it from the register moves NOTHING.

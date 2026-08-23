@@ -1,3 +1,9 @@
+import { readFileSync as fsReadFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+export const PANE_USAGE_SETTINGS = fileURLToPath(new URL('./claude-usage.settings.json', import.meta.url))
+
 // crew/adapters/adapter-claude.mjs — the claude agent adapter.
 //
 // An adapter is the seam between a crew seat and the CLI agent that fills it:
@@ -6,10 +12,10 @@
 // adapter by seat.agent (default 'claude', overridable via --agent-<role>)
 // and never builds the invocation itself — that composition lives here.
 //
-// seatCommand's output is a compatibility surface: for this adapter it is
-// byte-identical to the pre-refactor paneCommand() in crew.mjs (see
-// crew.test.mjs's byte-identity pin). Any change to the string below is a
-// behavior change, not a refactor.
+// seatCommand's output is no longer byte-identical to the pre-refactor
+// paneCommand() in crew.mjs: the per-seat usage settings path is required for
+// pane usage measurement (#492). Any change to the string below is a behavior
+// change, not a refactor.
 const INVARIANT = Object.freeze({
   prompt_file: true, tool_deny: true, unattended: true,
   // The Task tool is available in every claude transport; the seats that need
@@ -137,10 +143,41 @@ export function seatCommand({ role, model, promptFile, tools, deny, taskDir, boo
   return [
     'env', 'DEVTEAM_WORKER=1', `CREW_ROLE=${role}`, `CREW_TASK_DIR="${taskDir}"`,
     'claude', '--model', model, '--permission-mode', 'bypassPermissions',
+    '--settings', `"${PANE_USAGE_SETTINGS}"`,
     ...(effort ? ['--effort', `"${effort}"`] : []),
     '--allowedTools', `"${allowedTools(tools, grants)}"`,
     '--disallowedTools', `"${deny}"`,
     '--append-system-prompt-file', `"${promptFile}"`,
     `"${bootBrief}"`,
   ].join(' ')
+}
+
+const SESSION_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+export function paneUsageRecords({ taskDir, role, deps = {} } = {}) {
+  if (typeof taskDir !== 'string' || typeof role !== 'string') return []
+  let raw
+  try {
+    const readFileSync = deps.readFileSync ?? fsReadFileSync
+    raw = readFileSync(join(taskDir, 'usage', `${role}.jsonl`), 'utf8')
+  } catch {
+    return []
+  }
+  let lines
+  try { lines = String(raw).split(/\r?\n/) } catch { return [] }
+  const records = []
+  const seen = new Set()
+  for (const line of lines) {
+    if (!line.trim()) continue
+    let payload
+    try { payload = JSON.parse(line) } catch { continue }
+    const sessionId = payload && typeof payload === 'object' ? payload.session_id : null
+    const transcriptPath = payload && typeof payload === 'object' ? payload.transcript_path : null
+    if (typeof sessionId !== 'string' || !SESSION_ID_PATTERN.test(sessionId)) continue
+    if (typeof transcriptPath !== 'string' || !transcriptPath.startsWith('/') || !transcriptPath.endsWith('.jsonl')) continue
+    if (seen.has(sessionId)) continue
+    seen.add(sessionId)
+    records.push({ session_id: sessionId, transcript_path: transcriptPath })
+  }
+  return records
 }

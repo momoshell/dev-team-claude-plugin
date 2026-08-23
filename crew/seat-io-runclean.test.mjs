@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, providerConditionDetail,
-  readEnvelopeFile, reaskDecision, samplePaneScreen, saveCrew, seatIo, settleSeatTeardown, WAIT_POLL_MS, waitForEnvelope,
+  paneUsageFrames, readEnvelopeFile, reaskDecision, samplePaneScreen, saveCrew, seatIo, settleSeatTeardown, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition } from './headless.mjs'
 import { startFileWriter } from '../test/helpers.mjs'
@@ -67,6 +67,86 @@ function addLane(fixture, name, tracked) {
 function makeIo({ repoDir, paths }) {
   return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
 }
+
+test('paneUsageFrames folds claude spend once, then emits deltas and zeroes without repeating totals', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const session = '11111111-1111-4111-8111-111111111111'
+    const transcriptPath = join(fixture.paths.taskDir, `${session}.jsonl`)
+    const usageDir = join(fixture.paths.taskDir, 'usage')
+    mkdirSync(usageDir, { recursive: true })
+    const line = (id, input, output, cacheWrite, cacheRead) => JSON.stringify({
+      type: 'assistant', message: { id, usage: {
+        input_tokens: input, output_tokens: output,
+        cache_creation_input_tokens: cacheWrite, cache_read_input_tokens: cacheRead,
+      } },
+    })
+    writeFileSync(transcriptPath, `${line('a1', 1, 100, 10, 1000)}\n`)
+    writeFileSync(join(usageDir, 'planner.jsonl'), `${JSON.stringify({ session_id: session, transcript_path: transcriptPath })}\n`)
+
+    const first = paneUsageFrames({ taskDir: fixture.paths.taskDir, role: 'planner', id: 'd1', model: 'claude-opus-5', sent: {} })
+    assert.equal(first.frames.length, 1)
+    assert.equal(first.frames[0].usage.billed_output_tokens, 100)
+    writeFileSync(transcriptPath, `${line('a1', 1, 100, 10, 1000)}\n${line('a2', 2, 25, 5, 500)}\n`)
+    const second = paneUsageFrames({ taskDir: fixture.paths.taskDir, role: 'planner', id: 'd2', model: 'claude-opus-5', sent: first.sent })
+    assert.equal(second.frames.length, 1)
+    assert.deepEqual(second.frames[0].usage, {
+      billed_input_tokens: 2, billed_output_tokens: 25,
+      billed_cache_write_tokens: 5, billed_cache_read_tokens: 500,
+    })
+    const third = paneUsageFrames({ taskDir: fixture.paths.taskDir, role: 'planner', id: 'd3', model: 'claude-opus-5', sent: second.sent })
+    assert.deepEqual(third.frames[0].usage, {
+      billed_input_tokens: 0, billed_output_tokens: 0,
+      billed_cache_write_tokens: 0, billed_cache_read_tokens: 0,
+    })
+
+    const unmeasured = '22222222-2222-4222-8222-222222222222'
+    const unmeasuredPath = join(fixture.paths.taskDir, `${unmeasured}.jsonl`)
+    writeFileSync(unmeasuredPath, `${JSON.stringify({ type: 'assistant', message: { id: 'u1', usage: { output_tokens_v2: 99 } } })}\n`)
+    writeFileSync(join(usageDir, 'reviewer.jsonl'), `${JSON.stringify({ session_id: unmeasured, transcript_path: unmeasuredPath })}\n`)
+    const absent = paneUsageFrames({ taskDir: fixture.paths.taskDir, role: 'reviewer', id: 'd4', model: 'claude-opus-5', sent: {} })
+    assert.equal(absent.frames.length, 1)
+    assert.equal(absent.frames[0].usage, null)
+    assert.equal(Object.hasOwn(absent.sent, unmeasured), false)
+
+    const pi = paneUsageFrames({ taskDir: fixture.paths.taskDir, role: 'planner', agent: 'pi', sent: {} })
+    assert.deepEqual(pi.frames, [])
+  })
+})
+
+test('a pane wait emits usage and persists sent totals across a second seatIo instance', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const session = '33333333-3333-4333-8333-333333333333'
+    const transcriptPath = join(fixture.paths.taskDir, `${session}.jsonl`)
+    mkdirSync(join(fixture.paths.taskDir, 'usage'), { recursive: true })
+    writeFileSync(transcriptPath, JSON.stringify({ type: 'assistant', message: { id: 'w1', usage: {
+      input_tokens: 1, output_tokens: 77, cache_creation_input_tokens: 3, cache_read_input_tokens: 9,
+    } } }))
+    writeFileSync(join(fixture.paths.taskDir, 'usage', 'planner.jsonl'), JSON.stringify({ session_id: session, transcript_path: transcriptPath }))
+    const make = () => {
+      const events = []
+      const journal = []
+      const crew = { members: { planner: { surface_id: 'surface-planner', transport: 'pane', agent: 'claude', model: 'claude-opus-5' } } }
+      const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+        now: () => 0, sleep: () => {}, tree: () => ({ windows: [] }), locate: () => false,
+        sendLine: () => {}, assignmentLine: () => 'assignment', logLine: (_path, row) => journal.push(row), cmux: () => ({ ok: false }),
+      })
+      io.emit = (event) => events.push(event)
+      const assignment = io.assign({ role: 'planner', briefFile: join(fixture.paths.taskDir, 'brief.md') })
+      assert.doesNotThrow(() => io.wait(assignment.returnPath, 0))
+      return { events, journal }
+    }
+    const first = make()
+    const usage1 = first.events.filter((event) => event.kind === 'usage')
+    assert.equal(usage1.length, 1)
+    assert.equal(usage1[0].usage.billed_output_tokens, 77)
+    assert.equal(readFileSync(join(fixture.paths.taskDir, 'usage', 'planner.sent.json')).includes(session), true)
+    const second = make()
+    const usage2 = second.events.filter((event) => event.kind === 'usage')
+    assert.equal(usage2.length, 1)
+    assert.equal(usage2[0].usage.billed_output_tokens, 0)
+    assert.equal(first.journal.filter((row) => row.event === 'pane-usage').length, 1)
+  })
+})
 
 function restored(fixture) {
   const { repoDir } = fixture

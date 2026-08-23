@@ -5,8 +5,9 @@
 // 2026-08-07): this module imports NOTHING from this repo (node builtins
 // only) and is imported by NO decision module (crew/drive.mjs,
 // crew/crew.mjs in the crew era) — asserted in BOTH
-// directions by test/factory-transcript.test.mjs's source-text tests. No
-// caller is wired up yet: be-41-03/04/05 do that wiring in later slices.
+// directions by test/factory-transcript.test.mjs's source-text tests. The
+// production caller is crew/seat-io.mjs; the decision plane (crew/drive.mjs,
+// crew/crew.mjs) still does not import this reducer.
 //
 // WHY THIS EXISTS. Panes run `claude` INTERACTIVELY with stdio:'inherit'
 // (the retired adapter, see git history) and `--output-format stream-json` is
@@ -43,21 +44,18 @@
 // and CLI-version-dependent, and is never derived, only ever discovered by
 // scanning.
 //
-// NO-SUBAGENTS ASSUMPTION (why no <session-id>/subagents/*.jsonl walk is
-// needed for completeness): a worker session cannot spawn subagents because
-// In the retired legacy runtime, `DISALLOWED_TOOLS` was frozen as
-// `['mcp__*', 'Task', 'Agent']` and was always applied (retired runtime,
-// record.mjs:572, :651 -> --disallowedTools). If any role ever gains
-// `Task`, this reducer would silently under-count usage — that re-entry
-// condition ships as a drift-guard TEST (test/factory-transcript.test.mjs,
-// reading the crew seat table's SOURCE TEXT via readFileSync + regex, never
-// importing it), not as this comment alone.
+// SUBAGENT WALK (why the reducer walks <session-id>/subagents/*.jsonl): Claude
+// stores Task-bearing child transcripts beside the parent session, and their
+// usage is part of the seat's spend. The drift guard in
+// test/factory-transcript.test.mjs now checks the tool census stays honest when
+// the crew seat table changes; it no longer claims the reducer would
+// under-count subagents.
 //
 // Zero repo dependencies. ESM, Node 20 floor (this module uses no
 // floor-gated builtin, even though scripts/factory/* as a family sits on
 // the Node >= 24 floor for other reasons).
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 
 // The closed set of tool names this reducer will forward verbatim. Anything
 // not an exact member (including an ANSI-escape-laden, newline-laden, or
@@ -66,13 +64,11 @@ import { join } from 'node:path'
 // any runtime tool list on purpose: importing it would
 // breach the firewall (this module imports nothing from the repo).
 // 'Task' and 'Agent' are included even though DISALLOWED_TOOLS
-// forbade a legacy worker from ever calling them; in the crew era only
-// the BUILDER seat (whose transcripts this reducer counts) is guaranteed
-// subagent-free — planner/reviewer seats DO carry Task, so the no-subagents
-// assumption is builder-scoped, exactly what the drift guard pins: if
-// that drift guard ever failed (a role gained Task/Agent), the resulting
-// subagent calls must be visible in this mirrored data as their own name,
-// not laundered into the generic 'other' bucket alongside every other
+// forbade a legacy worker from ever calling them; planner/reviewer seats carry
+// Task and their child transcripts are folded into the parent session. The
+// drift guard keeps this census honest if the seat table changes: subagent calls
+// must remain visible in this mirrored data as their own name, not laundered
+// into the generic 'other' bucket alongside every other
 // unknown tool.
 export const KNOWN_TOOL_NAMES = Object.freeze([
   'Bash', 'Read', 'Edit', 'Write', 'Glob', 'Grep',
@@ -92,6 +88,9 @@ function numOr0(n) {
   // able to write a negative or fractional token count into the ledger.
   return Math.max(0, Math.trunc(n))
 }
+
+const BILLED_FIELDS = ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens']
+function hasBilledField(usage) { return BILLED_FIELDS.some((k) => typeof usage[k] === 'number' && Number.isFinite(usage[k])) }
 
 // The exact shape ledger.mjs's isoMs() accepts (its own regex, duplicated
 // here on purpose — importing it would breach the firewall). Anything that
@@ -208,6 +207,7 @@ export function readUsage({ transcriptPath } = {}) {
   const messages = new Map()
   let lastId = null
   let droppedLines = 0
+  let measured = false
 
   for (const line of lines) {
     if (!line) continue
@@ -227,6 +227,7 @@ export function readUsage({ transcriptPath } = {}) {
       continue
     }
     messages.set(id, usage)
+    if (hasBilledField(usage)) measured = true
     lastId = id
   }
 
@@ -259,6 +260,66 @@ export function readUsage({ transcriptPath } = {}) {
     context_window: null, // U-4: no verified source in #41
     message_count: messages.size,
     dropped_lines: droppedLines,
+    measured,
+  }
+}
+
+function billedTotalsOf(usage) {
+  return {
+    billed_input_tokens: usage?.billed_input_tokens ?? 0,
+    billed_output_tokens: usage?.billed_output_tokens ?? 0,
+    billed_cache_write_tokens: usage?.billed_cache_write_tokens ?? 0,
+    billed_cache_read_tokens: usage?.billed_cache_read_tokens ?? 0,
+  }
+}
+
+export function readSessionUsage({ transcriptPath } = {}) {
+  const parent = readUsage({ transcriptPath })
+  const parentUsage = billedTotalsOf(parent)
+  const subagentUsage = billedTotalsOf()
+  let subagentPaths = []
+  if (typeof transcriptPath === 'string' && transcriptPath !== '') {
+    const subagentsDir = join(dirname(transcriptPath), basename(transcriptPath).replace(/\.jsonl$/, ''), 'subagents')
+    try {
+      subagentPaths = readdirSync(subagentsDir, { withFileTypes: true })
+        .filter((entry) => entry && typeof entry.name === 'string' && /^agent-.*\.jsonl$/.test(entry.name) && entry.isFile())
+        .map((entry) => entry.name)
+        .sort()
+        .map((name) => join(subagentsDir, name))
+    } catch {
+      subagentPaths = []
+    }
+  }
+
+  let messageCount = Number(parent.message_count) || 0
+  let droppedLines = Number(parent.dropped_lines) || 0
+  let measured = parent.measured === true
+  for (const subagentPath of subagentPaths) {
+    const usage = readUsage({ transcriptPath: subagentPath })
+    subagentUsage.billed_input_tokens += usage.billed_input_tokens
+    subagentUsage.billed_output_tokens += usage.billed_output_tokens
+    subagentUsage.billed_cache_write_tokens += usage.billed_cache_write_tokens
+    subagentUsage.billed_cache_read_tokens += usage.billed_cache_read_tokens
+    messageCount += Number(usage.message_count) || 0
+    droppedLines += Number(usage.dropped_lines) || 0
+    measured = measured || usage.measured === true
+  }
+
+  return {
+    billed_input_tokens: parentUsage.billed_input_tokens + subagentUsage.billed_input_tokens,
+    billed_output_tokens: parentUsage.billed_output_tokens + subagentUsage.billed_output_tokens,
+    billed_cache_write_tokens: parentUsage.billed_cache_write_tokens + subagentUsage.billed_cache_write_tokens,
+    billed_cache_read_tokens: parentUsage.billed_cache_read_tokens + subagentUsage.billed_cache_read_tokens,
+    raw_read_tokens: parent.raw_read_tokens,
+    raw_written_tokens: parent.raw_written_tokens,
+    context_tokens: parent.context_tokens,
+    context_window: null,
+    message_count: messageCount,
+    dropped_lines: droppedLines,
+    measured,
+    subagent_files: subagentPaths.length,
+    parent_usage: parentUsage,
+    subagent_usage: subagentUsage,
   }
 }
 

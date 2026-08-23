@@ -9,7 +9,7 @@ import {
   mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const HERE = join(fileURLToPath(import.meta.url), '..')
@@ -19,7 +19,7 @@ const FACTORY_DIR = join(ROOT, 'scripts', 'factory')
 const MODULE_PATH = join(FACTORY_DIR, 'transcript.mjs')
 
 const {
-  resolveTranscript, readUsage, readToolCalls, KNOWN_TOOL_NAMES,
+  resolveTranscript, readUsage, readSessionUsage, readToolCalls, KNOWN_TOOL_NAMES,
 } = await import(MODULE_PATH)
 
 const fixture = mkdtempSync(join(tmpdir(), 'factory-transcript-'))
@@ -185,6 +185,63 @@ test('C2 CLAMP: numOr0 never lets a negative or fractional usage field survive i
   assert.equal(usage.billed_cache_read_tokens, 2, 'a fractional cache_read_input_tokens must truncate to an integer (2.9 -> 2)')
 })
 
+test('readSessionUsage folds parent and subagent files, preserving split totals and per-file dedupe', () => {
+  const transcriptPath = writeTranscript([
+    assistantLine({ id: 'parent-dup', timestamp: '2026-08-09T00:03:00.000Z', usage: { input_tokens: 2, output_tokens: 5, cache_creation_input_tokens: 3, cache_read_input_tokens: 7 } }),
+    assistantLine({ id: 'parent-dup', timestamp: '2026-08-09T00:03:00.100Z', usage: { input_tokens: 2, output_tokens: 400, cache_creation_input_tokens: 3, cache_read_input_tokens: 7 } }),
+  ])
+  const subagentsDir = join(dirname(transcriptPath), basename(transcriptPath, '.jsonl'), 'subagents')
+  mkdirSync(subagentsDir, { recursive: true })
+  writeFileSync(join(subagentsDir, 'agent-b.jsonl'), [
+    JSON.stringify(assistantLine({ id: 'sub-dup', timestamp: '2026-08-09T00:04:00.000Z', usage: { input_tokens: 11, output_tokens: 7, cache_creation_input_tokens: 13, cache_read_input_tokens: 17 } })),
+    JSON.stringify(assistantLine({ id: 'sub-dup', timestamp: '2026-08-09T00:04:00.100Z', usage: { input_tokens: 11, output_tokens: 60, cache_creation_input_tokens: 13, cache_read_input_tokens: 17 } })),
+  ].join('\n'))
+  writeFileSync(join(subagentsDir, 'agent-a.jsonl'), JSON.stringify(assistantLine({ id: 'sub-a', timestamp: '2026-08-09T00:05:00.000Z', usage: { input_tokens: 19, output_tokens: 9, cache_creation_input_tokens: 23, cache_read_input_tokens: 29 } })))
+  writeFileSync(join(subagentsDir, 'not-an-agent.txt'), 'ignored')
+
+  const usage = readSessionUsage({ transcriptPath })
+  assert.equal(usage.billed_output_tokens, 469, 'parent 400 + subagent 60 + subagent 9')
+  assert.equal(usage.billed_input_tokens, 32)
+  assert.equal(usage.billed_cache_write_tokens, 39)
+  assert.equal(usage.billed_cache_read_tokens, 53)
+  assert.equal(usage.message_count, 3)
+  assert.equal(usage.subagent_files, 2)
+  assert.equal(usage.measured, true)
+  assert.deepEqual(usage.parent_usage, {
+    billed_input_tokens: 2, billed_output_tokens: 400,
+    billed_cache_write_tokens: 3, billed_cache_read_tokens: 7,
+  })
+  assert.deepEqual(usage.subagent_usage, {
+    billed_input_tokens: 30, billed_output_tokens: 69,
+    billed_cache_write_tokens: 36, billed_cache_read_tokens: 46,
+  })
+  assert.equal(usage.context_tokens, 12, 'context belongs to the parent last message only')
+})
+
+test('readSessionUsage reports measured false for renamed fields and empty input, and tolerates absent or non-directory subagents', () => {
+  const renamed = writeTranscript([
+    assistantLine({ id: 'renamed', timestamp: '2026-08-09T00:06:00.000Z', usage: {
+      input_tokens_v2: 1, output_tokens_v2: 2, cache_creation_input_tokens_v2: 3, cache_read_input_tokens_v2: 4,
+    } }),
+  ])
+  const renamedUsage = readSessionUsage({ transcriptPath: renamed })
+  assert.equal(renamedUsage.message_count, 1)
+  assert.equal(renamedUsage.measured, false)
+
+  const empty = writeTranscript([])
+  const emptyUsage = readSessionUsage({ transcriptPath: empty })
+  assert.equal(emptyUsage.measured, false)
+  assert.equal(emptyUsage.subagent_files, 0)
+
+  const noSubagents = writeTranscript([assistantLine({ id: 'plain', timestamp: '2026-08-09T00:07:00.000Z', usage: { input_tokens: 1, output_tokens: 1, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 } })])
+  assert.equal(readSessionUsage({ transcriptPath: noSubagents }).subagent_files, 0)
+  const subagentsPath = join(dirname(noSubagents), basename(noSubagents, '.jsonl'), 'subagents')
+  mkdirSync(dirname(subagentsPath), { recursive: true })
+  writeFileSync(subagentsPath, 'not a directory')
+  assert.doesNotThrow(() => readSessionUsage({ transcriptPath: noSubagents }))
+  assert.equal(readSessionUsage({ transcriptPath: noSubagents }).subagent_files, 0)
+})
+
 // ---------------------------------------------------------------------------
 // RESOLUTION REFUSES BOTH WAYS AND COUNTS THEM DISTINCTLY.
 // ---------------------------------------------------------------------------
@@ -336,6 +393,11 @@ test('IMPORT FIREWALL (direction 1): transcript.mjs contains no repo import at a
   assert.doesNotMatch(transcriptSrc, /\bimport\(/, 'no dynamic import() either')
   assert.doesNotMatch(transcriptSrc, /\bfrom ['"]\.\.?\//, 'no relative-path import/re-export either')
   assert.doesNotMatch(transcriptSrc, /^export \* from /m, 'no re-export either')
+})
+
+test('IMPORT FIREWALL (positive production half): seat-io.mjs is the reducer caller', () => {
+  const seatSrc = readFileSync(join(CREW_DIR, 'seat-io.mjs'), 'utf8')
+  assert.match(seatSrc, /from ['"]\.\.\/scripts\/factory\/transcript\.mjs['"]/, 'crew/seat-io.mjs must import the reducer as the pane producer')
 })
 
 test('IMPORT FIREWALL (direction 2): no crew decision module (drive.mjs, crew.mjs) imports transcript.mjs', () => {
@@ -511,6 +573,7 @@ test('MALFORMED: an empty file produces a well-formed zeroed result, never a thr
     context_window: null,
     message_count: 0,
     dropped_lines: 0,
+    measured: false,
   })
   assert.deepEqual(readToolCalls({ transcriptPath: path }), [])
 })

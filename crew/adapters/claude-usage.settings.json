@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "mkdir -p \"$CREW_TASK_DIR/usage\" && { cat; echo; } >> \"$CREW_TASK_DIR/usage/$CREW_ROLE.jsonl\"" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "mkdir -p \"$CREW_TASK_DIR/usage\" && { cat; echo; } >> \"$CREW_TASK_DIR/usage/$CREW_ROLE.jsonl\"" }] }]
+  }
+}

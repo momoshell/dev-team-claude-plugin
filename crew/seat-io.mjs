@@ -16,7 +16,8 @@ import {
 import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, recogniseProviderCondition, writeCrewJson, updateCrewJson } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
-import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
+import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
+import { readSessionUsage } from '../scripts/factory/transcript.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { hostLoad, loadPolicy } from './host-load.mjs'
 
@@ -845,6 +846,7 @@ export const RESEAT_REASONS = Object.freeze(['transport', 'exhausted', 'no-tier'
 // here that can vouch for the translation, and reseat refuses rather than
 // writing a bare id.
 const SHIPPED_MODEL_STRINGS = Object.freeze({ claude: claudeModelString, pi: piModelString })
+const SHIPPED_PANE_USAGE = Object.freeze({ claude: claudePaneUsageRecords })
 
 export function modelStringFor(adapters, role, agent) {
   const injected = adapters?.[role]?.adapter
@@ -904,6 +906,60 @@ function addTotals(prev, delta) {
     billed_cache_write_tokens: (prev?.billed_cache_write_tokens ?? 0) + (delta?.billed_cache_write_tokens ?? 0),
     billed_cache_read_tokens: (prev?.billed_cache_read_tokens ?? 0) + (delta?.billed_cache_read_tokens ?? 0),
   }
+}
+
+function totalsOf(usage) {
+  return {
+    billed_input_tokens: Number.isFinite(usage?.billed_input_tokens) ? usage.billed_input_tokens : 0,
+    billed_output_tokens: Number.isFinite(usage?.billed_output_tokens) ? usage.billed_output_tokens : 0,
+    billed_cache_write_tokens: Number.isFinite(usage?.billed_cache_write_tokens) ? usage.billed_cache_write_tokens : 0,
+    billed_cache_read_tokens: Number.isFinite(usage?.billed_cache_read_tokens) ? usage.billed_cache_read_tokens : 0,
+  }
+}
+
+function subtractTotals(total, sent) {
+  if (sent === null) return total
+  return {
+    billed_input_tokens: Math.max(0, (total?.billed_input_tokens ?? 0) - (sent?.billed_input_tokens ?? 0)),
+    billed_output_tokens: Math.max(0, (total?.billed_output_tokens ?? 0) - (sent?.billed_output_tokens ?? 0)),
+    billed_cache_write_tokens: Math.max(0, (total?.billed_cache_write_tokens ?? 0) - (sent?.billed_cache_write_tokens ?? 0)),
+    billed_cache_read_tokens: Math.max(0, (total?.billed_cache_read_tokens ?? 0) - (sent?.billed_cache_read_tokens ?? 0)),
+  }
+}
+
+export function paneUsageFrames({ taskDir, role, id = null, model = null, agent = 'claude', sent = {}, adapter = null, deps = {} } = {}) {
+  const readRecords = adapter?.paneUsageRecords ?? SHIPPED_PANE_USAGE[agent] ?? null
+  if (!readRecords) return { frames: [], sent, records: 0, skipped: 0 }
+  if (!sent || typeof sent !== 'object' || Array.isArray(sent)) sent = {}
+  let records
+  try { records = readRecords({ taskDir, role, deps }) } catch { return { frames: [], sent, records: 0, skipped: 0 } }
+  if (!Array.isArray(records)) return { frames: [], sent, records: 0, skipped: 0 }
+
+  const frames = []
+  let skipped = 0
+  for (const record of records) {
+    if (!record || typeof record.session_id !== 'string' || !record.session_id || typeof record.transcript_path !== 'string' || !record.transcript_path) {
+      skipped += 1
+      continue
+    }
+    if (Object.hasOwn(sent, record.session_id) && (!sent[record.session_id] || typeof sent[record.session_id] !== 'object' || Array.isArray(sent[record.session_id]))) {
+      skipped += 1
+      continue
+    }
+    try {
+      const fold = readSessionUsage({ transcriptPath: record.transcript_path })
+      if (!fold || typeof fold !== 'object') throw new Error('pane usage fold was not an object')
+      const delta = subtractTotals(totalsOf(fold), sent[record.session_id] ?? null)
+      frames.push({
+        kind: 'usage', id, role, model, session_id: record.session_id,
+        transcript_path: record.transcript_path, usage: fold.measured ? delta : null,
+      })
+      if (fold.measured) sent[record.session_id] = totalsOf(fold)
+    } catch {
+      skipped += 1
+    }
+  }
+  return { frames, sent, records: records.length, skipped }
 }
 
 // crew/crew.mjs boots with this name; the BYTES have one owner
@@ -1009,12 +1065,11 @@ export function emitAdapter(emitter, crew = null) {
       if (event.review) {
         // The reviewing seat's CELL, read from the booted crew — the same
         // source and the same reason as the cell-failure branch below (:1080):
-        // the driver only ever knows the role. This is what makes a PANE
-        // review attributable at all: a pane seat emits no `usage` frame, so
-        // agent_sessions never gets a row to join (#404). Spread ONLY when the
-        // role is seated: an unseated role has no cell, and
-        // recordReviewOutcome's own `?? null` is the single place absence is
-        // decided.
+        // the driver only ever knows the role. This keeps a PANE review tied to
+        // the booted cell even when its usage frame is absent (for example a pi
+        // pane or an unmeasured Claude transcript). Spread ONLY when the role is
+        // seated: an unseated role has no cell, and recordReviewOutcome's own
+        // `?? null` is the single place absence is decided.
         const m = (crew && crew.members && crew.members[event.role]) || null
         emitter.emit((handle) => handle.recordReviewOutcome({
           adw_id: emitter.adwId, phase_id: phaseId, dispatch_id: event.id, role: event.role,
@@ -1477,6 +1532,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const existsSync = deps.existsSync || fsExistsSync
   const readFileSync = deps.readFileSync || fsReadFileSync
   const writeFileSync = deps.writeFileSync || fsWriteFileSync
+  const mkdirSync = deps.mkdirSync || fsMkdirSync
   const unlinkSync = deps.unlinkSync || fsUnlinkSync
   const renameSync = deps.renameSync || fsRenameSync
   const execSync = deps.execSync || cpExecSync
@@ -1681,6 +1737,46 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // push created is identified by the unique message it carries and restored by
   // its own commit id; an entry we cannot prove is ours is a refusal, never a
   // plausible guess.
+  const paneUsageSentPath = (role) => join(paths.taskDir, 'usage', `${role}.sent.json`)
+  const emitPaneUsage = (info) => {
+    try {
+      const member = crew.members?.[info?.role] || null
+      const sentPath = paneUsageSentPath(info.role)
+      let sent = {}
+      try {
+        const parsed = JSON.parse(String(readFileSync(sentPath, 'utf8')))
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) sent = parsed
+      } catch { sent = {} }
+      const result = paneUsageFrames({
+        taskDir: paths.taskDir, role: info.role, id: info.id,
+        model: member?.model ?? null, agent: member?.agent ?? 'claude', sent,
+        adapter: adapters?.[info.role]?.adapter ?? null, deps,
+      })
+      for (const frame of result.frames || []) {
+        try { io.emit?.(frame) } catch { /* usage instrumentation is never load-bearing */ }
+      }
+      try {
+        mkdirSync(join(paths.taskDir, 'usage'), { recursive: true })
+        writeFileSync(sentPath, JSON.stringify(result.sent))
+      } catch { /* durable usage is best-effort; the frame already carried the observation */ }
+
+      const readRecords = adapters?.[info.role]?.adapter?.paneUsageRecords
+        ?? SHIPPED_PANE_USAGE[member?.agent ?? 'claude'] ?? null
+      let records = []
+      try { records = readRecords ? readRecords({ taskDir: paths.taskDir, role: info.role, deps }) : [] } catch { records = [] }
+      for (const record of records) {
+        try {
+          const fold = readSessionUsage({ transcriptPath: record.transcript_path })
+          io.log({
+            event: 'pane-usage', role: info.role, id: info.id ?? null,
+            session_id: record.session_id, parent: fold.parent_usage ?? null,
+            subagents: fold.subagent_usage ?? null, subagent_files: fold.subagent_files ?? 0,
+            measured: fold.measured === true,
+          })
+        } catch { /* the journal is diagnostics, never load-bearing */ }
+      }
+    } catch { /* ADR-026: pane usage measurement is never load-bearing */ }
+  }
   const stashEntries = () => {
     const list = spawnSync('git', ['stash', 'list', '--format=%H %gs'], { cwd: checkout, encoding: 'utf8' })
     if (list.status !== 0) throw new Error(`runClean: git stash list failed, refusing to guess which stash entry is ours:\n${list.stderr || list.stdout || ''}`)
@@ -1775,6 +1871,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
         throw failure
       } finally {
+        // A pane's hook side channel is the only usage source for this
+        // transport. Measure in finally so a timeout or seat death still
+        // records spend already written to the transcript.
+        if (!transport && info?.role) emitPaneUsage(info)
         // The wait ending closes the run: a condition still on screen has been
         // seen from its first sighting to its last, and one row says so.
         closeSampleRun(info?.role)

@@ -20,7 +20,7 @@ Use a first-party exception only when the test enumerates each admitted path.
 Exhibit: `test/factory-ci-watch.test.mjs:205`.
 
 The factory intake test uses the same allowlist-shaped evidence.
-Exhibit: `test/factory-intake.test.mjs:1078`.
+Exhibit: `test/factory-intake.test.mjs:1116`.
 
 An allowlist is a deliberate admission, not permission for arbitrary packages.
 Exhibit: `test/factory-ci-watch.test.mjs:205`.
@@ -48,8 +48,8 @@ The cost of skipping it is paid at process startup, when the backend loads.
 When a first-party edge is allowed for a leaf exception, pin that target's own
 leaf property too; intentional non-leaf helpers such as `crew/headless-rpc.mjs`
 are outside this rule.
-Exhibit: `crew/daemon.test.mjs:246`, `crew/daemon.test.mjs:248`, and
-`crew/daemon.test.mjs:250`.
+Exhibit: `crew/daemon.test.mjs:247`, `crew/daemon.test.mjs:249`, and
+`crew/daemon.test.mjs:251`.
 
 See `import-firewall.md` for that second boundary.
 The source and its test are the maintenance surface for future dependency changes.

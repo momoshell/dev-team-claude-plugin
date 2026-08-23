@@ -13,16 +13,16 @@ An explicit `--dry-run` wins even when `--reclaim` appears too.
 Exhibit: `scripts/factory/reap-stale.mjs:251-254`.
 
 Account for outcomes as `proven`, `failed`, or `unproven`.
-Exhibit: `scripts/factory/reap-stale.mjs:71-75`.
+Exhibit: `scripts/factory/reap-stale.mjs:75`.
 
 A process that cannot be proven dead remains `unproven`, never assumed dead.
-Exhibit: `scripts/factory/reap-stale.mjs:71-75`.
+Exhibit: `scripts/factory/reap-stale.mjs:75`.
 
 `guardedKill` refuses absolute pid or pgid values 0 and 1.
-Exhibit: `scripts/factory/reap-stale.mjs:56-60`.
+Exhibit: `scripts/factory/reap-stale.mjs:58-60`.
 
 The guard applies in both signal directions, including negative group ids.
-Exhibit: `scripts/factory/reap-stale.mjs:56-60`.
+Exhibit: `scripts/factory/reap-stale.mjs:58-60`.
 
 Archived lanes are swept rather than skipped.
 Exhibit: `scripts/factory/reap-stale.mjs:105-107`.
@@ -31,7 +31,7 @@ The archived set was the likely leak location (#473).
 Exhibit: `scripts/factory/reap-stale.mjs:105-107`.
 
 A missing root is a refusal, not an empty proof of cleanliness.
-Exhibit: `scripts/factory/reap-stale.mjs:257`.
+Exhibit: `scripts/factory/reap-stale.mjs:265`.
 
 Three-state liveness preserves `null` for an unreadable pane.
 Exhibit: `crew/README.md:237`.
@@ -50,7 +50,7 @@ Keep the destructive flag visible in every human-facing reclaim instruction.
 Exhibit: `scripts/factory/reap-stale.mjs:257`.
 
 The cost of collapsing `unproven` into `failed` is an unsafe kill decision.
-Exhibit: `scripts/factory/reap-stale.mjs:71-75`.
+Exhibit: `scripts/factory/reap-stale.mjs:75`.
 
 The cost of skipping archived directories is a leak hidden by its name.
 Exhibit: `scripts/factory/reap-stale.mjs:105-107`.

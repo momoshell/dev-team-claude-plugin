@@ -42,7 +42,7 @@ An interrupted command is neither a created issue nor a rejected request.
 Status: this interrupted-path rule is unbacked in the checkout; see `evidence.md`.
 
 If `gh` is unavailable, preserve that as unavailable rather than as API failure.
-Exhibit: `scripts/factory/intake.mjs:545`.
+Exhibit: `scripts/factory/probe-repo.mjs:746`.
 
 If the cwd is missing, refuse before asking the CLI to resolve relative data.
 Exhibit: `scripts/factory/intake.mjs:533-535`.
@@ -50,7 +50,7 @@ Exhibit: `scripts/factory/intake.mjs:533-535`.
 Keep body-file construction and post-write confirmation in the same operation.
 Status: the combined operation is unbacked in the checkout; see `evidence.md`.
 
-The source exhibits cover explicit cwd and GH_BIN only, not remote creation.
+The source exhibits cover explicit cwd, GH_BIN, and unavailable-tool handling, not remote creation.
 
 The cost of a relative path is a silently missing or mislocated submission.
 Exhibit in kind: `skills/qa-test-writing/references/tooling.md:89`.

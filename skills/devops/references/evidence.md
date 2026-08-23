@@ -44,7 +44,7 @@ Ship the warning as unbacked, not as a local fact.
 ### Unknown linked-worktree probe and removal
 
 The linked-worktree probe catches a failed `rev-parse` and sets `linked = false`.
-Exhibit: `scripts/factory/ci-watch.mjs:241-244`.
+Exhibit: `scripts/factory/ci-watch.mjs:242-244`.
 
 That branch does not prove a safe worktree removal path, and no local removal
 implementation ties the failed probe to teardown.
@@ -57,7 +57,7 @@ measured fixture covers this probe outcome.
 No dedicated local mutation test isolates an interrupted or EPERM kill after a
 reclaim decision is made.
 
-The pid and pgid guard itself is backed by `scripts/factory/reap-stale.mjs:56-60`,
+The pid and pgid guard itself is backed by `scripts/factory/reap-stale.mjs:58-60`,
 but the kill-error accounting rule remains unbacked.
 
 Keep that edge marked unbacked in `processes.md` until a measured fixture pins it.

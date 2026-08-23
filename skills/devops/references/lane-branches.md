@@ -11,25 +11,25 @@ Preserve the open review until its outcome and teardown policy are decided.
 Status: this preservation rule is unbacked here; see `evidence.md`.
 
 Never publish from a worker path.
-Exhibit: `scripts/factory/ci-watch.mjs:262`.
+Exhibit: `scripts/factory/ci-watch.mjs:265`.
 
 The worker-path gate runs before branch resolution or construction of push argv.
-Exhibit: `scripts/factory/ci-watch.mjs:262`.
+Exhibit: `scripts/factory/ci-watch.mjs:265`.
 
 The linked-worktree probe compares the two Git directory locations.
-Exhibit: `scripts/factory/ci-watch.mjs:237`.
+Exhibit: `scripts/factory/ci-watch.mjs:240`.
 
 A checkout under the crew root is also treated as a worker path.
-Exhibit: `scripts/factory/ci-watch.mjs:237`.
+Exhibit: `scripts/factory/ci-watch.mjs:246`.
 
 A missing checkout refuses publication instead of guessing its location.
-Exhibit: `scripts/factory/ci-watch.mjs:262`.
+Exhibit: `scripts/factory/ci-watch.mjs:265`.
 
 An unresolved branch refuses publication instead of pushing a default.
-Exhibit: `scripts/factory/ci-watch.mjs:262`.
+Exhibit: `scripts/factory/ci-watch.mjs:265`.
 
 Keep lane work and host publication as separate lifecycle stages.
-Exhibit: `scripts/factory/ci-watch.mjs:262`.
+Exhibit: `scripts/factory/ci-watch.mjs:265`.
 
 Do not treat a green local test as permission to delete a remote branch.
 Status: this deletion safeguard is unbacked here; see `evidence.md`.
@@ -51,7 +51,7 @@ The cost of a premature close is lost review context and an altered PR state.
 Status: this platform cost is unbacked here; see `evidence.md`.
 
 The cost of worker-path publishing is a lane writing to the host remote.
-Exhibit: `scripts/factory/ci-watch.mjs:262`.
+Exhibit: `scripts/factory/ci-watch.mjs:265`.
 
 The source exhibit proves the worker refusal; it does not prove GitHub's close
 behavior, which remains explicitly unbacked.

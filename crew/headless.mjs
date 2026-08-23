@@ -7,6 +7,7 @@ import {
   mkdirSync as fsMkdirSync,
   readdirSync as fsReaddirSync,
   writeFileSync as fsWriteFileSync,
+  renameSync as fsRenameSync,
 } from 'node:fs'
 import { join } from 'node:path'
 import { spawn as cpSpawn } from 'node:child_process'
@@ -169,14 +170,98 @@ function workerCommand(adapter, spec) {
   return fn.call(adapter, spec)
 }
 
-function persistCrew(crew, paths, writeFileSync) {
-  // Session ids are useful after a supervisor restart. Test doubles commonly
-  // omit a real crew.json, so persistence is best-effort and never load-bearing.
-  const file = paths?.dir && join(paths.dir, 'crew.json')
-  if (!file) return
+// ONE durability contract for crew.json (#539, phase 2 of #546). Three
+// modules write this file and every reader parses it with no retry
+// (crew/crew.mjs:315 loadCrew, crew/daemon.mjs:1083), so a plain writeFileSync
+// publishes an O_TRUNC window the whole runtime can fall into — measured at
+// 2084 torn reads in 68156 (docs/audits/2026-08-23/hunt/h1/repro/r6-*.mjs).
+// The owner lives HERE, not in seat-io.mjs, because the import direction is
+// seat-io -> headless-rpc -> headless: this module is the only one of the
+// three writers the other two already import, and inverting that edge is a
+// cycle. seat-io.mjs's saveCrew stays exported (crew/crew.mjs boots with it)
+// and delegates.
+export const CREW_JSON_LOCK = 'crew-json'
+export const CREW_JSON_LOCK_DIR = '.crewjson-lock'
+
+export function crewJsonPath(paths) {
+  return paths?.dir ? join(paths.dir, 'crew.json') : null
+}
+
+function parseCrewJson(readFileSync, path) {
   try {
-    if (fsExistsSync(file)) writeFileSync(file, JSON.stringify(crew, null, 2))
-  } catch { /* the in-memory member remains authoritative for this process */ }
+    const value = JSON.parse(String(readFileSync(path, 'utf8')))
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null
+  } catch { return null }
+}
+
+// The ONLY code path that publishes crew.json bytes: a uniquely named sibling
+// temp (a fixed `.tmp` name is itself a collision two writers can tear, the
+// `<name>.json.tmp.<uuid>` convention is crew/reclaim.mjs:166) followed by
+// renameSync, an atomic replace on POSIX — no reader can observe the file
+// absent or half-written.
+export function writeCrewJson(paths, crew, deps = {}) {
+  const writeFileSync = deps.writeFileSync || fsWriteFileSync
+  const renameSync = deps.renameSync || fsRenameSync
+  const unlinkSync = deps.unlinkSync || fsUnlinkSync
+  const uuid = deps.uuid || randomUUID
+  const p = crewJsonPath(paths)
+  if (!p) throw new Error('writeCrewJson: no crew directory')
+  const tmp = `${p}.tmp.${uuid()}`
+  try {
+    writeFileSync(tmp, JSON.stringify(crew, null, 2))
+    renameSync(tmp, p)
+  } catch (err) {
+    try { unlinkSync(tmp) } catch { /* nothing staged */ }
+    throw err
+  }
+  return p
+}
+
+// Locked read-modify-write, the posture scripts/factory/emit.mjs:875-902
+// already uses. Every writer used to republish a whole private in-memory copy,
+// so a seat minting a session id erased the driver's reseat with no race at
+// all. `mutate` receives the CURRENT on-disk crew and returns false to publish
+// nothing. Fails CLOSED: an absent or unparseable file is never overwritten,
+// and the reason is returned rather than swallowed. The lock is
+// crew/reclaim.mjs's own fenced, link-exclusive, dead-owner-aware one — a
+// third implementation of a lock in this tree is not the fix.
+export function updateCrewJson(paths, mutate, deps = {}) {
+  const existsSync = deps.existsSync || fsExistsSync
+  const readFileSync = deps.readFileSync || fsReadFileSync
+  const p = crewJsonPath(paths)
+  if (!p) return { ok: false, reason: 'no-dir' }
+  if (!existsSync(p)) return { ok: false, reason: 'absent' }
+  let store
+  try {
+    store = reclaimStore({ dir: join(paths.dir, CREW_JSON_LOCK_DIR), actor: `crew-json:${deps.pid ?? process.pid}`, deps, _lockOnly: true })
+  } catch (err) {
+    return { ok: false, reason: 'lock-unavailable', error: String(err?.message ?? err) }
+  }
+  try {
+    return store.withLock(CREW_JSON_LOCK, () => {
+      const draft = parseCrewJson(readFileSync, p)
+      if (!draft) return { ok: false, reason: 'unreadable' }
+      if (mutate(draft) === false) return { ok: true, changed: false, crew: draft }
+      writeCrewJson(paths, draft, deps)
+      return { ok: true, changed: true, crew: draft }
+    })
+  } catch (err) {
+    const reason = err?.stage === 'reclaim-lock-unavailable' ? 'lock-unavailable' : 'write-failed'
+    return { ok: false, reason, error: String(err?.message ?? err) }
+  }
+}
+
+function persistCrew(paths, role, patch, deps) {
+  // Session ids are useful after a supervisor restart. Test doubles commonly
+  // omit a real crew.json, so an absent file stays a silent no-op — but this
+  // seat owns only its OWN member fields, so it re-reads under the lock and
+  // applies THIS delta instead of republishing a private whole-file copy.
+  return updateCrewJson(paths, (disk) => {
+    const member = disk?.members?.[role]
+    if (!member) return false
+    Object.assign(member, patch)
+    return true
+  }, deps)
 }
 
 export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps = {} }) {
@@ -189,12 +274,21 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   const mkdir = deps.mkdirSync || fsMkdirSync
   const readdir = deps.readdirSync || fsReaddirSync
   const write = deps.writeFileSync || fsWriteFileSync
+  const rename = deps.renameSync || fsRenameSync
   const kill = deps.kill || ((pid, signal) => process.kill(pid, signal))
   const uuid = deps.uuid || randomUUID
   const pid = deps.pid ?? process.pid
   const root = join(taskDir || paths.taskDir, 'headless')
   const store = reclaimStore({ dir: root, actor: `headless:${pid}`, deps })
   const runs = new Map()
+
+  const crewDeps = { existsSync: exists, readFileSync: read, writeFileSync: write, renameSync: rename, unlinkSync: unlink, mkdirSync: mkdir, readdirSync: readdir, uuid, now, sleep, pid }
+  // Best-effort is not silent: a persist that FAILS is journalled, so the
+  // operator can see that crew.json no longer matches this supervisor.
+  function notePersist(role, result) {
+    if (result?.ok || result?.reason === 'absent' || result?.reason === 'no-dir') return
+    log({ at: now(), event: 'crew-json-persist-failed', role, reason: result?.reason ?? 'unknown', error: result?.error ?? null })
+  }
 
   function activePath(role) { return join(root, `.${role}.active.json`) }
   function readState(path) {
@@ -261,7 +355,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     if (reconciliation.verdict === VERDICTS.RECLAIMABLE) store.clear(reconciliation.handle)
     if (!member.session_id) {
       member.session_id = sessionId
-      persistCrew(crew, paths, write)
+      notePersist(role, persistCrew(paths, role, { session_id: sessionId }, crewDeps))
     }
     const allocation = allocateRun()
     const { id, dir } = allocation
@@ -300,7 +394,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     child.unref?.()
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     member.started = true
-    persistCrew(crew, paths, write)
+    notePersist(role, persistCrew(paths, role, { started: true }, crewDeps))
     const run = { role, id, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
     runs.set(returnPath, run)
     log({ at: now(), event: 'headless-spawn', role, id, pid: child.pid, dir, returnPath })

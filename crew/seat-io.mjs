@@ -13,7 +13,7 @@ import {
   cmux as defaultCmux, tree as defaultTree, locate as defaultLocate, sendLine as defaultSendLine,
   closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,
 } from './driver.mjs'
-import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, recogniseProviderCondition } from './headless.mjs'
+import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, recogniseProviderCondition, writeCrewJson, updateCrewJson } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { modelString as claudeModelString } from './adapters/adapter-claude.mjs'
@@ -906,13 +906,11 @@ function addTotals(prev, delta) {
   }
 }
 
+// crew/crew.mjs boots with this name; the BYTES have one owner
+// (crew/headless.mjs writeCrewJson), so this delegates rather than carrying a
+// second copy of the same tmp+rename discipline (#539).
 export function saveCrew(paths, crew, fs = {}) {
-  const writeFileSync = fs.writeFileSync || fsWriteFileSync
-  const renameSync = fs.renameSync || fsRenameSync
-  const p = join(paths.dir, 'crew.json')
-  const tmp = `${p}.tmp`
-  writeFileSync(tmp, JSON.stringify(crew, null, 2))
-  renameSync(tmp, p)
+  writeCrewJson(paths, crew, fs)
 }
 
 export function resolveWorkerBin(args = {}) {
@@ -2081,10 +2079,32 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           target.provider = rung.cell.provider
           target.id = rung.cell.id
         }
-        try { saveCrew(paths, crew, { writeFileSync, renameSync }) } catch { /* persistence is best-effort */ }
+        // A locked read-modify-write, not a whole-file republish: a seat
+        // minting a session id from its own stale copy used to erase this
+        // reseat entirely (#539).
+        const persisted = updateCrewJson(paths, (disk) => {
+          for (const target of [disk.members?.[role], disk.seats?.[role]]) {
+            if (!target) continue
+            target.model = model
+            target.effort = rung.cell.effort
+            target.provider = rung.cell.provider
+            target.id = rung.cell.id
+          }
+          return true
+        }, { writeFileSync, renameSync, readFileSync, existsSync })
         const record = { role, from, to, rung: rung.rung, reason }
         if (m.transport === HEADLESS_RPC_TRANSPORT) record.retired = true
+        // A save that fails is VISIBLE — showDoc's posture (:2146). The run
+        // otherwise continues while crew.json still names the cell the
+        // operator did NOT select, silent from both ends. An ABSENT crew.json
+        // is not a failure: test doubles omit it, exactly as the transports do.
+        if (!persisted.ok && persisted.reason !== 'absent') {
+          record.persisted = false
+          record.persist_error = `${persisted.reason}${persisted.error ? `: ${persisted.error}` : ''}`
+          process.stderr.write(`warning: reseat of ${roleName} to ${rung.rung} was NOT persisted to crew.json (${record.persist_error}) — the file still names the previous cell\n`)
+        }
         try { io.log({ at: now(), reseat: record }) } catch { /* journal is diagnostics */ }
+        if (record.persisted === false) return { applied: true, persisted: false, why: record.persist_error, from, to, rung: rung.rung }
         return { applied: true, from, to, rung: rung.rung }
       } catch (err) {
         return { applied: false, reason: 'transport', why: `io.reseat failed: ${err?.message ?? err}`, from, to: null }
@@ -2142,7 +2162,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // guard holds; only the teardown close is lost.
         const surfaceId = newSurfaceIds(before, tree())
         crew.doc_viewer = { path, surface_id: surfaceId.length === 1 ? surfaceId[0] : null }
-        saveCrew(paths, crew, { writeFileSync, renameSync })
+        // One field of a shared file: re-read under the lock rather than
+        // republish this process's whole copy (#539).
+        const saved = updateCrewJson(paths, (disk) => { disk.doc_viewer = crew.doc_viewer; return true }, { writeFileSync, renameSync, readFileSync, existsSync })
+        if (!saved.ok && saved.reason !== 'absent') throw new Error(`crew.json not updated (${saved.reason})`)
         logLine(join(paths.dir, 'journal.jsonl'), { at: new Date(now()).toISOString(), event: 'doc-viewer', path, surface_id: crew.doc_viewer.surface_id })
       } catch (err) {
         process.stderr.write(`warning: plan viewer mount failed (${err.message}) — continuing\n`)

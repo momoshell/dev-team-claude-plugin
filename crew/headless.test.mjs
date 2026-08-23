@@ -1,9 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyRun, foldUsage, headlessIo, recogniseProviderCondition, shq } from './headless.mjs'
+import { classifyRun, foldUsage, headlessIo, recogniseProviderCondition, shq, updateCrewJson } from './headless.mjs'
+import { startFileWriter } from '../test/helpers.mjs'
 
 function makeFixture(overrides = {}, roles = ['builder']) {
   const dir = mkdtempSync(join(tmpdir(), 'headless-extra-'))
@@ -327,4 +328,186 @@ test('headless usage emission is never load-bearing on happy or aborted paths', 
     writeFileSync(join(aborted.taskDir, 'headless', run.id, 'exit'), '137')
     assert.throws(() => aborted.io.wait(run.returnPath, 1), (err) => err.stage === 'headless-aborted')
   } finally { aborted.cleanup() }
+})
+
+function durabilityDocument() {
+  return {
+    task: 'crew-json-durability',
+    members: {
+      builder: { role: 'builder', model: 'builder-model', transport: 'headless-json' },
+      reviewer: { role: 'reviewer', model: 'reviewer-model', transport: 'headless-json' },
+    },
+    seats: { builder: { model: 'builder-model' }, reviewer: { model: 'reviewer-model' } },
+    padding: 'x'.repeat(4096),
+  }
+}
+
+function durabilityPaths(tag) {
+  const dir = mkdtempSync(join(tmpdir(), `headless-json-${tag}-`))
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  return { dir, taskDir, returnsDir }
+}
+
+test('T1 harness control proves plain writes tear while atomic writes race safely', async () => {
+  const paths = durabilityPaths('t1')
+  const file = join(paths.dir, 'crew.json')
+  const text = JSON.stringify({ ...durabilityDocument(), version: '%N%' })
+  let plain = null; let atomic = null
+  try {
+    plain = await startFileWriter({ file, text, mode: 'plain', maxMs: 2000 })
+    let torn = 0
+    const deadline = Date.now() + 500
+    while (Date.now() < deadline) {
+      try { JSON.parse(readFileSync(file, 'utf8')) } catch { torn += 1 }
+    }
+    assert.notEqual(plain.pid, process.pid)
+    assert.ok(torn > 0, 'plain writer must produce an unparseable or empty read')
+    await plain.stop(); plain = null
+    rmSync(`${file}.stop`, { force: true })
+
+    writeFileSync(file, text.replace('"%N%"', '"seed"'))
+    atomic = await startFileWriter({ file, text, mode: 'atomic', maxMs: 2000 })
+    const contents = new Set()
+    const atomicDeadline = Date.now() + 500
+    while (Date.now() < atomicDeadline) {
+      const parsed = JSON.parse(readFileSync(file, 'utf8'))
+      contents.add(JSON.stringify(parsed.version))
+    }
+    assert.ok(contents.size >= 2, 'atomic writer must publish at least two distinct contents')
+    await atomic.stop(); atomic = null
+  } finally {
+    if (plain) await plain.stop()
+    if (atomic) await atomic.stop()
+    rmSync(paths.dir, { recursive: true, force: true })
+  }
+})
+
+test('T2 owner publishes through a rename and never targets crew.json with writeFileSync', () => {
+  const paths = durabilityPaths('t2')
+  const file = join(paths.dir, 'crew.json')
+  writeFileSync(file, JSON.stringify(durabilityDocument(), null, 2))
+  const before = statSync(file).ino
+  const targets = []; let n = 0
+  try {
+    const result = updateCrewJson(paths, (disk) => { disk.owner_marker = true; return true }, {
+      uuid: () => `t2-${++n}`,
+      writeFileSync: (path, data, options) => { targets.push(String(path)); return writeFileSync(path, data, options) },
+    })
+    assert.equal(result.ok, true)
+    assert.notEqual(statSync(file).ino, before)
+    assert.equal(targets.includes(file), false)
+    assert.ok(targets.some((path) => path.includes('crew.json.tmp.')))
+    assert.equal(JSON.parse(readFileSync(file, 'utf8')).owner_marker, true)
+  } finally { rmSync(paths.dir, { recursive: true, force: true }) }
+})
+
+test('T3 an atomic foreign writer cannot tear the locked owner', async () => {
+  const paths = durabilityPaths('t3')
+  const file = join(paths.dir, 'crew.json')
+  const text = JSON.stringify({ ...durabilityDocument(), version: '%N%' })
+  writeFileSync(file, text.replace('"%N%"', '"seed"'))
+  let writer = null; let n = 0
+  try {
+    writer = await startFileWriter({ file, text, mode: 'atomic', maxMs: 2000 })
+    for (let i = 0; i < 12; i += 1) {
+      const result = updateCrewJson(paths, (disk) => { disk.owner_updates = (disk.owner_updates || 0) + 1; return true }, { uuid: () => `t3-${++n}` })
+      assert.equal(result.ok, true)
+      assert.doesNotThrow(() => JSON.parse(readFileSync(file, 'utf8')))
+    }
+    const stopped = await writer.stop(); writer = null
+    assert.ok(stopped.writes >= 1)
+  } finally {
+    if (writer) await writer.stop()
+    rmSync(paths.dir, { recursive: true, force: true })
+  }
+})
+
+test('T4 owner RMW preserves a reseat and the seat delta from a stale copy', () => {
+  const paths = durabilityPaths('t4')
+  const file = join(paths.dir, 'crew.json')
+  try {
+    writeFileSync(file, JSON.stringify(durabilityDocument(), null, 2))
+    const result = updateCrewJson(paths, (disk) => {
+      disk.members.reviewer.model = 'reseated-model'
+      disk.reseated = { role: 'reviewer' }
+      return true
+    })
+    assert.equal(result.ok, true)
+    const persist = updateCrewJson(paths, (disk) => {
+      disk.members.builder.session_id = 'stale-seat-session'
+      return true
+    })
+    assert.equal(persist.ok, true)
+    const after = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(after.members.reviewer.model, 'reseated-model')
+    assert.deepEqual(after.reseated, { role: 'reviewer' })
+    assert.equal(after.members.builder.session_id, 'stale-seat-session')
+  } finally { rmSync(paths.dir, { recursive: true, force: true }) }
+})
+
+test('T5 owner fails closed for absent and unparseable crew.json', () => {
+  const absent = durabilityPaths('t5-absent')
+  try {
+    const result = updateCrewJson(absent, (disk) => { disk.created = true; return true })
+    assert.deepEqual(result, { ok: false, reason: 'absent' })
+    assert.equal(existsSync(join(absent.dir, 'crew.json')), false)
+  } finally { rmSync(absent.dir, { recursive: true, force: true }) }
+  const unreadable = durabilityPaths('t5-unreadable')
+  const file = join(unreadable.dir, 'crew.json')
+  const bytes = '{"broken":'
+  try {
+    writeFileSync(file, bytes)
+    const result = updateCrewJson(unreadable, (disk) => { disk.changed = true; return true })
+    assert.deepEqual(result, { ok: false, reason: 'unreadable' })
+    assert.equal(readFileSync(file, 'utf8'), bytes)
+  } finally { rmSync(unreadable.dir, { recursive: true, force: true }) }
+})
+
+test('T6 headless transport persists its own deltas without erasing a disk reseat', () => {
+  const paths = durabilityPaths('t6')
+  const file = join(paths.dir, 'crew.json')
+  const crew = { ...durabilityDocument(), checkout: paths.dir }
+  const disk = durabilityDocument()
+  disk.members.reviewer.model = 'operator-reseated-model'; disk.reseated = { role: 'reviewer' }
+  writeFileSync(file, JSON.stringify(disk, null, 2))
+  let n = 0
+  try {
+    const io = headlessIo({
+      crew, paths, taskDir: paths.taskDir, checkout: paths.dir,
+      adapters: { reviewer: { headlessCommand: (spec) => ({ bin: '/bin/worker', args: [spec.model] }) } }, bin: '/bin/worker',
+      deps: { spawn: () => ({ pid: 7001, unref() {} }), uuid: () => `t6-${++n}`, now: () => 0, sleep: () => {}, pid: 7000, log() {} },
+    })
+    io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    const after = JSON.parse(readFileSync(file, 'utf8'))
+    assert.equal(after.members.reviewer.model, 'operator-reseated-model')
+    assert.deepEqual(after.reseated, { role: 'reviewer' })
+    assert.match(after.members.reviewer.session_id, /^t6-/)
+    assert.equal(after.members.reviewer.started, true)
+  } finally { rmSync(paths.dir, { recursive: true, force: true }) }
+})
+
+test('T7 headless transport journals a failed crew.json persist', () => {
+  const paths = durabilityPaths('t7')
+  const file = join(paths.dir, 'crew.json')
+  const crew = { ...durabilityDocument(), checkout: paths.dir }
+  writeFileSync(file, JSON.stringify(crew, null, 2))
+  const events = []; let n = 0
+  try {
+    const io = headlessIo({
+      crew, paths, taskDir: paths.taskDir, checkout: paths.dir,
+      adapters: { reviewer: { headlessCommand: () => ({ bin: '/bin/worker', args: [] }) } }, bin: '/bin/worker',
+      deps: {
+        spawn: () => ({ pid: 7011, unref() {} }), uuid: () => `t7-${++n}`, now: () => 0, sleep: () => {}, pid: 7010,
+        log: (event) => events.push(event), writeFileSync: (path, data, options) => {
+          if (String(path).includes('crew.json.tmp.')) throw new Error('simulated crew.json write failure')
+          return writeFileSync(path, data, options)
+        },
+      },
+    })
+    io.assign({ role: 'reviewer', briefFile: join(paths.taskDir, 'brief.md') })
+    const failures = events.filter((event) => event.event === 'crew-json-persist-failed')
+    assert.ok(failures.length >= 1)
+    assert.ok(failures.every((event) => event.role === 'reviewer' && event.reason === 'write-failed'))
+  } finally { rmSync(paths.dir, { recursive: true, force: true }) }
 })

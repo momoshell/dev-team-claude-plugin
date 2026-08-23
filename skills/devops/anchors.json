@@ -13,7 +13,7 @@
   "crew/daemon.mjs:467": "artifacts: [join(run.crew_dir, 'journal.jsonl')]",
   "crew/daemon.mjs:669": "catch { return [] }",
   "crew/daemon.mjs:750": "const path = join(run.crew_dir, 'journal.jsonl')",
-  "crew/seat-io.mjs:1679": "common git dir from every linked worktree",
+  "crew/seat-io.mjs:1735": "common git dir from every linked worktree",
   "scripts/factory/ci-watch.mjs:237": "rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir",
   "scripts/factory/ci-watch.mjs:240": "lines[0] !== lines[1]",
   "scripts/factory/ci-watch.mjs:242": "    linked = false",

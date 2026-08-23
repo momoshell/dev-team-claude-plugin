@@ -17,16 +17,16 @@ coverage for it.
 Exhibit: `crew/pi/extensions/subagent.test.mjs:169`.
 
 Use a first-party exception only when the test enumerates each admitted path.
-Exhibit: `test/factory-ci-watch.test.mjs:205`.
+Exhibit: `test/factory-ci-watch.test.mjs:208`.
 
 The factory intake test uses the same allowlist-shaped evidence.
 Exhibit: `test/factory-intake.test.mjs:1116`.
 
 An allowlist is a deliberate admission, not permission for arbitrary packages.
-Exhibit: `test/factory-ci-watch.test.mjs:205`.
+Exhibit: `test/factory-ci-watch.test.mjs:208`.
 
 Keep the list literal enough that a reviewer can compare it with the module.
-Exhibit: `test/factory-ci-watch.test.mjs:205`.
+Exhibit: `test/factory-ci-watch.test.mjs:208`.
 
 Keep this boundary on runtime-file imports rather than package metadata.
 Exhibit: `crew/pi/extensions/subagent.test.mjs:169`.
@@ -38,7 +38,7 @@ A failed read or parse is recorded as an unbacked fail-closed edge here; see
 `evidence.md` for the search result.
 
 Unknown specifier forms require an explicit decision before they enter a list.
-Exhibit: `test/factory-ci-watch.test.mjs:205`.
+Exhibit: `test/factory-ci-watch.test.mjs:208`.
 
 The measured convention is cheap because the test imports the subject directly.
 Exhibit: `crew/pi/extensions/subagent.test.mjs:169`.

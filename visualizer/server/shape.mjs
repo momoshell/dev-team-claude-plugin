@@ -1091,6 +1091,9 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
       price: {
         cost_in_per_mtok: model.cost_in_per_mtok ?? null,
         cost_out_per_mtok: model.cost_out_per_mtok ?? null,
+        cost_cache_read_per_mtok: model.cost_cache_read_per_mtok ?? null,
+        cost_cache_write_per_mtok: model.cost_cache_write_per_mtok ?? null,
+        cache_rate_source: model.cache_rate_source ?? null,
         context: model.context ?? null,
         source: model.source ?? null,
         last_verified: model.last_verified ?? null,

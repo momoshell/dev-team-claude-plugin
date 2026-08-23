@@ -340,6 +340,34 @@ function openTestLedger(extra = {}) {
   return openLedger({ dbPath: join(dir, 'ledger.db'), stderr: { write: () => {} }, ...extra })
 }
 
+function seedCellUsage({ tag, provider, model_id, agent = 'claude', model = model_id, effort = 'high', sessions }) {
+  const ledger = openTestLedger()
+  sessions.forEach((tokens, i) => {
+    const adwId = `${tag}-adw-${i}`
+    const dispatchId = `${tag}-r${i}`
+    const sessionId = `${tag}-session-${i}`
+    ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: `${tag}-${i}`, tier: 'build' })
+    ledger.recordReviewOutcome({
+      adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', verdict: 'pass',
+      provider, model_id, agent, model, effort, transport: 'headless-json',
+      created_at: '2024-01-01T00:00:00.000Z',
+    })
+    ledger.startAgentSession({
+      adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', model,
+      claude_session_id: sessionId, transcript_path: null,
+    })
+    ledger.endAgentSession({
+      adw_id: adwId, claude_session_id: sessionId,
+      context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+      billed_input_tokens: tokens.in, billed_output_tokens: tokens.out,
+      billed_cache_write_tokens: tokens.cw, billed_cache_read_tokens: tokens.cr,
+    })
+  })
+  const dbPath = ledger._dbPath
+  ledger.close()
+  return dbPath
+}
+
 test('mkdirpBounded creates a deep path, and refuses promptly under a regular file rather than looping', () => {
   const dir = nextDir()
   mkdirpBounded(join(dir, 'a', 'b', 'c'), 0o700)
@@ -1035,12 +1063,12 @@ test('cells CLI prices a model-keyed cell through the adapter namespace it was b
     adw_id: adwId, claude_session_id: 'model-priced-session',
     context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
     billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000,
-    billed_cache_write_tokens: null, billed_cache_read_tokens: null,
+    billed_cache_write_tokens: 0, billed_cache_read_tokens: 0,
   })
   const pricePath = join(nextDir(), 'model-priced.json')
   writeFileSync(pricePath, JSON.stringify({
     schema_version: 1, updated_at: '2024-02-01',
-    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 5, cost_out_per_mtok: 30 } },
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 5, cost_out_per_mtok: 30, cost_cache_read_per_mtok: 0.5, cost_cache_write_per_mtok: 0 } },
   }))
   const dbPath = ledger._dbPath
   ledger.close()
@@ -1210,12 +1238,12 @@ test('cells CLI prices a cell from the named catalog and names the units', { ski
     adw_id: adwId, claude_session_id: 'priced-session',
     context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
     billed_input_tokens: 2_000_000, billed_output_tokens: 3_000_000,
-    billed_cache_write_tokens: 4, billed_cache_read_tokens: 5,
+    billed_cache_write_tokens: 4_000_000, billed_cache_read_tokens: 5_000_000,
   })
   const pricePath = join(nextDir(), 'prices.json')
   writeFileSync(pricePath, JSON.stringify({
     schema_version: 1, updated_at: '2024-02-01',
-    models: { 'anthropic/priced-model': { cost_in_per_mtok: 2, cost_out_per_mtok: 10 } },
+    models: { 'anthropic/priced-model': { cost_in_per_mtok: 2, cost_out_per_mtok: 10, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 2.5 } },
   }))
   const dbPath = ledger._dbPath
   ledger.close()
@@ -1227,7 +1255,138 @@ test('cells CLI prices a cell from the named catalog and names the units', { ski
   assert.equal(payload.price_source.updated_at, '2024-02-01')
   assert.equal(payload.price_source.units, CELL_PRICE_UNITS)
   const row = payload.rows.find((candidate) => candidate.model_id === 'priced-model')
-  assert.equal(row.cost_usd, 34)
+  assert.equal(row.cost_usd, 45)
+})
+
+test('cells prices the b168 planner seat from the shipped roster catalog', { skip: SKIP }, () => {
+  const dbPath = seedCellUsage({
+    tag: 'b168-planner', provider: 'anthropic', model_id: 'claude-opus-5',
+    sessions: [{ in: 146, out: 32393, cw: 132204, cr: 8141239 }],
+  })
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'claude-opus-5')
+  assert.ok(Math.abs(row.cost_usd - 6.2032145) <= 1e-6)
+  assert.ok(row.cost_usd > 7 * 0.810555)
+})
+
+test('cells prices the b168 static lead seat', { skip: SKIP }, () => {
+  const dbPath = seedCellUsage({
+    tag: 'b168-lead', provider: 'anthropic', model_id: 'claude-opus-5',
+    sessions: [{ in: 2, out: 7, cw: 13650, cr: 18545 }],
+  })
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'claude-opus-5')
+  assert.ok(Math.abs(row.cost_usd - 0.1459575) <= 1e-6)
+  assert.ok(row.cost_usd > 700 * 0.000185)
+})
+
+test('a model with no cache rate is unpriced, never partly priced', { skip: SKIP }, () => {
+  const dbPath = seedCellUsage({
+    tag: 'cache-less', provider: 'anthropic', model_id: 'cache-less-model',
+    sessions: [{ in: 1_000_000, out: 2_000_000, cw: 3_000_000, cr: 4_000_000 }],
+  })
+  const pricePath = join(nextDir(), 'cache-less.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'anthropic/cache-less-model': { cost_in_per_mtok: 5, cost_out_per_mtok: 25 } },
+  }))
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'cache-less-model')
+  assert.equal(row.cost_usd, null)
+  assert.ok(row.absent.cost_usd.includes(USAGE_ABSENT_CAUSES.cache_unpriced))
+  assert.match(row.absent.cost_usd, /cost_cache_read_per_mtok/)
+  assert.match(row.absent.cost_usd, /cost_cache_write_per_mtok/)
+})
+
+test('an unmeasured token class in ONE member of a cell leaves the whole cell unpriced', { skip: SKIP }, () => {
+  const pricePath = join(nextDir(), 'mixed-rated.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'anthropic/mixed-model': {
+      cost_in_per_mtok: 5, cost_out_per_mtok: 25,
+      cost_cache_read_per_mtok: 0.5, cost_cache_write_per_mtok: 10,
+    } },
+  }))
+  const complete = { in: 1_000_000, out: 2_000_000, cw: 3_000_000, cr: 4_000_000 }
+  for (const [column, field] of [
+    ['billed_input_tokens', 'in'],
+    ['billed_output_tokens', 'out'],
+    ['billed_cache_read_tokens', 'cr'],
+    ['billed_cache_write_tokens', 'cw'],
+  ]) {
+    const dbPath = seedCellUsage({
+      tag: `mixed-${field}`, provider: 'anthropic', model_id: 'mixed-model',
+      sessions: [complete, { ...complete, [field]: null }],
+    })
+    const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+    assert.equal(result.status, 0, result.stderr)
+    const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'mixed-model')
+    assert.equal(row[column], null)
+    assert.equal(row.cost_usd, null)
+    assert.match(row.absent.cost_usd, new RegExp(column))
+  }
+})
+
+test('a published zero cache-write rate is priced, not treated as absent', { skip: SKIP }, () => {
+  const dbPath = seedCellUsage({
+    tag: 'zero-cache-write', provider: 'openai', model_id: 'zero-cache-write-model',
+    sessions: [{ in: 1_000_000, out: 2_000_000, cw: 3_000_000, cr: 4_000_000 }],
+  })
+  const pricePath = join(nextDir(), 'zero-cache-write.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/zero-cache-write-model': {
+      cost_in_per_mtok: 5, cost_out_per_mtok: 25,
+      cost_cache_read_per_mtok: 0.5, cost_cache_write_per_mtok: 0,
+    } },
+  }))
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model_id === 'zero-cache-write-model')
+  assert.ok(Number.isFinite(row.cost_usd))
+  assert.equal(Object.prototype.hasOwnProperty.call(row.absent, 'cost_usd'), false)
+})
+
+test('CELL_PRICE_UNITS describes what cells computes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout.trim())
+  assert.doesNotMatch(CELL_PRICE_UNITS, /NOT priced/)
+  assert.match(CELL_PRICE_UNITS, /cost_cache_read_per_mtok/)
+  assert.match(CELL_PRICE_UNITS, /cost_cache_write_per_mtok/)
+  assert.equal(payload.definition.cost_usd, CELL_PRICE_UNITS)
+  assert.equal(payload.price_source.units, CELL_PRICE_UNITS)
+})
+
+test('every roster model carries its ratified cache rates and their provenance', () => {
+  const roster = JSON.parse(readFileSync(join(ROOT, 'crew', 'roster.json'), 'utf8'))
+  const expectedRates = {
+    'anthropic/claude-opus-5': { read: 0.5, write: 10 },
+    'anthropic/claude-sonnet-5': { read: 0.2, write: 4 },
+    'anthropic/claude-haiku-4-5': { read: 0.1, write: 2 },
+    'anthropic/claude-fable-5': { read: 1, write: 20 },
+    'openai/gpt-5.6-sol': { read: 0.5, write: 0 },
+    'openai/gpt-5.6-terra': { read: 0.2, write: 0 },
+    'openai/gpt-5.6-luna': { read: 0.02, write: 0 },
+  }
+  const expectedSources = {
+    anthropic: "anthropic published prompt-caching multipliers applied to this entry's own cost_in_per_mtok: cache read 0.10x, 1h-TTL cache write 2.00x. billed_cache_write_tokens collapses the 1h and 5m TTLs into one column, so pricing every cache write at the 1h rate is an explicit lossy convention, not a reconstruction of any session's TTL; 1h is the ratified one because this task's acceptance figures require it and because both sampled b168-paneusage claude-opus-5 pane seats used only 1h writes.",
+    openai: "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
+  }
+  assert.deepEqual(Object.keys(roster.models).sort(), Object.keys(expectedRates).sort())
+  for (const [key, expected] of Object.entries(expectedRates)) {
+    const model = roster.models[key]
+    assert.deepEqual({ read: model.cost_cache_read_per_mtok, write: model.cost_cache_write_per_mtok }, expected)
+    assert.ok(Math.abs(model.cost_cache_read_per_mtok - model.cost_in_per_mtok * 0.10) <= 1e-12)
+    const vendor = key.slice(0, key.indexOf('/'))
+    assert.equal(model.cache_rate_source, expectedSources[vendor])
+  }
 })
 
 test('cells CLI reads an unpriced model as unpriced, never as free', { skip: SKIP }, () => {

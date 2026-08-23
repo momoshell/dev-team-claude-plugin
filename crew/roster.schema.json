@@ -134,6 +134,17 @@
           "type": "number",
           "minimum": 0
         },
+        "cost_cache_read_per_mtok": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cost_cache_write_per_mtok": {
+          "type": "number",
+          "minimum": 0
+        },
+        "cache_rate_source": {
+          "type": "string"
+        },
         "context": {
           "type": "integer",
           "minimum": 1

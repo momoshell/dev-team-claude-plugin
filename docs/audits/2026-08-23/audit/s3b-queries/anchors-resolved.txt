@@ -1,0 +1,423 @@
+skills/backend-node/SKILL.md:30	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/SKILL.md:30	ok	test/factory-ci-watch.test.mjs:205	assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs', './probe-repo.mjs'])
+skills/backend-node/SKILL.md:31	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/SKILL.md:32	ok	crew/drive.mjs:124	export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
+skills/backend-node/SKILL.md:32	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/SKILL.md:33	ok	scripts/factory/ledger.mjs:3372	refuse(`${verb}: unknown flag --${name} — ${vocabulary}`)
+skills/backend-node/SKILL.md:33	ok	test/factory-emit.test.mjs:1403	test('CLI: emit-cli-unknown-flag-refusal — an unknown flag refuses with exit 2 and names it, on both verbs', () => {
+skills/backend-node/SKILL.md:34	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/SKILL.md:34	ok	crew/pi/extensions/subagent.test.mjs:174	assert.doesNotMatch(source, /^\s*enum\s/m)
+skills/backend-node/SKILL.md:35	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/SKILL.md:35	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/cli-flags.md:4	ok	scripts/factory/ledger.mjs:3340	const VERB_FLAGS = Object.freeze({
+skills/backend-node/references/cli-flags.md:7	ok	scripts/factory/ledger.mjs:3372	refuse(`${verb}: unknown flag --${name} — ${vocabulary}`)
+skills/backend-node/references/cli-flags.md:10	ok	scripts/factory/ledger.mjs:3334	// Every flag each verb accepts. A flag absent from its verb's set is REFUSED
+skills/backend-node/references/cli-flags.md:14	ok	scripts/factory/ledger.mjs:3334	// Every flag each verb accepts. A flag absent from its verb's set is REFUSED
+skills/backend-node/references/cli-flags.md:17	ok	test/factory-ledger.test.mjs:2318	test('#443: flagless subcommands refuse an unknown flag', { skip: SKIP }, () => {
+skills/backend-node/references/cli-flags.md:20	ok	test/factory-ledger.test.mjs:2326	test('#443: every window subcommand refuses the misspelled flag', { skip: SKIP }, () => {
+skills/backend-node/references/cli-flags.md:23	ok	test/factory-emit.test.mjs:1403	test('CLI: emit-cli-unknown-flag-refusal — an unknown flag refuses with exit 2 and names it, on both verbs', () => {
+skills/backend-node/references/cli-flags.md:25	ok	scripts/factory/emit.mjs:1341	// for an unknown VERB, which main already refuses. Mirrors ledger.mjs's own
+skills/backend-node/references/cli-flags.md:26	ok	scripts/factory/emit.mjs:1341	// for an unknown VERB, which main already refuses. Mirrors ledger.mjs's own
+skills/backend-node/references/cli-flags.md:29	ok	scripts/factory/ledger.mjs:3334	// Every flag each verb accepts. A flag absent from its verb's set is REFUSED
+skills/backend-node/references/cli-flags.md:29	ok	test/factory-ledger.test.mjs:2261	const refused = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--untill', '2026-08-21T01:00:00Z'])
+skills/backend-node/references/cli-flags.md:32	ok	scripts/factory/ledger.mjs:3340	const VERB_FLAGS = Object.freeze({
+skills/backend-node/references/cli-flags.md:35	ok	scripts/factory/ledger.mjs:4304	refuse(`unknown verb: ${verb}`)
+skills/backend-node/references/cli-flags.md:45	ok	test/factory-ledger.test.mjs:2261	const refused = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--untill', '2026-08-21T01:00:00Z'])
+skills/backend-node/references/cli-flags.md:45	ok	test/factory-emit.test.mjs:1403	test('CLI: emit-cli-unknown-flag-refusal — an unknown flag refuses with exit 2 and names it, on both verbs', () => {
+skills/backend-node/references/cli-flags.md:48	ok	test/factory-ledger.test.mjs:2261	const refused = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--untill', '2026-08-21T01:00:00Z'])
+skills/backend-node/references/cli-flags.md:51	ok	test/factory-ledger.test.mjs:2261	const refused = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--untill', '2026-08-21T01:00:00Z'])
+skills/backend-node/references/cli-flags.md:54	ok	scripts/factory/ledger.mjs:3340	const VERB_FLAGS = Object.freeze({
+skills/backend-node/references/cli-flags.md:57	ok	scripts/factory/ledger.mjs:3334	// Every flag each verb accepts. A flag absent from its verb's set is REFUSED
+skills/backend-node/references/cli-flags.md:60	ok	scripts/factory/ledger.mjs:3340	const VERB_FLAGS = Object.freeze({
+skills/backend-node/references/closed-enums.md:4	ok	crew/drive.mjs:124	export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:7	ok	crew/drive.mjs:124	export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:10	ok	crew/drive.mjs:137	// #251 — blueprint variants: a CLOSED enum of run shapes over this one driver.
+skills/backend-node/references/closed-enums.md:13	ok	crew/drive.mjs:137	// #251 — blueprint variants: a CLOSED enum of run shapes over this one driver.
+skills/backend-node/references/closed-enums.md:16	ok	crew/drive.mjs:244	if (!ENVELOPE_FIELD_KINDS.includes(field?.kind)) return `envelope field ${JSON.stringify(field?.name)} must declare a kind in ${ENVELOPE_FIELD_KINDS.join(', ')}`
+skills/backend-node/references/closed-enums.md:19	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:22	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:25	ok	crew/drive.test.mjs:5538	assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item'])
+skills/backend-node/references/closed-enums.md:28	ok	crew/reclaim.mjs:11	export const PARK_STATES = Object.freeze(['parked', 'claimed', 'resumed', 'abandoned'])
+skills/backend-node/references/closed-enums.md:31	ok	scripts/factory/reap-stale.mjs:75	export const REAP_ACCOUNTING = Object.freeze(['proven', 'failed', 'unproven'])
+skills/backend-node/references/closed-enums.md:34	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:38	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:41	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:43	ok	docs/conventions.md:122	- **2026-08-08** — **A frozen exported enum's drift guard needs `assert.ok(Object.isFrozen(X))` alongside `assert.deepEqual(X, [...])` — the deepEqual alone pins the valu
+skills/backend-node/references/closed-enums.md:48	ok	crew/drive.mjs:244	if (!ENVELOPE_FIELD_KINDS.includes(field?.kind)) return `envelope field ${JSON.stringify(field?.name)} must declare a kind in ${ENVELOPE_FIELD_KINDS.join(', ')}`
+skills/backend-node/references/closed-enums.md:51	ok	crew/drive.mjs:237-242	export function shapeDefect(shape, variantName) { ⏎ if (!shape || typeof shape !== 'object') return 'no declaration' ⏎ if (!EXECUTIONS.includes(shape.execution)) return `
+skills/backend-node/references/closed-enums.md:54	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/closed-enums.md:58	ok	crew/drive.test.mjs:4075	assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+skills/backend-node/references/erasable-ts.md:3	ok	docs/conventions.md:45	- **2026-08-20** — `crew/pi/extensions/subagent.ts` is the first TypeScript file on main, and every file under `crew/pi/extensions/` stays erasable-syntax-only and zero-d
+skills/backend-node/references/erasable-ts.md:6	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:9	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:12	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:15	ok	crew/pi/extensions/subagent.ts:5	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14,
+skills/backend-node/references/erasable-ts.md:18	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:21	ok	crew/pi/extensions/subagent.test.mjs:174	assert.doesNotMatch(source, /^\s*enum\s/m)
+skills/backend-node/references/erasable-ts.md:24	ok	crew/pi/extensions/subagent.test.mjs:175	assert.doesNotMatch(source, /^\s*namespace\s/m)
+skills/backend-node/references/erasable-ts.md:27	ok	crew/pi/extensions/subagent.test.mjs:174	assert.doesNotMatch(source, /^\s*enum\s/m)
+skills/backend-node/references/erasable-ts.md:31	ok	crew/pi/extensions/subagent.test.mjs:8	import * as mod from './subagent.ts'
+skills/backend-node/references/erasable-ts.md:34	ok	docs/conventions.md:45	- **2026-08-20** — `crew/pi/extensions/subagent.ts` is the first TypeScript file on main, and every file under `crew/pi/extensions/` stays erasable-syntax-only and zero-d
+skills/backend-node/references/erasable-ts.md:37	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:41	ok	crew/pi/extensions/subagent.test.mjs:174	assert.doesNotMatch(source, /^\s*enum\s/m)
+skills/backend-node/references/erasable-ts.md:49	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:53	ok	crew/pi/extensions/subagent.ts:5-9	// Why .ts: pi loads extensions through jiti (dist/core/extensions/loader.js:14, ⏎ // :358, :368), so no build step exists. Node imports this file directly via ⏎ // unfla
+skills/backend-node/references/erasable-ts.md:56	ok	crew/pi/extensions/subagent.test.mjs:174	assert.doesNotMatch(source, /^\s*enum\s/m)
+skills/backend-node/references/evidence.md:13	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/evidence.md:25	ok	crew/pi/extensions/subagent.test.mjs:174	assert.doesNotMatch(source, /^\s*enum\s/m)
+skills/backend-node/references/evidence.md:25	ok	crew/pi/extensions/subagent.test.mjs:175	assert.doesNotMatch(source, /^\s*namespace\s/m)
+skills/backend-node/references/evidence.md:32	ok	crew/pi/extensions/subagent.test.mjs:8	import * as mod from './subagent.ts'
+skills/backend-node/references/evidence.md:50	ok	crew/daemon.test.mjs:228	if (j > i && isImportStart(lines[j].trim())) break
+skills/backend-node/references/evidence.md:71	ok	test/factory-ledger.test.mjs:2261	const refused = run(['run-set', '--since', '2026-08-21T00:00:00Z', '--untill', '2026-08-21T01:00:00Z'])
+skills/backend-node/references/evidence.md:81	ok	crew/pi/extensions/subagent.test.mjs:8	import * as mod from './subagent.ts'
+skills/backend-node/references/evidence.md:92	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/references/evidence.md:92	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/import-firewall.md:4	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/import-firewall.md:7	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/import-firewall.md:10	ok	crew/daemon.test.mjs:228	if (j > i && isImportStart(lines[j].trim())) break
+skills/backend-node/references/import-firewall.md:13	ok	crew/daemon.test.mjs:228	if (j > i && isImportStart(lines[j].trim())) break
+skills/backend-node/references/import-firewall.md:16	ok	crew/daemon.test.mjs:230	if (from) { imports.push(from[2]); i = j; found = true; break }
+skills/backend-node/references/import-firewall.md:19	ok	crew/daemon.test.mjs:232	if (!found) imports.push(null)
+skills/backend-node/references/import-firewall.md:22	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/import-firewall.md:26	ok	crew/daemon.test.mjs:228	if (j > i && isImportStart(lines[j].trim())) break
+skills/backend-node/references/import-firewall.md:29	ok	crew/daemon.test.mjs:195	function stageRpcSeat(f, role) {
+skills/backend-node/references/import-firewall.md:32	ok	crew/daemon.test.mjs:238	assert.equal(
+skills/backend-node/references/import-firewall.md:36	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/import-firewall.md:39	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/import-firewall.md:47	ok	crew/daemon.test.mjs:228	if (j > i && isImportStart(lines[j].trim())) break
+skills/backend-node/references/import-firewall.md:50	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/import-firewall.md:53	ok	crew/daemon.test.mjs:195	function stageRpcSeat(f, role) {
+skills/backend-node/references/import-firewall.md:56	ok	crew/daemon.test.mjs:228	if (j > i && isImportStart(lines[j].trim())) break
+skills/backend-node/references/import-firewall.md:60	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/backend-node/references/usage-records.md:4	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/references/usage-records.md:7	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/references/usage-records.md:10	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/references/usage-records.md:14	ok	crew/pi/extensions/subagent.ts:396	// `totals.cost += usage.cost.total`, an unconditional dereference, so a
+skills/backend-node/references/usage-records.md:17	ok	skills/qa-test-writing/references/absence.md:3	**Rule: a value nobody measured is recorded as absent, with the reason it is
+skills/backend-node/references/usage-records.md:20	ok	crew/pi/extensions/subagent.test.mjs:456	test('usage is a complete pi Usage or absent, never partial', async () => {
+skills/backend-node/references/usage-records.md:23	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/usage-records.md:26	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/usage-records.md:29	ok	crew/pi/extensions/subagent.ts:525	// Complete or absent — never partial, never a fabricated zero.
+skills/backend-node/references/usage-records.md:32	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/usage-records.md:35	ok	crew/pi/extensions/subagent.ts:396	// `totals.cost += usage.cost.total`, an unconditional dereference, so a
+skills/backend-node/references/usage-records.md:38	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/references/usage-records.md:38	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/usage-records.md:48	ok	crew/pi/extensions/subagent.ts:394	usage: () => (measured ? billed : null),
+skills/backend-node/references/usage-records.md:48	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/usage-records.md:51	ok	crew/pi/extensions/subagent.ts:396	// `totals.cost += usage.cost.total`, an unconditional dereference, so a
+skills/backend-node/references/usage-records.md:54	ok	crew/pi/extensions/subagent.ts:396	// `totals.cost += usage.cost.total`, an unconditional dereference, so a
+skills/backend-node/references/usage-records.md:57	ok	crew/pi/extensions/subagent.test.mjs:468	assert.equal(Object.hasOwn(absent.result, 'usage'), false)
+skills/backend-node/references/usage-records.md:60	ok	crew/pi/extensions/subagent.ts:396	// `totals.cost += usage.cost.total`, an unconditional dereference, so a
+skills/backend-node/references/zero-dep.md:4	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:7	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:10	ok	crew/pi/extensions/subagent.test.mjs:173	assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
+skills/backend-node/references/zero-dep.md:13	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:17	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:20	ok	test/factory-ci-watch.test.mjs:205	assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs', './probe-repo.mjs'])
+skills/backend-node/references/zero-dep.md:23	ok	test/factory-intake.test.mjs:1078	assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './make-brief.mjs'])
+skills/backend-node/references/zero-dep.md:26	ok	test/factory-ci-watch.test.mjs:205	assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs', './probe-repo.mjs'])
+skills/backend-node/references/zero-dep.md:29	ok	test/factory-ci-watch.test.mjs:205	assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs', './probe-repo.mjs'])
+skills/backend-node/references/zero-dep.md:32	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:35	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:41	ok	test/factory-ci-watch.test.mjs:205	assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './emit.mjs', './probe-repo.mjs'])
+skills/backend-node/references/zero-dep.md:44	ok	crew/pi/extensions/subagent.test.mjs:169	test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
+skills/backend-node/references/zero-dep.md:49	ok	crew/daemon.test.mjs:221	const line = lines[i].trim()
+skills/crew-dispatch/references/tier.md:12	ok	crew/crew.mjs:265	tripwires,
+skills/crew-dispatch/references/tier.md:14	ok	crew/crew.mjs:265	tripwires,
+skills/crew-dispatch/references/tier.md:15	ok	crew/crew.mjs:1315-1329	function paneCommand(role, args, { taskDir, bootBrief, adapter, tierSeat, grants = EMPTY_GRANTS, configDir = null, advisorCell = null }) { ⏎ const seat = SEAT_DEFAULTS[ro
+skills/devops/SKILL.md:29	ok	crew/arms.mjs:661	return spawnRefusal('worktree-exists', `worktree path already exists: ${plan.dir}`, { path: plan.dir })
+skills/devops/SKILL.md:29	ok	crew/crew.mjs:1879	//   done       -> auto-teardown (archive the record, close the view),
+skills/devops/SKILL.md:30	ok	scripts/factory/ci-watch.mjs:237	['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+skills/devops/SKILL.md:30	ok	crew/seat-io.mjs:1655	if (raw === staleRaw) return null
+skills/devops/SKILL.md:31	ok	scripts/factory/intake.mjs:533	result = d.spawnSync('gh', [
+skills/devops/SKILL.md:31	ok	scripts/factory/probe-repo.mjs:739	result = spawnSync(process.env.GH_BIN || 'gh', args,
+skills/devops/SKILL.md:32	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/SKILL.md:33	ok	scripts/factory/reap-stale.mjs:251	// Safe by construction: only --reclaim turns the sweep destructive, and an
+skills/devops/SKILL.md:33	ok	crew/crew.mjs:664	`boot refused for task ${task}: a previous run's workers are still recorded as running or unmeasurable `
+skills/devops/SKILL.md:34	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/SKILL.md:34	ok	crew/daemon.mjs:371	const root = resolvePath(options.root || join(homedir(), '.crew', 'daemon'))
+skills/devops/references/daemon.md:4	ok	crew/daemon.mjs:371	const root = resolvePath(options.root || join(homedir(), '.crew', 'daemon'))
+skills/devops/references/daemon.md:7	ok	crew/daemon.mjs:371	const root = resolvePath(options.root || join(homedir(), '.crew', 'daemon'))
+skills/devops/references/daemon.md:10	ok	crew/daemon.mjs:373	const pidPath = join(root, 'daemon.json')
+skills/devops/references/daemon.md:13	ok	crew/daemon.mjs:451	artifacts: [join(run.crew_dir, 'journal.jsonl')],
+skills/devops/references/daemon.md:16	ok	crew/daemon.mjs:711	const path = join(run.crew_dir, 'journal.jsonl')
+skills/devops/references/daemon.md:20	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:23	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:26	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:29	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:32	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:35	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:38	ok	crew/README.md:216	`daemon.mjs` owns long-lived headless crew runs behind a Unix-socket JSONL protocol. Its socket and pidfile live at `<root>/daemon.sock` and `<root>/daemon.json` (the def
+skills/devops/references/daemon.md:47	ok	crew/daemon.mjs:1239	socket = net.connect(socketPath)
+skills/devops/references/daemon.md:50	ok	crew/daemon.mjs:713	if (!line.trim()) continue
+skills/devops/references/daemon.md:53	ok	crew/daemon.mjs:615	function cursorLines(path, cursor) {
+skills/devops/references/daemon.md:56	ok	crew/daemon.mjs:113	export const DAEMON_COMMANDS = Object.freeze(['ping', 'enqueue', 'list', 'state', 'result', 'tail', 'untail', 'stop', 'send'])
+skills/devops/references/daemon.md:56	ok	skills/devops/exhibits.test.mjs:15	test('the daemon closed command set is fully documented', () => {
+skills/devops/references/daemon.md:60	ok	crew/README.md:216	`daemon.mjs` owns long-lived headless crew runs behind a Unix-socket JSONL protocol. Its socket and pidfile live at `<root>/daemon.sock` and `<root>/daemon.json` (the def
+skills/devops/references/evidence.md:20	ok	scripts/factory/intake.mjs:533-535	result = d.spawnSync('gh', [ ⏎ 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url', '--limit', '1', ⏎ ], { cwd: root, encoding: 'utf8' })
+skills/devops/references/evidence.md:33	ok	scripts/factory/probe-repo.mjs:799	'rebaseMergeAllowed', 'deleteBranchOnMerge', 'allowAutoMerge',
+skills/devops/references/evidence.md:47	ok	scripts/factory/ci-watch.mjs:241-244	} catch { ⏎ linked = false ⏎ } ⏎ let underCrew = false
+skills/devops/references/evidence.md:60	ok	scripts/factory/reap-stale.mjs:56-60	export function guardedKill(kill) { ⏎ return (pid, signal) => { ⏎ if (!Number.isSafeInteger(pid) || (pid < 0 ? -pid : pid) <= 1) { ⏎ const err = new Error(`reap: refusing
+skills/devops/references/evidence.md:71	ok	tasks/cmux-mode/spike-findings.md:58	- Ancestry chain observed: `zsh (bash tool shell, pid 60237)` → `claude (pid 34820, launched with --session-id + --settings containing full hook wiring)` → `zsh` → `login
+skills/devops/references/gh.md:18	ok	skills/qa-test-writing/references/tooling.md:89	and a compound `cd` that silently changed what a relative path meant.
+skills/devops/references/gh.md:21	ok	scripts/factory/intake.mjs:533-535	result = d.spawnSync('gh', [ ⏎ 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url', '--limit', '1', ⏎ ], { cwd: root, encoding: 'utf8' })
+skills/devops/references/gh.md:24	ok	scripts/factory/intake.mjs:533-535	result = d.spawnSync('gh', [ ⏎ 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url', '--limit', '1', ⏎ ], { cwd: root, encoding: 'utf8' })
+skills/devops/references/gh.md:27	ok	scripts/factory/probe-repo.mjs:739	result = spawnSync(process.env.GH_BIN || 'gh', args,
+skills/devops/references/gh.md:30	ok	scripts/factory/probe-repo.mjs:739	result = spawnSync(process.env.GH_BIN || 'gh', args,
+skills/devops/references/gh.md:45	ok	scripts/factory/intake.mjs:545	}
+skills/devops/references/gh.md:48	ok	scripts/factory/intake.mjs:533-535	result = d.spawnSync('gh', [ ⏎ 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url', '--limit', '1', ⏎ ], { cwd: root, encoding: 'utf8' })
+skills/devops/references/gh.md:56	ok	skills/qa-test-writing/references/tooling.md:89	and a compound `cd` that silently changed what a relative path meant.
+skills/devops/references/gh.md:59	ok	scripts/factory/intake.mjs:533-535	result = d.spawnSync('gh', [ ⏎ 'pr', 'list', '--head', branch, '--state', 'open', '--json', 'number,url', '--limit', '1', ⏎ ], { cwd: root, encoding: 'utf8' })
+skills/devops/references/lane-branches.md:14	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/references/lane-branches.md:17	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/references/lane-branches.md:20	ok	scripts/factory/ci-watch.mjs:237	['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+skills/devops/references/lane-branches.md:23	ok	scripts/factory/ci-watch.mjs:237	['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+skills/devops/references/lane-branches.md:26	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/references/lane-branches.md:29	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/references/lane-branches.md:32	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/references/lane-branches.md:44	ok	scripts/factory/ci-watch.mjs:277	if (typeof runBranch !== 'string' || runBranch.length === 0) {
+skills/devops/references/lane-branches.md:54	ok	scripts/factory/ci-watch.mjs:262	const worker = isWorkerPath({ checkout, crewRoot, deps: d })
+skills/devops/references/processes.md:4	ok	crew/crew.mjs:664-666	`boot refused for task ${task}: a previous run's workers are still recorded as running or unmeasurable ` ⏎ + `[reason: ${reason}]${detail ? ` (${detail})` : ''} — booting
+skills/devops/references/processes.md:7	ok	crew/crew.mjs:664-666	`boot refused for task ${task}: a previous run's workers are still recorded as running or unmeasurable ` ⏎ + `[reason: ${reason}]${detail ? ` (${detail})` : ''} — booting
+skills/devops/references/processes.md:10	ok	scripts/factory/reap-stale.mjs:251-254	// Safe by construction: only --reclaim turns the sweep destructive, and an ⏎ // explicit --dry-run wins over it in either order (#439). ⏎ flags.dryRun = explicitDryRun |
+skills/devops/references/processes.md:13	ok	scripts/factory/reap-stale.mjs:251-254	// Safe by construction: only --reclaim turns the sweep destructive, and an ⏎ // explicit --dry-run wins over it in either order (#439). ⏎ flags.dryRun = explicitDryRun |
+skills/devops/references/processes.md:16	ok	scripts/factory/reap-stale.mjs:71-75	// The proven/failed/unproven accounting reclaimDescendants already adjudicates ⏎ // per record (crew/seat-io.mjs, `outcome`). Carried through the sweep so a ⏎ // process
+skills/devops/references/processes.md:19	ok	scripts/factory/reap-stale.mjs:71-75	// The proven/failed/unproven accounting reclaimDescendants already adjudicates ⏎ // per record (crew/seat-io.mjs, `outcome`). Carried through the sweep so a ⏎ // process
+skills/devops/references/processes.md:22	ok	scripts/factory/reap-stale.mjs:56-60	export function guardedKill(kill) { ⏎ return (pid, signal) => { ⏎ if (!Number.isSafeInteger(pid) || (pid < 0 ? -pid : pid) <= 1) { ⏎ const err = new Error(`reap: refusing
+skills/devops/references/processes.md:25	ok	scripts/factory/reap-stale.mjs:56-60	export function guardedKill(kill) { ⏎ return (pid, signal) => { ⏎ if (!Number.isSafeInteger(pid) || (pid < 0 ? -pid : pid) <= 1) { ⏎ const err = new Error(`reap: refusing
+skills/devops/references/processes.md:28	ok	scripts/factory/reap-stale.mjs:105-107	// ones most likely to hold a leak (#473). Archived still means finished — ⏎ // the row says which it is and nothing downstream reads it as active. ⏎ const dir = join(roo
+skills/devops/references/processes.md:31	ok	scripts/factory/reap-stale.mjs:105-107	// ones most likely to hold a leak (#473). Archived still means finished — ⏎ // the row says which it is and nothing downstream reads it as active. ⏎ const dir = join(roo
+skills/devops/references/processes.md:34	ok	scripts/factory/reap-stale.mjs:257	export const USAGE = 'usage: npm run crew:reap -- [--reclaim] [--dry-run] [--root <crew-root>] (default: dry run — nothing is signalled without --reclaim)'
+skills/devops/references/processes.md:37	ok	crew/README.md:237	**Liveness is three-state, deliberately.** `paneAlive()` returns `true`,
+skills/devops/references/processes.md:40	ok	crew/README.md:237	**Liveness is three-state, deliberately.** `paneAlive()` returns `true`,
+skills/devops/references/processes.md:44	ok	scripts/factory/reap-stale.mjs:105-107	// ones most likely to hold a leak (#473). Archived still means finished — ⏎ // the row says which it is and nothing downstream reads it as active. ⏎ const dir = join(roo
+skills/devops/references/processes.md:50	ok	scripts/factory/reap-stale.mjs:257	export const USAGE = 'usage: npm run crew:reap -- [--reclaim] [--dry-run] [--root <crew-root>] (default: dry run — nothing is signalled without --reclaim)'
+skills/devops/references/processes.md:53	ok	scripts/factory/reap-stale.mjs:71-75	// The proven/failed/unproven accounting reclaimDescendants already adjudicates ⏎ // per record (crew/seat-io.mjs, `outcome`). Carried through the sweep so a ⏎ // process
+skills/devops/references/processes.md:56	ok	scripts/factory/reap-stale.mjs:105-107	// ones most likely to hold a leak (#473). Archived still means finished — ⏎ // the row says which it is and nothing downstream reads it as active. ⏎ const dir = join(roo
+skills/devops/references/processes.md:59	ok	crew/crew.mjs:664-666	`boot refused for task ${task}: a previous run's workers are still recorded as running or unmeasurable ` ⏎ + `[reason: ${reason}]${detail ? ` (${detail})` : ''} — booting
+skills/devops/references/worktrees.md:4	ok	crew/arms.mjs:670	const spawnResult = git(
+skills/devops/references/worktrees.md:7	ok	crew/arms.mjs:661	return spawnRefusal('worktree-exists', `worktree path already exists: ${plan.dir}`, { path: plan.dir })
+skills/devops/references/worktrees.md:10	ok	crew/arms.mjs:670	const spawnResult = git(
+skills/devops/references/worktrees.md:13	ok	scripts/pr-review-window.sh:61-62	# 2. scan the roots. Linked worktrees have a .git *file*, so `-type d` naturally ⏎ #    skips them and only finds primary checkouts.
+skills/devops/references/worktrees.md:16	ok	scripts/pr-review-window.sh:61-62	# 2. scan the roots. Linked worktrees have a .git *file*, so `-type d` naturally ⏎ #    skips them and only finds primary checkouts.
+skills/devops/references/worktrees.md:19	ok	scripts/factory/ci-watch.mjs:237	['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+skills/devops/references/worktrees.md:22	ok	scripts/factory/ci-watch.mjs:237	['rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir'],
+skills/devops/references/worktrees.md:25	ok	crew/seat-io.mjs:1655	if (raw === staleRaw) return null
+skills/devops/references/worktrees.md:28	ok	crew/seat-io.mjs:1656	return readEnvelopeFile(returnPath, { existsSync, readFileSync, role })
+skills/devops/references/worktrees.md:31	ok	skills/qa-test-writing/references/tooling.md:65-66	A detached worktree **shares the object store and must be removed** with ⏎ `git worktree remove` — you cannot simply `rm -rf` it and forget.
+skills/devops/references/worktrees.md:37	ok	skills/qa-test-writing/references/tooling.md:13-16	Do **not** symlink `node_modules` into a worktree to "fix" it. A symlink is not ⏎ matched by a `node_modules/` gitignore directory pattern, so it shows as `??` ⏎ and a cr
+skills/devops/references/worktrees.md:42	ok	crew/crew.mjs:1879	//   done       -> auto-teardown (archive the record, close the view),
+skills/devops/references/worktrees.md:45	ok	crew/crew.mjs:1881	//   escalation -> NEVER teardown: the workspace IS the escalation context
+skills/devops/references/worktrees.md:52	ok	crew/arms.mjs:670	const spawnResult = git(
+skills/devops/references/worktrees.md:55	ok	skills/qa-test-writing/references/tooling.md:65-66	A detached worktree **shares the object store and must be removed** with ⏎ `git worktree remove` — you cannot simply `rm -rf` it and forget.
+skills/frontend-svelte/references/components.md:9	ok	visualizer/web/src/lib/RunCard.svelte:8	let { run, taskEnvelope = null, onopen = () => {} } = $props()
+skills/frontend-svelte/references/components.md:10	ok	visualizer/web/src/lib/FleetTable.svelte:2	let { rows = [], onopen = () => {} } = $props()
+skills/frontend-svelte/references/components.md:11	ok	visualizer/web/src/lib/PhasePanel.svelte:3	let { run, phase = null, returns = {}, events = [] } = $props()
+skills/frontend-svelte/references/components.md:13	ok	visualizer/web/src/lib/PhaseGantt.svelte:5	let { run, events = [], onselectphase = () => {} } = $props()
+skills/frontend-svelte/references/components.md:13	ok	visualizer/web/src/App.svelte:124	<nav aria-label="Views">
+skills/frontend-svelte/references/components.md:17	ok	visualizer/web/src/lib/Filters.svelte:2	let { filters = $bindable({ mode: '', status: '', since: '', until: '' }), viewFilters = $bindable({ hide_slugless: true, hide_archived: true }), hiddenLine = '' } = $pro
+skills/frontend-svelte/references/components.md:21	ok	visualizer/web/src/lib/PhasePanel.svelte:19	</script>
+skills/frontend-svelte/references/components.md:21	ok	visualizer/web/src/lib/AcceptPanel.svelte:10	{/snippet}
+skills/frontend-svelte/references/components.md:25	ok	visualizer/web/src/App.svelte:130	<label class="theme">Theme <select bind:value={theme}><option value="os">OS</option><option value="paper">Paper</option><option value="ink">Ink</option></select></label>
+skills/frontend-svelte/references/components.md:25	ok	visualizer/web/src/lib/RunCard.svelte:52	<header><div><strong>{run.goal || 'Untitled run'}</strong><small>{run.repo_slug || 'repository pending'}</small></div><span class={`status ${status.tone}`} title={status.
+skills/frontend-svelte/references/components.md:25	ok	visualizer/web/src/lib/PhasePanel.svelte:53	{#if panel.events.length}{#each panel.events as event (event.id)}{@const value = eventPayload(event)}<article class="event"><code>{event.type} · seq {event.seq ?? '—'} · 
+skills/frontend-svelte/references/components.md:25	ok	Filters.svelte:2 [basename→visualizer/web/src/lib/Filters.svelte]	let { filters = $bindable({ mode: '', status: '', since: '', until: '' }), viewFilters = $bindable({ hide_slugless: true, hide_archived: true }), hiddenLine = '' } = $pro
+skills/frontend-svelte/references/components.md:29	ok	Filters.svelte:2 [basename→visualizer/web/src/lib/Filters.svelte]	let { filters = $bindable({ mode: '', status: '', since: '', until: '' }), viewFilters = $bindable({ hide_slugless: true, hide_archived: true }), hiddenLine = '' } = $pro
+skills/frontend-svelte/references/components.md:29	ok	test/visualizer-shape.test.mjs:750	assert.doesNotMatch(source, /^\s*export\s+let\s/m, relative)
+skills/frontend-svelte/references/components.md:31	ok	visualizer/web/src/lib/RunCard.svelte:18	// Left undefined until the effect's first pass: reading run.running here
+skills/frontend-svelte/references/components.md:35	ok	visualizer/web/src/lib/AcceptPanel.svelte:36	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.accept-rows { display:grid; gap:.5rem; }.a
+skills/frontend-svelte/references/components.md:35	ok	visualizer/web/src/lib/PhasePanel.svelte:62	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem;
+skills/frontend-svelte/references/components.md:35	ok	visualizer/web/src/App.svelte:187	:global(*) { box-sizing:border-box; }
+skills/frontend-svelte/references/components.md:39	ok	RunCard.svelte:53 [basename→visualizer/web/src/lib/RunCard.svelte]	<div class="meta"><span class:muted={!run.mode} title={run.pending.mode}>mode {run.mode || '—'}</span><span class:mono={true} class:dashed={duration.dashed} title={durati
+skills/frontend-svelte/references/components.md:39	ok	RoleTag.svelte:4 [basename→visualizer/web/src/lib/RoleTag.svelte]	<span class="role-tag" style={`--role-color: var(--role-${role})`} title={lane == null ? role : `${role} · lane ${lane}`}>
+skills/frontend-svelte/references/components.md:39	ok	PhaseDots.svelte:5 [basename→visualizer/web/src/lib/PhaseDots.svelte]	<div class="dots" aria-label="phases">{#each phases as phase (phase.id ?? phase.seq)}<span class:running={phase.status === 'running'} class="dot" class:status-ok={phase.l
+skills/frontend-svelte/references/structure.md:7	ok	visualizer/web/src/App.svelte:1	<script>
+skills/frontend-svelte/references/structure.md:11	ok	visualizer/web/src/main.js:1	import { mount } from 'svelte'
+skills/frontend-svelte/references/structure.md:11	ok	App.svelte:44 [basename→visualizer/web/src/App.svelte]	$effect(() => subscribeHash((next) => route = next))
+skills/frontend-svelte/references/structure.md:13	ok	visualizer/web/src/App.svelte:143	<CellHealthPanel />
+skills/frontend-svelte/references/structure.md:13	ok	visualizer/web/src/lib/RunDetail.svelte:33	<style>.detail { max-width:1200px; margin:auto; padding:1rem; display:grid; gap:1rem; }.detail > header { display:flex; align-items:center; gap:1rem; }.detail h1 { margin
+skills/frontend-svelte/references/structure.md:21	ok	visualizer/web/src/lib/api.js:1	async function request(path, options) {
+skills/frontend-svelte/references/structure.md:22	ok	visualizer/web/src/lib/route.js:1	export const VIEWS = Object.freeze(['fleet', 'ops', 'roster', 'run', 'phase'])
+skills/frontend-svelte/references/structure.md:23	ok	visualizer/web/src/lib/drain.js:1	export const PAGE_LIMIT = 200
+skills/frontend-svelte/references/structure.md:24	ok	visualizer/web/src/lib/fleet.js:1	export const SILENT_AFTER_MS = 30_000
+skills/frontend-svelte/references/structure.md:25	ok	visualizer/web/src/lib/panels.js:1	const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
+skills/frontend-svelte/references/structure.md:26	ok	visualizer/web/src/lib/timeline.js:1	export const REQUEST_ZONE = 0.12
+skills/frontend-svelte/references/structure.md:27	ok	visualizer/web/src/lib/trace.js:1	import { acceptRows } from './panels.js'
+skills/frontend-svelte/references/structure.md:29	ok	visualizer/web/src/App.svelte:1	<script>
+skills/frontend-svelte/references/structure.md:29	ok	visualizer/web/src/lib/FleetTable.svelte:1	<script>
+skills/frontend-svelte/references/testing.md:15	ok	test/visualizer-panels.test.mjs:623	assert.match(table, /duration<\/th><th class="micro">tokens<\/th><th class="micro">cost<\/th><th class="micro">heartbeat<\/th>/)
+skills/frontend-svelte/references/testing.md:15	ok	test/visualizer-shape.test.mjs:750	assert.doesNotMatch(source, /^\s*export\s+let\s/m, relative)
+skills/pr-review/SKILL.md:38	ok	crew/roles/reviewer.md:37-42	"details": { "review_path": "<abs>", "verdict": "pass"|"changes-needed", ⏎ "must_fix": <n>, "should_fix": <n>, "consider": <n>, ⏎ "findings": [ { "id": "<stable within TH
+skills/pr-review/SKILL.md:39	ok	crew/roles/reviewer.md:49	`findings` is optional: omit it and the run behaves exactly as before. The
+skills/pr-review/references/divergence.md:5	ok	crew/roles/reviewer.md:12-18	2. Judge two separate questions, in order: ⏎ a. CONFORMANCE — does the diff implement the plan's Changes, Tests, and ⏎ nothing else? Out-of-plan edits are findings even w
+skills/pr-review/references/divergence.md:16	ok	crew/drive.mjs:2040	const outOfScope = outOfScopeFiles(io.changedFiles(), scopeMatcher([]))
+skills/pr-review/references/divergence.md:20	ok	crew/drive.mjs:1388	export function scopeMatcher(entries) {
+skills/pr-review/references/divergence.md:20	ok	crew/drive.mjs:2040	const outOfScope = outOfScopeFiles(io.changedFiles(), scopeMatcher([]))
+skills/pr-review/references/findings-shape.md:27	ok	crew/roles/reviewer.md:37-42	"details": { "review_path": "<abs>", "verdict": "pass"|"changes-needed", ⏎ "must_fix": <n>, "should_fix": <n>, "consider": <n>, ⏎ "findings": [ { "id": "<stable within TH
+skills/pr-review/references/findings-shape.md:28	ok	crew/roles/reviewer.md:49	`findings` is optional: omit it and the run behaves exactly as before. The
+skills/pr-review/references/rubric.md:56	ok	crew/roles/reviewer.md:14	nothing else? Out-of-plan edits are findings even when harmless.
+skills/qa-test-writing/references/vacuity.md:96	ok	shape.mjs:220 [basename→visualizer/server/shape.mjs]	billed_cost_usd: null,
+skills/qa-test-writing/references/vacuity.md:99	ok	reap-stale.mjs:58 [basename→scripts/factory/reap-stale.mjs]	if (!Number.isSafeInteger(pid) || (pid < 0 ? -pid : pid) <= 1) {
+skills/ui-design/SKILL.md:38	ok	visualizer/web/src/lib/IntakePanel.svelte:122	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color
+skills/ui-design/SKILL.md:38	ok	visualizer/web/src/lib/RosterPanel.svelte:187	<style>.panel { background:var(--panel); border:1px solid var(--line); padding:1rem; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.bands, .catalog, .r
+skills/ui-design/SKILL.md:39	ok	visualizer/web/src/lib/RunCard.svelte:59	.card { background:var(--panel); border:1px solid var(--line); padding:1rem; display:grid; gap:.8rem; }
+skills/ui-design/SKILL.md:39	ok	visualizer/web/src/lib/FleetTable.svelte:31	table { width:100%; border-collapse:collapse; background:var(--panel); border:1px solid var(--line); }
+skills/ui-design/SKILL.md:40	ok	visualizer/web/src/lib/PhaseGantt.svelte:59	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.axis { display:flex; justify-content:space-between; color:var(--muted
+skills/ui-design/SKILL.md:41	ok	visualizer/web/src/lib/RunCard.svelte:53	<div class="meta"><span class:muted={!run.mode} title={run.pending.mode}>mode {run.mode || '—'}</span><span class:mono={true} class:dashed={duration.dashed} title={durati
+skills/ui-design/SKILL.md:41	ok	visualizer/web/src/lib/FleetTable.svelte:15	<td class="mono">{#if row.tier.dashed}{@render mark(row.tier)}{:else}{row.tier.text}{/if}</td>
+skills/ui-design/SKILL.md:41	ok	visualizer/web/src/lib/AcceptPanel.svelte:36	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.accept-rows { display:grid; gap:.5rem; }.a
+skills/ui-design/SKILL.md:41	ok	docs/adr/adr-029-headless-observability-interjection.md:23	A human watches the run's existing durable record—journal, task-directory artifacts, envelopes, and the ledger's coarse lifecycle mirror—surfaced by the visualizer, plus 
+skills/ui-design/SKILL.md:42	ok	visualizer/web/src/lib/AcceptPanel.svelte:36	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.accept-rows { display:grid; gap:.5rem; }.a
+skills/ui-design/SKILL.md:42	ok	visualizer/web/src/lib/PhasePanel.svelte:62	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem;
+skills/ui-design/SKILL.md:42	ok	visualizer/web/src/App.svelte:187	:global(*) { box-sizing:border-box; }
+skills/ui-design/SKILL.md:43	ok	visualizer/web/src/App.svelte:17	let route = $state(parseHash(location.hash))
+skills/ui-design/SKILL.md:43	ok	visualizer/web/src/lib/theme.css:36	:root,
+skills/ui-design/SKILL.md:44	ok	visualizer/web/src/lib/RoleTag.svelte:4	<span class="role-tag" style={`--role-color: var(--role-${role})`} title={lane == null ? role : `${role} · lane ${lane}`}>
+skills/ui-design/SKILL.md:44	ok	visualizer/web/src/lib/PhaseDots.svelte:5	<div class="dots" aria-label="phases">{#each phases as phase (phase.id ?? phase.seq)}<span class:running={phase.status === 'running'} class="dot" class:status-ok={phase.l
+skills/ui-design/SKILL.md:44	ok	visualizer/web/src/lib/PhaseGantt.svelte:48	<button class:queued={block.queued} class="block" style={`left:${block.x * 100}%;width:${block.width * 100}%;--lane-color:var(--lane-${block.lane ?? 0})`} title={`${block
+skills/ui-design/references/contract.md:7	ok	visualizer/web/src/lib/theme.css:2	--ink-ground: #17171a;
+skills/ui-design/references/contract.md:11	ok	visualizer/web/src/lib/GateChips.svelte:13	.gate-chips { display:grid; gap:.25rem; }.chips { display:flex; gap:.3rem; flex-wrap:wrap; }.chip { border-radius:1rem; padding:.15rem .45rem; font-size:.75rem; white-spa
+skills/ui-design/references/contract.md:11	ok	AcceptPanel.svelte:36 [basename→visualizer/web/src/lib/AcceptPanel.svelte]	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.accept-rows { display:grid; gap:.5rem; }.a
+skills/ui-design/references/contract.md:11	ok	PhasePanel.svelte:62 [basename→visualizer/web/src/lib/PhasePanel.svelte]	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem;
+skills/ui-design/references/contract.md:15	ok	visualizer/web/src/App.svelte:201	.rail { display:grid; gap:.4rem; border:1px solid var(--serious); padding:.7rem; margin:0 0 1rem; }
+skills/ui-design/references/contract.md:15	ok	App.svelte:208 [basename→visualizer/web/src/App.svelte]	.chip.serious { color:var(--status-escalated); }
+skills/ui-design/references/contract.md:15	ok	visualizer/web/src/lib/RosterPanel.svelte:187	<style>.panel { background:var(--panel); border:1px solid var(--line); padding:1rem; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.bands, .catalog, .r
+skills/ui-design/references/contract.md:19	ok	App.svelte:46 [basename→visualizer/web/src/App.svelte]	$effect(() => {
+skills/ui-design/references/contract.md:19	ok	visualizer/web/src/App.svelte:17	let route = $state(parseHash(location.hash))
+skills/ui-design/references/contract.md:19	ok	visualizer/web/src/lib/theme.css:36	:root,
+skills/ui-design/references/contract.md:23	ok	visualizer/web/src/lib/theme.css:36	:root,
+skills/ui-design/references/contract.md:29	ok	test/visualizer-shape.test.mjs:286	test('theme role and lane aliases follow the ratified role order', () => {
+skills/ui-design/references/contract.md:30	ok	test/visualizer-panels.test.mjs:627	assert.match(table, /\.stale \{ color:var\(--status-escalated\); \}/)
+skills/ui-design/references/contract.md:31	ok	test/visualizer-panels.test.mjs:845	assert.ok(source.includes('--identity-column:15rem'))
+skills/ui-design/references/contract.md:32	ok	test/visualizer-panels.test.mjs:660	for (const file of ['App.svelte', 'lib/FleetTable.svelte', 'lib/RunCard.svelte', 'lib/Filters.svelte']) {
+skills/ui-design/references/contract.md:32	ok	test/visualizer-teardown.test.mjs:201	assert.doesNotMatch(component, /--role-|--lane-/)
+skills/ui-design/references/contract.md:32	ok	test/visualizer-server.test.mjs:1396	assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRos
+skills/ui-design/references/contract.md:33	ok	test/visualizer-shape.test.mjs:750	assert.doesNotMatch(source, /^\s*export\s+let\s/m, relative)
+skills/ui-design/references/contract.md:35	ok	visualizer/web/src/lib/EventStream.svelte:29	{#if !phaseAvailable}<p class="muted">phase filter unavailable — this run's events predate phase linkage (#123)</p>{/if}
+skills/ui-design/references/contract.md:35	ok	visualizer/web/src/lib/MetricsStrip.svelte:19	<span class="pending">read/write — awaiting the metering daemon (#83)</span>
+skills/ui-design/references/limits.md:20	ok	visualizer/web/src/lib/PhaseGantt.svelte:59	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.axis { display:flex; justify-content:space-between; color:var(--muted
+skills/ui-design/references/limits.md:28	ok	test/visualizer-shape.test.mjs:286	test('theme role and lane aliases follow the ratified role order', () => {
+skills/ui-design/references/limits.md:28	ok	test/visualizer-panels.test.mjs:627	assert.match(table, /\.stale \{ color:var\(--status-escalated\); \}/)
+skills/ui-design/references/limits.md:47	ok	test/visualizer-shape.test.mjs:286	test('theme role and lane aliases follow the ratified role order', () => {
+skills/ui-design/references/state-colour.md:7	ok	visualizer/web/src/lib/fleet.js:53	if (taskEnvelope?.status === 'escalation') {
+skills/ui-design/references/state-colour.md:7	ok	visualizer/web/src/lib/RunCard.svelte:52	<header><div><strong>{run.goal || 'Untitled run'}</strong><small>{run.repo_slug || 'repository pending'}</small></div><span class={`status ${status.tone}`} title={status.
+skills/ui-design/references/state-colour.md:7	ok	visualizer/web/src/lib/FleetTable.svelte:14	<td><span class={`status ${row.status.tone}`} title={row.status.why}><span class="status-dot" aria-hidden="true"></span>{row.status.word}</span></td>
+skills/ui-design/references/state-colour.md:7	ok	RunCard.svelte:65 [basename→visualizer/web/src/lib/RunCard.svelte]	.status.ok { color:var(--status-ok); }
+skills/ui-design/references/state-colour.md:7	ok	FleetTable.svelte:37 [basename→visualizer/web/src/lib/FleetTable.svelte]	.status.ok { color:var(--status-ok); }
+skills/ui-design/references/state-colour.md:9	ok	test/visualizer-panels.test.mjs:280	assert.equal(refused.tone, 'refused')
+skills/ui-design/references/state-colour.md:9	ok	test/visualizer-teardown.test.mjs:119	assert.equal(viewRun.tone, 'leak')
+skills/ui-design/references/state-colour.md:13	ok	visualizer/web/src/lib/RoleTag.svelte:4	<span class="role-tag" style={`--role-color: var(--role-${role})`} title={lane == null ? role : `${role} · lane ${lane}`}>
+skills/ui-design/references/state-colour.md:13	ok	RoleTag.svelte:9 [basename→visualizer/web/src/lib/RoleTag.svelte]	.swatch { width:.65rem; height:.65rem; background:var(--role-color); display:inline-block; }
+skills/ui-design/references/state-colour.md:17	ok	visualizer/web/src/lib/PhaseDots.svelte:5	<div class="dots" aria-label="phases">{#each phases as phase (phase.id ?? phase.seq)}<span class:running={phase.status === 'running'} class="dot" class:status-ok={phase.l
+skills/ui-design/references/state-colour.md:17	ok	visualizer/web/src/lib/PhaseGantt.svelte:48	<button class:queued={block.queued} class="block" style={`left:${block.x * 100}%;width:${block.width * 100}%;--lane-color:var(--lane-${block.lane ?? 0})`} title={`${block
+skills/ui-design/references/state-colour.md:17	ok	visualizer/web/src/lib/trace.js:3	export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
+skills/ui-design/references/state-colour.md:17	ok	visualizer/web/src/lib/theme.css:57	--lane-0: var(--role-planner);
+skills/ui-design/references/state-colour.md:21	ok	test/visualizer-panels.test.mjs:660	for (const file of ['App.svelte', 'lib/FleetTable.svelte', 'lib/RunCard.svelte', 'lib/Filters.svelte']) {
+skills/ui-design/references/state-colour.md:21	ok	test/visualizer-teardown.test.mjs:201	assert.doesNotMatch(component, /--role-|--lane-/)
+skills/ui-design/references/state-colour.md:21	ok	test/visualizer-server.test.mjs:1396	assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRos
+skills/ui-design/references/state-colour.md:21	ok	PhaseGantt.svelte:48 [basename→visualizer/web/src/lib/PhaseGantt.svelte]	<button class:queued={block.queued} class="block" style={`left:${block.x * 100}%;width:${block.width * 100}%;--lane-color:var(--lane-${block.lane ?? 0})`} title={`${block
+skills/ui-design/references/state-colour.md:25	ok	PhaseGantt.svelte:59 [basename→visualizer/web/src/lib/PhaseGantt.svelte]	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.axis { display:flex; justify-content:space-between; color:var(--muted
+skills/ui-design/references/state-colour.md:25	ok	PhaseDots.svelte:8 [basename→visualizer/web/src/lib/PhaseDots.svelte]	<style>.phase-wrap { display:flex; align-items:center; gap:.5rem; }.dots { display:flex; gap:.3rem; }.dot { width:.75rem; height:.75rem; border-radius:50%; }.lane-dot { b
+skills/ui-design/references/state-colour.md:25	ok	RoleTag.svelte:9 [basename→visualizer/web/src/lib/RoleTag.svelte]	.swatch { width:.65rem; height:.65rem; background:var(--role-color); display:inline-block; }
+skills/ui-design/references/state-colour.md:33	ok	visualizer/web/src/lib/GateChips.svelte:13	.gate-chips { display:grid; gap:.25rem; }.chips { display:flex; gap:.3rem; flex-wrap:wrap; }.chip { border-radius:1rem; padding:.15rem .45rem; font-size:.75rem; white-spa
+skills/ui-design/references/state-colour.md:34	ok	visualizer/web/src/lib/AcceptPanel.svelte:36	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.accept-rows { display:grid; gap:.5rem; }.a
+skills/ui-design/references/state-colour.md:35	ok	visualizer/web/src/lib/PhasePanel.svelte:62	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem;
+skills/ui-design/references/state-colour.md:36	ok	visualizer/web/src/lib/PhaseGantt.svelte:59	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.axis { display:flex; justify-content:space-between; color:var(--muted
+skills/ui-design/references/state-colour.md:37	ok	visualizer/web/src/lib/IntakePanel.svelte:122	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color
+skills/ui-design/references/state-colour.md:38	ok	visualizer/web/src/lib/CellHealthPanel.svelte:61	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.cells
+skills/ui-design/references/state-colour.md:39	ok	visualizer/web/src/lib/RunSetPanel.svelte:61	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color
+skills/ui-design/references/state-colour.md:40	ok	visualizer/web/src/lib/RunDetail.svelte:33	<style>.detail { max-width:1200px; margin:auto; padding:1rem; display:grid; gap:1rem; }.detail > header { display:flex; align-items:center; gap:1rem; }.detail h1 { margin
+skills/ui-design/references/state-colour.md:41	ok	visualizer/web/src/lib/EnvelopeInspector.svelte:48	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.role { border-top:1px solid var(--line); padding:.7rem 0; }.ch
+skills/ui-design/references/state-colour.md:42	ok	visualizer/web/src/lib/RosterEditor.svelte:71	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.fields { display:fle
+skills/ui-design/references/state-colour.md:45	ok	visualizer/web/src/lib/EventStream.svelte:29	{#if !phaseAvailable}<p class="muted">phase filter unavailable — this run's events predate phase linkage (#123)</p>{/if}
+skills/ui-design/references/state-colour.md:45	ok	visualizer/web/src/lib/MetricsStrip.svelte:19	<span class="pending">read/write — awaiting the metering daemon (#83)</span>
+skills/ui-design/references/state-colour.md:49	ok	visualizer/web/src/App.svelte:201	.rail { display:grid; gap:.4rem; border:1px solid var(--serious); padding:.7rem; margin:0 0 1rem; }
+skills/ui-design/references/state-colour.md:49	ok	visualizer/web/src/lib/RosterPanel.svelte:187	<style>.panel { background:var(--panel); border:1px solid var(--line); padding:1rem; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.bands, .catalog, .r
+skills/ui-design/references/state-colour.md:50	ok	visualizer/web/src/lib/RosterEditor.svelte:71	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.fields { display:fle
+skills/ui-design/references/state-colour.md:51	ok	visualizer/web/src/lib/FleetTable.svelte:36	.status-dot { width:.55rem; height:.55rem; background:var(--neutral); display:inline-block; }
+skills/ui-design/references/state-colour.md:52	ok	visualizer/web/src/lib/PhaseGantt.svelte:40	{#if identity}<RoleTag role={identity.role || 'unlinked'} lane={identity.lane} />{:else}<span class="muted">unlinked</span>{/if}
+skills/ui-design/references/state-colour.md:52	ok	RoleTag.svelte:9 [basename→visualizer/web/src/lib/RoleTag.svelte]	.swatch { width:.65rem; height:.65rem; background:var(--role-color); display:inline-block; }
+skills/ui-design/references/state-colour.md:53	ok	App.svelte:46 [basename→visualizer/web/src/App.svelte]	$effect(() => {
+skills/ui-design/references/state-colour.md:57	ok	visualizer/web/src/lib/RunDetail.svelte:33	<style>.detail { max-width:1200px; margin:auto; padding:1rem; display:grid; gap:1rem; }.detail > header { display:flex; align-items:center; gap:1rem; }.detail h1 { margin
+skills/ui-design/references/state-colour.md:57	ok	EnvelopeInspector.svelte:48 [basename→visualizer/web/src/lib/EnvelopeInspector.svelte]	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.role { border-top:1px solid var(--line); padding:.7rem 0; }.ch
+skills/ui-design/references/state-colour.md:57	ok	RosterEditor.svelte:71 [basename→visualizer/web/src/lib/RosterEditor.svelte]	<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.fields { display:fle
+skills/ui-design/references/state-colour.md:57	ok	App.svelte:200 [basename→visualizer/web/src/App.svelte]	.error { color:var(--status-fail); }
+skills/ui-design/references/state-colour.md:57	ok	RosterPanel.svelte:187 [basename→visualizer/web/src/lib/RosterPanel.svelte]	<style>.panel { background:var(--panel); border:1px solid var(--line); padding:1rem; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--muted); }.bands, .catalog, .r
+skills/ui-design/references/state-colour.md:58	ok	PhasePanel.svelte:62 [basename→visualizer/web/src/lib/PhasePanel.svelte]	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem;
+skills/ui-design/references/state-colour.md:58	ok	GateChips.svelte:13 [basename→visualizer/web/src/lib/GateChips.svelte]	.gate-chips { display:grid; gap:.25rem; }.chips { display:flex; gap:.3rem; flex-wrap:wrap; }.chip { border-radius:1rem; padding:.15rem .45rem; font-size:.75rem; white-spa
+skills/ui-design/references/state-colour.md:58	ok	PhaseGantt.svelte:59 [basename→visualizer/web/src/lib/PhaseGantt.svelte]	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.axis { display:flex; justify-content:space-between; color:var(--muted
+skills/ui-design/references/state-colour.md:58	ok	TeardownPanel.svelte:54 [basename→visualizer/web/src/lib/TeardownPanel.svelte]	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.meta, .muted { color:var(--
+skills/ui-design/references/state-colour.md:59	ok	visualizer/web/src/lib/fleet.js:58	if (run?.running && !run?.phases?.length) return { key: 'queued', word: 'queued', tone: 'quiet', where: null, why: null }
+skills/ui-design/references/state-colour.md:59	ok	App.svelte:209 [basename→visualizer/web/src/App.svelte]	.chip.quiet { color:var(--muted); }
+skills/ui-design/references/state-colour.md:59	ok	RunCard.svelte:65 [basename→visualizer/web/src/lib/RunCard.svelte]	.status.ok { color:var(--status-ok); }
+skills/ui-design/references/state-colour.md:59	ok	FleetTable.svelte:37 [basename→visualizer/web/src/lib/FleetTable.svelte]	.status.ok { color:var(--status-ok); }
+skills/ui-design/references/state-colour.md:60	ok	visualizer/web/src/lib/theme.css:129	*, *::before, *::after { box-sizing: border-box; border-radius:0; }
+skills/ui-design/references/state-colour.md:60	ok	App.svelte:192 [basename→visualizer/web/src/App.svelte]	button, select { font:inherit; border:1px solid var(--line); border-radius:0; background:var(--panel); color:inherit; padding:.35rem .55rem; cursor:pointer; }
+skills/ui-design/references/state-colour.md:62	ok	visualizer/web/src/lib/RunCard.svelte:53	<div class="meta"><span class:muted={!run.mode} title={run.pending.mode}>mode {run.mode || '—'}</span><span class:mono={true} class:dashed={duration.dashed} title={durati
+skills/ui-design/references/state-colour.md:62	ok	FleetTable.svelte:15 [basename→visualizer/web/src/lib/FleetTable.svelte]	<td class="mono">{#if row.tier.dashed}{@render mark(row.tier)}{:else}{row.tier.text}{/if}</td>
+skills/ui-design/references/state-colour.md:62	ok	docs/adr/adr-029-headless-observability-interjection.md:23	A human watches the run's existing durable record—journal, task-directory artifacts, envelopes, and the ledger's coarse lifecycle mirror—surfaced by the visualizer, plus 
+skills/ui-design/references/tokens.md:15	ok	visualizer/web/src/lib/theme.css:2	--ink-ground: #17171a;
+skills/ui-design/references/tokens.md:16	ok	visualizer/web/src/lib/theme.css:3	--ink-panel: #1e1e22;
+skills/ui-design/references/tokens.md:17	ok	visualizer/web/src/lib/theme.css:4	--ink-hairline: #26262b;
+skills/ui-design/references/tokens.md:18	ok	visualizer/web/src/lib/theme.css:5	--ink-text: #eae8ee;
+skills/ui-design/references/tokens.md:19	ok	visualizer/web/src/lib/theme.css:6	--ink-muted: #9b99a3;
+skills/ui-design/references/tokens.md:20	ok	visualizer/web/src/lib/theme.css:7	--paper-ground: #efece5;
+skills/ui-design/references/tokens.md:21	ok	visualizer/web/src/lib/theme.css:8	--paper-panel: #e7e3da;
+skills/ui-design/references/tokens.md:22	ok	visualizer/web/src/lib/theme.css:9	--paper-hairline: #e2ded4;
+skills/ui-design/references/tokens.md:23	ok	visualizer/web/src/lib/theme.css:10	--paper-text: #15140f;
+skills/ui-design/references/tokens.md:24	ok	visualizer/web/src/lib/theme.css:11	--paper-muted: #55534a;
+skills/ui-design/references/tokens.md:25	ok	visualizer/web/src/lib/theme.css:12	--spot-light: #8839ef;
+skills/ui-design/references/tokens.md:26	ok	visualizer/web/src/lib/theme.css:13	--spot-dark: #cba6f7;
+skills/ui-design/references/tokens.md:27	ok	visualizer/web/src/lib/theme.css:14	--role-planner-dark: #3987e5;
+skills/ui-design/references/tokens.md:28	ok	visualizer/web/src/lib/theme.css:15	--role-builder-dark: #d95926;
+skills/ui-design/references/tokens.md:29	ok	visualizer/web/src/lib/theme.css:16	--role-reviewer-dark: #199e70;
+skills/ui-design/references/tokens.md:30	ok	visualizer/web/src/lib/theme.css:17	--role-tech-lead-dark: #c98500;
+skills/ui-design/references/tokens.md:31	ok	visualizer/web/src/lib/theme.css:18	--role-lead-dark: #d55181;
+skills/ui-design/references/tokens.md:32	ok	visualizer/web/src/lib/theme.css:19	--role-driver-dark: #9085e9;
+skills/ui-design/references/tokens.md:33	ok	visualizer/web/src/lib/theme.css:20	--role-planner-light: #2a78d6;
+skills/ui-design/references/tokens.md:34	ok	visualizer/web/src/lib/theme.css:21	--role-builder-light: #eb6834;
+skills/ui-design/references/tokens.md:35	ok	visualizer/web/src/lib/theme.css:22	--role-reviewer-light: #1baf7a;
+skills/ui-design/references/tokens.md:36	ok	visualizer/web/src/lib/theme.css:23	--role-tech-lead-light: #eda100;
+skills/ui-design/references/tokens.md:37	ok	visualizer/web/src/lib/theme.css:24	--role-lead-light: #e87ba4;
+skills/ui-design/references/tokens.md:38	ok	visualizer/web/src/lib/theme.css:25	--role-driver-light: #4a3aa7;
+skills/ui-design/references/tokens.md:39	ok	visualizer/web/src/lib/theme.css:26	--serious: #ec835a;
+skills/ui-design/references/tokens.md:40	ok	visualizer/web/src/lib/theme.css:28	--status-ok-raw: #2f9e62;
+skills/ui-design/references/tokens.md:41	ok	visualizer/web/src/lib/theme.css:29	--status-fail-raw: #c94f58;
+skills/ui-design/references/tokens.md:42	ok	visualizer/web/src/lib/theme.css:30	--status-running-raw: #c38b18;
+skills/ui-design/references/tokens.md:43	ok	visualizer/web/src/lib/theme.css:31	--status-skipped-raw: #77747d;
+skills/ui-design/references/tokens.md:44	ok	visualizer/web/src/lib/theme.css:32	--mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+skills/ui-design/references/tokens.md:46	ok	visualizer/web/src/lib/theme.css:27	/* These status steps are operational tokens, not part of the ratified role palette. */
+skills/ui-design/references/tokens.md:54	ok	visualizer/web/src/lib/theme.css:40	--bg: var(--paper-ground);
+skills/ui-design/references/tokens.md:55	ok	visualizer/web/src/lib/theme.css:41	--panel: var(--paper-panel);
+skills/ui-design/references/tokens.md:56	ok	visualizer/web/src/lib/theme.css:42	--line: var(--paper-hairline);
+skills/ui-design/references/tokens.md:57	ok	visualizer/web/src/lib/theme.css:43	--muted: var(--paper-muted);
+skills/ui-design/references/tokens.md:58	ok	visualizer/web/src/lib/theme.css:44	--accent: var(--spot-light);
+skills/ui-design/references/tokens.md:59	ok	visualizer/web/src/lib/theme.css:45	--neutral: var(--paper-muted);
+skills/ui-design/references/tokens.md:60	ok	visualizer/web/src/lib/theme.css:46	--status-ok: var(--status-ok-raw);
+skills/ui-design/references/tokens.md:61	ok	visualizer/web/src/lib/theme.css:47	--status-fail: var(--status-fail-raw);
+skills/ui-design/references/tokens.md:62	ok	visualizer/web/src/lib/theme.css:48	--status-running: var(--status-running-raw);
+skills/ui-design/references/tokens.md:63	ok	visualizer/web/src/lib/theme.css:49	--status-skipped: var(--status-skipped-raw);
+skills/ui-design/references/tokens.md:64	ok	visualizer/web/src/lib/theme.css:50	--status-escalated: var(--serious);
+skills/ui-design/references/tokens.md:65	ok	visualizer/web/src/lib/theme.css:51	--role-planner: var(--role-planner-light);
+skills/ui-design/references/tokens.md:66	ok	visualizer/web/src/lib/theme.css:52	--role-builder: var(--role-builder-light);
+skills/ui-design/references/tokens.md:67	ok	visualizer/web/src/lib/theme.css:53	--role-reviewer: var(--role-reviewer-light);
+skills/ui-design/references/tokens.md:68	ok	visualizer/web/src/lib/theme.css:54	--role-tech-lead: var(--role-tech-lead-light);
+skills/ui-design/references/tokens.md:69	ok	visualizer/web/src/lib/theme.css:55	--role-lead: var(--role-lead-light);
+skills/ui-design/references/tokens.md:70	ok	visualizer/web/src/lib/theme.css:56	--role-driver: var(--role-driver-light);
+skills/ui-design/references/tokens.md:71	ok	visualizer/web/src/lib/theme.css:57	--lane-0: var(--role-planner);
+skills/ui-design/references/tokens.md:72	ok	visualizer/web/src/lib/theme.css:58	--lane-1: var(--role-builder);
+skills/ui-design/references/tokens.md:73	ok	visualizer/web/src/lib/theme.css:59	--lane-2: var(--role-reviewer);
+skills/ui-design/references/tokens.md:74	ok	visualizer/web/src/lib/theme.css:60	--lane-3: var(--role-tech-lead);
+skills/ui-design/references/tokens.md:75	ok	visualizer/web/src/lib/theme.css:61	--lane-4: var(--role-lead);
+skills/ui-design/references/tokens.md:76	ok	visualizer/web/src/lib/theme.css:62	--lane-5: var(--role-driver);
+skills/ui-design/references/tokens.md:77	ok	visualizer/web/src/lib/theme.css:63	--lane-6: var(--neutral);
+skills/ui-design/references/tokens.md:78	ok	visualizer/web/src/lib/theme.css:64	--lane-7: var(--muted);
+skills/ui-design/references/tokens.md:84	ok	visualizer/web/src/lib/theme.css:36	:root,
+skills/ui-design/references/tokens.md:84	ok	App.svelte:17 [basename→visualizer/web/src/App.svelte]	let route = $state(parseHash(location.hash))
+skills/ui-design/references/tokens.md:88	ok	visualizer/web/src/lib/PhaseGantt.svelte:59	.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.axis { display:flex; justify-content:space-between; color:var(--muted
+skills/ui-design/references/tokens.md:88	ok	test/visualizer-panels.test.mjs:845	assert.ok(source.includes('--identity-column:15rem'))
+skills/ui-design/references/tokens.md:89	ok	RoleTag.svelte:4 [basename→visualizer/web/src/lib/RoleTag.svelte]	<span class="role-tag" style={`--role-color: var(--role-${role})`} title={lane == null ? role : `${role} · lane ${lane}`}>
+skills/ui-design/references/tokens.md:89	ok	PhaseDots.svelte:5 [basename→visualizer/web/src/lib/PhaseDots.svelte]	<div class="dots" aria-label="phases">{#each phases as phase (phase.id ?? phase.seq)}<span class:running={phase.status === 'running'} class="dot" class:status-ok={phase.l
+skills/ui-design/references/tokens.md:89	ok	PhaseGantt.svelte:48 [basename→visualizer/web/src/lib/PhaseGantt.svelte]	<button class:queued={block.queued} class="block" style={`left:${block.x * 100}%;width:${block.width * 100}%;--lane-color:var(--lane-${block.lane ?? 0})`} title={`${block
+
+TOTAL 421 unresolved/OOR 0

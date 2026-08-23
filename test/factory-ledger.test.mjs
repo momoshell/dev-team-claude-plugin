@@ -31,6 +31,7 @@ import {
 } from '../scripts/factory/ledger.mjs'
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES } from '../crew/drive.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
+import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
 // openRun is the only production writer of sessions.tier and the compiler
 // proposal columns: it reads the boot record/brief and forwards them. The
 // forwarding is pinned here, next to the columns it writes, because
@@ -963,6 +964,196 @@ test('cellReviews aggregates by cell and task class and counts only a run\'s fir
     { reviews: 1, first_round_reviews: 1, first_round_passes: 1 },
   )
   ledger.close()
+})
+
+test('cellReviews keys a model-only review on its model and never splits a roster-keyed cell', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'model-keyed-reviews', repo_slug: 'r', task_slug: 'model-keyed-reviews', tier: 'build' })
+  const review = (dispatch_id, cell) => ledger.recordReviewOutcome({
+    adw_id: 'model-keyed-reviews', dispatch_id, role: 'reviewer', verdict: 'pass',
+    created_at: '2024-01-01T00:00:00.000Z', ...cell,
+  })
+  review('override-review', { agent: 'pi', provider: null, model_id: null, model: 'openai-codex/gpt-5.6-sol', effort: 'high' })
+  review('roster-review-one', { agent: 'pi', provider: 'openai', model_id: 'gpt-5.6-terra', model: 'openai-codex/gpt-5.6-terra', effort: 'max' })
+  review('roster-review-two', { agent: 'pi', provider: 'openai', model_id: 'gpt-5.6-terra', model: 'legacy-terra', effort: 'max' })
+  const rows = ledger.cellReviews()
+  assert.equal(rows.reduce((total, row) => total + Number(row.reviews), 0), 3)
+  const modelKeyed = rows.find((row) => row.model_key === 'openai-codex/gpt-5.6-sol')
+  assert.equal(modelKeyed?.reviews, 1)
+  const rosterKeyed = rows.find((row) => row.provider === 'openai' && row.model_id === 'gpt-5.6-terra')
+  assert.deepEqual({ reviews: rosterKeyed?.reviews, model_key: rosterKeyed?.model_key }, { reviews: 2, model_key: null })
+  assert.equal(rows.filter((row) => row.provider === 'openai' && row.model_id === 'gpt-5.6-terra').length, 1)
+  ledger.close()
+})
+
+test('cells CLI reads an override-booted review as its own cell and leaves an identity-less one unattributed', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (adw_id, dispatch_id, cell = {}) => {
+    ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id, tier: 'build' })
+    ledger.recordReviewOutcome({
+      adw_id, dispatch_id, role: 'reviewer', verdict: 'pass', created_at: '2024-01-01T00:00:00.000Z', ...cell,
+    })
+  }
+  seed('override-cell', 'override-cell-r1', {
+    agent: 'pi', provider: null, model_id: null, model: 'openai-codex/gpt-5.6-sol', effort: 'high', transport: 'pane',
+  })
+  for (let i = 0; i < 3; i++) seed(`identityless-${i}`, `identityless-${i}-r1`)
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout.trim())
+  const modelRow = payload.rows.find((row) => row.model === 'openai-codex/gpt-5.6-sol')
+  assert.equal(modelRow?.reviews, 1)
+  assert.equal(modelRow?.model, 'openai-codex/gpt-5.6-sol')
+  assert.ok(Object.prototype.hasOwnProperty.call(modelRow.absent, 'roster_cell'))
+  assert.ok(!Object.prototype.hasOwnProperty.call(modelRow.absent, 'cell'))
+  const identityless = payload.rows.find((row) => row.provider === null && row.model_id === null && row.model === null)
+  assert.equal(identityless?.reviews, 3)
+  assert.equal(identityless?.model, null)
+  assert.match(identityless.absent.cell, /unattributed/)
+  assert.ok(!Object.prototype.hasOwnProperty.call(identityless.absent, 'roster_cell'))
+})
+
+test('cells CLI prices a model-keyed cell through the adapter namespace it was booted in', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const adwId = 'model-priced'
+  const dispatchId = 'model-priced-r1'
+  const model = 'openai-codex/gpt-5.6-sol'
+  assert.equal(piModelString({ provider: 'openai', id: 'gpt-5.6-sol' }), model)
+  ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 'model-priced', tier: 'build' })
+  ledger.recordReviewOutcome({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', verdict: 'pass',
+    agent: 'pi', provider: null, model_id: null, model, effort: 'high', transport: 'headless-json',
+    created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.startAgentSession({
+    adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', model,
+    claude_session_id: 'model-priced-session', transcript_path: null,
+  })
+  ledger.endAgentSession({
+    adw_id: adwId, claude_session_id: 'model-priced-session',
+    context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+    billed_input_tokens: 1_000_000, billed_output_tokens: 2_000_000,
+    billed_cache_write_tokens: null, billed_cache_read_tokens: null,
+  })
+  const pricePath = join(nextDir(), 'model-priced.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 5, cost_out_per_mtok: 30 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const row = JSON.parse(result.stdout.trim()).rows.find((candidate) => candidate.model === model)
+  assert.equal(row.price_key, 'openai/gpt-5.6-sol')
+  assert.equal(row.cost_usd, 65)
+})
+
+test('cells CLI leaves an unmappable model string unpriced, never mispriced', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (adw_id, agent, model) => {
+    ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id, tier: 'build' })
+    ledger.recordReviewOutcome({
+      adw_id, dispatch_id: `${adw_id}-r1`, role: 'reviewer', verdict: 'pass',
+      agent, provider: null, model_id: null, model, effort: 'high', transport: 'headless-json',
+      created_at: '2024-01-01T00:00:00.000Z',
+    })
+  }
+  seed('unmappable-prefix', 'pi', 'weird-cli/gpt-5.6-sol')
+  seed('unmappable-agent', 'unknown-agent', 'openai-codex/gpt-5.6-sol')
+  const pricePath = join(nextDir(), 'unmappable.json')
+  writeFileSync(pricePath, JSON.stringify({
+    schema_version: 1, updated_at: '2024-02-01',
+    models: { 'openai/gpt-5.6-sol': { cost_in_per_mtok: 5, cost_out_per_mtok: 30 } },
+  }))
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells', '--prices', pricePath], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout.trim()).rows
+  for (const model of ['weird-cli/gpt-5.6-sol', 'openai-codex/gpt-5.6-sol']) {
+    const row = rows.find((candidate) => candidate.model === model)
+    assert.equal(row.price_key, null)
+    assert.equal(row.cost_usd, null)
+    assert.match(row.absent.price_key, new RegExp(model.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')))
+    assert.match(row.absent.cost_usd, /unpriced/)
+  }
+})
+
+test('a model-keyed cell crosses the rate floor exactly as a roster-keyed one does', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (model, count) => {
+    for (let i = 0; i < count; i++) {
+      const adwId = `model-floor-${model}-${i}`
+      ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, tier: 'build' })
+      ledger.recordReviewOutcome({
+        adw_id: adwId, dispatch_id: `${adwId}-r1`, role: 'reviewer', verdict: 'pass',
+        agent: 'pi', provider: null, model_id: null, model, effort: 'high', transport: 'headless-json',
+        created_at: '2024-01-01T00:00:00.000Z',
+      })
+    }
+  }
+  seed('openai-codex/gpt-5.6-sol', CELL_RATE_FLOOR - 1)
+  seed('openai-codex/gpt-5.6-luna', CELL_RATE_FLOOR)
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout.trim()).rows
+  assert.equal(rows.find((row) => row.model === 'openai-codex/gpt-5.6-sol').thin, true)
+  assert.equal(rows.find((row) => row.model === 'openai-codex/gpt-5.6-luna').thin, false)
+})
+
+test('cells CLI joins usage to the model-keyed cell that earned it', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (adwId, dispatchId, model, effort, totals) => {
+    ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, tier: 'build' })
+    ledger.recordReviewOutcome({
+      adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', verdict: 'pass',
+      agent: 'pi', provider: null, model_id: null, model, effort, transport: 'headless-json',
+      created_at: '2024-01-01T00:00:00.000Z',
+    })
+    if (totals === null) return
+    const sessionId = `${adwId}-session`
+    ledger.startAgentSession({ adw_id: adwId, dispatch_id: dispatchId, role: 'reviewer', model, claude_session_id: sessionId, transcript_path: null })
+    ledger.endAgentSession({
+      adw_id: adwId, claude_session_id: sessionId,
+      context_tokens: null, context_window: null, raw_read_tokens: null, raw_written_tokens: null,
+      billed_input_tokens: totals[0], billed_output_tokens: totals[1],
+      billed_cache_write_tokens: null, billed_cache_read_tokens: null,
+    })
+  }
+  seed('usage-sol', 'usage-sol-r1', 'openai-codex/gpt-5.6-sol', 'high', [1_000_000, 2_000_000])
+  seed('usage-luna', 'usage-luna-r1', 'openai-codex/gpt-5.6-luna', 'max', [2_000_000, 1_000_000])
+  seed('usage-pane', 'usage-pane-r1', 'openai-codex/gpt-5.6-pane', 'high', null)
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const rows = JSON.parse(result.stdout.trim()).rows
+  const sol = rows.find((row) => row.model === 'openai-codex/gpt-5.6-sol')
+  const luna = rows.find((row) => row.model === 'openai-codex/gpt-5.6-luna')
+  const pane = rows.find((row) => row.model === 'openai-codex/gpt-5.6-pane')
+  assert.deepEqual({ sessions: sol.usage_sessions, input: sol.billed_input_tokens, output: sol.billed_output_tokens }, { sessions: 1, input: 1_000_000, output: 2_000_000 })
+  assert.deepEqual({ sessions: luna.usage_sessions, input: luna.billed_input_tokens, output: luna.billed_output_tokens }, { sessions: 1, input: 2_000_000, output: 1_000_000 })
+  assert.equal(pane.usage_sessions, 0)
+  assert.ok(Object.prototype.hasOwnProperty.call(pane.absent, 'usage'))
+})
+
+test('the cells definition block states the model key it computes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const result = run(['cells'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const definition = JSON.parse(result.stdout.trim()).definition
+  assert.match(definition.cell, /keyed on that model string/)
+  assert.match(definition.cell, /none of the three stays unattributed/)
+  assert.match(definition.cell, /two are never merged/)
+  assert.match(definition.model, /^the raw override model string/)
+  assert.match(definition.price_key, /never a stripped prefix/)
 })
 
 test('cells CLI reports a measured rate, a measured zero, and an unmeasured denominator', { skip: SKIP }, () => {

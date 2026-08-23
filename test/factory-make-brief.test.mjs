@@ -647,10 +647,10 @@ test('standing blocks and unfilled slots render verbatim', () => {
   assert.ok(brief.includes('ReturnEnvelope'))
   assert.ok(brief.split(SLOT_MARKER).length - 1 >= 2)
   // Every other standing block is byte-identical to fc13fa1; b76 touched only the
-  // mutation contract.
+  // mutation contract, and b161 moved the conventions block's floor.
   const digest = (text) => createHash('sha256').update(text).digest('hex')
   assert.equal(digest(ACCEPTANCE_GATE_BLOCK), 'd8fc7641f8ad456c0bd60032571a3c09d5f2a81e2fe0a480190369e854db61a2')
-  assert.equal(digest(CONVENTIONS_BLOCK), '52a0dcc6dd2833218dbe5a635e35acd8d92f55de7e6a83817f4d162786a7993f')
+  assert.equal(digest(CONVENTIONS_BLOCK), 'e3d510a9129041cc5d30e2a81e4b2eadf898f812219a82d16ea6fd2f4d8d47f5')
 })
 
 // The per-check mutation contract must reach a planner mechanically: two lanes lost

@@ -20,13 +20,13 @@ import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.
 // A handful of this file's tests query the real SQLite mirror directly (via
 // openLedger().dumpTable(...)) or otherwise assert a real, non-null
 // phase_id/mirror row count from an UNFORCED (real process.versions.node)
-// ledger handle. Below NODE_FLOOR (ledger.mjs's own node:sqlite floor,
-// currently 24.0.0), openLedger() DEGRADES by design (ADR-024, #40): no
+// ledger handle. Below NODE_FLOOR (the repository containment floor),
+// openLedger() DEGRADES by design (ADR-024/ADR-031, #40): no
 // mirror table exists, dumpTable/getSession answer [] / null, and
 // phaseTransition legitimately returns phase_id: null. Those specific tests
 // (and only those — every other test in this file either forces degraded
 // mode explicitly via nodeVersion, or never touches the real mirror at all,
-// and stays ungated) self-skip below the floor, mirroring
+// and stays ungated) self-skip when node:sqlite is unavailable, mirroring
 // test/factory-ledger.test.mjs's own SKIP pattern exactly (this is the one
 // other file in the split allowed to contain a skip — see
 // test/factory-emit-floor.test.mjs for the zero-condition-excluded half).

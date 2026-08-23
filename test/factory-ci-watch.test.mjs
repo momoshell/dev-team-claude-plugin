@@ -270,7 +270,7 @@ test("ciShape reads the watched check names from this repo's ratified ci cell", 
   })
   const shape = ciShape({ checkout: ROOT, profilePath })
   assert.equal(shape.ok, true)
-  assert.deepEqual(shape.checks, ['test (node 24)'])
+  assert.deepEqual(shape.checks, ['test (node 26)'])
 })
 
 test('ciShape flattens every job across workflows and dedupes by check name', () => {

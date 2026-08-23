@@ -168,7 +168,7 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   assert.equal(workflow.file, '.github/workflows/test.yml')
   assert.deepEqual(workflow.triggers, ['push', 'pull_request'])
   assert.equal(workflow.jobs[0].id, 'test')
-  assert.equal(workflow.jobs[0].check_name, 'test (node 24)')
+  assert.equal(workflow.jobs[0].check_name, 'test (node 26)')
   assert.ok(profile.fields.conventions.value.files.includes('docs/conventions.md'))
   assert.ok(!profile.fields.conventions.value.files.includes('CLAUDE.md'))
   // The default branch is read from refs/remotes/origin/HEAD, which a local

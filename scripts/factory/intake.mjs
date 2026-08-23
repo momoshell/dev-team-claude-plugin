@@ -980,7 +980,11 @@ export function intakeSweep({ board, checkout = process.cwd(), dbPath = null, co
       proposal = proposeTier({
         where: verifiedWhere,
         discovery,
-        protectedPaths: Array.isArray(settings.protectedPaths) ? settings.protectedPaths : [],
+        // Pass the configured value THROUGH: proposeTier's own default applies when it is
+        // absent (a JS default parameter fires on undefined), and normaliseProtectedPaths
+        // refuses a malformed one with a typed reason. Coercing it to [] would discard an
+        // operator's floor request in silence.
+        protectedPaths: settings.protectedPaths,
       })
     } catch (err) {
       if (err instanceof BriefUsageError) {

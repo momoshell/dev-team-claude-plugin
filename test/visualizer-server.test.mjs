@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createRequire } from 'node:module'
 import { createHash } from 'node:crypto'
-import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
@@ -11,6 +11,7 @@ import { openLedger, NODE_FLOOR, replayJsonl, WRITERS } from '../scripts/factory
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
+import { rawRequest } from './helpers.mjs'
 
 const require = createRequire(import.meta.url)
 function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
@@ -94,6 +95,17 @@ async function startInProcess(feed, options) {
 async function stopInProcess(server) {
   if (server?.listening) await new Promise((resolve) => server.close(resolve))
 }
+function rawStatus(response) {
+  return Number((response.text.match(/^HTTP\/1\.1 (\d{3})/) || [])[1] || 0)
+}
+function rawHeader(response, name) {
+  const line = response.text.split('\r\n').find((candidate) => candidate.toLowerCase().startsWith(`${name.toLowerCase()}:`))
+  return line ? line.slice(line.indexOf(':') + 1).trim() : null
+}
+function rawJson(response) {
+  const [, body = ''] = response.text.split('\r\n\r\n', 2)
+  return JSON.parse(body)
+}
 function returnsFixture(root, adwId) {
   const dir = join(root, 'repo', 'finished'), returns = join(dir, 'returns'), ledger = join(dir, 'ledger')
   mkdirSync(returns, { recursive: true }); mkdirSync(ledger, { recursive: true })
@@ -142,6 +154,185 @@ function fixture(path, { filler = 0 } = {}) {
   ledger.close()
   return { done, live, pane }
 }
+
+// These probes deliberately bypass fetch: undici normalizes request targets and
+// Host headers before they reach the server.
+test('raw request targets are refused without killing the visualizer', { skip: SKIP }, async () => {
+  for (const target of ['//', '///', '//?x=1']) {
+    const dir = mkdtempSync(join(tmpdir(), 'visualizer-raw-target-'))
+    let server
+    try {
+      server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
+      const host = new URL(server.base).host
+      const hostile = await rawRequest({ port: Number(new URL(server.base).port), requestLine: `GET ${target} HTTP/1.1`, headers: [`Host: ${host}`, 'connection: close'] })
+      assert.equal(rawStatus(hostile), 400)
+      const after = await rawRequest({ port: Number(new URL(server.base).port), requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: ${host}`, 'connection: close'] })
+      assert.equal(rawStatus(after), 200)
+      assert.equal(server.child.exitCode, null)
+    } finally {
+      if (server) await stopServer(server.child)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('raw Host values are refused without killing the visualizer', { skip: SKIP }, async () => {
+  for (const hostValue of [']bad[', 'a:b:c', '%', 'ho st', '[::1', '@', 'x:99999999', 'a b']) {
+    const dir = mkdtempSync(join(tmpdir(), 'visualizer-raw-host-'))
+    let server
+    try {
+      server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
+      const port = Number(new URL(server.base).port)
+      const hostile = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: ${hostValue}`, 'connection: close'] })
+      assert.equal(rawStatus(hostile), 400)
+      const after = await rawRequest({ port, requestLine: 'GET /api/health HTTP/1.1', headers: [`Host: 127.0.0.1:${port}`, 'connection: close'] })
+      assert.equal(rawStatus(after), 200)
+      assert.equal(server.child.exitCode, null)
+    } finally {
+      if (server) await stopServer(server.child)
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+const WRITE_ROUTES = [
+  { path: '/api/intake/brake', body: JSON.stringify({ engaged: true, actor: 'evil.example' }) },
+  { path: '/api/triage', body: JSON.stringify({ adw_id: 'csrf-0000-0000-000000000001', reviewed: true }) },
+  { path: '/api/roster/propose', body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: null }) },
+  { path: '/api/roster/ladder/stage', body: JSON.stringify({ moves: [] }) },
+  { path: '/api/roster/ladder/compose', body: JSON.stringify({ moves: [] }) },
+]
+
+test('state-writing routes refuse CORS simple requests before reading the body', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cors-simple-'))
+  const checkout = join(dir, 'checkout')
+  mkdirSync(checkout, { recursive: true })
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout })
+    const port = Number(new URL(server.base).port)
+    for (const route of WRITE_ROUTES) {
+      const response = await rawRequest({
+        port,
+        requestLine: `POST ${route.path} HTTP/1.1`,
+        headers: [`Host: 127.0.0.1:${port}`, 'content-type: text/plain;charset=UTF-8', 'Origin: https://evil.example', `content-length: ${Buffer.byteLength(route.body)}`, 'connection: close'],
+        body: route.body,
+      })
+      assert.equal(rawStatus(response), 415)
+    }
+    assert.equal(existsSync(join(checkout, '.factory', 'STOP')), false)
+  } finally {
+    if (server) await stopServer(server.child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('state-writing routes refuse foreign JSON origins before writing state', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cors-origin-'))
+  const checkout = join(dir, 'checkout')
+  mkdirSync(checkout, { recursive: true })
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout })
+    const port = Number(new URL(server.base).port)
+    for (const route of WRITE_ROUTES) {
+      const response = await rawRequest({
+        port,
+        requestLine: `POST ${route.path} HTTP/1.1`,
+        headers: [`Host: 127.0.0.1:${port}`, 'content-type: application/json', 'Origin: https://evil.example', `content-length: ${Buffer.byteLength(route.body)}`, 'connection: close'],
+        body: route.body,
+      })
+      assert.equal(rawStatus(response), 403)
+    }
+    assert.equal(existsSync(join(checkout, '.factory', 'STOP')), false)
+  } finally {
+    if (server) await stopServer(server.child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('same-origin and originless JSON clients still engage the stop switch', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-cors-legitimate-'))
+  const checkout = join(dir, 'checkout')
+  mkdirSync(checkout, { recursive: true })
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'), null, null, { DEVTEAM_INTAKE_CHECKOUT: checkout })
+    const port = Number(new URL(server.base).port)
+    const host = `127.0.0.1:${port}`
+    const body = JSON.stringify({ engaged: true, actor: 'ops' })
+    const own = await rawRequest({
+      port,
+      requestLine: 'POST /api/intake/brake HTTP/1.1',
+      headers: [`Host: ${host}`, 'content-type: application/json', `Origin: http://${host}`, `content-length: ${Buffer.byteLength(body)}`, 'connection: close'],
+      body,
+    })
+    assert.equal(rawStatus(own), 200)
+    assert.equal(rawJson(own).ok, true)
+    assert.equal(existsSync(join(checkout, '.factory', 'STOP')), true)
+
+    const originless = await rawRequest({
+      port,
+      requestLine: 'POST /api/intake/brake HTTP/1.1',
+      headers: [`Host: ${host}`, 'content-type: application/json', `content-length: ${Buffer.byteLength(body)}`, 'connection: close'],
+      body,
+    })
+    assert.equal(rawStatus(originless), 200)
+    assert.equal(rawJson(originless).ok, true)
+
+    const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
+    const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
+    assert.equal(posts.length, 5)
+    assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
+  } finally {
+    if (server) await stopServer(server.child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('all 405 responses advertise an allowed method', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-allow-'))
+  let server
+  try {
+    server = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db'))
+    const port = Number(new URL(server.base).port)
+    const request = async (method, path) => rawRequest({ port, requestLine: `${method} ${path} HTTP/1.1`, headers: [`Host: 127.0.0.1:${port}`, 'connection: close'] })
+    for (const [method, path, allow] of [
+      ['POST', '/api/sessions', 'GET'],
+      ['GET', '/api/triage', 'POST'],
+      ['GET', '/api/roster/propose', 'POST'],
+      ['PUT', '/api/intake/brake', 'GET, POST'],
+      ['PUT', '/', 'GET, HEAD'],
+    ]) {
+      const response = await request(method, path)
+      assert.equal(rawStatus(response), 405)
+      assert.equal(rawHeader(response, 'allow'), allow)
+    }
+    const brake = await request('GET', '/api/intake/brake')
+    assert.equal(rawStatus(brake), 200)
+  } finally {
+    if (server) await stopServer(server.child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('the visualizer CLI announces a port through a symlinked repository path', { skip: SKIP }, async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-symlink-'))
+  const link = join(dir, 'repo-link')
+  const checkout = join(dir, 'checkout')
+  mkdirSync(checkout, { recursive: true })
+  symlinkSync(process.cwd(), link)
+  const child = spawnProcess(process.execPath, [join(link, 'visualizer/server/server.mjs'), '--port', '0', '--ledger-db', join(dir, 'ledger.db'), '--triage-db', join(dir, 'visualizer.db'), '--checkout', checkout], { stdio: ['ignore', 'pipe', 'pipe'] })
+  children.add(child)
+  try {
+    const base = await announce(child)
+    assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/)
+    assert.equal(child.exitCode, null)
+  } finally {
+    if (child.exitCode === null) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
 
 test('visualizer server never writes to the ledger', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-server-'))
@@ -714,7 +905,7 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     ({ child, base } = await startServer(ledgerDb, triageDb, crewRoot))
     assert.equal((await json(base, '/api/roster/propose')).status, 405)
     assert.equal((await json(base, '/api/roster/propose', { method: 'PUT' })).status, 405)
-    assert.equal((await json(base, '/api/roster/propose', { method: 'POST', body: '{ not json' })).status, 400)
+    assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json' })).status, 400)
     assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
     assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: 'opus' }) })).status, 400)
     const legal = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }) })
@@ -1357,7 +1548,7 @@ test('roster ladder routes stage and compose read-only bundles', { skip: SKIP },
     assert.equal(view.status, 200); assert.equal(view.json.degraded, false); assert.ok(view.json.bands.length); assert.ok(view.json.rail.length)
     for (const method of ['POST', 'PUT']) assert.equal((await json(base, '/api/roster/ladder', { method })).status, 405)
     assert.equal((await json(base, '/api/roster/ladder/stage')).status, 405)
-    assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', body: '{ not json' })).status, 400)
+    assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json' })).status, 400)
     assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
     const legal = await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }] }) })
     assert.equal(legal.status, 200); assert.equal(legal.json.ok, true); assert.match(legal.json.diff, /^--- a\/crew\/roster\.json/m); assert.equal(legal.json.checks.length, 4)

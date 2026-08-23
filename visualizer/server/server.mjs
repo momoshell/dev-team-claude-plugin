@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { resolve, join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -84,10 +84,29 @@ export function parseCliArgs(argv) {
   }
   return out
 }
-function json(res, status, value) {
+function json(res, status, value, headers = {}) {
   const body = JSON.stringify(value)
-  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body) })
+  res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'content-length': Buffer.byteLength(body), ...headers })
   res.end(body)
+}
+
+// #543: a state-writing route must not be reachable as a CORS SIMPLE request.
+// Requiring application/json alone forces a preflight the browser will fail;
+// the Origin compare is the second lock, for any client that sends one. This is
+// NOT authentication and does not cover a local process — see the residuals.
+const WRITE_CONTENT_TYPE = 'application/json'
+function sameOrigin(origin, host) {
+  if (typeof host !== 'string' || host === '') return false
+  let parsed
+  try { parsed = new URL(origin) } catch { return false }
+  return parsed.host.toLowerCase() === host.toLowerCase()
+}
+export function writeGuard(req) {
+  const type = String(req.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+  if (type !== WRITE_CONTENT_TYPE) return { status: 415, error: 'state-writing requests require content-type: application/json' }
+  const origin = req.headers.origin
+  if (origin != null && origin !== '' && !sameOrigin(origin, req.headers.host)) return { status: 403, error: 'cross-origin request refused' }
+  return null
 }
 function integer(value, fallback) {
   if (value == null || value === '') return fallback
@@ -175,15 +194,23 @@ export function startServer(options = {}) {
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const server = createServer(async (req, res) => {
-    const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
+    // #544: the request target and the Host header are both attacker-chosen, and
+    // an unparseable one threw ABOVE this handler's try — an unhandled rejection
+    // that exits the process and drops every in-flight keep-alive client.
+    let url
+    try {
+      url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
+    } catch {
+      return json(res, 400, { schema, error: 'invalid request target or Host header' })
+    }
     try {
       if (url.pathname === '/api/sessions') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const result = feed.listRuns({ mode: url.searchParams.get('mode') || '', status: url.searchParams.get('status') || '', since: url.searchParams.get('since') || '', until: url.searchParams.get('until') || '' })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/events') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const after = integer(url.searchParams.get('after'), 0), limit = integer(url.searchParams.get('limit'), 200)
         const phase_id = url.searchParams.has('phase_id') ? integer(url.searchParams.get('phase_id'), null) : undefined
         if (after === null || limit === null || limit < 1 || phase_id === null) return json(res, 400, { schema, error: 'after, limit and phase_id must be integers' })
@@ -194,18 +221,18 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/returns') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const repo_slug = url.searchParams.get('repo_slug'), task_slug = url.searchParams.get('task_slug')
         if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = returns.listEnvelopes({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/roster') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...roster.readRoster() })
       }
       if (url.pathname === '/api/cell-health') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultCellWindow()
         const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
         const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
@@ -217,7 +244,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...shapeCellHealth({ ...result, roster: roster.readRoster(), since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/run-set') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultRunSetWindow()
         const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
         const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
@@ -251,7 +278,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...shapeRunSet({ ...result, degraded: runSetHealth?.degraded === true, degraded_reason: runSetReason, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
       }
       if (url.pathname === '/api/intake') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultIntakeWindow()
         const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
         const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
@@ -265,7 +292,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...shapeIntake({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/seat-teardowns') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultTeardownWindow()
         const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
         const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
@@ -279,7 +306,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...shapeSeatTeardowns({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/cell-attribution') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultCellWindow()
         const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
         const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
@@ -294,7 +321,9 @@ export function startServer(options = {}) {
       }
       if (url.pathname === '/api/intake/brake') {
         if (req.method === 'GET') return json(res, 200, readBrake(config))
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET, POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.engaged !== 'boolean' || typeof input.actor !== 'string') {
@@ -342,7 +371,9 @@ export function startServer(options = {}) {
         })
       }
       if (url.pathname === '/api/roster/propose') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.tier !== 'string' || typeof input.role !== 'string') return json(res, 400, { schema, error: 'tier and role are required' })
@@ -352,7 +383,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/roster/ladder') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const window = defaultCellWindow()
         const ladder = readLadder({ ladderPath: config.ladderPath })
         const reference = readReference({ referencePath: config.referencePath })
@@ -361,7 +392,9 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...view })
       }
       if (url.pathname === '/api/roster/ladder/stage') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves)) return json(res, 400, { schema, error: 'moves must be an array' })
@@ -376,7 +409,9 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, roster_path: raw.path, ...result })
       }
       if (url.pathname === '/api/roster/ladder/compose') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves)) return json(res, 400, { schema, error: 'moves must be an array' })
@@ -391,19 +426,21 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/health') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...feed.health(), ...returns.health(), returns_readonly: true })
       }
       if (url.pathname === '/api/triage') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' })
+        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req) // #543: /api/triage is a state writer too
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (typeof input.adw_id !== 'string' || typeof input.reviewed !== 'boolean') return json(res, 400, { schema, error: 'adw_id and reviewed are required' })
         const result = feed.setTriage(input)
         return json(res, 200, { schema, ...result })
       }
-      if (url.pathname.startsWith('/api/')) return json(res, req.method === 'GET' ? 404 : 405, { schema, error: 'not found' })
-      if (req.method !== 'GET' && req.method !== 'HEAD') return res.writeHead(405).end()
+      if (url.pathname.startsWith('/api/')) return req.method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
+      if (req.method !== 'GET' && req.method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
       return staticResponse(req, res)
     } catch (err) { return json(res, 500, { schema, error: err.message || 'internal error' }) }
   })
@@ -416,7 +453,13 @@ export function startServer(options = {}) {
   return { server, feed }
 }
 
-const invokedDirectly = process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
+// realpath both sides: the ESM loader realpaths import.meta.url while argv[1]
+// stays literal, so under a symlinked path component a literal compare is
+// silently false and this CLI would no-op (h5 F3).
+function realpathOr(path) {
+  try { return realpathSync(path) } catch { return path }
+}
+const invokedDirectly = process.argv[1] && realpathOr(process.argv[1]) === realpathOr(fileURLToPath(import.meta.url))
 if (invokedDirectly) {
   // process.exitCode, not process.exit: the refusal happens BEFORE
   // startServer, so nothing is bound, no ledger is opened and no state is

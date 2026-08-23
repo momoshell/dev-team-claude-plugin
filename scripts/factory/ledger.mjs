@@ -144,7 +144,7 @@ export const REVIEW_VERDICTS = Object.freeze(['pass', 'changes-needed'])
 // share over a handful of reviews is not a policy input, and the readout says
 // so rather than leaving the reader to notice the denominator.
 export const CELL_RATE_FLOOR = 12
-export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens (cost_in_per_mtok, cost_out_per_mtok); cache-read and cache-write tokens are reported but NOT priced — the catalog carries no rate for them'
+export const CELL_PRICE_UNITS = 'USD per 1,000,000 tokens: input and output at cost_in_per_mtok and cost_out_per_mtok, cache reads at cost_cache_read_per_mtok and cache writes at cost_cache_write_per_mtok, all four ratified per model in the same catalog — a model missing either cache rate leaves the whole row unpriced, never partly priced, and a token class even one member session never measured does the same; billed_cache_write_tokens collapses the 1h and 5m write TTLs into one column, so pricing every write at the ratified 1h rate is an explicit lossy convention (#527)'
 export const ADVISOR_AB_VERDICTS = Object.freeze(['overlap', 'no-overlap', 'skipped'])
 export const ADVISOR_AB_INCOMPLETE_REASONS = Object.freeze([
   'envelope-missing', 'envelope-unreadable', 'envelope-role-mismatch',
@@ -313,6 +313,7 @@ export const USAGE_ABSENT_CAUSES = Object.freeze({
   measured_transport: 'a non-pane transport is recorded for it, yet no agent_sessions row exists — the usage frame was never folded into the register; unmeasured, not a measured zero',
   transport_unrecorded: 'no transport is recorded for it, so why no agent_sessions row exists is itself unmeasured — a run predating per-agent token measurement (#119) reads this way too, and neither is a measured zero',
   unbilled_rows: 'its agent_sessions rows carry no billed token totals — unmeasured, not a measured zero',
+  cache_unpriced: 'the catalog entry has input/output rates but does not carry every cache rate required to price all four billed token classes; this row is UNPRICED, never partly priced and never free',
 })
 
 // transports: an iterable of the transport strings recorded for the run(s).
@@ -2608,10 +2609,10 @@ export function openLedger({
         r.agent, r.effort, r.role, sx.tier AS task_class,
         COUNT(*) AS usage_sessions,
         SUM(CASE WHEN a.billed_input_tokens IS NULL THEN 1 ELSE 0 END) AS unbilled_sessions,
-        SUM(a.billed_input_tokens) AS billed_input_tokens,
-        SUM(a.billed_output_tokens) AS billed_output_tokens,
-        SUM(a.billed_cache_write_tokens) AS billed_cache_write_tokens,
-        SUM(a.billed_cache_read_tokens) AS billed_cache_read_tokens
+        CASE WHEN COUNT(a.billed_input_tokens) = COUNT(*) THEN SUM(a.billed_input_tokens) ELSE NULL END AS billed_input_tokens,
+        CASE WHEN COUNT(a.billed_output_tokens) = COUNT(*) THEN SUM(a.billed_output_tokens) ELSE NULL END AS billed_output_tokens,
+        CASE WHEN COUNT(a.billed_cache_write_tokens) = COUNT(*) THEN SUM(a.billed_cache_write_tokens) ELSE NULL END AS billed_cache_write_tokens,
+        CASE WHEN COUNT(a.billed_cache_read_tokens) = COUNT(*) THEN SUM(a.billed_cache_read_tokens) ELSE NULL END AS billed_cache_read_tokens
       FROM review_outcomes r
         JOIN agent_sessions a ON a.adw_id = r.adw_id AND a.dispatch_id = r.dispatch_id
         LEFT JOIN sessions sx ON sx.adw_id = r.adw_id
@@ -4042,17 +4043,33 @@ export function main(argv) {
         } else if (unbilledSessions > 0) {
           absent.usage = USAGE_ABSENT_CAUSES.unbilled_rows
         }
+        const cacheRate = (field) => (price !== null && typeof price[field] === 'number' && Number.isFinite(price[field]))
+          ? price[field]
+          : null
+        const cacheReadRate = cacheRate('cost_cache_read_per_mtok')
+        const cacheWriteRate = cacheRate('cost_cache_write_per_mtok')
+        const missingCacheRates = []
+        if (cacheReadRate === null) missingCacheRates.push('cost_cache_read_per_mtok')
+        if (cacheWriteRate === null) missingCacheRates.push('cost_cache_write_per_mtok')
+        const missingVolume = []
+        if (billedInputTokens === null) missingVolume.push('billed_input_tokens')
+        if (billedOutputTokens === null) missingVolume.push('billed_output_tokens')
+        if (billedCacheReadTokens === null) missingVolume.push('billed_cache_read_tokens')
+        if (billedCacheWriteTokens === null) missingVolume.push('billed_cache_write_tokens')
         let costUsd = null
-        if (hasRates && billedInputTokens !== null && billedOutputTokens !== null) {
-          const inTokens = billedInputTokens
-          const outTokens = billedOutputTokens
-          costUsd = (inTokens / 1e6) * price.cost_in_per_mtok + (outTokens / 1e6) * price.cost_out_per_mtok
+        if (hasRates && missingVolume.length === 0 && missingCacheRates.length === 0) {
+          costUsd = (billedInputTokens / 1e6) * price.cost_in_per_mtok
+            + (billedOutputTokens / 1e6) * price.cost_out_per_mtok
+            + (billedCacheReadTokens / 1e6) * cacheReadRate
+            + (billedCacheWriteTokens / 1e6) * cacheWriteRate
         }
         if (row.model_key !== null && priceKey === null) absent.price_key = `the model string ${row.model_key} is translated to no single ${row.agent === null ? 'adapter' : row.agent}-catalog key, and a prefix is never stripped to guess one — unmapped, so this cell is unpriced, never free`
         if (!hasRates) {
           absent.cost_usd = `no price for ` + `${priceKey} in ${priceSourcePath} — unpriced, never free`
-        } else if (billedInputTokens === null || billedOutputTokens === null) {
-          absent.cost_usd = 'no measured token volume for this cell — unpriced here means unmeasured, never free'
+        } else if (missingVolume.length > 0) {
+          absent.cost_usd = `no measured ${missingVolume.join(', ')} for this cell — unpriced here means unmeasured, never free`
+        } else if (missingCacheRates.length > 0) {
+          absent.cost_usd = `${USAGE_ABSENT_CAUSES.cache_unpriced} (${priceKey} in ${priceSourcePath} carries no ${missingCacheRates.join(' and ')})`
         }
         return {
           provider: row.provider,

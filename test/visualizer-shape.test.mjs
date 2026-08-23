@@ -725,7 +725,7 @@ test('shapeCellHealth carries catalog prices and leaves absent prices pending', 
         { role: 'builder', provider: 'openai', id: 'gpt-5', agent: 'pi', effort: 'max' },
         { role: 'planner', provider: 'anthropic', id: 'ghost', agent: 'claude', effort: 'medium' },
       ] }],
-      models: [{ key: 'openai/gpt-5', cost_in_per_mtok: 2, cost_out_per_mtok: 12, context: 400000, source: 'vendor', last_verified: '2026-08-13' }],
+      models: [{ key: 'openai/gpt-5', cost_in_per_mtok: 2, cost_out_per_mtok: 12, cost_cache_read_per_mtok: 0.2, cost_cache_write_per_mtok: 0, cache_rate_source: 'published prompt-caching rates', context: 400000, source: 'vendor', last_verified: '2026-08-13' }],
     },
     since: start, until: null, label: 'last 7 days',
   })
@@ -733,6 +733,9 @@ test('shapeCellHealth carries catalog prices and leaves absent prices pending', 
   const unknown = result.cells.find((cell) => cell.model_id === 'ghost')
   assert.equal(known.price.cost_in_per_mtok, 2)
   assert.equal(known.price.cost_out_per_mtok, 12)
+  assert.equal(known.price.cost_cache_read_per_mtok, 0.2)
+  assert.equal(known.price.cost_cache_write_per_mtok, 0)
+  assert.equal(known.price.cache_rate_source, 'published prompt-caching rates')
   assert.equal(known.price_pending, null)
   assert.equal(unknown.price, null)
   assert.ok(unknown.price_pending)

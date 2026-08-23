@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
-  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync, symlinkSync, chmodSync,
+  openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync, symlinkSync, chmodSync, renameSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -20,6 +20,7 @@ import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
+import { writeTornFile } from '../test/helpers.mjs'
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
 // through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
@@ -856,6 +857,41 @@ test('an eligible review escalation regrants once in place with a continuation b
   })
 })
 
+test('a regranted continuation gets a fresh unmeasured envelope budget', async () => {
+  await each(async (f) => {
+    const envelope = {
+      status: 'escalation',
+      details: {
+        escalation: { where: 'review', why: 'close the remaining defect' },
+        extra_rounds_granted: [{ where: 'review', round: 3 }],
+        gate: { discrimination: 'proven' },
+        commit: null,
+      },
+    }
+    appendJournal(f, { review_outcome: { dispatch: 'd3', must_fix: 2, findings: [] } })
+    appendJournal(f, { review_outcome: { dispatch: 'd5', must_fix: 1, findings: [{ id: 'RV3-1', severity: 'must-fix', location: 'crew/daemon.mjs:191', summary: 'close this defect' }] } })
+    const run = f.d.enqueue({ crew_dir: f.crewDir }).run_id
+    const first = writeTornFile({ file: returnFor(f, run), completeText: JSON.stringify(envelope, null, 2) })
+    f.alive.delete(900)
+    for (let i = 0; i < 5; i += 1) f.d.poll()
+    let records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
+
+    f.alive.add(900)
+    first.complete()
+    f.d.poll()
+    records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.filter((record) => record.run_id === run && record.kind === 'regrant').length, 1)
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
+
+    writeTornFile({ file: returnFor(f, run, 2), completeText: JSON.stringify(envelope, null, 2) })
+    f.alive.delete(900)
+    f.d.poll()
+    records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'orphaned'), false)
+  })
+})
+
 test('a stale child callback cannot orphan the regranted continuation', async () => {
   await each(async (f) => {
     const children = []
@@ -1565,6 +1601,113 @@ test('restart settles a dead child from its envelope', async () => {
   } finally { f.cleanup() }
 })
 
+test('a torn envelope on a dead child is unmeasured, not absent', async () => {
+  const f = fixture()
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    const envelope = JSON.stringify({ status: 'done', summary: 'torn', details: { commit: 'abc1234' } }, null, 2)
+    writeTornFile({ file: returnFor(f, run), completeText: envelope })
+    f.alive.delete(900)
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(records.some((record) => record.kind === 'orphaned'), false)
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('the completed envelope settles the run with its own outcome', async () => {
+  const f = fixture()
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    const envelope = JSON.stringify({ status: 'done', summary: 'complete', details: { commit: 'abc1234' } }, null, 2)
+    const torn = writeTornFile({ file: returnFor(f, run), completeText: envelope })
+    f.alive.delete(900)
+    f.d.poll()
+    torn.complete()
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    const settled = records.find((record) => record.kind === 'settled')
+    assert.ok(settled)
+    assert.equal(settled.outcome_status, 'done')
+    assert.equal(f.d.result({ run }).envelope.details.commit, 'abc1234')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('an absent envelope on a dead child still orphans', async () => {
+  const f = fixture()
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    f.alive.delete(900)
+    f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    const orphaned = records.find((record) => record.kind === 'orphaned')
+    assert.ok(orphaned)
+    assert.equal(orphaned.reason, 'child-dead')
+    assert.equal(f.d.result({ run }).envelope.details.escalation.why, 'child-dead')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('a restart does not resurrect the wrong verdict', async () => {
+  const f = fixture()
+  let next = null
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    const envelope = JSON.stringify({ status: 'done', summary: 'restart', details: { commit: 'restart-123' } }, null, 2)
+    const torn = writeTornFile({ file: returnFor(f, run), completeText: envelope })
+    f.alive.delete(900)
+    f.d.poll()
+    await f.d.stop()
+    next = daemon({ root: f.root, deps: f.deps })
+    await next.start()
+    torn.complete()
+    next.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    assert.equal(records.some((record) => record.kind === 'orphaned'), false)
+    assert.equal(records.some((record) => record.kind === 'settled'), true)
+    assert.equal(next.result({ run }).envelope.details.commit, 'restart-123')
+  } finally { await f.d.stop(); await next?.stop(); f.cleanup() }
+})
+
+test('the unmeasured retry is bounded', async () => {
+  const f = fixture()
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    const envelope = JSON.stringify({ status: 'done', summary: 'never complete', details: {} }, null, 2)
+    const torn = writeTornFile({ file: returnFor(f, run), completeText: envelope })
+    const bytes = readFileSync(returnFor(f, run), 'utf8')
+    f.alive.delete(900)
+    for (let i = 0; i < 8; i += 1) f.d.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+    const orphaned = records.find((record) => record.kind === 'orphaned')
+    assert.ok(orphaned)
+    assert.equal(orphaned.reason, 'envelope-unreadable')
+    assert.equal(readFileSync(returnFor(f, run), 'utf8'), bytes)
+    assert.equal(typeof torn.tornBytes, 'number')
+  } finally { await f.d.stop(); f.cleanup() }
+})
+
+test('the child publishes the envelope by rename', () => {
+  const f = fixture()
+  try {
+    const own = join(f.returnsDir, 'rename.task.json')
+    const writes = []
+    const renames = []
+    runChild({ crew_dir: f.crewDir, task_return: own, task: 'x' }, {
+      driveTask: () => ({ status: 'done', summary: 'rename' }), seatIo: () => ({}), preflight: false,
+      writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
+      renameSync: (from, to) => { renames.push(String(to)); return renameSync(from, to) },
+    })
+    assert.equal(writes.filter((path) => path === own).length, 0)
+    assert.equal(writes.filter((path) => path === f.taskReturn).length, 0)
+    assert.equal(renames.filter((path) => path === own).length, 1)
+    assert.equal(renames.filter((path) => path === f.taskReturn).length, 1)
+  } finally { f.cleanup() }
+})
+
 // 16. A crew directory is a single active session key.
 test('enqueue twice for one crew is run-active and forks once', async () => {
   await each(async (f) => {
@@ -2175,25 +2318,27 @@ test('runChild mirrors per-run envelopes and writes the well-known path only onc
   const f = fixture()
   try {
     const own = join(f.returnsDir, 'r1.task.json')
-    const writes = []
+    const renames = []
     const result = runChild({ crew_dir: f.crewDir, task_return: own, task: 'x' }, {
       driveTask: () => ({ status: 'done', summary: 'per-run' }), seatIo: () => ({}), preflight: false,
-      writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
+      writeFileSync: (path, value, options) => writeFileSync(path, value, options),
+      renameSync: (from, to) => { renames.push(String(to)); return renameSync(from, to) },
     })
     assert.equal(result.status, 'done')
     assert.deepEqual(JSON.parse(readFileSync(own, 'utf8')), JSON.parse(readFileSync(f.taskReturn, 'utf8')))
-    assert.equal(writes.filter((path) => path === own).length, 1)
-    assert.equal(writes.filter((path) => path === f.taskReturn).length, 1)
+    assert.equal(renames.filter((path) => path === own).length, 1)
+    assert.equal(renames.filter((path) => path === f.taskReturn).length, 1)
   } finally { f.cleanup() }
 
   const wellKnown = fixture()
   try {
-    const writes = []
+    const renames = []
     runChild({ crew_dir: wellKnown.crewDir, task_return: wellKnown.taskReturn, task: 'x' }, {
       driveTask: () => ({ status: 'done', summary: 'well-known' }), seatIo: () => ({}), preflight: false,
-      writeFileSync: (path, value, options) => { writes.push(String(path)); return writeFileSync(path, value, options) },
+      writeFileSync: (path, value, options) => writeFileSync(path, value, options),
+      renameSync: (from, to) => { renames.push(String(to)); return renameSync(from, to) },
     })
-    assert.equal(writes.filter((path) => path === wellKnown.taskReturn).length, 1)
+    assert.equal(renames.filter((path) => path === wellKnown.taskReturn).length, 1)
   } finally { wellKnown.cleanup() }
 })
 

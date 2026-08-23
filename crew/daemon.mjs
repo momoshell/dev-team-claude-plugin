@@ -311,6 +311,22 @@ function jsonAt(path, exists, read) {
   } catch { return null }
 }
 
+// THREE READ STATES for a run's envelope, and only three. `absent` is no file at
+// all; `unmeasured` is bytes that EXIST and do not parse — a child caught inside
+// its own write, whose verdict is not knowable YET; `valid` is a settled outcome.
+// jsonAt cannot tell the first two apart (both are null), which is how one torn
+// read became a permanent `orphaned` verdict (#540).
+function envelopeRead(path, exists, read) {
+  if (!path || !exists(path)) return { state: 'absent', envelope: null }
+  let text
+  try { text = String(read(path, 'utf8')) } catch { return { state: 'unmeasured', envelope: null } }
+  try {
+    const value = JSON.parse(text)
+    if (isObject(value)) return { state: 'valid', envelope: value }
+  } catch { /* torn bytes are the child's, mid-write */ }
+  return { state: 'unmeasured', envelope: null }
+}
+
 function absoluteChildPath(root, value) {
   if (!value) return null
   return resolvePath(root, String(value))
@@ -484,6 +500,7 @@ export function daemon(options = {}) {
       orphaned: false,
       orphan_reason: null,
       child_dead: false,
+      unmeasured_polls: 0,
       sequence: 0,
       feed: [],
       journal: { offset: 0, rest: Buffer.alloc(0) },
@@ -558,7 +575,29 @@ export function daemon(options = {}) {
     return run
   }
 
-  function runEnvelope(run) { return jsonAt(run.task_return, exists, read) }
+  // The retry is BOUNDED: at most UNMEASURED_POLL_LIMIT consecutive unmeasured
+  // reads taken after the child was observed dead. On exhaustion the run orphans
+  // with reason 'envelope-unreadable' — today's verdict, only after the bytes have
+  // had their chance. A daemon restart re-measures the file and starts a fresh
+  // budget; the terminal outcome is unchanged, only deferred.
+  const UNMEASURED_POLL_LIMIT = 5
+
+  function runEnvelopeRead(run) { return envelopeRead(run.task_return, exists, read) }
+  function runEnvelope(run) { return runEnvelopeRead(run).envelope }
+
+  // The ONE place a read of the envelope decides a dead child's run: poll, the
+  // exit handler and restart adoption all go through it, so the three states
+  // cannot drift apart across paths.
+  function judgeEnvelope(run, reason) {
+    const read = runEnvelopeRead(run)
+    if (read.state === 'valid') { run.unmeasured_polls = 0; settle(run, read.envelope); return 'settled' }
+    if (read.state === 'absent') { orphanRun(run, reason); return 'orphaned' }
+    run.child_dead = true
+    run.orphan_reason ||= reason
+    run.unmeasured_polls += 1
+    if (run.unmeasured_polls > UNMEASURED_POLL_LIMIT) { orphanRun(run, 'envelope-unreadable'); return 'orphaned' }
+    return 'unmeasured'
+  }
 
   function sameFile(leftPath, rightPath) {
     if (!leftPath || !rightPath) return false
@@ -781,6 +820,7 @@ export function daemon(options = {}) {
       run.lifecycle = 'queued'
       run.child_pid = null
       run.child_dead = false
+      run.unmeasured_polls = 0
       run.orphan_reason = null
       run.envelope = null
       run.blocked = false
@@ -826,9 +866,7 @@ export function daemon(options = {}) {
           run.child_dead = true
           run.orphan_reason ||= signal ? `child-exit:${signal}` : `child-exit:${code ?? 'unknown'}`
           appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: code ?? null, signal: signal ?? null }))
-          const after = runEnvelope(run)
-          if (after) settle(run, after)
-          else orphanRun(run, run.orphan_reason)
+          judgeEnvelope(run, run.orphan_reason)
         }
       } catch { /* diagnostics are subordinate to daemon liveness */ }
     }
@@ -843,8 +881,8 @@ export function daemon(options = {}) {
     discoverRpcWorkers(run)
     pollJournal(run)
     for (const worker of run.workers.values()) pollWorker(run, worker)
-    const before = runEnvelope(run)
-    if (before) settle(run, before)
+    const before = runEnvelopeRead(run)
+    if (before.state === 'valid') settle(run, before.envelope)
     if (run.lifecycle !== 'settled') {
       const alive = run.child_dead ? false : processAlive(kill, run.child_pid)
       if (alive === false && !run.child_dead) {
@@ -852,9 +890,7 @@ export function daemon(options = {}) {
         run.orphan_reason ||= 'child-dead'
         appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: null }))
       }
-      const after = runEnvelope(run)
-      if (after) settle(run, after)
-      else if (run.child_dead) orphanRun(run, run.orphan_reason || 'child-dead')
+      if (run.child_dead) judgeEnvelope(run, run.orphan_reason || 'child-dead')
     }
   }
 
@@ -1204,9 +1240,7 @@ export function daemon(options = {}) {
         continue
       }
       if (!hasPid(run.child_pid)) {
-        const envelope = runEnvelope(run)
-        if (envelope) settle(run, envelope)
-        else orphanRun(run, 'orphaned-on-restart')
+        judgeEnvelope(run, 'orphaned-on-restart')
         continue
       }
       const alive = processAlive(kill, run.child_pid)
@@ -1215,9 +1249,7 @@ export function daemon(options = {}) {
         appendRecord({ kind: 'adopted', run_id: run.run_id, at: now() })
         continue
       }
-      const envelope = runEnvelope(run)
-      if (envelope) settle(run, envelope)
-      else orphanRun(run, 'orphaned-on-restart')
+      judgeEnvelope(run, 'orphaned-on-restart')
     }
   }
 

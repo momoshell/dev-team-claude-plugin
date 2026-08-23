@@ -1,0 +1,12 @@
+socket before          : true   pidfile: true
+enqueue during stop()  : {"run_id":"r-1","crew_dir":"/tmp/h1r5-V2nnl5/crew","state":"working"}
+records in runs.jsonl  : [enqueued, started]
+children forked        : [913]  alive=[true]
+socket after           : false   pidfile: false
+poll loop              : cleared by stop() (crew/daemon.mjs:1420) — nothing will ever poll this run
+
+EXPECTED: a daemon that is shutting down REFUSES the admission (the run stays enqueued for
+          the next daemon, or the caller is told 'not-running') — it does not fork.
+OBSERVED: the run was admitted and recorded 'started', a detached child was forked, and the
+          daemon then exited with no socket, no pidfile and no poll loop behind it.
+R5 REPRODUCED — an unsupervised detached child outlives the daemon that forked it

@@ -1,0 +1,437 @@
+TAP version 13
+# brief: unknown option: --bogus [reason: missing-line]
+# Subtest: the four authored lines are carried verbatim and compilation is idempotent
+ok 1 - the four authored lines are carried verbatim and compilation is idempotent
+  ---
+  duration_ms: 484.340542
+  type: 'test'
+  ...
+# Subtest: a missing where path refuses by name and a blank ask refuses
+ok 2 - a missing where path refuses by name and a blank ask refuses
+  ---
+  duration_ms: 99.142375
+  type: 'test'
+  ...
+# Subtest: validateAsk rejects short and heading-restating asks, while genuine asks pass
+ok 3 - validateAsk rejects short and heading-restating asks, while genuine asks pass
+  ---
+  duration_ms: 0.459417
+  type: 'test'
+  ...
+# Subtest: an unknown top-level request key is a tagged refusal
+ok 4 - an unknown top-level request key is a tagged refusal
+  ---
+  duration_ms: 52.973583
+  type: 'test'
+  ...
+# Subtest: the path key finds a test pinning a non-code file
+ok 5 - the path key finds a test pinning a non-code file
+  ---
+  duration_ms: 249.602625
+  type: 'test'
+  ...
+# Subtest: extractKeys independently finds exports, codes, written paths, and basenames
+ok 6 - extractKeys independently finds exports, codes, written paths, and basenames
+  ---
+  duration_ms: 0.8895
+  type: 'test'
+  ...
+# Subtest: exported symbols, error codes, and written filenames each find their test
+ok 7 - exported symbols, error codes, and written filenames each find their test
+  ---
+  duration_ms: 258.601125
+  type: 'test'
+  ...
+# Subtest: broad keys are reported with counts and are not tripwires
+ok 8 - broad keys are reported with counts and are not tripwires
+  ---
+  duration_ms: 327.462625
+  type: 'test'
+  ...
+# Subtest: citation-only code comments couple to a where owner
+ok 9 - citation-only code comments couple to a where owner
+  ---
+  duration_ms: 93.9225
+  type: 'test'
+  ...
+# Subtest: citation-only coupling is enforced by fences and can be acknowledged as read-only
+ok 10 - citation-only coupling is enforced by fences and can be acknowledged as read-only
+  ---
+  duration_ms: 362.692666
+  type: 'test'
+  ...
+# Subtest: baseline is measured, colour-neutral, and absent test scripts are unknown
+ok 11 - baseline is measured, colour-neutral, and absent test scripts are unknown
+  ---
+  duration_ms: 409.3765
+  type: 'test'
+  ...
+# Subtest: a ratified profile test_command becomes the measured lane and states its basis
+ok 12 - a ratified profile test_command becomes the measured lane and states its basis
+  ---
+  duration_ms: 235.309125
+  type: 'test'
+  ...
+# Subtest: a proposed profile test_command is not consumed and names the package fallback
+ok 13 - a proposed profile test_command is not consumed and names the package fallback
+  ---
+  duration_ms: 239.075541
+  type: 'test'
+  ...
+# Subtest: an unknown profile test_command is not consumed because only ratified cells count
+ok 14 - an unknown profile test_command is not consumed because only ratified cells count
+  ---
+  duration_ms: 240.466209
+  type: 'test'
+  ...
+# Subtest: an absent profile compiles with its path and unreadable reason stated
+ok 15 - an absent profile compiles with its path and unreadable reason stated
+  ---
+  duration_ms: 236.706625
+  type: 'test'
+  ...
+# Subtest: --require-profile refuses unreadable and unratified profiles by distinct reasons
+ok 16 - --require-profile refuses unreadable and unratified profiles by distinct reasons
+  ---
+  duration_ms: 299.968333
+  type: 'test'
+  ...
+# Subtest: a recorded baseline count is named unused while the compile measures fresh counts
+ok 17 - a recorded baseline count is named unused while the compile measures fresh counts
+  ---
+  duration_ms: 235.150625
+  type: 'test'
+  ...
+# Subtest: the default profile path is used when no --profile flag is supplied
+ok 18 - the default profile path is used when no --profile flag is supplied
+  ---
+  duration_ms: 267.444709
+  type: 'test'
+  ...
+# Subtest: --profile overrides the default profile path and names the override
+ok 19 - --profile overrides the default profile path and names the override
+  ---
+  duration_ms: 261.48625
+  type: 'test'
+  ...
+# Subtest: ratified convention files render with their basis and malformed files are unavailable
+ok 20 - ratified convention files render with their basis and malformed files are unavailable
+  ---
+  duration_ms: 455.610458
+  type: 'test'
+  ...
+# Subtest: fences are sorted and no fence register is explicit when omitted
+ok 21 - fences are sorted and no fence register is explicit when omitted
+  ---
+  duration_ms: 494.852167
+  type: 'test'
+  ...
+# Subtest: a named lane declares its fence as the write surface and keeps discovery distinct
+ok 22 - a named lane declares its fence as the write surface and keeps discovery distinct
+  ---
+  duration_ms: 253.32975
+  type: 'test'
+  ...
+# Subtest: an unknown lane and a lane without fences both refuse with unknown-lane
+ok 23 - an unknown lane and a lane without fences both refuse with unknown-lane
+  ---
+  duration_ms: 319.381833
+  type: 'test'
+  ...
+# Subtest: without fences the write surface is the authored where paths and names its basis
+ok 24 - without fences the write surface is the authored where paths and names its basis
+  ---
+  duration_ms: 247.688125
+  type: 'test'
+  ...
+# Subtest: an unslashed directory fence entry refuses at compile time
+ok 25 - an unslashed directory fence entry refuses at compile time
+  ---
+  duration_ms: 22.849542
+  type: 'test'
+  ...
+# Subtest: scope validation allows slashed directories, files and absent paths
+ok 26 - scope validation allows slashed directories, files and absent paths
+  ---
+  duration_ms: 28.721916
+  type: 'test'
+  ...
+# Subtest: the lane is never inferred from the output filename
+ok 27 - the lane is never inferred from the output filename
+  ---
+  duration_ms: 248.509208
+  type: 'test'
+  ...
+# Subtest: scope validation refuses unslashed directories without changing the rendered surface
+ok 28 - scope validation refuses unslashed directories without changing the rendered surface
+  ---
+  duration_ms: 567.130375
+  type: 'test'
+  ...
+# Subtest: standing blocks and unfilled slots render verbatim
+ok 29 - standing blocks and unfilled slots render verbatim
+  ---
+  duration_ms: 248.912458
+  type: 'test'
+  ...
+# Subtest: every compiled brief carries the per-check mutation contract
+ok 30 - every compiled brief carries the per-check mutation contract
+  ---
+  duration_ms: 253.306292
+  type: 'test'
+  ...
+# Subtest: the mutation contract states the FAIL-line separator rule
+ok 31 - the mutation contract states the FAIL-line separator rule
+  ---
+  duration_ms: 246.14125
+  type: 'test'
+  ...
+# Subtest: the mutation contract states the node --test reporter rule
+ok 32 - the mutation contract states the node --test reporter rule
+  ---
+  duration_ms: 250.00575
+  type: 'test'
+  ...
+# Subtest: the mutation contract demands a mutation exercising the narrowest claim
+ok 33 - the mutation contract demands a mutation exercising the narrowest claim
+  ---
+  duration_ms: 484.693042
+  type: 'test'
+  ...
+# Subtest: the charter and the checklist state the contract the driver enforces
+ok 34 - the charter and the checklist state the contract the driver enforces
+  ---
+  duration_ms: 0.288958
+  type: 'test'
+  ...
+# Subtest: out refusal and force overwrite follow the CLI contract
+ok 35 - out refusal and force overwrite follow the CLI contract
+  ---
+  duration_ms: 1203.83375
+  type: 'test'
+  ...
+# Subtest: a nested git checkout resolves to the repository root
+ok 36 - a nested git checkout resolves to the repository root
+  ---
+  duration_ms: 231.162792
+  type: 'test'
+  ...
+# Subtest: directory where entries expand for discovery while the authored directory is rendered
+ok 37 - directory where entries expand for discovery while the authored directory is rendered
+  ---
+  duration_ms: 232.486333
+  type: 'test'
+  ...
+# Subtest: one-file scopes render a marked mechanical proposal with reasons
+ok 38 - one-file scopes render a marked mechanical proposal with reasons
+  ---
+  duration_ms: 228.164125
+  type: 'test'
+  ...
+# Subtest: directory breadth proposes a higher tier and explains its source count
+ok 39 - directory breadth proposes a higher tier and explains its source count
+  ---
+  duration_ms: 396.189875
+  type: 'test'
+  ...
+# Subtest: proposeTier pins breadth bands, directory raises, and tripwire-floor raises
+ok 40 - proposeTier pins breadth bands, directory raises, and tripwire-floor raises
+  ---
+  duration_ms: 0.609416
+  type: 'test'
+  ...
+# Subtest: proposeTier returns separate shape and strength proposals with distinct reasons
+ok 41 - proposeTier returns separate shape and strength proposals with distinct reasons
+  ---
+  duration_ms: 0.107583
+  type: 'test'
+  ...
+# Subtest: risk signals drive shape independently of complexity
+ok 42 - risk signals drive shape independently of complexity
+  ---
+  duration_ms: 0.139042
+  type: 'test'
+  ...
+# Subtest: complexity signals drive ratified strength independently of risk
+ok 43 - complexity signals drive ratified strength independently of risk
+  ---
+  duration_ms: 0.106791
+  type: 'test'
+  ...
+# Subtest: strength proposals are restricted to the ratified ladder and explain each signal group
+ok 44 - strength proposals are restricted to the ratified ladder and explain each signal group
+  ---
+  duration_ms: 0.2165
+  type: 'test'
+  ...
+# Subtest: renderProposedTier labels tier, shape, and strength in risk then complexity order
+ok 45 - renderProposedTier labels tier, shape, and strength in risk then complexity order
+  ---
+  duration_ms: 0.673208
+  type: 'test'
+  ...
+# Subtest: protected-path risk leaves the legacy tier and protected hits unchanged
+ok 46 - protected-path risk leaves the legacy tier and protected hits unchanged
+  ---
+  duration_ms: 0.059667
+  type: 'test'
+  ...
+# Subtest: protected paths default to the floor, raise one step, match directory prefixes, and reject malformed input
+ok 47 - protected paths default to the floor, raise one step, match directory prefixes, and reject malformed input
+  ---
+  duration_ms: 0.27875
+  type: 'test'
+  ...
+# Subtest: protected file input is normalized, deduped, and wired through the CLI
+ok 48 - protected file input is normalized, deduped, and wired through the CLI
+  ---
+  duration_ms: 430.272042
+  type: 'test'
+  ...
+# Subtest: a ratified protected-path list adds to the floor and names its basis in the compiled brief
+ok 49 - a ratified protected-path list adds to the floor and names its basis in the compiled brief
+  ---
+  duration_ms: 242.134667
+  type: 'test'
+  ...
+# Subtest: a brief compiled without a ratified list names the authored floor
+ok 50 - a brief compiled without a ratified list names the authored floor
+  ---
+  duration_ms: 247.829792
+  type: 'test'
+  ...
+# Subtest: a ratified protected-path list that is not a list refuses the compile
+ok 51 - a ratified protected-path list that is not a list refuses the compile
+  ---
+  duration_ms: 236.308459
+  type: 'test'
+  ...
+# Subtest: absence cases return neither proposal with reasons and render no proposal
+ok 52 - absence cases return neither proposal with reasons and render no proposal
+  ---
+  duration_ms: 334.044709
+  type: 'test'
+  ...
+# Subtest: shape and strength proposals ship inside the Proposed tier section
+ok 53 - shape and strength proposals ship inside the Proposed tier section
+  ---
+  duration_ms: 0.483333
+  type: 'test'
+  ...
+# Subtest: proposal block renders exact mechanical/workhorse bytes and filters out-of-vocabulary values
+ok 54 - proposal block renders exact mechanical/workhorse bytes and filters out-of-vocabulary values
+  ---
+  duration_ms: 0.052
+  type: 'test'
+  ...
+# Subtest: compiler and emitter proposal declarations stay in agreement
+ok 55 - compiler and emitter proposal declarations stay in agreement
+  ---
+  duration_ms: 0.04525
+  type: 'test'
+  ...
+# Subtest: the parser returns a refusal code for an unknown CLI option
+ok 56 - the parser returns a refusal code for an unknown CLI option
+  ---
+  duration_ms: 0.370167
+  type: 'test'
+  ...
+# Subtest: the compiler parses cleanly with node --check
+ok 57 - the compiler parses cleanly with node --check
+  ---
+  duration_ms: 28.471125
+  type: 'test'
+  ...
+# Subtest: direct gatherers refuse a non-git checkout and preserve verified entries
+ok 58 - direct gatherers refuse a non-git checkout and preserve verified entries
+  ---
+  duration_ms: 94.067708
+  type: 'test'
+  ...
+# Subtest: extractSymbols is the exported-symbol half and tolerates object input
+ok 59 - extractSymbols is the exported-symbol half and tolerates object input
+  ---
+  duration_ms: 0.194334
+  type: 'test'
+  ...
+# Subtest: real ci-watch discovery names its non-test callers without widening tripwires
+ok 60 - real ci-watch discovery names its non-test callers without widening tripwires
+  ---
+  duration_ms: 583.67675
+  type: 'test'
+  ...
+# Subtest: real crew-drive discovery retains crew-child as an exported-symbol caller
+ok 61 - real crew-drive discovery retains crew-child as an exported-symbol caller
+  ---
+  duration_ms: 7161.10725
+  type: 'test'
+  ...
+# Subtest: coupling refuses an unfenced caller and quiets when every caller is covered
+ok 62 - coupling refuses an unfenced caller and quiets when every caller is covered
+  ---
+  duration_ms: 3415.681584
+  type: 'test'
+  ...
+# Subtest: a coupled fixture refuses a fence that omits its caller
+ok 63 - a coupled fixture refuses a fence that omits its caller
+  ---
+  duration_ms: 1352.660166
+  type: 'test'
+  ...
+# Subtest: a valid acknowledgement does not clear another unfenced coupled source
+ok 64 - a valid acknowledgement does not clear another unfenced coupled source
+  ---
+  duration_ms: 5448.657792
+  type: 'test'
+  ...
+# Subtest: a coupled fixture renders an in-fence caller
+ok 65 - a coupled fixture renders an in-fence caller
+  ---
+  duration_ms: 1734.759417
+  type: 'test'
+  ...
+# Subtest: a coupled fixture can acknowledge a read-only caller verbatim
+ok 66 - a coupled fixture can acknowledge a read-only caller verbatim
+  ---
+  duration_ms: 1971.778042
+  type: 'test'
+  ...
+# Subtest: stale and malformed coupling acknowledgements refuse by input reason
+ok 67 - stale and malformed coupling acknowledgements refuse by input reason
+  ---
+  duration_ms: 4451.025458
+  type: 'test'
+  ...
+# Subtest: no fence reports coupling without enforcing it
+ok 68 - no fence reports coupling without enforcing it
+  ---
+  duration_ms: 1805.946209
+  type: 'test'
+  ...
+# Subtest: broad exported keys never become coupled sources
+ok 69 - broad exported keys never become coupled sources
+  ---
+  duration_ms: 999.841083
+  type: 'test'
+  ...
+# Subtest: rendering absent coupling discovery states that it was not checked
+ok 70 - rendering absent coupling discovery states that it was not checked
+  ---
+  duration_ms: 150.476833
+  type: 'test'
+  ...
+# Subtest: stale acknowledgements refuse before unfenced coupled sources
+ok 71 - stale acknowledgements refuse before unfenced coupled sources
+  ---
+  duration_ms: 795.345584
+  type: 'test'
+  ...
+1..71
+# tests 71
+# suites 0
+# pass 71
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 44661.030583

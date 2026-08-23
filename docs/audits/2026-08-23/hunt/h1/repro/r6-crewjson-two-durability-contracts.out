@@ -1,0 +1,21 @@
+crew.json size: 1191 bytes
+
+plain writeFileSync (headless.mjs:178, headless-rpc.mjs:182)
+  reads=66522 writes=55259 TORN READS=2413 (of which zero-byte: 2413)
+  first torn read: Unexpected end of JSON input | bytes read: 0 | head: ""
+
+tmp + renameSync (saveCrew, seat-io.mjs:914-915)
+  reads=154425 writes=18483 TORN READS=0 (of which zero-byte: 0)
+
+after the driver's reseat  : reviewer.model=claude-opus-5 reseated={"role":"reviewer","from":"claude-sonnet-5","to":"claude-opus-5"}
+after the seat's persist   : reviewer.model=claude-sonnet-5 reseated=null builder.session_id="sess-abc"
+
+EXPECTED: one durability contract for one file — every writer publishes atomically, and a
+          read-modify-write of a shared file re-reads under a lock instead of overwriting.
+OBSERVED: the plain writer produced 2413 unparseable reads in 66522 attempts;
+          the atomic writer produced 0. Every reader of crew.json (loadCrew,
+          crew/crew.mjs:315) turns one of those into a throw, and teardownCmd is one of them.
+          Part 2: the driver's reseat survived on disk for one write and was then erased
+          by a seat that had never read it — with reseat's own save error swallowed anyway
+          (crew/seat-io.mjs:2084).
+R6 REPRODUCED — torn reads from the non-atomic writers, and a silently lost reseat

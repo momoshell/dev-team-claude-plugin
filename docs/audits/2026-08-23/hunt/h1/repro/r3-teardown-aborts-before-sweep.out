@@ -1,0 +1,20 @@
+mode=broken  cmux stub=exits 1 (unhealthy substrate)
+seat root pid=1431 pgid=1431 alive=true
+teardownCore threw : "tree failed: cmux: connection refused"
+journal events     : []
+state dir archived : NO — /var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h1-r3-broken-i4N067/crew-state still in place
+seat root alive    : true
+
+EXPECTED: a pane substrate that cannot be reached is a teardown DIAGNOSTIC — the seat
+          processes are still reclaimed and the dir is still archived.
+OBSERVED: teardownCore threw at crew/crew.mjs:2059; no settle ran; root alive=true; archived=false.
+R3 REPRODUCED — live seat process + unarchived state dir
+mode=healthy  cmux stub=exits 0 (healthy)
+seat root pid=1472 pgid=1472 alive=true
+teardownCore threw : no
+journal events     : ["seat-teardown","seat-teardown-sweep","seat-root-settle","seat-root-settle-sweep","descendant-reclaim","descendant-reclaim-sweep"]
+state dir archived : crew-state.archive-2026-08-23T10-23-19-001Z
+seat root alive    : false
+
+CONTROL: identical inputs, healthy cmux stub.
+OBSERVED: root alive=false; archived=true — the sweep is exactly what the throw skipped.

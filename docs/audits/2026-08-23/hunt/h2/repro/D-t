@@ -1,0 +1,4 @@
+#!/bin/sh
+# bounded runner: ./t <seconds> <cmd...>   (stands in for GNU `timeout`)
+n=$1; shift
+exec perl -e 'my $n=shift; $SIG{ALRM}=sub{ print STDERR "\n[TIMEOUT after ${n}s]\n"; kill 9, -$$; exit 124 }; alarm $n; setpgrp(0,0); exec @ARGV or die $!;' "$n" "$@"

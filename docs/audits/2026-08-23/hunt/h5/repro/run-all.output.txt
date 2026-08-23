@@ -1,0 +1,237 @@
+scratch tree : /private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws
+server under test: /private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws/repo/visualizer/server/server.mjs
+
+========================================================================
+D1 — a request for the path "//" kills the server (server.mjs:178, outside the try)
+========================================================================
+  GET /        -> survived       client saw: HTTP/1.1 200 OK
+  GET //       -> DIED exit 1    client saw: (nothing at all)
+  GET ///      -> DIED exit 1    client saw: (nothing at all)
+  GET //a      -> survived       client saw: HTTP/1.1 200 OK
+  GET //?x=1   -> DIED exit 1    client saw: (nothing at all)
+  GET /a//b    -> survived       client saw: HTTP/1.1 200 OK
+
+  through an ordinary client: curl http://127.0.0.1:55739//  ->  curl: Command failed: curl -s -o /dev/null -w %{http_code} http://127.0.0.1:55739//
+  server: DIED exit 1
+  port after the crash: free
+  stderr:
+    node:internal/url:840
+          href = bindingUrl.parse(input, base, true);
+                            ^
+    
+    TypeError: Invalid URL
+        at new URL (node:internal/url:840:25)
+        at Server.<anonymous> (file:///private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws/repo/visualizer/server/server.mjs:178:17)
+        at Server.emit (node:events:509:20)
+
+========================================================================
+D2 — a malformed Host header kills the server — same line, same cause
+========================================================================
+  Host: "127.0.0.1:1"    -> survived       client saw: HTTP/1.1 200 OK
+  Host: "]bad["          -> DIED exit 1    client saw: (nothing at all)
+  Host: "a:b:c"          -> DIED exit 1    client saw: (nothing at all)
+  Host: "%"              -> DIED exit 1    client saw: (nothing at all)
+  Host: "ho st"          -> DIED exit 1    client saw: (nothing at all)
+  Host: "[::1"           -> DIED exit 1    client saw: (nothing at all)
+  Host: "@"              -> DIED exit 1    client saw: (nothing at all)
+  Host: "x:99999999"     -> DIED exit 1    client saw: (nothing at all)
+  Host: "a b"            -> DIED exit 1    client saw: (nothing at all)
+
+  an in-flight client during the crash:
+    DIED exit 1
+    the innocent keep-alive client was dropped
+    a later request: ECONNREFUSED
+
+========================================================================
+D3 — invoking the CLI through a symlinked path is a silent no-op (server.mjs:419)
+========================================================================
+  A real absolute path  + valid flags -> RUNNING (a server started)
+     stdout: {"listening":true,"port":55766,"ledger_db":"/private/var/folders/1v/y5spv6js39x59187x47msf
+     stderr: (empty)
+  B symlinked DIRECTORY + valid flags -> exit 0
+     stdout: (empty)
+     stderr: (empty)
+  C symlinked FILE      + valid flags -> exit 0
+     stdout: (empty)
+     stderr: (empty)
+  D real absolute path  + BAD flag    -> exit 2
+     stdout: (empty)
+     stderr: viz-serve: unknown flag --untill — it accepts --port, --host, --ledger-db, --triage-db, --crew-root, --checkou
+  E symlinked DIRECTORY + BAD flag    -> exit 0
+     stdout: (empty)
+     stderr: (empty)
+  F symlinked FILE      + BAD flag    -> exit 0
+     stdout: (empty)
+     stderr: (empty)
+  G symlinked CWD, RELATIVE argv[1]   -> exit 2
+     stdout: (empty)
+     stderr: viz-serve: unknown flag --untill — it accepts --port, --host, --ledger-db, --triage-db, --crew-root, --checkou
+  H real CWD,      RELATIVE argv[1]   -> exit 2
+     stdout: (empty)
+     stderr: viz-serve: unknown flag --untill — it accepts --port, --host, --ledger-db, --triage-db, --crew-root, --checkou
+
+  why: server.mjs:419 compares resolve(argv[1]) with resolve(fileURLToPath(import.meta.url)).
+    argv[1]                : /private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws/repo-link/visualizer/server/server.mjs
+    import.meta.url (realpathed by the ESM loader): /private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws/repo/visualizer/server/server.mjs
+  G vs H is the answer to "does a symlinked CWD change behaviour": NO — process.cwd()
+  is already the realpath, so both sides agree. Only a symlink INSIDE argv[1] breaks it.
+  On macOS /tmp is a symlink to /private/tmp, so a checkout under /tmp reproduces D3 with
+  no hand-made link at all.
+
+========================================================================
+D4 — the window routes validate with Date.parse but query with a STRING compare
+========================================================================
+  since="2020-01-01T00:00:00.000Z"         run-set: HTTP 200 runs=2 absent=null  |  cell-health: cells=7 recorded=1
+  since="Jan 1 2020"                       run-set: HTTP 200 runs=0 absent=null  |  cell-health: cells=6 recorded=0
+  since="Wed, 01 Jan 2020 00:00:00 GMT"    run-set: HTTP 200 runs=0 absent=null  |  cell-health: cells=6 recorded=0
+
+  All three name the SAME instant. The ISO one answers the data; the two
+  Date.parse-valid non-ISO ones answer a MEASURED ZERO (absent: null) because
+  'J'/'W' sort above '2' in the SQL string comparison at ledger-feed.mjs:148/187/314.
+
+  and /api/sessions does not validate at all:
+    /api/sessions (none)                                                        HTTP 200 runs=2
+    /api/sessions?since=-1                                                      HTTP 200 runs=2
+    /api/sessions?since=1e309                                                   HTTP 200 runs=2
+    /api/sessions?since=zzz                                                     HTTP 200 runs=0
+    /api/sessions?since=2030-01-01T00:00:00.000Z&until=2020-01-01T00:00:00.000Z HTTP 200 runs=0
+    the same since=1e309 on a sibling route:
+    /api/cell-health?since=1e309                                                 HTTP 400 "since and until must be ISO timestamps"
+
+========================================================================
+D5 — no route refuses an unknown query parameter — the --untill typo class
+========================================================================
+  intended /api/cell-health?until=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until="2026-08-23T09:49:05.191Z"
+  typo     /api/cell-health?untill=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until=undefined   <-- the bound was silently dropped
+  intended /api/run-set?until=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until="2026-08-23T09:49:05.191Z"
+  typo     /api/run-set?untill=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until=undefined   <-- the bound was silently dropped
+  intended /api/intake?until=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until="2026-08-23T09:49:05.191Z"
+  typo     /api/intake?untill=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until=undefined   <-- the bound was silently dropped
+  intended /api/seat-teardowns?until=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until="2026-08-23T09:49:05.191Z"
+  typo     /api/seat-teardowns?untill=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until=undefined   <-- the bound was silently dropped
+  intended /api/cell-attribution?until=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until="2026-08-23T09:49:05.191Z"
+  typo     /api/cell-attribution?untill=2026-08-23T09:49:05.191Z
+     -> HTTP 200 window.until=undefined   <-- the bound was silently dropped
+
+  /api/events?limit=1  -> 1 events
+  /api/events?limitt=1 -> 27 events   <-- the cap was silently dropped
+
+========================================================================
+D6 — /api/events cannot tell "no events" from "the ledger cannot be opened"
+========================================================================
+  healthy ledger, a run with no events after id 999999:
+    {"schema":1,"events":[],"cursor":999999}
+    control /api/sessions degraded: false
+  UNOPENABLE ledger, the identical request:
+    {"schema":1,"events":[],"cursor":999999}
+    control /api/sessions degraded: true
+    control /api/cell-health absent: "unable to open database file"
+  ^ the two /api/events bodies are byte-identical. ledger-feed.mjs:102 returns
+    { events: [], cursor: after } with no degraded and no absent.
+
+========================================================================
+D7 — state-writing routes take a CORS simple request — no Origin, no content-type check
+========================================================================
+  GET /api/intake/brake -> clear
+  POST with content-type: text/plain and Origin: https://evil.example
+    -> HTTP 200 ok=true state=engaged recorded=true
+  stop switch on disk: ENGAGED
+     {"actor":"evil.example","at":"2026-08-23T10:19:05.396Z"}
+  POST /api/triage from the same origin -> 200 {"schema":1,"adw_id":"csrf","reviewed_at":"2026-08-23T10:19:05.401Z"}
+  (a no-cors POST never needs to READ the reply — the write has already happened)
+
+========================================================================
+D8 — SIGTERM never returns while one request is in flight
+========================================================================
+  1. no connections                            exit 0/null after 2ms              port: free
+  2. one IDLE keep-alive socket                exit 0/null after 3ms              port: free
+  3. socket open, no bytes sent                exit 0/null after 3ms              port: free
+  4. IN-FLIGHT request (dribbled POST body)    STILL RUNNING after 5000ms         port: free
+
+  the port frees but the PROCESS lives on holding the ledger + triage handles,
+  so a restart rebinds while an orphan still holds the sqlite files.
+  a second SIGTERM does kill it (process.once removed the listener, restoring
+  the default disposition) — but then nothing ever calls feed.close().
+  after 1st SIGTERM: alive
+  after 2nd SIGTERM: exit null/SIGTERM
+
+========================================================================
+D9 — /api/triage 500s on a JSON null body; /api/events 500s on a big limit
+========================================================================
+  triage null   -> 500 {"schema":1,"error":"Cannot read properties of null (reading 'adw_id')"}
+  triage []     -> 400 {"schema":1,"error":"adw_id and reviewed are required"}
+  triage 5      -> 400 {"schema":1,"error":"adw_id and reviewed are required"}
+  brake  null   -> 400 {"schema":1,"error":"engaged must be a boolean and actor must be a non-empty string of at most 120 characters"
+  propose null  -> 400 {"schema":1,"error":"tier and role are required"}
+  stage  null   -> 400 {"schema":1,"error":"moves must be an array"}
+  compose null  -> 400 {"schema":1,"error":"moves must be an array"}
+
+  /api/events?limit=99999999999999999999999 -> 500 {"schema":1,"error":"datatype mismatch"}
+  /api/events?after=99999999999999999999999 -> 200 {"schema":1,"events":[],"cursor":1e+23}
+  replaying the cursor it just handed back (after=1e+23) -> 400 {"schema":1,"error":"after, limit and phase_id must be integers"}
+
+========================================================================
+D10 — a symlink inside web/dist escapes the DIST fence (resolve, not realpath)
+========================================================================
+  200  /                                  "<!doctype html><title>real index</title>"
+  200  /assets/app.js                     "console.log(\"app\")"
+  200  /nope.js                           "<!doctype html><title>real index</title>"
+  200  /../../../etc/passwd               "<!doctype html><title>real index</title>"
+  404  /%2e%2e%2f%2e%2e%2fetc%2fpasswd    "Not found"
+  404  /..%2f..%2fetc%2fpasswd            "Not found"
+  200  /leak.txt                          "TOP SECRET"
+  200  /out/x.txt                         "OUTSIDE FILE"
+  ^ lexical traversal is correctly refused; a SYMLINK inside dist is not.
+    server.mjs:159 compares resolve()d strings, which never follow a symlink.
+
+========================================================================
+D11 — /api/returns says "no task directory" about a directory that exists
+========================================================================
+  adw_id="(omitted)"                            HTTP 200 error="no task directory for this run" dir=null envelopes=0
+  adw_id="hunt-done-0000-0000-000000000001"     HTTP 200 error=undefined dir=present envelopes=1
+  adw_id="wrong-id"                             HTTP 200 error="no task directory for this run" dir=null envelopes=0
+  the directory really is there: /private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws/state/crew/repo/finished
+  returns-source.mjs:36-45 — when a candidate HAS a run.json whose adw_id does not
+  match, hasRun is true, so the "unverified fallback" branch is skipped and the
+  answer becomes a claim of absence that is simply false.
+
+========================================================================
+D12 — HEAD is 405 on every /api route; no 405 carries an Allow header
+========================================================================
+  /api/health      HEAD=405 Method Not Allowed | OPTIONS=405 Method Not Allowed | DELETE=405 Method Not Allowed
+  /api/sessions    HEAD=405 Method Not Allowed | OPTIONS=405 Method Not Allowed | DELETE=405 Method Not Allowed
+  /api/triage      HEAD=405 Method Not Allowed | OPTIONS=405 Method Not Allowed | DELETE=405 Method Not Allowed
+  /                HEAD=200 OK | OPTIONS=405 Method Not Allowed | DELETE=405 Method Not Allowed
+  RFC 9110: HEAD must be supported wherever GET is, and a 405 must send Allow.
+
+========================================================================
+DN — attacks the code SURVIVED (do not re-run these)
+========================================================================
+  20 connections reset mid-response      -> 200
+  10 POSTs aborted mid-body              -> 200
+  360 concurrent panel reads (2 clients) -> statuses: 200
+  60 concurrent triage WRITES            -> statuses: 200
+    8000-byte header             -> HTTP/1.1 200 OK
+   20000-byte header             -> HTTP/1.1 431 Request Header Fields Too Large
+  GET /api/sessions  with a body        -> HTTP/1.1 200 OK
+  GET /api/health    with a body        -> HTTP/1.1 200 OK
+  GET /              with a body        -> HTTP/1.1 200 OK
+  "' OR 1=1 --" as status/mode/type      -> 200 (parameterised; 0 rows)
+  --port -1 / 1e309 / 99999 / 0x50       -> exit 2 refusals (parsePort, #474)
+  DEVTEAM_VIZ_PORT=-1 / 99999            -> exit 2 refusals (portFromEnv, #474)
+  unknown/short/positional CLI args      -> exit 2 refusals (parseCliArgs, #443)
+  panelReadLoop (panels.js:43-50)        -> a plain setInterval; a rejected read sets
+                                            `error` and leaves read_at alone, so a bounce
+                                            shows the failure AND goes visibly stale, and
+                                            the next tick recovers. Truthful.
+
+scratch tree left at /private/var/folders/1v/y5spv6js39x59187x47msfjr0000gn/T/h5-http-bebfws (delete it when you are done)

@@ -1,0 +1,18 @@
+measurement: our own child, running   : stat=Ss kill(-pgid,0)=ok (reads ALIVE)
+measurement: our own child, killed    : stat=Z kill(-pgid,0)=EPERM  <-- EPERM, not ESRCH
+
+ARM-A own-child: root pid=1214 ppid=1158 (ours=1158) pgid=1214
+   summary      : {"records":1,"settled":0,"already_dead":0,"unidentified":0,"failed":0,"unproven":1}
+   journal row  : {"root_settled":"unproven","root_liveness":"unknown","reason":"probe-unknown"}
+   ps after     : stat=Z  (Z or gone == the sweep DID kill it)
+
+ARM-B reparented: root pid=1348 ppid=1 (ours=1158) pgid=1348
+   summary      : {"records":1,"settled":1,"already_dead":0,"unidentified":0,"failed":0,"unproven":0}
+   journal row  : {"root_settled":"proven","root_liveness":"dead","reason":"probe-dead"}
+   ps after     : stat=(gone)  (Z or gone == the sweep DID kill it)
+
+EXPECTED: both arms are the same kill of the same program — both record 'proven'.
+OBSERVED: ARM-A (the production shape, the supervisor's own child) recorded "unproven"
+          with the process dead=true; ARM-B (reparented, reaped by launchd) recorded
+          "proven" with dead=true. The only difference is who reaps the corpse.
+R7 REPRODUCED — a proven kill recorded as unproven for every seat the supervisor spawned

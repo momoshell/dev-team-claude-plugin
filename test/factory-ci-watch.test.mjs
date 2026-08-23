@@ -191,6 +191,9 @@ test('every subprocess in a watch uses the injected seam', () => {
     const shape = ciShape({ checkout: world.host, profilePath })
     assert.equal(shape.ok, true)
     assert.ok(calls.every((argv) => argv[0] === 'git' || argv[0] === shape.lane[0]))
+    const watchSource = readFileSync(join(ROOT, 'scripts/factory/ci-watch.mjs'), 'utf8')
+    const direct = watchSource.split('\n').filter((line) => /\bcpSpawnSync\s*\(/.test(line))
+    assert.deepEqual(direct, [])
   })
 })
 

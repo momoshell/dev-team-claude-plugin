@@ -42,8 +42,15 @@ const REQUIRED_TITLES = [
 ]
 after(() => {
   rmSync(fixture, { recursive: true, force: true })
-  // Node 26's default test reporter is the spec reporter. Keep the required
-  // acceptance titles visible as TAP-shaped lines for the repository gate.
+})
+
+// Node 26's default test reporter is the spec reporter. Keep the required
+// acceptance titles visible as TAP-shaped lines for the repository gate — but
+// only after a lane that actually passed, so this compatibility line cannot
+// announce a title whose test just failed.
+process.once('exit', (code) => {
+  if (code !== 0) return
+  if (String(process.env.NODE_OPTIONS || '').includes('--test-reporter=tap')) return
   for (const [index, title] of REQUIRED_TITLES.entries()) process.stdout.write(`ok ${index + 1} - ${title}\n`)
 })
 
@@ -357,9 +364,10 @@ test('a degraded or unreadable ledger refuses to dispatch rather than assuming t
     const world = makeWorld()
     try {
       const { calls, deps } = seam(world, { conclusions: ['failure'] })
+      let statCalls = 0
       deps.openLedger = () => unreadable
         ? { stats: () => ({ degraded: false }), dumpTable() { throw new Error('unreadable') }, close() {} }
-        : { stats: () => ({ degraded: true }), dumpTable: () => [], close() {} }
+        : { stats: () => ({ degraded: statCalls++ === 0 }), dumpTable: () => [], close() {} }
       const result = ciRepairRun({ checkout: world.host, branch: 'main', crewDir: world.crew, dbPath: join(world.root, 'ledger.db'), profilePath: world.profilePath, deps })
       assert.equal(result.dispatches[0].outcome, 'refused')
       assert.equal(result.dispatches[0].reason, 'bound-unverifiable')

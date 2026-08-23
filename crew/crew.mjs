@@ -401,7 +401,9 @@ export function resolveLaneFence(args = {}, deps = {}) {
     throw new Error('--fences needs a path to the fence register JSON (--fences and --lane are given together or not at all)')
   }
   const lane = rawLane.trim()
-  return { lane, fence: forLane({ fences: gather({ fencesPath: rawFences }), lane }) }
+  const fenceCheckout = typeof args.checkout === 'string' && args.checkout.trim()
+    ? args.checkout : process.cwd()
+  return { lane, fence: forLane({ fences: gather({ fencesPath: rawFences, checkout: fenceCheckout }), lane }) }
 }
 
 // The ROUND VALIDATION LANE — a different thing from the fence-register lane
@@ -1999,6 +2001,30 @@ function archivedReturn(paths) {
   return null
 }
 
+// The wait ceiling, closed-set: the same posture as crew/limits.mjs:29-42 and
+// crew/drive.mjs:71-84. `Number()` was the defect — Number('abc') is NaN,
+// Date.now() < NaN is false, and waitCmd's loop body never ran once, so a
+// SETTLED done run was reported as still-running with exit 1 (repro
+// docs/audits/2026-08-23/hunt/h2/repro/A-04-timeout-wrong-answer.mjs). 0x10
+// silently meant 16 s and Infinity meant unbounded.
+export const TIMEOUT_S_REFUSAL = 'invalid-timeout-s'
+export const TIMEOUT_S_DEFAULT = 3600
+export const TIMEOUT_S_MIN = 1
+export const TIMEOUT_S_MAX = 21600   // the WAIT_SECONDS_MAX sibling (crew/drive.mjs:60)
+export function resolveTimeoutS(raw) {
+  if (raw === undefined || raw === null) return TIMEOUT_S_DEFAULT
+  const bad = () => Object.assign(
+    new Error(`--timeout-s must be a whole number of seconds between ${TIMEOUT_S_MIN} and ${TIMEOUT_S_MAX}, got ${JSON.stringify(raw)} [${TIMEOUT_S_REFUSAL}]`),
+    { reason: TIMEOUT_S_REFUSAL },
+  )
+  if (typeof raw !== 'number' && typeof raw !== 'string') throw bad()
+  const text = typeof raw === 'number' ? String(raw) : raw.trim()
+  if (!/^[0-9]+$/.test(text)) throw bad()
+  const value = Number(text)
+  if (!Number.isInteger(value) || value < TIMEOUT_S_MIN || value > TIMEOUT_S_MAX) throw bad()
+  return value
+}
+
 function waitCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -2006,7 +2032,7 @@ function waitCmd(args) {
   // No loadCrew here: the live dir may vanish mid-wait when run auto-tears
   // down on done — poll the live envelope path AND the archive fallback.
   const livePath = join(paths.returnsDir, 'task.json')
-  const timeoutMs = Number(args['timeout-s'] || 3600) * 1000
+  const timeoutMs = resolveTimeoutS(args['timeout-s']) * 1000
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     for (const p of [livePath, archivedReturn(paths)]) {
@@ -2124,7 +2150,7 @@ export class UsageError extends Error { constructor(message) { super(message); t
 
 // A --flag followed by another --flag (or by nothing) is a BOOLEAN true —
 // otherwise `run --brief-file x --keep` silently loses --keep.
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const out = { _: [] }
   for (let i = 0; i < argv.length; i += 1) {
     const t = argv[i]
@@ -2143,6 +2169,39 @@ export const KNOWN_FLAGS = Object.freeze({
   status: Object.freeze(['task', 'checkout']),
   teardown: Object.freeze(['task', 'checkout']),
 })
+// Every flag on every verb declares whether it CARRIES A VALUE or MEANS TRUE.
+// A flag with no entry here is a flag with no value contract, and assertUsage
+// refuses it rather than letting parseArgs' boolean fallback
+// (crew/crew.mjs:2126) decide: `--suite` at the end of an argv line became
+// boolean true, Node coerced it into the shell argv, and `/bin/sh -c true`
+// exited 0 with empty output — a GREEN full-suite stage that ran nothing
+// (#538). Same posture as resolveValidationLane (:418): validate, refuse from
+// a closed set, name the flag.
+export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
+export const FLAG_VALUE_CONTRACT = Object.freeze({
+  task: 'value', checkout: 'value', roles: 'value', tier: 'value',
+  fences: 'value', lane: 'value', 'brief-file': 'value', variant: 'value',
+  'files-in-scope': 'value', 'validation-lane': 'value',
+  'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
+  ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),
+  suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value',
+  'memory-dir': 'value', 'memory-backend': 'value', 'memory-budget-bytes': 'value',
+  // --headless and --headless-rpc take a comma-separated ROLE LIST; bare, they
+  // degrade to an empty list (:469-473) — a silent no-op, not a boolean.
+  headless: 'value', 'headless-rpc': 'value',
+  // --headless-all is a switch: seatTransport (:485-487) already refuses any
+  // value but true, because it names no roles — it asks every seat to pick a
+  // headless transport.
+  'headless-all': 'boolean',
+  // --keep is a switch: runCmd reads only its truthiness (:1886) to skip the
+  // auto-teardown a done run would otherwise perform.
+  keep: 'boolean',
+})
+// The boolean flags, named and exported rather than inlined as exceptions, so
+// the argv matrix in crew/crew.test.mjs can be exhaustive by construction.
+const BOOLEAN_FLAG_NAMES = Object.freeze(['headless-all', 'keep'])
+export const BOOLEAN_FLAGS = Object.freeze(Object.keys(FLAG_VALUE_CONTRACT)
+  .filter((flag) => BOOLEAN_FLAG_NAMES.includes(flag) && FLAG_VALUE_CONTRACT[flag] === 'boolean').sort())
 export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 'allow-shortfall-'])
 export const REQUIRED_FLAGS = Object.freeze({
   boot: Object.freeze(['task']),
@@ -2153,6 +2212,10 @@ export const REQUIRED_FLAGS = Object.freeze({
   teardown: Object.freeze(['task']),
 })
 export const BOOT_ONLY_FLAGS = Object.freeze(['fences', 'lane'])
+
+function usageRefusal(message) {
+  return Object.assign(new UsageError(message), { reason: FLAG_VALUE_REFUSAL })
+}
 
 export function assertUsage(verb, args) {
   const supplied = args && typeof args === 'object' ? args : {}
@@ -2173,6 +2236,22 @@ export function assertUsage(verb, args) {
     const names = unknown.map((flag) => `--${flag}`).join(', ')
     const knownNames = known.map((flag) => `--${flag}`).join(', ')
     throw new UsageError(`crew.mjs ${verb} does not read ${names}; ${verb} reads: ${knownNames}`)
+  }
+  for (const flag of keys) {
+    const roleOverride = verb === 'boot'
+      && ROLE_FLAG_PREFIXES.some((prefix) => flag.startsWith(prefix) && flag.length > prefix.length)
+    const contract = FLAG_VALUE_CONTRACT[flag] || (roleOverride ? 'value' : null)
+    const value = supplied[flag]
+    if (contract === null) {
+      throw usageRefusal(`crew.mjs ${verb} declares no value contract for --${flag}: add it to FLAG_VALUE_CONTRACT`)
+    }
+    if (contract === 'boolean') {
+      if (value === true || value === 'true') continue
+      throw usageRefusal(`crew.mjs ${verb} --${flag} takes no value, got ${JSON.stringify(value)} [${FLAG_VALUE_REFUSAL}]`)
+    }
+    if (typeof value !== 'string' || value.trim() === '') {
+      throw usageRefusal(`crew.mjs ${verb} --${flag} needs a value, got ${JSON.stringify(value)} [${FLAG_VALUE_REFUSAL}]`)
+    }
   }
   for (const flag of REQUIRED_FLAGS[verb] || []) {
     const value = supplied[flag]

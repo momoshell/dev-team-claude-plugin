@@ -575,6 +575,12 @@ test('scope validation allows slashed directories, files and absent paths', () =
   }))
   assert.throws(() => validateScopeEntries({ checkout: root, files: 'config' }), (error) => error.reason === 'wrong-type')
   assert.throws(() => validateScopeEntries({ checkout: root, files: ['   '] }), (error) => error.reason === 'wrong-type')
+  for (const entry of ['lib/widget.mjs ', 'lib/*.mjs', '/abs/path.mjs', './', '.', 'lib/../lib/widget.mjs']) {
+    assert.throws(() => validateScopeEntries({ checkout: root, files: [entry] }), (error) => error.reason === 'scope-entry-shape', entry)
+  }
+  assert.throws(() => validateScopeEntries({ checkout: root, files: ['Lib/widget.mjs'] }), (error) => error.reason === 'scope-entry-case')
+  assert.ok(REFUSAL_REASONS.includes('scope-entry-shape'))
+  assert.ok(REFUSAL_REASONS.includes('scope-entry-case'))
 })
 
 test('the lane is never inferred from the output filename', () => {
@@ -607,10 +613,25 @@ test('scope validation refuses unslashed directories without changing the render
   assert.equal(refused.status, 2)
   assert.match(refused.stderr, /scope-directory-unslashed/)
 
+  // A sibling surface is validated too; this is the register repro from
+  // docs/audits/2026-08-23/hunt/h2/repro/C-a3-fence-register.mjs.
   writeFileSync(fencesPath, `${JSON.stringify({
     lanes: [
       { lane: 'own', files: ['lib/widget.mjs', 'config/'] },
-      { lane: 'control', files: ['lib/widget.mjs'] },
+      { lane: 'control', files: ['lib/widget.mjs', 'config'] }
+    ],
+  }, null, 2)}\n`)
+  const siblingRefused = run(root, [
+    '--request', requestPath, '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'sibling-refused.md'),
+  ])
+  assert.equal(siblingRefused.status, 2)
+  assert.match(siblingRefused.stderr, /scope-directory-unslashed/)
+
+  writeFileSync(fencesPath, `${JSON.stringify({
+    lanes: [
+      { lane: 'own', files: ['lib/widget.mjs', 'config/'] },
+      { lane: 'control', files: ['lib/widget.mjs', 'config/'] }
     ],
   }, null, 2)}\n`)
   const slashed = run(root, [
@@ -630,6 +651,28 @@ test('scope validation refuses unslashed directories without changing the render
     withoutSurface(readFileSync(join(root, 'slashed.md'), 'utf8')),
     withoutSurface(readFileSync(join(root, 'control.md'), 'utf8')),
   )
+})
+
+test('every fence sibling spelling that the matcher cannot read is refused', () => {
+  const root = fixture('fence-register-spellings')
+  const spellings = [
+    ['unslashed-dir', 'config'],
+    ['dot-slash', './'],
+    ['dot', '.'],
+    ['absolute', join(root, 'lib/widget.mjs')],
+    ['glob', 'lib/*.mjs'],
+    ['traversal', 'lib/../lib/widget.mjs'],
+    ['trailing-space', 'lib/widget.mjs '],
+    ['case-variant', 'Lib/widget.mjs'],
+  ]
+  // Acceptance table mirrored from docs/audits/2026-08-23/hunt/h2/repro/C-a3-fence-register.mjs.
+  for (const [label, spelling] of spellings) {
+    const path = put(root, `${label}.json`, `${JSON.stringify({ lanes: [
+      { lane: 'own', files: ['lib/widget.mjs'] },
+      { lane: 'sibling', files: [spelling] },
+    ] }, null, 2)}\n`)
+    assert.throws(() => gatherFences({ fencesPath: path, checkout: root }), (error) => REFUSAL_REASONS.includes(error.reason), label)
+  }
 })
 
 test('standing blocks and unfilled slots render verbatim', () => {
@@ -1169,8 +1212,10 @@ test('compiler and emitter proposal declarations stay in agreement', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 17)
+  assert.equal(REFUSAL_REASONS.length, 19)
   assert.ok(REFUSAL_REASONS.includes('scope-directory-unslashed'))
+  assert.ok(REFUSAL_REASONS.includes('scope-entry-shape'))
+  assert.ok(REFUSAL_REASONS.includes('scope-entry-case'))
   assert.ok(REFUSAL_REASONS.includes('coupled-source-unfenced'))
   assert.ok(REFUSAL_REASONS.includes('stale-read-ack'))
   assert.ok(REFUSAL_REASONS.includes('profile-unreadable'))

@@ -38,7 +38,7 @@
 // filename.
 
 import {
-  existsSync, readFileSync, realpathSync, statSync, writeFileSync,
+  existsSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -110,6 +110,8 @@ const STALE_READ_ACK = 'stale-read-ack'
 const PROFILE_UNREADABLE = 'profile-unreadable'
 const PROFILE_UNRATIFIED = 'profile-unratified'
 const SCOPE_DIRECTORY_UNSLASHED = 'scope-directory-unslashed'
+const SCOPE_ENTRY_SHAPE = 'scope-entry-shape'
+const SCOPE_ENTRY_CASE = 'scope-entry-case'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -129,6 +131,8 @@ export const REFUSAL_REASONS = Object.freeze([
   PROFILE_UNREADABLE,
   PROFILE_UNRATIFIED,
   SCOPE_DIRECTORY_UNSLASHED,
+  SCOPE_ENTRY_SHAPE,
+  SCOPE_ENTRY_CASE,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -802,7 +806,7 @@ export function gatherBaseline({ checkout, lane = null, laneBasis = null } = {})
   return { lane: selectedLane, pass, fail, status: 'green', reason: null, laneBasis: basis }
 }
 
-export function gatherFences({ fencesPath } = {}) {
+export function gatherFences({ fencesPath, checkout } = {}) {
   if (fencesPath == null) return null
   let data
   try {
@@ -852,6 +856,17 @@ export function gatherFences({ fencesPath } = {}) {
         return { file, why: read.why }
       }).sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
     }
+    // #537: the register's sibling surfaces BECOME the runtime deny list
+    // (laneFenceFor -> crew.mjs boot -> lane_fence in crew.json), so an entry the
+    // matcher cannot read denies nothing at all. Validating here, not at the
+    // caller, is what makes compile and boot agree: both readers of this register
+    // go through this function and nothing else. `reads` entries are
+    // acknowledgements, never a deny surface, and are deliberately not validated.
+    validateScopeEntries({
+      checkout,
+      files: entry.files,
+      context: `fences.lanes[${index}] (lane "${entry.lane}")`,
+    })
     return { lane: entry.lane, files: [...new Set(entry.files)].sort(), reads }
   })
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
@@ -862,19 +877,59 @@ export function gatherFences({ fencesPath } = {}) {
 // driver compares it as an exact file path and every file under it falls out of
 // scope — #145 attempt 3 died there with a gate-green tree. The matching rule is
 // correct; the silence was the defect, so this refuses at compile time.
-export function validateScopeEntries({ checkout, files = [] } = {}) {
+// Check 3: the matcher compares STRINGS (crew/protected-paths.mjs:45-47), so
+// an entry whose on-disk spelling differs only in case matches nothing git
+// ever prints. Resolved segment by segment with readdirSync so the verdict is
+// identical on a case-insensitive (macOS) and a case-sensitive (Linux CI)
+// filesystem: realpathSync.native silently CORRECTS the spelling on one and
+// throws ENOENT on the other. A segment nothing matches at all is a file the
+// lane is about to create, and is not this check's business.
+function onDiskSpelling(root, normalised) {
+  const segments = normalised.replace(/\/+$/, '').split('/').filter(Boolean)
+  let dir = root
+  for (let i = 0; i < segments.length; i += 1) {
+    let names
+    try { names = readdirSync(dir) } catch { return null }
+    if (names.includes(segments[i])) { dir = resolve(dir, segments[i]); continue }
+    const lower = segments[i].toLowerCase()
+    const actual = names.find((name) => name.toLowerCase() === lower)
+    if (!actual) return null
+    return [...segments.slice(0, i), actual, ...segments.slice(i + 1)].join('/')
+  }
+  return null
+}
+
+export function validateScopeEntries({ checkout, files = [], context = '' } = {}) {
   if (!Array.isArray(files)) refuseUsage('files_in_scope must be an array', WRONG_TYPE)
   const root = gitRoot(checkout)
+  const label = context ? `${context}: ` : ''
   for (const entry of files) {
     if (typeof entry !== 'string' || !entry.trim()) {
-      refuseUsage(`scope entry is invalid: ${String(entry)}`, WRONG_TYPE)
+      refuseUsage(`${label}scope entry is invalid: ${String(entry)}`, WRONG_TYPE)
+    }
+    if (entry !== entry.trim()) {
+      refuseUsage(`${label}scope entry has leading or trailing whitespace: ${JSON.stringify(entry)}`, SCOPE_ENTRY_SHAPE)
     }
     const normalised = normaliseRepoPath(entry)
+    if (/[*?[\]{}]/.test(normalised)) {
+      refuseUsage(`${label}scope entry uses a glob pattern; list literal paths or a trailing-slash directory: ${entry}`, SCOPE_ENTRY_SHAPE)
+    }
+    if (normalised.startsWith('/')) {
+      refuseUsage(`${label}scope entry is an absolute path; paths must be repo-relative, as git status prints them: ${entry}`, SCOPE_ENTRY_SHAPE)
+    }
+    if (normalised.split('/').some((segment) => segment === '.' || segment === '..')) {
+      refuseUsage(`${label}scope entry must be a plain repo-relative path (no . or .. segments): ${entry}`, SCOPE_ENTRY_SHAPE)
+    }
+    const actual = onDiskSpelling(root, normalised)
+    if (actual !== null) {
+      refuseUsage(`${label}scope entry's on-disk spelling is ${actual}, not ${normalised} — the matcher compares strings: ${entry}`, SCOPE_ENTRY_CASE)
+    }
+    if (normalised === '.') continue
     if (normalised.endsWith('/')) continue
     let stat
     try { stat = statSync(resolve(root, normalised)) } catch { continue }
     if (!stat.isDirectory()) continue
-    refuseUsage(`scope entry resolves to a directory and can only match with a trailing slash: ${entry} (write "${normalised}/")`, SCOPE_DIRECTORY_UNSLASHED)
+    refuseUsage(`${label}scope entry resolves to a directory and can only match with a trailing slash: ${entry} (write "${normalised}/")`, SCOPE_DIRECTORY_UNSLASHED)
   }
   return files
 }
@@ -1528,7 +1583,7 @@ function compile(flags) {
     : testCommand.used
       ? testCommand.basis
       : `package.json scripts.test — ${testCommand.basis}`
-  const fences = gatherFences({ fencesPath: flags.fences })
+  const fences = gatherFences({ fencesPath: flags.fences, checkout })
   const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
   if (writeSurface.basis === 'fences') validateScopeEntries({ checkout, files: writeSurface.files })
   const coupling = crossCheckCoupling({ discovery, writeSurface })

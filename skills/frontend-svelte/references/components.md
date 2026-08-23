@@ -1,6 +1,6 @@
 # Component idioms
 
-These are measured conventions in `visualizer/web/src/` rather than general Svelte advice. The source evidence is the checkout described in `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md` §4 and the rune census. Retrieve any API fact from the `svelte` MCP as required by `references/routing.md`.
+These are measured conventions in `visualizer/web/src/` rather than general Svelte advice; reproduce the rune census with `grep` over that directory. Retrieve any API fact from the `svelte` MCP as required by `references/routing.md`.
 
 ## Props are one destructuring line
 
@@ -10,7 +10,7 @@ Declare props with one destructuring `$props()` line and put defaults there:
 - `let { rows = [], onopen = () => {} } = $props()` — `visualizer/web/src/lib/FleetTable.svelte:2`.
 - `let { run, phase = null, returns = {}, events = [] } = $props()` — `visualizer/web/src/lib/PhasePanel.svelte:3`.
 
-Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:5` uses `onselectphase`; `visualizer/web/src/App.svelte:124` passes `onback` to `RunDetail`. Defaults make the component's call shape visible at its boundary.
+Keep callbacks as props named `on<verb>` (`onopen`, `onback`, `onphase`, `onselectphase`) rather than adding an event-dispatching seam. `visualizer/web/src/lib/PhaseGantt.svelte:5` uses `onselectphase`; `visualizer/web/src/App.svelte:135` passes `onback` to `RunDetail`. Defaults make the component's call shape visible at its boundary.
 
 ## Two-way state is explicit
 

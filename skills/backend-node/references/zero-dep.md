@@ -45,8 +45,11 @@ Exhibit: `crew/pi/extensions/subagent.test.mjs:169`.
 
 The cost of skipping it is paid at process startup, when the backend loads.
 
-When a first-party edge is allowed, pin the target's own leaf property too.
-Exhibit: `crew/daemon.test.mjs:221`.
+When a first-party edge is allowed for a leaf exception, pin that target's own
+leaf property too; intentional non-leaf helpers such as `crew/headless-rpc.mjs`
+are outside this rule.
+Exhibit: `crew/daemon.test.mjs:246`, `crew/daemon.test.mjs:248`, and
+`crew/daemon.test.mjs:250`.
 
 See `import-firewall.md` for that second boundary.
 The source and its test are the maintenance surface for future dependency changes.

@@ -53,7 +53,6 @@ trailer — both are worse than filling them in.
              "commit_subject": "<one conventional-commit subject line for the WHOLE change>",
              "issues": [112, 114], // emits a Refs: trailer
              "validation_lane": "<the exact command the builder must run green>",
-             "consult_wanted": true|false,
              "consult_questions": ["..."],
              "gate_path": "<abs path INSIDE the task dir>",
              "carve_verdict": "proceed" | "carve",
@@ -79,9 +78,12 @@ workflow and asserts the Node floor against it. A `crew/daemon.mjs` admission
 or settle change pulls in `crew/daemon.test.mjs` AND `crew/factoryctl.test.mjs`
 — the latter settles a run by writing the well-known `returns/task.json`. An
 adapter change pulls in the matching `crew/adapter-*.test.mjs` files, listed
-literally (scope takes no globs). Twice — #193 and #199 — a scope fixed without
+literally (scope takes no globs). Twice — #222 and #232 — a scope fixed without
 that grep sent the run to `escalate:scope`: the builder needed a test file the
-plan had never looked for, and the gate was right to refuse it.
+plan had never looked for, and the gate was right to refuse it. The record is
+those two issues, not #193 and #199, which are unrelated (a daemon-batching epic
+and a per-crew-dir envelope issue); they are named here only because
+`crew/drive.test.mjs` still pins the old numbers.
 
 `gate_path` is required whenever you return a `gate_cmd`; it must be an absolute
 path inside the task dir. The driver measures gate bytes from that path and

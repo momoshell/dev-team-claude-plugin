@@ -1,10 +1,10 @@
 # Theming contract
 
-The contract below is the checkable boundary recorded in `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md` §2 and §8. It describes the code that exists; it does not turn an unmeasured convention into a test.
+The contract below is the checkable boundary recorded in `visualizer/web/src/lib/theme.css:2–32, 36–127` and the suite pins at `test/visualizer-shape.test.mjs:286–292`, `test/visualizer-panels.test.mjs:627,629`, `test/visualizer-panels.test.mjs:845–847`, and `test/visualizer-panels.test.mjs:660–665`. It describes the code that exists; it does not turn an unmeasured convention into a test.
 
 ## T1 — component names only Tier-2 aliases
 
-A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. A `var(--…)` census over the 21 components obeys T1 at **21/21**, with the measured component-local layout and indirection exceptions in `references/tokens.md`. Exhibit: `visualizer/web/src/lib/theme.css:2–32, 36–127` and the register §2.
+A component may name only Tier-2 aliases: `--bg`, `--panel`, `--line`, `--muted`, `--accent`, `--neutral`, the `--status-*` aliases, `--status-escalated`, the six `--role-*` aliases, and `--lane-0` through `--lane-7`. It must not name a raw `--ink-*`, `--paper-*`, `--spot-*`, role `-dark`/`-light` half, `--serious`, or `-raw` status token. A `var(--…)` census over the 21 components obeys T1 at **20/21**; `visualizer/web/src/App.svelte:201–202` is the exception, where `--serious` remains. Exhibit: `visualizer/web/src/lib/theme.css:2–32, 36–127` and the measured suite pins above.
 
 ## T2 — painted colour comes from a token
 

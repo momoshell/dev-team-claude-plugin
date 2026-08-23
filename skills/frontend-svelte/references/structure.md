@@ -1,6 +1,6 @@
 # Visualizer structure
 
-The app is a small Svelte shell over plain JavaScript shaping modules. These facts are measured on this checkout and recorded in `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md` §3–4.
+The app is a small Svelte shell over plain JavaScript shaping modules. These facts are measured on this checkout; the per-module `lib/*.js:1–N` exhibits are carried in the table below.
 
 ## Shell and ownership
 
@@ -14,11 +14,12 @@ There are 20 `.svelte` components under `visualizer/web/src/lib/`. The shell com
 
 ## Plain module split
 
-Keep data acquisition, route parsing, drains, shaping, layout, and trace interpretation in the seven existing plain modules:
+Keep data acquisition, route parsing, drains, shaping, envelope diffing, layout, and trace interpretation in the eight existing plain modules:
 
 | Module | Local responsibility | Exhibit |
 |---|---|---|
 | `api.js` | one `request` wrapper plus endpoint thunks for sessions, events, returns, roster, and panels | `visualizer/web/src/lib/api.js:1–26` |
+| `envelope-diff.js` | compare two envelopes field-by-field over `['status','summary','artifacts','details']` | `visualizer/web/src/lib/envelope-diff.js:1–45` |
 | `route.js` | parse and format hash views and subscribe to hash changes | `visualizer/web/src/lib/route.js:1–40` |
 | `drain.js` | page event streams by cursor and coalesce a final drain behind an in-flight periodic drain | `visualizer/web/src/lib/drain.js:1–49` |
 | `fleet.js` | derive status tones and shape run cells, absence marks, filters, and fleet metrics | `visualizer/web/src/lib/fleet.js:1–174` |

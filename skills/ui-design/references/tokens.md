@@ -1,6 +1,6 @@
 # Token vocabulary
 
-This reference records the measured vocabulary in `visualizer/web/src/lib/theme.css`; it does not invent a palette. The preserved evidence is `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md` §§0–2. A component-facing rule is useful only when it can be traced to those files and lines.
+This reference records the measured vocabulary in `visualizer/web/src/lib/theme.css`; it does not invent a palette. The canonical source is `visualizer/web/src/lib/theme.css`. A component-facing rule is useful only when it can be traced to that file and its lines.
 
 ## The census
 
@@ -88,4 +88,4 @@ Permit two component-local custom-property patterns, and do not confuse either w
 1. Layout locals belong to the element that consumes geometry: `--identity-column:15rem` and `--lane-gap:.6rem` at `visualizer/web/src/lib/PhaseGantt.svelte:59`, with the `calc()` that consumes them pinned by `test/visualizer-panels.test.mjs:845–847`.
 2. A token-indirection local may carry a runtime role or lane suffix: `RoleTag.svelte:4` sets `--role-color` from a role alias, `PhaseDots.svelte:5` sets `--lane-color`, and `PhaseGantt.svelte:48` supplies the lane indirection. The declaration still resolves to a Tier-2 alias; it does not license a literal colour.
 
-The canonical measured source for this table is `visualizer/web/src/lib/theme.css` and `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md`; values not present in either source do not belong in this reference.
+The canonical measured source for this table is `visualizer/web/src/lib/theme.css`; values not present in that source do not belong in this reference.

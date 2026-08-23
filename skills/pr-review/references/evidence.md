@@ -5,7 +5,7 @@
 > The reviewer's verdict and grade are the same measurement, and the register
 > has no post-merge defect, revert, or incident record to validate them.
 
-The evidence register is `/Users/x/.dev-team/factory/preserved/scout-b152-reviewmine/findings.md`.
+The scout register `scout-b152-reviewmine/findings.md` cannot be followed from this repository; its denominators are vendored below, but the F-number provenance is not independently resolvable here.
 F0 records the corpus and its denominators: **274** `review_outcomes` rows,
 **278** JSONL records, **339** reviewer envelopes over **228** lanes, **254**
 extracted findings, **194** ledger lanes versus **227** disk lanes, and **1,879**

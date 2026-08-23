@@ -1318,15 +1318,19 @@ test('usageWindow fails closed below the emitter floor and preserves its at-floo
   const dbPath = join(dir, 'ledger.db')
   const since = '2026-01-02T00:00:00.000Z'
   try {
-    assert.equal(LEDGER_NODE_FLOOR, '24.0.0')
-    for (const nodeVersion of ['22.13.0', '20.20.2', 'not-a-version']) {
+    assert.equal(LEDGER_NODE_FLOOR, '26.0.0')
+    // The daemon's import firewall forbids importing the ledger, so the mirror is
+    // a literal. Pin the equality here so a future half-move fails the suite
+    // rather than only the lane's gate.
+    assert.equal(LEDGER_NODE_FLOOR, NODE_FLOOR, 'crew/daemon.mjs LEDGER_NODE_FLOOR and scripts/factory/ledger.mjs NODE_FLOOR must move together')
+    for (const nodeVersion of ['24.15.0', '22.13.0', 'not-a-version']) {
       const result = usageWindow({ dbPath, since, nodeVersion })
       assert.equal(result.measured, false, `node ${nodeVersion} must fail closed below the emitter floor`)
       assert.equal(result.total, null)
       assert.equal(result.sessions, 0)
-      assert.match(result.why, /24\.0\.0/)
+      assert.match(result.why, /26\.0\.0/)
     }
-    for (const nodeVersion of ['24.0.0', '24.15.0']) {
+    for (const nodeVersion of ['26.0.0', '26.5.1']) {
       const result = usageWindow({ dbPath, since, nodeVersion })
       if (sqliteAvailable()) {
         assert.deepEqual(result, { measured: true, total: 0, sessions: 0 })
@@ -1345,7 +1349,7 @@ test('the ledger floor gates a configured budget but not a no-budget daemon', ()
   try {
     assert.throws(() => budgeted.d.enqueue({ crew_dir: budgeted.crewDir }), (err) => {
       assert.equal(err.code, 'budget-unmeasurable')
-      assert.match(err.message, /24\.0\.0/)
+      assert.match(err.message, /26\.0\.0/)
       return true
     })
     assert.equal(budgeted.forks.length, 0)

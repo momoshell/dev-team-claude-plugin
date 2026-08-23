@@ -399,12 +399,23 @@ test('read and mutate argument validation is host-side', async () => {
 // Where the network boundary is unenforceable the lab refuses every program
 // before it runs, so no escape is attempted at all. Both branches assert a
 // real refusal and neither admits an outcome of 'ok'.
+// The Net permission scope exists exactly where the --allow-net flag does:
+// measured false on node 20/22/24 and true on 26.5.1 (crew/pi/extensions/lab.ts:51-54
+// is the same discriminator, read here independently in the host process).
+// At or above the repo's Node floor the boundary IS enforceable, so
+// 'net-unenforceable' is no longer an acceptable escape outcome — a suite that
+// refused everything would be green while proving nothing. Below the floor the
+// refusal branch stays reachable and is still the correct answer.
+const NET_ENFORCEABLE = process.allowedNodeEnvironmentFlags.has(mod.LAB_AUDIT_NET_FLAG)
+
 function assertEscapeRefused(result, assertDenial) {
   assert.equal(result.details.outcome, 'refused')
-  if (result.details.refused === 'net-unenforceable') {
+  if (!NET_ENFORCEABLE) {
+    assert.equal(result.details.refused, 'net-unenforceable')
     assert.equal(result.details.audit.net_enforceable, false)
     return
   }
+  assert.notEqual(result.details.refused, 'net-unenforceable', 'this runtime enforces the network boundary, so an escape must be a real denial')
   assertDenial(result.details)
 }
 
@@ -430,6 +441,7 @@ test('escape: a program that reaches the network is denied', async () => {
   const result = await realTool("import { createServer } from 'node:net'\nawait new Promise((resolve, reject) => { const server = createServer(); server.on('error', reject); server.listen(0, () => { server.close(); resolve() }) })\n")
   assertEscapeRefused(result, (details) => {
     assert.equal(details.denial.code, 'ERR_ACCESS_DENIED')
+    assert.equal(details.denial.permission, 'Net')
     assert.match(JSON.stringify(details), /--allow-net/)
   })
 })

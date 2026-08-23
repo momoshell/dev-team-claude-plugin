@@ -12,10 +12,12 @@
 // caller), then attempts the database mirror inside a try/catch that never
 // rethrows (a mirror failure only increments stats().mirror_errors).
 //
-// SCOPED FLOOR: this module has its own Node floor (NODE_FLOOR, currently
-// '24.0.0') independent of the rest of the plugin, because it depends on
-// node:sqlite (a release-candidate builtin, verified working here on node
-// v24.15.0, darwin/arm64, with no CLI flag). node:sqlite is NEVER
+// SCOPED FLOOR: this module owns the repository's Node floor (`NODE_FLOOR`,
+// currently `'26.0.0'`). `node:sqlite`, which this module depends on, is
+// satisfied from v24 — the floor is higher because `node --permission` only
+// DENIES a network bind from v26 on (measured: v24.15.0 binds, v26.5.1 raises
+// `ERR_ACCESS_DENIED`), and the planner lab refuses to serve a program on a
+// runtime that cannot enforce that boundary. `node:sqlite` is NEVER
 // statically imported — it does not exist on Node 20 and this module must
 // still import cleanly there. It is loaded lazily, via createRequire, only
 // inside the first real database access, only after the floor check has
@@ -111,7 +113,7 @@ export function mkdirpBounded(dir, mode = 0o700) {
 // ---------------------------------------------------------------------------
 
 export const LEDGER_VERSION = 1
-export const NODE_FLOOR = '24.0.0'
+export const NODE_FLOOR = '26.0.0'
 export const TERM_TO_KILL_MS = 5000
 
 export const EVENT_TYPES = Object.freeze([

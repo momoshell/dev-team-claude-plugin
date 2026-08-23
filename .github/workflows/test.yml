@@ -6,11 +6,11 @@ on:
 
 jobs:
   test:
-    name: test (node 24)
+    name: test (node 26)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "24"
+          node-version: "26"
       - run: npm test

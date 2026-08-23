@@ -124,13 +124,13 @@ export const DEFAULT_CONCURRENCY = 2
 // no usage and are uncounted because enqueue refuses pane transport before a
 // run is admitted; no run this ceiling governs can contain one.
 export const DEFAULT_BUDGET_WINDOW_MS = 24 * 60 * 60 * 1000
-// Duplicated from scripts/factory/ledger.mjs:78 (NODE_FLOOR), which is the
+// Duplicated from scripts/factory/ledger.mjs (NODE_FLOOR), which is the
 // source of truth. The import firewall forbids importing it here, the same
 // posture this file already takes for the ledger db-path convention and the
 // agent_sessions column names. The two literals must move together: below
 // this floor the emitter degrades to JSONL only and writes no DB, so a ceiling
 // read here would be zero forever.
-export const LEDGER_NODE_FLOOR = '24.0.0'
+export const LEDGER_NODE_FLOOR = '26.0.0'
 // Date's representable millisecond range. A larger window makes the rolling
 // start invalid at admission, so reject it with the rest of budget validation.
 const MAX_BUDGET_WINDOW_MS = 8_640_000_000_000_000

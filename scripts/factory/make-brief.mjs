@@ -153,7 +153,7 @@ gate shells out to the suite, strip ANSI before parsing it (#240).`)
 
 // The task-specific write-surface and grep lines precede this unchanged
 // standing tail in the rendered Conventions block.
-export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a Node ≥24 floor; follow the existing
+export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a Node ≥26 floor; follow the existing
   \`scripts/factory/*\` conventions rather than inventing new ones.
 - No version bump (#137). Commit on green only. Never push, never open a PR.
   No \`Co-Authored-By\` trailers.

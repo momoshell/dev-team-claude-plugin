@@ -241,6 +241,26 @@ loop counts only `false` toward its dead-seat verdict, so a cmux hiccup can
 never kill a live run. Liveness is a give-up signal only: a quiet seat is not
 a failed one, and outcome comes from the envelope file, always.
 
+**Two planes, and only one of them is authority.** `crew.json`,
+`journal.jsonl` and the ledger are the control plane: they are the record, and
+they outlive every seat. Pane and headless seats are compute — a cache of that
+record, wiped on their own schedule by a closed pane, a killed worker, or a
+cmux that stopped answering. The two fail INDEPENDENTLY, so recovery is
+reconcile-on-wake: no path may assume the seat it left is the seat it finds.
+Each asks "still live, or gone?" and answers from the control plane. **Boot**
+asks first: `boot-descendant-sweep` (`crew.mjs`) sweeps this task's recorded
+descendants through `reclaimDescendants` (`seat-io.mjs`) and refuses to boot
+over any still alive or unmeasurable. **Mid-run and on restart** it is asked
+again — `waitForEnvelope`'s tri-state `paneAlive` probe fails a seat only on
+repeated MEASURED death, and a restarted daemon re-asks it per run in
+`adoptOrOrphan` (`daemon.mjs`), attaching a live driver and settling or
+orphaning a dead one from the persisted envelope. **Exit** closes the loop:
+`settleSeatTeardown` records only what each seat's death was proven to be,
+then calls `reclaimDescendants` once more. `npm run crew:reap -- --reclaim`
+(`scripts/factory/reap-stale.mjs`) is that same sweep out of band, across every
+task dir, for the operator whose boot was refused. A sixth seat-lifecycle path
+is correct only if it, too, treats the seat it finds as unproven until measured.
+
 ## Plan check: growth evidence and the carve verdict
 
 During each plan-check round the driver records the plan and gate byte counts,

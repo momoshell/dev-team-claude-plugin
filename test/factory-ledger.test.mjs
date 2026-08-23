@@ -22,7 +22,7 @@ import { ROOT } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
-  SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, LedgerUsageError,
+  SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
@@ -2515,6 +2515,205 @@ test('S11(c): two processes racing to open + migrate the same fresh db both comp
 })
 
 // ---------------------------------------------------------------------------
+// #541: allocate-then-confirm and collapse readout pins
+// ---------------------------------------------------------------------------
+
+// #541: two live emitters on one adw_id lose no record.
+test('#541: two live emitters on one adw_id lose no record', { skip: SKIP, timeout: 15000 }, async () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const emitter = join(dir, 'emitter.mjs')
+  writeFileSync(emitter, `
+    import { openLedger } from ${JSON.stringify(new URL('../scripts/factory/ledger.mjs', import.meta.url).href)}
+    import { existsSync, writeFileSync } from 'node:fs'
+    import { join } from 'node:path'
+    const [dbPath, dir, tag] = process.argv.slice(2)
+    const ledger = openLedger({ dbPath })
+    writeFileSync(join(dir, 'ready.' + tag), '')
+    const other = tag === 'A' ? 'B' : 'A'
+    const deadline = Date.now() + 10000
+    while (!existsSync(join(dir, 'ready.' + other)) && Date.now() < deadline) {}
+    for (let i = 0; i < 25; i += 1) {
+      ledger.recordEvent({ adw_id: '541-race', type: 'log', payload: { level: 'info', message: tag + ':' + i } })
+    }
+    ledger.close()
+  `)
+  const childA = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'A'], { stdio: 'ignore' }))
+  const childB = trackChild(spawn(process.execPath, [emitter, dbPath, dir, 'B'], { stdio: 'ignore' }))
+  assert.notEqual(childA.pid, process.pid, 'the emitter must be a REAL second process')
+  assert.notEqual(childB.pid, process.pid, 'the emitter must be a REAL second process')
+  const [exitA, exitB] = await Promise.all([
+    new Promise((resolve) => childA.on('exit', (code) => resolve(code))),
+    new Promise((resolve) => childB.on('exit', (code) => resolve(code))),
+  ])
+  assert.equal(exitA, 0, 'emitter A crashed')
+  assert.equal(exitB, 0, 'emitter B crashed')
+  const jsonlEvents = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
+    .map((line) => JSON.parse(line)).filter((line) => line.kind === 'recordEvent')
+  assert.equal(jsonlEvents.length, 50)
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.equal(ledger.dumpTable('events').filter((row) => row.adw_id === '541-race').length, 50)
+    const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+    try {
+      replayJsonl(jsonlPath, rebuilt)
+      assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-race').length, 50)
+    } finally { rebuilt.close() }
+  } finally { ledger.close() }
+})
+
+// #541: a degraded handle's spent sequence numbers are not re-issued.
+test('#541: degraded-then-healthy allocation preserves distinct authority seqs', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const degraded = openLedger({ dbPath, jsonlPath, nodeVersion: '20.0.0', stderr: { write: () => {} } })
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      degraded.recordEvent({ adw_id: '541-degraded', type: 'log', payload: { level: 'info', message: `degraded-${i}` } })
+    }
+  } finally { degraded.close() }
+  const healthy = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      healthy.recordEvent({ adw_id: '541-degraded', type: 'log', payload: { level: 'info', message: `healthy-${i}` } })
+    }
+  } finally { healthy.close() }
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-degraded')
+  assert.equal(lines.length, 10)
+  assert.equal(new Set(lines.map((line) => line.args.seq)).size, 10)
+  const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+  try {
+    replayJsonl(jsonlPath, rebuilt)
+    assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-degraded').length, 10)
+  } finally { rebuilt.close() }
+})
+
+// #541: an explicit seq advances a degraded handle's memoized authority floor.
+test('#541: explicit sequence advances the degraded allocator floor', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const ledger = openLedger({ dbPath, jsonlPath, nodeVersion: '20.0.0', stderr: { write: () => {} } })
+  try {
+    ledger.recordEvent({ adw_id: '541-explicit-floor', type: 'log', payload: { level: 'info', message: 'automatic-1' } })
+    ledger.recordEvent({ adw_id: '541-explicit-floor', seq: 2, type: 'log', payload: { level: 'info', message: 'explicit-2' } })
+    ledger.recordEvent({ adw_id: '541-explicit-floor', type: 'log', payload: { level: 'info', message: 'automatic-3' } })
+  } finally { ledger.close() }
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-explicit-floor')
+  assert.deepEqual(lines.map((line) => line.args.seq), [1, 2, 3])
+  const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+  try {
+    replayJsonl(jsonlPath, rebuilt)
+    assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-explicit-floor').length, 3)
+  } finally { rebuilt.close() }
+})
+
+// #541: an empty memoized floor scans prior authority before an explicit write.
+test('#541: explicit sequence floor scans prior degraded authority', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const jsonlPath = join(dir, 'ledger.jsonl')
+  const first = openLedger({ dbPath, jsonlPath, nodeVersion: '20.0.0', stderr: { write: () => {} } })
+  try {
+    first.recordEvent({ adw_id: '541-explicit-scan', seq: 2, type: 'log', payload: { level: 'info', message: 'explicit-2' } })
+  } finally { first.close() }
+  const second = openLedger({ dbPath, jsonlPath, nodeVersion: '20.0.0', stderr: { write: () => {} } })
+  try {
+    second.recordEvent({ adw_id: '541-explicit-scan', seq: 1, type: 'log', payload: { level: 'info', message: 'explicit-1' } })
+    second.recordEvent({ adw_id: '541-explicit-scan', type: 'log', payload: { level: 'info', message: 'automatic-3' } })
+  } finally { second.close() }
+  const lines = readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    .filter((line) => line.kind === 'recordEvent' && line.args.adw_id === '541-explicit-scan')
+  assert.deepEqual(lines.map((line) => line.args.seq), [2, 1, 3])
+  const rebuilt = openLedger({ dbPath: join(nextDir(), 'rebuilt.db'), stderr: { write: () => {} } })
+  try {
+    replayJsonl(jsonlPath, rebuilt)
+    assert.equal(rebuilt.dumpTable('events').filter((row) => row.adw_id === '541-explicit-scan').length, 3)
+  } finally { rebuilt.close() }
+})
+
+// #541: a different-content duplicate key is visible without changing drift.
+test('#541: the detector reports a collapsed key', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.recordEvent({ adw_id: '541-collapse', seq: 1, type: 'log', payload: { level: 'info', message: 'first' } })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  const first = JSON.parse(readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)[0])
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ ...first, args: { ...first.args, payload: { level: 'info', message: 'second' } } })}\n`)
+  const ledger = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    assert.equal(drift.collapsed_lines_total, 1)
+    assert.equal(drift.collapse_remedy, DRIFT_COLLAPSE_REMEDY)
+    assert.equal(drift.writers.find((writer) => writer.writer === 'recordEvent').collapsed_keys, 1)
+    assert.equal(drift.drift_total, 0)
+  } finally { ledger.close() }
+})
+
+// #541: repeats with identical content are idempotent, not collapse.
+test('#541: the detector discriminates idempotent repeats from collapse', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  try {
+    for (let i = 0; i < 3; i += 1) {
+      source.recordEvent({ adw_id: '541-identical', seq: 1, type: 'log', payload: { level: 'info', message: 'same' } })
+    }
+    let drift = source.jsonlDrift()
+    assert.equal(drift.collapsed_lines_total, 0)
+    assert.equal(drift.collapse_remedy, null)
+    assert.equal(drift.drift_total, 0)
+  } finally { source.close() }
+
+  const sourceAgain = openTestLedger()
+  sourceAgain.recordEvent({ adw_id: '541-replay', seq: 1, type: 'log', payload: { level: 'info', message: 'same' } })
+  const sourcePath = sourceAgain._jsonlPath
+  sourceAgain.close()
+  const target = openTestLedger()
+  try {
+    replayJsonl(sourcePath, target)
+    replayJsonl(sourcePath, target)
+    const drift = target.jsonlDrift()
+    assert.equal(drift.collapsed_lines_total, 0)
+    assert.equal(drift.collapse_remedy, null)
+    assert.equal(drift.drift_total, 0)
+  } finally { target.close() }
+})
+
+// #541: an explicit different-content collision is counted by stats.
+test('#541: the collision is visible in stats()', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordEvent({ adw_id: '541-stats', seq: 1, type: 'log', payload: { level: 'info', message: 'first' } })
+    ledger.recordEvent({ adw_id: '541-stats', seq: 1, type: 'log', payload: { level: 'info', message: 'different' } })
+    const collided = ledger.stats()
+    assert.equal(collided.seq_collisions, 1)
+    assert.equal(collided.mirror_errors, 1)
+    ledger.recordEvent({ adw_id: '541-stats', seq: 1, type: 'log', payload: { level: 'info', message: 'first' } })
+    const replayed = ledger.stats()
+    assert.equal(replayed.seq_collisions, collided.seq_collisions)
+    assert.equal(replayed.mirror_errors, collided.mirror_errors)
+  } finally { ledger.close() }
+})
+
+// #541: doctor names a measured key collapse independently of drift.
+test('#541: the doctor CLI names a key collapse', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.recordEvent({ adw_id: '541-doctor', seq: 1, type: 'log', payload: { level: 'info', message: 'first' } })
+  const { _dbPath: dbPath, _jsonlPath: jsonlPath } = source
+  const first = JSON.parse(readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)[0])
+  source.close()
+  appendFileSync(jsonlPath, `${JSON.stringify({ ...first, args: { ...first.args, payload: { level: 'info', message: 'second' } } })}\n`)
+  const result = run(['doctor'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  assert.match(result.stderr, /key collapse/)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.jsonl_drift.collapsed_lines_total, 1)
+})
+
+// ---------------------------------------------------------------------------
 // S12: cheap missing negative tests
 // ---------------------------------------------------------------------------
 
@@ -4058,7 +4257,7 @@ test('doctor reports per-writer JSONL/mirror drift naming the writer and the cou
     assert.equal(drift.measured, true)
     assert.deepEqual(drift.writers.find((writer) => writer.writer === 'startSession'), {
       writer: 'startSession', table: 'sessions', unique_key: ['adw_id'],
-      distinct_keys: 2, rows_present: 1, drift: 1,
+      lines: 2, distinct_keys: 2, rows_present: 1, drift: 1, collapsed_keys: 0,
     })
     assert.equal(drift.drift_total, 1)
   } finally { ledger.close() }
@@ -4178,14 +4377,16 @@ test('repeat unique keys are upserts, not drift', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   try {
     for (let i = 0; i < 3; i += 1) {
-      ledger.startSession({ adw_id: 'drift-repeat', repo_slug: 'r', task_slug: 't' })
+      ledger.startSession({ adw_id: 'drift-repeat', repo_slug: 'r', task_slug: 't', started_at: `2026-08-22T00:00:0${i}.000Z` })
     }
     const drift = ledger.jsonlDrift()
     const writer = drift.writers.find((entry) => entry.writer === 'startSession')
     assert.equal(drift.lines, 3)
-    assert.deepEqual({ distinct_keys: writer.distinct_keys, rows_present: writer.rows_present, drift: writer.drift }, {
-      distinct_keys: 1, rows_present: 1, drift: 0,
+    assert.deepEqual({ lines: writer.lines, distinct_keys: writer.distinct_keys, rows_present: writer.rows_present, drift: writer.drift, collapsed_keys: writer.collapsed_keys }, {
+      lines: 3, distinct_keys: 1, rows_present: 1, drift: 0, collapsed_keys: 1,
     })
+    assert.equal(drift.collapsed_lines_total, 2)
+    assert.equal(drift.collapse_remedy, DRIFT_COLLAPSE_REMEDY)
   } finally { ledger.close() }
 })
 

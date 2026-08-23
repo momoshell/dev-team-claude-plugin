@@ -1,6 +1,6 @@
 # State, role, and lane colour
 
-This reference turns the measured R1–R5 decisions and L1–L12 departures in `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md` §§5–7 into constraints for a new component. The system is strongest for chrome and weakest for state colour; copy the rule, not the majority habit.
+This reference turns the measured R1–R5 decisions and the documented L1 inventory plus L2, L3, L6, L10, and L11 departures in this file into constraints for a new component. The system is strongest for chrome and weakest for state colour; copy the rule, not the majority habit.
 
 ## R1 — derive a tone, then map class to token
 

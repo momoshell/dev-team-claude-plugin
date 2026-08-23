@@ -1,6 +1,6 @@
 # Known limits
 
-This reference preserves the limits in `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md` §§6, 8–10. They are constraints to expose, not defects this lane silently fixes.
+This reference preserves the limits measured from `visualizer/web/src/lib/theme.css:2–31`; the ratios below are recorded measurements, not a repository-provided formula. The §9/§10 absences are already restated in full at `:32–51`. They are constraints to expose, not defects this lane silently fixes.
 
 ## Contrast limit
 

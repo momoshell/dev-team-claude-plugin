@@ -17,7 +17,7 @@ This is a retrieval-first repo skill, not a Svelte API manual. A Svelte API fact
 |---|---|---|
 | What Svelte API or syntax fact do I need? | Retrieve it from the MCP in the documented order | `references/routing.md` |
 | How should this component declare props, callbacks, snippets, state, and styles? | Copy measured component idioms | `references/components.md` |
-| Where should data, theme, routes, and shaping logic live? | Follow the app shell and seven-module split | `references/structure.md` |
+| Where should data, theme, routes, and shaping logic live? | Follow the app shell and eight-module split | `references/structure.md` |
 | What can this repo test, and what must remain source text? | Keep assertions in plain modules and pin only structural source | `references/testing.md` |
 
 ## Operating rules
@@ -28,11 +28,11 @@ This skill owns only this repo's conventions: the visualizer's structure, its co
 
 Before writing code, read the routing reference, ask the `svelte` MCP for any API fact you do not have in the current response, then read the repo reference that matches the question. Keep component props in one destructuring line, keep deterministic logic in `visualizer/web/src/lib/*.js`, and run `svelte-autofixer` over changed Svelte code before returning it.
 
-The preserved measurements live at `/Users/x/.dev-team/factory/preserved/scout-b151-viztokens/conventions-register.md`; they describe this checkout and are not a substitute for current MCP documentation.
+The measured source can be checked with `grep` over `visualizer/web/src`; it describes this checkout and is not a substitute for current MCP documentation.
 
 ## Key references
 
 - `references/routing.md` — MCP retrieval order and question routing
 - `references/components.md` — props, runes, snippets, events, bindings, effects, and scoped styles
-- `references/structure.md` — shell ownership and the seven plain modules
+- `references/structure.md` — shell ownership and the eight plain modules
 - `references/testing.md` — node tests, source pins, and the absent DOM harness

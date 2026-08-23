@@ -14,10 +14,10 @@ window at exit 0 (#443).
 Exhibit: `scripts/factory/ledger.mjs:3334`.
 
 Pin the refusal direction in the ledger test.
-Exhibit: `test/factory-ledger.test.mjs:2318`.
+Exhibit: `test/factory-ledger.test.mjs:2452`.
 
 Pin the inverse direction so accepted window flags still work.
-Exhibit: `test/factory-ledger.test.mjs:2326`.
+Exhibit: `test/factory-ledger.test.mjs:2457`.
 
 Pin the process-level status as `exit 2` for the emit CLI.
 Exhibit: `test/factory-emit.test.mjs:1403`.
@@ -26,7 +26,7 @@ The same refusal shape is mirrored in `scripts/factory/emit.mjs:1341`.
 Exhibit: `scripts/factory/emit.mjs:1341`.
 
 Do not let an unknown option become an omitted bound or a null filter.
-Exhibit: `scripts/factory/ledger.mjs:3334` and `test/factory-ledger.test.mjs:2261`.
+Exhibit: `scripts/factory/ledger.mjs:3334` and `test/factory-ledger.test.mjs:2452`.
 
 An empty vocabulary means a verb accepts no flags; it is not an open parser.
 Exhibit: `scripts/factory/ledger.mjs:3340`.
@@ -42,13 +42,13 @@ If a value is missing, report usage rather than reading the next option as data.
 Status: this missing-value edge is unbacked in this checkout; see `evidence.md`.
 
 Test a typo, a valid option, and the exit status as three distinct observations.
-Exhibit: `test/factory-ledger.test.mjs:2261`, `:2266`, and `test/factory-emit.test.mjs:1403`.
+Exhibit: `test/factory-ledger.test.mjs:2452`, `:2457`, and `test/factory-emit.test.mjs:1403`.
 
 The test expectation must come from the CLI contract, not from parsed output.
-Exhibit: `test/factory-ledger.test.mjs:2261` and `:2266`.
+Exhibit: `test/factory-ledger.test.mjs:2452` and `:2457`.
 
 A green happy-path test alone cannot catch the one-letter window regression.
-Exhibit: `test/factory-ledger.test.mjs:2261`.
+Exhibit: `test/factory-ledger.test.mjs:2452`.
 
 Keep the exhibit and the accepted vocabulary updated in one change.
 Exhibit: `scripts/factory/ledger.mjs:3340` and `:3372`.

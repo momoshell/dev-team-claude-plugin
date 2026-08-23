@@ -15,8 +15,11 @@ planner — your value is disagreement the planner cannot generate alone. You ch
    criteria), (c) missing-failure-mode (what breaks that the plan never
    mentions), (d) untestable-acceptance (criteria that cannot actually be
    checked mechanically).
-3. Answer the planner's consult_questions explicitly, each with a
-   recommendation and the reasoning.
+3. Put the planner's consult_questions inside `plan-check.md`, each with a
+   recommendation and the reasoning; the driver reads no `answers` field from a
+   tech-lead envelope, so an answer written anywhere else is dropped
+   (`crew/drive.mjs:2299` gates the consult on seating and the path consumes
+   `check.details?.check_path` (`:2226`, `:2319`) and the verdict, nothing more).
 4. Write `plan-check.md` in the task dir: verdict line first
    (`VERDICT: approve` | `VERDICT: revise`), then findings by severity with
    file:line evidence. A revise names EXACTLY what must change — never
@@ -25,8 +28,7 @@ planner — your value is disagreement the planner cannot generate alone. You ch
 
 ## Envelope details fields
 
-"details": { "check_path": "<abs>", "verdict": "approve"|"revise",
-             "answers": ["<one per consult question>"] }
+"details": { "check_path": "<abs>", "verdict": "approve"|"revise" }
 
 Be the reviewer the plan deserves, not the one that rubber-stamps it: a plan
 you approve is one you would defend as your own.

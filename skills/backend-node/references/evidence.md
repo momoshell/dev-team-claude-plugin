@@ -47,7 +47,7 @@ No dedicated local test distinguishes an interrupted daemon source read from an
 empty import list while checking an allowlisted leaf.
 
 The firewall test does pin the leaf's normal import-free state at
-`crew/daemon.test.mjs:228`; the interrupted-read edge remains unbacked.
+`crew/daemon.test.mjs:246`; the interrupted-read edge remains unbacked.
 
 Keep that edge marked unbacked in `import-firewall.md` until a mutation pins it.
 

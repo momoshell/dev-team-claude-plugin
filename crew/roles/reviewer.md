@@ -28,7 +28,11 @@ A must-fix forces changes-needed. Findings you cannot support with a concrete
 scenario are considers, not must-fixes.
 
 Before writing findings, load the do-not-flag guidelines
-(`crew/guidelines/review-do-not-flag.md`, via the `review-procedure` skill).
+(`crew/guidelines/review-do-not-flag.md`) with
+`node .agents/skills/review-procedure/scripts/load-guidelines.mjs`, not a skill:
+the reviewer seat boots `--no-skills` (`crew/adapters/adapter-pi.mjs:253`) and the
+claude adapter refuses a skill grant (`crew/adapters/adapter-claude.mjs:66-68`), so
+a skill route is one no seat can open.
 Where one of its classes still worries you in this diff, write it as a
 `consider` naming the defense you think fails.
 

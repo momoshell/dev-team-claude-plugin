@@ -1819,6 +1819,91 @@ function exhaustionAcceptIo(details = {}, options = {}, findings = ACCEPT_FINDIN
   })
 }
 
+const CLOBBER_R2 = [{ id: 'RV9-1', severity: 'should-fix', location: 'c.mjs:3', summary: 'a different set entirely' }]
+
+// r1 always raises ACCEPT_FINDINGS; r2 is whatever the direction under test needs.
+function twoRoundReviewIo(round2Findings, accept, options = {}) {
+  return fakeIo({
+    envelopes: {
+      'planner:1': planEnv(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS),
+      'reviewer:2': reviewEnv('changes-needed', round2Findings),
+      'lead:1': leadEnv('accept', 'because', accept),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    ...options,
+  })
+}
+
+test('a findings-less later round leaves the canonical accept contract intact', () => {
+  const io = twoRoundReviewIo(undefined, {})
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.equal(io.calls.commits.length, 0)
+  assert.ok(res.details.accepted_via == null)
+  const record = res.details.accept_decision
+  assert.equal(record.findings_total, 2)
+  for (const id of ['RV1-1', 'RV1-2']) {
+    assert.ok(record.errors.some((error) => error.id === id && error.why === 'omitted id'))
+  }
+  const brief = io.calls.writes[`${TD}/decision-1.md`]
+  assert.match(brief, /RV1-1 \(must-fix\)/)
+  assert.match(brief, /For an accept, name every listed finding exactly once/)
+})
+
+test('a findings-carrying later round replaces the canonical accept contract', () => {
+  const io = twoRoundReviewIo(CLOBBER_R2, { residuals: [{ id: 'RV9-1', type: 'cosmetic' }], refuted: [] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  const record = io.calls.logs.find((line) => line.accept_decision)?.accept_decision
+  assert.equal(record.findings_total, 1)
+  assert.equal(record.outcome, 'accepted')
+})
+
+test('the superseded round-1 findings are not shown in the round-2 contract', () => {
+  const io = twoRoundReviewIo(CLOBBER_R2, { residuals: [{ id: 'RV9-1', type: 'cosmetic' }], refuted: [] })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const brief = io.calls.writes[`${TD}/decision-1.md`]
+  assert.match(brief, /RV9-1 \(should-fix\)/)
+  assert.doesNotMatch(brief, /RV1-1/)
+  assert.doesNotMatch(brief, /RV1-2/)
+})
+
+test('an empty findings array is a report and replaces the set; an absent key is not', () => {
+  const absentIo = twoRoundReviewIo(undefined, {})
+  const absent = driveTask(CTX, absentIo)
+  const emptyIo = twoRoundReviewIo([], { residuals: [], refuted: [] })
+  const empty = driveTask(CTX, emptyIo)
+  assert.equal(absent.status, 'escalation')
+  assert.equal(absentIo.calls.commits.length, 0)
+  assert.equal(empty.status, 'done')
+  assert.equal(emptyIo.calls.commits.length, 1)
+  const record = emptyIo.calls.logs.find((line) => line.accept_decision)?.accept_decision
+  assert.equal(record.findings_total, 0)
+  assert.equal(record.outcome, 'accepted')
+})
+
+test('reviewOutcome distinguishes an absent findings key from an empty array', () => {
+  const withoutFindings = reviewOutcome('reviewer', reviewEnv('changes-needed'))
+  assert.equal('findings' in withoutFindings, false)
+  const withFindings = reviewOutcome('reviewer', reviewEnv('changes-needed', []))
+  assert.deepEqual(withFindings.findings, [])
+  assert.equal(withFindings.findings_report.total, 0)
+})
+
+test('the same rule holds at build exhaustion', () => {
+  const io = twoRoundReviewIo(undefined, {})
+  const res = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 3 } }, io)
+  assert.equal(res.details.accept_decision.where, 'build-exhausted')
+  assert.equal(res.details.accept_decision.findings_total, 2)
+  assert.equal(res.status, 'escalation')
+  assert.equal(io.calls.commits.length, 0)
+})
+
 test('valid typed accept at review exhaustion commits with a should-fix refutation', () => {
   const io = exhaustionAcceptIo({
     residuals: [],

@@ -1795,7 +1795,14 @@ export function driveTask(ctx, io) {
     const review = reviewOutcome(role, env)
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
     if (review) io.log({ at: io.now(), review_outcome: { dispatch: id, ...review } })
-    if (review) S.acceptFindings = review.findings ?? null
+    // The canonical set follows the rule lastReview already follows: a reviewer
+    // envelope that CARRIES a findings array replaces it; one that carries no
+    // findings key at all leaves it intact (#542). An EMPTY array is truthy and
+    // therefore replaces — that is a reviewer saying "I looked and found
+    // nothing", which IS a report. An ABSENT key is a seat that did not report,
+    // and absence is not zero (#442). Clobbering here erased the whole accept
+    // contract and committed on a record claiming zero residuals.
+    if (review?.findings) S.acceptFindings = review.findings
     if (review?.findings) S.lastReview = review
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } })

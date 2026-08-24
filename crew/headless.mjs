@@ -41,6 +41,14 @@ export const SEAT_REFUSALS = Object.freeze([
   { member: 'transient', pattern: /overloaded_error|\boverloaded\b|rate_limit_error|\brate limit\b|connection closed|websocket|internal server error|\bterminated\b|fetch failed/i },
 ])
 
+// A frame no pattern matched is not a frame that warrants no action: "we could
+// not classify it" and "nothing is warranted" are different conclusions. The
+// unclassified case is a strictly WEAKER signal than `rejected`, whose one
+// identical re-send #567 already ratified — so it earns the same action, gated
+// on the one thing that distinguishes a stalled seat from a working one:
+// SILENCE. `silenceReaskDecision` (crew/seat-io.mjs) owns that gate.
+export const UNCLASSIFIED_REFUSAL = 'unclassified'
+
 // What the DRIVER may do about each member, and a data map for the same reason
 // the vocabulary is one: a policy change is a data edit, not a new branch.
 export const SEAT_REFUSAL_ACTIONS = Object.freeze({
@@ -49,6 +57,7 @@ export const SEAT_REFUSAL_ACTIONS = Object.freeze({
   transient: 'journal',   // self-heals; let the budget ride
   suspended: 'journal',   // the host slept; the seat is not at fault
   overflowed: 'journal',  // n=0 in 219 lanes — a first occurrence is itself the news
+  [UNCLASSIFIED_REFUSAL]: 'reprompt-on-silence',   // verbatim: mutation G1
 })
 
 // The SAME CSI pattern scripts/factory/make-brief.mjs:53 carries, re-inlined

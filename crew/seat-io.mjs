@@ -15,7 +15,7 @@ import {
 } from './driver.mjs'
 import {
   headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS,
-  recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
+  UNCLASSIFIED_REFUSAL, recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
@@ -48,6 +48,17 @@ export const SUBSTRATE_MISSES_TO_DIE = 2
 // of healthy mid-turn work and far below the 83-minute measured death: a tool
 // call that legitimately takes minutes is never called stale.
 export const TRANSCRIPT_STALE_MS = 900_000
+
+// b204-reprompt, measured 2026-08-24 on b199-resumestate: a planner emitted one
+// unclassified error frame, produced no frame for 14 minutes, and a HAND
+// re-nudge woke it — it resumed and finished. The nudge landed 7 seconds after
+// the 1800s budget lapsed, so the lane escalated anyway. 300s is chosen against
+// the same corpus as TRANSCRIPT_STALE_MS above: p99 of gaps where a frame was
+// OWED is 80.7s, so 300s is well past a legitimately slow tool call, and it is a
+// third of the 900s staleness threshold — the re-send therefore lands with a
+// turn's budget left instead of at expiry, which is the whole difference between
+// tonight's revival and tonight's escalation.
+export const SILENCE_REASK_MS = 300_000   // verbatim: mutation G6
 
 // #392: an unparseable envelope from a seat that is still THERE is a defect in
 // the report about the work, not in the work. Ask the one participant who can
@@ -1389,6 +1400,27 @@ export function reaskDecision({ kind, transport, surfaceId, alive, asked }) {
   return { ask: true, why: 'a live pane seat can re-emit its own envelope' }
 }
 
+// What the driver owes a seat that emitted an UNCLASSIFIED refusal frame, from
+// measured facts only: the frame's instant, the newest transcript mtime, now,
+// and whether the one re-send was already sent. Pure and exported for the same
+// reason reaskDecision is — the policy is unit-testable without a seat. `sentAt`
+// IS the bound made visible: once set, this function can never answer 'reask'
+// again, so a re-send can no more loop than #392's re-ask can.
+export function silenceReaskDecision({ frameAt, latest, at, sentAt = null, quietMs = SILENCE_REASK_MS }) {   // verbatim: mutation G11
+  if (!Number.isFinite(frameAt)) return { act: 'none', why: 'no unclassified refusal frame is armed for this assignment' }
+  const grewSince = (mark) => Number.isFinite(latest) && latest > mark   // verbatim: mutation G8
+  if (!Number.isFinite(sentAt)) {                                        // verbatim: mutation G4
+    // A transcript frame AFTER the unclassified frame is the seat answering for
+    // itself: a working seat is never re-asked.
+    if (grewSince(frameAt)) return { act: 'none', why: 'the seat produced a transcript frame after the unclassified frame' }   // verbatim: mutation G3
+    if (at - frameAt >= quietMs) return { act: 'reask', why: `no transcript frame for ${Math.round((at - frameAt) / 1000)}s after an unclassified refusal frame` }   // verbatim: mutation G2
+    return { act: 'wait', why: `silent for ${Math.round((at - frameAt) / 1000)}s, under the ${Math.round(quietMs / 1000)}s threshold` }
+  }
+  if (grewSince(sentAt)) return { act: 'revived', why: 'the seat produced a transcript frame after the re-send' }
+  if (at - sentAt >= quietMs) return { act: 'still-silent', why: `no transcript frame for ${Math.round((at - sentAt) / 1000)}s after the one re-send; the bound is ${REASK_MAX} per assignment` }
+  return { act: 'wait', why: 'the one re-send is outstanding' }
+}
+
 // The assignment line's charset admits neither parentheses nor quotes
 // (crew/driver.mjs:69), and #359's message carries both — so the verbatim
 // failure travels in a FILE and the line points at it, exactly as every other
@@ -1604,6 +1636,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const lastDiagnosis = new Map()     // returnPath -> the state a wait expired in
   const staleNoted = new Set()        // roles already journalled stale — one line per seat, never a loop
   const repromptedRefusals = new Set() // returnPaths already re-prompted — the bound, per assignment
+  const silenceWatch = new Map()      // returnPath -> the unclassified frame being watched for silence
   const transportForPath = new Map()
   const transportFactories = {
     [HEADLESS_TRANSPORT]: deps.headlessIo || defaultHeadlessIo,
@@ -1692,13 +1725,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           adapter: adapters?.[role]?.adapter ?? null, deps,
         })
         : []
-    } catch { return null }
-    if (!Array.isArray(frames)) return null
+    } catch { frames = [] }
+    if (!Array.isArray(frames)) frames = []
     for (const frame of frames) {
       if (!frame || !Number.isFinite(frame.at)) continue
       refusalFloor.set(role, frame.at)          // never re-fire on a frame already handled
       lastRefusal.set(role, frame)
-      const action = frame.member ? SEAT_REFUSAL_ACTIONS[frame.member] : 'journal'
+      const policyKey = frame.member ?? UNCLASSIFIED_REFUSAL
+      const action = Object.hasOwn(SEAT_REFUSAL_ACTIONS, policyKey) ? SEAT_REFUSAL_ACTIONS[policyKey] : 'journal'
       const note = (outcome, extra = {}) => {
         try {
           io.log({ event: 'seat-refusal', role, id: info?.id ?? null, member: frame.member,
@@ -1709,6 +1743,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       if (action === 'end') {
         note('ended')
         throw refusalError(info, info?.returnPath, frame)
+      }
+      if (action === 'reprompt-on-silence') {   // verbatim: mutation G5
+        armSilenceWatch(info, frame)
+        note('watching')
+        continue
       }
       if (action !== 'reprompt') {
         note('journalled')
@@ -1732,7 +1771,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('reprompted')
       return { restartBudget: true }
     }
-    return null
+    return pollSilence(info, at)
   }
   // Same seam as sampleSeatRefusal: agent-keyed, deps-overridable. The pi reader
   // addresses a CHECKOUT, not a seat (piSessionDir), so a busy sibling can mask a
@@ -1759,6 +1798,65 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     staleNoted.add(role)
     try { io.log({ at: record.at, event: 'seat-stale', role, id: info?.id ?? null, last_frame_at: record.latest, stale_ms: record.at - record.latest, threshold_ms: TRANSCRIPT_STALE_MS }) }
     catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+  }
+  const armSilenceWatch = (info, frame) => {
+    const returnPath = info?.returnPath
+    if (!returnPath) return
+    const watch = silenceWatch.get(returnPath)
+    // A SECOND unclassified frame before any re-send is itself evidence of life:
+    // restart the quiet clock rather than counting silence from the first one.
+    if (!watch) silenceWatch.set(returnPath, { frameAt: frame.at, sentAt: null, notedSilent: false })
+    else if (watch.sentAt === null) watch.frameAt = frame.at
+  }
+  // The liveness tick already measures transcript growth (:1495); this is the
+  // same measurement asked the one question nothing asked before — has the seat
+  // said ANYTHING since it errored? Never fatal: no path here throws, so a
+  // silent seat's wait ends exactly as it does today unless a re-send revives it.
+  const pollSilence = (info, at) => {
+    const returnPath = info?.returnPath
+    const watch = returnPath ? silenceWatch.get(returnPath) : null
+    if (!watch) return null
+    const decision = silenceReaskDecision({ frameAt: watch.frameAt, latest: growthFor(info), at, sentAt: watch.sentAt })
+    const note = (outcome, extra = {}) => {
+      try {
+        io.log({
+          at, event: 'seat-silence-reask', role: info?.role ?? null, id: info?.id ?? null, returnPath,
+          outcome, why: decision.why, silent_ms: at - (watch.sentAt ?? watch.frameAt), ...extra,
+        })
+      } catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+    }
+    if (decision.act === 'wait') return null
+    if (decision.act === 'none') { silenceWatch.delete(returnPath); note('growing'); return null }
+    if (decision.act === 'revived') { silenceWatch.delete(returnPath); note('revived'); return null }
+    if (decision.act === 'still-silent') {
+      if (watch.notedSilent) return null
+      watch.notedSilent = true
+      note('still-silent')
+      return null
+    }
+    // 'reask'. The bound is the SAME set #567's reprompt uses, so one assignment
+    // can never be re-sent twice by the two paths between them.
+    const member = crew.members?.[info?.role] || null
+    if (repromptedRefusals.has(returnPath)) {
+      silenceWatch.delete(returnPath)
+      note('declined', { why: `the re-send bound of ${REASK_MAX} per assignment is already spent` })
+      return null
+    }
+    if (!info?.surface_id || (member?.transport && member.transport !== DEFAULT_TRANSPORT)) {
+      silenceWatch.delete(returnPath)
+      note('declined', { why: !info?.surface_id ? 'no surface_id' : `transport ${member.transport} is not pane` })
+      return null
+    }
+    repromptedRefusals.add(returnPath)
+    watch.sentAt = at
+    try {
+      sendLine(info.surface_id, assignmentLine({ id: info.id, role: info.role, briefFile: info.brief, returnPath, taskDir: paths.taskDir }))
+    } catch (sendErr) {
+      note('undelivered', { why: sendErr?.message || 'assignment send failed' })
+      return null
+    }
+    note('sent')
+    return { restartBudget: true, silence: 'sent' }   // verbatim: mutation G7
   }
   const reaskUnusableEnvelope = ({ returnPath, info, transport, err, timeoutS }) => {
     const role = info?.role || 'unknown'

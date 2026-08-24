@@ -9,7 +9,7 @@ import { join } from 'node:path'
 import {
   cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, saveCrew, seatIo, settleSeatTeardown,
-  SEAT_REFUSAL_STAGE, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth,
+  SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
@@ -1277,26 +1277,42 @@ test('waitForEnvelope samples transcript growth on each liveness tick without ch
   assert.deepEqual(env, { status: 'done' })
 })
 
-function withTranscriptSeat({ start = 0, timeoutS = 2000, transcriptPaths, statSync, refusalFrames }, body) {
+function withTranscriptSeat({ start = 0, timeoutS = 2000, transcriptPaths, statSync, refusalFrames, sendLine, envelopeAt, surfaceId = 'surface-builder', transportAt = null }, body) {
   const root = scratchDir('seat-transcript-growth-')
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
-  let clock = start; let returnPath = null
+  let clock = start; let returnPath = null; let envelopeWritten = false
   const logs = []; const events = []
-  const crew = { members: { builder: { surface_id: 'surface-builder', transport: 'pane', agent: 'claude' } } }
+  const member = { ...(surfaceId ? { surface_id: surfaceId } : {}), transport: 'pane', agent: 'claude' }
+  const crew = { members: { builder: member } }
+  const envelopeReady = () => {
+    if (typeof envelopeAt === 'function') {
+      try { return envelopeAt(clock) === true } catch { return false }
+    }
+    return Number.isFinite(envelopeAt) && clock >= envelopeAt
+  }
   const deps = {
     now: () => clock,
-    sleep: (ms) => { clock += ms },
-    sendLine: () => {},
+    sleep: (ms) => {
+      clock += ms
+      if (!envelopeWritten && returnPath && envelopeReady()) {
+        writeFileSync(returnPath, JSON.stringify({ status: 'done' }))
+        envelopeWritten = true
+      }
+    },
+    sendLine: (surface, line) => { if (sendLine) sendLine(surface, line, clock) },
     logLine: (_path, row) => logs.push(row),
-    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
-    locate: (_tree, id) => id === 'surface-builder',
-    existsSync: (path) => path === returnPath ? false : (typeof path === 'string' && existsSync(path)),
+    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: surfaceId }] }] }] }] }),
+    locate: (_tree, id) => id === surfaceId,
+    existsSync: (path) => path === returnPath ? envelopeWritten : (typeof path === 'string' && existsSync(path)),
   }
   if (transcriptPaths) deps.transcriptPaths = transcriptPaths
   if (statSync === true) deps.statSync = () => ({ mtimeMs: clock })
-  else if (statSync) deps.statSync = statSync
-  if (refusalFrames) deps.refusalFrames = refusalFrames
+  else if (statSync) deps.statSync = (path) => statSync(path, clock)
+  if (refusalFrames) deps.refusalFrames = (context) => {
+    if (Number.isFinite(transportAt) && clock >= transportAt) member.transport = 'headless-json'
+    return refusalFrames(context)
+  }
   try {
     const io = seatIo(crew, paths, process.cwd(), null, null, {}, deps)
     io.emit = (event) => events.push(event)
@@ -1306,6 +1322,165 @@ function withTranscriptSeat({ start = 0, timeoutS = 2000, transcriptPaths, statS
     return body({ io, paths, logs, events, env, assignment, clock: () => clock })
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
+
+test('silenceReaskDecision gates one quiet re-send on measured transcript growth', () => {
+  const frameAt = 1_000_000
+  assert.equal(SILENCE_REASK_MS, 300_000)
+  assert.ok(SILENCE_REASK_MS < TRANSCRIPT_STALE_MS)
+  assert.equal(silenceReaskDecision({ frameAt, latest: frameAt, at: frameAt + SILENCE_REASK_MS - 1 }).act, 'wait')
+  assert.equal(silenceReaskDecision({ frameAt, latest: frameAt, at: frameAt + SILENCE_REASK_MS }).act, 'reask')
+  assert.equal(silenceReaskDecision({ frameAt, latest: frameAt + 1, at: frameAt + SILENCE_REASK_MS }).act, 'none')
+  assert.equal(silenceReaskDecision({ frameAt: Number.NaN, latest: null, at: frameAt + SILENCE_REASK_MS }).act, 'none')
+  assert.equal(silenceReaskDecision({ frameAt, latest: null, at: frameAt + 1 + SILENCE_REASK_MS, sentAt: frameAt + 1 }).act, 'still-silent')
+  assert.equal(silenceReaskDecision({ frameAt, latest: frameAt + 2, at: frameAt + SILENCE_REASK_MS, sentAt: frameAt + 1 }).act, 'revived')
+  assert.notEqual(silenceReaskDecision({ frameAt, latest: null, at: frameAt + SILENCE_REASK_MS * 10, sentAt: frameAt + 1 }).act, 'reask')
+})
+
+test('an unclassified refusal plus frozen transcript is re-sent exactly once at the quiet threshold', () => {
+  let seen = false
+  const sends = []
+  withTranscriptSeat({
+    timeoutS: 600, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }),
+    sendLine: (surface, line, at) => sends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (seen) return []
+      seen = true
+      return [{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(sends.length, 2)
+    assert.equal(sends[1].line, sends[0].line)
+    assert.equal(sends[1].at, 30_000 + SILENCE_REASK_MS)
+    assert.equal(logs.filter((row) => row.event === 'seat-silence-reask' && row.outcome === 'sent').length, 1)
+  })
+})
+
+test('a second silence after the bounded re-send is journalled without another re-send', () => {
+  let seen = false
+  const sends = []
+  withTranscriptSeat({
+    timeoutS: 700, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }),
+    sendLine: (surface, line, at) => sends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (seen) return []
+      seen = true
+      return [{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(sends.length, 2)
+    assert.equal(logs.filter((row) => row.event === 'seat-silence-reask' && row.outcome === 'sent').length, 1)
+    assert.equal(logs.filter((row) => row.event === 'seat-silence-reask' && row.outcome === 'still-silent').length, 1)
+  })
+})
+
+test('a seat still producing transcript frames is never re-sent', () => {
+  let seen = false
+  const sends = []
+  withTranscriptSeat({
+    timeoutS: 600, transcriptPaths: () => ['/x/builder.jsonl'], statSync: true,
+    sendLine: (surface, line, at) => sends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (seen) return []
+      seen = true
+      return [{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(sends.length, 1)
+    assert.equal(logs.filter((row) => row.event === 'seat-silence-reask' && row.outcome === 'growing').length, 1)
+    assert.equal(logs.some((row) => row.event === 'seat-silence-reask' && row.outcome === 'sent'), false)
+  })
+})
+
+test('a revived seat gets a fresh wait budget after the silence re-send', () => {
+  let seen = false
+  let resentAt = null
+  const sends = []
+  withTranscriptSeat({
+    timeoutS: 2_000, envelopeAt: 2_100_000,
+    transcriptPaths: () => ['/x/builder.jsonl'], statSync: (_path, at) => ({ mtimeMs: resentAt !== null && at > resentAt ? at : 0 }),
+    sendLine: (surface, line, at) => {
+      sends.push({ surface, line, at })
+      if (sends.length === 2) resentAt = at
+    },
+    refusalFrames: () => {
+      if (seen) return []
+      seen = true
+      return [{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]
+    },
+  }, ({ logs, env }) => {
+    assert.ok(2_100_000 > 2_000_000)
+    assert.deepEqual(env, { status: 'done' })
+    assert.equal(sends.length, 2)
+    assert.equal(logs.filter((row) => row.event === 'seat-silence-reask' && row.outcome === 'revived').length, 1)
+  })
+})
+
+test('classified refusal actions remain immediate or journal-only', () => {
+  let transientSeen = false
+  const transientSends = []
+  withTranscriptSeat({
+    timeoutS: 35, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }),
+    sendLine: (surface, line, at) => transientSends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (transientSeen) return []
+      transientSeen = true
+      return [{ at: 30_000, member: 'transient', message: 'WebSocket error', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(transientSends.length, 1)
+    assert.equal(logs.some((row) => row.event === 'seat-silence-reask'), false)
+  })
+
+  let rejectedSeen = false
+  const rejectedSends = []
+  withTranscriptSeat({
+    timeoutS: 35, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }),
+    sendLine: (surface, line, at) => rejectedSends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (rejectedSeen) return []
+      rejectedSeen = true
+      return [{ at: 30_000, member: 'rejected', message: 'model not found', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(rejectedSends.length, 2)
+    assert.equal(rejectedSends[1].at, 30_000)
+    assert.equal(logs.some((row) => row.event === 'seat-silence-reask'), false)
+  })
+})
+
+test('silence re-send declines without a surface or on a non-pane transport', () => {
+  let noSurfaceSeen = false
+  const noSurfaceSends = []
+  withTranscriptSeat({
+    surfaceId: null, timeoutS: 400, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }),
+    sendLine: (surface, line, at) => noSurfaceSends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (noSurfaceSeen) return []
+      noSurfaceSeen = true
+      return [{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(noSurfaceSends.length, 1)
+    const declined = logs.find((row) => row.event === 'seat-silence-reask' && row.outcome === 'declined')
+    assert.equal(declined?.why, 'no surface_id')
+  })
+
+  let nonPaneSeen = false
+  const nonPaneSends = []
+  withTranscriptSeat({
+    transportAt: 30_000, timeoutS: 400, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }),
+    sendLine: (surface, line, at) => nonPaneSends.push({ surface, line, at }),
+    refusalFrames: () => {
+      if (nonPaneSeen) return []
+      nonPaneSeen = true
+      return [{ at: 30_000, member: null, message: 'API Error: Server error mid-response', source: 'claude' }]
+    },
+  }, ({ logs }) => {
+    assert.equal(nonPaneSends.length, 1)
+    const declined = logs.find((row) => row.event === 'seat-silence-reask' && row.outcome === 'declined')
+    assert.equal(declined?.why, 'transport headless-json is not pane')
+  })
+})
 
 test('seatIo names a stale pane at expiry and journals one warning', () => {
   withTranscriptSeat({ transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }) }, ({ io, logs, events, env, assignment }) => {

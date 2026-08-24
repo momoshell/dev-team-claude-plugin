@@ -1,10 +1,33 @@
 # Closeout
 
-The closeout order is literally **preserve → commit → prove → suite → push+PR → teardown**. Teardown is last, and it happens in the same turn as the push and PR; an escalated run never auto-tears-down because its live workspace is the escalation context.
+There are **two** closeouts and they order teardown OPPOSITELY. Decide which
+one you are in before you run anything: one of them tears down last, the other
+tears down first, and applying the wrong one puts a live seat inside your
+commit.
+
+## Which closeout is this?
+
+One question decides it: **did the driver settle this lane's seats?**
+
+| The lane… | Closeout | Teardown |
+|---|---|---|
+| reached `done` and its own driver archived the crew dir | **normal** | last |
+| escalated, or its driver exited while its seats may still be running | **recovery** | first |
+
+A run that reaches `done` tears itself down. The other half is policy in code
+at `crew/crew.mjs:1883` — an escalated lane never auto-tears-down, because its
+live workspace IS the escalation context the human needs. So an escalated
+lane's seats are **live until proven otherwise**, and quiet panes are not
+proof. Measured today on `b196-dispatchexec`: it escalated at `review:r3` and
+its driver exited while TWO claude seats were still running.
+
+If you arrived after the driver was gone, or you are adjudicating an
+escalation by hand, you are in the recovery closeout.
 
 ## Preserve first
 
-Copy the live state directory before inspecting, repairing, or renaming it:
+Both closeouts start here. Copy the live state directory before inspecting,
+repairing, or renaming it:
 
 ```sh
 cp -a <state-dir> <state-dir>.recovery-copy
@@ -16,27 +39,89 @@ prompt path, written and read back at boot. The b150-permprobe lane proved the
 failure mode: after a live rename, relaunch reported `Append system prompt file not found` on both panes. Preserve by COPY; rename only after teardown has
 finished.
 
-## Teardown last
+## Normal closeout — teardown last
 
-Run the actual command only after the built tree is committed, mutation proof
-and suite are green, and the PR is pushed/opened:
+The driver reached `done` and settled its own seats. The order is literally
+**preserve → commit → prove → suite → push+PR → teardown**. Teardown is last,
+and it happens in the same turn as the push and PR: nothing is still writing
+to the tree, so the commit is safe and the live workspace stays readable until
+the PR exists.
+
+## Recovery closeout — teardown first
+
+The driver is gone but the seats may not be. Invert the order to
+**preserve → teardown → commit → prove → suite → push+PR**: preserve by copy
+as always, then tear down FIRST and commit after.
+
+Two reasons, both structural:
+
+- The scope gate protects a fresh run's dirty checkout, and **nothing protects
+  the tree DURING a recovery**. A seat that is still alive keeps working while
+  you read, stage and commit.
+- The gate **adjudicates paths and not content**, so it cannot see an
+  unexpected edit to a file that is legitimately in scope. Inside the fence is
+  not the same as correct.
+
+The hazard is measured, not hypothetical. On `b175-paneusage` a seat was still
+alive during a hand recovery, kept working, and applied one of its own gate
+kill-mutations to the working tree; it merged correctly by ORDERING LUCK
+alone, because the mutation landed after the operator's commit rather than
+before it. On `b196-dispatchexec` the driver exited with two seats still
+running, and the teardown that followed reported `seats 4 proven 4` — that
+tally is the evidence, not the archive rename that came with it.
+
+### Prove the seats dead, do not assume it
 
 ```sh
 node crew/crew.mjs teardown --task <slug> --checkout <dir>
 ```
 
+Read the exit status and the JSON, in that order:
+
+- Teardown **exits non-zero when a seat was not proven dead**:
+  `crew/crew.mjs:2143` compares `proven` and `recorded` against `seats` and
+  sets `process.exitCode = 1`.
+- **Exit 0 is not proof on its own.** That guard reads
+  `if (seats && …)`, so a `seats: null` payload — teardown measured NO seats,
+  which `crew/crew.mjs:2097` records deliberately as an ABSENCE rather than a
+  false zero — short-circuits it and takes the success path. Measured today on
+  `b201-anchorrepair`: `exit=0` with
+  `{"archived":"…","seats":null}`, proving nothing. This is the recovery
+  closeout's own path, because a lane whose driver is gone is the one most
+  likely to yield no pane rows. Treat `seats: null` as UNPROVEN and fall back
+  to `pgrep -f <slug>` before you commit. Tracked as #601.
+- Its JSON carries `{archived, seats:{seats, proven, failed, …}}`. `proven`
+  must equal `seats`; `failed` counts seats measured still alive. A clean
+  archive rename alone is not evidence.
+
+Two operator traps, both measured today, both of which produced a confident
+wrong reading:
+
+- **`--checkout` is required in practice and optional to the parser.**
+  `REQUIRED_FLAGS.teardown` is `['task']` alone, while `pathsFor` keys the
+  state directory on the checkout's BASENAME and defaults to `process.cwd()`.
+  Run teardown from the wrong directory and it derives a state directory that
+  was never yours and errors, while appearing to have run. Always pass
+  `--checkout <dir>`.
+- **A shell exit status read after a pipeline reports the LAST command's
+  status.** Piping teardown into `tail` reports `tail`'s success for a
+  teardown that failed. Do not pipe it; or read `${pipestatus[1]}` (zsh) /
+  `${PIPESTATUS[0]}` (bash). See `references/instruments.md`.
+
+Only once `proven` equals `seats` do you commit, prove the mutations, run the
+suite, and push.
+
+## Archive naming
+
 Teardown archives by renaming the state directory to
-`${paths.dir}.archive-${iso}`. Its JSON output includes
-`{archived, seats:{seats, proven, failed, …}}`: `archived` identifies the
-archive path, while the seat counts say which processes were proven dead. The
-command exits 1 when a seat was not proven dead; do not report a clean teardown
-from the archive rename alone.
+`${paths.dir}.archive-${iso}`, and `archived` in its JSON identifies the
+archive path.
 
 Only `.archive-` is recognised by status, wait, and the stale reaper:
 `ARCHIVE_RE = /\.archive-\d{4}-\d{2}-\d{2}T/`. A hand rename to
 `.escalated-…` is invisible to all three, so it hides the lane rather than
-recording recovery state. Leave escalated work under its live name until the
-operator is ready for the real teardown.
+recording recovery state. Never hand-rename a live state directory as a
+substitute for the real teardown.
 
 ## Publishing, and what to check after teardown
 
@@ -58,8 +143,10 @@ keeps its workspace on purpose.
 **immediately after teardown**, verify what was actually published: the
 **merged blob** on the remote and the worktree state. A live seat can dirty the
 tree after a commit (b175's builder applied a gate mutation post-push, which
-only surfaced when the worktree refused removal). Teardown stays last; the
-verification follows it.
+only surfaced when the worktree refused removal). In the normal closeout
+teardown stays last and the verification follows it; in the recovery closeout
+teardown came first, so the verification is against a tree nothing can still
+be writing to.
 
 An accept-with-residuals is a close-out task, not a result: read the reviewer's
 last findings and the diff before trusting the branch. Archived crew journals

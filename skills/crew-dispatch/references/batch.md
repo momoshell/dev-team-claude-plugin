@@ -36,3 +36,12 @@ unwritten.
 and **`#379`** had two of three; a body stale about its trigger is stale about
 its steps too. Verify every clause you are about to brief, not just the blocking
 one.
+
+## The executable form
+
+`scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
+over a batch directory of request JSONs and a fence register, refusing the
+batch at the first failed check rather than proceeding
+(`scripts/factory/dispatch-batch.mjs:29`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
+says WHY each check exists, which the script cannot.

@@ -124,10 +124,8 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } }
     const handle = open()
     if (!handle) return { rows: null, absent: degradedReason || 'the ledger could not be opened' }
     if (probe.missing_tables.includes('cell_failures')) return { rows: null, absent: 'cell_failures predates this ledger mirror' }
-    const before = ledger.stats().mirror_errors
-    const rows = ledger.cellFailures({ since, until })
-    const after = ledger.stats()
-    if (after.mirror_errors > before) return { rows: null, absent: after.mirror_first_code || 'mirror read failed' }
+    const { value: rows, errors } = ledger.captureMirrorErrors(() => ledger.cellFailures({ since, until }))
+    if (errors.count > 0) return { rows: null, absent: errors.first_code || 'mirror read failed' }
     return { rows, absent: null }
   }
   function cellAttribution({ since = null, until = null } = {}) {
@@ -214,13 +212,12 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } }
     }
 
     let sweeps, picks, ever
-    const sweepsBefore = ledger.stats().mirror_errors
-    sweeps = ledger.intakeSweeps({ since, until })
-    const sweepsAfter = ledger.stats()
-    if (sweepsAfter.mirror_errors > sweepsBefore) return {
+    const sweepsRead = ledger.captureMirrorErrors(() => ledger.intakeSweeps({ since, until }))
+    sweeps = sweepsRead.value
+    if (sweepsRead.errors.count > 0) return {
       sweeps: null, refusals: null, picks: null, ever: null,
       candidate_refusals: null, candidate_picks: null, candidates_absent: null,
-      absent: sweepsAfter.mirror_first_code || 'mirror read failed',
+      absent: sweepsRead.errors.first_code || 'mirror read failed',
     }
     try {
       picks = handle.prepare(`
@@ -250,13 +247,12 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } }
       refusals_absent = 'intake_refusals predates this ledger mirror'
       candidates_absent = refusals_absent
     } else {
-      const refusalsBefore = ledger.stats().mirror_errors
-      refusals = ledger.intakeRefusals({ since, until })
-      const refusalsAfter = ledger.stats()
-      if (refusalsAfter.mirror_errors > refusalsBefore) return {
+      const refusalsRead = ledger.captureMirrorErrors(() => ledger.intakeRefusals({ since, until }))
+      refusals = refusalsRead.value
+      if (refusalsRead.errors.count > 0) return {
         sweeps: null, refusals: null, picks: null, ever: null,
         candidate_refusals: null, candidate_picks: null, candidates_absent: null,
-        absent: refusalsAfter.mirror_first_code || 'mirror read failed',
+        absent: refusalsRead.errors.first_code || 'mirror read failed',
       }
       try {
         // Latest recorded refusal per issue. SQLite's bare-column-with-MAX()
@@ -294,13 +290,13 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } }
     probeColumns()
     const handle = open()
     if (!handle) return { rows: null, transports: [], absent: degradedReason || 'the ledger could not be opened' }
-    const before = ledger.stats().mirror_errors
-    const rows = ledger.runSet({ since, until })
-    const transportRows = ledger.transportsFor(rows.map((row) => row.adw_id))
-    const after = ledger.stats()
-    if (after.mirror_errors > before) return { rows: null, transports: [], absent: after.mirror_first_code || 'mirror read failed' }
-    const transports = [...transportRows.values()].flatMap((values) => [...values])
-    return { rows, transports, absent: null }
+    const { value, errors } = ledger.captureMirrorErrors(() => {
+      const rows = ledger.runSet({ since, until })
+      return { rows, transportRows: ledger.transportsFor(rows.map((row) => row.adw_id)) }
+    })
+    if (errors.count > 0) return { rows: null, transports: [], absent: errors.first_code || 'mirror read failed' }
+    const transports = [...value.transportRows.values()].flatMap((values) => [...values])
+    return { rows: value.rows, transports, absent: null }
   }
   function budgetWindow({ since, until = null } = {}) {
     probeColumns()
@@ -333,7 +329,7 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } }
   function health() {
     probeColumns()
     const triageHealth = triage.health()
-    return { degraded: degraded || triageHealth.degraded, ledger_db: ledgerDb, triage_db: triageHealth.path, readonly: true, probe: { ...probe } }
+    return { degraded: degraded || triageHealth.degraded, ledger_db: ledgerDb, triage_db: triageHealth.path, ledger_feed_readonly: true, triage_sidecar_writable: true, probe: { ...probe } }
   }
   return {
     listRuns,

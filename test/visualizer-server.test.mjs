@@ -1707,3 +1707,29 @@ test('ladder source and API calls carry the required drag surface', () => {
   for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
   assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
 })
+
+test('viz-absent-cause-per-call — a second failure through one handle reports the second cause', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-absent-cause-per-call-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    // Failure one through this handle: a parameter the mirror cannot bind.
+    const first = feed.cellFailures({ since: Symbol('unbindable'), until: null })
+    assert.equal(first.rows, null)
+    assert.equal(first.absent, 'ERR_INVALID_ARG_TYPE')
+    // Failure two, through the SAME long-lived handle: a transport source the
+    // mirror no longer has.
+    const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+    writable.exec('DROP TABLE modifier_attempts')
+    writable.close()
+    const second = feed.runSet({ since: new Date(0).toISOString() })
+    assert.equal(second.rows, null)
+    // The cause of THIS read, never the first code the handle ever saw.
+    assert.equal(second.absent, 'ERR_SQLITE_ERROR')
+    assert.notEqual(second.absent, first.absent)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})

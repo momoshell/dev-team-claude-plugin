@@ -12,28 +12,14 @@ import { cellHealth } from '../crew/breaker.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
-import { rawRequest, scratchDir } from './helpers.mjs'
+import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
 
 const require = createRequire(import.meta.url)
-function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })
 
 function digest(path) { return createHash('sha256').update(readFileSync(path)).digest('hex') }
-function treeDigest(root) {
-  const hash = createHash('sha256')
-  function walk(dir) {
-    for (const name of readdirSync(dir).sort()) {
-      const path = join(dir, name), stat = statSync(path)
-      hash.update(name)
-      if (stat.isDirectory()) walk(path)
-      else hash.update(readFileSync(path))
-    }
-  }
-  walk(root)
-  return hash.digest('hex')
-}
 async function json(base, path, options) {
   const response = await fetch(`${base}${path}`, options)
   const text = await response.text()

@@ -1,10 +1,10 @@
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_EVENTS,
@@ -23,9 +23,11 @@ import {
   watchdogLine,
 } from '../scripts/factory/crew-watch.mjs'
 import { discoverLanes, watchPass } from '../scripts/factory/lane-watch.mjs'
+import { makeSeedLane } from './helpers.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-crew-watch-'))
 const NOW = Date.parse('2026-08-19T18:00:00.000Z')
+const seedLane = makeSeedLane(NOW)
 let worldNumber = 0
 
 const QUIET = {
@@ -38,30 +40,6 @@ function world() {
   const root = join(fixtureRoot, `world-${++worldNumber}`)
   mkdirSync(root, { recursive: true })
   return root
-}
-
-function seedLane(root, {
-  repo = 'dt-demo',
-  task = 'demo-lane',
-  journalLines = [],
-  artifacts = [],
-  settled = false,
-} = {}) {
-  const dir = join(root, repo, task)
-  const taskDir = join(dir, 'task')
-  mkdirSync(taskDir, { recursive: true })
-  mkdirSync(join(dir, 'returns'), { recursive: true })
-  writeFileSync(join(dir, 'crew.json'), JSON.stringify({ schema_version: 3, task, checkout: `/tmp/${repo}` }))
-  writeFileSync(join(dir, 'journal.jsonl'), journalLines.map((line) => JSON.stringify(line)).join('\n') + (journalLines.length ? '\n' : ''))
-  for (const artifact of artifacts) {
-    const path = join(taskDir, artifact.name)
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, artifact.body ?? 'x')
-    const when = (NOW - artifact.ageS * 1000) / 1000
-    utimesSync(path, when, when)
-  }
-  if (settled) writeFileSync(join(dir, 'returns', 'task.json'), '{}')
-  return { dir, taskDir, journal: join(dir, 'journal.jsonl') }
 }
 
 function deps(now = NOW, extra = {}) {

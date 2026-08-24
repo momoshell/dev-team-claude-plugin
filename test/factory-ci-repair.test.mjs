@@ -7,8 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync as cpSpawnSync } from 'node:child_process'
-import { createRequire } from 'node:module'
-import { ROOT } from './helpers.mjs'
+import { ROOT, sqliteAvailable, gitResult as git } from './helpers.mjs'
 import {
   UNKNOWN_REASONS,
 } from '../scripts/factory/ci-watch.mjs'
@@ -17,10 +16,6 @@ import {
 } from '../scripts/factory/ci-repair.mjs'
 import { openLedger, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
-const require = createRequire(import.meta.url)
-function sqliteAvailable() {
-  try { require('node:sqlite'); return true } catch { return false }
-}
 const SQLITE_OK = sqliteAvailable()
 const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 const FIXTURE_CHECK = 'test (node 24)'
@@ -53,15 +48,6 @@ process.once('exit', (code) => {
   if (String(process.env.NODE_OPTIONS || '').includes('--test-reporter=tap')) return
   for (const [index, title] of REQUIRED_TITLES.entries()) process.stdout.write(`ok ${index + 1} - ${title}\n`)
 })
-
-function git(repoDir, ...args) {
-  return cpSpawnSync('git', [
-    '-c', 'user.email=crew@example.invalid',
-    '-c', 'user.name=Crew Test',
-    '-c', 'protocol.file.allow=always',
-    '-C', repoDir, ...args,
-  ], { encoding: 'utf8' })
-}
 
 function ratifiedCell(value) {
   return {

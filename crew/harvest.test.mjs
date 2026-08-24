@@ -9,26 +9,9 @@ import { join } from 'node:path'
 import {
   factoryRef, harvestRun, HARVEST_REASONS, HARVEST_STATUSES,
 } from './harvest.mjs'
+import { git, gitResult } from '../test/helpers.mjs'
 
 const ID = '11111111-2222-3333-4444-555555555555'
-
-function git(repoDir, ...args) {
-  return execFileSync('git', [
-    '-c', 'user.email=crew@example.invalid',
-    '-c', 'user.name=Crew Test',
-    '-c', 'protocol.file.allow=always',
-    '-C', repoDir, ...args,
-  ], { encoding: 'utf8' })
-}
-
-function gitResult(repoDir, ...args) {
-  return cpSpawnSync('git', [
-    '-c', 'user.email=crew@example.invalid',
-    '-c', 'user.name=Crew Test',
-    '-c', 'protocol.file.allow=always',
-    '-C', repoDir, ...args,
-  ], { encoding: 'utf8' })
-}
 
 function makeWorld() {
   const root = mkdtempSync(join(tmpdir(), 'crew-harvest-'))

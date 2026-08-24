@@ -1,6 +1,5 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
 import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -11,9 +10,8 @@ import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/l
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
 import { INTAKE_REFUSALS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
+import { sqliteAvailable } from './helpers.mjs'
 
-const require = createRequire(import.meta.url)
-function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
 const SQLITE_SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 
 const start = '2024-01-01T00:00:00.000Z'

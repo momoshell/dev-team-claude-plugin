@@ -8,7 +8,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
+// node:module is not imported here: D1's node:sqlite probe lives in test/helpers.mjs.
 import {
   daemon, deriveState, normalizeEvent, usageWindow, scopeEntryDefects, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
 } from './daemon.mjs'
@@ -20,7 +20,7 @@ import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
-import { writeTornFile } from '../test/helpers.mjs'
+import { sqliteAvailable, writeTornFile } from '../test/helpers.mjs'
 
 // Quote characters inside a regex literal are ordinary here again: maskCode()
 // in test/factory-env.test.mjs classifies every slash from the token before it
@@ -51,13 +51,13 @@ const DAEMON_CODE = sourceCode(DAEMON_SOURCE)
 const CHILD_CODE = sourceCode(CHILD_SOURCE)
 const DRIVE_MODULE = ['drive', 'mjs'].join('.')
 const SEAT_IO_MODULE = ['seat-io', 'mjs'].join('.')
-const require = createRequire(import.meta.url)
-function sqliteAvailable() {
-  try {
-    require('node:sqlite')
-    return true
-  } catch { return false }
-}
+// D1 (#591 tranche 2): the node:sqlite probe now comes from test/helpers.mjs.
+// These six lines remain prose rather than deleted because
+// skills/backend-node/anchors.json pins six line-keyed anchors in this file
+// from crew/daemon.test.mjs:221 down. That skill is outside this lane's
+// fence, so this conversion stays line-count neutral — the same device as
+// the block at lines 25-30.
+// The per-file SKIP message stays where it is.
 const LEDGER_SQLITE_OK = Number.parseInt(process.versions.node, 10) >= Number.parseInt(NODE_FLOOR, 10) && sqliteAvailable()
 
 // The rpc wrapper is spawned detached and unrefed, so this test cannot retain

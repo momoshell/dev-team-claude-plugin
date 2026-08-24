@@ -44,12 +44,50 @@ function request(ask = 'measure one owned source behavior', where = ['crew/owned
   }
 }
 
+function requestFor(lane, extra = {}) {
+  return { ...request(`measure ${lane} source behavior`, [`crew/owned-${lane}.mjs`]), ...extra }
+}
+
 function makeBatch(names = ['lane-b', 'lane-a']) {
   const batch = join(root, `batch-${Math.random().toString(36).slice(2)}`)
   mkdirSync(batch, { recursive: true })
   for (const lane of names) put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(`measure ${lane} source behavior`)))
   return batch
 }
+
+// tier and shape DIFFER: a fixture where they agree passes against the defect.
+const briefWithTierAndShape = [
+  '## Proposed tier',
+  'proposed tier: build',
+  'proposed shape: mechanical',
+  '```proposal',
+  '{',
+  '  "shape": "mechanical",',
+  '  "strength": "workhorse"',
+  '}',
+  '```',
+].join('\n')
+
+const briefWithBlockOnly = [
+  '```proposal',
+  '{',
+  '  "shape": "judge",',
+  '  "strength": "workhorse"',
+  '}',
+  '```',
+].join('\n')
+
+const briefWithQuotedTier = [
+  'The ask quotes proposed tier: judge mid-sentence.',
+  '## Proposed tier',
+  'proposed tier: build',
+  '```proposal',
+  '{',
+  '  "shape": "mechanical",',
+  '  "strength": "workhorse"',
+  '}',
+  '```',
+].join('\n')
 
 function entry(lane, files, reads = []) { return { lane, files, reads } }
 function refusal(fn, reason) {
@@ -330,6 +368,69 @@ function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
   return { report, spawned, measures, compiles }
 }
 
+function dispatchFixture({
+  label,
+  names = ['lane-a', 'lane-b'],
+  requests = {},
+  fences,
+  batchTier = 'mechanical',
+  runFlags = {},
+} = {}) {
+  const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
+  const parent = join(root, `dispatch-${label}-parent`)
+  const out = join(root, `dispatch-${label}-out`)
+  mkdirSync(batch, { recursive: true })
+  const authored = Object.fromEntries(names.map((lane) => [lane, requests[lane] || requestFor(lane)]))
+  for (const lane of names) put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(authored[lane]))
+  const spawned = []
+  const logs = []
+  const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
+  const deps = {
+    existsSync: () => false,
+    readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
+    readFileSync: (path, encoding) => {
+      const text = String(path)
+      if (text.endsWith(REQUEST_SUFFIX) && text.startsWith(batch)) {
+        const name = basenameOf(text)
+        const lane = name.slice(0, -REQUEST_SUFFIX.length)
+        return JSON.stringify(authored[lane])
+      }
+      if (text.endsWith('.brief.md')) return briefWithBlockOnly
+      if (text.endsWith('/crew.json')) {
+        const lane = text.split('/').at(-2)
+        return JSON.stringify({
+          lane_name: lane,
+          lane_fence: names.filter((candidate) => candidate !== lane).map((sibling) => ({ lane: sibling, files: [] })),
+        })
+      }
+      return readFileSync(text, encoding || 'utf8')
+    },
+    spawn: (call) => {
+      spawned.push(call)
+      const args = (call.args || []).map(String)
+      if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    log: (line) => logs.push(String(line)),
+  }
+  const report = dispatchBatch({
+    batchDir: batch,
+    fences: laneFences,
+    checkout: root,
+    parentDir: parent,
+    outDir: out,
+    tier: batchTier,
+    variant: 'full',
+    runFlags,
+    deps,
+  })
+  return { report, spawned, logs, batch, parent, out, fences: laneFences }
+}
+
+function basenameOf(path) {
+  return String(path).split('/').at(-1)
+}
+
 test('a four-lane batch measures the baseline once', () => {
   const names = ['lane-a', 'lane-b', 'lane-c', 'lane-d']
   const result = fakedDispatch({ label: 'four', names, shaFor: () => 'a'.repeat(40) })
@@ -486,12 +587,122 @@ test('compileLane performs at most two passes and carries compiler reads into a 
         if (pass === 1) return { status: 2, stderr: 'brief: coupled source(s) outside lane fence: crew/x.mjs · X [reason: coupled-source-unfenced]' }
         return { status: 0, stdout: '', stderr: '' }
       },
-      readFileSync: (path) => path.endsWith('.brief.md') ? '```proposal\n{"shape":"mechanical"}\n```' : readFileSync(path, 'utf8'),
+      readFileSync: (path) => path.endsWith('.brief.md') ? briefWithTierAndShape : readFileSync(path, 'utf8'),
     },
   })
   assert.equal(calls.length, 2)
-  assert.equal(result.proposed, 'mechanical')
+  assert.equal(result.proposed, 'build')
   const retry = calls[1].args[calls[1].args.indexOf('--fences') + 1]
   assert.notEqual(retry, register)
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads.map(({ file }) => file), ['crew/x.mjs'])
+})
+
+function compileBriefProposal(brief, label) {
+  const batch = makeBatch(['lane-a'])
+  const out = join(root, `proposal-${label}-out`)
+  const register = join(root, `proposal-${label}-register.json`)
+  put(register, JSON.stringify({ lanes: [entry('lane-a', ['crew/owned.mjs'], [])] }))
+  return compileLane({
+    lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
+    fences: [entry('lane-a', ['crew/owned.mjs'], [])],
+    deps: {
+      spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+      readFileSync: (path) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, 'utf8'),
+    },
+  }).proposed
+}
+
+test('a proposal block without a tier line never supplies the seating tier', () => {
+  assert.equal(compileBriefProposal(briefWithBlockOnly, 'block-only'), null)
+})
+
+test('a mid-sentence proposed tier quote does not outrank the compiler line', () => {
+  assert.equal(compileBriefProposal(briefWithQuotedTier, 'quoted-tier'), 'build')
+})
+
+test('readBatch splits a lane tier and leaves the compiler request schema clean', () => {
+  const batch = makeBatch(['lane-a', 'lane-b'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { tier: 'judge' })))
+  const lanes = readBatch({ batchDir: batch })
+  assert.equal(lanes.find(({ lane }) => lane === 'lane-a').tier, 'judge')
+  assert.equal(lanes.find(({ lane }) => lane === 'lane-b').tier, null)
+  assert.equal(Object.hasOwn(lanes.find(({ lane }) => lane === 'lane-a').request, 'tier'), false)
+})
+
+test('a lane tier seats that lane while a sibling takes the batch default', () => {
+  const result = dispatchFixture({
+    label: 'lane-tier',
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'judge' }) },
+    batchTier: 'mechanical',
+  })
+  const boots = result.spawned.filter(({ args }) => args.includes('boot'))
+  const seated = Object.fromEntries(boots.map((call) => {
+    const task = call.args[call.args.indexOf('--task') + 1]
+    return [task, call.args[call.args.indexOf('--tier') + 1]]
+  }))
+  assert.deepEqual(seated, { 'lane-a': 'judge', 'lane-b': 'mechanical' })
+  const requested = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
+  assert.ok(requested.some((line) => line.includes('lane=lane-a') && line.includes('requested=judge requested_from=lane')))
+  assert.ok(requested.some((line) => line.includes('lane=lane-b') && line.includes('requested=mechanical requested_from=batch')))
+})
+
+test('the compiler receives exactly the four schema request keys', () => {
+  const result = dispatchFixture({
+    label: 'clean-request',
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'judge' }) },
+  })
+  const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  assert.equal(compiles.length, 2)
+  const expected = ['ask', 'done_means', 'out_of_scope', 'where']
+  for (const call of compiles) {
+    const path = call.args[call.args.indexOf('--request') + 1]
+    assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort(), expected)
+  }
+})
+
+test('a lane tier below its protected floor refuses tier-floor-conflict', () => {
+  const requestBody = requestFor('lane-a', { tier: 'mechanical', where: ['crew/drive.mjs'] })
+  assert.throws(() => dispatchFixture({
+    label: 'floor-conflict',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestBody },
+    fences: [entry('lane-a', ['crew/drive.mjs'])],
+  }), (err) => err instanceof BatchRefusal && err.reason === 'tier-floor-conflict')
+})
+
+test('an unrecognised lane tier refuses batch-unreadable', () => {
+  assert.throws(() => dispatchFixture({
+    label: 'unknown-tier',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'operator' }) },
+  }), (err) => err instanceof BatchRefusal && err.reason === 'batch-unreadable')
+})
+
+test('keep defaults on, --no-keep removes it, and the report states the choice', () => {
+  const kept = dispatchFixture({ label: 'keep-default' })
+  const keptRuns = kept.spawned.filter(({ args }) => args.includes('run'))
+  assert.equal(kept.report.keep, true)
+  assert.equal(keptRuns.length, 2)
+  assert.equal(keptRuns.every(({ args }) => args.includes('--keep')), true)
+
+  const released = dispatchFixture({ label: 'keep-off', runFlags: { 'no-keep': true } })
+  const releasedRuns = released.spawned.filter(({ args }) => args.includes('run'))
+  assert.equal(released.report.keep, false)
+  assert.equal(releasedRuns.length, 2)
+  assert.equal(releasedRuns.every(({ args }) => !args.includes('--keep')), true)
+  assert.equal(released.logs.filter((line) => line.startsWith('dispatch-batch: workspaces keep=false')).length, 1)
+})
+
+test('parseCliArgs accepts --no-keep as a boolean override', () => {
+  assert.deepEqual(parseCliArgs(['--batch', 'b', '--no-keep']), { batch: 'b', 'no-keep': true })
+})
+
+test('closing output states the keep policy and names one teardown command per lane', () => {
+  const result = dispatchFixture({ label: 'closing-output' })
+  assert.equal(result.logs.filter((line) => line.startsWith('dispatch-batch: workspaces keep=true')).length, 1)
+  for (const lane of ['lane-a', 'lane-b']) {
+    assert.ok(result.logs.includes(
+      `dispatch-batch: teardown lane=${lane} command=node crew/crew.mjs teardown --task ${lane} --checkout ${join(result.parent, `dt-${lane}`)}`,
+    ))
+  }
 })

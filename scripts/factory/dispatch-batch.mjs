@@ -56,6 +56,12 @@ export const STALE_READ_ACK = 'stale-read-ack'
 
 export const REQUEST_SUFFIX = '.request.json'
 
+// Keys a lane's request carries for the DISPATCHER, not for the compiler. The
+// compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
+// dispatch-only key is split off here and never reaches the compiled request.
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier'])
+export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
+
 export class BatchRefusal extends Error {
   constructor(message, reason) {
     super(`dispatch-batch: ${message}`)
@@ -154,6 +160,22 @@ function childFailure(result) {
   return stderr || error || signal || stdout || `exit ${String(result?.status)}`
 }
 
+// A dispatch-only key travels with the lane it describes. The tier value is
+// checked here rather than at boot so a typo names its own file.
+function splitDispatchKeys(parsed, requestPath) {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { dispatch: {}, request: parsed }
+  const dispatch = {}
+  const request = {}
+  for (const [key, value] of Object.entries(parsed)) {
+    if (DISPATCH_ONLY_REQUEST_KEYS.includes(key)) dispatch[key] = value
+    else request[key] = value
+  }
+  if (Object.prototype.hasOwnProperty.call(dispatch, 'tier') && !TIER_NAMES.includes(dispatch.tier)) {
+    refuse(`request ${requestPath} names an unknown tier ${JSON.stringify(dispatch.tier)}; expected one of ${TIER_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  }
+  return { dispatch, request }
+}
+
 export function readBatch({ batchDir, deps } = {}) {
   const d = normalDeps(deps)
   if (typeof batchDir !== 'string' || batchDir.trim() === '') {
@@ -178,9 +200,14 @@ export function readBatch({ batchDir, deps } = {}) {
     const lane = name.slice(0, -REQUEST_SUFFIX.length)
     if (!lane) refuse(`request filename has no lane name: ${name}`, BATCH_UNREADABLE)
     const requestPath = join(directory, name)
-    let request
+    let parsed
     try {
-      request = JSON.parse(d.readFileSync(requestPath, 'utf8'))
+      parsed = JSON.parse(d.readFileSync(requestPath, 'utf8'))
+    } catch (err) {
+      refuse(`cannot read or validate request ${requestPath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
+    }
+    const { dispatch, request } = splitDispatchKeys(parsed, requestPath)
+    try {
       validateRequest(request, { taskName: lane })
     } catch (err) {
       refuse(`cannot read or validate request ${requestPath}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
@@ -189,6 +216,7 @@ export function readBatch({ batchDir, deps } = {}) {
       lane,
       name,
       request,
+      tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
       where: request.where.map(normaliseRepoPath),
     })
   }
@@ -369,16 +397,15 @@ function writeUpdatedRegister({ data, lane, reason, files, outDir, d }) {
   return path
 }
 
+// The compiler proposes a tier on ONE line and renders the proposal block from
+// the other two axes: PROPOSAL_KEYS is ['shape', 'strength'] (make-brief.mjs:148)
+// and the block never carries a tier at all. Shape is the RISK axis and shares
+// the mechanical|build|judge vocabulary with tier, so reading it through
+// TIER_NAMES passed the membership guard on the wrong axis and seated every
+// lane at its shape. The line anchor keeps a phrase quoted mid-sentence in the
+// ask from outranking the compiler's own line.
 function proposalFromBrief(text) {
-  const block = /```proposal\s*([\s\S]*?)```/.exec(text)
-  if (block) {
-    try {
-      const value = JSON.parse(block[1])
-      if (value && TIER_NAMES.includes(value.tier)) return value.tier
-      if (value && TIER_NAMES.includes(value.shape)) return value.shape
-    } catch { /* prose fallback below keeps an unparseable block from inventing a tier */ }
-  }
-  const match = /proposed tier:\s*(mechanical|build|judge)\b/i.exec(text)
+  const match = /^proposed tier:\s*(mechanical|build|judge)\b/im.exec(text)
   return match ? match[1].toLowerCase() : null
 }
 
@@ -430,10 +457,10 @@ export function measureBatchBaseline({ plans, outDir, checkout, deps } = {}) {
   return path
 }
 
-function compileCommand({ lane, batchDir, laneDir, registerPath, outDir, baselinePath }) {
+function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath }) {
   const args = [
     'scripts/factory/make-brief.mjs',
-    '--request', join(batchDir, `${lane}.request.json`),
+    '--request', requestPath,
     '--checkout', laneDir,
     '--fences', registerPath,
     '--lane', lane,
@@ -444,13 +471,16 @@ function compileCommand({ lane, batchDir, laneDir, registerPath, outDir, baselin
   return { file: 'node', args, cwd: laneDir }
 }
 
-export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
+export function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
   const d = normalDeps(deps)
   const name = laneNameOf(lane)
   const requestDir = resolve(batchDir)
   const checkout = typeof laneDir === 'string' && laneDir.trim() ? laneDir : process.cwd()
   const outputDir = typeof outDir === 'string' && outDir.trim() ? outDir : join(requestDir, 'out')
   const authoredRegister = registerPath || join(outputDir, 'dispatch.fences.json')
+  const compileRequest = typeof requestPath === 'string' && requestPath.trim()
+    ? requestPath
+    : join(requestDir, `${name}${REQUEST_SUFFIX}`)
   try { mkdirSync(outputDir, { recursive: true }) } catch (err) {
     refuse(`cannot create compiler output directory ${outputDir}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
@@ -463,7 +493,7 @@ export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fen
 
   let currentRegister = authoredRegister
   let result
-  try { result = d.spawn(compileCommand({ lane: name, batchDir: requestDir, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
+  try { result = d.spawn(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (result?.status === 0) {
@@ -487,7 +517,7 @@ export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fen
   currentRegister = writeUpdatedRegister({ data, lane: name, reason: parsed.reason, files: parsed.files, outDir: outputDir, d })
 
   let second
-  try { second = d.spawn(compileCommand({ lane: name, batchDir: requestDir, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
+  try { second = d.spawn(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler retry could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (!second || second.status !== 0) {
@@ -585,8 +615,9 @@ function preflightRunOptions({ variant, runFlags = {} } = {}) {
   }
 }
 
-function runCommand({ lane, laneDir, briefPath, files, variant, runFlags = {} }) {
-  const args = ['crew/crew.mjs', 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath, '--keep']
+function runCommand({ lane, laneDir, briefPath, files, variant, keep, runFlags = {} }) {
+  const args = ['crew/crew.mjs', 'run', '--task', lane, '--checkout', laneDir, '--brief-file', briefPath]
+  if (keep) args.push('--keep')
   const add = (flag, value) => {
     if (value === undefined || value === null || value === '') return
     args.push(`--${flag}`, String(value))
@@ -612,6 +643,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   // tripped over. Ordering is the whole fix — both refusals still fire.
   preflightRunOptions({ variant, runFlags })
   const plans = planWorktrees({ lanes, parentDir, checkout, deps: d })
+  const keep = runFlags['no-keep'] !== true
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
   if (dryRun) {
     d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
@@ -635,11 +667,25 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
 
   createWorktrees({ plans, checkout: root, deps: d })
   const baselinePath = measureBatchBaseline({ plans, outDir: outputDir, checkout: root, deps: d })
+  // The compiler's request schema is closed, so every lane is compiled from a
+  // copy of its request with the dispatch-only keys removed. The copy is named
+  // so it can never be mistaken for an authored request, even when --out points
+  // at the batch directory itself.
+  const compileRequests = new Map()
+  for (const lane of lanes) {
+    const requestPath = join(outputDir, `${lane.lane}${COMPILE_REQUEST_SUFFIX}`)
+    try { writeFileSync(requestPath, JSON.stringify(lane.request, null, 2) + '\n') } catch (err) {
+      refuse(`cannot write compiler request ${requestPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+    }
+    compileRequests.set(lane.lane, requestPath)
+  }
+
   const compiled = []
   for (const plan of plans) {
     compiled.push(compileLane({
       lane: plan.lane,
       batchDir: resolve(batchDir),
+      requestPath: compileRequests.get(plan.lane),
       laneDir: plan.dir,
       registerPath,
       outDir: outputDir,
@@ -649,14 +695,20 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     }))
   }
 
+  const laneByName = new Map(lanes.map((lane) => [lane.lane, lane]))
   const settled = []
   for (const item of compiled) {
     const plan = plans.find((candidate) => candidate.lane === item.lane)
     const laneFence = fenceReport.perLane[item.lane]
     const floor = tierFloor({ files: laneFence.files, extra: runFlags.protectedPaths })
-    const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested: tier })
+    const laneEntry = laneByName.get(item.lane)
+    // A lane's own tier is the requested tier for THAT lane; --tier stays the
+    // batch default for every lane that does not name one. The floor still wins
+    // and tier-floor-conflict still refuses, per lane.
+    const requested = laneEntry?.tier ?? tier
+    const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} settled=${result.tier}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} settled=${result.tier}`)
     settled.push({ ...item, plan, floor, tier: result.tier })
   }
 
@@ -693,6 +745,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
           briefPath: item.brief,
           files,
           variant,
+          keep,
           runFlags,
         }),
         background: true,
@@ -706,9 +759,19 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     }
     const watchArgs = ['scripts/factory/crew-watch.mjs', item.lane, '--follow']
     d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} command=node ${watchArgs.join(' ')}`)
-    runs.push({ lane: item.lane, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root } })
+    runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root } })
   }
-  return { lanes: runs, plans, registerPath, outDir: outputDir }
+
+  // Keeping the workspaces is a CHOICE, so the dispatcher states it and names
+  // the command that undoes it. crew.mjs self-tears-down only on a done run
+  // without --keep (crew/crew.mjs:1888); an escalated lane is kept either way.
+  d.log(keep
+    ? 'dispatch-batch: workspaces keep=true — every lane workspace and crew dir is kept for inspection; pass --no-keep to let a lane that finishes done tear itself down'
+    : 'dispatch-batch: workspaces keep=false — a lane that finishes done tears itself down and archives its crew dir; an escalated lane is kept either way')
+  for (const item of runs) {
+    d.log(`dispatch-batch: teardown lane=${item.lane} command=node crew/crew.mjs teardown --task ${item.lane} --checkout ${item.laneDir}`)
+  }
+  return { lanes: runs, plans, registerPath, outDir: outputDir, keep }
 }
 
 export function parseCliArgs(argv) {
@@ -720,7 +783,7 @@ export function parseCliArgs(argv) {
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
   ])
-  const booleanFlags = new Set(['dry-run', 'force'])
+  const booleanFlags = new Set(['dry-run', 'force', 'no-keep'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (typeof argument !== 'string' || !argument.startsWith('--')) {

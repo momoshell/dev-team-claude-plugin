@@ -1277,6 +1277,14 @@ export function openLedger({
     // seq) and whose key is already held by DIFFERENT content — the mirror
     // keeps the first and this record exists only in the JSONL authority.
     seq_collisions: 0,
+    // Two near-synonyms holding different things: degraded_reason is a CODE
+    // ('below_floor' for the version check, else an open failure's error
+    // code/name), degraded_message is the full human sentence passed to
+    // noteDegraded. Both consumers depend on the split: scripts/factory/emit.mjs
+    // compares degraded_reason against 'below_floor' to decide whether a
+    // degradation was expected, and visualizer/server/ledger-feed.mjs surfaces
+    // degraded_message verbatim as the run-set's absent prose. Both null while
+    // not degraded.
     degraded_reason: null, degraded_message: null,
   }
   const seqAllocators = new Map() // `${adw_id}:${kind}` -> next seq

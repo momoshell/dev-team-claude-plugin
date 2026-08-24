@@ -1,4 +1,6 @@
 // Pure run shaping helpers. This module opens no file and no database.
+// The ledger exports these two names specifically so every renderer has one
+// home for this vocabulary (#433).
 import { usageAbsentCause, USAGE_ABSENT_CAUSES } from '../../scripts/factory/ledger.mjs'
 
 const lanes = new Map()
@@ -13,8 +15,12 @@ const MODEL_ROLE_PENDING = "not measured — this run records an agent_sessions 
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const SEAT_TEARDOWN_WINDOW_MS = 24 * 60 * 60 * 1000
-// The ledger exports these two names specifically so every renderer has one
-// home for this vocabulary (#433); this module still opens no file or database.
+// Dependency-free copies, kept in lockstep with scripts/factory/ledger.mjs:
+// SEAT_TEARDOWN_OUTCOMES mirrors the ledger's export of the SAME name, and
+// INTAKE_REFUSAL_REASONS mirrors the ledger's INTAKE_REFUSALS — the same list
+// under a different name. Widen either list there and widen it here in the
+// same change; test/visualizer-teardown.test.mjs and test/visualizer-shape.test.mjs
+// catch the drift, but only as a confusing red after the fact.
 export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
 export const INTAKE_REFUSAL_REASONS = Object.freeze([
   'stop-switch', 'window-cap', 'rate-limit-floor',

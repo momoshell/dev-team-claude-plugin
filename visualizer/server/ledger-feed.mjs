@@ -294,7 +294,6 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } }
     probeColumns()
     const handle = open()
     if (!handle) return { rows: null, transports: [], absent: degradedReason || 'the ledger could not be opened' }
-    if (probe.missing_tables.includes('sessions')) return { rows: null, transports: [], absent: 'sessions predates this ledger mirror' }
     const before = ledger.stats().mirror_errors
     const rows = ledger.runSet({ since, until })
     const transportRows = ledger.transportsFor(rows.map((row) => row.adw_id))

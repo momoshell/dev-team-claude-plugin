@@ -1,0 +1,10 @@
+{
+  "crew/drive.mjs:23": "plan_rounds: 2, // planner attempts",
+  "crew/drive.mjs:44": "builder: 2400, reviewer: 1800",
+  "crew/drive.mjs:339": "export const GATE_REAP_SHELL = '/bin/bash'",
+  "crew/drive.test.mjs:2513": "'/path/that/does/not/exist'",
+  "crew/protected-paths.mjs:24": "export function resolveProtectedPaths(extra)",
+  "scripts/factory/make-brief.mjs:108": "COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'",
+  "scripts/factory/make-brief.mjs:109": "STALE_READ_ACK = 'stale-read-ack'",
+  "scripts/factory/make-brief.mjs:1251": "a recorded baseline is a fact about a commit and is never consumed"
+}

@@ -7,7 +7,7 @@ are written without the leading `--`; role-prefixed names are accepted only on
 ```json
 {
   "boot": ["task", "checkout", "tier", "roles", "fences", "lane", "headless-all", "model-reviewer", "effort-reviewer", "agent-reviewer"],
-  "run":  ["task", "checkout", "brief-file", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "suite", "keep"],
+  "run":  ["task", "checkout", "brief-file", "variant", "files-in-scope", "validation-lane", "plan-rounds", "build-rounds", "review-rounds", "wait-planner", "wait-tech-lead", "wait-builder", "wait-reviewer", "wait-lead", "suite", "keep"],
   "boot_only": ["fences", "lane"]
 }
 ```
@@ -16,6 +16,9 @@ are written without the leading `--`; role-prefixed names are accepted only on
 role-prefixed families `model-`, `agent-`, `effort-`, and `allow-shortfall-`
 are a boot-only extension; a concrete suffix such as `model-reviewer` must
 still be non-empty. `boot_only` is exactly `fences`, then `lane`.
+
+The per-role wait budgets default to `WAITS_S` and are the flag lever 9 names;
+they are `run` flags, not boot flags.
 
 The runtime's misplaced-flag refusal is:
 

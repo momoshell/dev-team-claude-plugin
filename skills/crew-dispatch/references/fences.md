@@ -60,11 +60,17 @@ node --input-type=module -e "import { scopeMatcher } from './crew/drive.mjs'; co
 ```
 
 The protected-path floor is the other consumer. Check the exact scope entries
-with `protectedHitsIn`, including the authored `docs/adr/` and workflow floor:
+with `protectedHitsIn` over `resolveProtectedPaths(profileAdditions)`; the
+resolved-union evidence belongs in [`references/tier.md`](tier.md):
 
 ```sh
-node --input-type=module -e "import { protectedHitsIn, PROTECTED_PATHS } from './crew/protected-paths.mjs'; console.log(protectedHitsIn(['skills/crew-dispatch/'], PROTECTED_PATHS))"
+node --input-type=module -e "import { protectedHitsIn } from './crew/protected-paths.mjs'; import { checkoutProtectedPaths } from './scripts/factory/probe-repo.mjs'; const { paths, basis } = checkoutProtectedPaths({ checkout: process.cwd() }); console.log(basis); console.log(protectedHitsIn(['skills/crew-dispatch/'], paths))"
 ```
+
+Print the `basis`, never a remembered count: `checkoutProtectedPaths` falls back
+to the authored floor with `used: false` whenever no ratified profile is
+readable, so an empty hit list alone cannot tell you which floor you were
+measured against.
 
 ## Arrival, not parsing
 
@@ -82,3 +88,28 @@ grep -F '"event":"lane-fence"' <state-dir>/journal.jsonl
 surfaces to deny. An empty array at arrival is not evidence that the fence was
 lost; the lane name plus the journal `lane-fence` event establish that it
 arrived.
+
+## The fence is a claim about the code
+
+A requirement's **seam** is part of its specification. For every “record /
+persist / durably store” clause, name the seam and verify it can hold the value
+before fencing its owning module out, or cut the requirement explicitly and say
+it is deferred (#356/b56: three plan rounds, zero code, and a lane forced to
+invent a write). When a re-dispatch cuts an invented mechanism, add an
+**anti-spiral** clause forbidding both the mechanism and the machinery it would
+need. Before fencing file F out of a brief that changes contract C, grep F for
+C's names: a mirrored enum or marker table is the commonest carrier (#193,
+#199, and the repair-variant lane).
+
+## Granularity, measured
+
+Recount with no extension filter first: `--include` silently under-reports, and
+one `.js` file was missed in a 20-file rename. When a brief moves a constant,
+**grep the VALUE**, not only the symbol, because an import firewall can turn one
+value into two declarations and only the second has its own pinning test (b161
+→ `escalate:scope`, three plan rounds, zero code). A task changing a
+**DETECTOR** owns whatever that detector newly flags; compute that set before
+dispatch. A `where` path that does not exist refuses **`missing-path`**, so a
+lane needing a new file puts its fixture in an existing home. A source-grep
+tripwire is trivially spoofable: when relocating code, retarget it honestly,
+not with a comment.

@@ -50,5 +50,4 @@ git rebase origin/main
 ```
 
 Run the lane's gate and suite again after the rebase, then push and open the PR.
-Never delete the lane branch while its PR is open; the branch remains the
-review and recovery handle until the PR is merged or explicitly closed.
+Publication boundaries are owned by [`skills/devops/references/lane-branches.md`](../../devops/references/lane-branches.md); recovery for a broken boundary is in [`skills/crew-recovery/references/closeout.md`](../../crew-recovery/references/closeout.md).

@@ -209,6 +209,23 @@ paired with `{ "check": "C1", "file": "scripts/factory/make-brief.mjs", "find": 
 Every compiled brief repeats this contract under `## Per-check mutations`.
 Rationale: #330.
 
+## What a plan costs the lane (measured, #588)
+
+- Lever 1: a brief that says **choose the shape**, *decide*, or **add a mode**
+  carries undone design. Judge plan-check is the most expensive place to settle
+  one (b184: three tech-lead rounds at xhigh, then escalation and re-dispatch;
+  b187 at the same tier, with a finished table and one directional rule, was
+  accepted at round 1). Name it as a `details.questions` entry; do not choose
+  silently.
+- Lever 3: the gate runs **before review**, so an expressible check costs zero
+  review rounds. Naming the exact kill-mutation per finding passed first round
+  with no findings; leaving per-finding judgement to the lane took three review
+  rounds.
+- Lever 9: a plan demanding N isolated kill-mutations must size its own budget.
+  The builder wait is **2400s**, and b187-jsonleaf escalated at builder while
+  healthy because six isolated proofs plus 14 files never fit it. Say so under
+  `Risks/consults` and ask for **`--wait-builder`** ≈ `2400 + N × suite_time`.
+
 ## Team memory
 
 A `## Team memory` section may be appended below; it is accumulated judgment from past runs — advisory context, outranked by the brief, the plan and the code; it may be partial (the trailing comment says what was dropped).

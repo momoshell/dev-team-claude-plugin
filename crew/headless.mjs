@@ -25,10 +25,30 @@ const KILL_GRACE_MS = 10_000
 // branches on the result (#373 owns the pane half and will reuse this). Ordered
 // — first match wins — and a DATA table, so a new condition is a data edit.
 export const PROVIDER_CONDITIONS = Object.freeze([
-  { condition: 'overloaded', pattern: /overloaded_error|\boverloaded\b|\b529\b/i },
-  { condition: 'rate-limit', pattern: /rate_limit_error|\brate limit\b|\b429\b/i },
-  { condition: 'auth', pattern: /authentication_error|invalid api key|\bunauthorized\b|\b401\b|\b403\b/i },
+  { condition: 'overloaded', pattern: /overloaded_error|\boverloaded\b/i },
+  { condition: 'rate-limit', pattern: /rate_limit_error|\brate limit\b/i },
+  { condition: 'auth', pattern: /authentication_error|invalid api key|\bunauthorized\b/i },
 ])
+
+// The refusal vocabulary is DATA, so adding a member is a data edit rather
+// than a new branch. Order is load-bearing: the first match wins.
+export const SEAT_REFUSALS = Object.freeze([
+  { member: 'overflowed', pattern: /context_length_exceeded|prompt is too long|exceeds the context window/i },
+  { member: 'quota', pattern: /\b(?:session|weekly) limit\b|usage limit (?:has been )?reached/i },
+  { member: 'rejected', pattern: /is not supported on this model|is not supported when using|invalid_request_error|no api key for provider|model not found|safeguards flagged/i },
+  { member: 'suspended', pattern: /computer went to sleep/i },
+  { member: 'transient', pattern: /overloaded_error|\boverloaded\b|rate_limit_error|\brate limit\b|connection closed|websocket|internal server error|\bterminated\b|fetch failed/i },
+])
+
+// What the DRIVER may do about each member, and a data map for the same reason
+// the vocabulary is one: a policy change is a data edit, not a new branch.
+export const SEAT_REFUSAL_ACTIONS = Object.freeze({
+  rejected: 'reprompt',   // one identical re-send, then end named (#567, b177 vs b175)
+  quota: 'end',           // the frame states the reset; re-prompting cannot help
+  transient: 'journal',   // self-heals; let the budget ride
+  suspended: 'journal',   // the host slept; the seat is not at fault
+  overflowed: 'journal',  // n=0 in 219 lanes — a first occurrence is itself the news
+})
 
 // The SAME CSI pattern scripts/factory/make-brief.mjs:53 carries, re-inlined
 // rather than imported across the factory boundary — the precedent is
@@ -41,6 +61,13 @@ export function recogniseProviderCondition(text) {
   if (typeof text !== 'string' || !text) return null
   const plain = text.replace(ANSI_CSI, '')
   for (const { condition, pattern } of PROVIDER_CONDITIONS) if (pattern.test(plain)) return condition
+  return null
+}
+
+export function recogniseSeatRefusal(text) {
+  if (typeof text !== 'string' || !text) return null
+  const plain = text.replace(ANSI_CSI, '')
+  for (const { member, pattern } of SEAT_REFUSALS) if (pattern.test(plain)) return member
   return null
 }
 

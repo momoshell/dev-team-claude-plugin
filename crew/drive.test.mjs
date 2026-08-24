@@ -6036,7 +6036,7 @@ test('a child-shaped ctx (lead only in seatedRoles) takes the gate repair on the
   assert.equal(attendedIo.calls.assign.filter(({ role, note }) => role === 'lead' && note === 'gate-fix').length, 1)
 })
 
-test('the panel is skipped without a tech-lead, and PANEL_PARTNERS excludes the planner', () => {
+test('the panel is skipped without a tech-lead, and this drive hands the seated planner no panel assignment', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', []) },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
@@ -6046,6 +6046,7 @@ test('the panel is skipped without a tech-lead, and PANEL_PARTNERS excludes the 
   assert.equal(result.status, 'done')
   assert.ok(io.calls.logs.some((line) => line.panel_skipped === 'seats'))
   assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 1)
+  assert.deepEqual(io.calls.assign.filter(({ role }) => role === 'planner').map(({ note }) => note), ['plan'], 'the seated planner is assigned for the plan round only, never a panel seat')
   assert.deepEqual(PANEL_PARTNERS, ['tech-lead'])
   assert.deepEqual(PERSPECTIVE_TARGETS, ['reviewer', 'tech-lead'])
 })

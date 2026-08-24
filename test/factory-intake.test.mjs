@@ -1131,15 +1131,82 @@ test('intake.mjs carries no identity literals or absolute paths', () => {
   assert.equal(/(?:^|["'`])\/(?!\/)/m.test(source), false)
 })
 
-test('importing intake.mjs performs no I/O and node --check passes', () => {
+// The module-eval I/O this graph is MEASURED to perform, named one by one with
+// its anchor. Silence is not evidence: the probe below wraps fs/net/dns/
+// child_process, proves on a real read that the wrapper can see a SUCCESSFUL
+// call, and only then imports the module — so a read that succeeds is observed
+// rather than inferred from an exit code.
+const INTAKE_EVAL_IO_WARRANTED = new Map([
+  ['fs.readFileSync:crew/model-ladder.json', 'make-brief.mjs:81 `export const LADDER_BANDS = readLadderBands()` reads the ratified ladder at module-eval time; intake.mjs imports make-brief.mjs'],
+])
+
+const IO_PROBE_SOURCE = [
+  "import { createRequire } from 'node:module'",
+  "import { fileURLToPath, pathToFileURL } from 'node:url'",
+  "const require = createRequire(import.meta.url)",
+  "const mods = { fs: require('node:fs'), fsp: require('node:fs/promises'), net: require('node:net'), dns: require('node:dns'), cp: require('node:child_process') }",
+  "const seen = []",
+  "let watching = false",
+  "const wrap = (label, name) => {",
+  "  const obj = mods[label]",
+  "  const orig = obj[name]",
+  "  if (typeof orig !== 'function') return",
+  "  obj[name] = function (...args) {",
+  "    if (watching) seen.push({ call: `${label}.${name}`, arg: String(args[0]) })",
+  "    return orig.apply(this, args)",
+  "  }",
+  "}",
+  "for (const n of ['readFileSync', 'writeFileSync', 'appendFileSync', 'openSync', 'readdirSync', 'mkdirSync', 'statSync', 'lstatSync', 'existsSync', 'realpathSync', 'accessSync', 'readFile', 'writeFile', 'open', 'readdir', 'mkdir', 'stat', 'access']) wrap('fs', n)",
+  "for (const n of ['readFile', 'writeFile', 'appendFile', 'open', 'readdir', 'mkdir', 'stat', 'lstat', 'access', 'realpath']) wrap('fsp', n)",
+  "for (const n of ['connect', 'createConnection']) wrap('net', n)",
+  "for (const n of ['lookup', 'resolve']) wrap('dns', n)",
+  "for (const n of ['spawn', 'spawnSync', 'exec', 'execSync', 'execFile', 'execFileSync', 'fork']) wrap('cp', n)",
+  "",
+  "// Self-proof: the instrument must be shown to SEE a successful read before its",
+  "// silence is worth anything.",
+  "watching = true",
+  "mods.fs.readFileSync(process.argv[1])",
+  "const instrumentProven = seen.some((entry) => entry.call === 'fs.readFileSync')",
+  "seen.length = 0",
+  "",
+  "await import(pathToFileURL(process.argv[2]).href)",
+  "watching = false",
+  "",
+  "const toPath = (arg) => (arg.startsWith('file://') ? fileURLToPath(arg) : arg)",
+  "const unexpected = seen",
+  "  .map((entry) => ({ ...entry, path: toPath(entry.arg) }))",
+  "  // Loading the module graph itself runs through these same functions. Stated",
+  "  // blind spot: a read of a .mjs/.js/.cjs source file is indistinguishable",
+  "  // from the loader reading it, so this detector's floor is every NON-source",
+  "  // read plus every network or subprocess call.",
+  "  .filter((entry) => !(entry.call.startsWith('fs.') && /\\.(mjs|js|cjs)$/.test(entry.path)))",
+  "  .map((entry) => `${entry.call}:${entry.path}`)",
+  "console.log(JSON.stringify({ instrumentProven, unexpected }))",
+  "",
+].join('\n')
+
+test('importing intake.mjs performs no unobserved I/O at module eval beyond the warranted ladder read, and node --check passes', () => {
   const script = fileURLToPath(new URL('../scripts/factory/intake.mjs', import.meta.url))
   const check = spawnSync(process.execPath, ['--check', script], { encoding: 'utf8' })
   assert.equal(check.status, 0, check.stderr)
-  const imported = spawnSync(process.execPath, ['--input-type=module', '-e', `
-    import(${JSON.stringify(new URL('../scripts/factory/intake.mjs', import.meta.url).href)}).then(() => console.log('ok'))
-  `], { encoding: 'utf8' })
-  assert.equal(imported.status, 0, imported.stderr)
-  assert.equal(imported.stdout.trim(), 'ok')
+
+  const probe = join(scratchDir('factory-intake-io-probe-'), 'probe.mjs')
+  writeFileSync(probe, IO_PROBE_SOURCE)
+  const run = spawnSync(process.execPath, [probe, script], { encoding: 'utf8' })
+  assert.equal(run.status, 0, run.stderr)
+  const observed = JSON.parse(run.stdout)
+  assert.equal(observed.instrumentProven, true, 'the probe must be proven able to see a successful read before its silence counts')
+  const remainingWarranted = new Map([...INTAKE_EVAL_IO_WARRANTED.keys()].map((entry) => [entry, 1]))
+  const unwarranted = []
+  for (const entry of observed.unexpected.map((value) => value.replace(`${ROOT}/`, ''))) {
+    const remaining = remainingWarranted.get(entry) || 0
+    if (remaining === 0) unwarranted.push(entry)
+    else remainingWarranted.set(entry, remaining - 1)
+  }
+  for (const [entry, remaining] of remainingWarranted) {
+    if (remaining > 0) unwarranted.push(`${entry} (expected ${remaining} read(s) not observed)`)
+  }
+  assert.deepEqual(unwarranted, [], `intake.mjs performed unwarranted I/O at module-eval time: ${JSON.stringify(unwarranted)}`)
 })
 
 test('an unusable board is rejected before the stop switch or runner', () => {

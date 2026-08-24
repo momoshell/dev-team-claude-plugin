@@ -25,3 +25,12 @@ above it. This round measured **34 wrong anchors out of 40** in
 **b161** did exactly this in `crew/daemon.mjs`, dropping the line number rather
 than guessing a new one. This rule is guidance, not a detector: nothing
 enforces it on comments today, and building that detector is a separate lane.
+
+## A stale citation moves; the file does not
+
+The measured cases show why line counts must not drive citation choices: #596 held `crew/daemon.test.mjs` at 3304 lines; #599 re-anchored five `ledger.mjs` anchors by hand; and #579 deleted four comment blocks to hold 4600.
+
+- The line number is advisory and the CONTENT is the identity — #550's rule applied to code-to-code citations.
+- If a citation goes stale the CITATION moves, and holding a file's line count constant is never a goal.
+- Repair is opt-in: `node skills/qa-test-writing/anchor-pin.mjs --repair <skillDir>` rewrites the key and the prose; checking never rewrites, so CI still sees real drift.
+- The ambiguous cases refuse rather than guess: content on more than one line has no unique home, and content on no line is rot a human reads.

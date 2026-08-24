@@ -14,6 +14,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { harvestRun } from './harvest.mjs'
+import { readJsonTri } from './json-leaf.mjs'
 
 export const ARM_AXES = Object.freeze(['prompt', 'roster', 'model'])
 
@@ -107,14 +108,6 @@ function axisReason(axes) {
 
 function validPin(pin) {
   return typeof pin === 'string' && pin.trim().length > 0
-}
-
-function readJson(path, d) {
-  try {
-    return JSON.parse(d.readFileSync(path, 'utf8'))
-  } catch {
-    return null
-  }
 }
 
 function wellFormedArm(record) {
@@ -257,12 +250,8 @@ function recoverableTornLine(lines, index) {
 function crewMetadata(arm, d) {
   let path
   try { path = join(arm.crew_dir, 'crew.json') } catch { return null }
-  try {
-    if (!d.existsSync(path)) return null
-  } catch {
-    return null
-  }
-  const crew = readJson(path, d)
+  let crew
+  try { crew = readJsonTri(path, d) ?? null } catch { return null }
   return crew && typeof crew === 'object' && !Array.isArray(crew) ? crew : null
 }
 

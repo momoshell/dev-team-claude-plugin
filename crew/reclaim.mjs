@@ -1,7 +1,7 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync, renameSync as fsRenameSync, linkSync as fsLinkSync } from 'node:fs'
 import { join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
-
+import { readJsonAt, readJsonTri, JSON_STATES } from './json-leaf.mjs'
 
 export const PHASES = { RESERVED: 'reserved', SPAWNING: 'spawning', RUNNING: 'running' }
 export const VERDICTS = { FREE: 'free', RECLAIMABLE: 'reclaimable', BUSY: 'busy', UNRESOLVABLE: 'unresolvable' }
@@ -344,12 +344,7 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
   }
   const leasePath = (key) => join(leasesDir, `${key}.json`)
   const parkPath = (id) => join(parksDir, `${id}.json`)
-  const readJson = (path) => {
-    if (!d.existsSync(path)) return null
-    let raw
-    try { raw = d.readFileSync(path, 'utf8') } catch { return undefined }
-    try { return JSON.parse(String(raw)) } catch { return undefined }
-  }
+  const readJson = (path) => readJsonTri(path, d)
   const writeExclusive = (path, value) => {
     const tmp = `${path}.tmp.${d.uuid()}`
     try {
@@ -975,10 +970,10 @@ export function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, co
   }
   function readMarker(key) {
     const path = pathOf(key)
-    if (!d.existsSync(path)) return { path, raw: null, marker: null }
-    let raw
-    try { raw = String(d.readFileSync(path, 'utf8')) } catch { return { path, raw: null, marker: null, unreadable: true } }
-    try { return { path, raw, marker: JSON.parse(raw) } } catch { return { path, raw, marker: null } }
+    const read = readJsonAt(path, d)
+    if (read.state === JSON_STATES.ABSENT) return { path, raw: null, marker: null }
+    if (read.raw === null) return { path, raw: null, marker: null, unreadable: true }
+    return { path, raw: read.raw, marker: read.state === JSON_STATES.VALUE ? read.value : null }
   }
   function identityFor(key, item) {
     return item.marker && typeof item.marker.reservation_id === 'string' ? { key, reservation_id: item.marker.reservation_id } : item.raw != null ? { key, digest: digest(item.raw) } : { key, digest: '' }

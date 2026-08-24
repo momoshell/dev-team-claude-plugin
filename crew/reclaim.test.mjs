@@ -50,6 +50,19 @@ test('liveness enum is tri-state', () => assert.deepEqual(LIVENESS, { ALIVE: 'al
 test('lock constants are bounded', () => { assert.equal(LOCK_ATTEMPTS, 20); assert.equal(LOCK_INTERVAL_MS, 50) })
 test('marker lock names are stable and safe', () => { assert.equal(markerLockName('x'), markerLockName('x')); assert.notEqual(markerLockName('x'), markerLockName('y')); assert.match(markerLockName('x'), /^[0-9a-f]+$/) })
 test('free reconciliation', () => each(({ s }) => assert.equal(s.reconcile('a').verdict, VERDICTS.FREE)))
+test('an absent marker is free', () => each(({ s }) => assert.equal(s.reconcile('a').verdict, VERDICTS.FREE)))
+test('a marker path that cannot be read is unresolvable, not free', () => each(({ dir, s }) => {
+  mkdirSync(join(dir, '.a.active.json'))
+  assert.equal(s.reconcile('a').verdict, VERDICTS.UNRESOLVABLE)
+}))
+test('malformed marker bytes are unresolvable', () => each(({ dir, s }) => {
+  writeFileSync(join(dir, '.a.active.json'), '{not json')
+  assert.equal(s.reconcile('a').verdict, VERDICTS.UNRESOLVABLE)
+}))
+test('a marker containing literal null is unresolvable', () => each(({ dir, s }) => {
+  writeFileSync(join(dir, '.a.active.json'), 'null')
+  assert.equal(s.reconcile('a').verdict, VERDICTS.UNRESOLVABLE)
+}))
 test('reserve creates owned marker', () => each(({ s }) => { const r = s.reserve('a', { phase: PHASES.RESERVED }); assert.equal(r.ok, true); assert.equal(r.marker.owner.pid, 700); assert.equal(r.marker.key, 'a') }))
 test('reserve is exclusive', () => each(({ s }) => { assert.equal(s.reserve('a', { phase: PHASES.RESERVED }).ok, true); assert.deepEqual(s.reserve('a', { phase: PHASES.RESERVED }), { ok: false, reason: 'busy' }) }))
 test('reservation handle clears', () => each(({ s }) => { const r = s.reserve('a', { phase: PHASES.RESERVED }); assert.equal(s.clear(r.handle), true); assert.equal(s.reconcile('a').verdict, VERDICTS.FREE) }))

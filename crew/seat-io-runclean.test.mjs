@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, claudeRefusalFrames, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames,
+  cellFailureKind, claudeRefusalFrames, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
@@ -68,6 +68,33 @@ function addLane(fixture, name, tracked) {
 function makeIo({ repoDir, paths }) {
   return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
 }
+
+test('descendant capture distinguishes valid, malformed and absent markers', () => {
+  const snapshot = () => ({ ok: true, rows: new Map([[process.pid, { pid: process.pid, ppid: 1, pgid: process.pid, start: 'root' }]]) })
+  const round = (content) => {
+    const root = scratchDir('descendant-marker-')
+    const taskDir = join(root, 'task')
+    const transportDir = join(taskDir, DESCENDANT_STORE_DIRS['headless-json'])
+    mkdirSync(transportDir, { recursive: true })
+    if (content !== null) {
+      writeFileSync(join(transportDir, '.builder.active.json'), content)
+    }
+    return descendantCapture({ taskDir, log: () => {}, deps: { snapshot } }).round()
+  }
+  const valid = round(JSON.stringify({
+    reservation_id: 'reservation-1', key: 'builder', phase: 'running', role: 'builder', id: 'd1',
+    dir: join('headless', 'd1'), pid: process.pid, owner: { pid: process.pid, startedAt: Date.now() },
+  }))
+  assert.equal(valid.records, 1)
+  assert.equal(valid.captures, 1)
+  assert.equal(valid.discovery_failures, 0)
+  const malformed = round('{not json')
+  assert.equal(malformed.discovery_failures, 1)
+  const absent = round(null)
+  assert.equal(absent.discovery_failures, 0)
+  assert.equal(absent.records, 0)
+  assert.equal(absent.captures, 0)
+})
 
 test('paneUsageFrames folds claude spend once, then emits deltas and zeroes without repeating totals', () => {
   withRepo({ dirty: false }, (fixture) => {

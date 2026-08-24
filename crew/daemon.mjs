@@ -25,6 +25,7 @@ import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { slugOrNull } from './slug.mjs'
 import { regrantVerdict, continuationBrief } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
+import { readJsonTri } from './json-leaf.mjs'
 
 const regranted = new Set()
 const MAX_FRAME_BYTES = 1024 * 1024
@@ -304,11 +305,8 @@ function processAlive(kill, value) {
 }
 
 function jsonAt(path, exists, read) {
-  if (!path || !exists(path)) return null
-  try {
-    const value = JSON.parse(String(read(path, 'utf8')))
-    return isObject(value) ? value : null
-  } catch { return null }
+  const value = readJsonTri(path, { existsSync: exists, readFileSync: read }) ?? null
+  return isObject(value) ? value : null
 }
 
 // THREE READ STATES for a run's envelope, and only three. `absent` is no file at

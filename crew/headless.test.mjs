@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync, unlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -269,6 +269,26 @@ test('failed command write does not spawn and clears marker', () => { let spawne
 test('proven-dead pgid reservation is reclaimed', () => { let spawned = 0; const f = makeFixture({ kill: (pid, signal) => { if (signal === 0) { const e = Error(); e.code = 'ESRCH'; throw e } if (Math.abs(pid) === 111) { const e = Error(); e.code = 'ESRCH'; throw e } }, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '111'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.equal(spawned, 1) } finally { f.cleanup() } })
 test('live pgid reservation is busy', () => { let spawned = 0; const f = makeFixture({ kill: () => true, spawn: () => { spawned += 1; return { pid: 900, unref() {} } } }); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); writeFileSync(join(f.taskDir, 'headless', 'd1', 'pgid'), '222'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ reservation_id: 'old', key: 'builder', phase: 'spawning', owner: { pid: 999999999 }, id: 'd1', evidence: { kind: 'pgid', file: join(f.taskDir, 'headless', 'd1', 'pgid') } })); assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' }), (e) => e.stage === 'headless-session-busy'); assert.equal(spawned, 0) } finally { f.cleanup() } })
 test('completed legacy marker frees seat', () => { const f = makeFixture(); try { mkdirSync(join(f.taskDir, 'headless', 'd1')); const exit = join(f.taskDir, 'headless', 'd1', 'exit'); writeFileSync(exit, '0'); writeFileSync(join(f.taskDir, 'headless', '.builder.active.json'), JSON.stringify({ phase: 'running', role: 'builder', id: 'd1', exit, sessionId: 'old' })); f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.equal(f.calls[0].sessionId, 'old') } finally { f.cleanup() } })
+test('an active marker that VANISHES between reads yields a fresh uuid rather than a throw (a genuinely malformed marker is REFUSED as unresolvable, not healed)', () => {
+  let consumed = false
+  const f = makeFixture({
+    readFileSync(path, ...args) {
+      const value = readFileSync(path, ...args)
+      if (!consumed && String(path).endsWith('/.builder.active.json')) {
+        consumed = true
+        unlinkSync(path)
+      }
+      return value
+    },
+  })
+  try {
+    const active = join(f.taskDir, 'headless', '.builder.active.json')
+    mkdirSync(join(f.taskDir, 'headless'), { recursive: true })
+    writeFileSync(active, '{not json')
+    assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' }))
+    assert.equal(f.calls[0].sessionId, 'extra-1')
+  } finally { f.cleanup() }
+})
 test('synchronous spawn failure rolls back and retries', () => { let fail = true; const f = makeFixture({ spawn: () => { if (fail) { fail = false; throw Error('spawn') } return { pid: 901, unref() {} } } }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), false); assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })) } finally { f.cleanup() } })
 test('unref failure retains SPAWNING reservation', () => { const f = makeFixture({ spawn: () => ({ pid: 901, unref() { throw Error('unref') } }) }); try { assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/b' })); assert.equal(JSON.parse(readFileSync(join(f.taskDir, 'headless', '.builder.active.json'))).phase, 'spawning') } finally { f.cleanup() } })
 test('timeout EPERM retains marker', () => { let clock = 0; const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill() { const e = Error('permission'); e.code = 'EPERM'; throw e } }); try { const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.throws(() => f.io.wait(run.returnPath, 0)); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), true) } finally { f.cleanup() } })

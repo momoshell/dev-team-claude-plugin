@@ -1,46 +1,46 @@
 # Import firewall and leaf exceptions
 
 Treat the daemon import list as a narrow firewall, not as a dependency graph.
-Exhibit: `crew/daemon.test.mjs:240`.
+Exhibit: `crew/daemon.test.mjs:246`.
 
 The test admits builtins and a small first-party set.
-Exhibit: `crew/daemon.test.mjs:240`.
+Exhibit: `crew/daemon.test.mjs:246`.
 
 The daemon's leaf exceptions—`crew/slug.mjs`, `crew/escalation-policy.mjs`, and
 `crew/variants.mjs`—must remain import-free; admitted non-leaf helpers such as
 `crew/headless-rpc.mjs` are outside this rule.
-Exhibit: `crew/daemon.test.mjs:247`, `crew/daemon.test.mjs:249`, and
-`crew/daemon.test.mjs:251`.
+Exhibit: `crew/daemon.test.mjs:253`, `crew/daemon.test.mjs:255`, and
+`crew/daemon.test.mjs:257`.
 
 `crew/slug.mjs` must stay import-free.
-Exhibit: `crew/daemon.test.mjs:247`.
+Exhibit: `crew/daemon.test.mjs:253`.
 
 `crew/escalation-policy.mjs` must stay import-free.
-Exhibit: `crew/daemon.test.mjs:249`.
+Exhibit: `crew/daemon.test.mjs:255`.
 
 `crew/variants.mjs` must stay import-free.
-Exhibit: `crew/daemon.test.mjs:251`.
+Exhibit: `crew/daemon.test.mjs:257`.
 
 These three checks are separate from the allowlist assertion.
-Exhibit: `crew/daemon.test.mjs:240`.
+Exhibit: `crew/daemon.test.mjs:246`.
 
 The separation matters: the daemon can admit a leaf only while its leaf
 property is still observed.
-Exhibit: `crew/daemon.test.mjs:247`.
+Exhibit: `crew/daemon.test.mjs:253`.
 
 Do not replace the leaves with a barrel import or a convenience runner.
-Exhibit: `crew/daemon.test.mjs:214`.
+Exhibit: `crew/daemon.test.mjs:221`.
 
 The firewall also counts dynamic imports and keeps one computed adapter load.
-Exhibit: `crew/daemon.test.mjs:256`.
+Exhibit: `crew/daemon.test.mjs:280`.
 
 A new allowlisted leaf exception therefore needs two edits: the admission and
 its import-free assertion.
-Exhibit: `crew/daemon.test.mjs:240`, `crew/daemon.test.mjs:247`,
-`crew/daemon.test.mjs:249`, and `crew/daemon.test.mjs:251`.
+Exhibit: `crew/daemon.test.mjs:246`, `crew/daemon.test.mjs:253`,
+`crew/daemon.test.mjs:255`, and `crew/daemon.test.mjs:257`.
 
 An unknown import is a refusal, not an invitation to broaden the list.
-Exhibit: `crew/daemon.test.mjs:240`.
+Exhibit: `crew/daemon.test.mjs:246`.
 
 An interrupted source read cannot establish leaf status; keep that outcome
 visible to the test harness instead of converting it into approval.
@@ -48,18 +48,18 @@ Status: this interrupted-read edge is unbacked in this checkout; see
 `evidence.md`.
 
 The test's own wording is the operational contract for future contributors.
-Exhibit: `crew/daemon.test.mjs:247`.
+Exhibit: `crew/daemon.test.mjs:253`.
 
 Review the leaf and the caller together because either side can widen reach.
-Exhibit: `crew/daemon.test.mjs:240`.
+Exhibit: `crew/daemon.test.mjs:246`.
 
 This rule protects daemon startup from accidental runner coupling.
-Exhibit: `crew/daemon.test.mjs:214`.
+Exhibit: `crew/daemon.test.mjs:221`.
 
 The cost of skipping the leaf pin is paid by every daemon process that loads it.
-Exhibit: `crew/daemon.test.mjs:247`.
+Exhibit: `crew/daemon.test.mjs:253`.
 
 When a leaf exception is removed, remove its leaf assertion in the same measured
 change and let the test show the boundary moved.
-Exhibit: `crew/daemon.test.mjs:247`, `crew/daemon.test.mjs:249`, and
-`crew/daemon.test.mjs:251`.
+Exhibit: `crew/daemon.test.mjs:253`, `crew/daemon.test.mjs:255`, and
+`crew/daemon.test.mjs:257`.

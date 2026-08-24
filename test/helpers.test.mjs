@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
 import { spawnSync } from 'node:child_process'
-import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
+import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ROOT, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
@@ -166,4 +166,125 @@ test('writeTornFile refuses a prefix that parses', () => {
   } finally {
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+// Helper duplication tripwire. The 2026-08-23 audit (docs/audits/2026-08-23/audit/
+// s4-register.md, D1-D6) measured sqliteAvailable in 8 files, git()/gitResult() in
+// 7 copies with SIX distinct bodies, and repo-root derivation in 12 copies under 6
+// names. #591 consolidated the first tranche, this lane the last four carriers;
+// without a detector the copies come back one call site at a time (#551).
+//
+// Scope: *.test.mjs under the directories that hold test files, plus the shared
+// non-test test modules. Production modules are NEVER enumerated, so the indented
+// `return function git(where, args)` factories in crew/arms.mjs, crew/harvest.mjs
+// and scripts/factory/ci-watch.mjs cannot be flagged, by construction rather than
+// by exception. test/helpers.mjs is the one sanctioned implementation.
+// Blind spot, stated: a test file under a NEW top-level directory is not scanned;
+// the count assertion below is the cheap guard against a scan that reads nothing.
+const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane'
+// Regrowth is written however the next author writes small helpers, not only as
+// a column-0 `function` declaration. A const arrow is the commonest form in this
+// repo, and a helper re-declared inside a test() body is indented. Matching only
+// the narrow form would leave the guard green through exactly the regrowth #551
+// describes, so every binding form is covered and pinned below.
+const LOCAL_HELPER_DECL = new RegExp(String.raw`^\s*(?:export\s+(?:default\s+)?)?(?:(?:async\s+)?function\s*\*?\s*(?:${HELPER_NAMES})\s*\(|(?:const|let|var)\s+(?:${HELPER_NAMES})\s*=\s*(?:async\s+)?(?:function\b|\(|[A-Za-z_$][\w$]*\s*=>))`, 'gm')
+const LOCAL_REPO_ROOT = new RegExp([
+  // Quote style is unenforced here (no eslint config), and package.json pins
+  // node >= 26, which makes import.meta.dirname the idiomatic derivation today.
+  // A detector blind to either is blind to the forms most likely to appear next.
+  String.raw`new URL\(\s*['"\x60](?:\.\./)+['"\x60]`,
+  String.raw`import\.meta\.dirname`,
+  String.raw`dirname\(\s*dirname\(\s*fileURLToPath`,
+  String.raw`join\(\s*dirname\(\s*fileURLToPath\([^)]*\)\s*\)\s*,\s*'\.\.'`,
+  String.raw`'--show-toplevel'`,
+].join('|'), 'g')
+const HELPER_SELF = 'test/helpers.mjs'
+const HELPER_SELF_TEST = 'test/helpers.test.mjs'
+const HELPER_SCAN_DIRS = ['commands', 'crew', 'scripts', 'skills', 'test', 'visualizer']
+const HELPER_SCAN_EXTRA = ['test/fixtures.mjs', 'test/helpers.mjs']
+
+function localHelperSites(source) {
+  return [...source.matchAll(LOCAL_HELPER_DECL)].length + [...source.matchAll(LOCAL_REPO_ROOT)].length
+}
+
+function helperTestFiles(dir, out = []) {
+  for (const name of readdirSync(join(ROOT, dir)).sort()) {
+    const rel = `${dir}/${name}`
+    if (statSync(join(ROOT, rel)).isDirectory()) { if (name !== 'node_modules') helperTestFiles(rel, out) }
+    else if (name.endsWith('.test.mjs')) out.push(rel)
+  }
+  return out
+}
+
+function helperScannedFiles() {
+  return [...HELPER_SCAN_DIRS.flatMap((dir) => helperTestFiles(dir)), ...HELPER_SCAN_EXTRA]
+}
+
+// Frozen, not forgiven. Each of these carries a local copy this lane did not
+// convert: they sit outside its write fence, so the exemption — not a weaker
+// rule — is how the detector owns what it newly flags. The warranty is the
+// audited site COUNT as a CEILING: add a copy to an exempt file and its warranty
+// fails. It is deliberately not equality — equality also fails when a copy is
+// REMOVED, so the lane that finally converts an exempt file would turn this test
+// red for doing the very thing the exemption is waiting for.
+function frozenHelperSites(sites, why) {
+  return { sites, why, warranty: (source) => localHelperSites(source) <= sites }
+}
+
+const HELPER_EXEMPT = new Map([
+  ['commands/commands.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['crew/crew.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one dirname(dirname(fileURLToPath())) repo-root derivation; outside this lane\'s fence, so frozen rather than converted')],
+  ['crew/drive.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../') repo-root derivation; owned by lane b199-resumestate, so frozen rather than converted")],
+  ['crew/pi/extensions/lab.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['crew/pi/extensions/subagent.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['skills/backend-node/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['skills/crew-dispatch/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['skills/crew-recovery/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['skills/devops/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['skills/pr-review/findings-shape.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+  ['test/factory-ci-watch.test.mjs', frozenHelperSites(2, 'audited 2026-08-24: a local sqliteAvailable and a local git whose body returns the spawnSync result rather than stdout; outside this lane\'s fence, so frozen rather than converted')],
+  ['test/factory-emit.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one local sqliteAvailable; outside this lane's fence, so frozen rather than converted")],
+  // Found only once the detector was widened to const-arrow bindings: a SEVENTH
+  // git() copy (`const git = (...args) => spawnSync(...)`) that the column-0
+  // `function` pattern never saw. It is the regrowth form this widening exists
+  // to catch, already present in the tree, and it is outside this lane's fence.
+  ['test/factory-intake.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one const-arrow git() over spawnSync, invisible to the pre-widening detector; outside this lane's fence, so frozen rather than converted")],
+  ['test/factory-ledger.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one local sqliteAvailable; outside this lane's fence, so frozen rather than converted")],
+  ['test/factory-make-brief.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one local git taking an args ARRAY and asserting status; outside this lane\'s fence, so frozen rather than converted')],
+  ['test/factory-probe-repo.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one local git with a DIFFERENT identity (probe@example.invalid); outside this lane\'s fence, so frozen rather than converted')],
+  ['test/version-agreement.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one join(dirname(fileURLToPath()), '..') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
+])
+
+test('helper duplication tripwire — no test file re-declares a consolidated helper', () => {
+  const scanned = helperScannedFiles()
+  assert.ok(scanned.length >= 50, `expected at least 50 scanned test files, found ${scanned.length}`)
+  const offenders = scanned.filter((file) => {
+    if (file === HELPER_SELF || file === HELPER_SELF_TEST || HELPER_EXEMPT.has(file)) return false
+    return localHelperSites(readFileSync(join(ROOT, file), 'utf8')) > 0
+  })
+  assert.deepEqual(offenders, [])
+})
+
+test('helper duplication tripwire — every exemption has a live, load-bearing warranty', () => {
+  let total = 0
+  for (const [file, exemption] of HELPER_EXEMPT) {
+    let source
+    try { source = readFileSync(join(ROOT, file), 'utf8') }
+    catch (err) { assert.fail(`exemption ${file} is missing or unreadable: ${err.message}`) }
+    assert.ok(exemption.why.length > 20, `exemption ${file} carries no audited reason`)
+    assert.equal(exemption.warranty(source), true, `exemption ${file} warranty no longer holds`)
+    assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
+    total += exemption.sites
+  }
+  assert.equal(total, 18)
+})
+
+test('helper duplication tripwire — the detector flags a hand-rolled copy and clears an import', () => {
+  assert.equal(localHelperSites('function sqliteAvailable() {}\n'), 1)
+  assert.equal(localHelperSites('function gitResult(a) {}\n'), 1)
+  assert.equal(localHelperSites("const R = fileURLToPath(new URL('../../', import.meta.url))\n"), 1)
+  assert.equal(localHelperSites("execFileSync('git', ['rev-parse', '--show-toplevel'])\n"), 1)
+  assert.equal(localHelperSites("import { git, sqliteAvailable } from './helpers.mjs'\n"), 0)
+  assert.equal(localHelperSites("const HERE = fileURLToPath(new URL('./', import.meta.url))\n"), 0)
+  assert.equal(localHelperSites('  return function git(where, args) {}\n'), 0)
 })

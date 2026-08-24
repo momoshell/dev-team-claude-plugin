@@ -9,13 +9,13 @@ import {
   ROLE_FLAG_PREFIXES,
 } from '../../crew/crew.mjs'
 import { VARIANT_NAMES, VARIANTS } from '../../crew/variants.mjs'
+import { ROOT } from '../../test/helpers.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
-const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const FLAGS = join(HERE, 'references/flags.md')
 const VARIANTS_DOC = join(HERE, 'references/variants.md')
 const TIER = join(HERE, 'references/tier.md')
-const SEAT_IO = join(REPO, 'crew/seat-io.mjs')
+const SEAT_IO = join(ROOT, 'crew/seat-io.mjs')
 
 function readText(path) {
   let text

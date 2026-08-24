@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync, spawnSync as cpSpawnSync } from 'node:child_process'
+import { spawnSync as cpSpawnSync } from 'node:child_process'
 import {
   appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync,
 } from 'node:fs'
@@ -12,28 +12,11 @@ import {
   armsManifestPath, appendArm, collectArms, factoryctlSpawner, readManifest, spawnArmSet,
 } from './arms.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
+import { git, gitResult } from '../test/helpers.mjs'
 
 const ID_A = '11111111-2222-3333-4444-555555555555'
 const ID_B = '22222222-3333-4444-5555-666666666666'
 const ID_C = '33333333-4444-5555-6666-777777777777'
-
-function git(repoDir, ...args) {
-  return execFileSync('git', [
-    '-c', 'user.email=crew@example.invalid',
-    '-c', 'user.name=Crew Test',
-    '-c', 'protocol.file.allow=always',
-    '-C', repoDir, ...args,
-  ], { encoding: 'utf8' }).trim()
-}
-
-function gitResult(repoDir, ...args) {
-  return cpSpawnSync('git', [
-    '-c', 'user.email=crew@example.invalid',
-    '-c', 'user.name=Crew Test',
-    '-c', 'protocol.file.allow=always',
-    '-C', repoDir, ...args,
-  ], { encoding: 'utf8' })
-}
 
 function makeWorld() {
   const root = mkdtempSync(join(tmpdir(), 'crew-arms-'))
@@ -43,11 +26,11 @@ function makeWorld() {
   writeFileSync(join(host, 'seed.txt'), 'seed\n')
   git(host, 'add', 'seed.txt')
   git(host, 'commit', '-q', '-m', 'base')
-  const pin = git(host, 'rev-parse', 'HEAD')
+  const pin = git(host, 'rev-parse', 'HEAD').trim()
   writeFileSync(join(host, 'other.txt'), 'other\n')
   git(host, 'add', 'other.txt')
   git(host, 'commit', '-q', '-m', 'other')
-  const other = git(host, 'rev-parse', 'HEAD')
+  const other = git(host, 'rev-parse', 'HEAD').trim()
   git(host, 'checkout', '-q', '-B', 'main', pin)
   const manifest = join(root, 'factory', 'arms', 'set-a.jsonl')
   let serial = 0
@@ -74,7 +57,7 @@ function makeWorld() {
       return { adwId, run, crewDir, base }
     },
     refs() {
-      const output = git(host, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/factory/')
+      const output = git(host, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/factory/').trim()
       return output ? output.split('\n').sort() : []
     },
     ref(adwId) {
@@ -186,12 +169,12 @@ test('spawnArmSet creates distinct branch worktrees at one pin', () => withWorld
   assert.equal(result.count, 2)
   assert.equal(calls.length, 2)
   assert.equal(result.pin, world.pin)
-  const listed = git(world.host, 'worktree', 'list')
+  const listed = git(world.host, 'worktree', 'list').trim()
   for (const [offset, arm] of result.arms.entries()) {
     assert.equal(arm.index, offset + 1)
     assert.equal(existsSync(arm.checkout), true)
-    assert.equal(git(arm.checkout, 'rev-parse', 'HEAD'), world.pin)
-    assert.equal(git(arm.checkout, 'branch', '--show-current'), `arms/set-a/${String(offset + 1).padStart(2, '0')}`)
+    assert.equal(git(arm.checkout, 'rev-parse', 'HEAD').trim(), world.pin)
+    assert.equal(git(arm.checkout, 'branch', '--show-current').trim(), `arms/set-a/${String(offset + 1).padStart(2, '0')}`)
     assert.ok(listed.includes(arm.checkout), `${arm.checkout} not in worktree list`)
   }
   assert.equal(manifestLines(world.manifest).length, 2)
@@ -435,7 +418,7 @@ test('a mixed-pin manifest refuses the whole set before writing refs', () => wit
   writeFileSync(join(world.host, 'drift.txt'), 'drift\n')
   git(world.host, 'add', 'drift.txt')
   git(world.host, 'commit', '-q', '-m', 'drift')
-  const otherPin = git(world.host, 'rev-parse', 'HEAD')
+  const otherPin = git(world.host, 'rev-parse', 'HEAD').trim()
   const b = world.arm(ID_B, { base: otherPin })
   assertAppendOk(add(world, a, { pin: world.pin }))
   assertAppendOk(add(world, b, { pin: otherPin }))
@@ -452,7 +435,7 @@ test('a manifest pin that drifts from crew.json base is refused without a ref', 
   writeFileSync(join(world.host, 'drift.txt'), 'drift\n')
   git(world.host, 'add', 'drift.txt')
   git(world.host, 'commit', '-q', '-m', 'drift')
-  const otherPin = git(world.host, 'rev-parse', 'HEAD')
+  const otherPin = git(world.host, 'rev-parse', 'HEAD').trim()
   writeFileSync(join(a.crewDir, 'crew.json'), JSON.stringify({ checkout: a.run, base: otherPin }))
   assertAppendOk(add(world, a, { pin: world.pin }))
   const report = collectArms({ manifestPath: world.manifest, repo: world.host })
@@ -478,7 +461,7 @@ test('collectArms probes crew.json exactly once and preserves pin drift refusal'
   writeFileSync(join(world.host, 'drift.txt'), 'drift\n')
   git(world.host, 'add', 'drift.txt')
   git(world.host, 'commit', '-q', '-m', 'drift')
-  const otherPin = git(world.host, 'rev-parse', 'HEAD')
+  const otherPin = git(world.host, 'rev-parse', 'HEAD').trim()
   writeFileSync(join(a.crewDir, 'crew.json'), JSON.stringify({ checkout: a.run, base: otherPin }))
   assertAppendOk(add(world, a, { pin: world.pin }))
   const target = join(a.crewDir, 'crew.json')

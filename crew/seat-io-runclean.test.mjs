@@ -12,7 +12,7 @@ import {
   SEAT_REFUSAL_STAGE, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
-import { scratchDir, startFileWriter } from '../test/helpers.mjs'
+import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 
 const CONTENT = Object.freeze({
@@ -22,14 +22,6 @@ const CONTENT = Object.freeze({
   ignored: 'ignored secret content\n',
   node: 'node package content\n',
 })
-
-function git(repoDir, ...args) {
-  return execFileSync('git', [
-    '-c', 'user.email=crew@example.invalid',
-    '-c', 'user.name=Crew Test',
-    '-C', repoDir, ...args,
-  ], { encoding: 'utf8' })
-}
 
 function makeRepo({ dirty = true } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'crew-run-clean-'))
@@ -818,14 +810,13 @@ test('provider recognition branches no adjudication, escalation, reseat or retry
       assert.equal(forged.event.detail, 'same provider failure')
     }
 
-    const repoRoot = execFileSync('git', ['rev-parse', '--show-toplevel'], { encoding: 'utf8' }).trim()
     const listed = execFileSync('git', [
       'grep', '-l', '-e', 'providerCondition', '-e', 'PROVIDER_CONDITIONS', '-e', 'recogniseProviderCondition', '--', 'crew/', 'scripts/', 'visualizer/',
-    ], { cwd: repoRoot, encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean).sort()
+    ], { cwd: ROOT, encoding: 'utf8' }).trim().split(/\r?\n/).filter(Boolean).sort()
     assert.deepEqual(listed, [
       'crew/headless.mjs', 'crew/headless.test.mjs', 'crew/seat-io-runclean.test.mjs', 'crew/seat-io.mjs',
     ])
-    const seatIoSource = readFileSync(join(repoRoot, 'crew/seat-io.mjs'), 'utf8')
+    const seatIoSource = readFileSync(join(ROOT, 'crew/seat-io.mjs'), 'utf8')
     for (const pattern of [/overloaded_error/, /rate_limit_error/, /authentication_error/, /\b529\b/, /\b429\b/]) {
       assert.doesNotMatch(seatIoSource, pattern)
     }

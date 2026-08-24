@@ -798,7 +798,7 @@ test('a readable mirror missing a transport source is absent, not transport-unre
     const response = await json(base, `/api/run-set?since=${encodeURIComponent(new Date(0).toISOString())}`)
     assert.equal(response.status, 200)
     assert.ok(response.json.absent)
-    assert.doesNotMatch(response.body, /transport_unrecorded/)
+    assert.ok(!response.body.includes(USAGE_ABSENT_CAUSES.transport_unrecorded))
   } finally {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })

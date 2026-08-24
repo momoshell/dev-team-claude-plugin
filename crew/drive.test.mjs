@@ -19,7 +19,7 @@ import {
   refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
-  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN,
+  parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
@@ -42,17 +42,18 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [] } = {}) {
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false } = {}) {
   const calls = { assign: [], run: [], runClean: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], files }
-  const counts = {}
+  const counts = {}; let seq = 0
+
   const writeCounts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   const io = {
     calls,
     assign({ role, briefFile, note }) {
-      counts[role] = (counts[role] || 0) + 1
+      counts[role] = (counts[role] || 0) + 1; seq += 1
       calls.assign.push({ role, briefFile, note, n: counts[role] })
-      return { id: `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
+      return { id: seqIds ? `d${seq}` : `${role}${counts[role]}`, returnPath: `${role}:${counts[role]}` }
     },
     wait(returnPath, timeoutS) {
       calls.waits.push({ returnPath, timeoutS })
@@ -134,7 +135,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
 // Drive `crew.mjs run` for real without a booted workspace: a throwaway HOME, a
 // throwaway git checkout and a hand-written crew.json. `drive` is stubbed, so
 // the ctx handed to the driver and the journal rows beside it are observable.
-function runCmdFixture(flags = {}) {
+function runCmdFixture(flags = {}, driveOverride = null) {
   const home = scratchDir('crew-waits-run-home-')
   const checkoutRoot = scratchDir('crew-waits-run-checkout-')
   const checkout = join(checkoutRoot, 'checkout')
@@ -171,13 +172,12 @@ function runCmdFixture(flags = {}) {
     try {
       runCmd({ task, checkout, 'brief-file': brief, keep: true, ...flags }, {
         drive: (seen) => {
-          ctx = seen
+          ctx = seen; if (driveOverride) return driveOverride(seen)
           return { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
         },
       })
     } finally { process.stdout.write = previousWrite }
-    const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line))
-    return { ctx, rows }
+    const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((line) => JSON.parse(line)); const envelope = JSON.parse(readFileSync(taskReturn, 'utf8')); return { ctx, rows, envelope }
   } finally {
     process.stdout.write = previousWrite
     if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome
@@ -6085,4 +6085,209 @@ test('waitDiagnosis is not consulted when an envelope is present but shape-inval
   io.waitDiagnosis = () => { consulted += 1; return { state: 'stale', text: 'should not appear' } }
   assert.throws(() => driveTask(CTX, io), /planner: no valid envelope at planner:1 within 1800s$/)
   assert.equal(consulted, 0)
+})
+
+const resumeRed = () => ({ ok: false, output: RED() })
+const resumeGreen = () => ({ ok: true, output: `${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` })
+const resumeStageRows = (io) => io.calls.logs.filter((row) => typeof row?.stage === 'string').map((row) => row.stage)
+const resumeDoneRows = (io) => io.calls.logs.filter((row) => typeof row?.stage_done === 'string').map((row) => row.stage_done)
+const replayResumeStages = (io) => {
+  const stack = []
+  for (const row of io.calls.logs) {
+    if (typeof row?.stage === 'string') stack.push(row.stage)
+    if (typeof row?.stage_done === 'string') assert.equal(stack.pop(), row.stage_done)
+  }
+  return stack
+}
+const resumeKeys = ['stages', 'escalation', 'commit', 'dissents', 'extra_rounds_granted', 'growth', 'modifiers', 'gate', 'seq_high_water', 'gate_attempt_high_water', 'cursor', 'consults_spent', 'accept_findings', 'head']
+
+test('every escalation exit carries the full resume key set', () => {
+  const exits = [
+    driveTask(CTX, fakeIo({ envelopes: { 'planner:1': { status: 'insufficient', role: 'planner', summary: 'thin', artifacts: [] }, 'lead:1': leadEnv('escalate') } })),
+    driveTask({ ...CTX, limits: { build_rounds: 1 } }, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() }, changed: ['a.mjs', 'outside.mjs'] })),
+    driveTask({ ...CTX, limits: { build_rounds: 1 } }, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'lead:1': leadEnv('escalate') }, runs: { 'lane-cmd': { ok: false, output: 'red lane' } }, changed: ['a.mjs'] })),
+    driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red suite' } }, changed: ['a.mjs'] })),
+  ]
+  assert.deepEqual(exits.map((result) => result.status), ['escalation', 'escalation', 'escalation', 'escalation'])
+  for (const result of exits) for (const key of resumeKeys) assert.ok(Object.hasOwn(result.details, key), `missing details.${key}`)
+  assert.deepEqual(exits.map((result) => result.details.escalation.where), ['plan', 'scope', 'lane', 'suite'])
+})
+
+test('there is exactly one escalation composer', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  assert.equal((source.match(/status: 'escalation'/g) || []).length, 1)
+})
+
+test('the escalation gate block is the done block', () => {
+  const escalationIo = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'lead:1': leadEnv('escalate') },
+    runs: { 'gate-cmd': resumeRed(), 'lane-cmd': { ok: false, output: 'red lane' } }, changed: ['a.mjs'],
+  })
+  const escalated = driveTask({ ...CTX, limits: { build_rounds: 1 } }, escalationIo)
+  const doneIo = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'gate-cmd:1': resumeRed(), 'gate-cmd:2': resumeGreen(), 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs'],
+  })
+  const done = driveTask(CTX, doneIo)
+  assert.equal(escalated.details.gate.cmd, 'gate-cmd')
+  for (const key of Object.keys(done.details.gate)) assert.ok(Object.hasOwn(escalated.details.gate, key), `missing gate key ${key}`)
+})
+
+test('the escalation gate block survives a repair', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-bad' } }),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+    },
+    cleanRuns: { 'gate-bad': resumeGreen(), 'gate-fixed': resumeRed() },
+    runs: { 'gate-bad:1': resumeRed(), 'gate-bad:2': resumeGreen(), 'gate-fixed': resumeGreen(), 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'suite red' } },
+    changed: ['a.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.gate.cmd, 'gate-fixed')
+  assert.equal(result.details.gate.repairs, 1)
+  assert.deepEqual(result.details.gate.replaced, ['gate-bad'])
+})
+
+test('a pre-gate escalation reads gate null and does not throw', () => {
+  const result = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': { status: 'insufficient', role: 'planner', summary: 'thin', artifacts: [] }, 'lead:1': leadEnv('escalate') } }))
+  assert.equal(result.details.gate, null)
+  assert.equal(result.details.escalation.where, 'plan')
+})
+
+test('roundCursor reads the last round of each loop and a live escalation', () => {
+  assert.deepEqual(roundCursor(['plan:r1', 'plan:r2', 'build:r1', 'review:r1', 'build:r2']), { plan_round: 2, build_round: 2, review_round: 1 })
+  assert.deepEqual(roundCursor([]), { plan_round: null, build_round: null, review_round: null })
+  assert.deepEqual(roundCursor(null), { plan_round: null, build_round: null, review_round: null })
+  assert.deepEqual(roundCursor(['plan:r1', null, 4, 'other']), { plan_round: 1, build_round: null, review_round: null })
+  const result = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }))
+  assert.deepEqual(result.details.cursor, { plan_round: 1, build_round: 1, review_round: 1 })
+})
+
+test('review pass, review panel and check labels are not round cursors', () => {
+  assert.deepEqual(roundCursor(['plan:r1', 'check:r2', 'review:r1', 'review:panel-r2', 'review:pass']), { plan_round: 1, build_round: null, review_round: 1 })
+})
+
+test('seq high water records d ids and ignores legacy fake ids', () => {
+  const options = { envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }
+  const seqIo = fakeIo({ ...options, seqIds: true })
+  const legacyIo = fakeIo(options)
+  assert.equal(driveTask(CTX, seqIo).details.seq_high_water, seqIo.calls.assign.length)
+  assert.equal(driveTask(CTX, legacyIo).details.seq_high_water, 0)
+})
+
+test('gate attempt high water counts every gate invocation', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'lead:1': leadEnv('escalate') }, runs: { 'gate-cmd': resumeRed(), 'lane-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  const invocations = io.calls.run.filter(({ cmd }) => cmd === 'gate-cmd').length
+  assert.equal(result.details.gate_attempt_high_water, invocations)
+})
+
+test('consults and reviewer findings carry into an escalation', () => {
+  const consulted = driveTask({ ...CTX, limits: { build_rounds: 1 } }, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'lead:1': leadEnv('escalate') }, runs: { 'lane-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }))
+  assert.equal(consulted.details.consults_spent, 1)
+  const noConsult = driveTask({ ...CTX, limits: { build_rounds: 1 } }, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() }, changed: ['a.mjs', 'outside.mjs'] }))
+  assert.equal(noConsult.details.consults_spent, 0)
+  const findings = [{ id: 'RV1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]
+  const carried = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', findings) }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }))
+  assert.deepEqual(carried.details.accept_findings, findings)
+  const absent = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }))
+  assert.equal(absent.details.accept_findings, null)
+})
+
+test('panel fused findings are the canonical accept findings', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A' }]),
+      'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A' }] } },
+      'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true } },
+      'lead:2': leadEnv('escalate'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs'],
+  })
+  const result = driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 1 } }, io)
+  const panel = io.calls.logs.map((row) => row.review_outcome).find((row) => row?.panel)
+  assert.equal(result.status, 'escalation')
+  assert.deepEqual(result.details.accept_findings, panel.findings)
+  assert.ok(result.details.accept_findings.some((finding) => finding.reviewer === 'both'))
+})
+
+test('normal terminal journals replay as a balanced nested stack', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs'] })
+  const result = driveTask(CTX, io)
+  assert.deepEqual(resumeStageRows(io), result.details.stages)
+  assert.deepEqual(replayResumeStages(io), [])
+  assert.equal(new Set(resumeDoneRows(io)).size, resumeDoneRows(io).length)
+})
+
+test('stage records entry only and opens nested occurrences', () => {
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('const stage = (label) => {')
+  const rest = source.slice(start)
+  const end = rest.indexOf('\n  }\n')
+  const body = rest.slice(0, end)
+  assert.doesNotMatch(body, /stageComplete\(\)|stage_done/)
+  assert.match(body, /openStages\.push\(label\)/)
+})
+
+test('a stage that outlives its first blocker is not completed early', () => {
+  const run = (lead) => {
+    const io = fakeIo({ envelopes: { 'planner:1': { status: 'insufficient', role: 'planner', summary: 'thin', artifacts: [] }, 'lead:1': lead, 'planner:2': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] })
+    return { io, result: (() => { try { return driveTask(CTX, io) } catch (err) { return err } })() }
+  }
+  const control = run(leadEnv('bounce'))
+  assert.ok(control.io.calls.logs.some((row) => row.stage_done === 'plan:r1'))
+  const subject = run(null)
+  assert.ok(subject.result instanceof Error)
+  assert.equal(subject.io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.equal(subject.io.calls.logs.some((row) => row.stage_done === 'plan:r1'), false)
+})
+
+test('nested panel child completes while unfinished review parent does not', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed', [{ id: 'A1', severity: 'must-fix', location: 'a.mjs:1', summary: 'A' }]),
+      'tech-lead:2': { status: 'done', role: 'tech-lead', details: { verdict: 'changes-needed', findings: [{ id: 'B1', severity: 'must-fix', location: 'a.mjs:2', summary: 'B' }] } },
+      'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], closes_class: true } }, 'lead:2': null,
+    }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs'],
+  })
+  assert.throws(() => driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 1 } }, io))
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 2)
+  assert.ok(io.calls.logs.some((row) => row.stage_done === 'review:panel-r1'))
+  assert.equal(io.calls.logs.some((row) => row.stage_done === 'review:r1'), false)
+})
+
+test('a failed stage entry row is never completed', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    cleanRuns: { 'gate-cmd': resumeRed() }, runs: { 'gate-cmd:1': resumeRed(), 'gate-cmd:2': resumeGreen(), 'lane-cmd': { ok: true, output: '' } }, changed: ['a.mjs'],
+  })
+  const originalLog = io.log
+  let failed = false
+  io.log = (row) => {
+    if (!failed && row?.stage === 'gate-proof:1') { failed = true; throw new Error('journal write failed') }
+    originalLog(row)
+  }
+  assert.throws(() => driveTask(CTX, io), /journal write failed/)
+  assert.equal(io.calls.logs.some((row) => row.stage_done === 'gate-proof:1'), false)
+})
+
+test('runCmd carries the start HEAD and fills a crashed run stage list', () => {
+  const previousExitCode = process.exitCode
+  try {
+    const run = runCmdFixture({}, (ctx) => {
+      writeFileSync(ctx.journal, `${JSON.stringify({ at: new Date().toISOString(), stage: 'plan:r1' })}\n`, { flag: 'a' })
+      writeFileSync(ctx.journal, `${JSON.stringify({ at: new Date().toISOString(), stage: 'build:r1' })}\n`, { flag: 'a' })
+      throw new Error('driver boom')
+    })
+    assert.ok(run.ctx.head)
+    assert.equal(run.rows[0].event, 'run-start')
+    assert.equal(run.rows[0].head, run.ctx.head)
+    assert.deepEqual(run.envelope.details.stages, ['plan:r1', 'build:r1'])
+    assert.equal(run.envelope.details.escalation.where, 'driver')
+  } finally { process.exitCode = previousExitCode }
 })

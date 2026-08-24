@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -62,6 +62,7 @@ const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
 
 const CLI_REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const CREW_REPO_ROOT = CLI_REPO_ROOT
 const CLI_PROBE_TASK = 'b120-usage-probe'
 const CLI_PROBE_BRIEF = join(tmpdir(), 'b120-usage-probe-brief.md')
 const CLI_ENV = { ...process.env, NO_COLOR: '1' }
@@ -4863,4 +4864,31 @@ test('tier headless boot journals an inert shadow pick beside roster seats', asy
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutFixture.root, { recursive: true, force: true })
   }
+})
+
+test('readHead returns HEAD, answers null when git cannot answer, and honors the exec seam', () => {
+  const missing = join(tmpdir(), 'resume-head-does-not-exist')
+  const expected = execSync('git rev-parse HEAD', { cwd: CREW_REPO_ROOT, encoding: 'utf8' }).trim()
+  assert.equal(readHead(CREW_REPO_ROOT), expected)
+  assert.equal(readHead(join(missing, 'missing')), null)
+  let seen = null
+  assert.equal(readHead('/ignored', { execSync: (command, options) => { seen = { command, options }; return 'injected-head\n' } }), 'injected-head')
+  assert.deepEqual(seen, { command: 'git rev-parse HEAD', options: { cwd: '/ignored', encoding: 'utf8' } })
+})
+
+test('stagesFromJournal bounds stages at the last run-start and handles unreadable journals', () => {
+  const dir = join(tmpdir(), `resume-journal-${process.pid}-${Date.now()}`)
+  mkdirSync(dir)
+  try {
+    const path = join(dir, 'journal.jsonl')
+    writeFileSync(path, [
+      { event: RUN_START_EVENT, head: 'aaa' }, { stage: 'plan:r1' }, { stage_done: 'plan:r1' },
+      { event: RUN_START_EVENT, head: 'bbb' }, { stage: 'plan:r1' }, { stage: 'build:r1' },
+      'not json', { event: 'noise' },
+    ].map((row) => typeof row === 'string' ? row : JSON.stringify(row)).join('\n'))
+    assert.deepEqual(stagesFromJournal(path), ['plan:r1', 'build:r1'])
+    writeFileSync(path, JSON.stringify({ event: RUN_START_EVENT, head: 'ccc' }) + '\n')
+    assert.deepEqual(stagesFromJournal(path), [])
+    assert.equal(stagesFromJournal(join(dir, 'missing.jsonl')), null)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })

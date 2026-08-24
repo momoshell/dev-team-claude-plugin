@@ -64,3 +64,30 @@ verification follows it.
 An accept-with-residuals is a close-out task, not a result: read the reviewer's
 last findings and the diff before trusting the branch. Archived crew journals
 under `~/.crew` are evidence, not junk — do not prune them.
+
+## Rebase first, then re-anchor
+
+A `path:line` citation is a claim about **one specific tree**. Repairing anchors
+before a rebase calibrates them against a tree that will never exist on `main`,
+and the error is invisible locally: the exhibits tests pass in the worktree and
+fail the moment the lane merges.
+
+Measured on `b187-jsonleaf`: restoring with `git checkout main -- skills/` pulled
+a sibling's merged re-anchoring (#586, calibrated to a `scripts/factory/ledger.mjs`
+of **4608** lines) into a worktree still based on a tree where that file was
+**4600** — the exact +8. Re-anchoring after the rebase moved **5** anchors
+instead of 10, and a different file set. Restore from `HEAD`, never from `main`.
+
+Two rules the reviewer added, both earned:
+
+- **Re-anchor INTO the commit, not beside it.** An uncommitted repair is the same
+  failure as a wrongly-staged one, one step later — the branch tip still carries
+  the breakage the branch tip causes.
+- **Verify against the COMMITTED tree.** `git show HEAD:<anchors.json>` against
+  `git show HEAD:<file>` needs no scratch checkout and cannot be fooled by a
+  clean-looking working tree, which is exactly what masks this.
+
+**Every edit to a cited file rots anchors, and only the exhibits tests notice** —
+the acceptance gate and the edited file's own tests both stay green. `b187`
+paid this four times in one lane: the build, a new pin, a comment, a file-level
+rule. There is no repair tool; `anchor-pin.mjs` detects and cannot fix (#582).

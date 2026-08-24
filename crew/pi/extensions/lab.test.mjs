@@ -86,12 +86,13 @@ function scriptedProgram(requests, result = 'done', { concurrent = false, close 
   return { child, responses }
 }
 
-function scriptedHarness({ requests, result = 'done', concurrent = false, suite = {}, deps = {} } = {}) {
+function scriptedHarness({ requests, result = 'done', concurrent = false, suite = {}, deps = {}, envPatch = {} } = {}) {
   const holder = temp('lab-harness-')
   const taskDir = join(holder, 'task')
   mkdirSync(taskDir, { recursive: true })
   const env = { ...process.env, CREW_ROLE: 'planner', CREW_TASK_DIR: taskDir }
   delete env.NODE_OPTIONS
+  Object.assign(env, envPatch)
   const program = scriptedProgram(requests, result, { concurrent, close: suite.closeProgram !== false })
   const calls = []
   const syncCalls = []
@@ -475,6 +476,7 @@ test('runnerSource emits a startup audit and five RPC stubs', () => {
   assert.match(source, /process\.permission\.has/)
   assert.match(source, /net-unenforceable/)
   assert.match(source, /allowedNodeEnvironmentFlags/)
+  assert.match(source, /node_options: process\.env\.NODE_OPTIONS \|\| null/)
 })
 
 test('the host surfaces the child\'s typed refusal', async () => {
@@ -555,6 +557,25 @@ test('runSuite argv inserts -- and rejects an over-long path array', async () =>
   await bad.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
   assert.equal(bad.program.responses[1].refused, 'op-args-invalid')
   assert.equal(bad.calls.length, 1)
+})
+
+test('the suite child receives a scrubbed environment', async () => {
+  const run = scriptedHarness({
+    requests: [
+      { id: 1, op: 'scratchCheckout', args: [] },
+      { id: 2, op: 'runSuite', args: [['crew/pi/extensions/subagent.test.mjs']] },
+    ],
+    suite: { stdout: '# pass 1\n# fail 0\n' },
+    envPatch: { NODE_OPTIONS: '--require=/nonexistent-preload.cjs', FORCE_COLOR: '1', CLICOLOR_FORCE: '1' },
+    deps: { kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
+  })
+  const result = await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(result.details.outcome, 'ok')
+  const suiteEnv = run.calls[1].options.env
+  assert.equal(Object.hasOwn(suiteEnv, 'NODE_OPTIONS'), false)
+  assert.equal(Object.hasOwn(suiteEnv, 'FORCE_COLOR'), false)
+  assert.equal(Object.hasOwn(suiteEnv, 'CLICOLOR_FORCE'), false)
+  assert.equal(suiteEnv.NO_COLOR, '1')
 })
 
 test('grep closes its option allowlist and forwards only mapped flags', async () => {

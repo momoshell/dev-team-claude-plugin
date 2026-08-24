@@ -1,5 +1,5 @@
 // Content pins for prose citations; see references/citations.md and vacuity.md's detector-key section.
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 export const MIN_EXPECTED_LENGTH = 12
@@ -54,6 +54,17 @@ function display(value) {
   return JSON.stringify(value)
 }
 
+function readTargetLines(root, anchor) {
+  const target = join(root, anchor.rel)
+  try {
+    if (!existsSync(target)) return { failure: `${anchor.key}: target file is missing` }
+    if (statSync(target).isDirectory()) return { failure: `${anchor.key}: target is a directory` }
+    return { lines: readFileSync(target, 'utf8').split('\n') }
+  } catch (error) {
+    return { failure: `${anchor.key}: target could not be read (${error?.code || error?.message || String(error)})` }
+  }
+}
+
 export function checkAnchors({ root, docs, manifest }) {
   let anchors
   try {
@@ -66,22 +77,8 @@ export function checkAnchors({ root, docs, manifest }) {
   const cited = new Set(anchors.map(({ key }) => key))
 
   for (const anchor of anchors) {
-    const target = join(root, anchor.rel)
-    let lines
-    try {
-      if (!existsSync(target)) {
-        failures.push(`${anchor.key}: target file is missing`)
-        continue
-      }
-      if (statSync(target).isDirectory()) {
-        failures.push(`${anchor.key}: target is a directory`)
-        continue
-      }
-      lines = readFileSync(target, 'utf8').split('\n')
-    } catch (error) {
-      failures.push(`${anchor.key}: target could not be read (${error?.code || error?.message || String(error)})`)
-      continue
-    }
+    const { lines, failure } = readTargetLines(root, anchor)
+    if (failure) { failures.push(failure); continue }
 
     if (anchor.line < 1 || anchor.line > lines.length) {
       failures.push(`${anchor.key}: line is out of range (target has ${lines.length} lines)`)
@@ -124,3 +121,118 @@ export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors }
   if (failures.length > 0) throw new Error(failures.join('\n'))
   return result.anchors
 }
+
+function escapeLiteral(value) { return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') }
+
+export function rewriteCitations(text, rewrites) {
+  if (!(rewrites instanceof Map) || rewrites.size === 0) return text
+  const pattern = new RegExp(`(${[...rewrites.keys()].map(escapeLiteral).join('|')})(?!\\d)`, 'g')
+  return text.replace(pattern, (match) => rewrites.get(match))
+}
+
+export function repairAnchors({ root, docs, manifest }) {
+  let anchors
+  try {
+    anchors = collectAnchors({ docs })
+  } catch (error) {
+    return { anchors: 0, repairs: [], refusals: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], manifest, edits: [] }
+  }
+  const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
+  const cited = new Set(anchors.map(({ key }) => key))
+  const refusals = []
+  const repairs = []
+  const rewrites = new Map()
+
+  for (const anchor of anchors) {
+    if (rewrites.has(anchor.key)) continue
+    const { lines, failure } = readTargetLines(root, anchor)
+    if (failure) { refusals.push(failure); continue }
+    if (!Object.hasOwn(declarations, anchor.key)) {
+      refusals.push(`${anchor.key}: manifest has no entry`)
+      continue
+    }
+    const expected = declarations[anchor.key]
+    if (typeof expected !== 'string' || expected.trim().length < MIN_EXPECTED_LENGTH) {
+      refusals.push(`${anchor.key}: expected ${display(expected)} must be at least ${MIN_EXPECTED_LENGTH} non-space characters`)
+      continue
+    }
+    const found = []
+    for (let i = 0; i < lines.length; i += 1) if (lineCarries(lines[i], expected)) found.push(i + 1)
+    if (found.length === 0) {
+      refusals.push(`${anchor.key}: content appears nowhere in ${anchor.rel}; this is rot, not a shift`)
+      continue
+    }
+    if (found.length > 1) {
+      refusals.push(`${anchor.key}: content occurs ${found.length} times in ${anchor.rel}; a repair refuses to guess`)
+      continue
+    }
+    const nextLine = found[0]
+    if (nextLine === anchor.line) continue
+    const nextKey = `${anchor.rel}:${nextLine}`
+    if (Object.hasOwn(declarations, nextKey) && declarations[nextKey] !== expected) {
+      refusals.push(`${anchor.key}: line ${nextLine} is already declared by another anchor`)
+      continue
+    }
+    rewrites.set(anchor.key, nextKey)
+    repairs.push({ key: anchor.key, rel: anchor.rel, from: anchor.line, to: nextLine, nextKey })
+  }
+
+  for (const key of Object.keys(declarations)) {
+    if (!cited.has(key)) refusals.push(`${key}: manifest entry is orphaned (no citation)`)
+  }
+
+  const next = { ...declarations }
+  for (const repair of repairs) delete next[repair.key]
+  for (const repair of repairs) next[repair.nextKey] = declarations[repair.key]
+
+  const edits = []
+  for (const doc of docs) {
+    let text
+    try {
+      text = readFileSync(doc, 'utf8')
+    } catch (error) {
+      refusals.push(`${doc}: citation doc could not be re-read (${error?.code || error?.message || String(error)})`)
+      continue
+    }
+    const rewritten = rewriteCitations(text, rewrites)
+    if (rewritten !== text) edits.push({ doc, text: rewritten })
+  }
+
+  return { anchors: anchors.length, repairs, refusals, manifest: next, edits }
+}
+
+export function repairAnchorsInPlace({ root, skillDir, manifestPath }) {
+  let manifest
+  try {
+    manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+  } catch (error) {
+    return { anchors: 0, repairs: [], refusals: [`could not read anchor manifest ${manifestPath}: ${error?.message || String(error)}`], manifest: {}, edits: [] }
+  }
+  const result = repairAnchors({ root, docs: skillDocs(skillDir), manifest })
+  if (result.repairs.length > 0) {
+    writeFileSync(manifestPath, `${JSON.stringify(result.manifest, null, 2)}\n`)
+    for (const edit of result.edits) writeFileSync(edit.doc, edit.text)
+  }
+  return result
+}
+
+export function repairCli(argv, log = console.log) {
+  let skillDir = null
+  let root = process.cwd()
+  for (let i = 0; i < argv.length; i += 1) {
+    if (argv[i] === '--repair') { skillDir = argv[i + 1]; i += 1; continue }
+    if (argv[i] === '--root') { root = argv[i + 1]; i += 1; continue }
+    log(`unknown argument ${argv[i]}`)
+    return 2
+  }
+  if (!skillDir || !root) {
+    log('usage: node skills/qa-test-writing/anchor-pin.mjs --repair <skillDir> [--root <root>]')
+    return 2
+  }
+  const result = repairAnchorsInPlace({ root, skillDir, manifestPath: join(skillDir, 'anchors.json') })
+  for (const repair of result.repairs) log(`repaired ${repair.key} -> ${repair.nextKey}`)
+  for (const refusal of result.refusals) log(`refused ${refusal}`)
+  return result.refusals.length > 0 ? 1 : 0
+}
+
+if (import.meta.main) process.exit(repairCli(process.argv.slice(2)))

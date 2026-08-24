@@ -7,11 +7,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createServer } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
-import { openLedger, NODE_FLOOR, replayJsonl, WRITERS } from '../scripts/factory/ledger.mjs'
+import { openLedger, NODE_FLOOR, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
+import { cellHealth } from '../crew/breaker.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
-import { rawRequest } from './helpers.mjs'
+import { rawRequest, scratchDir } from './helpers.mjs'
 
 const require = createRequire(import.meta.url)
 function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
@@ -402,6 +403,50 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
   }
 })
 
+test('read-only ledger handles do not create a missing path, lie about writes, or hand out writable connections', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-read-only-handles-')
+  const missingDir = join(dir, 'missing'), missingDb = join(missingDir, 'ledger.db')
+  const lines = []
+  const missing = openLedger({ dbPath: missingDb, readOnly: true, stderr: { write(text) { lines.push(text) } } })
+  try {
+    assert.equal(missing.readConnection(), null)
+    assert.equal(missing.stats().degraded, true)
+    assert.match(lines.join(''), /read-only handle unavailable; writes remain refused/)
+    assert.doesNotMatch(lines.join(''), /JSONL recording continues/)
+    for (const path of [missingDir, missingDb, `${missingDb}-wal`, `${missingDb}-shm`, join(missingDir, 'ledger.jsonl')]) assert.equal(existsSync(path), false, path)
+  } finally { missing.close() }
+
+  const seededDb = join(dir, 'seeded', 'ledger.db')
+  const seed = openLedger({ dbPath: seededDb }); seed.startSession({ adw_id: 'seed', repo_slug: 'repo', task_slug: 'seed' }); seed.close()
+  const existing = openLedger({ dbPath: seededDb, readOnly: true, stderr: { write() {} } })
+  try {
+    const conn = existing.readConnection()
+    assert.ok(conn)
+    assert.throws(() => conn.exec('CREATE TABLE read_only_probe (x)'))
+  } finally { existing.close() }
+
+  const writable = openLedger({ dbPath: seededDb })
+  try { assert.throws(() => writable.readConnection(), /readConnection is available only on a read-only handle/) } finally { writable.close() }
+  rmSync(dir, { recursive: true, force: true })
+})
+
+test('feed delegated readouts equal the ledger methods on one fixture', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-delegations-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  const read = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+  const since = new Date(0).toISOString()
+  try {
+    assert.deepEqual(feed.cellFailures({ since, until: null }).rows, read.cellFailures({ since, until: null }))
+    assert.deepEqual(feed.runSet({ since, until: null }).rows, read.runSet({ since, until: null }))
+    assert.deepEqual(feed.intake({ since, until: null }).sweeps, read.intakeSweeps({ since, until: null }))
+    assert.deepEqual(feed.intake({ since, until: null }).refusals, read.intakeRefusals({ since, until: null }))
+  } finally {
+    feed.close(); read.close(); rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('sessions expose token, gate, and review measurements while live runs stay pending', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-measurements-'))
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
@@ -486,6 +531,46 @@ test('cell health reports a stated window, run-less rows and kinds without a ver
     assert.equal((await json(base, '/api/cell-health?since=not-a-date')).status, 400)
   } finally {
     if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('cell health, roster ladder, and breaker agree on host-attributed failures in one process', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-cell-health-three-way-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const roster = JSON.parse(readFileSync(join(process.cwd(), 'crew', 'roster.json'), 'utf8'))
+  const seat = roster.tiers.judge.planner
+  const adwId = 'visualizer-three-way-0000-000000000001'
+  const ledger = openLedger({ dbPath: ledgerDb })
+  ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'three-way', started_at: new Date(Date.now() - 3600e3).toISOString() })
+  const cell = { provider: seat.provider, model_id: seat.id, agent: seat.agent, effort: seat.effort, role: 'planner' }
+  ledger.recordCellFailure({ ...cell, kind: 'boot-refusal', adw_id: null, created_at: new Date(Date.now() - 1800e3).toISOString() })
+  ledger.recordCellFailure({ ...cell, kind: 'seat-died', adw_id: adwId, attribution: 'host', created_at: new Date(Date.now() - 1700e3).toISOString() })
+  ledger.recordCellFailure({ ...cell, kind: 'seat-died', adw_id: adwId, attribution: 'cell', created_at: new Date(Date.now() - 1600e3).toISOString() })
+  ledger.recordCellFailure({ ...cell, kind: 'timeout', adw_id: adwId, attribution: 'cell', created_at: new Date(Date.now() - 1500e3).toISOString() })
+  ledger.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  let started
+  try {
+    started = await startInProcess(feed, { ledgerDb, triageDb, crewRoot: dir })
+    const health = (await json(started.base, '/api/cell-health')).json
+    const ladder = (await json(started.base, '/api/roster/ladder')).json
+    const breaker = cellHealth({ policy: { threshold: 3, window_ms: 24 * 3600e3 }, seats: roster.tiers.judge, dbPath: ledgerDb })
+    const expected = { failures: 4, run_less: 1, host_attributed: 1, counted: 2 }
+    const healthCell = health.cells.find((row) => row.provider === seat.provider && row.model_id === seat.id && row.agent === seat.agent && row.effort === seat.effort)
+    const ladderChip = ladder.chips.find((row) => row.key === `${seat.provider}/${seat.id}`)
+    const breakerCell = breaker.cells.find((row) => row.provider === seat.provider && row.model_id === seat.id && row.agent === seat.agent && row.effort === seat.effort)
+    assert.ok(healthCell)
+    assert.ok(ladderChip?.measured)
+    assert.ok(breakerCell)
+    for (const key of Object.keys(expected)) {
+      assert.equal(healthCell[key], expected[key], `cell-health ${key}`)
+      assert.equal(ladderChip.measured[key], expected[key], `roster-ladder ${key}`)
+      assert.equal(breakerCell[key], expected[key], `breaker ${key}`)
+    }
+  } finally {
+    await stopInProcess(started?.server)
+    feed.close()
     rmSync(dir, { recursive: true, force: true })
   }
 })
@@ -672,6 +757,48 @@ test('run-set states its window and lists every run in it', { skip: SKIP }, asyn
     for (const row of response.json.rows) if (row.status in tally) tally[row.status] += 1
     assert.deepEqual(response.json.settled, tally)
     assert.equal(response.json.rows.find((row) => row.adw_id === done).billed_input_tokens, 15)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/run-set uses the ledger pane wording and never resurrects the deleted cause', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-run-set-pane-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const ledger = openLedger({ dbPath: ledgerDb })
+  const adwId = 'visualizer-pane-0000-000000000001'
+  ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'pane', started_at: new Date(Date.now() - 2 * 3600e3).toISOString() })
+  ledger.recordCellFailure({ provider: 'anthropic', model_id: 'pane-cell', agent: 'claude', effort: 'high', role: 'planner', kind: 'seat-died', transport: 'pane', adw_id: adwId, created_at: new Date(Date.now() - 3600e3).toISOString() })
+  ledger.endSession({ adw_id: adwId, status: 'ok' })
+  ledger.close()
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const response = await json(base, `/api/run-set?since=${encodeURIComponent(new Date(0).toISOString())}`)
+    assert.equal(response.status, 200)
+    assert.equal(response.json.unmeasured.usage, `no run in this window has an agent_sessions row: ${USAGE_ABSENT_CAUSES.pane}`)
+    assert.doesNotMatch(response.body, /predates per-agent token measurement/)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a readable mirror missing a transport source is absent, not transport-unrecorded', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-run-set-transport-absent-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE modifier_attempts')
+  writable.close()
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const response = await json(base, `/api/run-set?since=${encodeURIComponent(new Date(0).toISOString())}`)
+    assert.equal(response.status, 200)
+    assert.ok(response.json.absent)
+    assert.doesNotMatch(response.body, /transport_unrecorded/)
   } finally {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
@@ -1427,6 +1554,14 @@ test('the visualizer CLI still accepts every flag it reads', async () => {
     assert.equal(announced.ledger_db, ledgerDb)
     assert.equal(announced.crew_root, crewRoot)
     assert.ok(Number.isInteger(announced.port) && announced.port > 0, `expected an ephemeral port, got ${announced.port}`)
+    assert.equal(Object.prototype.hasOwnProperty.call(announced, 'readonly_reads'), false)
+    assert.equal(announced.ledger_feed_readonly, true)
+    assert.equal(announced.triage_sidecar_writable, true)
+    assert.deepEqual(announced.writes, [
+      'triage sidecar (may create visualizer.db and its WAL/SHM)',
+      'stop-switch',
+      'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)',
+    ])
     await stopServer(child); child = null
   } finally {
     if (child) await stopServer(child)

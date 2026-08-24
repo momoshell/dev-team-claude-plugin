@@ -2913,6 +2913,79 @@ function seedRun(ledger, adwId, startedAt, status = 'running') {
   if (status !== 'running') ledger.endSession({ adw_id: adwId, status })
 }
 
+test('read-only writers refuse ordinary and sequence paths without changing authority or mirror', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({ adw_id: 'read-only-seed', repo_slug: 'repo', task_slug: 'seed' })
+  source.startPhase({ adw_id: 'read-only-seed', seq: 1, name: 'plan' })
+  const dbPath = source._dbPath
+  const jsonlPath = source._jsonlPath
+  const beforeJsonl = readFileSync(jsonlPath)
+  const beforeSessions = source.listSessions()
+  const beforePhases = source.dumpTable('phases')
+  source.close()
+
+  const reader = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  try {
+    assert.throws(() => reader.startSession({ adw_id: 'read-only-ordinary', repo_slug: 'repo', task_slug: 'ordinary' }))
+    assert.throws(() => reader.startPhase({ adw_id: 'read-only-seed', seq: 2, name: 'build' }))
+  } finally { reader.close() }
+
+  const after = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.deepEqual(after.listSessions(), beforeSessions)
+    assert.deepEqual(after.dumpTable('phases'), beforePhases)
+  } finally { after.close() }
+  assert.deepEqual(readFileSync(jsonlPath), beforeJsonl)
+})
+
+test('read-only ledger answers delegated readouts without creating a missing path', { skip: SKIP }, () => {
+  const missingDir = join(nextDir(), 'missing')
+  const missingDb = join(missingDir, 'ledger.db')
+  const missing = openLedger({ dbPath: missingDb, readOnly: true, stderr: { write: () => {} } })
+  try { assert.equal(missing.readConnection(), null) } finally { missing.close() }
+  for (const path of [missingDir, missingDb, `${missingDb}-wal`, `${missingDb}-shm`, join(missingDir, 'ledger.jsonl')]) assert.equal(existsSync(path), false, path)
+
+  const source = openTestLedger()
+  seedRun(source, 'read-only-reads', RUNSET_SINCE)
+  source.recordCellFailure({ provider: 'anthropic', model_id: 'read-cell', agent: 'claude', effort: 'high', role: 'planner', kind: 'timeout', adw_id: null, created_at: RUNSET_SINCE })
+  source.recordIntakeSweep({ board_owner: 'owner', board_project: 1, outcome: 'none', considered: 1, pages: 1, created_at: RUNSET_SINCE })
+  source.recordIntakeRefusal({ board_owner: 'owner', board_project: 1, issue: 1, reason: 'stop-switch', created_at: RUNSET_SINCE })
+  const dbPath = source._dbPath
+  source.close()
+  const writable = openLedger({ dbPath, stderr: { write: () => {} } })
+  const reader = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  try {
+    const options = { since: RUNSET_SINCE, until: null }
+    assert.deepEqual(reader.cellFailures(options), writable.cellFailures(options))
+    assert.deepEqual(reader.runSet(options), writable.runSet(options))
+    assert.deepEqual(reader.intakeSweeps(options), writable.intakeSweeps(options))
+    assert.deepEqual(reader.intakeRefusals(options), writable.intakeRefusals(options))
+  } finally { reader.close(); writable.close() }
+})
+
+test('runSet keeps runs and null billing when agent_sessions is absent', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'legacy.db')
+  const conn = new (require('node:sqlite').DatabaseSync)(dbPath)
+  conn.exec(`CREATE TABLE sessions (
+    adw_id TEXT PRIMARY KEY, repo_slug TEXT, task_slug TEXT, started_at TEXT,
+    ended_at TEXT, status TEXT, billed_input_tokens INTEGER,
+    billed_output_tokens INTEGER, billed_cache_write_tokens INTEGER,
+    billed_cache_read_tokens INTEGER
+  )`)
+  conn.prepare('INSERT INTO sessions (adw_id, repo_slug, task_slug, started_at, status) VALUES (?, ?, ?, ?, ?)')
+    .run('legacy-run', 'repo', 'legacy', RUNSET_SINCE, 'ok')
+  conn.close()
+  const ledger = openLedger({ dbPath, readOnly: true, stderr: { write: () => {} } })
+  try {
+    const rows = ledger.runSet({ since: RUNSET_SINCE })
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].adw_id, 'legacy-run')
+    assert.equal(rows[0].agent_sessions, 0)
+    for (const key of ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']) assert.equal(rows[0][key], null)
+  } finally { ledger.close() }
+})
+
 test('run variant registers stay equal to the driver enum and marker values', { skip: SKIP }, () => {
   assert.deepEqual([...RUN_VARIANTS], [...VARIANT_NAMES])
   assert.deepEqual([...new Set(Object.values(RUN_VARIANT_MARKERS))].sort(), [...RUN_VARIANTS].sort())

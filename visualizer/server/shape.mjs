@@ -1,4 +1,6 @@
-// Pure run shaping helpers. This module deliberately has no filesystem or database dependencies.
+// Pure run shaping helpers. This module opens no file and no database.
+import { usageAbsentCause, USAGE_ABSENT_CAUSES } from '../../scripts/factory/ledger.mjs'
+
 const lanes = new Map()
 const PALETTE_SIZE = 8
 export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
@@ -11,8 +13,8 @@ const MODEL_ROLE_PENDING = "not measured — this run records an agent_sessions 
 export const RUN_SET_WINDOW_MS = 24 * 60 * 60 * 1000
 export const INTAKE_WINDOW_MS = 24 * 60 * 60 * 1000
 export const SEAT_TEARDOWN_WINDOW_MS = 24 * 60 * 60 * 1000
-// Keep this dependency-free copy lockstep with scripts/factory/ledger.mjs:134;
-// the shaper must not import the ledger module just to render its vocabulary.
+// The ledger exports these two names specifically so every renderer has one
+// home for this vocabulary (#433); this module still opens no file or database.
 export const SEAT_TEARDOWN_OUTCOMES = Object.freeze(['proven', 'failed', 'unproven'])
 export const INTAKE_REFUSAL_REASONS = Object.freeze([
   'stop-switch', 'window-cap', 'rate-limit-floor',
@@ -713,7 +715,7 @@ function budgetBlock({ ceiling = null, burn = null, since = null, until = null, 
   return budget
 }
 
-export function shapeRunSet({ rows, absent, degraded = false, degraded_reason = null, since, until, label, ceiling = null, burn = null } = {}) {
+export function shapeRunSet({ rows, absent, degraded = false, degraded_reason = null, since, until, label, transports = [], ceiling = null, burn = null } = {}) {
   const window = { since: since ?? null, until: until ?? null, label: label ?? null }
   const suppliedAbsent = typeof absent === 'string' && absent.length > 0 ? absent : null
   const degradedAbsent = degradedAbsence(degraded, degraded_reason)
@@ -774,8 +776,8 @@ export function shapeRunSet({ rows, absent, degraded = false, degraded_reason = 
   const hasUnmeasuredUsage = source.length > 0 && (agentSessions === 0 || source.some((row) => RUN_SET_BILLED_KEYS.some((key) => row?.[key] == null)))
   if (hasUnmeasuredUsage) {
     unmeasured.usage = agentSessions === 0
-      ? 'no agent_sessions rows for any run in this window — predates per-agent token measurement (#119), not a measured zero'
-      : 'one or more agent_sessions rows for runs in this window have no billed token totals — unmeasured, not a measured zero'
+      ? `no run in this window has an agent_sessions row: ${usageAbsentCause(transports)}`
+      : `one or more runs in this window: ${USAGE_ABSENT_CAUSES.unbilled_rows}`
   }
 
   const shapedRows = source.map((row) => {
@@ -1022,7 +1024,7 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
       cell = {
         key, provider, model_id, agent, effort,
         roles: new Set(), tiers: new Set(), seated,
-        failures: 0, run_less: 0, first_at: null, last_at: null,
+        failures: 0, run_less: 0, host_attributed: 0, first_at: null, last_at: null,
         by_kind: new Map(),
       }
       cells.set(key, cell)
@@ -1044,15 +1046,18 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
       })
       const failures = countValue(row?.failures)
       const run_less = countValue(row?.run_less)
+      const host_attributed = countValue(row?.host_attributed)
       cell.failures += failures
       cell.run_less += run_less
+      cell.host_attributed += host_attributed
       if (row?.role != null) cell.roles.add(row.role)
       cell.first_at = earlierTimestamp(cell.first_at, row?.first_at ?? null)
       cell.last_at = laterTimestamp(cell.last_at, row?.last_at ?? null)
       const kind = row?.kind ?? '—'
-      const byKind = cell.by_kind.get(kind) || { kind, failures: 0, run_less: 0 }
+      const byKind = cell.by_kind.get(kind) || { kind, failures: 0, run_less: 0, host_attributed: 0 }
       byKind.failures += failures
       byKind.run_less += run_less
+      byKind.host_attributed += host_attributed
       cell.by_kind.set(kind, byKind)
     }
   }
@@ -1106,6 +1111,8 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
     const undetermined = Boolean(absentReason)
     const failures = undetermined ? null : cell.failures
     const run_less = undetermined ? null : cell.run_less
+    const host_attributed = undetermined ? null : cell.host_attributed
+    const counted = undetermined ? null : Math.max(0, failures - run_less - host_attributed)
     const state = undetermined
       ? 'undetermined'
       : failures === 0 ? 'silent' : (failures > 0 && run_less === failures ? 'run-less-only' : 'recorded')
@@ -1126,6 +1133,8 @@ export function shapeCellHealth({ rows, absent, roster, since, until, label } = 
       failures,
       run_less,
       in_run: undetermined ? null : failures - run_less,
+      host_attributed,
+      counted,
       first_at: undetermined ? null : cell.first_at,
       last_at: undetermined ? null : cell.last_at,
       by_kind,

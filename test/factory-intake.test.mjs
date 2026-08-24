@@ -3,13 +3,13 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, readFileSync, rmSync, writeFileSync,
 } from 'node:fs'
-import { tmpdir } from 'node:os'
+
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { ROOT } from './helpers.mjs'
+import { ROOT, scratchDir } from './helpers.mjs'
 import {
   ACTOR_CLAIM_MAX_CHARS, DEFAULT_INTAKE_CONFIG, MAX_SWEEP_TICKS, PREMISE_REFERENCE_CAP,
   REQUIRED_INTAKE_CONFIG_KEYS, SWEEP_USAGE, bodyDigest, compileIntakeBrief,
@@ -26,15 +26,15 @@ import {
 const TARGET = 'scripts/factory/intake.mjs'
 const UNKNOWN_PREMISE_SYMBOL = ['zzz', 'NotAReal', 'Symbol', 'Here'].join('')
 const NOW = Date.parse('2026-01-02T00:00:00.000Z')
-const fixture = mkdtempSync(join(tmpdir(), 'factory-intake-'))
+const fixture = scratchDir('factory-intake-')
 after(() => rmSync(fixture, { recursive: true, force: true }))
 
 function dbPath() {
-  return join(mkdtempSync(join(tmpdir(), 'factory-intake-')), 'ledger.db')
+  return join(scratchDir('factory-intake-'), 'ledger.db')
 }
 
 function withLedgerSentinel(fn) {
-  const base = mkdtempSync(join(tmpdir(), 'factory-intake-sentinel-'))
+  const base = scratchDir('factory-intake-sentinel-')
   const db = join(base, 'db', 'ledger.db')
   const dir = join(base, 'dir')
   const previousDb = process.env.DEVTEAM_LEDGER_DB
@@ -57,7 +57,7 @@ function withLedgerSentinel(fn) {
 let callerCheckoutMemo = null
 function callerCheckout() {
   if (callerCheckoutMemo) return callerCheckoutMemo
-  const root = mkdtempSync(join(fixture, 'caller-checkout-'))
+  const root = scratchDir('caller-checkout-', { parent: fixture })
   mkdirSync(join(root, 'lib'), { recursive: true })
   mkdirSync(join(root, 'test'), { recursive: true })
   writeFileSync(join(root, 'lib', 'widget.mjs'), 'export function widgetLoop() { return 1 }\n')
@@ -244,7 +244,7 @@ function runSweep(nodes, options = {}) {
 }
 
 function dispatchDeps(nodes, overrides = {}) {
-  const crewDir = mkdtempSync(join(fixture, 'crew-'))
+  const crewDir = scratchDir('crew-', { parent: fixture })
   const taskDir = join(crewDir, 'task')
   const returnsDir = join(crewDir, 'returns')
   const ledgerDir = join(crewDir, 'ledger')

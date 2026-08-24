@@ -2,15 +2,57 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
-import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { ROOT, rawRequest, startFileWriter, writeTornFile } from './helpers.mjs'
+import { ROOT, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
 
 const listen = async (server) => {
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve) })
   return server.address().port
 }
+
+const helperUrl = new URL('./helpers.mjs', import.meta.url).href
+
+function runScratchChild(root, { hardExit = false } = {}) {
+  const script = join(root, hardExit ? 'hard-exit.test.mjs' : 'clean.test.mjs')
+  const report = join(root, hardExit ? 'hard-exit.minted' : 'clean.minted')
+  const exit = hardExit ? '  process.exit(3)\n' : ''
+  writeFileSync(script, `import { test } from 'node:test'\nimport { writeFileSync } from 'node:fs'\nimport { scratchDir } from ${JSON.stringify(helperUrl)}\ntest('child mints a scratch directory', () => {\n  const dir = scratchDir('helpers-child-')\n  writeFileSync(${JSON.stringify(report)}, dir)\n${exit}})\n`)
+  const env = { ...process.env, TMPDIR: root, NO_COLOR: '1' }
+  delete env.NODE_TEST_CONTEXT
+  const result = spawnSync(process.execPath, ['--test', '--test-reporter=tap', script], {
+    env, encoding: 'utf8', timeout: 30000,
+  })
+  const minted = existsSync(report) ? readFileSync(report, 'utf8').trim() : ''
+  rmSync(script, { force: true })
+  rmSync(report, { force: true })
+  return { result, minted, leftovers: readdirSync(root) }
+}
+
+test('scratchDir mints a directory under the ambient temp root with the given prefix', () => {
+  const dir = scratchDir('helpers-mint-')
+  assert.ok(dir.startsWith(`${tmpdir()}/`))
+  assert.match(dir, /helpers-mint-[^/]+$/)
+  assert.equal(existsSync(dir), true)
+})
+
+test('a scratch dir does not survive a clean node --test child', () => {
+  const root = scratchDir('helpers-clean-root-')
+  const child = runScratchChild(root)
+  assert.equal(child.result.status, 0, child.result.stderr)
+  assert.ok(child.minted.startsWith(`${root}/helpers-child-`), `child reported no minted path: ${child.minted}`)
+  assert.deepEqual(child.leftovers, [])
+})
+
+test('a scratch dir does not survive a child that hard-exits mid-test', () => {
+  const root = scratchDir('helpers-hard-exit-root-')
+  const child = runScratchChild(root, { hardExit: true })
+  assert.notEqual(child.result.status, 0, child.result.stderr)
+  assert.ok(child.minted.startsWith(`${root}/helpers-child-`), `child reported no minted path: ${child.minted}`)
+  assert.deepEqual(child.leftovers, [])
+})
 
 // MUTATION G1: repoint ROOT and the repository-root contract goes red.
 test('ROOT still resolves to the repo root', () => {
@@ -69,7 +111,7 @@ test('rawRequest reports a socket closed without a response', async () => {
 
 // MUTATION G4/G6: remove the second-process write loop or invert its PID assertion and this self-test goes red.
 test('startFileWriter writes from a second process while the parent reads', async () => {
-  const root = mkdtempSync(join(tmpdir(), 'helpers-writer-'))
+  const root = scratchDir('helpers-writer-')
   const file = join(root, 'crew.json')
   const text = JSON.stringify({ pad: 'x'.repeat(4000), n: '%N%' })
   writeFileSync(file, text.split('%N%').join('seed'))
@@ -96,7 +138,7 @@ test('startFileWriter writes from a second process while the parent reads', asyn
 
 // MUTATION G5: publish the complete text instead of a prefix and this torn-file check goes red.
 test('writeTornFile produces bytes that exist and do not parse, then recovers', () => {
-  const root = mkdtempSync(join(tmpdir(), 'helpers-torn-'))
+  const root = scratchDir('helpers-torn-')
   try {
     const file = join(root, 'envelope.json')
     const envelope = { assignment_id: 'd1', role: 'builder', status: 'done', summary: 'y'.repeat(200) }
@@ -117,7 +159,7 @@ test('writeTornFile produces bytes that exist and do not parse, then recovers', 
 
 // MUTATION G5: remove the parse and empty-prefix refusals and the torn fixture becomes vacuous.
 test('writeTornFile refuses a prefix that parses', () => {
-  const root = mkdtempSync(join(tmpdir(), 'helpers-torn-guard-'))
+  const root = scratchDir('helpers-torn-guard-')
   try {
     assert.throws(() => writeTornFile({ file: join(root, 'p.json'), completeText: '{"a":1}   ', keepBytes: 7 }), /parses/)
     assert.throws(() => writeTornFile({ file: join(root, 'e.json'), completeText: '{}', keepBytes: 0 }), /empty|parses/)

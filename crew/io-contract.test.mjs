@@ -1,8 +1,8 @@
 // Gate-facing shared contract: the same behavioral assertions run against both io subjects.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'; import { scratchDir } from '../test/helpers.mjs'
+
 import { join } from 'node:path'
 import { cellFailureKind, emitAdapter, seatIo, nextRung, nextModelRung } from './seat-io.mjs'
 import { resolveSeatModels } from './crew.mjs'
@@ -17,7 +17,7 @@ const OPTIONAL = ['runClean', 'status', 'showDoc', 'emit', 'reseat', 'teardown']
 const FAULT = process.env.CREW_IO_CONTRACT_FAULT || ''
 
 function dirs() {
-  const root = mkdtempSync(join(tmpdir(), 'crew-io-contract-'))
+  const root = scratchDir('crew-io-contract-')
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir); mkdirSync(paths.returnsDir)
   return paths

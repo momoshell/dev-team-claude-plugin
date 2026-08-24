@@ -2,17 +2,17 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { spawnSync as nodeSpawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './lab.ts'
 import * as capabilities from '../../capabilities.mjs'
+import { scratchDir } from '../../../test/helpers.mjs'
 
 const ROOT = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
 
 function temp(prefix = 'lab-test-') {
-  return realpathSync(mkdtempSync(join(realpathSync(tmpdir()), prefix)))
+  return realpathSync(scratchDir(prefix))
 }
 
 function fakeChild(pid = 4321) {

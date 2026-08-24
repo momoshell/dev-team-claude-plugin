@@ -183,12 +183,13 @@ function measurementState(key, cells) {
   const rows = cells.rows.filter((row) => record(row) && String(row.provider) + '/' + String(row.model_id) === key)
   if (!rows.length) {
     return {
-      value: { failures: 0, run_less: 0, in_run: 0, cells: 0, kinds: {}, first_at: null, last_at: null },
+      value: { failures: 0, run_less: 0, in_run: 0, host_attributed: 0, counted: 0, cells: 0, kinds: {}, first_at: null, last_at: null },
       pending: null,
     }
   }
   let failures = 0
   let runLess = 0
+  let hostAttributed = 0
   let firstAt = null
   let lastAt = null
   const cellKeys = new Set()
@@ -198,6 +199,7 @@ function measurementState(key, cells) {
     const rowRunLess = numberValue(row.run_less)
     failures += rowFailures
     runLess += rowRunLess
+    hostAttributed += numberValue(row.host_attributed)
     cellKeys.add(`${row.agent ?? '<missing>'}\u001f${row.effort ?? '<missing>'}`)
     const kind = String(row.kind ?? '<unknown>')
     kinds.set(kind, (kinds.get(kind) || 0) + rowFailures)
@@ -209,6 +211,8 @@ function measurementState(key, cells) {
       failures,
       run_less: runLess,
       in_run: failures - runLess,
+      host_attributed: hostAttributed,
+      counted: Math.max(0, failures - runLess - hostAttributed),
       cells: cellKeys.size,
       kinds: Object.fromEntries([...kinds.entries()].sort(([left], [right]) => left.localeCompare(right))),
       first_at: firstAt,

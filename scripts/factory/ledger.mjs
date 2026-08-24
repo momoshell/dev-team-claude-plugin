@@ -24,11 +24,11 @@
 // still import cleanly there. It is loaded lazily, via createRequire, only
 // inside the first real database access, only after the floor check has
 // already passed. Below the floor (or if the lazy require throws for any
-// other reason, e.g. a build without sqlite support) the returned handle
+// other reason, e.g. a build without sqlite support) a writable handle
 // DEGRADES: every writer still appends its JSONL line, every writer/reader
 // still exists and is callable, the database mirror silently no-ops,
 // readers return empty results, `degraded` is true, and exactly one
-// diagnostic line is written to stderr for the handle's whole lifetime.
+// diagnostic line is written to stderr for the handle's whole lifetime. A read-only handle instead refuses every writer when its read door is absent.
 //
 // RETENTION: this mirror never removes rows, never removes tables, and
 // never reclaims space — none of the three destructive SQL verbs appears
@@ -1261,7 +1261,7 @@ export function openLedger({
   jsonlPath = join(dirname(dbPath), 'ledger.jsonl'),
   nodeVersion = process.versions.node,
   now = () => Date.now(),
-  stderr = process.stderr,
+  stderr = process.stderr, readOnly = false,
 } = {}) {
   if (!dbPath) {
     refuse('openLedger requires dbPath')
@@ -1277,11 +1277,7 @@ export function openLedger({
     // seq) and whose key is already held by DIFFERENT content — the mirror
     // keeps the first and this record exists only in the JSONL authority.
     seq_collisions: 0,
-    // Distinguishes WHY a handle is degraded — 'below_floor' (the version
-    // check) vs an open-time failure's error code/name (e.g. a build
-    // without sqlite support, or a permission/lock failure the one retry
-    // below didn't resolve). null while not degraded.
-    degraded_reason: null,
+    degraded_reason: null, degraded_message: null,
   }
   const seqAllocators = new Map() // `${adw_id}:${kind}` -> next seq
   const seqFloors = new Map() // `${adw_id}:${kind}` -> JSONL authority floor
@@ -1310,9 +1306,12 @@ export function openLedger({
     if (!stats.degraded_reason) {
       stats.degraded_reason = code || 'unknown'
     }
-    if (!degradedNoticeWritten) {
+    if (!stats.degraded_message) stats.degraded_message = reason; if (!degradedNoticeWritten) {
       degradedNoticeWritten = true
-      stderr.write(`ledger: degraded (${reason}) — mirror disabled, JSONL recording continues\n`)
+      const consequence = readOnly
+        ? 'read-only handle unavailable; writes remain refused'
+        : 'mirror disabled, JSONL recording continues'
+      stderr.write(`ledger: degraded (${reason}) — ${consequence}\n`)
     }
   }
 
@@ -1323,13 +1322,13 @@ export function openLedger({
     chmodIfExists(dir, 0o700)
   }
 
-  // Lazily opens the SQLite mirror on first real access. Synchronous by
-  // design (createRequire, not await import()) so every writer stays
-  // synchronous and "no write transaction spans an await" is structurally
-  // impossible to violate.
-  // Bounded, immediate (no-sleep) open-lock retry budget — see the
-  // CONCURRENCY SEAM comment in the catch block below for why this exists
-  // and why it can never sleep. Raised from a single retry (round 3) to a
+  function assertWritable() {
+    if (readOnly) refuse('this ledger handle is read-only — it may not write')
+  }
+
+  // Lazily opens the SQLite mirror on first real access; every writer stays synchronous.
+  // Bounded, immediate (no-sleep) open-lock retry budget; the catch block
+  // below explains why retries never sleep. Raised from a single retry (round 3) to a
   // small bounded count: a live two-real-process race on a brand-new db
   // (#41's own SEQ RESERVATION UNDER CONCURRENCY test) showed a single
   // retry insufficient on a loaded CI runner — one side's ensureDb()
@@ -1342,17 +1341,16 @@ export function openLedger({
   function ensureDb() {
     if (db || dbOpenAttempted) return db
     if (degraded) {
+      // Below-floor degradation emits its notice lazily on first access.
+      // A read-only handle's consequence names refused writes.
       dbOpenAttempted = true
-      // Below-floor degradation is decided at openLedger() time, but the
-      // one required stderr notice is still emitted lazily, on first real
-      // access, consistent with this handle's lazy-open contract.
       noteDegraded(`node ${nodeVersion} is below NODE_FLOOR ${NODE_FLOOR}`, 'below_floor')
       return null
     }
     try {
-      ensureDirAndPerms()
+      if (!readOnly) ensureDirAndPerms()
       const { DatabaseSync } = require('node:sqlite')
-      const conn = new DatabaseSync(dbPath)
+      const conn = readOnly ? new DatabaseSync(dbPath, { readOnly: true }) : new DatabaseSync(dbPath)
       // busy_timeout is set FIRST, before journal_mode/synchronous: those
       // two pragmas (and the migrations that follow) can themselves throw
       // "database is locked" against a freshly-created db another process
@@ -1361,12 +1359,12 @@ export function openLedger({
       // it any later left journal_mode/synchronous themselves exposed to
       // an instant, unprotected lock failure.
       conn.exec('PRAGMA busy_timeout = 5000')
-      conn.exec('PRAGMA journal_mode = WAL')
-      conn.exec('PRAGMA synchronous = 1')
-      applyMigrations(conn)
-      chmodIfExists(dbPath, 0o600)
-      chmodIfExists(`${dbPath}-wal`, 0o600)
-      chmodIfExists(`${dbPath}-shm`, 0o600)
+      if (!readOnly) conn.exec('PRAGMA journal_mode = WAL')
+      if (!readOnly) conn.exec('PRAGMA synchronous = 1')
+      if (!readOnly) applyMigrations(conn)
+      if (!readOnly) chmodIfExists(dbPath, 0o600)
+      if (!readOnly) chmodIfExists(`${dbPath}-wal`, 0o600)
+      if (!readOnly) chmodIfExists(`${dbPath}-shm`, 0o600)
       db = conn
       dbOpenAttempted = true
       return db
@@ -1396,6 +1394,7 @@ export function openLedger({
   }
 
   function appendJsonl(kind, args) {
+    assertWritable()
     ensureDirAndPerms()
     const line = { v: LEDGER_VERSION, kind, at: isoMs(now()), args }
     appendFileSync(jsonlPath, `${JSON.stringify(line)}\n`)
@@ -1497,6 +1496,7 @@ export function openLedger({
   // unique-key insert; a crash after the committed row but before its line is
   // a rebuildable mirror-row gap instead.
   function insertSequenced({ jsonlKind, adwId, seqKind, explicitSeq, build, insert }) {
+    assertWritable()
     const conn = ensureDb()
     if (!conn) {
       const seq = explicitSeq ?? nextSeq(adwId, seqKind, null)
@@ -2943,19 +2943,13 @@ export function openLedger({
 
   // A run-set is a VIEW, never a stored batch: the ledger has no group column,
   // so the set is delimited by the window [since, until) over sessions.started_at
-  // — the same delimiter slice B's budget window uses (crew/daemon.mjs:105).
-  // Each agent_sessions row is a running total, not a delta (endAgentSession
-  // overwrites, :1129) — SUM over rows, never MAX or a last-row read.
   function runSet({ since, until = null } = {}) {
+    const agentSessionsPresent = () => queryRows("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", ['agent_sessions']).length > 0
     const untilClause = until == null ? '' : ' AND s.started_at < ?'
     const params = until == null ? [since] : [since, until]
+    const usageSelect = agentSessionsPresent() ? '(SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions, (SELECT SUM(a.billed_input_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens, (SELECT SUM(a.billed_output_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens, (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens, (SELECT SUM(a.billed_cache_read_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens' : '0 AS agent_sessions, NULL AS billed_input_tokens, NULL AS billed_output_tokens, NULL AS billed_cache_write_tokens, NULL AS billed_cache_read_tokens'
     const rows = queryRows(`
-      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
-        (SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions,
-        (SELECT SUM(a.billed_input_tokens)       FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens,
-        (SELECT SUM(a.billed_output_tokens)      FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens,
-        (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens,
-        (SELECT SUM(a.billed_cache_read_tokens)  FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens
+      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at, ${usageSelect}
       FROM sessions s
       WHERE s.started_at >= ?${untilClause}
       ORDER BY s.started_at, s.adw_id
@@ -3262,6 +3256,11 @@ export function openLedger({
     return { degraded, ...stats }
   }
 
+  function readConnection() {
+    if (!readOnly) refuse('readConnection is available only on a read-only handle')
+    return ensureDb()
+  }
+
   function close() {
     if (db) {
       db.close()
@@ -3296,6 +3295,7 @@ export function openLedger({
     recordSourceError, linkRun,
     listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
+    readConnection,
     close,
     installFinalizer: installFinalizerOn,
     // internal, used by the doctor CLI verb and tests only:

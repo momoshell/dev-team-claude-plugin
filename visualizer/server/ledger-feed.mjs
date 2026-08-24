@@ -1,10 +1,10 @@
-// Read-only ledger Feed implementation. node:sqlite is loaded lazily so this
-// module can be imported on older Node versions and report a degraded feed.
-import { createRequire } from 'node:module'
+// Read-only factory-ledger Feed implementation. scripts/factory/ledger.mjs
+// owns its only factory-ledger database door; triage.mjs separately owns the
+// writable visualizer.db sidecar. An unavailable ledger handle degrades the
+// feed rather than throwing.
+import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { createTriage } from './triage.mjs'
 import { shapeRun, matchesFilters } from './shape.mjs'
-
-const require = createRequire(import.meta.url)
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
 const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns']
 // Which shape fields a missing table makes unknowable. Feeding these into the
@@ -18,7 +18,8 @@ const TABLE_FIELDS = {
   accept_decisions: ['accept_decisions'],
 }
 
-export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
+export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } } = {}) {
+  let ledger = null
   let db = null
   let degraded = false
   let degradedReason = null
@@ -28,15 +29,18 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
   const triage = createTriage({ ledgerDb, triageDb })
 
   function open() {
-    if (db || degraded || closed) return db
+    if (ledger || degraded || closed) return db
     try {
-      const { DatabaseSync } = require('node:sqlite')
-      db = new DatabaseSync(ledgerDb, { readOnly: true })
-      db.exec('PRAGMA busy_timeout = 5000')
+      ledger = openLedger({ dbPath: ledgerDb, readOnly: true, stderr })
+      db = ledger.readConnection()
+      if (!db) {
+        degraded = true
+        degradedReason = ledger.stats().degraded_message || 'the ledger could not be opened'
+      }
       return db
     } catch (err) {
       degraded = true
-      degradedReason = err?.message || String(err)
+      degradedReason = ledger?.stats().degraded_message || err?.message || String(err)
       return null
     }
   }
@@ -120,21 +124,11 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     const handle = open()
     if (!handle) return { rows: null, absent: degradedReason || 'the ledger could not be opened' }
     if (probe.missing_tables.includes('cell_failures')) return { rows: null, absent: 'cell_failures predates this ledger mirror' }
-    try {
-      const rows = handle.prepare(`
-      SELECT provider, model_id, agent, effort, role, kind,
-        COUNT(*) AS failures, MIN(created_at) AS first_at, MAX(created_at) AS last_at,
-        SUM(CASE WHEN adw_id IS NULL THEN 1 ELSE 0 END) AS run_less
-      FROM cell_failures
-      WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-      GROUP BY provider, model_id, agent, effort, role, kind
-      ORDER BY provider, model_id, agent, effort, role, kind
-    `).all(since, since, until, until)
-      return { rows, absent: null }
-    } catch (err) {
-      if (!probe.missing_tables.includes('cell_failures')) probe.missing_tables.push('cell_failures')
-      return { rows: null, absent: err?.message || String(err) }
-    }
+    const before = ledger.stats().mirror_errors
+    const rows = ledger.cellFailures({ since, until })
+    const after = ledger.stats()
+    if (after.mirror_errors > before) return { rows: null, absent: after.mirror_first_code || 'mirror read failed' }
+    return { rows, absent: null }
   }
   function cellAttribution({ since = null, until = null } = {}) {
     probeColumns()
@@ -220,15 +214,15 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     }
 
     let sweeps, picks, ever
+    const sweepsBefore = ledger.stats().mirror_errors
+    sweeps = ledger.intakeSweeps({ since, until })
+    const sweepsAfter = ledger.stats()
+    if (sweepsAfter.mirror_errors > sweepsBefore) return {
+      sweeps: null, refusals: null, picks: null, ever: null,
+      candidate_refusals: null, candidate_picks: null, candidates_absent: null,
+      absent: sweepsAfter.mirror_first_code || 'mirror read failed',
+    }
     try {
-      sweeps = handle.prepare(`
-        SELECT outcome, reason,
-          COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
-        FROM intake_sweeps
-        WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-        GROUP BY outcome, reason
-        ORDER BY outcome, reason
-      `).all(since, since, until, until)
       picks = handle.prepare(`
         SELECT picked_issue, board_owner, board_project, created_at
         FROM intake_sweeps
@@ -256,15 +250,15 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
       refusals_absent = 'intake_refusals predates this ledger mirror'
       candidates_absent = refusals_absent
     } else {
+      const refusalsBefore = ledger.stats().mirror_errors
+      refusals = ledger.intakeRefusals({ since, until })
+      const refusalsAfter = ledger.stats()
+      if (refusalsAfter.mirror_errors > refusalsBefore) return {
+        sweeps: null, refusals: null, picks: null, ever: null,
+        candidate_refusals: null, candidate_picks: null, candidates_absent: null,
+        absent: refusalsAfter.mirror_first_code || 'mirror read failed',
+      }
       try {
-        refusals = handle.prepare(`
-          SELECT reason,
-            COUNT(*) AS count, MIN(created_at) AS first_at, MAX(created_at) AS last_at
-          FROM intake_refusals
-          WHERE (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-          GROUP BY reason
-          ORDER BY reason
-        `).all(since, since, until, until)
         // Latest recorded refusal per issue. SQLite's bare-column-with-MAX()
         // rule keeps the non-aggregated columns on the MAX(created_at) row.
         candidate_refusals = handle.prepare(`
@@ -299,42 +293,15 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
   function runSet({ since, until = null } = {}) {
     probeColumns()
     const handle = open()
-    if (!handle) return { rows: null, absent: degradedReason || 'the ledger could not be opened' }
-    const untilClause = until == null ? '' : ' AND s.started_at < ?'
-    const params = until == null ? [since] : [since, until]
-    const sql = probe.missing_tables.includes('agent_sessions')
-      ? `
-      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
-        0 AS agent_sessions,
-        NULL AS billed_input_tokens,
-        NULL AS billed_output_tokens,
-        NULL AS billed_cache_write_tokens,
-        NULL AS billed_cache_read_tokens
-      FROM sessions s
-      WHERE s.started_at >= ?${untilClause}
-      ORDER BY s.started_at, s.adw_id
-    `
-      : `
-      -- Keep this in lockstep with scripts/factory/ledger.mjs:1575-1585:
-      -- agent_sessions rows hold running totals, so usage is SUM over rows,
-      -- never MAX or a last-row read.
-      SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at,
-        (SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions,
-        (SELECT SUM(a.billed_input_tokens)       FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens,
-        (SELECT SUM(a.billed_output_tokens)      FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens,
-        (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens,
-        (SELECT SUM(a.billed_cache_read_tokens)  FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens
-      FROM sessions s
-      WHERE s.started_at >= ?${untilClause}
-      ORDER BY s.started_at, s.adw_id
-    `
-    try {
-      const rows = handle.prepare(sql).all(...params)
-      return { rows, absent: null }
-    } catch (err) {
-      if (!probe.missing_tables.includes('sessions')) probe.missing_tables.push('sessions')
-      return { rows: null, absent: err?.message || String(err) }
-    }
+    if (!handle) return { rows: null, transports: [], absent: degradedReason || 'the ledger could not be opened' }
+    if (probe.missing_tables.includes('sessions')) return { rows: null, transports: [], absent: 'sessions predates this ledger mirror' }
+    const before = ledger.stats().mirror_errors
+    const rows = ledger.runSet({ since, until })
+    const transportRows = ledger.transportsFor(rows.map((row) => row.adw_id))
+    const after = ledger.stats()
+    if (after.mirror_errors > before) return { rows: null, transports: [], absent: after.mirror_first_code || 'mirror read failed' }
+    const transports = [...transportRows.values()].flatMap((values) => [...values])
+    return { rows, transports, absent: null }
   }
   function budgetWindow({ since, until = null } = {}) {
     probeColumns()
@@ -380,7 +347,7 @@ export function createLedgerFeed({ ledgerDb, triageDb } = {}) {
     budgetWindow,
     setTriage: (input) => triage.setTriage(input),
     health,
-    close: () => { closed = true; if (db) { try { db.close() } catch {} db = null }; triage.close() },
+    close: () => { closed = true; if (ledger) { try { ledger.close() } catch {} }; ledger = null; db = null; triage.close() },
     _probe: probe,
     _reason: () => degradedReason,
   }

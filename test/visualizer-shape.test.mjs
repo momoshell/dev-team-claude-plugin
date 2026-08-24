@@ -9,7 +9,7 @@ import { startServer } from '../visualizer/server/server.mjs'
 import { drainEvents, createDrainQueue } from '../visualizer/web/src/lib/drain.js'
 import { layoutTimeline, MIN_WIDTH, QUEUED_WIDTH } from '../visualizer/web/src/lib/timeline.js'
 import { diffEnvelopes, attemptPairs } from '../visualizer/web/src/lib/envelope-diff.js'
-import { INTAKE_REFUSALS, NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
+import { INTAKE_REFUSALS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
 
 const require = createRequire(import.meta.url)
@@ -320,6 +320,21 @@ test('shapeCellHealth folds kinds into one cell and keeps run-less separate', ()
   assert.deepEqual(cell.roles, ['builder', 'planner'])
 })
 
+test('shapeCellHealth carries host-attributed failures and floors counted at zero', () => {
+  const result = shapeCellHealth({
+    rows: [
+      { provider: 'openai', model_id: 'hosted', agent: 'pi', effort: 'max', role: 'planner', kind: 'timeout', failures: 4, run_less: 1, host_attributed: 1 },
+      { provider: 'openai', model_id: 'floor', agent: 'pi', effort: 'max', role: 'planner', kind: 'timeout', failures: 1, run_less: 2, host_attributed: 1 },
+    ],
+    roster: { tiers: [] }, since: start, until: null, label: 'last 7 days',
+  })
+  const hosted = result.cells.find((cell) => cell.model_id === 'hosted')
+  const floor = result.cells.find((cell) => cell.model_id === 'floor')
+  assert.deepEqual({ host_attributed: hosted.host_attributed, counted: hosted.counted }, { host_attributed: 1, counted: 2 })
+  assert.equal(floor.counted, 0)
+  assert.equal(hosted.by_kind[0].host_attributed, 1)
+})
+
 test('shapeCellHealth marks a cell whose every failure is run-less', () => {
   const result = shapeCellHealth({
     rows: [{ provider: 'openai', model_id: 'cell', agent: 'pi', effort: 'max', role: 'reviewer', kind: 'no-envelope', failures: 2, run_less: 2 }],
@@ -361,6 +376,18 @@ test('shapeRunSet never fabricates a zero for an unmeasured window', () => {
   assert.doesNotMatch(JSON.stringify(result), /"billed_[a-z_]+":\s*0/)
 })
 
+test('shapeRunSet uses the ledger transport wording for unmeasured usage', () => {
+  for (const [transports, cause] of [
+    [['pane'], USAGE_ABSENT_CAUSES.pane],
+    [['pane', 'headless-rpc'], USAGE_ABSENT_CAUSES.measured_transport],
+    [[], USAGE_ABSENT_CAUSES.transport_unrecorded],
+  ]) {
+    const result = shapeRunSet({ rows: [{ ...base, agent_sessions: 0 }], transports, since: start, until: end, label: 'last 24 hours' })
+    assert.equal(result.unmeasured.usage, `no run in this window has an agent_sessions row: ${cause}`)
+    assert.doesNotMatch(JSON.stringify(result), /predates per-agent token measurement/)
+  }
+})
+
 test('shapeRunSet distinguishes active agent sessions with no billed totals', () => {
   const result = shapeRunSet({
     rows: [{ ...base, agent_sessions: 1 }],
@@ -374,7 +401,7 @@ test('shapeRunSet distinguishes active agent sessions with no billed totals', ()
     billed_cache_read_tokens: null,
   })
   assert.equal(result.coverage.measured, 0)
-  assert.match(result.unmeasured.usage, /one or more agent_sessions rows/)
+  assert.match(result.unmeasured.usage, /one or more runs in this window:/)
   assert.doesNotMatch(result.unmeasured.usage, /no agent_sessions rows/)
 })
 
@@ -744,7 +771,7 @@ test('shapeCellHealth carries catalog prices and leaves absent prices pending', 
 
 test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the boundaries', () => {
   const files = allFiles(join(process.cwd(), 'visualizer'))
-  const allowed = new Set(['visualizer/server/ledger-feed.mjs', 'visualizer/server/triage.mjs'])
+  const allowed = new Set(['visualizer/server/triage.mjs'])
   for (const file of files) {
     const source = readFileSync(file, 'utf8')
     const relative = file.replace(`${process.cwd()}/`, '')
@@ -754,6 +781,10 @@ test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the b
       assert.doesNotMatch(source, /^\s*\$:\s/m, relative)
     }
   }
+  const feed = readFileSync(join(process.cwd(), 'visualizer/server/ledger-feed.mjs'), 'utf8')
+  assert.doesNotMatch(feed, /node:sqlite/)
+  assert.doesNotMatch(feed, /DatabaseSync/)
+  assert.match(feed, /import \{ openLedger \} from ['"]\.\.\/\.\.\/scripts\/factory\/ledger\.mjs['"]/)
 })
 
 test('shapeIntake merges per-issue candidates, keeps the latest refusal, and sorts by issue', () => {

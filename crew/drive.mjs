@@ -1811,7 +1811,8 @@ export function driveTask(ctx, io) {
       // env == null was already recorded by io.wait as a 'timeout'; this branch
       // is the seat that DID answer, with something the driver cannot use.
       if (env != null) emit({ kind: 'cell-failure', role, id, failure: 'unusable-envelope', stage: null, detail: `envelope at ${returnPath} failed the shape or anti-replay check` })
-      throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s`)
+      const diagnosis = env == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9
+      throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s${diagnosis?.text ? ` — ${diagnosis.text}` : ''}`)
     }
     io.log({ at: io.now(), envelope: id, role, status: env.status })
     return env

@@ -1,7 +1,7 @@
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, renameSync as fsRenameSync, mkdirSync as fsMkdirSync,
-  readdirSync as fsReaddirSync,
+  readdirSync as fsReaddirSync, statSync as fsStatSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
@@ -33,6 +33,21 @@ export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
 // Bound substrate probes so a dead pane manager fails promptly without conflating per-seat liveness.
 export const SUBSTRATE_MISSES_TO_DIE = 2
+// b187-jsonleaf, 2026-08-24: a seat stopped mid-turn with NO error frame in any
+// store while the pane rendered a spinner and an incrementing timer for 83
+// minutes, its token counters byte-identical across 50 minutes, and a re-nudge
+// produced zero frames in 300s. paneProbe said alive because the pane existed;
+// SEAT_REFUSALS said nothing because there was no error frame to read. The one
+// signal that cannot lie already exists: a transcript grows on EVERY frame.
+// 900s is MEASURED, not guessed. Over the 880-transcript corpus under
+// ~/.pi/agent/sessions, gaps where a frame was OWED (previous frame an assistant
+// frame with stop=toolUse, or a toolResult) are n=52833, p50=0.05s, p90=15.9s,
+// p99=80.7s, p99.9=525.7s — and only 37 of 52833 exceed 900s. IDLE gaps (a human
+// between turns) run an order of magnitude longer (p90=422s), which is why the
+// naive all-gaps distribution must not be used. 900s therefore sits above p99.9
+// of healthy mid-turn work and far below the 83-minute measured death: a tool
+// call that legitimately takes minutes is never called stale.
+export const TRANSCRIPT_STALE_MS = 900_000
 
 // #392: an unparseable envelope from a seat that is still THERE is a defect in
 // the report about the work, not in the work. Ask the one participant who can
@@ -1398,7 +1413,53 @@ export function reaskBrief({ role, id, returnPath, message }) {
   ].join('\n')
 }
 
-export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, onAlive, now, sleep }) {
+// Which of three states a wait that expired was in. PURE, so the escalation text
+// is unit-testable without a seat. Precedence follows the evidence: a measured
+// stale transcript is the CURRENT state and outranks a refusal frame that may be
+// minutes old; a NAMED refusal outranks a bare budget overrun; a seat still
+// producing frames simply ran out of budget. This never kills or restarts
+// anything — naming the state is this lane, the action policy is #567's.
+export function waitState({ role, latest, refusal, at, timeoutS, staleMs = TRANSCRIPT_STALE_MS }) {
+  const measured = Number.isFinite(latest)                                        // verbatim: mutation A5
+  const idleS = measured ? Math.max(0, Math.round((at - latest) / 1000)) : null
+  // The brief's third state is "refused under a NAMED condition", so membership
+  // of the CLOSED vocabulary is the guard, never truthiness.
+  // `recogniseSeatRefusal` returns null for any frame no pattern matches
+  // (`crew/headless.mjs:68-72`), both transcript readers keep that null as
+  // `frame.member`, and `sampleSeatRefusal` stores the frame in `lastRefusal`
+  // before its default `journal` action (`crew/seat-io.mjs:1623-1642`) — so a
+  // truthy check renders "REFUSED ... (unclassified)" from real production
+  // input. An unclassified frame's raw provider message still travels in the
+  // timeout evidence (§1g's existing `the provider says:` clause); it just does
+  // not get to NAME the state.
+  const named = !!refusal && SEAT_REFUSALS.some((row) => row.member === refusal.member)   // verbatim: mutation A16
+  if (measured && at - latest >= staleMs) {                                       // verbatim: mutation A2
+    return { state: 'stale', text: `the seat is STALE: ${role} produced its last transcript frame ${idleS}s ago, past the ${Math.round(staleMs / 1000)}s staleness threshold — a spinner and an elapsed timer are not evidence of life` }
+  }
+  if (named) {
+    return { state: 'refused', text: `the seat REFUSED: ${role} — the provider says: ${refusal.message} (${refusal.member})` }   // verbatim: mutation A3
+  }
+  if (measured) {
+    return { state: 'working', text: `the seat is WORKING: ${role} produced a transcript frame ${idleS}s ago and simply exceeded its ${timeoutS}s budget` }   // verbatim: mutation A4
+  }
+  return null   // unmeasured is not stale (#297): a NULL beats a value nobody measured
+}
+
+// The newest mtime across a seat's transcript files, or null when NOTHING is
+// readable. Growth is the measurement; absence of a reading is NOT staleness.
+export function transcriptGrowth(paths, deps = {}) {
+  const stat = deps.statSync ?? fsStatSync
+  let latest = null
+  for (const path of Array.isArray(paths) ? paths : []) {
+    let mtime
+    try { mtime = stat(path).mtimeMs } catch { continue }
+    if (!Number.isFinite(mtime)) continue
+    if (latest === null || mtime > latest) latest = mtime                          // verbatim: mutation A6
+  }
+  return latest
+}
+
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onAlive, now, sleep }) {
   const started = now()
   let deadline = started + timeoutS * 1000
   let lastProbeAt = started
@@ -1425,6 +1486,16 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
         // One bounded re-prompt has been sent to this seat: the clock it was
         // waiting against belongs to a request the provider never accepted.
         if (signal && signal.restartBudget === true) deadline = current + timeoutS * 1000
+      }
+      // Transcript growth on the SAME tick as the pane probe. The pane says a
+      // surface EXISTS; only the transcript says a frame ARRIVED. Never
+      // load-bearing and never fatal: a throwing sampler is swallowed exactly
+      // like sampleSeat's non-refusal exceptions, and a stale reading ends
+      // nothing here — it is recorded so the ESCALATION can name it.
+      if (sampleGrowth) {
+        let latest = null
+        try { latest = sampleGrowth(current) } catch { latest = null }
+        if (Number.isFinite(latest) && onGrowth) onGrowth({ at: current, latest })  // verbatim: mutation A7
       }
       // A heartbeat is a MEASUREMENT: stamped only where liveness was
       // OBSERVED. `current` is that probe's own timestamp — the same instant
@@ -1529,6 +1600,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const reasked = new Set()   // returnPaths already re-asked — the bound, per assignment
   const refusalFloor = new Map()      // role -> the instant after which a frame is THIS request's
   const lastRefusal = new Map()       // role -> the last refusal frame seen, the evidence a failure quotes
+  const lastGrowth = new Map()        // returnPath -> { at, latest }, the last measured transcript reading
+  const lastDiagnosis = new Map()     // returnPath -> the state a wait expired in
+  const staleNoted = new Set()        // roles already journalled stale — one line per seat, never a loop
   const repromptedRefusals = new Set() // returnPaths already re-prompted — the bound, per assignment
   const transportForPath = new Map()
   const transportFactories = {
@@ -1660,6 +1734,32 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     return null
   }
+  // Same seam as sampleSeatRefusal: agent-keyed, deps-overridable. The pi reader
+  // addresses a CHECKOUT, not a seat (piSessionDir), so a busy sibling can mask a
+  // stale pi seat — that is the same coarseness piRefusalFrames already
+  // carries, and it errs toward 'working', never toward a false 'stale'.
+  const growthFor = (info) => {
+    const role = info?.role
+    if (!role) return null
+    const member = crew.members?.[role] || null
+    const reader = deps.transcriptPaths ?? SHIPPED_TRANSCRIPT_READERS[member?.agent ?? 'claude'] ?? null
+    let files
+    try {
+      files = typeof reader === 'function'
+        ? reader({ checkout, taskDir: paths.taskDir, role, adapter: adapters?.[role]?.adapter ?? null, deps })
+        : []
+    } catch { return null }
+    return transcriptGrowth(files, deps)
+  }
+  const noteGrowth = (info, returnPath, record) => {
+    lastGrowth.set(returnPath, record)
+    const role = info?.role
+    if (!role || staleNoted.has(role)) return
+    if (record.at - record.latest < TRANSCRIPT_STALE_MS) return
+    staleNoted.add(role)
+    try { io.log({ at: record.at, event: 'seat-stale', role, id: info?.id ?? null, last_frame_at: record.latest, stale_ms: record.at - record.latest, threshold_ms: TRANSCRIPT_STALE_MS }) }
+    catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+  }
   const reaskUnusableEnvelope = ({ returnPath, info, transport, err, timeoutS }) => {
     const role = info?.role || 'unknown'
     const surfaceId = transport ? null : (info?.surface_id || null)
@@ -1710,6 +1810,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         },
         probeSeat: () => paneProbe(surfaceId, { tree, locate }),
         sampleSeat: (at) => sampleSeatRefusal({ ...info, returnPath }, at),
+        sampleGrowth: () => growthFor(info),
+        onGrowth: (record) => noteGrowth(info, returnPath, record),
         onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
         now,
         sleep,
@@ -1842,6 +1944,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
             probeSeat: info ? () => info.surface_id ? paneProbe(info.surface_id, { tree, locate }) : { alive: null, substrate: 'ok' } : null,
             sampleSeat: info ? (at) => sampleSeatRefusal({ ...info, returnPath }, at) : null,
+            sampleGrowth: info ? () => growthFor(info) : null,
+            onGrowth: (record) => noteGrowth(info, returnPath, record),
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed
               // write: the ledger is diagnostics, the wait is the run.
@@ -1852,8 +1956,13 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           })
         if (env == null) {
           const refusal = lastRefusal.get(info?.role)
+          const verdict = waitState({
+            role: info?.role || 'unknown', latest: lastGrowth.get(returnPath)?.latest ?? null,
+            refusal: refusal ?? null, at: now(), timeoutS,                            // verbatim: mutation A15
+          })
+          if (verdict) lastDiagnosis.set(returnPath, verdict)                       // verbatim: mutation A8
           noteCellFailure(info?.role, info?.id, 'timeout', {
-            message: `no envelope at ${returnPath} within ${timeoutS}s${refusal ? `; the provider says: ${refusal.message}` : ''}`,
+            message: `no envelope at ${returnPath} within ${timeoutS}s${verdict ? `; ${verdict.text}` : ''}${refusal ? `; the provider says: ${refusal.message}` : ''}`,
             seatRefusal: refusal?.member,
           })
         }
@@ -1886,6 +1995,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // closed here because liveness no longer reads pane pixels.
       }
     },
+    // The state the wait EXPIRED in, for the escalation the operator reads.
+    // Optional by design: a transport io that owns its own wait has nothing to
+    // report, and drive.mjs calls it with `?.` (crew/io-contract.test.mjs:235
+    // checks membership, never an exhaustive key set).
+    waitDiagnosis(returnPath) { return lastDiagnosis.get(returnPath) ?? null },
     captureDescendants() { return capture.round(true) },
     reclaimDescendants() {
       // settleSeatTeardown calls THIS method, and it is the run-end sweep that
@@ -2395,5 +2509,28 @@ export function claudeRefusalFrames({ taskDir, role, since = 0, adapter = null, 
   frames.sort((a, b) => a.at - b.at)
   return frames
 }
+
+export function claudeTranscriptPaths({ taskDir, role, adapter = null, deps = {} } = {}) {
+  const readRecords = adapter?.paneUsageRecords ?? SHIPPED_PANE_USAGE.claude
+  if (typeof readRecords !== 'function') return []
+  let records
+  try { records = readRecords({ taskDir, role, deps }) } catch { return [] }
+  if (!Array.isArray(records)) return []
+  return records.map((record) => record?.transcript_path).filter((path) => typeof path === 'string' && path)   // verbatim: mutation A13
+}
+
+export function piTranscriptPaths({ checkout, deps = {} } = {}) {
+  const exists = deps.existsSync ?? fsExistsSync
+  const readdir = deps.readdirSync ?? fsReaddirSync
+  let dir
+  try { dir = piSessionDir(checkout, deps) } catch { return [] }
+  try {
+    if (!exists(dir)) return []
+    const names = readdir(dir)
+    return Array.isArray(names) ? names.filter((name) => String(name).endsWith('.jsonl')).map((name) => join(dir, String(name))) : []   // verbatim: mutation A14
+  } catch { return [] }
+}
+
+const SHIPPED_TRANSCRIPT_READERS = Object.freeze({ claude: claudeTranscriptPaths, pi: piTranscriptPaths })
 
 const SHIPPED_REFUSAL_READERS = Object.freeze({ claude: claudeRefusalFrames, pi: piRefusalFrames })

@@ -13,7 +13,7 @@
   "crew/daemon.mjs:748": "const path = join(run.crew_dir, 'journal.jsonl')",
   "crew/README.md:216": "owns long-lived headless crew runs",
   "crew/README.md:237": "Liveness is three-state, deliberately",
-  "crew/seat-io.mjs:1734": "common git dir from every linked worktree",
+  "crew/seat-io.mjs:1836": "common git dir from every linked worktree",
   "scripts/factory/ci-watch.mjs:237": "rev-parse', '--path-format=absolute', '--git-dir', '--git-common-dir",
   "scripts/factory/ci-watch.mjs:240": "lines[0] !== lines[1]",
   "scripts/factory/ci-watch.mjs:242": "    linked = false",

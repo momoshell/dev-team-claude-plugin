@@ -2,16 +2,16 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, claudeRefusalFrames, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames,
+  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, saveCrew, seatIo, settleSeatTeardown,
-  SEAT_REFUSAL_STAGE, WAIT_POLL_MS, waitForEnvelope,
+  SEAT_REFUSAL_STAGE, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth,
 } from './seat-io.mjs'
-import { headlessIo, recogniseProviderCondition } from './headless.mjs'
+import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
 import { scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 
@@ -1210,4 +1210,189 @@ test('showDoc updates doc_viewer without clobbering a concurrent member change',
     if (writer) await writer.stop()
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('waitState names stale, refused and working states and stays silent without growth', () => {
+  const at = 2_000_000
+  const stale = waitState({ role: 'builder', latest: at - 1_000_000, refusal: null, at, timeoutS: 2400 })
+  assert.equal(stale.state, 'stale')
+  assert.match(stale.text, /1000s ago/)
+  assert.match(stale.text, /a spinner and an elapsed timer are not evidence of life/)
+  const refused = waitState({ role: 'builder', latest: at - 1000, refusal: { member: 'transient', message: 'WebSocket error' }, at, timeoutS: 2400 })
+  assert.equal(refused.state, 'refused')
+  assert.match(refused.text, /WebSocket error/)
+  assert.match(refused.text, /transient/)
+  const working = waitState({ role: 'builder', latest: at - 500_000, refusal: null, at, timeoutS: 2400 })
+  assert.equal(working.state, 'working')
+  assert.match(working.text, /2400s budget/)
+  assert.equal(waitState({ role: 'builder', latest: null, refusal: null, at, timeoutS: 2400 }), null)
+  for (const { member } of SEAT_REFUSALS) {
+    assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: { member, message: 'named condition' }, at, timeoutS: 2400 }).state, 'refused')
+  }
+})
+
+test('waitState never names an unclassified refusal frame', () => {
+  const at = 2_000_000
+  for (const member of [null, 'overloaded', undefined]) {
+    const refusal = { member, message: 'something the closed vocabulary does not match' }
+    const fresh = waitState({ role: 'builder', latest: at - 1000, refusal, at, timeoutS: 2400 })
+    assert.equal(fresh.state, 'working')
+    assert.doesNotMatch(fresh.text, /refused|unclassified/i)
+    assert.equal(waitState({ role: 'builder', latest: null, refusal, at, timeoutS: 2400 }), null)
+  }
+})
+
+test('waitState uses the measured 900-second threshold at both arms', () => {
+  assert.equal(TRANSCRIPT_STALE_MS, 900_000)
+  const at = 2_000_000
+  assert.equal(waitState({ role: 'builder', latest: at - 500_000, refusal: null, at, timeoutS: 2400 }).state, 'working')
+  assert.equal(waitState({ role: 'builder', latest: at - 1_000_000, refusal: null, at, timeoutS: 2400 }).state, 'stale')
+  assert.equal(waitState({ role: 'builder', latest: at - TRANSCRIPT_STALE_MS, refusal: null, at, timeoutS: 2400 }).state, 'stale')
+})
+
+test('transcriptGrowth chooses the newest readable mtime and refuses to guess', () => {
+  const stat = (path) => ({ mtimeMs: path === '/x/a.jsonl' ? 1000 : 5000 })
+  assert.equal(transcriptGrowth(['/x/a.jsonl', '/x/b.jsonl'], { statSync: stat }), 5000)
+  assert.equal(transcriptGrowth(['/x/b.jsonl', '/x/a.jsonl'], { statSync: stat }), 5000)
+  assert.equal(transcriptGrowth(['/x/a.jsonl'], { statSync: () => { throw new Error('EPERM') } }), null)
+  assert.equal(transcriptGrowth('not-an-array', { statSync: stat }), null)
+  assert.equal(transcriptGrowth(['/x/a.jsonl', '/x/b.jsonl'], { statSync: (path) => ({ mtimeMs: path === '/x/a.jsonl' ? Number.NaN : 5000 }) }), 5000)
+})
+
+test('waitForEnvelope samples transcript growth on each liveness tick without changing the wait', () => {
+  const run = (growth) => {
+    let clock = 0; let probes = 0; const seen = []; const aliveAt = []
+    const options = {
+      returnPath: '/tmp/return.json', timeoutS: 600, role: 'builder',
+      readEnvelope: () => (probes >= 4 ? { status: 'done' } : null),
+      probeSeat: () => { probes += 1; return true }, onAlive: (at) => aliveAt.push(at), now: () => clock,
+      sleep: (ms) => { clock += ms },
+    }
+    if (growth) { options.sampleGrowth = () => 4242; options.onGrowth = (record) => seen.push(record) }
+    const env = waitForEnvelope(options)
+    return { env, aliveAt, probes, seen }
+  }
+  const plain = run(null)
+  const measured = run(true)
+  assert.deepEqual({ env: measured.env, aliveAt: measured.aliveAt, probes: measured.probes }, { env: plain.env, aliveAt: plain.aliveAt, probes: plain.probes })
+  assert.deepEqual(measured.seen, [1, 2, 3, 4].map((n) => ({ at: n * LIVENESS_PROBE_MS, latest: 4242 })))
+
+  let clock = 0; let probes = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 600, role: 'builder', readEnvelope: () => (probes >= 1 ? { status: 'done' } : null),
+    probeSeat: () => { probes += 1; return true }, sampleGrowth: () => { throw new Error('interrupted stat') },
+    onGrowth: () => { throw new Error('growth callback is not load-bearing') }, now: () => clock, sleep: (ms) => { clock += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+})
+
+function withTranscriptSeat({ start = 0, timeoutS = 2000, transcriptPaths, statSync, refusalFrames }, body) {
+  const root = scratchDir('seat-transcript-growth-')
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  let clock = start; let returnPath = null
+  const logs = []; const events = []
+  const crew = { members: { builder: { surface_id: 'surface-builder', transport: 'pane', agent: 'claude' } } }
+  const deps = {
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    sendLine: () => {},
+    logLine: (_path, row) => logs.push(row),
+    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+    locate: (_tree, id) => id === 'surface-builder',
+    existsSync: (path) => path === returnPath ? false : (typeof path === 'string' && existsSync(path)),
+  }
+  if (transcriptPaths) deps.transcriptPaths = transcriptPaths
+  if (statSync === true) deps.statSync = () => ({ mtimeMs: clock })
+  else if (statSync) deps.statSync = statSync
+  if (refusalFrames) deps.refusalFrames = refusalFrames
+  try {
+    const io = seatIo(crew, paths, process.cwd(), null, null, {}, deps)
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    returnPath = assignment.returnPath
+    const env = io.wait(returnPath, timeoutS)
+    return body({ io, paths, logs, events, env, assignment, clock: () => clock })
+  } finally { rmSync(root, { recursive: true, force: true }) }
+}
+
+test('seatIo names a stale pane at expiry and journals one warning', () => {
+  withTranscriptSeat({ transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: 0 }) }, ({ io, logs, events, env, assignment }) => {
+    assert.equal(env, null)
+    assert.equal(io.waitDiagnosis(assignment.returnPath).state, 'stale')
+    assert.ok(events.find((event) => event.kind === 'cell-failure' && /the seat is STALE:/.test(event.detail)))
+    assert.equal(logs.filter((row) => row.event === 'seat-stale' && row.role === 'builder').length, 1)
+  })
+})
+
+test('seatIo names a producing seat working and leaves an unmeasurable seat unnamed', () => {
+  withTranscriptSeat({ transcriptPaths: () => ['/x/builder.jsonl'], statSync: true }, ({ io, events, env, assignment }) => {
+    assert.equal(env, null)
+    assert.equal(io.waitDiagnosis(assignment.returnPath).state, 'working')
+    assert.match(events.find((event) => event.kind === 'cell-failure').detail, /the seat is WORKING:/)
+  })
+
+  withTranscriptSeat({ transcriptPaths: () => [] }, ({ io, events, env, assignment }) => {
+    assert.equal(env, null)
+    assert.equal(io.waitDiagnosis(assignment.returnPath), null)
+    assert.equal(events.find((event) => event.kind === 'cell-failure').detail, `no envelope at ${assignment.returnPath} within 2000s`)
+  })
+})
+
+test('the shipped Claude transcript address chain measures a real aged transcript', () => {
+  const root = scratchDir('seat-shipped-claude-')
+  const taskDir = join(root, 'task'); const usageDir = join(taskDir, 'usage'); const transcript = join(root, 'session.jsonl')
+  mkdirSync(usageDir, { recursive: true }); writeFileSync(transcript, '{}\n')
+  const aged = (Date.now() - 1_000_000) / 1000; utimesSync(transcript, aged, aged)
+  writeFileSync(join(usageDir, 'builder.jsonl'), `${JSON.stringify({ session_id: '11111111-1111-4111-8111-111111111111', transcript_path: transcript })}\n`)
+  try {
+    assert.deepEqual(claudeTranscriptPaths({ taskDir, role: 'builder' }), [transcript])
+    assert.deepEqual(claudeTranscriptPaths({ taskDir, role: 'absent' }), [])
+    writeFileSync(join(usageDir, 'bad.jsonl'), ['not json', JSON.stringify({ session_id: 'bad', transcript_path: transcript }), JSON.stringify({ session_id: '11111111-1111-4111-8111-111111111111', transcript_path: 'relative.jsonl' })].join('\n') + '\n')
+    assert.deepEqual(claudeTranscriptPaths({ taskDir, role: 'bad' }), [])
+
+    const start = Date.now(); const paths = { dir: root, taskDir, returnsDir: join(root, 'returns') }; mkdirSync(paths.returnsDir, { recursive: true })
+    let clock = start; let returnPath = null; const events = []
+    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane', agent: 'claude' } } }, paths, process.cwd(), null, null, {}, {
+      now: () => clock, sleep: (ms) => { clock += ms }, sendLine: () => {},
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+      existsSync: (path) => path === returnPath ? false : (typeof path === 'string' && existsSync(path)),
+    })
+    io.emit = (event) => events.push(event)
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' }); returnPath = assignment.returnPath
+    assert.equal(io.wait(returnPath, 31), null)
+    const verdict = io.waitDiagnosis(returnPath)
+    assert.equal(verdict.state, 'stale'); assert.match(verdict.text, /10\d\ds ago/)
+    assert.ok(events.some((event) => event.kind === 'cell-failure' && /the seat is STALE:/.test(event.detail)))
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('the shipped pi transcript address chain filters only jsonl files and degrades to empty', () => {
+  const root = scratchDir('seat-shipped-pi-'); const home = join(root, 'home'); const checkout = '/tmp/pi-checkout'
+  const sessions = piSessionDir(checkout, { home }); mkdirSync(sessions, { recursive: true })
+  for (const name of ['session.jsonl', 'other.jsonl', 'sleep.log']) writeFileSync(join(sessions, name), '{}\n')
+  try {
+    const expected = readdirSync(sessions).filter((name) => name.endsWith('.jsonl')).map((name) => join(sessions, name))
+    assert.deepEqual(piTranscriptPaths({ checkout, deps: { home } }), expected)
+    assert.deepEqual(piTranscriptPaths({ checkout: '/tmp/missing-pi', deps: { home } }), [])
+    assert.deepEqual(piTranscriptPaths({ checkout, deps: { home, existsSync: () => true, readdirSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } } }), [])
+    assert.deepEqual(piTranscriptPaths({ checkout, deps: { home, existsSync: () => true, readdirSync: () => 'interrupted' } }), [])
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('a journalled transient refusal reaches the seatIo expiry diagnosis', () => {
+  let sent = false
+  withTranscriptSeat({ start: 1_000_000_000_000, transcriptPaths: () => ['/x/builder.jsonl'], statSync: true, refusalFrames: () => {
+    if (sent) return []
+    sent = true
+    return [{ at: 1_000_000_030_000, member: 'transient', message: 'Overloaded', source: 'claude' }]
+  } }, ({ io, events, env, assignment }) => {
+    assert.equal(env, null)
+    const verdict = io.waitDiagnosis(assignment.returnPath)
+    assert.equal(verdict.state, 'refused')
+    assert.match(verdict.text, /Overloaded/); assert.match(verdict.text, /transient/)
+    const timeout = events.find((event) => event.kind === 'cell-failure' && event.failure === 'timeout')
+    assert.ok(timeout); assert.match(timeout.detail, /the seat REFUSED:/); assert.match(timeout.detail, /the provider says: Overloaded/)
+  })
 })

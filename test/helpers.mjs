@@ -1,6 +1,43 @@
 // Shared test helpers for the surviving suites.
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { after } from 'node:test'
+
+// Scratch directories, drained without the caller remembering. The suite leaked
+// 142 directories per run because cleanup was wired per call site: a file with
+// twenty creates and one rmSync looks clean and leaks nineteen (#572). Three
+// drains, because the leaks that matter come from runs that do not finish:
+// the node:test root `after` hook (normal completion), `process.on('exit')`
+// (a test that throws, or hard-exits past every after hook), and the three
+// catchable interrupt signals, re-raised so the exit status is unchanged.
+// SIGKILL is unreachable by construction and is the one hole.
+const SCRATCH_DIRS = new Set()
+const SCRATCH_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP']
+
+function drainScratchDirs() {
+  for (const dir of SCRATCH_DIRS) {
+    try { rmSync(dir, { recursive: true, force: true }) } catch {}
+  }
+  SCRATCH_DIRS.clear()
+}
+
+after(drainScratchDirs)
+process.on('exit', drainScratchDirs)
+for (const signal of SCRATCH_SIGNALS) {
+  process.on(signal, () => {
+    drainScratchDirs()
+    process.removeAllListeners(signal)
+    process.kill(process.pid, signal)
+  })
+}
+
+export function scratchDir(prefix = 'crew-test-', { parent = tmpdir() } = {}) {
+  const dir = mkdtempSync(join(parent, prefix))
+  SCRATCH_DIRS.add(dir)
+  return dir
+}
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 

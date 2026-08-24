@@ -1,8 +1,8 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { scratchDir } from '../../../test/helpers.mjs'
+
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
@@ -89,7 +89,7 @@ async function drive(extension, {
   cwd,
   mkTempDir,
 } = {}) {
-  const root = mkdtempSync(join(tmpdir(), 'subagent-suite-'))
+  const root = scratchDir('subagent-suite-')
   const taskDir = join(root, 'task')
   let definitionPath = defFile === undefined ? join(ROOT, 'crew/pi/agents/scout.json') : defFile
   if (defBody !== undefined) {
@@ -520,11 +520,11 @@ test('abort sends SIGTERM then a cancellable SIGKILL', async () => {
 })
 
 test('cleanup removes the prompt file and its temp dir on every path', async () => {
-  const temp = mkdtempSync(join(tmpdir(), 'subagent-cleanup-'))
+  const temp = scratchDir('subagent-cleanup-')
   const run = await driven(mod, { mkTempDir: () => temp })
   assert.equal(existsSync(temp), false)
   assert.equal(run.journal.length, 1)
-  const temp2 = mkdtempSync(join(tmpdir(), 'subagent-cleanup-'))
+  const temp2 = scratchDir('subagent-cleanup-')
   const thrown = await driven(mod, { mkTempDir: () => temp2, spawnMode: 'throw' })
   assert.ok(thrown.result.details.refused)
   assert.equal(existsSync(temp2), false)

@@ -575,3 +575,134 @@ test('ledger sandbox tripwire — every exemption has a live, load-bearing warra
     assert.ok(!LEDGER_SANDBOX_EXEMPT.has(file), `${file} is a live ledger leak and may never be exempted`)
   }
 })
+
+// Temp sandbox tripwire. A test file may not call the raw mkdtemp primitive; it
+// calls scratchDir from test/helpers.mjs, which registers the directory and
+// drains it on the node:test after hook, on process exit and on
+// SIGINT/SIGTERM/SIGHUP. The rule is decidable on ONE line, which is the whole
+// point: cleanup here is applied per call site, so a file with twenty creates
+// and a single rmSync passes any presence check and still leaks nineteen — that
+// is how 142 directories per run went unnoticed since Aug 15 (#572).
+//
+// Scope: *.test.mjs under the directories that hold test files, plus the one
+// shared non-test test module (test/fixtures.mjs:28 mints for its callers).
+// Production modules are NEVER enumerated, so crew/pi/extensions/lab.ts and
+// crew/pi/extensions/subagent.ts — whose runtime mkdtemp is legitimate — cannot
+// be flagged by construction, not by an exception. test/helpers.mjs is the one
+// sanctioned implementation and is named as such.
+// Blind spot, stated: a test file added under a NEW top-level directory is not
+// scanned; the count assertion below is the cheap guard against a scan that
+// silently reads nothing.
+const RAW_TEMP_CALL = new RegExp(String.raw`\bmkdtempSync\s*\(|\bmkdtemp\s*\(`, 'g')
+const TEMP_HELPER_SELF = 'test/helpers.mjs'
+const TEMP_SCAN_DIRS = ['commands', 'crew', 'scripts', 'skills', 'test', 'visualizer']
+const TEMP_SCAN_EXTRA = ['test/fixtures.mjs']
+
+function rawTempSites(source) {
+  return [...maskCode(source).matchAll(RAW_TEMP_CALL)].length
+}
+
+function tempScannedFiles() {
+  return [...TEMP_SCAN_DIRS.flatMap((dir) => testFilesUnder(dir)), ...TEMP_SCAN_EXTRA]
+}
+
+// Frozen, not forgiven. Each of these files creates temp directories and removes
+// them again: the 2026-08-24 full-suite snapshot on 4ef9f2f attributed all 142
+// leaked directories to the five files this lane converts, and none of these
+// appear in that attribution. They sit outside this lane's write fence, so the
+// exemption — not a weaker rule — is how this detector owns what it newly flags.
+// The warranty is the audited call-site COUNT: add a call site to an exempt file
+// and its warranty fails, forcing the new site through the helper.
+function frozenTempSites(sites) {
+  return {
+    sites,
+    why: `audited 2026-08-24 on 4ef9f2f: ${sites} raw temp call site(s), none of them in the 142-directory full-suite leak attribution; outside this lane's fence, so frozen at ${sites} rather than converted`,
+    warranty: (source) => rawTempSites(source) === sites,
+  }
+}
+
+const RAW_TEMP_EXEMPT = new Map([
+  ['crew/arms.test.mjs', frozenTempSites(1)],
+  ['crew/capabilities.test.mjs', frozenTempSites(1)],
+  ['crew/crew.test.mjs', frozenTempSites(77)],
+  ['crew/daemon.test.mjs', frozenTempSites(7)],
+  ['crew/factoryctl.test.mjs', frozenTempSites(2)],
+  ['crew/harvest.test.mjs', frozenTempSites(1)],
+  ['crew/headless-rpc.test.mjs', frozenTempSites(3)],
+  ['crew/headless.test.mjs', frozenTempSites(3)],
+  ['crew/memory.test.mjs', frozenTempSites(20)],
+  ['crew/pi/extensions/advisor.test.mjs', frozenTempSites(1)],
+  ['crew/reclaim-descendants.test.mjs', frozenTempSites(4)],
+  ['crew/reclaim.test.mjs', frozenTempSites(1)],
+  ['crew/roster-refresh.test.mjs', frozenTempSites(1)],
+  ['crew/seat-io-runclean.test.mjs', frozenTempSites(4)],
+  ['skills/qa-test-writing/anchor-pin.test.mjs', frozenTempSites(1)],
+  ['test/factory-ci-repair.test.mjs', frozenTempSites(2)],
+  ['test/factory-ci-watch.test.mjs', frozenTempSites(1)],
+  ['test/factory-crew-watch.test.mjs', frozenTempSites(1)],
+  ['test/factory-emit-floor.test.mjs', frozenTempSites(2)],
+  ['test/factory-emit.test.mjs', frozenTempSites(3)],
+  ['test/factory-lane-watch.test.mjs', frozenTempSites(1)],
+  ['test/factory-ledger-floor.test.mjs', frozenTempSites(1)],
+  ['test/factory-ledger.test.mjs', frozenTempSites(4)],
+  ['test/factory-make-brief.test.mjs', frozenTempSites(1)],
+  ['test/factory-probe-repo.test.mjs', frozenTempSites(1)],
+  ['test/factory-reap-stale.test.mjs', frozenTempSites(1)],
+  ['test/factory-transcript.test.mjs', frozenTempSites(1)],
+  ['test/fixtures.mjs', frozenTempSites(1)],
+  ['test/visualizer-returns.test.mjs', frozenTempSites(1)],
+  ['test/visualizer-roster-edit.test.mjs', frozenTempSites(5)],
+  ['test/visualizer-server.test.mjs', frozenTempSites(43)],
+  ['test/visualizer-shape.test.mjs', frozenTempSites(1)],
+  ['test/visualizer-teardown.test.mjs', frozenTempSites(1)],
+])
+const TEMP_CONVERTED = [
+  'crew/drive.test.mjs',
+  'crew/io-contract.test.mjs',
+  'crew/pi/extensions/lab.test.mjs',
+  'crew/pi/extensions/subagent.test.mjs',
+  'test/factory-intake.test.mjs',
+  'test/helpers.test.mjs',
+]
+
+test('temp sandbox tripwire — no test file hand-rolls a temp directory', () => {
+  const scanned = tempScannedFiles()
+  assert.ok(scanned.length >= 50, `expected at least 50 scanned test files, found ${scanned.length}`)
+  const offenders = scanned.filter((file) => {
+    if (file === TEMP_HELPER_SELF || RAW_TEMP_EXEMPT.has(file)) return false
+    return rawTempSites(readFileSync(join(ROOT, file), 'utf8')) > 0
+  })
+  assert.deepEqual(offenders, [])
+})
+
+test('temp sandbox tripwire — every exemption has a live, load-bearing warranty', () => {
+  let total = 0
+  for (const [file, exemption] of RAW_TEMP_EXEMPT) {
+    let source
+    try { source = readFileSync(join(ROOT, file), 'utf8') }
+    catch (err) { assert.fail(`exemption ${file} is missing or unreadable: ${err.message}`) }
+    assert.ok(exemption.why.length > 20, `exemption ${file} carries no anchor-backed reason`)
+    assert.equal(exemption.warranty(source), true, `exemption ${file} warranty no longer holds`)
+    assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
+    total += exemption.sites
+  }
+  assert.equal(total, 198)
+})
+
+test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {
+  assert.equal(rawTempSites("const d = mkdtempSync(join(tmpdir(), 'x-'))"), 1)
+  assert.equal(rawTempSites("const d = scratchDir('x-')"), 0)
+  assert.equal(rawTempSites("// const d = mkdtempSync(join(tmpdir(), 'x-'))"), 0)
+  assert.equal(rawTempSites("/* const d = mkdtempSync(join(tmpdir(), 'x-')) */"), 0)
+  assert.equal(rawTempSites('const text = "mkdtempSync(join(tmpdir(), \'x-\'))"'), 0)
+  assert.equal(rawTempSites(String.raw`/mkdtempSync\s*\(/`), 0)
+})
+
+test('temp sandbox tripwire — the five measured leakers may never be exempted', () => {
+  for (const file of TEMP_CONVERTED) {
+    assert.ok(!RAW_TEMP_EXEMPT.has(file), `${file} may not be exempted`)
+    const source = readFileSync(join(ROOT, file), 'utf8')
+    assert.equal(rawTempSites(source), 0, `${file} still has a raw temp call`)
+    assert.match(source, /\bscratchDir\b/, `${file} does not name scratchDir`)
+  }
+})

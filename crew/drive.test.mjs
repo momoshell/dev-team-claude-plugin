@@ -4,9 +4,9 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { scratchDir } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
-import { tmpdir } from 'node:os'
+
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { regrantVerdict } from './escalation-policy.mjs'
@@ -135,8 +135,8 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
 // throwaway git checkout and a hand-written crew.json. `drive` is stubbed, so
 // the ctx handed to the driver and the journal rows beside it are observable.
 function runCmdFixture(flags = {}) {
-  const home = mkdtempSync(join(tmpdir(), 'crew-waits-run-home-'))
-  const checkoutRoot = mkdtempSync(join(tmpdir(), 'crew-waits-run-checkout-'))
+  const home = scratchDir('crew-waits-run-home-')
+  const checkoutRoot = scratchDir('crew-waits-run-checkout-')
   const checkout = join(checkoutRoot, 'checkout')
   const task = 'waits-run'
   const previousHome = process.env.HOME
@@ -286,7 +286,7 @@ test('the wait flag, refusal and record surfaces are derived from WAITS_S', () =
 })
 
 test('run refuses an invalid wait budget before reading crew state', () => {
-  const home = mkdtempSync(join(tmpdir(), 'crew-waits-refusal-home-'))
+  const home = scratchDir('crew-waits-refusal-home-')
   const previousHome = process.env.HOME
   let drove = 0
   process.env.HOME = home
@@ -681,8 +681,8 @@ test('skills are self-contained and verifiable on both vendors', () => {
 test('the codemod stages before it applies and fails loudly without ast-grep', () => {
   const script = join(REPO_ROOT, '.agents/skills/ast-grep-codemod/scripts/codemod.mjs')
   const fake = join(REPO_ROOT, '.agents/skills/ast-grep-codemod/test-fixtures/fake-ast-grep.mjs')
-  const log = join(mkdtempSync(join(tmpdir(), 'b19-drive-')), 'invocations.log')
-  const stage = join(mkdtempSync(join(tmpdir(), 'b19-stage-')), 'proposal.json')
+  const log = join(scratchDir('b19-drive-'), 'invocations.log')
+  const stage = join(scratchDir('b19-stage-'), 'proposal.json')
   const run = (args, env) => spawnSync(process.execPath, [script, ...args], {
     cwd: REPO_ROOT, encoding: 'utf8', env: { ...process.env, ...env },
   })
@@ -699,7 +699,7 @@ test('the codemod stages before it applies and fails loudly without ast-grep', (
   })
   assert.equal(proposed.status, 0)
   assert.ok(invocations() >= 1)
-  const failedProbeStage = join(mkdtempSync(join(tmpdir(), 'b19-probe-failure-')), 'proposal.json')
+  const failedProbeStage = join(scratchDir('b19-probe-failure-'), 'proposal.json')
   const failedProbe = run([
     'propose', '--pattern', 'probeFailure($A)', '--rewrite', 'probeFailed($A)', '--lang', 'js', 'crew/roles/planner.md',
   ], {
@@ -708,7 +708,7 @@ test('the codemod stages before it applies and fails loudly without ast-grep', (
   })
   assert.equal(failedProbe.status, 3)
   assert.equal(existsSync(failedProbeStage), false)
-  const failedProposeStage = join(mkdtempSync(join(tmpdir(), 'b19-propose-failure-')), 'proposal.json')
+  const failedProposeStage = join(scratchDir('b19-propose-failure-'), 'proposal.json')
   const failedPropose = run([
     'propose', '--pattern', 'runFailure($A)', '--rewrite', 'runFailed($A)', '--lang', 'js', 'crew/roles/planner.md',
   ], {
@@ -732,7 +732,7 @@ test('the codemod stages before it applies and fails loudly without ast-grep', (
   assert.equal(existsSync(applyLog), false)
   const missing = run([
     'propose', '--pattern', 'a($A)', '--rewrite', 'b($A)', '--lang', 'js', 'crew/roles/planner.md',
-  ], { AST_GREP_BIN: '/nonexistent', CODEMOD_STAGE: join(mkdtempSync(join(tmpdir(), 'b19-missing-')), 'proposal.json') })
+  ], { AST_GREP_BIN: '/nonexistent', CODEMOD_STAGE: join(scratchDir('b19-missing-'), 'proposal.json') })
   assert.equal(missing.status, 3)
   const missingOutput = `${missing.stdout || ''}${missing.stderr || ''}`
   assert.match(missingOutput, /ast-grep/)
@@ -2357,7 +2357,7 @@ const b127Spy = (dir, name, body) => {
   chmodSync(path, 0o755)
   return path
 }
-const b127InvokeGate = ({ cmd, dir = mkdtempSync(join(tmpdir(), 'b127-gate-test-')), overrides = {} }) => {
+const b127InvokeGate = ({ cmd, dir = scratchDir('b127-gate-test-'), overrides = {} }) => {
   const paths = b127GatePaths(dir)
   const wrapped = gateReapCommand({ cmd, ...paths, ...overrides })
   const result = spawnSync('/bin/sh', ['-c', wrapped], { encoding: 'utf8', timeout: 120_000 })
@@ -2389,7 +2389,7 @@ test('a gate reap kills the process GROUP, and a leaked descendant is proven dea
 })
 
 test('a timed-out gate runner is bounded and the sweep reaps its leaked descendant', { timeout: 90_000 }, () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-timeout-'))
+  const dir = scratchDir('b127-gate-timeout-')
   const paths = b127GatePaths(dir)
   const cmd = `nohup sleep 40 >/dev/null 2>&1 & echo "leaked $!"; sleep 60`
   const wrapped = gateReapCommand({ cmd, ...paths })
@@ -2458,7 +2458,7 @@ test('runGate sweeps each wrapped invocation without adding a sweep to calls.run
 })
 
 test('a composed gate wrapper installs no signal trap', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-signal-free-'))
+  const dir = scratchDir('b127-gate-signal-free-')
   try {
     const wrapped = gateReapCommand({ cmd: 'true', ...b127GatePaths(dir) })
     assert.doesNotMatch(wrapped, /\btrap\b/)
@@ -2469,7 +2469,7 @@ test('a composed gate wrapper installs no signal trap', () => {
 })
 
 test('a gate that exits cleanly is never signalled', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-clean-'))
+  const dir = scratchDir('b127-gate-clean-')
   const sleepLog = join(dir, 'sleep.log')
   try {
     const run = b127InvokeGate({ dir, cmd: 'echo clean\nexit 0', overrides: {
@@ -2541,7 +2541,7 @@ test('a gate reap report that could not be cleared is never read', () => {
 })
 
 test('a refused KILL after a delivered TERM is unproven, never failed', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-mixed-'))
+  const dir = scratchDir('b127-gate-mixed-')
   try {
     const pgidCopy = join(dir, 'pgid.copy')
     const run = b127InvokeGate({ dir, cmd: b127GroupCommand(pgidCopy), overrides: {
@@ -2558,7 +2558,7 @@ test('a refused KILL after a delivered TERM is unproven, never failed', () => {
 })
 
 test('a refused first signal is unproven with zero signals, while a dead-after-refusal group is proven', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-refused-'))
+  const dir = scratchDir('b127-gate-refused-')
   try {
     const pgidCopy = join(dir, 'pgid.copy')
     const alive = b127InvokeGate({ dir, cmd: b127GroupCommand(pgidCopy), overrides: {
@@ -2572,7 +2572,7 @@ test('a refused first signal is unproven with zero signals, while a dead-after-r
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
-  const deadDir = mkdtempSync(join(tmpdir(), 'b127-gate-dead-'))
+  const deadDir = scratchDir('b127-gate-dead-')
   try {
     const pgidCopy = join(deadDir, 'pgid.copy')
     const deadFlag = join(deadDir, 'dead.flag')
@@ -2589,7 +2589,7 @@ test('a refused first signal is unproven with zero signals, while a dead-after-r
 })
 
 test('a gate reap observes a group dying during the fourth settle round', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-boundary-'))
+  const dir = scratchDir('b127-gate-boundary-')
   try {
     const pgidCopy = join(dir, 'pgid.copy')
     const sleepLog = join(dir, 'sleep.log')
@@ -2608,7 +2608,7 @@ test('a gate reap observes a group dying during the fourth settle round', () => 
 })
 
 test('gate reap wrappers round-trip shell text and refuse a delimiter-bearing command', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-text-'))
+  const dir = scratchDir('b127-gate-text-')
   try {
     const paths = b127GatePaths(dir)
     const command = `printf "a'b\\\" $VAR"\n# newline\necho done`
@@ -2622,7 +2622,7 @@ test('gate reap wrappers round-trip shell text and refuse a delimiter-bearing co
 })
 
 test('gate reap guards the driver group before any signal', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'b127-gate-guard-'))
+  const dir = scratchDir('b127-gate-guard-')
   try {
     const lines = gateReapCommand({ cmd: 'true', ...b127GatePaths(dir) }).split('\n')
     const guardAt = lines.findIndex((line) => line.includes('"$__crew_self"') && line.includes(')'))
@@ -5395,7 +5395,7 @@ test('the variant-aware attended seat guard accepts a planner-less directed crew
 
 test('the daemon child preflight accepts the same planner-less directed crew', () => {
   const makeFixture = (roles) => {
-    const dir = mkdtempSync(join(tmpdir(), 'directed-child-'))
+    const dir = scratchDir('directed-child-')
     const crewDir = join(dir, 'crew')
     const taskDir = join(crewDir, 'task')
     const returnsDir = join(crewDir, 'returns')

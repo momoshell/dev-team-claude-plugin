@@ -4,5 +4,6 @@
   "crew/drive.mjs:2511": "const completeCheckProof = (label) => {",
   "scripts/factory/make-brief.mjs:657": "function colourNeutralEnv(base = process.env)",
   "crew/crew.mjs:1883": "escalation -> NEVER teardown",
-  "crew/crew.mjs:2143": "seats.proven !== seats.seats || seats.recorded !== seats.seats"
+  "crew/crew.mjs:2143": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "crew/crew.mjs:2097": "const seats = rows.length"
 }

@@ -81,6 +81,15 @@ Read the exit status and the JSON, in that order:
 - Teardown **exits non-zero when a seat was not proven dead**:
   `crew/crew.mjs:2143` compares `proven` and `recorded` against `seats` and
   sets `process.exitCode = 1`.
+- **Exit 0 is not proof on its own.** That guard reads
+  `if (seats && …)`, so a `seats: null` payload — teardown measured NO seats,
+  which `crew/crew.mjs:2097` records deliberately as an ABSENCE rather than a
+  false zero — short-circuits it and takes the success path. Measured today on
+  `b201-anchorrepair`: `exit=0` with
+  `{"archived":"…","seats":null}`, proving nothing. This is the recovery
+  closeout's own path, because a lane whose driver is gone is the one most
+  likely to yield no pane rows. Treat `seats: null` as UNPROVEN and fall back
+  to `pgrep -f <slug>` before you commit. Tracked as #601.
 - Its JSON carries `{archived, seats:{seats, proven, failed, …}}`. `proven`
   must equal `seats`; `failed` counts seats measured still alive. A clean
   archive rename alone is not evidence.

@@ -24,4 +24,5 @@ Use status for alive, the cmux surface for pane presence, and journal recency
 for activity. If one instrument lies or a measurement is surprising, re-derive
 it **a second way** before killing, reassigning, or tearing down a seat. An
 unreadable journal, missing return, unknown timestamp, or interrupted probe is
-unknown—not proof of idle, death, or failure.
+unknown—not proof of idle, death, or failure. For the instrument cases behind
+surprising readings, continue with [`references/instruments.md`](instruments.md).

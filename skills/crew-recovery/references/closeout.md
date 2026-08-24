@@ -37,3 +37,30 @@ Only `.archive-` is recognised by status, wait, and the stale reaper:
 `.escalated-…` is invisible to all three, so it hides the lane rather than
 recording recovery state. Leave escalated work under its live name until the
 operator is ready for the real teardown.
+
+## Publishing, and what to check after teardown
+
+The lane branch is not a publishing surface. The rule lives in
+`references/lane-branches.md` of the devops skill; do not restate it here. This
+file owns recovery for having broken it: `git fetch origin refs/pull/<N>/head:<branch>`,
+re-push, then `gh pr reopen`. Closing or
+reopening someone else's PR is outward-facing, so ask first.
+
+**diff every PR**'s `--name-only` file list **against the lane**'s declared
+fence before opening it. A file outside the fence means the base is wrong, not
+that the lane misbehaved; a suppressed `git rebase` failure was caught exactly
+this way, one step before reverting a sibling's merged work.
+
+A lane that reaches `done` tears itself down; the mechanism and its exhibit are
+in the devops worktrees reference. This file owns the escalated half, which
+keeps its workspace on purpose.
+
+**immediately after teardown**, verify what was actually published: the
+**merged blob** on the remote and the worktree state. A live seat can dirty the
+tree after a commit (b175's builder applied a gate mutation post-push, which
+only surfaced when the worktree refused removal). Teardown stays last; the
+verification follows it.
+
+An accept-with-residuals is a close-out task, not a result: read the reviewer's
+last findings and the diff before trusting the branch. Archived crew journals
+under `~/.crew` are evidence, not junk — do not prune them.

@@ -2,7 +2,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import net from 'node:net'
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync, unlinkSync,
   openSync, readSync, fstatSync, closeSync, statSync, utimesSync, appendFileSync, symlinkSync, chmodSync, renameSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -21,6 +21,13 @@ import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
 import { writeTornFile } from '../test/helpers.mjs'
+
+// FILE-WIDE RULE: no LITERAL quote character inside a regex literal in this
+// file. A quoted regex desynchronises maskCode() in test/factory-env.test.mjs,
+// which then masks everything BELOW it — dropping this file's raw temp call
+// sites from 7 to 2 and silently disarming the temp sandbox tripwire. It fails
+// far away, as `exemption crew/daemon.test.mjs warranty no longer holds`,
+// naming temp usage that never changed. Write \x27 and \x22 instead. See #592.
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
 // through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
@@ -232,23 +239,40 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
     }
     if (!found) imports.push(null)
   }
-  // The allowlist admits two first-party modules: the server-side rpc helper,
-  // and the slug leaf. A leaf is only safe while it stays a leaf, so the next
-  // assertion pins that — otherwise allowlisting it would be a hole in the
-  // firewall rather than an exception to it.
+  // The allowlist admits first-party leaves: the server-side rpc helper, the
+  // slug leaf, escalation policy, variants, and the JSON reader. A leaf is
+  // only safe while it stays a leaf, so the next assertions pin that posture.
   assert.equal(
-    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs' || specifier === './variants.mjs'),
+    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs' || specifier === './variants.mjs' || specifier === './json-leaf.mjs'),
     true,
-    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, the escalation policy leaf, or the variants leaf',
+    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, the escalation policy leaf, the variants leaf, or the JSON leaf',
   )
   // Mutation killed: someone adding an import to slug.mjs — which would pull
   // that dependency into the server process through the allowlisted edge.
   const slugCode = readFileSync(new URL('./slug.mjs', import.meta.url), 'utf8')
-  assert.doesNotMatch(slugCode, /^\s*import[\s(]/m, 'crew/slug.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  assert.doesNotMatch(slugCode, /^\s*import\b/m, 'crew/slug.mjs must stay import-free: the daemon allowlists it as a LEAF')
   const policyCode = readFileSync(new URL('./escalation-policy.mjs', import.meta.url), 'utf8')
-  assert.doesNotMatch(policyCode, /^\s*import[\s(]/m, 'crew/escalation-policy.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  assert.doesNotMatch(policyCode, /^\s*import\b/m, 'crew/escalation-policy.mjs must stay import-free: the daemon allowlists it as a LEAF')
   const variantsCode = readFileSync(new URL('./variants.mjs', import.meta.url), 'utf8')
-  assert.doesNotMatch(variantsCode, /^\s*import[\s(]/m, 'crew/variants.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  assert.doesNotMatch(variantsCode, /^\s*import\b/m, 'crew/variants.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  // The JSON leaf is the one allowlisted leaf that is NOT import-free — it
+  // legitimately reads through node:fs — so the import-free shape above cannot
+  // pin it. Its leaf posture is that every import is a BUILTIN: a first-party
+  // import here would pull that module into the daemon server process through
+  // the allowlisted edge, and nothing else would notice.
+  const leafCode = readFileSync(new URL('./json-leaf.mjs', import.meta.url), 'utf8')
+  // NOTE: the quote characters below are written as \x27/\x22 escapes on purpose.
+  // A literal quote inside a regex literal desynchronises maskCode() in
+  // test/factory-env.test.mjs, which silently masks the REST OF THIS FILE and
+  // drops its raw-temp call sites from 7 to 2 — turning the temp sandbox
+  // tripwire off for everything below. Measured 2026-08-24.
+  const leafSpecifiers = [...leafCode.matchAll(/^\s*import\b[^\x27\x22]*[\x27\x22]([^\x27\x22]+)[\x27\x22]/gm)].map(([, specifier]) => specifier)
+  assert.equal(leafSpecifiers.length > 0, true, 'crew/json-leaf.mjs must declare at least one import for this pin to be meaningful')
+  assert.deepEqual(
+    leafSpecifiers.filter((specifier) => !specifier.startsWith('node:')),
+    [],
+    'crew/json-leaf.mjs must import only node builtins: the daemon allowlists it as a LEAF',
+  )
   assert.equal(DAEMON_CODE.includes(DRIVE_MODULE), false, 'daemon must not name the driver module')
   assert.equal(DAEMON_CODE.includes(SEAT_IO_MODULE), false, 'daemon must not name the real io module')
   const dynamicImports = DAEMON_CODE.match(/\bimport\s*\(/g) || []
@@ -3022,6 +3046,27 @@ test('send delivers a steer frame to a steerable rpc seat', async () => {
     assert.equal(frame.message, 'guidance')
     assert.equal(typeof frame.id, 'string')
   }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+})
+
+test('send refuses malformed or absent crew.json with the same invalid-spec', async () => {
+  const refusals = []
+  for (const state of ['malformed', 'absent']) {
+    await each(async (f) => {
+      const { run_id: run } = f.d.enqueue({ crew_dir: f.crewDir })
+      stageRpcSeat(f, 'builder')
+      const crewPath = join(f.crewDir, 'crew.json')
+      if (state === 'malformed') writeFileSync(crewPath, '{not json')
+      else unlinkSync(crewPath)
+      await assert.rejects(() => f.d.send({ run, message: 'guidance', role: 'builder' }), (err) => {
+        refusals.push({ code: err.code, message: err.message })
+        return err.code === 'invalid-spec'
+      })
+    }, { roles: ['builder'], transport: 'headless-rpc', agent: 'pi' })
+  }
+  assert.equal(refusals.length, 2)
+  assert.equal(refusals[0].code, refusals[1].code)
+  assert.match(refusals[0].message, /^cannot read crew\.json at /)
+  assert.match(refusals[1].message, /^cannot read crew\.json at /)
 })
 
 test('send refuses a transport that cannot be steered', async () => {

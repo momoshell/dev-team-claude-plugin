@@ -15,6 +15,7 @@ import { randomUUID } from 'node:crypto'
 import { assignmentLine } from './driver.mjs'
 import { shq, classifyRun, updateCrewJson } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
+import { readJsonTri } from './json-leaf.mjs'
 import { translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
@@ -267,7 +268,8 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
   function seatFile(role, name) { return join(seatDir(role), name) }
   function sessionPath(role) { return seatFile(role, 'session.json') }
   function readJson(path) {
-    try { return exists(path) ? JSON.parse(String(read(path, 'utf8'))) : null } catch { return null }
+    try { return readJsonTri(path, { existsSync: exists, readFileSync: read }) ?? null }
+    catch { return null }
   }
   function saveJson(path, value) { write(path, JSON.stringify(value, null, 2)) }
   function session(role) { return readJson(sessionPath(role)) || {} }

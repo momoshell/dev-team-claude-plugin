@@ -19,6 +19,7 @@ import {
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
+import { readJsonTri } from './json-leaf.mjs'
 import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
 import { readSessionUsage } from '../scripts/factory/transcript.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
@@ -253,10 +254,8 @@ function markerEntries(dir) {
 }
 
 function readMarker(dir, name) {
-  try {
-    const marker = JSON.parse(String(fsReadFileSync(join(dir, name), 'utf8')))
-    return marker && typeof marker === 'object' ? marker : null
-  } catch { return null }
+  const marker = readJsonTri(join(dir, name)) ?? null
+  return marker && typeof marker === 'object' ? marker : null
 }
 
 function ownerLiveness(pid, deps = {}) {

@@ -25,7 +25,7 @@ function fixture(options = {}) {
     pid: options.pid ?? 700, uuid: options.uuid || (() => 'session-1'),
     spawn: () => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }, openSync: options.openSync || (() => 10),
     writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
-    existsSync: (path) => existsSync(path) || String(path).endsWith('/cmd.fifo'),
+    existsSync: options.existsSync || ((path) => existsSync(path) || String(path).endsWith('/cmd.fifo')),
     writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep: options.sleep || (() => {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
@@ -122,6 +122,30 @@ test('session_resume: a second supervisor uses the persisted session', () => {
       assert.equal(second.specs.at(-1).resume, true)
       assert.equal(second.specs.at(-1).sessionId, 'session-1')
     } finally { second.cleanup() }
+  } finally { f.cleanup() }
+})
+
+test('a malformed session.json starts a fresh session rather than throwing', () => {
+  const f = fixture()
+  try {
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    mkdirSync(seatDir, { recursive: true })
+    writeFileSync(join(seatDir, 'session.json'), '{not json')
+    assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }))
+    assert.equal(f.specs.at(-1).resume, false)
+    assert.equal(f.specs.at(-1).sessionId, 'session-1')
+  } finally { f.cleanup() }
+})
+
+test('a supervisor session probe that throws starts a fresh session', () => {
+  const f = fixture({ existsSync(path) {
+    if (String(path).endsWith('/session.json')) throw Error('probe failed')
+    return existsSync(path) || String(path).endsWith('/cmd.fifo')
+  } })
+  try {
+    assert.doesNotThrow(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }))
+    assert.equal(f.specs.at(-1).resume, false)
+    assert.equal(f.specs.at(-1).sessionId, 'session-1')
   } finally { f.cleanup() }
 })
 

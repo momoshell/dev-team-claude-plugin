@@ -2,7 +2,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFileSync, spawnSync as cpSpawnSync } from 'node:child_process'
 import {
-  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, unlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -461,6 +461,38 @@ test('a manifest pin that drifts from crew.json base is refused without a ref', 
   assert.equal(report.reason, 'pin-drift')
   assert.match(JSON.stringify(report), new RegExp(`${world.pin}.*${otherPin}|${otherPin}.*${world.pin}`))
   assert.deepEqual(world.refs(), [])
+}))
+
+test('a malformed crew.json is treated like an absent crew.json', () => withWorld((world) => {
+  const a = world.arm(ID_A)
+  assertAppendOk(add(world, a))
+  unlinkSync(join(a.crewDir, 'crew.json'))
+  const absent = collectArms({ manifestPath: world.manifest, repo: world.host })
+  writeFileSync(join(a.crewDir, 'crew.json'), '{not json')
+  const malformed = collectArms({ manifestPath: world.manifest, repo: world.host })
+  assert.deepEqual(malformed, absent)
+}))
+
+test('collectArms probes crew.json exactly once and preserves pin drift refusal', () => withWorld((world) => {
+  const a = world.arm(ID_A)
+  writeFileSync(join(world.host, 'drift.txt'), 'drift\n')
+  git(world.host, 'add', 'drift.txt')
+  git(world.host, 'commit', '-q', '-m', 'drift')
+  const otherPin = git(world.host, 'rev-parse', 'HEAD')
+  writeFileSync(join(a.crewDir, 'crew.json'), JSON.stringify({ checkout: a.run, base: otherPin }))
+  assertAppendOk(add(world, a, { pin: world.pin }))
+  const target = join(a.crewDir, 'crew.json')
+  let probes = 0
+  const result = collectArms({
+    manifestPath: world.manifest,
+    repo: world.host,
+    deps: { existsSync(path) {
+      if (String(path) === target) probes += 1
+      return existsSync(path)
+    } },
+  })
+  assert.equal(probes, 1)
+  assert.equal(result.reason, 'pin-drift')
 }))
 
 test('an empty arm is collected while a sibling still creates its ref', () => withWorld((world) => {

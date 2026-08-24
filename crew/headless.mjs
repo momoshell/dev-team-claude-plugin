@@ -16,6 +16,7 @@ import { randomUUID } from 'node:crypto'
 import { assignmentLine } from './driver.mjs'
 import { headlessCommand as defaultHeadlessCommand } from './adapters/adapter-claude.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
+import { readJsonTri } from './json-leaf.mjs'
 
 export const WAIT_POLL_MS = 5000
 const KILL_GRACE_MS = 10_000
@@ -318,10 +319,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   }
 
   function activePath(role) { return join(root, `.${role}.active.json`) }
-  function readState(path) {
-    if (!exists(path)) return null
-    try { return JSON.parse(read(path, 'utf8')) } catch { return null }
-  }
+  function readState(path) { return readJsonTri(path, { existsSync: exists, readFileSync: read }) ?? null }
   function activeRun(role) { return readState(activePath(role)) }
   function readEnvelope(returnPath) { return envelopeAt(returnPath, exists, read) }
   function allocateRun() {

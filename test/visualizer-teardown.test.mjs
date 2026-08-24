@@ -1,6 +1,5 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { createRequire } from 'node:module'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -9,9 +8,8 @@ import { openLedger, NODE_FLOOR, SEAT_TEARDOWN_OUTCOMES as LEDGER_OUTCOMES } fro
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { defaultTeardownWindow, SEAT_TEARDOWN_OUTCOMES, shapeSeatTeardowns } from '../visualizer/server/shape.mjs'
 import { teardownPanel } from '../visualizer/web/src/lib/panels.js'
+import { sqliteAvailable } from './helpers.mjs'
 
-const require = createRequire(import.meta.url)
-function sqliteAvailable() { try { require('node:sqlite'); return true } catch { return false } }
 const SKIP = sqliteAvailable() ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 const children = new Set()
 after(() => { for (const child of children) { try { child.kill('SIGKILL') } catch {} } })

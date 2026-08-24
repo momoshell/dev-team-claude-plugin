@@ -1,9 +1,12 @@
 // Shared test helpers for the surviving suites.
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, readdirSync, statSync, readFileSync, mkdirSync, utimesSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { after } from 'node:test'
+import { createRequire } from 'node:module'
+import { createHash } from 'node:crypto'
+import { execFileSync, spawnSync } from 'node:child_process'
 
 // Scratch directories, drained without the caller remembering. The suite leaked
 // 142 directories per run because cleanup was wired per call site: a file with
@@ -134,5 +137,73 @@ export function writeTornFile({ file, completeText, keepBytes = Math.max(1, Math
   return {
     tornBytes: prefix.length,
     complete: () => { writeFileSync(`${file}.tmp`, completeText); renameSync(`${file}.tmp`, file) },
+  }
+}
+
+const require = createRequire(import.meta.url)
+
+// D1: one implementation of the node:sqlite probe. The per-file SKIP message,
+// which interpolates that file's own NODE_FLOOR, stays where it is.
+export function sqliteAvailable() {
+  try { require('node:sqlite'); return true } catch { return false }
+}
+
+// D2: the one git contract. Six copies disagreed about the -c flags, the
+// primitive and the argument shape; these two are the A/B pair that already
+// agreed on every observable, and they keep both return conventions because
+// the callers use both. NOT trimmed: crew/arms.test.mjs:20 trims and its callers
+// depend on that, which is why arms cannot adopt `git` unchanged.
+const GIT_CONFIG = [
+  '-c', 'user.email=crew@example.invalid',
+  '-c', 'user.name=Crew Test',
+  '-c', 'protocol.file.allow=always',
+]
+export function git(repoDir, ...args) {
+  return execFileSync('git', [...GIT_CONFIG, '-C', repoDir, ...args], { encoding: 'utf8' })
+}
+export function gitResult(repoDir, ...args) {
+  return spawnSync('git', [...GIT_CONFIG, '-C', repoDir, ...args], { encoding: 'utf8' })
+}
+
+// D4: byte-identical bodies.
+export function treeDigest(root) {
+  const hash = createHash('sha256')
+  function walk(dir) {
+    for (const name of readdirSync(dir).sort()) {
+      const path = join(dir, name), stat = statSync(path)
+      hash.update(name)
+      if (stat.isDirectory()) walk(path)
+      else hash.update(readFileSync(path))
+    }
+  }
+  walk(root)
+  return hash.digest('hex')
+}
+
+// D4: seedLane's only free variable is the caller's NOW. A factory keeps every
+// existing `seedLane(root, …)` call site unchanged.
+export function makeSeedLane(now) {
+  return function seedLane(root, {
+    repo = 'dt-demo',
+    task = 'demo-lane',
+    journalLines = [],
+    artifacts = [],
+    settled = false,
+  } = {}) {
+    const dir = join(root, repo, task)
+    const taskDir = join(dir, 'task')
+    mkdirSync(taskDir, { recursive: true })
+    mkdirSync(join(dir, 'returns'), { recursive: true })
+    writeFileSync(join(dir, 'crew.json'), JSON.stringify({ schema_version: 3, task, checkout: `/tmp/${repo}` }))
+    writeFileSync(join(dir, 'journal.jsonl'), journalLines.map((line) => JSON.stringify(line)).join('\n') + (journalLines.length ? '\n' : ''))
+    for (const artifact of artifacts) {
+      const path = join(taskDir, artifact.name)
+      mkdirSync(dirname(path), { recursive: true })
+      writeFileSync(path, artifact.body ?? 'x')
+      const when = (now - artifact.ageS * 1000) / 1000
+      utimesSync(path, when, when)
+    }
+    if (settled) writeFileSync(join(dir, 'returns', 'task.json'), '{}')
+    return { dir, taskDir, journal: join(dir, 'journal.jsonl') }
   }
 }

@@ -1,24 +1,10 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { createHash } from 'node:crypto'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createReturnsSource } from '../visualizer/server/returns-source.mjs'
-
-function treeDigest(root) {
-  const hash = createHash('sha256')
-  function walk(dir) {
-    for (const name of readdirSync(dir).sort()) {
-      const path = join(dir, name), stat = statSync(path)
-      hash.update(name)
-      if (stat.isDirectory()) walk(path)
-      else hash.update(readFileSync(path))
-    }
-  }
-  walk(root)
-  return hash.digest('hex')
-}
+import { treeDigest } from './helpers.mjs'
 
 test('returns source resolves archives, attempts, malformed envelopes, and never writes', () => {
   const root = mkdtempSync(join(tmpdir(), 'visualizer-returns-'))

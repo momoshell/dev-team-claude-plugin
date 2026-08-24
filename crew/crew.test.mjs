@@ -3429,6 +3429,13 @@ test('assertDefBandFloors refuses below-floor and unknown pinned models', () => 
 })
 
 test('loadLadder reads the ratified bands and tier floors through the runtime seam', () => {
+  // The title's claim, driven: the injected reader must SEE the injected path.
+  // `ladder.path` alone is an identity round-trip of the destructuring default.
+  const injectedPath = '/tmp/injected-model-ladder.json'
+  let seenPath = null
+  const injected = loadLadder({ path: injectedPath, readFile: (p) => { seenPath = p; return JSON.stringify(rosterLadder) } })
+  assert.equal(seenPath, injectedPath)
+  assert.equal(injected.path, injectedPath)
   const ladder = loadLadder()
   assert.equal(ladder.path, LADDER_PATH)
   assert.deepEqual(Object.fromEntries(ladder.ranks), { frontier: 3, workhorse: 2, utility: 1, basement: 0 })
@@ -4167,7 +4174,7 @@ test('a degraded emitter is inert for the adapter and drive', () => {
     const emitter = openRun({ stateDir: stateFile, repoSlug: 'repo', taskSlug: 'task', dbPath: join(stateFile, 'ledger.db') })
     const adapter = emitAdapter(emitter)
     assert.doesNotThrow(() => adapterEvents().forEach((event) => adapter(event)))
-    assert.ok(emitter.stats().dropped >= 0)
+    assert.ok(emitter.stats().dropped > 0, 'a degraded emitter must COUNT the adapter events it swallowed')
 
     const ctx = {
       task: 'degraded', briefFile: '/tmp/brief.md', taskDir: '/tmp/degraded-task', checkout: '/tmp/repo',
@@ -4254,10 +4261,16 @@ function capabilityFixtureRoot() {
 test('a charter requirement unmet by adapter and register refuses to boot from the closed reason set', async () => {
   const root = capabilityFixtureRoot()
   try {
+    // "from the closed reason set" — the set itself, matching the honest
+    // neighbour a few tests down (crew/crew.test.mjs:4459).
+    const CLOSED_REASONS = ['register-invalid', 'capability-shortfall', 'unknown-grant', 'grant-unsupported',
+      'extension-missing', 'unknown-skill', 'agent-def-invalid', 'local-settings-missing',
+      'local-endpoint-dead', 'grant-contradicts-deny']
     await assert.rejects(
       () => resolveAdapters(['planner'], { 'agent-planner': 'pi' }, null, { register: capabilityRegister(), root }),
       (err) => {
         assert.equal(err.reason, 'capability-shortfall')
+        assert.ok(CAPABILITY_REFUSALS.includes(err.reason))
         assert.match(err.message, /planner/)
         assert.match(err.message, /subagents/)
         assert.match(err.message, /pi/)
@@ -4269,6 +4282,7 @@ test('a charter requirement unmet by adapter and register refuses to boot from t
       () => resolveAdapters(['builder'], { 'agent-builder': 'pi' }, null, { register: builderRequires, root }),
       (err) => err.reason === 'capability-shortfall' && /builder/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
     )
+    assert.deepEqual([...CAPABILITY_REFUSALS], CLOSED_REASONS)
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
@@ -4332,15 +4346,37 @@ test('resolveAdapters refuses a claude-seated local-provider cell before any sea
   try {
     const settings = join(root, 'crew/pi/settings.json')
     writeFileSync(settings, '{}')
-    const register = capabilityRegister({ local_providers: {
-      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
-    } })
-    const seats = { builder: { agent: 'claude', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null } }
+    const base = capabilityRegister()
+    const register = capabilityRegister({
+      local_providers: {
+        'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+      },
+      // A grant path nothing else in the fixture carries: if the resolver ever
+      // reaches the NEXT seat, this path is the unambiguous evidence.
+      roles: { planner: { ...base.roles.planner, requires: [], extensions: ['crew/pi/planner-marker.js'] } },
+    })
+    const seats = {
+      builder: { agent: 'claude', effort: 'max', provider: 'local-pi', id: 'qwen3-coder', model: null },
+      planner: { agent: 'claude', effort: 'max', provider: null, id: 'claude-opus-5', model: null },
+    }
+    const probed = []
+    const seen = []
     await assert.rejects(
-      () => resolveAdapters(['builder'], {}, seats, { register, root, probeEndpoint: async () => true }),
+      () => resolveAdapters(['builder', 'planner'], {}, seats, {
+        register, root,
+        probeEndpoint: async (url) => { probed.push(url); return true },
+        exists: (p) => { seen.push(p); return existsSync(p) },
+      }),
       (err) => err.reason === 'grant-unsupported'
         && /builder/.test(err.message) && /local-pi/.test(err.message) && /claude/.test(err.message),
     )
+    // The endpoint was proven LIVE first, so this is the capability refusal and
+    // not a masked local-endpoint-dead, and the spies are wired to a real read.
+    assert.deepEqual(probed, ['http://127.0.0.1:11434/v1'])
+    assert.ok(seen.includes(settings))
+    // "before any seat spawns": the refusal short-circuits the resolution, so
+    // NOTHING was read for the next seat, let alone spawned for it.
+    assert.deepEqual(seen.filter((p) => p.includes('planner-marker')), [])
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 

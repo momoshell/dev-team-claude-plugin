@@ -382,23 +382,69 @@ function proposalFromBrief(text) {
   return match ? match[1].toLowerCase() : null
 }
 
-function compileCommand({ lane, batchDir, laneDir, registerPath, outDir }) {
-  return {
-    file: 'node',
-    args: [
-      'scripts/factory/make-brief.mjs',
-      '--request', join(batchDir, `${lane}.request.json`),
-      '--checkout', laneDir,
-      '--fences', registerPath,
-      '--lane', lane,
-      '--out', join(outDir, `${lane}.brief.md`),
-      '--force',
-    ],
-    cwd: laneDir,
+export function measureBatchBaseline({ plans, outDir, checkout, deps } = {}) {
+  const d = normalDeps(deps)
+  if (!Array.isArray(plans) || plans.length < 2) return null
+  const shas = new Set()
+  for (const plan of plans) {
+    let result
+    try {
+      result = d.spawn({
+        file: 'git',
+        args: ['-C', plan.dir, 'rev-parse', 'HEAD'],
+        cwd: plan.dir,
+      })
+    } catch (err) {
+      d.log(`dispatch-batch: cannot measure shared commit for ${plan.lane}: ${err?.message || String(err)}`)
+      return null
+    }
+    const sha = result?.status === 0 ? textOf(result.stdout).trim() : ''
+    if (!sha) {
+      d.log(`dispatch-batch: cannot measure shared commit for ${plan.lane}; measuring per lane`)
+      return null
+    }
+    shas.add(sha)
   }
+  if (shas.size !== 1) {
+    d.log('dispatch-batch: lanes do not share a commit; measuring per lane')
+    return null
+  }
+  if (typeof outDir !== 'string' || !outDir.trim()) return null
+  const path = join(outDir, 'batch-baseline.json')
+  let result
+  try {
+    result = d.spawn({
+      file: 'node',
+      args: ['scripts/factory/make-brief.mjs', '--measure-baseline', path, '--checkout', plans[0].dir],
+      cwd: plans[0].dir,
+    })
+  } catch (err) {
+    d.log(`dispatch-batch: batch baseline measurement failed: ${err?.message || String(err)}; measuring per lane`)
+    return null
+  }
+  if (!result || result.status !== 0) {
+    d.log(`dispatch-batch: batch baseline measurement failed; measuring per lane`)
+    return null
+  }
+  d.log(`dispatch-batch: measured shared baseline sha=${[...shas][0]} path=${path}`)
+  return path
 }
 
-export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fences, deps } = {}) {
+function compileCommand({ lane, batchDir, laneDir, registerPath, outDir, baselinePath }) {
+  const args = [
+    'scripts/factory/make-brief.mjs',
+    '--request', join(batchDir, `${lane}.request.json`),
+    '--checkout', laneDir,
+    '--fences', registerPath,
+    '--lane', lane,
+    '--out', join(outDir, `${lane}.brief.md`),
+    '--force',
+  ]
+  if (typeof baselinePath === 'string' && baselinePath.trim()) args.push('--baseline', baselinePath)
+  return { file: 'node', args, cwd: laneDir }
+}
+
+export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
   const d = normalDeps(deps)
   const name = laneNameOf(lane)
   const requestDir = resolve(batchDir)
@@ -417,7 +463,7 @@ export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fen
 
   let currentRegister = authoredRegister
   let result
-  try { result = d.spawn(compileCommand({ lane: name, batchDir: requestDir, laneDir: checkout, registerPath: currentRegister, outDir: outputDir })) } catch (err) {
+  try { result = d.spawn(compileCommand({ lane: name, batchDir: requestDir, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (result?.status === 0) {
@@ -441,7 +487,7 @@ export function compileLane({ lane, batchDir, laneDir, registerPath, outDir, fen
   currentRegister = writeUpdatedRegister({ data, lane: name, reason: parsed.reason, files: parsed.files, outDir: outputDir, d })
 
   let second
-  try { second = d.spawn(compileCommand({ lane: name, batchDir: requestDir, laneDir: checkout, registerPath: currentRegister, outDir: outputDir })) } catch (err) {
+  try { second = d.spawn(compileCommand({ lane: name, batchDir: requestDir, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler retry could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (!second || second.status !== 0) {
@@ -588,6 +634,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   }
 
   createWorktrees({ plans, checkout: root, deps: d })
+  const baselinePath = measureBatchBaseline({ plans, outDir: outputDir, checkout: root, deps: d })
   const compiled = []
   for (const plan of plans) {
     compiled.push(compileLane({
@@ -597,6 +644,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
       registerPath,
       outDir: outputDir,
       fences,
+      baselinePath,
       deps: d,
     }))
   }

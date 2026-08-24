@@ -2,8 +2,8 @@
 // scripts/factory/make-brief.mjs — compile the mechanical half of a brief from
 // four ratified authored lines. It verifies the requested paths, finds tests
 // that pin those paths and their discoverable keys, measures the target's
-// baseline, carries caller-supplied fences, and repeats the standing blocks.
-// It never decides the carve, acceptance judgment, or crew decisions.
+// baseline, carries caller-supplied fences, and repeats the standing blocks; a supplied baseline carrying a commit sha may be reused when it describes this clean tree; a profile's recorded baseline
+// still may not be consumed. It never decides the carve, acceptance judgment, or crew decisions.
 //
 // LIBRARY vs CLI: importing this file performs no I/O. main(argv) returns an
 // exit code and never calls process.exit; the invokedDirectly guard at the
@@ -17,9 +17,9 @@
 // make an unrelated charter edit change a compilation. #240 is why the
 // baseline child gets a colour-neutral environment before its output is
 // parsed. Repo-specific test_command and conventions now come from a ratified
-// repo profile. A recorded baseline is never consumed: it describes a commit,
-// while the profile records no commit sha, so every compile measures the
-// checkout. --require-profile is the explicit autonomous-caller posture;
+// repo profile. A supplied baseline carrying a commit sha may be reused when
+// it describes this clean tree; the profile's recorded baseline is never
+// consumed because it records no commit sha. --require-profile is the explicit autonomous-caller posture;
 // hand-driven callers state and use the package.json fallback when profile
 // facts are absent.
 //
@@ -1247,26 +1247,132 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
   return { tier, shape, strength, reasons, shapeReasons, strengthReasons, signals }
 }
 
-function formatCountBasis(profileBaseline) {
+function formatCountBasis(profileBaseline, supplied) {
   const basis = 'count basis: measured this compile — a recorded baseline is a fact about a commit and is never consumed'
+  let rendered = supplied?.used === true
+    ? `count basis: reused a supplied baseline — recorded sha ${supplied.sha} equals HEAD, recorded command byte-identical to the lane command, checkout clean`
+    : basis
+  if (supplied?.offered === true && supplied.used !== true) {
+    rendered += ` (supplied baseline not reused: ${supplied.reason})`
+  }
   if (profileBaseline?.recorded !== undefined) {
     const value = profileBaseline.recorded
     if (value && typeof value === 'object' && !Array.isArray(value)
       && (typeof value.passed === 'number' || typeof value.passed === 'string')) {
-      return `${basis} (profile records passed ${value.passed} in a ratified cell, refused at the read boundary as commit-scoped and not used)`
+      return `${rendered} (profile records passed ${value.passed} in a ratified cell, refused at the read boundary as commit-scoped and not used)`
     }
-    return `${basis} (profile records a ratified baseline, refused at the read boundary as commit-scoped and not used)`
+    return `${rendered} (profile records a ratified baseline, refused at the read boundary as commit-scoped and not used)`
   }
-  if (!profileBaseline?.used) return basis
+  if (!profileBaseline?.used) return rendered
   const value = profileBaseline.value
   if (value && typeof value === 'object' && !Array.isArray(value)
     && (typeof value.passed === 'number' || typeof value.passed === 'string')) {
-    return `${basis} (profile records passed ${value.passed}, not used)`
+    return `${rendered} (profile records passed ${value.passed}, not used)`
   }
-  return `${basis} (profile records a ratified baseline, not used)`
+  return `${rendered} (profile records a ratified baseline, not used)`
 }
 
-function formatBaseline(baseline, profile = null) {
+const BASELINE_UNREADABLE = 'unreadable-baseline'
+const BASELINE_MALFORMED = 'malformed-baseline'
+
+export function resolveBaselineCommand({ checkout, lane = null } = {}) {
+  if (nonEmptyString(lane)) return lane
+  let packageData
+  try {
+    packageData = JSON.parse(readFileSync(join(resolve(checkout || process.cwd()), 'package.json'), 'utf8'))
+  } catch {
+    return null
+  }
+  const command = packageData?.scripts?.test
+  return nonEmptyString(command) ? command : null
+}
+
+export function gitState({ checkout } = {}) {
+  let root
+  try { root = resolve(checkout || process.cwd()) } catch { return { sha: null, clean: null } }
+  let sha = null
+  try {
+    const result = spawnSync('git', ['-C', root, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+      env: colourNeutralEnv(),
+      timeout: 10_000,
+    })
+    const value = result?.status === 0 && !result.error ? String(result.stdout || '').trim() : ''
+    if (/^[0-9a-f]{7,64}$/.test(value)) sha = value
+  } catch { /* an unavailable probe leaves sha unknown */ }
+
+  let clean = null
+  try {
+    const result = spawnSync('git', ['-C', root, 'status', '--porcelain'], {
+      encoding: 'utf8',
+      env: colourNeutralEnv(),
+      timeout: 10_000,
+    })
+    if (result?.status === 0 && !result.error) clean = String(result.stdout || '').trim().length === 0
+  } catch { /* an unavailable probe leaves cleanliness unknown */ }
+  return { sha, clean }
+}
+
+export function readSuppliedBaseline(path) {
+  let data
+  try {
+    data = JSON.parse(readFileSync(resolve(path), 'utf8'))
+  } catch {
+    return { value: null, reason: BASELINE_UNREADABLE }
+  }
+  if (!data || typeof data !== 'object' || Array.isArray(data)
+    || !nonEmptyString(data.sha) || !nonEmptyString(data.command)
+    || !Number.isInteger(data.pass) || data.pass < 0
+    || !Number.isInteger(data.fail) || data.fail < 0) {
+    return { value: null, reason: BASELINE_MALFORMED }
+  }
+  return {
+    value: { sha: data.sha, command: data.command, pass: data.pass, fail: data.fail },
+    reason: null,
+  }
+}
+
+export function reuseBaseline({ checkout, command, laneBasis, path } = {}) {
+  const reject = (reason) => ({
+    baseline: null,
+    supplied: { offered: true, used: false, reason },
+  })
+  if (path == null) return { baseline: null, supplied: { offered: false, used: false, reason: null } }
+  const read = readSuppliedBaseline(path)
+  if (!read.value) return reject(read.reason)
+  const supplied = read.value
+  const state = gitState({ checkout })
+  if (state.clean !== true) return reject(state.clean === null ? 'status-unavailable' : 'dirty-tree')
+  if (state.sha == null) return reject('sha-unavailable')
+  if (supplied.sha !== state.sha) return reject('sha-mismatch')
+  if (!nonEmptyString(command) || supplied.command !== command) return reject('command-mismatch')
+  return {
+    baseline: {
+      lane: supplied.command,
+      pass: supplied.pass,
+      fail: supplied.fail,
+      status: supplied.fail > 0 ? 'red' : 'green',
+      reason: null,
+      laneBasis,
+      reused: true,
+    },
+    supplied: { offered: true, used: true, reason: null, sha: supplied.sha },
+  }
+}
+
+export function laneFromProfile(testCommand) {
+  const lane = testCommand.used && nonEmptyString(testCommand.value)
+    ? testCommand.value
+    : null
+  const laneBasis = testCommand.used && lane == null
+    ? `package.json scripts.test — ${testCommand.basis} (value is not a non-blank string)`
+    : testCommand.used
+      ? testCommand.basis
+      : `package.json scripts.test — ${testCommand.basis}`
+  return { lane, laneBasis }
+}
+
+function formatBaseline(baseline, profile = null, supplied = null) {
   const lane = baseline.lane || '(no test lane)'
   const line = baseline.status === 'unknown'
     ? `lane: ${lane} · unknown · reason: ${baseline.reason}`
@@ -1274,7 +1380,7 @@ function formatBaseline(baseline, profile = null) {
   const laneBasis = baseline.laneBasis
     || profile?.testCommand?.basis
     || 'package.json scripts.test — no profile consulted'
-  return `${line}\nlane basis: ${laneBasis}\n${formatCountBasis(profile?.baseline)}`
+  return `${line}\nlane basis: ${laneBasis}\n${formatCountBasis(profile?.baseline, supplied)}`
 }
 
 function keyList(discovery) {
@@ -1431,7 +1537,8 @@ function renderValidation(baseline, discovery) {
   const count = baseline.status === 'unknown'
     ? `unknown (${baseline.reason})`
     : `pass ${baseline.pass}, fail ${baseline.fail}`
-  return `narrow: ${narrow}\nfull: ${full} · measured baseline ${count}`
+  const basis = baseline.reused === true ? 'reused baseline' : 'measured baseline'
+  return `narrow: ${narrow}\nfull: ${full} · ${basis} ${count}`
 }
 
 export function renderBrief(gathered) {
@@ -1439,6 +1546,7 @@ export function renderBrief(gathered) {
   const where = gathered.where || []
   const discovery = gathered.discovery || gathered.tripwires || { candidates: [], tripwires: [], broadKeys: [] }
   const baseline = gathered.baseline || { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }
+  const supplied = gathered.supplied ?? null
   const profile = gathered.profile || null
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
   const writeSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
@@ -1462,7 +1570,7 @@ export function renderBrief(gathered) {
     '## Coupled sources',
     renderCoupled(coupling),
     '## Baseline',
-    formatBaseline(baseline, profile),
+    formatBaseline(baseline, profile, supplied),
     '## Out of scope',
     request.out_of_scope,
     '## Fences',
@@ -1490,7 +1598,7 @@ export function renderBrief(gathered) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline'])
   const booleanFlags = new Set(['force', 'require-profile'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -1551,7 +1659,37 @@ function writeBrief(content, outPath, force) {
   writeFileSync(outPath, content)
 }
 
+function measureOnly(flags) {
+  if (flags.request != null || flags.out != null) {
+    refuseUsage('--measure-baseline cannot be combined with --request or --out', MISSING_LINE)
+  }
+  const checkout = gitRoot(flags.checkout || process.cwd())
+  const profileResult = gatherProfile({
+    checkout,
+    profilePath: flags.profile,
+    requireProfile: flags['require-profile'] === true,
+  })
+  const testCommand = profileField(profileResult, 'test_command')
+  if (flags['require-profile'] === true && !testCommand.used) {
+    refuseUsage(`test_command is not ratified: ${testCommand.basis}`, PROFILE_UNRATIFIED)
+  }
+  const { lane, laneBasis } = laneFromProfile(testCommand)
+  const baseline = gatherBaseline({ checkout, lane, laneBasis })
+  const state = gitState({ checkout })
+  const status = baseline.status === 'green' || baseline.status === 'red' ? baseline.status : 'unknown'
+  const output = {
+    sha: state.clean === true ? state.sha : null,
+    command: baseline.lane,
+    pass: baseline.pass,
+    fail: baseline.fail,
+    status,
+  }
+  writeFileSync(resolve(flags['measure-baseline']), `${JSON.stringify(output, null, 2)}\n`)
+  return 0
+}
+
 function compile(flags) {
+  if (flags['measure-baseline'] != null) return measureOnly(flags)
   if (typeof flags.request !== 'string' || !flags.request) refuseUsage('--request <file> is required', MISSING_LINE)
   const outPath = outputPathOrNull(flags.out)
   const taskName = parseTaskStem(outPath || flags.request)
@@ -1570,24 +1708,19 @@ function compile(flags) {
     refuseUsage(`test_command is not ratified: ${testCommand.basis}`, PROFILE_UNRATIFIED)
   }
   const conventions = profileField(profileResult, 'conventions')
-  // A baseline is a fact about a commit; profile metadata has no commit sha,
-  // so this value is evidence only and is never used to replace measurement.
+  // A profile baseline is a fact about a commit with no recorded sha, so it
+  // remains evidence only; a caller-supplied baseline is checked separately.
   const recordedBaseline = profileField(profileResult, 'baseline')
   // default_branch and ci have no consumer in this module (ci belongs to the
   // sibling profile-ci-shape lane), so they deliberately stay out of wiring.
-  const lane = testCommand.used && nonEmptyString(testCommand.value)
-    ? testCommand.value
-    : null
-  const laneBasis = testCommand.used && lane == null
-    ? `package.json scripts.test — ${testCommand.basis} (value is not a non-blank string)`
-    : testCommand.used
-      ? testCommand.basis
-      : `package.json scripts.test — ${testCommand.basis}`
+  const { lane, laneBasis } = laneFromProfile(testCommand)
   const fences = gatherFences({ fencesPath: flags.fences, checkout })
   const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
   if (writeSurface.basis === 'fences') validateScopeEntries({ checkout, files: writeSurface.files })
   const coupling = crossCheckCoupling({ discovery, writeSurface })
-  const baseline = gatherBaseline({ checkout, lane, laneBasis })
+  const command = resolveBaselineCommand({ checkout, lane })
+  const reuse = reuseBaseline({ checkout, command, laneBasis, path: flags.baseline ?? null })
+  const baseline = reuse.baseline || gatherBaseline({ checkout, lane, laneBasis })
   let fromProfile
   try {
     fromProfile = profileProtectedPaths(profileResult.profile, { path: profileResult.path })
@@ -1603,6 +1736,7 @@ function compile(flags) {
     discovery,
     coupling,
     baseline,
+    supplied: reuse.supplied,
     fences,
     lane: flags.lane ?? null,
     writeSurface,

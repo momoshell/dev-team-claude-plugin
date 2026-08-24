@@ -170,63 +170,138 @@ const LEDGER_DOORS = new Map([
 // re-export. The spawn arm is absent rather than silent: a spawn-plus-path-
 // mention rule was measured during planning and produced 13 offenders, nearly
 // all from a mere path mention in a comment.
+// Regex literals are the fourth trick, and the one that cost the most. A quote
+// character inside a regex literal used to open a string this masker never
+// closed, so every line BELOW it was masked as one long string and every
+// detector built here silently stopped counting: measured 2026-08-24,
+// crew/daemon.test.mjs fell from 7 raw temp call sites to 2 and
+// crew/crew.test.mjs from 84 to 77. Every slash is therefore classified from
+// the token before it, and where that token cannot decide — a `}` closes a
+// block and an object literal alike — the masker REFUSES rather than guesses.
+// Silent under-counting is ruled out by construction, not by care. Stated
+// blind spots: an unterminated string, block comment or template literal
+// refuses instead of masking to end of file, and a template substitution is
+// masked as the code it is.
+const MASK_WORD = /[A-Za-z0-9_$]/
+// After these keywords a slash can only begin a regex literal: each is followed
+// by an expression, never by a divisor.
+const REGEX_KEYWORDS = new Set(['return', 'typeof', 'instanceof', 'in', 'of', 'new', 'delete', 'void', 'throw', 'case', 'do', 'else', 'yield', 'await'])
+// A `)` closes either a control header — `if (a) /re/.test(b)` — or a value
+// expression — `(a - b) / 2`. The paren stack below remembers which, so these
+// two are distinguished rather than guessed.
+const CONTROL_HEADS = new Set(['if', 'while', 'for', 'with'])
+
+function slashVerdict(prev) {
+  if (prev.kind === 'value') return 'division'
+  if (prev.kind === 'keyword') return 'regex-after-keyword'
+  if (prev.kind === 'close-paren') return prev.control ? 'regex-after-control' : 'division'
+  if (prev.text === ']') return 'division'
+  if (prev.text === '}') return 'ambiguous'
+  return 'regex-in-operand-position'
+}
+
 function maskCode(source) {
-  const out = String(source).split('')
+  const text = String(source)
+  const out = text.split('')
+  const lineOf = (at) => text.slice(0, at).split('\n').length
+  const refuseMask = (at, why) => { throw new Error(`maskCode refuses to guess: ${why} at line ${lineOf(at)}`) }
+  const blankAt = (at) => { if (text[at] !== '\n' && text[at] !== '\r') out[at] = ' ' }
+  const parens = []
+  const substitutions = []
   let i = 0
-  while (i < out.length) {
-    const ch = source[i]
-    const next = source[i + 1]
-    if (ch === '/' && next === '/') {
-      out[i] = ' '
-      out[i + 1] = ' '
-      i += 2
-      while (i < out.length && source[i] !== '\n') {
-        out[i] = ' '
-        i += 1
+  let prev = { kind: 'none', text: '' }
+  let mode = 'code'
+  let templateStart = -1
+  while (i < text.length) {
+    if (mode === 'template') {
+      if (text[i] === '\\') { out[i] = ' '; if (i + 1 < text.length) blankAt(i + 1); i += 2; continue }
+      if (text[i] === '`') { out[i] = ' '; i += 1; mode = 'code'; prev = { kind: 'value', text: '`' }; continue }
+      if (text[i] === '$' && text[i + 1] === '{') {
+        out[i] = ' '; out[i + 1] = ' '; i += 2
+        substitutions.push({ braces: 0 })
+        mode = 'code'
+        prev = { kind: 'punct', text: '{' }
+        continue
       }
+      blankAt(i); i += 1
+      continue
+    }
+    const ch = text[i]
+    const next = text[i + 1]
+    if (ch === '/' && next === '/') {
+      out[i] = ' '; out[i + 1] = ' '; i += 2
+      while (i < text.length && text[i] !== '\n') { out[i] = ' '; i += 1 }
       continue
     }
     if (ch === '/' && next === '*') {
-      out[i] = ' '
-      out[i + 1] = ' '
-      i += 2
-      while (i < out.length) {
-        if (source[i] === '*' && source[i + 1] === '/') {
-          out[i] = ' '
-          out[i + 1] = ' '
-          i += 2
-          break
-        }
-        if (source[i] !== '\n' && source[i] !== '\r') out[i] = ' '
-        i += 1
+      const start = i
+      out[i] = ' '; out[i + 1] = ' '; i += 2
+      let closedComment = false
+      while (i < text.length) {
+        if (text[i] === '*' && text[i + 1] === '/') { out[i] = ' '; out[i + 1] = ' '; i += 2; closedComment = true; break }
+        blankAt(i); i += 1
       }
+      if (!closedComment) refuseMask(start, 'an unterminated block comment')
       continue
     }
-    if (ch === "'" || ch === '"' || ch === '`') {
+    if (ch === '`') { out[i] = ' '; templateStart = i; i += 1; mode = 'template'; continue }
+    if (ch === "'" || ch === '"') {
       const quote = ch
-      out[i] = ' '
-      i += 1
-      while (i < out.length) {
-        if (source[i] === '\\') {
-          out[i] = ' '
-          if (i + 1 < out.length) {
-            if (source[i + 1] !== '\n' && source[i + 1] !== '\r') out[i + 1] = ' '
-          }
-          i += 2
-          continue
-        }
-        if (source[i] === quote) {
-          out[i] = ' '
-          i += 1
-          break
-        }
-        if (source[i] !== '\n' && source[i] !== '\r') out[i] = ' '
-        i += 1
+      const start = i
+      out[i] = ' '; i += 1
+      let closedString = false
+      while (i < text.length) {
+        if (text[i] === '\\') { out[i] = ' '; if (i + 1 < text.length) blankAt(i + 1); i += 2; continue }
+        if (text[i] === quote) { out[i] = ' '; i += 1; closedString = true; break }
+        blankAt(i); i += 1
       }
+      if (!closedString) refuseMask(start, 'an unterminated string literal')
+      prev = { kind: 'value', text: quote }
       continue
     }
+    if (MASK_WORD.test(ch)) {
+      let end = i
+      while (end < text.length && MASK_WORD.test(text[end])) end += 1
+      const word = text.slice(i, end)
+      i = end
+      prev = { kind: REGEX_KEYWORDS.has(word) ? 'keyword' : 'value', text: word, word }
+      continue
+    }
+    if (ch === '(') { parens.push(prev.kind === 'value' && CONTROL_HEADS.has(prev.word || '')); prev = { kind: 'punct', text: '(' }; i += 1; continue }
+    if (ch === ')') { const control = parens.pop(); prev = { kind: 'close-paren', text: ')', control: control === true }; i += 1; continue }
+    if (ch === '{') { if (substitutions.length) substitutions[substitutions.length - 1].braces += 1; prev = { kind: 'punct', text: '{' }; i += 1; continue }
+    if (ch === '}') {
+      const substitution = substitutions[substitutions.length - 1]
+      if (substitution && substitution.braces === 0) { substitutions.pop(); out[i] = ' '; i += 1; mode = 'template'; continue }
+      if (substitution) substitution.braces -= 1
+      prev = { kind: 'punct', text: '}' }; i += 1; continue
+    }
+    if (ch === '/') {
+      const verdict = slashVerdict(prev)
+      if (verdict === 'ambiguous') refuseMask(i, 'a slash after } that is either a regex literal or a division')
+      if (verdict === 'division') { prev = { kind: 'punct', text: '/' }; i += 1; continue }
+      const start = i
+      i += 1
+      let inClass = false
+      let closedRegex = false
+      while (i < text.length) {
+        const inner = text[i]
+        if (inner === '\n' || inner === '\r') break
+        if (inner === '\\') { out[i] = ' '; if (i + 1 < text.length) blankAt(i + 1); i += 2; continue }
+        if (inner === '[') inClass = true
+        else if (inner === ']') inClass = false
+        else if (inner === '/' && !inClass) { i += 1; closedRegex = true; break }
+        out[i] = ' '; i += 1
+      }
+      if (!closedRegex) refuseMask(start, 'a regex literal that does not close on its own line')
+      while (i < text.length && MASK_WORD.test(text[i])) { out[i] = ' '; i += 1 }
+      prev = { kind: 'value', text: '/' }
+      continue
+    }
+    if (!/\s/.test(ch)) prev = { kind: 'punct', text: ch }
     i += 1
   }
+  if (mode === 'template') refuseMask(templateStart, 'an unterminated template literal')
   return out.join('')
 }
 
@@ -517,6 +592,21 @@ test('ledger sandbox tripwire — a one-hop module-scope mkdtemp redirect is acc
   assert.equal(ledgerSandboxVerdict('const x = 1\n', 'test'), 'not-a-writer')
 })
 
+// MUTATION M3: reading a control-header slash as a division desynchronises the
+// ledger tripwire the same way — its sandbox assignment stops being visible and
+// a sandboxed file is reported as an unsandboxed writer.
+test('ledger sandbox tripwire — a quoted regex above the sandbox assignment stays visible', () => {
+  const source = [
+    "import { bootCmd } from '../crew/crew.mjs'",
+    "const d = mkdtempSync(join(tmpdir(), 'x-'))",
+    String.raw`if (d) /['"]/.test(d)`,
+    'process.env.DEVTEAM_LEDGER_DIR = d',
+    "await bootCmd({ task: 't' })",
+    '',
+  ].join('\n')
+  assert.equal(ledgerSandboxVerdict(source, 'test'), 'sandboxed')
+})
+
 test('ledger sandbox tripwire — every registered door is live and carries its reason', () => {
   for (const [key, door] of LEDGER_DOORS) {
     const split = key.indexOf('#')
@@ -632,7 +722,7 @@ function frozenTempSites(sites) {
 const RAW_TEMP_EXEMPT = new Map([
   ['crew/arms.test.mjs', frozenTempSites(1)],
   ['crew/capabilities.test.mjs', frozenTempSites(1)],
-  ['crew/crew.test.mjs', frozenTempSites(77)],
+  ['crew/crew.test.mjs', frozenTempSites(84)],
   ['crew/daemon.test.mjs', frozenTempSites(7)],
   ['crew/factoryctl.test.mjs', frozenTempSites(2)],
   ['crew/harvest.test.mjs', frozenTempSites(1)],
@@ -660,7 +750,7 @@ const RAW_TEMP_EXEMPT = new Map([
   ['test/fixtures.mjs', frozenTempSites(1)],
   ['test/visualizer-returns.test.mjs', frozenTempSites(1)],
   ['test/visualizer-roster-edit.test.mjs', frozenTempSites(5)],
-  ['test/visualizer-server.test.mjs', frozenTempSites(43)],
+  ['test/visualizer-server.test.mjs', frozenTempSites(45)],
   ['test/visualizer-shape.test.mjs', frozenTempSites(1)],
   ['test/visualizer-teardown.test.mjs', frozenTempSites(1)],
 ])
@@ -694,7 +784,7 @@ test('temp sandbox tripwire — every exemption has a live, load-bearing warrant
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 198)
+  assert.equal(total, 207)
 })
 
 test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {
@@ -704,6 +794,38 @@ test('temp sandbox tripwire — the detector flags a hand-rolled call and clears
   assert.equal(rawTempSites("/* const d = mkdtempSync(join(tmpdir(), 'x-')) */"), 0)
   assert.equal(rawTempSites('const text = "mkdtempSync(join(tmpdir(), \'x-\'))"'), 0)
   assert.equal(rawTempSites(String.raw`/mkdtempSync\s*\(/`), 0)
+})
+
+// MUTATION M1: reading an operand-position slash as a division restores the
+// desynchronisation — the quote inside the regex opens a string that runs to
+// the end of the source and the call site below it disappears.
+test('maskCode — a quote inside a regex literal does not mask the code below it', () => {
+  const source = [String.raw`const QUOTE = /['"]/`, "const d = mkdtempSync(join(tmpdir(), 'x-'))", ''].join('\n')
+  assert.equal(rawTempSites(source), 1)
+})
+
+// MUTATION M2: unmasking single-quoted strings lets a call site spelled inside
+// a string be counted — the over-counting direction this pins shut.
+test('maskCode — a real quoted string above a call site is still masked', () => {
+  const source = ["const text = 'mkdtempSync(join(tmpdir(), 1))'", "const d = mkdtempSync(join(tmpdir(), 'y-'))", ''].join('\n')
+  assert.equal(rawTempSites(source), 1)
+})
+
+// MUTATION M4: a `}` slash guessed at either way is the silent under-count this
+// refusal exists to make impossible.
+test('maskCode — refuses the one slash it cannot classify', () => {
+  assert.throws(() => maskCode("function f() {}\n/x'y/.test(a)\n"), /refuses to guess/)
+})
+
+// MUTATION M5: an unterminated string masking to end of file is a silent
+// under-count by another route.
+test('maskCode — refuses an unterminated string literal', () => {
+  assert.throws(() => maskCode('const bad = "oops\nconst d = mkdtempSync(x)\n'), /refuses to guess/)
+})
+
+// MUTATION M6: classifying every slash as a regex swallows the rest of the line.
+test('maskCode — arithmetic division is not read as a regex literal', () => {
+  assert.equal(rawTempSites("const r = Math.round((a - b) / 1000)\nconst d = mkdtempSync(x)\n"), 1)
 })
 
 test('temp sandbox tripwire — the five measured leakers may never be exempted', () => {

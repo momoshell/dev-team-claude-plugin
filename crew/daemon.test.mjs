@@ -22,12 +22,12 @@ import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
 import { writeTornFile } from '../test/helpers.mjs'
 
-// FILE-WIDE RULE: no LITERAL quote character inside a regex literal in this
-// file. A quoted regex desynchronises maskCode() in test/factory-env.test.mjs,
-// which then masks everything BELOW it — dropping this file's raw temp call
-// sites from 7 to 2 and silently disarming the temp sandbox tripwire. It fails
-// far away, as `exemption crew/daemon.test.mjs warranty no longer holds`,
-// naming temp usage that never changed. Write \x27 and \x22 instead. See #592.
+// Quote characters inside a regex literal are ordinary here again: maskCode()
+// in test/factory-env.test.mjs classifies every slash from the token before it
+// and refuses the one case it cannot classify, so a quoted regex no longer
+// masks everything BELOW it and no longer disarms the temp sandbox tripwire
+// for the rest of this file. The hex-escape workaround it carried is retired;
+// this block keeps the file's line count, which skills/backend-node pins.
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
 // through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
@@ -261,12 +261,12 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   // import here would pull that module into the daemon server process through
   // the allowlisted edge, and nothing else would notice.
   const leafCode = readFileSync(new URL('./json-leaf.mjs', import.meta.url), 'utf8')
-  // NOTE: the quote characters below are written as \x27/\x22 escapes on purpose.
-  // A literal quote inside a regex literal desynchronises maskCode() in
-  // test/factory-env.test.mjs, which silently masks the REST OF THIS FILE and
-  // drops its raw-temp call sites from 7 to 2 — turning the temp sandbox
-  // tripwire off for everything below. Measured 2026-08-24.
-  const leafSpecifiers = [...leafCode.matchAll(/^\s*import\b[^\x27\x22]*[\x27\x22]([^\x27\x22]+)[\x27\x22]/gm)].map(([, specifier]) => specifier)
+  // The specifier extraction reads the first quoted string on each import line
+  // and is written with an ordinary quote character class. maskCode() in
+  // test/factory-env.test.mjs is regex-literal-aware since b194, so a quote
+  // inside a regex literal no longer desynchronises the temp and ledger
+  // tripwires that both read this file (#592).
+  const leafSpecifiers = [...leafCode.matchAll(/^\s*import\b[^'"]*['"]([^'"]+)['"]/gm)].map(([, specifier]) => specifier)
   assert.equal(leafSpecifiers.length > 0, true, 'crew/json-leaf.mjs must declare at least one import for this pin to be meaningful')
   assert.deepEqual(
     leafSpecifiers.filter((specifier) => !specifier.startsWith('node:')),

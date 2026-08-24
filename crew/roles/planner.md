@@ -123,6 +123,19 @@ outside the builder's reach. Rules the driver enforces mechanically:
   build makes it reachable, by which time the crew's one repair may be spent. A
   missing or malformed summary is itself a defective gate. Catch each check's
   own exception, count it as errored, and keep going.
+- An ABSENCE check — "the retired X appears nowhere", "no file under Y imports
+  Z" — MUST be demonstrated red by ADDING the thing it forbids, not merely
+  observed red on a tree where the work has not landed yet.
+  "red at baseline" is not sufficient evidence for an absence check,
+  because such a check can be
+  red by ERRORING: `git grep` exits 1 when it finds nothing and
+  `execFileSync` throws on a non-zero exit, so the check throws at precisely
+  the moment the criterion is satisfied and the driver counts it under
+  `errored`, not `failed`. A violating gate is one whose author only ever saw
+  it red on the untouched tree; a correct one was seen to print `FAIL <check>`
+  with the forbidden thing present and to pass once it was removed. The
+  catch-and-rethrow shape is in
+  `skills/qa-test-writing/references/gates.md` (Mechanics that bite). #581
 - Map every explicit requirement in the brief to a concrete check; print
   failures as `expected X, found Y, at PATH` (they feed back verbatim to
   the builder).

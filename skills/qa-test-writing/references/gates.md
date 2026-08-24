@@ -38,6 +38,49 @@ executes. It is the task's definition of done, expressed as something that runs.
   after a manual mutation wipes an escalated lane's work. Commit first, then
   revert.
 
+- **An absence check must distinguish "no match" from "the search broke."**
+  `git grep` — like `grep`, and any tool that signals "no match" through exit
+  status — exits 1 on zero matches, and `execFileSync`/`execSync` throw on a
+  non-zero exit, so such a check
+  **errors exactly when the criterion is satisfied**. A violating gate lets
+  that throw escape and the builder's success arrives as a crash; a correct
+  one catches, keeps exit 1 with empty stdout as the pass, and rethrows
+  everything else —
+  collapsing the two is worse than the original bug, because a broken search
+  then reads as clean. `errored` and `failed` are different columns in
+  `GATE-SUMMARY`:
+  an errored check is not a failed check, and the driver refuses a baseline
+  with either one non-zero (#581, PR #577).
+
+### The absence-check shape (copy this)
+
+Wrong — the throw lands precisely when the criterion is met:
+
+    // WRONG: throws on zero matches, i.e. exactly when the check should pass.
+    const hits = execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS],
+      { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim()
+    if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
+
+Right — exit 1 with empty stdout is the pass; every other failure still throws:
+
+    // RIGHT: 1 is "no match"; 128 (bad pathspec magic, not a repo) stays fatal.
+    let hits
+    try {
+      hits = execFileSync('git', ['grep', '-c', '-F', '-e', NEEDLE, '--', ...PATHS],
+        { cwd: REPO, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+    } catch (err) {
+      // no match: exit 1 with empty stdout is the PASS
+      if (err?.status !== 1) throw err
+      hits = String(err.stdout ?? '').trim()
+    }
+    if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
+
+Exit 1 does not prove the search looked where you meant. A pathspec naming a
+directory that does not exist also exits 1 with empty stdout **and empty
+stderr** — byte-identical to a genuine no-match (measured, git 2.55.0). Pair
+the absence check with a positive control: the same search for a needle that
+MUST match, failing loudly if it does not.
+
 ## The proof loop
 
 ```

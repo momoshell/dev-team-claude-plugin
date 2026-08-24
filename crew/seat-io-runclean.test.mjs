@@ -7,11 +7,12 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, providerConditionDetail,
-  paneUsageFrames, readEnvelopeFile, reaskDecision, samplePaneScreen, saveCrew, seatIo, settleSeatTeardown, WAIT_POLL_MS, waitForEnvelope,
+  cellFailureKind, claudeRefusalFrames, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames,
+  providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, saveCrew, seatIo, settleSeatTeardown,
+  SEAT_REFUSAL_STAGE, WAIT_POLL_MS, waitForEnvelope,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition } from './headless.mjs'
-import { startFileWriter } from '../test/helpers.mjs'
+import { scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 
 const CONTENT = Object.freeze({
@@ -447,57 +448,151 @@ test('run keeps a nested node test summary parseable under FORCE_COLOR', () => {
   }
 })
 
-test('samplePaneScreen asks for scrollback and sees through colour and box rules', () => {
-  const calls = []
-  const frame = '╭──╮\n│ \x1b[31mrate\x1b[0m│limit exceeded │\n╰──╯\n'
-  const sample = samplePaneScreen('surface-builder', {
-    cmux: (verb, args, options) => {
-      calls.push({ verb, args: [...args], options })
-      return { ok: true, stdout: frame }
-    },
-  })
-  assert.deepEqual(sample, { read: true, condition: 'rate-limit' })
-  assert.equal(recogniseProviderCondition(frame), null)
-  assert.deepEqual(calls, [{
-    verb: 'read-screen',
-    args: ['--surface', 'surface-builder', '--scrollback', '--lines', '200'],
-    options: { timeoutMs: 5000 },
-  }])
+test('piRefusalFrames reads typed refusal frames and preserves provider text', () => {
+  const home = scratchDir('pi-refusal-home-')
+  const checkout = '/Users/x/Development/dt-b183-seatrefusal'
+  const dir = join(home, '.pi', 'agent', 'sessions', `-${checkout.replaceAll('/', '-')}--`)
+  mkdirSync(dir, { recursive: true })
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }
+  const frame = (stop, message, content, timestamp) => JSON.stringify({ timestamp, message: { stopReason: stop, errorMessage: message, content, usage } })
+  writeFileSync(join(dir, 'session.jsonl'), [
+    frame('error', 'WebSocket error', [{ type: 'thinking', thinking: '' }], '2026-08-23T21:31:42.796Z'),
+    frame('error', 'prompt_cache_retention is not supported on this model', [], '2026-08-23T22:01:41.213Z'),
+  ].join('\n') + '\n')
+  const frames = piRefusalFrames({ checkout, deps: { home } })
+  assert.deepEqual(frames.map((row) => [row.member, row.source]), [['transient', 'pi'], ['rejected', 'pi']])
+  assert.equal(frames[0].message, 'WebSocket error')
+  assert.deepEqual(piRefusalFrames({ checkout, since: Date.parse('2026-08-23T21:40:00.000Z'), deps: { home } }).map((row) => row.member), ['rejected'])
 })
 
-test('a failed, empty or throwing screen read records nothing', () => {
-  assert.deepEqual(samplePaneScreen('surface-builder', {
-    cmux: () => ({ ok: false, stdout: 'API Error 529 overloaded' }),
-  }), { read: false, condition: null })
-  assert.deepEqual(samplePaneScreen('surface-builder', {
-    cmux: () => ({ ok: true, stdout: '' }),
-  }), { read: false, condition: null })
-  assert.deepEqual(samplePaneScreen('surface-builder', {
-    cmux: () => { throw new Error('read-screen failed') },
-  }), { read: false, condition: null })
-  // A failed, empty or throwing read is NOT a clean screen: `read: false` is
-  // what keeps it from being read as evidence a condition ended.
-  assert.deepEqual(samplePaneScreen('surface-builder', {
-    cmux: () => ({ ok: true, stdout: 'nothing interesting here' }),
-  }), { read: true, condition: null })
+test('piRefusalFrames ignores non-refusal stops and degrades every store/read/parse failure to no evidence', () => {
+  const home = scratchDir('pi-refusal-edge-')
+  const checkout = '/tmp/pi-edge'
+  const dir = join(home, '.pi', 'agent', 'sessions', `-${checkout.replaceAll('/', '-')}--`)
+  mkdirSync(dir, { recursive: true })
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0 }
+  writeFileSync(join(dir, 'session.jsonl'), [
+    JSON.stringify({ timestamp: '2026-08-23T21:31:42.796Z', message: { stopReason: 'aborted', errorMessage: 'WebSocket error', content: [], usage } }),
+    JSON.stringify({ timestamp: '2026-08-23T21:32:42.796Z', message: { stopReason: 'stop', content: [], usage } }),
+    'not json', '',
+  ].join('\n'))
+  assert.deepEqual(piRefusalFrames({ checkout, deps: { home } }), [])
+  assert.deepEqual(piRefusalFrames({ checkout: '/missing', deps: { home } }), [])
+  assert.deepEqual(piRefusalFrames({ checkout, deps: { home, existsSync: () => true, readFileSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } } }), [])
+})
 
+test('claudeRefusalFrames reads only API error transcript rows and tolerates absent usage', () => {
+  const root = scratchDir('claude-refusal-')
+  const transcript = join(root, 'transcript.jsonl')
+  const taskDir = join(root, 'task')
+  mkdirSync(join(taskDir, 'usage'), { recursive: true })
+  writeFileSync(transcript, [
+    JSON.stringify({ timestamp: '2026-08-23T09:10:00.000Z', message: { content: [{ text: 'working line 403' }] } }),
+    JSON.stringify({ timestamp: '2026-08-23T09:17:40.719Z', isApiErrorMessage: true, message: { content: [{ text: "You've hit your session limit · resets 2pm (Europe/Belgrade)" }] } }),
+  ].join('\n') + '\n')
+  writeFileSync(join(taskDir, 'usage', 'builder.jsonl'), `${JSON.stringify({ session_id: '11111111-1111-4111-8111-111111111111', transcript_path: transcript })}\n`)
+  const frames = claudeRefusalFrames({ taskDir, role: 'builder' })
+  assert.deepEqual(frames.map((row) => [row.member, row.source]), [['quota', 'claude']])
+  assert.deepEqual(claudeRefusalFrames({ taskDir: join(root, 'empty'), role: 'builder' }), [])
+})
+
+test('refusal detail is guarded and refusal failures stay in the ledger vocabulary', () => {
+  assert.match(providerConditionDetail({ message: 'wait ended', seatRefusal: 'quota' }), /^\[refusal:quota\] /)
+  for (const value of ['not-a-member', '__proto__']) assert.equal(providerConditionDetail({ message: 'wait ended', seatRefusal: value }), 'wait ended')
+  assert.equal(cellFailureKind({ stage: SEAT_REFUSAL_STAGE }), 'transport-error')
+})
+
+test('seatIo reprompts a rejection once, ends on the second, and journals other members', () => {
   withRepo({ dirty: false }, (fixture) => {
-    let clock = 0
+    const text = 'prompt_cache_retention is not supported on this model'
+    const queue = [
+      [{ at: 30_000, member: 'rejected', message: text, source: 'pi' }],
+      [],
+      [{ at: 90_000, member: 'rejected', message: text, source: 'pi' }],
+    ]
+    const sends = []
     const journal = []
-    const io = seatIo({ members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
-      cmux: () => ({ ok: false, stdout: 'API Error 529 overloaded' }),
-      logLine: (_path, row) => journal.push(row),
-      now: () => clock,
-      sleep: (ms) => { clock += ms },
-      sendLine: () => {},
+    let clock = 0
+    const io = seatIo({ members: { builder: { agent: 'pi', model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      now: () => clock, sleep: (ms) => { clock += ms }, sendLine: (surface, line) => sends.push({ surface, line }),
+      refusalFrames: () => queue.shift() || [], logLine: (_path, row) => journal.push(row), existsSync: () => false,
       tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
       locate: (_tree, id) => id === 'surface-builder',
-      existsSync: () => false,
     })
     const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
-    assert.equal(io.wait(assignment.returnPath, 35), null)
-    assert.equal(journal.some((row) => row.event === 'pane-provider-sample'), false)
+    let thrown
+    try { io.wait(assignment.returnPath, 300) } catch (err) { thrown = err }
+    assert.equal(sends.length, 2)
+    assert.equal(sends[0].line, sends[1].line)
+    assert.equal(thrown?.stage, SEAT_REFUSAL_STAGE)
+    assert.match(thrown.message, new RegExp(text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')))
+    assert.equal(journal.filter((row) => row.event === 'seat-refusal').length, 2)
   })
+})
+
+test('seatIo policy matrix acts on every refusal member without parking quota', () => {
+  const refusal = (member, message) => [{ at: LIVENESS_PROBE_MS, member, message, source: 'pi' }]
+  const run = ({ member, message, surface = 'surface-builder', timeoutS = 35 }) => withRepo({ dirty: false }, (fixture) => {
+    let clock = 0
+    let reads = 0
+    const sends = []
+    const journal = []
+    const crew = { members: { builder: { agent: 'pi', model: 'sonnet', transport: 'pane', ...(surface ? { surface_id: surface } : {}) } } }
+    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      sendLine: (id, line) => sends.push({ id, line }),
+      refusalFrames: () => {
+        reads += 1
+        return reads === 1 ? refusal(member, message) : []
+      },
+      logLine: (_path, row) => journal.push(row),
+      existsSync: () => false,
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+    })
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    let thrown = null
+    let env = null
+    try { env = io.wait(assignment.returnPath, timeoutS) } catch (err) { thrown = err }
+    return { clock, env, thrown, sends, resends: sends.slice(1), journal }
+  })
+
+  const quotaText = "You've hit your session limit · resets 3pm (Europe/Belgrade)"
+  const quota = run({ member: 'quota', message: quotaText, timeoutS: 300 })
+  assert.equal(quota.resends.length, 0)
+  assert.equal(quota.thrown?.stage, SEAT_REFUSAL_STAGE)
+  assert.ok(quota.thrown.message.includes(quotaText))
+  assert.equal(quota.clock, LIVENESS_PROBE_MS)
+  assert.equal(quota.journal.some((row) => row.event === 'seat-refusal' && row.outcome === 'ended'), true)
+  assert.equal(quota.journal.some((row) => row.event === 'attention' || Object.hasOwn(row, 'park_id')), false)
+
+  const declined = run({ member: 'rejected', message: 'prompt_cache_retention is not supported on this model', surface: null })
+  assert.equal(declined.resends.length, 0)
+  assert.equal(declined.thrown, null)
+  assert.equal(declined.env, null)
+  assert.deepEqual(declined.journal.find((row) => row.event === 'seat-refusal'), {
+    event: 'seat-refusal', role: 'builder', id: 'd1', member: 'rejected', source: 'pi',
+    message: 'prompt_cache_retention is not supported on this model', at: LIVENESS_PROBE_MS,
+    outcome: 'declined', why: 'no surface_id',
+  })
+
+  for (const [member, message] of [
+    ['transient', 'WebSocket error'],
+    ['suspended', 'API Error: Your computer went to sleep mid-response.'],
+  ]) {
+    const journalOnly = run({ member, message })
+    assert.equal(journalOnly.resends.length, 0)
+    assert.equal(journalOnly.thrown, null)
+    assert.equal(journalOnly.env, null)
+    assert.equal(journalOnly.clock, 35_000)
+    assert.equal(journalOnly.journal.some((row) => row.event === 'seat-refusal' && row.member === member && row.outcome === 'journalled'), true)
+  }
+
+  const overflowed = run({ member: 'overflowed', message: 'context_length_exceeded' })
+  assert.equal(overflowed.resends.length, 0)
+  assert.equal(overflowed.thrown, null)
+  assert.equal(overflowed.journal.some((row) => row.event === 'seat-refusal' && row.member === 'overflowed' && row.news === 'first-occurrence'), true)
 })
 
 test('waitForEnvelope sampling cannot change liveness decisions', () => {
@@ -656,161 +751,6 @@ test('a recognised provider condition lands in the cell-failure detail with role
     assert.equal(rows[0].transport, 'headless-json')
     assert.equal(rows[0].model, 'sonnet')
     assert.equal(rows[0].detail, event.detail)
-  })
-})
-
-test('a sampled condition lands on the seat failure with SAMPLED evidence', () => {
-  withRepo({ dirty: false }, (fixture) => {
-    let clock = 0
-    const events = []
-    const journal = []
-    const crew = {
-      task: 'b73-pane',
-      members: { builder: {
-        agent: 'claude', provider: 'anthropic', id: 'model-id', model: 'sonnet', transport: 'pane',
-        surface_id: 'surface-builder',
-      } },
-    }
-    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
-      cmux: () => ({ ok: true, stdout: 'API Error 529 overloaded' }),
-      logLine: (_path, row) => journal.push(row),
-      now: () => clock,
-      sleep: (ms) => { clock += ms },
-      sendLine: () => {},
-      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
-      locate: (_tree, id) => id === 'surface-builder',
-      existsSync: () => false,
-    })
-    io.emit = (event) => events.push(event)
-    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
-    assert.equal(io.wait(assignment.returnPath, 35), null)
-    const event = events.find((candidate) => candidate.kind === 'cell-failure')
-    assert.ok(event)
-    assert.match(event.detail, /^\[provider-sampled:overloaded\] /)
-    assert.equal(journal.filter((row) => row.event === 'pane-provider-sample').length, 1)
-
-    const rows = []
-    const adapter = emitAdapter({
-      adwId: 'adw-pane-provider',
-      emit: (fn) => fn({ recordCellFailure: (row) => rows.push(row) }),
-    }, crew)
-    adapter(event)
-    assert.equal(rows.length, 1)
-    assert.equal(rows[0].role, 'builder')
-    assert.equal(rows[0].transport, 'pane')
-    assert.equal(rows[0].model, 'sonnet')
-    assert.equal(rows[0].detail, event.detail)
-
-    assert.match(providerConditionDetail({ message: 'captured', providerCondition: 'overloaded' }), /^\[provider:overloaded\] /)
-    assert.equal(providerConditionDetail({ message: 'transport failure' }), 'transport failure')
-  })
-})
-
-test('nothing branches on a sampled condition', () => {
-  const run = (stdout) => withRepo({ dirty: false }, (fixture) => {
-    let clock = 0
-    const events = []
-    const thrown = new Error('driver transport failure')
-    const crew = { members: { builder: { model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }
-    const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
-      cmux: () => ({ ok: true, stdout }),
-      now: () => clock,
-      sleep: (ms) => {
-        clock += ms
-        if (clock > LIVENESS_PROBE_MS) throw thrown
-      },
-      sendLine: () => {},
-      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
-      locate: (_tree, id) => id === 'surface-builder',
-      existsSync: () => false,
-    })
-    io.emit = (event) => events.push(event)
-    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
-    assert.throws(() => io.wait(assignment.returnPath, 35), (err) => {
-      assert.equal(err, thrown)
-      return true
-    })
-    return { event: events.find((event) => event.kind === 'cell-failure'), thrown }
-  })
-
-  const sampled = run('API Error 529 overloaded')
-  const clean = run('nothing interesting here')
-  assert.deepEqual(
-    [sampled.event.failure, sampled.event.stage, cellFailureKind(sampled.thrown), sampled.thrown.message],
-    [clean.event.failure, clean.event.stage, cellFailureKind(clean.thrown), clean.thrown.message],
-  )
-  assert.notEqual(sampled.event.detail, clean.event.detail)
-  for (const condition of ['not-a-condition', '__proto__']) {
-    assert.equal(providerConditionDetail({ message: 'same provider failure', sampledProviderCondition: condition }), 'same provider failure')
-  }
-})
-
-// One 95s wait fires the liveness probe three times (30s / 60s / 90s), reading
-// one scripted screen each; the last screen repeats if fewer are supplied.
-function paneSampleRun(fixture, screens) {
-  let clock = 0
-  let reads = 0
-  const journal = []
-  const crew = { members: { builder: { model: 'sonnet', transport: 'pane', surface_id: 'surface-builder' } } }
-  const io = seatIo(crew, fixture.paths, fixture.repoDir, null, null, {}, {
-    cmux: (verb) => {
-      if (verb !== 'read-screen') return { ok: true, stdout: '' }
-      return screens[Math.min(reads++, screens.length - 1)]
-    },
-    logLine: (_path, row) => journal.push(row),
-    now: () => clock,
-    sleep: (ms) => { clock += ms },
-    sendLine: () => {},
-    tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
-    locate: (_tree, id) => id === 'surface-builder',
-    existsSync: () => false,
-  })
-  const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
-  assert.equal(io.wait(assignment.returnPath, 95), null)
-  assert.equal(reads, 3)
-  return journal.filter((row) => row.event === 'pane-provider-sample')
-}
-
-const CONDITION_SCREEN = { ok: true, stdout: 'API Error 529 overloaded' }
-const CLEAN_SCREEN = { ok: true, stdout: 'nothing interesting here' }
-const FAILED_READ = { ok: false, stdout: 'API Error 529 overloaded' }
-
-test('a condition persisting across probes is ONE record, first sighting to last', () => {
-  withRepo({ dirty: false }, (fixture) => {
-    const samples = paneSampleRun(fixture, [CONDITION_SCREEN])
-    assert.equal(samples.length, 1)
-    assert.deepEqual(
-      [samples[0].condition, samples[0].basis, samples[0].bound, samples[0].first_seen_at, samples[0].last_seen_at],
-      ['overloaded', 'sampled', 'lower', LIVENESS_PROBE_MS, 3 * LIVENESS_PROBE_MS],
-    )
-    // The row is a WINDOW, never a tally: three probes saw one condition, and
-    // nothing on the row can be read as three of anything (#413).
-    for (const row of samples) {
-      assert.equal(Object.keys(row).some((key) => /(count|total|observed|sightings|probes)/i.test(key)), false)
-    }
-  })
-})
-
-test('an intermittent condition stays distinguishable from a persistent one', () => {
-  withRepo({ dirty: false }, (fixture) => {
-    const samples = paneSampleRun(fixture, [CONDITION_SCREEN, CLEAN_SCREEN, CONDITION_SCREEN])
-    assert.equal(samples.length, 2)
-    assert.deepEqual(samples.map((row) => [row.first_seen_at, row.last_seen_at]), [
-      [LIVENESS_PROBE_MS, LIVENESS_PROBE_MS],
-      [3 * LIVENESS_PROBE_MS, 3 * LIVENESS_PROBE_MS],
-    ])
-    assert.deepEqual([...new Set(samples.map((row) => row.condition))], ['overloaded'])
-  })
-})
-
-test('a failed read never splits one run into two records', () => {
-  withRepo({ dirty: false }, (fixture) => {
-    const samples = paneSampleRun(fixture, [CONDITION_SCREEN, FAILED_READ, CONDITION_SCREEN])
-    assert.equal(samples.length, 1)
-    assert.deepEqual(
-      [samples[0].first_seen_at, samples[0].last_seen_at],
-      [LIVENESS_PROBE_MS, 3 * LIVENESS_PROBE_MS],
-    )
   })
 })
 

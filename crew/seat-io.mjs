@@ -13,7 +13,10 @@ import {
   cmux as defaultCmux, tree as defaultTree, locate as defaultLocate, sendLine as defaultSendLine,
   closeSurface as defaultCloseSurface, logLine as defaultLogLine, assignmentLine as defaultAssignmentLine,
 } from './driver.mjs'
-import { headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, recogniseProviderCondition, writeCrewJson, updateCrewJson } from './headless.mjs'
+import {
+  headlessIo as defaultHeadlessIo, PROVIDER_CONDITIONS, SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS,
+  recogniseProviderCondition, recogniseSeatRefusal, writeCrewJson, updateCrewJson,
+} from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
 import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
@@ -1030,6 +1033,9 @@ export function phaseForStage(label) {
 // 'substrate-gone' deliberately falls through to transport-error; never fold it into seat-died.
 export function cellFailureKind(err) {
   const stage = String((err && err.stage) || '')
+  // A refusal is an adapter/provider failure; transport-error is the only
+  // member of the ledger's closed set available to this lane.
+  if (stage === SEAT_REFUSAL_STAGE) return 'transport-error'   // verbatim: mutation C16
   if (stage === 'seat-died') return 'seat-died'
   const tail = stage.replace(/^(headless|rpc|pane)-/, '')
   if (tail !== stage) {
@@ -1272,52 +1278,10 @@ export function settleSeatTeardown(io, deps = {}) {
   return { ...summary, rows, ...(descendants ? { descendants } : {}) }
 }
 
-export const PANE_SAMPLE_LINES = 200
-export const PANE_SAMPLE_TIMEOUT_MS = 5000
-const BOX_DRAWING = /[─-▟]/g
-
-export function normaliseScreenText(text) {
-  if (typeof text !== 'string' || !text) return ''
-  return text.replace(BOX_DRAWING, ' ').replace(/\s+/g, ' ').trim()
-}
-
-// A READ and a CONDITION are different facts. A screen that could not be read
-// is no evidence at all, and only a screen the probe actually read can be
-// evidence that a condition has ENDED (#413).
-export function samplePaneScreen(surfaceId, deps = {}) {
-  const cmux = deps.cmux || defaultCmux
-  let res
-  try {
-    res = cmux('read-screen', ['--surface', surfaceId, '--scrollback', '--lines', String(PANE_SAMPLE_LINES)], { timeoutMs: PANE_SAMPLE_TIMEOUT_MS })
-  } catch { return { read: false, condition: null } }
-  if (!res || res.ok !== true) return { read: false, condition: null }
-  const text = normaliseScreenText(String(res.stdout || ''))
-  if (!text) return { read: false, condition: null }
-  return { read: true, condition: recogniseProviderCondition(text) }
-}
-
-// One record per RUN — one continuous stretch of the same recognised condition
-// on one pane. `bound: 'lower'` still says the row can only undercount: the
-// condition may have begun before first_seen_at and outlived last_seen_at, and
-// a probe that misses it entirely is never recorded. What the row no longer
-// does is COUNT: a per-probe counter turned one persistent on-screen artifact
-// into N sightings that read as N incidents (#413).
-export function paneSampleRow({ role, transport, model, condition, firstSeenAt, lastSeenAt }) {
-  return {
-    event: 'pane-provider-sample',
-    role: role ?? null,
-    transport: transport ?? null,
-    model: model ?? null,
-    condition,
-    basis: 'sampled',
-    bound: 'lower',
-    first_seen_at: firstSeenAt ?? null,
-    last_seen_at: lastSeenAt ?? null,
-  }
-}
-
 export function providerConditionDetail(err) {
   const message = (err && err.message) || null
+  const refusal = err && err.seatRefusal
+  if (SEAT_REFUSALS.some((r) => r.member === refusal)) return `[refusal:${refusal}] ${message ?? ''}`.trim()
   const captured = err && err.providerCondition
   if (PROVIDER_CONDITIONS.some((c) => c.condition === captured)) return `[provider:${captured}] ${message ?? ''}`.trim()
   const sampled = err && err.sampledProviderCondition
@@ -1437,7 +1401,7 @@ export function reaskBrief({ role, id, returnPath, message }) {
 
 export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, onAlive, now, sleep }) {
   const started = now()
-  const deadline = started + timeoutS * 1000
+  let deadline = started + timeoutS * 1000
   let lastProbeAt = started
   let misses = 0
   let substrateMisses = 0
@@ -1451,7 +1415,18 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
       const raw = probeSeat()
       const probe = (raw && typeof raw === 'object') ? raw : { alive: raw, substrate: null }
       const alive = probe.alive
-      if (sampleSeat) try { sampleSeat(current) } catch { /* a sample is never load-bearing */ }
+      if (sampleSeat) {
+        let signal = null
+        try { signal = sampleSeat(current) } catch (err) {
+          // A refusal is the third member of the seat-died / substrate-gone family:
+          // the ONLY exception a sample may end a wait with. Everything else stays
+          // never-load-bearing, exactly as before.
+          if (err && err.stage === SEAT_REFUSAL_STAGE) throw err
+        }
+        // One bounded re-prompt has been sent to this seat: the clock it was
+        // waiting against belongs to a request the provider never accepted.
+        if (signal && signal.restartBudget === true) deadline = current + timeoutS * 1000
+      }
       // A heartbeat is a MEASUREMENT: stamped only where liveness was
       // OBSERVED. `current` is that probe's own timestamp — the same instant
       // the miss accounting records as `lastProbeAt`. An indeterminate probe
@@ -1553,6 +1528,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   let seq = 0
   const seatFor = new Map()
   const reasked = new Set()   // returnPaths already re-asked — the bound, per assignment
+  const refusalFloor = new Map()      // role -> the instant after which a frame is THIS request's
+  const lastRefusal = new Map()       // role -> the last refusal frame seen, the evidence a failure quotes
+  const repromptedRefusals = new Set() // returnPaths already re-prompted — the bound, per assignment
   const transportForPath = new Map()
   const transportFactories = {
     [HEADLESS_TRANSPORT]: deps.headlessIo || defaultHeadlessIo,
@@ -1599,7 +1577,6 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // budget expired attributes the row to the host, measurably quiet attributes
   // it to the cell, and an unmeasured host attributes NOTHING (null) rather
   // than guessing — host-load.mjs declares no default threshold on purpose.
-  // Never load-bearing for the wait.
   const timeoutAttribution = () => {
     try {
       const record = hostLoad({ policy: loadPolicy(env), ...hostLoadDeps })
@@ -1618,47 +1595,72 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       })
     } catch { /* never load-bearing */ }
   }
-  // `sampledConditions` is the LAST condition recognised for a seat and is
-  // never cleared: it is the evidence a cell failure quotes. `sampleRuns` is
-  // the OPEN run, and it is the journal's unit — closed, and only then
-  // written, when the condition changes, when a read shows it gone, or when
-  // the wait ends.
-  const sampledConditions = new Map()
-  const sampleRuns = new Map()
-  const closeSampleRun = (role) => {
-    const run = sampleRuns.get(role)
-    if (!run) return
-    sampleRuns.delete(role)
-    const m = crew.members?.[role] || null
+  const refusalError = (info, returnPath, frame) => {
+    const at = Number.isFinite(frame?.at) ? frame.at : now()
+    const err = new Error(`seat refused: ${info?.role || 'unknown'} — the provider says: ${frame?.message ?? ''} `
+      + `(${frame?.member ?? 'unclassified'}, from the ${frame?.source || 'unknown'} transcript at ${new Date(at).toISOString()}); `
+      + `no envelope arrived at ${returnPath}`)
+    err.stage = SEAT_REFUSAL_STAGE
+    err.role = info?.role || 'unknown'
+    err.seatRefusal = frame?.member
+    return err
+  }
+  const sampleSeatRefusal = (info, at) => {
+    const role = info?.role
+    if (!role) return null
+    const member = crew.members?.[role] || null
+    const reader = deps.refusalFrames ?? SHIPPED_REFUSAL_READERS[member?.agent ?? 'claude'] ?? null
+    let frames
     try {
-      io.log({ at: now(), ...paneSampleRow({
-        role, transport: m?.transport ?? DEFAULT_TRANSPORT, model: m?.model ?? null,
-        condition: run.condition, firstSeenAt: run.firstSeenAt, lastSeenAt: run.lastSeenAt,
-      }) })
-    } catch { /* the journal is diagnostics, never load-bearing */ }
-  }
-  const samplePaneSeat = (role, surfaceId, at) => {
-    const sample = samplePaneScreen(surfaceId, { cmux })
-    // A failed or empty read is not evidence the condition ended — leave the
-    // open run exactly as it was and record nothing.
-    if (!sample.read) return null
-    const condition = sample.condition
-    if (!condition) { closeSampleRun(role); return null }
-    // `at` is the probe's own instant, the same one the miss accounting and
-    // the heartbeat stamp; now() is the fallback for a caller that has none.
-    const seenAt = typeof at === 'number' ? at : now()
-    const run = sampleRuns.get(role)
-    if (run && run.condition === condition) run.lastSeenAt = seenAt
-    else {
-      closeSampleRun(role)
-      sampleRuns.set(role, { condition, firstSeenAt: seenAt, lastSeenAt: seenAt })
+      frames = typeof reader === 'function'
+        ? reader({
+          checkout, taskDir: paths.taskDir, role,
+          since: refusalFloor.get(role) ?? info.at,
+          adapter: adapters?.[role]?.adapter ?? null, deps,
+        })
+        : []
+    } catch { return null }
+    if (!Array.isArray(frames)) return null
+    for (const frame of frames) {
+      if (!frame || !Number.isFinite(frame.at)) continue
+      refusalFloor.set(role, frame.at)          // never re-fire on a frame already handled
+      lastRefusal.set(role, frame)
+      const action = frame.member ? SEAT_REFUSAL_ACTIONS[frame.member] : 'journal'
+      const note = (outcome, extra = {}) => {
+        try {
+          io.log({ event: 'seat-refusal', role, id: info?.id ?? null, member: frame.member,
+            source: frame.source, message: frame.message, at: frame.at, outcome,
+            ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}), ...extra })
+        } catch { /* refusal journalling is diagnostics, never load-bearing */ }
+      }
+      if (action === 'end') {
+        note('ended')
+        throw refusalError(info, info?.returnPath, frame)
+      }
+      if (action !== 'reprompt') {
+        note('journalled')
+        continue
+      }
+      if (repromptedRefusals.has(info?.returnPath)) {   // verbatim: mutation C13
+        note('ended-after-reprompt')
+        throw refusalError(info, info?.returnPath, frame)
+      }
+      if (!info?.surface_id || (member?.transport && member.transport !== DEFAULT_TRANSPORT)) {
+        note('declined', { why: !info?.surface_id ? 'no surface_id' : `transport ${member.transport} is not pane` })
+        continue
+      }
+      repromptedRefusals.add(info?.returnPath)       // verbatim: mutation C15
+      try {
+        sendLine(info.surface_id, assignmentLine({ id: info.id, role, briefFile: info.brief, returnPath: info.returnPath, taskDir: paths.taskDir }))
+      } catch (sendErr) {
+        note('undelivered', { why: sendErr?.message || 'assignment send failed' })
+        continue
+      }
+      note('reprompted')
+      return { restartBudget: true }
     }
-    sampledConditions.set(role, { condition })
-    return condition
+    return null
   }
-  // #392: ONE bounded re-ask, composed by code the same way a bounce brief is.
-  // The seat is alive, its bytes are on disk, and we hold a quotable parse
-  // error — so ask the only participant who can fix it. Never repairs the file.
   const reaskUnusableEnvelope = ({ returnPath, info, transport, err, timeoutS }) => {
     const role = info?.role || 'unknown'
     const surfaceId = transport ? null : (info?.surface_id || null)
@@ -1701,8 +1703,6 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         returnPath,
         timeoutS: window,
         role,
-        // Only CHANGED bytes are an answer: the stale file is still on disk and
-        // re-reading it would report the same defect before the seat could act.
         readEnvelope: () => {
           let raw
           try { raw = String(readFileSync(returnPath, 'utf8')) } catch { return null }
@@ -1710,7 +1710,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           return readEnvelopeFile(returnPath, { existsSync, readFileSync, role })
         },
         probeSeat: () => paneProbe(surfaceId, { tree, locate }),
-        sampleSeat: (at) => samplePaneSeat(role, surfaceId, at),
+        sampleSeat: (at) => sampleSeatRefusal({ ...info, returnPath }, at),
         onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
         now,
         sleep,
@@ -1725,14 +1725,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       err.reask = { attempted: true, delivered: true, recovered: false, second: null }
       note('no-new-bytes', { window_s: window })
     } catch (secondErr) {
+      if (secondErr && secondErr.stage === SEAT_REFUSAL_STAGE) throw secondErr
       err.message = `${err.message}\n[re-ask attempted: one re-ask was sent to ${role} and the second envelope is still unparseable: ${secondErr.message}]`
       err.reask = { attempted: true, delivered: true, recovered: false, second: secondErr.message }
       note('unparseable-again', { second: secondErr.stage || null })
     }
     return { envelope: null, error: err }
   }
-  // The stash stack is NOT per-worktree: `git rev-parse --git-path refs/stash`
-  // resolves to the SAME file in the common git dir from every linked worktree,
+  // The stash stack is NOT per-worktree: `git rev-parse --git-path refs/stash` resolves to the SAME file in the common git dir from every linked worktree,
   // so `git stash pop` restores whatever lane pushed LAST (#471). The entry a
   // push created is identified by the unique message it carries and restored by
   // its own commit id; an entry we cannot prove is ours is a refusal, never a
@@ -1809,7 +1809,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           const result = transport.assign(spec)
           id = result?.id ?? null
           transportForPath.set(result.returnPath, transport)
-          seatFor.set(result.returnPath, { role, id })
+          const assignedAt = now()
+          seatFor.set(result.returnPath, { role, id, brief: briefFile, at: assignedAt, returnPath: result.returnPath, transport: m.transport })
+          refusalFloor.set(role, assignedAt)
+          lastRefusal.delete(role)
           return result
         }
         seq += 1
@@ -1818,7 +1821,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // Anti-replay: seq restarts every process, so a crashed/escalated run
         // leaves files a re-run's wait() would instantly (and wrongly) accept.
         if (existsSync(returnPath)) unlinkSync(returnPath)
-        seatFor.set(returnPath, { role, surface_id: m.surface_id, id })
+        const assignedAt = now()
+        seatFor.set(returnPath, { role, surface_id: m.surface_id, id, brief: briefFile, at: assignedAt, returnPath, transport: m.transport })
+        refusalFloor.set(role, assignedAt)
+        lastRefusal.delete(role)
         sendLine(m.surface_id, assignmentLine({ id, role, briefFile, returnPath, taskDir: paths.taskDir }))
         return { id, returnPath }
       } catch (err) {
@@ -1835,8 +1841,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           : waitForEnvelope({
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
-            probeSeat: info ? () => paneProbe(info.surface_id, { tree, locate }) : null,
-            sampleSeat: info?.surface_id ? (at) => samplePaneSeat(info.role, info.surface_id, at) : null,
+            probeSeat: info ? () => info.surface_id ? paneProbe(info.surface_id, { tree, locate }) : { alive: null, substrate: 'ok' } : null,
+            sampleSeat: info ? (at) => sampleSeatRefusal({ ...info, returnPath }, at) : null,
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed
               // write: the ledger is diagnostics, the wait is the run.
@@ -1846,9 +1852,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             now, sleep,
           })
         if (env == null) {
+          const refusal = lastRefusal.get(info?.role)
           noteCellFailure(info?.role, info?.id, 'timeout', {
-            message: `no envelope at ${returnPath} within ${timeoutS}s`,
-            sampledProviderCondition: sampledConditions.get(info?.role)?.condition,
+            message: `no envelope at ${returnPath} within ${timeoutS}s${refusal ? `; the provider says: ${refusal.message}` : ''}`,
+            seatRefusal: refusal?.member,
           })
         }
         return env
@@ -1867,7 +1874,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         }
         if (failure.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
         if (failure.stage === 'substrate-gone') io.log({ at: now(), substrate_gone: info?.role || 'unknown', returnPath })
-        const sampled = sampledConditions.get(info?.role); if (sampled) failure.sampledProviderCondition = sampled.condition
+        const refusal = lastRefusal.get(info?.role)
+        if (refusal) failure.seatRefusal = refusal.member
         noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
         throw failure
       } finally {
@@ -1875,9 +1883,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // transport. Measure in finally so a timeout or seat death still
         // records spend already written to the transcript.
         if (!transport && info?.role) emitPaneUsage(info)
-        // The wait ending closes the run: a condition still on screen has been
-        // seen from its first sighting to its last, and one row says so.
-        closeSampleRun(info?.role)
+        // Transcript refusal frames are durable evidence; no screen run is
+        // closed here because liveness no longer reads pane pixels.
       }
     },
     captureDescendants() { return capture.round(true) },
@@ -2277,3 +2284,117 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   if (emitter) io.emit = emitAdapter(emitter, crew)
   return io
 }
+
+export const SEAT_REFUSAL_STAGE = 'seat-refused'
+const PI_REFUSAL_STOPS = new Set(['error', 'length'])
+
+export function piSessionDir(checkout, deps = {}) {
+  return join(deps.home ?? homedir(), '.pi', 'agent', 'sessions', `-${String(checkout).replaceAll('/', '-')}--`)
+}
+
+function refusalSince(since) {
+  if (Number.isFinite(since)) return Number(since)
+  const parsed = Date.parse(String(since ?? ''))
+  return Number.isFinite(parsed) ? parsed : 0
+}
+
+function refusalAt(value) {
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null
+  if (typeof value !== 'string' || !value) return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function zeroPiUsage(usage) {
+  if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return false
+  return ['input', 'output', 'cacheRead', 'cacheWrite', 'totalTokens'].every((key) => usage[key] === 0)
+}
+
+function piRefusalRow(row) {
+  const message = row?.message
+  const stop = message?.stopReason
+  if (!PI_REFUSAL_STOPS.has(stop)) return null
+  const at = refusalAt(row?.timestamp)
+  if (at === null) return null
+  if (stop === 'length') {
+    return { at, member: 'overflowed', message: message.errorMessage || 'stopReason: length', source: 'pi' }
+  }
+  const content = message?.content
+  if (!Array.isArray(content)) return null
+  if (!zeroPiUsage(message?.usage)) return null
+  if (typeof message.errorMessage !== 'string' || !message.errorMessage) return null
+  const refusal = recogniseSeatRefusal(message.errorMessage)
+  return { at, member: refusal, message: message.errorMessage, source: 'pi' }
+}
+
+export function piRefusalFrames({ checkout, since = 0, deps = {} } = {}) {
+  const exists = deps.existsSync ?? fsExistsSync
+  const read = deps.readFileSync ?? fsReadFileSync
+  const readdir = deps.readdirSync ?? fsReaddirSync
+  let dir
+  try { dir = piSessionDir(checkout, deps) } catch { return [] }
+  try {
+    if (!exists(dir)) return []
+    const names = readdir(dir)
+    if (!Array.isArray(names)) return []
+    const floor = refusalSince(since)
+    const frames = []
+    for (const name of names) {
+      const path = join(dir, String(name))
+      let raw
+      try { raw = String(read(path, 'utf8')) } catch { continue }
+      for (const line of raw.split(/\r?\n/)) {
+        if (!line.trim()) continue
+        let row
+        try { row = JSON.parse(line) } catch { continue }
+        let frame
+        try { frame = piRefusalRow(row) } catch { frame = null }
+        if (!frame || frame.at <= floor) continue
+        frames.push(frame)
+      }
+    }
+    frames.sort((a, b) => a.at - b.at)
+    return frames
+  } catch { return [] }
+}
+
+function claudeRefusalRow(row) {
+  if (row?.isApiErrorMessage !== true) return null
+  const at = refusalAt(row?.timestamp)
+  if (at === null) return null
+  const content = row?.message?.content
+  if (!Array.isArray(content)) return null
+  const texts = content.map((part) => part?.text).filter((text) => typeof text === 'string')
+  const message = texts.join('')
+  if (!message) return null
+  return { at, member: recogniseSeatRefusal(message), message, source: 'claude' }
+}
+
+export function claudeRefusalFrames({ taskDir, role, since = 0, adapter = null, deps = {} } = {}) {
+  const readRecords = adapter?.paneUsageRecords ?? SHIPPED_PANE_USAGE.claude
+  if (typeof readRecords !== 'function') return []
+  let records
+  try { records = readRecords({ taskDir, role, deps }) } catch { return [] }
+  if (!Array.isArray(records)) return []
+  const floor = refusalSince(since)
+  const frames = []
+  for (const record of records) {
+    if (!record || typeof record.session_id !== 'string' || !record.session_id
+      || typeof record.transcript_path !== 'string' || !record.transcript_path) continue
+    let raw
+    try { raw = String((deps.readFileSync ?? fsReadFileSync)(record.transcript_path, 'utf8')) } catch { continue }
+    for (const line of raw.split(/\r?\n/)) {
+      if (!line.trim()) continue
+      let row
+      try { row = JSON.parse(line) } catch { continue }
+      let frame
+      try { frame = claudeRefusalRow(row) } catch { frame = null }
+      if (!frame || frame.at <= floor) continue
+      frames.push(frame)
+    }
+  }
+  frames.sort((a, b) => a.at - b.at)
+  return frames
+}
+
+const SHIPPED_REFUSAL_READERS = Object.freeze({ claude: claudeRefusalFrames, pi: piRefusalFrames })

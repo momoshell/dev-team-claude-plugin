@@ -32,7 +32,7 @@ import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, paneUsageRecords } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import {
-  cellFailureKind, paneAlive, paneProbe, seatIo, SUBSTRATE_MISSES_TO_DIE,
+  cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_MISSES_TO_DIE,
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -3627,6 +3627,62 @@ test('waitForEnvelope fast-fails after consecutive gone probes, but indeterminat
     returnPath: '/tmp/return.json', timeoutS: 60, role: 'builder',
     readEnvelope: () => null, probeSeat: () => null, now, sleep,
   }), null)
+})
+
+test('waitForEnvelope rethrows only a staged seat refusal and restarts only on its signal', () => {
+  let clock = 0
+  const refusal = Object.assign(new Error('seat refused: provider text'), { stage: SEAT_REFUSAL_STAGE })
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/refusal.json', timeoutS: 600, role: 'builder', readEnvelope: () => null,
+    probeSeat: () => true, sampleSeat: () => { throw refusal }, now: () => clock, sleep: (ms) => { clock += ms },
+  }), (err) => err === refusal)
+  const run = (signal) => {
+    let t = 0
+    let calls = 0
+    waitForEnvelope({
+      returnPath: '/tmp/restart.json', timeoutS: 60, role: 'builder', readEnvelope: () => null,
+      probeSeat: () => true, sampleSeat: () => (++calls === 1 ? signal : null), now: () => t,
+      sleep: (ms) => { t += ms },
+    })
+    return t
+  }
+  const plain = run(null)
+  assert.ok(run({ restartBudget: true }) > plain)
+  assert.equal(run({ restartBudget: 'yes' }), plain)
+})
+
+test('a staged refusal escapes driveTask with provider text intact for child escalation mapping', () => {
+  const text = 'the provider says: prompt_cache_retention is not supported on this model'
+  const refusal = Object.assign(new Error(text), { stage: SEAT_REFUSAL_STAGE, role: 'builder' })
+  let gateRuns = 0
+  const io = {
+    readFile: (path) => path === '/tmp/brief.md'
+      ? '```directed\n{"gate_cmd":"gate-cmd","files_in_scope":["crew/seat-io.mjs"]}\n```' : '',
+    writeFile: () => {}, log: () => {}, status: () => {}, now: () => 0,
+    assign: () => ({ id: 'd1', returnPath: '/tmp/refusal.json' }),
+    wait: () => { throw refusal },
+    run: () => {
+      gateRuns += 1
+      return gateRuns === 1
+        ? { ok: false, output: 'red\nGATE-SUMMARY {"total":1,"failed":1,"errored":0}' }
+        : { ok: true, output: 'GATE-SUMMARY {"total":1,"failed":0,"errored":0}' }
+    },
+    changedFiles: () => [],
+  }
+  assert.throws(() => driveTask({
+    task: 'seat-refusal', briefFile: '/tmp/brief.md', taskDir: '/tmp/seat-refusal',
+    checkout: '/tmp/repo', journal: '/tmp/seat-refusal/journal.jsonl',
+    roles: ['builder', 'reviewer'], seatedRoles: ['builder', 'reviewer'], variant: 'directed',
+    lane: 'lane-cmd', suite: 'suite-cmd', files_in_scope: ['crew/seat-io.mjs'],
+  }, io), (err) => {
+    assert.equal(err, refusal)
+    assert.equal(err.stage, SEAT_REFUSAL_STAGE)
+    assert.match(err.message, /prompt_cache_retention is not supported on this model/)
+    const mapped = { escalation: { where: err.stage || 'child-preflight', why: err.message } }
+    assert.equal(mapped.escalation.where, SEAT_REFUSAL_STAGE)
+    assert.match(mapped.escalation.why, /provider says/)
+    return true
+  })
 })
 
 test('waitForEnvelope envelope wins at death time and liveness constants are integer exports', () => {

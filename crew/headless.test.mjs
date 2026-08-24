@@ -3,7 +3,10 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync, readdirSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { classifyRun, foldUsage, headlessIo, recogniseProviderCondition, shq, updateCrewJson } from './headless.mjs'
+import {
+  classifyRun, foldUsage, headlessIo, recogniseProviderCondition, recogniseSeatRefusal,
+  SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, shq, updateCrewJson,
+} from './headless.mjs'
 import { startFileWriter } from '../test/helpers.mjs'
 
 function makeFixture(overrides = {}, roles = ['builder']) {
@@ -147,6 +150,41 @@ test('ANSI-laden stderr matches through the CSI stripper a naive matcher would m
   const raw = 'API Error: \x1b[1;31mrate\x1b[0m limit exceeded for this organization'
   assert.equal(/rate limit/i.test(raw), false)
   assert.equal(recogniseProviderCondition(raw), 'rate-limit')
+})
+
+test('seat refusal recognition stays closed, ordered, and actionable', () => {
+  const positives = [
+    ['prompt_cache_retention is not supported on this model', 'rejected'],
+    ['Error: Codex error: model not found', 'rejected'],
+    ['The model is not supported when using Codex with a ChatGPT account', 'rejected'],
+    ['No API key for provider: openai-codex', 'rejected'],
+    ["Fable 5's safeguards flagged this message", 'rejected'],
+    ["You've hit your session limit · resets 3pm (Europe/Belgrade)", 'quota'],
+    ["You've hit your weekly limit · resets 3pm (Europe/Belgrade)", 'quota'],
+    ['The usage limit has been reached', 'quota'],
+    ['WebSocket error', 'transient'],
+    ['WebSocket closed 1000', 'transient'],
+    ['terminated', 'transient'],
+    ['fetch failed', 'transient'],
+    ['Connection closed mid-response', 'transient'],
+    ['529 Overloaded. This is temporary', 'transient'],
+    ['500 Internal server error', 'transient'],
+    ['Your computer went to sleep mid-response', 'suspended'],
+    ['context_length_exceeded and invalid_request_error', 'overflowed'],
+  ]
+  assert.deepEqual(positives.map(([text]) => recogniseSeatRefusal(text)), positives.map(([, member]) => member))
+  const negatives = [
+    'PASS G9', 'GATE-SUMMARY {"total":403,"failed":0,"errored":0}', 'ok 401 - something',
+    '↑366k ↓31k R7.0M $0.250 (sub) 73.0%/272k (auto)',
+    'crew/seat-io.mjs:429:  const rows = []', '403→export function refusalRow({ role })',
+  ]
+  for (const value of [...negatives, '', undefined, null, [], {}]) {
+    assert.equal(recogniseSeatRefusal(value), null)
+    assert.equal(recogniseProviderCondition(value), null)
+  }
+  assert.equal(Object.isFrozen(SEAT_REFUSALS), true)
+  assert.deepEqual(SEAT_REFUSALS.map((row) => row.member), ['overflowed', 'quota', 'rejected', 'suspended', 'transient'])
+  assert.deepEqual(Object.keys(SEAT_REFUSAL_ACTIONS).sort(), SEAT_REFUSALS.map((row) => row.member).sort())
 })
 
 test('an unrecognised, missing, empty or unreadable stderr carries no recognition', () => {

@@ -1314,7 +1314,8 @@ export function openLedger({
     if (!stats.degraded_reason) {
       stats.degraded_reason = code || 'unknown'
     }
-    if (!stats.degraded_message) stats.degraded_message = reason; if (!degradedNoticeWritten) {
+    if (!stats.degraded_message) stats.degraded_message = reason
+    if (!degradedNoticeWritten) {
       degradedNoticeWritten = true
       const consequence = readOnly
         ? 'read-only handle unavailable; writes remain refused'
@@ -1367,12 +1368,14 @@ export function openLedger({
       // it any later left journal_mode/synchronous themselves exposed to
       // an instant, unprotected lock failure.
       conn.exec('PRAGMA busy_timeout = 5000')
-      if (!readOnly) conn.exec('PRAGMA journal_mode = WAL')
-      if (!readOnly) conn.exec('PRAGMA synchronous = 1')
-      if (!readOnly) applyMigrations(conn)
-      if (!readOnly) chmodIfExists(dbPath, 0o600)
-      if (!readOnly) chmodIfExists(`${dbPath}-wal`, 0o600)
-      if (!readOnly) chmodIfExists(`${dbPath}-shm`, 0o600)
+      if (!readOnly) {
+        conn.exec('PRAGMA journal_mode = WAL')
+        conn.exec('PRAGMA synchronous = 1')
+        applyMigrations(conn)
+        chmodIfExists(dbPath, 0o600)
+        chmodIfExists(`${dbPath}-wal`, 0o600)
+        chmodIfExists(`${dbPath}-shm`, 0o600)
+      }
       db = conn
       dbOpenAttempted = true
       return db
@@ -1409,16 +1412,47 @@ export function openLedger({
     chmodIfExists(jsonlPath, 0o600)
   }
 
+  // A per-call mirror-error channel. stats().mirror_first_code LATCHES for the
+  // life of the handle: it holds the FIRST code this handle ever saw and never
+  // updates. A long-lived reader (the visualizer feed keeps one handle for the
+  // server's whole life) that detects a failure by a stats().mirror_errors
+  // delta and then reads that stat publishes a cause belonging to some earlier,
+  // unrelated failure. Callers that must report THIS call's cause wrap the call
+  // in captureMirrorErrors instead. #580 RV1-5/6.
+  const mirrorErrorSinks = []
+  function noteMirrorError(err) {
+    const code = err?.code ?? err?.name ?? 'UnknownMirrorError'
+    stats.mirror_errors += 1
+    if (!stats.mirror_first_code) stats.mirror_first_code = code
+    for (const sink of mirrorErrorSinks) {
+      sink.count += 1
+      if (!sink.first_code) sink.first_code = code
+      sink.last_code = code
+    }
+    return code
+  }
+
+  // Returns { value, errors } where errors is { count, first_code, last_code }
+  // over the mirror failures recorded DURING fn() and nothing else. An
+  // exception thrown by fn propagates unchanged: a throw is a different
+  // condition from a swallowed mirror failure and must not be reported as one.
+  function captureMirrorErrors(fn) {
+    const sink = { count: 0, first_code: null, last_code: null }
+    mirrorErrorSinks.push(sink)
+    try {
+      return { value: fn(), errors: sink }
+    } finally {
+      mirrorErrorSinks.splice(mirrorErrorSinks.indexOf(sink), 1)
+    }
+  }
+
   function mirror(fn) {
     const conn = ensureDb()
     if (!conn) return
     try {
       fn(conn)
     } catch (err) {
-      stats.mirror_errors += 1
-      if (!stats.mirror_first_code) {
-        stats.mirror_first_code = err.code ?? err.name ?? 'UnknownMirrorError'
-      }
+      noteMirrorError(err)
     }
   }
 
@@ -1527,10 +1561,7 @@ export function openLedger({
       try {
         res = insert(conn, built.row)
       } catch (err) {
-        stats.mirror_errors += 1
-        if (!stats.mirror_first_code) {
-          stats.mirror_first_code = err.code ?? err.name ?? 'UnknownMirrorError'
-        }
+        noteMirrorError(err)
         break
       }
       if (res.changes === 1) {
@@ -2724,10 +2755,7 @@ export function openLedger({
       // empty result — count it the same way mirror() does, so a schema
       // mismatch or locked-db read failure is visible in stats() rather
       // than masquerading as "table has zero rows".
-      stats.mirror_errors += 1
-      if (!stats.mirror_first_code) {
-        stats.mirror_first_code = err.code ?? err.name ?? 'UnknownMirrorError'
-      }
+      noteMirrorError(err)
       return []
     }
   }
@@ -2738,10 +2766,7 @@ export function openLedger({
     try {
       return conn.prepare(sql).all(...params)
     } catch (err) {
-      stats.mirror_errors += 1
-      if (!stats.mirror_first_code) {
-        stats.mirror_first_code = err.code ?? err.name ?? 'UnknownMirrorError'
-      }
+      noteMirrorError(err)
       return []
     }
   }
@@ -2955,7 +2980,17 @@ export function openLedger({
     const agentSessionsPresent = () => queryRows("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", ['agent_sessions']).length > 0
     const untilClause = until == null ? '' : ' AND s.started_at < ?'
     const params = until == null ? [since] : [since, until]
-    const usageSelect = agentSessionsPresent() ? '(SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions, (SELECT SUM(a.billed_input_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens, (SELECT SUM(a.billed_output_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens, (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens, (SELECT SUM(a.billed_cache_read_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens' : '0 AS agent_sessions, NULL AS billed_input_tokens, NULL AS billed_output_tokens, NULL AS billed_cache_write_tokens, NULL AS billed_cache_read_tokens'
+    const usageSelect = agentSessionsPresent()
+      ? `(SELECT COUNT(*) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS agent_sessions,
+         (SELECT SUM(a.billed_input_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_input_tokens,
+         (SELECT SUM(a.billed_output_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_output_tokens,
+         (SELECT SUM(a.billed_cache_write_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_write_tokens,
+         (SELECT SUM(a.billed_cache_read_tokens) FROM agent_sessions a WHERE a.adw_id = s.adw_id) AS billed_cache_read_tokens`
+      : `0 AS agent_sessions,
+         NULL AS billed_input_tokens,
+         NULL AS billed_output_tokens,
+         NULL AS billed_cache_write_tokens,
+         NULL AS billed_cache_read_tokens`
     const rows = queryRows(`
       SELECT s.adw_id, s.task_slug, s.repo_slug, s.status, s.started_at, s.ended_at, ${usageSelect}
       FROM sessions s
@@ -3303,6 +3338,7 @@ export function openLedger({
     recordSourceError, linkRun,
     listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
+    captureMirrorErrors,
     readConnection,
     close,
     installFinalizer: installFinalizerOn,

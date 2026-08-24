@@ -147,6 +147,49 @@ function compile(root, overrides = {}, extra = [], outName = 'brief.md', env = {
   return { result, outPath, brief: readFileSync(outPath, 'utf8') }
 }
 
+let committedFixtureNumber = 0
+function committedFixture(label) {
+  committedFixtureNumber += 1
+  const root = nextRoot(`committed-${label}`)
+  const marker = join(fixtureRoot, `${String(committedFixtureNumber).padStart(2, '0')}-${label}.marker`)
+  rmSync(marker, { force: true })
+  const command = `printf ran >> "${marker}"; printf "pass 7\\nfail 0\\n"`
+  put(root, 'package.json', `${JSON.stringify({
+    name: `committed-${label}`, private: true, type: 'module', scripts: { test: command },
+  }, null, 2)}\n`)
+  put(root, 'lib/widget.mjs', "export const WIDGET_CACHE_FILE = 'out/widget.json'\n")
+  put(root, 'test/widget.test.mjs', "test('fixture test', () => {})\n")
+  git(root, ['init', '-q', '-b', 'main'])
+  git(root, ['config', 'user.email', 'factory@test.invalid'])
+  git(root, ['config', 'user.name', 'factory test'])
+  git(root, ['add', '-A'])
+  git(root, ['commit', '-q', '-m', 'fixture'])
+  const sha = git(root, ['rev-parse', 'HEAD']).stdout.trim()
+  return { root, marker, command, sha }
+}
+
+let committedCompileNumber = 0
+function compileCommitted(fx, extra = []) {
+  committedCompileNumber += 1
+  const requestPath = join(fixtureRoot, `${String(committedCompileNumber).padStart(2, '0')}-${committedCompileNumber}.request.json`)
+  const outPath = join(fixtureRoot, `${String(committedCompileNumber).padStart(2, '0')}-${committedCompileNumber}.brief.md`)
+  writeFileSync(requestPath, `${JSON.stringify({
+    ask: ASK, where: ['lib/widget.mjs'], done_means: DONE, out_of_scope: OUT,
+  }, null, 2)}\n`)
+  const result = run(fx.root, [
+    '--request', requestPath, '--checkout', fx.root, '--out', outPath,
+    '--profile', join(fixtureRoot, 'missing-profile.json'), ...extra,
+  ])
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  return { result, outPath, brief: readFileSync(outPath, 'utf8') }
+}
+
+function suppliedBaseline(label, value) {
+  const path = join(fixtureRoot, `${label}.baseline.json`)
+  writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
+  return path
+}
+
 function section(brief, heading) {
   const lines = brief.split('\n')
   const start = lines.findIndex((line) => line.trim() === heading)
@@ -342,6 +385,109 @@ test('baseline is measured, colour-neutral, and absent test scripts are unknown'
   const deadBody = section(deadBrief, '## Baseline')
   assert.match(deadBody, /unknown/)
   assert.doesNotMatch(deadBody, /\b0\b/)
+})
+
+test('a verified supplied baseline is reused without running the suite', () => {
+  const fx = committedFixture('reuse')
+  const path = suppliedBaseline('reuse', { sha: fx.sha, command: fx.command, pass: 4242, fail: 0 })
+  const { brief } = compileCommitted(fx, ['--baseline', path])
+  assert.equal(existsSync(fx.marker), false)
+  assert.match(section(brief, '## Baseline'), /pass 4242/)
+  assert.match(brief, /count basis: reused a supplied baseline/)
+  assert.match(section(brief, '## Validation lane'), /reused baseline/)
+})
+
+test('a supplied baseline from another commit is refused and measured', () => {
+  const fx = committedFixture('sha-mismatch')
+  const path = suppliedBaseline('sha-mismatch', { sha: '0'.repeat(40), command: fx.command, pass: 4242, fail: 0 })
+  const { brief } = compileCommitted(fx, ['--baseline', path])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), true)
+  assert.match(body, /pass 7/)
+  assert.doesNotMatch(body, /pass 4242/)
+  assert.match(body, /sha-mismatch/)
+})
+
+test('a supplied baseline from another command is refused and measured', () => {
+  const fx = committedFixture('command-mismatch')
+  const path = suppliedBaseline('command-mismatch', { sha: fx.sha, command: `${fx.command} `, pass: 4242, fail: 0 })
+  const { brief } = compileCommitted(fx, ['--baseline', path])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), true)
+  assert.match(body, /pass 7/)
+  assert.doesNotMatch(body, /pass 4242/)
+  assert.match(body, /command-mismatch/)
+})
+
+test('a supplied baseline over a dirty checkout is refused and measured', () => {
+  const fx = committedFixture('dirty-tree')
+  put(fx.root, 'uncommitted.txt', 'edit\n')
+  const path = suppliedBaseline('dirty-tree', { sha: fx.sha, command: fx.command, pass: 4242, fail: 0 })
+  const { brief } = compileCommitted(fx, ['--baseline', path])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), true)
+  assert.match(body, /pass 7/)
+  assert.doesNotMatch(body, /pass 4242/)
+  assert.match(body, /dirty-tree/)
+})
+
+test('an unreadable supplied baseline is refused and measured', () => {
+  const fx = committedFixture('unreadable-baseline')
+  const path = join(fixtureRoot, 'no-such-supplied-baseline.json')
+  rmSync(path, { force: true })
+  const { brief } = compileCommitted(fx, ['--baseline', path])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), true)
+  assert.match(body, /pass 7/)
+  assert.doesNotMatch(body, /pass 4242/)
+  assert.match(body, /unreadable-baseline/)
+})
+
+test('a malformed supplied baseline is refused and measured', () => {
+  const fx = committedFixture('malformed-baseline')
+  const path = suppliedBaseline('malformed-baseline', { sha: 123, command: null, pass: 4242, fail: 0 })
+  const { brief } = compileCommitted(fx, ['--baseline', path])
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), true)
+  assert.match(body, /pass 7/)
+  assert.doesNotMatch(body, /pass 4242/)
+  assert.match(body, /malformed-baseline/)
+})
+
+test('a compile without a supplied baseline keeps the measured count basis', () => {
+  const fx = committedFixture('no-supply')
+  const { brief } = compileCommitted(fx)
+  const body = section(brief, '## Baseline')
+  assert.equal(existsSync(fx.marker), true)
+  assert.match(body, /pass 7/)
+  assert.match(body, /count basis: measured this compile — a recorded baseline is a fact about a commit and is never consumed/)
+})
+
+test('--measure-baseline writes commit-scoped counts and clears sha for a dirty tree', () => {
+  const fx = committedFixture('measure-only')
+  const cleanPath = join(fixtureRoot, 'measure-only-clean.baseline.json')
+  const clean = run(fx.root, [
+    '--measure-baseline', cleanPath, '--checkout', fx.root,
+    '--profile', join(fixtureRoot, 'missing-profile.json'),
+  ])
+  assert.equal(clean.status, 0, `${clean.stderr}\n${clean.stdout}`)
+  assert.deepEqual(JSON.parse(readFileSync(cleanPath, 'utf8')), {
+    sha: fx.sha, command: fx.command, pass: 7, fail: 0, status: 'green',
+  })
+  assert.equal(existsSync(fx.marker), true)
+
+  put(fx.root, 'uncommitted.txt', 'edit\n')
+  const dirtyPath = join(fixtureRoot, 'measure-only-dirty.baseline.json')
+  const dirty = run(fx.root, [
+    '--measure-baseline', dirtyPath, '--checkout', fx.root,
+    '--profile', join(fixtureRoot, 'missing-profile.json'),
+  ])
+  assert.equal(dirty.status, 0, `${dirty.stderr}\n${dirty.stdout}`)
+  const dirtyValue = JSON.parse(readFileSync(dirtyPath, 'utf8'))
+  assert.equal(dirtyValue.sha, null)
+  assert.equal(dirtyValue.command, fx.command)
+  assert.equal(dirtyValue.pass, 7)
+  assert.equal(dirtyValue.fail, 0)
 })
 
 test('a ratified profile test_command becomes the measured lane and states its basis', () => {

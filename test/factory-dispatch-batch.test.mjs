@@ -269,6 +269,108 @@ test('dispatchBatch compiles lanes sequentially and then boots and runs them', (
   assert.equal(runCalls.every((call) => call.background === true && String(call.logPath).endsWith('/run.log')), true)
 })
 
+function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
+  const batch = makeBatch(names)
+  for (const lane of names) {
+    put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(
+      `measure ${lane} source behavior`, [`crew/owned-${lane}.mjs`],
+    )))
+  }
+  const out = join(root, `baseline-${label}-out`)
+  const parent = join(root, `baseline-${label}-parent`)
+  const spawned = []
+  const deps = {
+    existsSync: () => false,
+    readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
+    readFileSync: (path, encoding) => {
+      const text = String(path)
+      if (text.endsWith(REQUEST_SUFFIX)) return readFileSync(text, 'utf8')
+      if (text.endsWith('.brief.md')) return '```proposal\n{"shape":"build","strength":null}\n```\n'
+      if (text.endsWith('/crew.json')) {
+        const lane = text.split('/').at(-2)
+        const siblings = names.filter((candidate) => candidate !== lane)
+        return JSON.stringify({
+          lane_name: lane,
+          lane_fence: siblings.map((sibling) => ({ lane: sibling, files: [] })),
+        })
+      }
+      return readFileSync(text, encoding || 'utf8')
+    },
+    spawn: (call) => {
+      spawned.push(call)
+      const args = (call.args || []).map(String)
+      if (args.includes('rev-parse') && args.includes('HEAD')) {
+        const index = args.indexOf('-C')
+        const target = index === -1 ? String(call.cwd || '') : args[index + 1]
+        return { status: 0, stdout: `${shaFor(target)}\n`, stderr: '' }
+      }
+      if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
+      if (args.includes('--measure-baseline')) {
+        return { status: measurementStatus, stdout: '', stderr: measurementStatus === 0 ? '' : 'measurement failed' }
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    log: () => {},
+  }
+  const report = dispatchBatch({
+    batchDir: batch,
+    fences: names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`])),
+    checkout: root,
+    parentDir: parent,
+    outDir: out,
+    tier: 'mechanical',
+    variant: 'full',
+    deps,
+  })
+  const measures = spawned.filter(({ args }) => (args || []).map(String).includes('--measure-baseline'))
+  const compiles = spawned.filter(({ args }) => {
+    const list = (args || []).map(String)
+    return list.some((arg) => arg.endsWith('make-brief.mjs')) && list.includes('--request')
+  })
+  return { report, spawned, measures, compiles }
+}
+
+test('a four-lane batch measures the baseline once', () => {
+  const names = ['lane-a', 'lane-b', 'lane-c', 'lane-d']
+  const result = fakedDispatch({ label: 'four', names, shaFor: () => 'a'.repeat(40) })
+  // Measured mechanism: four lanes cost four suite runs before this lane and one after.
+  assert.equal(result.measures.length, 1)
+  assert.equal(result.compiles.length, 4)
+  assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.report.lanes.length, 4)
+})
+
+test('lanes on different commits fall back to measuring per lane', () => {
+  const names = ['lane-a', 'lane-b', 'lane-c']
+  const result = fakedDispatch({
+    label: 'divergent', names,
+    shaFor: (target) => String(target).endsWith('lane-a') ? 'a'.repeat(40) : 'b'.repeat(40),
+  })
+  assert.equal(result.measures.length, 0)
+  assert.equal(result.compiles.length, 3)
+  assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.report.lanes.length, 3)
+})
+
+test('a failed batch measurement never refuses the batch', () => {
+  const names = ['lane-a', 'lane-b', 'lane-c']
+  const result = fakedDispatch({
+    label: 'failed-measurement', names, shaFor: () => 'a'.repeat(40), measurementStatus: 1,
+  })
+  assert.equal(result.measures.length, 1)
+  assert.equal(result.compiles.length, 3)
+  assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.report.lanes.length, 3)
+})
+
+test('a single-lane batch takes no separate batch measurement', () => {
+  const result = fakedDispatch({ label: 'single', names: ['lane-a'], shaFor: () => 'a'.repeat(40) })
+  assert.equal(result.measures.length, 0)
+  assert.equal(result.compiles.length, 1)
+  assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
+  assert.equal(result.report.lanes.length, 1)
+})
+
 test('parseCliArgs refuses missing values and unknown flags', () => {
   refusal(() => parseCliArgs(['--tier']), 'batch-unreadable')
   refusal(() => parseCliArgs(['--not-a-flag', 'x']), 'batch-unreadable')

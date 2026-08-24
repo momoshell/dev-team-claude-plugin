@@ -1398,6 +1398,23 @@ export function outOfScopeFiles(changed, inScope) {
   return (Array.isArray(changed) ? changed : []).filter((f) => !inScope(f))
 }
 
+export const CURSOR_STAGES = Object.freeze({
+  plan_round: /^plan:r(\d+)$/,
+  build_round: /^build:r(\d+)$/,
+  review_round: /^review:r(\d+)$/,
+})
+export function roundCursor(stages) {
+  const cursor = { plan_round: null, build_round: null, review_round: null }
+  if (!Array.isArray(stages)) return cursor
+  for (const label of stages) {
+    if (typeof label !== 'string') continue
+    for (const [key, pattern] of Object.entries(CURSOR_STAGES)) {
+      const match = pattern.exec(label)
+      if (match) cursor[key] = Number(match[1])
+    }
+  }
+  return cursor
+}
 // `extra` adds to the authored floor and can never replace it.
 export function protectedHits(entries, extra) {
   return protectedHitsIn(entries, resolveProtectedPaths(extra))
@@ -1475,11 +1492,12 @@ export function driveTask(ctx, io) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null, seqHighWater: 0 }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
   const journal = ctx.journal || art('journal.jsonl')
+  let gateBlock = () => null
 
   // Instrumentation is never load-bearing (ADR-024/026 clause 1): the
   // emitter itself never throws, and this try/catch means an io that does
@@ -1563,13 +1581,16 @@ export function driveTask(ctx, io) {
     return record
   }
 
-  // Every stage transition goes to the journal AND (when io provides it) to
-  // a live status surface — the workspace pill — so a quiet team is never
-  // illegible: the pill says which CODE stage is running (suite, gate,
-  // commit...). On escalation it freezes at the failing stage.
+  const openStages = []
+  const stageComplete = () => {
+    const label = openStages.pop()
+    if (label === undefined) return
+    io.log({ at: io.now(), stage_done: label })
+  }
   const stage = (label) => {
     const violation = undeclaredStage(shape, label)
     if (violation) throw fail('variant', `the ${variant} shape ${violation}`)
+    openStages.push(label)
     S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label); emit({ kind: 'stage', label })
   }
 
@@ -1692,14 +1713,17 @@ export function driveTask(ctx, io) {
     if (!suiteRes.ok) {
       io.log({ at: io.now(), converge_declined: 'suite red' })
       emit({ kind: 'converge', action: 'declined', where: 'suite', why: 'suite red' })
+      stageComplete()
       return null
     }
 
+    stageComplete()
     stage('converge:issues')
     const residuals = residualList({ findings: S.lastReview?.findings ?? null, gateSummary, gateRed })
     if (residuals.length === 0) {
       io.log({ at: io.now(), converge_declined: 'no residuals' })
       emit({ kind: 'converge', action: 'declined', where: 'residuals', why: 'no residuals to record' })
+      stageComplete()
       return null
     }
     const issues = []
@@ -1715,12 +1739,14 @@ export function driveTask(ctx, io) {
         const detail = err?.message ?? String(err)
         io.log({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail })
         emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
+        stageComplete()
         return null
       }
       if (!filed || !Number.isInteger(filed.number)) {
         const detail = `malformed issue result for ${residual.id}`
         io.log({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail })
         emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
+        stageComplete()
         return null
       }
       residual.issue = { number: filed.number, url: filed.url }
@@ -1728,6 +1754,7 @@ export function driveTask(ctx, io) {
       emit({ kind: 'converge', action: 'issue-filed', residual: residual.id, number: filed.number })
     }
 
+    stageComplete()
     stage('converge:commit')
     const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
     const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
@@ -1736,6 +1763,7 @@ export function driveTask(ctx, io) {
     S.commit = io.commit(committing, message)
     emit({ kind: 'converge', action: 'committed', commit: S.commit, files: committing.length })
 
+    stageComplete()
     stage('converge:pr')
     let pr
     try {
@@ -1751,6 +1779,7 @@ export function driveTask(ctx, io) {
       })
     } catch (err) {
       const detail = err?.message ?? String(err)
+      stageComplete()
       return escalate(
         'converge-pr',
         `the work is committed at ${S.commit} but the draft PR could not be opened: ${detail}`,
@@ -1760,6 +1789,7 @@ export function driveTask(ctx, io) {
     }
     if (!pr || !Number.isInteger(pr.number) || typeof pr.url !== 'string' || pr.url.length === 0) {
       const detail = 'malformed draft PR result'
+      stageComplete()
       return escalate(
         'converge-pr',
         `the work is committed at ${S.commit} but the draft PR could not be opened: ${detail}`,
@@ -1768,9 +1798,10 @@ export function driveTask(ctx, io) {
       )
     }
 
+    stageComplete()
     stage('converge')
     emit({ kind: 'converge', action: 'settled', commit: S.commit, pr: pr.number, issues: issues.length })
-    return {
+    const result = {
       status: 'converge',
       summary: `Task ${ctx.task} converged with residuals: committed ${S.commit} (${committing.length} files), suite green, ${gateRed ? 'gate red' : 'gate green with unresolved review findings'} — DRAFT PR #${pr.number}, ${issues.length} follow-up issue(s) filed. Merge authority stays human.`,
       artifacts: [planPath, journal],
@@ -1778,17 +1809,21 @@ export function driveTask(ctx, io) {
         commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
         dissents: S.dissents, accepted_via: null, escalation: { where, why },
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
-        gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
+        gate: gateBlock(),
         converge: {
           pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
           gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
         },
       },
     }
+    stageComplete()
+    return result
   }
 
   function assignAndWait(role, briefFile, note) {
     const { id, returnPath } = io.assign({ role, briefFile, note })
+    const seq = /^d(\d+)$/.exec(id)?.[1]
+    if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
     io.log({ at: io.now(), assign: id, role, brief: briefFile })
     emit({ kind: 'assign', id, role, brief: briefFile })
     const env = io.wait(returnPath, waits[role] || 1200)
@@ -1940,12 +1975,26 @@ export function driveTask(ctx, io) {
 
   function escalate(where, why, extraArtifacts = [], extraDetails = {}) {
     stage(`escalate:${where}`)
-    return {
+    const details = {
+      stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents,
+      extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
+      gate: gateBlock(),
+      seq_high_water: S.seqHighWater,
+      gate_attempt_high_water: gateAttempt,
+      cursor: roundCursor(S.stages),
+      consults_spent: S.consults,
+      accept_findings: S.acceptFindings,
+      head: ctx.head ?? null,
+      ...extraDetails,
+    }
+    const result = {
       status: 'escalation',
       summary: `Task ${ctx.task} needs a human: ${why}`,
       artifacts: [journal, ...extraArtifacts],
-      details: { stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents, extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers, ...extraDetails },
+      details,
     }
+    stageComplete()
+    return result
   }
 
   // Settle a lead accept at either exhaustion point. A missing findings array
@@ -2037,41 +2086,32 @@ export function driveTask(ctx, io) {
       // mere seat failure.
       seatFailure = err
     }
+    stageComplete()
     if (runs('scope-gate')) {
       stage('scope-gate:r1')
-      // The declared write surface IS the in-scope set: `none` means the EMPTY
-      // set, under which every changed file is out of scope. Same matcher, same
-      // filter, same gate as :1730 — never a second write check.
-      // `writes: 'none'` (the only surface shapeDefect lets an envelope shape
-      // declare) means the EMPTY in-scope set, under which every changed file is
-      // out of scope. Same matcher, same filter, same gate as :1730.
       const outOfScope = outOfScopeFiles(io.changedFiles(), scopeMatcher([]))
       if (outOfScope.length > 0) {
+        stageComplete()
         return escalate('scope',
           `a ${variant} run writes nothing, but the tree carries ${outOfScope.length} changed file(s): ${outOfScope.join(', ')}`,
           env?.artifacts || [])
       }
     }
+    stageComplete()
     if (seatFailure) return escalate(variant, `the ${seat} seat failed: ${seatFailure.message}`)
     if (env.status !== 'done') {
       return escalate(variant, `the ${seat} seat returned status=${env.status}: ${env.summary || ''}`, env.artifacts || [])
     }
     const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
     if (defect) {
-      // MUTATION A9: hard-code the bracketed reason here (or drop defect.reason) and the
-      // durable record stops naming the reason the validator actually produced.
       return escalate('envelope', `the ${variant} envelope is not the shape that accepts it [${defect.reason}]: ${defect.why}`, Array.isArray(env.artifacts) ? env.artifacts : [])
     }
     stage('envelope-accept')
-    // Reported from the ENVELOPE, never from the declaration (#427). This is the
-    // SECOND presence read of each declared field — validation performs the first —
-    // and gate A6 counts exactly that.
-    // MUTATION A6: pass an empty declaration here and the accepted run stops
-    // reading THIS envelope to report it.
     const observedFields = envelopeFieldsPresent(env, shape)
     io.log({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: observedFields } })
+    stageComplete()
     stage('done')
-    return {
+    const result = {
       status: 'done',
       summary: `${variant} ${ctx.task} complete: envelope accepted on shape, 0 files changed. Stages: ${S.stages.join(' | ')}`,
       artifacts: [journal, ...env.artifacts],
@@ -2082,12 +2122,10 @@ export function driveTask(ctx, io) {
         envelope: { seat, fields: observedFields, files_changed: 0 },
       },
     }
+    stageComplete()
+    return result
   }
   if (shape.execution === 'envelope') return driveEnvelopeShape()
-
-  // A repair shape replaces the planner's revision loop with one bounded triage
-  // seat. Its product is deliberately normalized to the reviewed loop's plan
-  // envelope so every later scope, lane, review and finish check stays shared.
   const driveTriageRound = () => {
     const inherited = shape.sources.scope === 'inherited' ? ctx.files_in_scope : null
     if (!Array.isArray(inherited) || inherited.length === 0) {
@@ -2101,7 +2139,6 @@ export function driveTask(ctx, io) {
     if (!laneCmd) {
       return { stop: escalate('triage', `a ${variant} run takes its validation lane from the failing run (--lane) and ctx carries none`) }
     }
-
     stage(`${variant}:r1`)
     const briefPath = art(`${variant}-brief.md`)
     io.writeFile(briefPath, [
@@ -2127,40 +2164,46 @@ export function driveTask(ctx, io) {
       '  details.files_in_scope: optional narrowed scope, never wider than the inherited list',
       '  details.commit_subject / details.issues: optional',
     ].join('\n'))
-
     const env = assignAndWait('planner', briefPath, 'triage')
     if (env.status !== 'done') {
+      stageComplete()
       return { stop: escalate('triage', `the triage seat returned status=${env.status}: ${env.summary || ''} — a ${variant} run's triage is bounded to one round, so there is no revision to bounce it to`, env.artifacts || []) }
     }
     const defect = envelopeDefect(env, shape, { taskDir: ctx.taskDir })
     if (defect) {
+      stageComplete()
       return { stop: escalate('triage', `the triage envelope is not one the driver can build from: ${defect.why}`, Array.isArray(env.artifacts) ? env.artifacts : []) }
     }
     const planPath = env.details.plan_path
     if (typeof planPath !== 'string' || !env.artifacts.includes(planPath)) {
+      stageComplete()
       return { stop: escalate('triage', `details.plan_path must name one of the artifacts the triage round wrote (it becomes the builder's first brief); found ${JSON.stringify(planPath ?? null)} against ${JSON.stringify(env.artifacts)}`, env.artifacts) }
     }
     let note = null
     try { note = io.readFile(planPath) } catch { note = null }
     if (typeof note !== 'string' || !note.trim()) {
+      stageComplete()
       return { stop: escalate('triage', `the triage note at ${planPath} is empty or unreadable — the builder is briefed from that file and would be sent to a 404`, env.artifacts) }
     }
     if (shape.sources.gate === 'none' && env.details.gate_cmd) {
+      stageComplete()
       return { stop: escalate('triage', 'the triage round returned a gate_cmd — this shape declares gate source "none", and a gate the crew authors for its own repair has no proof (ADR-030)', env.artifacts) }
     }
-
     const asked = env.details.files_in_scope
     let scope = inherited
     if (asked !== undefined) {
       if (!Array.isArray(asked) || asked.length === 0) {
+        stageComplete()
         return { stop: escalate('triage-scope', 'the triage round returned an empty or non-array files_in_scope; it may narrow the inherited scope, but may not remove the declared scope') }
       }
       const askedErrors = validateScopeEntries(asked)
       if (askedErrors.length > 0) {
+        stageComplete()
         return { stop: escalate('triage-scope', `files_in_scope carries entries the scope gate cannot honor — fix the triage, not the build: ${askedErrors.map(({ entry, why }) => `${JSON.stringify(entry)} (${why})`).join('; ')}`, env.artifacts) }
       }
       const extra = outOfScopeFiles(asked, scopeMatcher(inherited))
       if (extra.length > 0) {
+        stageComplete()
         return { stop: escalate('triage-scope', `the triage round asked to widen the inherited scope with ${extra.join(', ')} — a triage that needs a wider surface is an escalation, not a re-plan`, env.artifacts) }
       }
       scope = asked
@@ -2169,6 +2212,7 @@ export function driveTask(ctx, io) {
       variant, seat: 'planner', scope_source: shape.sources.scope, lane_source: shape.sources.lane,
       gate_source: shape.sources.gate, inherited: inherited.length, scope: scope.length,
     } })
+    stageComplete()
     return { plan: {
       status: 'done', role: 'planner', summary: env.summary,
       artifacts: env.artifacts,
@@ -2181,27 +2225,25 @@ export function driveTask(ctx, io) {
       },
     } }
   }
-
-  // The directed shape's plan IS the brief: NO seat opens this run. The driver
-  // reads the orchestrator's declared gate and write surface out of the task
-  // brief and normalizes them into the same plan envelope every later scope,
-  // lane, gate, review and finish check already consumes.
   const driveDirectedRound = () => {
     stage(`${variant}:r1`)
     let text = null
     try { text = io.readFile(ctx.briefFile) } catch { text = null }
     const directed = parseDirectedBrief(text)
     if (directed.defect) {                                                     // ⚓ B2
+      stageComplete()
       return { stop: escalate(variant, `the ${variant} brief at ${ctx.briefFile} is not a plan this driver can build from: ${directed.defect} — its gate and write surface are the orchestrator's to author, so there is no seat to bounce this to`) }
     }
     const laneCmd = shape.sources.lane === 'ctx' ? ctx.lane : null
     if (!laneCmd) {
+      stageComplete()
       return { stop: escalate(variant, `a ${variant} run takes its validation lane from the dispatch (--validation-lane) and ctx carries none`) }
     }
     io.log({ at: io.now(), directed: {
       variant, seat: null, scope_source: shape.sources.scope, lane_source: shape.sources.lane,
       gate_source: shape.sources.gate, scope: directed.files_in_scope.length,
     } })
+    stageComplete()
     return { plan: {
       status: 'done', role: null, summary: `directed by the task brief at ${ctx.briefFile}`,
       artifacts: [ctx.briefFile],
@@ -2213,16 +2255,10 @@ export function driveTask(ctx, io) {
       },
     } }
   }
-
-  // ---- 1. PLAN ----------------------------------------------------------------
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = null
   let planBrief = ctx.briefFile
   let extraPlanRounds = 0
-  // ONE plan-revision brief for both bounce sites (ordinary and lead-granted).
-  // The brief points at the check DOCUMENT and says to apply what it prescribes
-  // verbatim: that document is the contracted source of exact corrections
-  // (crew/roles/tech-lead.md:22), and the envelope summary is only a headline.
   const planRevisionBrief = (round, check) => {
     const checkPath = check.details?.check_path || art('plan-check.md')
     return [
@@ -2245,7 +2281,10 @@ export function driveTask(ctx, io) {
           ...questionConsultLines('planner', questions)].join('\n'),
         ['bounce', 'escalate'], [planBrief, ...(env.artifacts || [])],
       )
-      if (c.decision === 'escalate') return escalate('plan', c.reason, env.artifacts || [])
+      if (c.decision === 'escalate') {
+        stageComplete()
+        return escalate('plan', c.reason, env.artifacts || [])
+      }
       const matched = matchAnswers(questions, c.answers)
       if (questions.length > 0) io.log({ at: io.now(), question_answers: { role: 'planner', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } })
       const b = art(`plan-bounce-r${round}.md`)
@@ -2257,6 +2296,7 @@ export function driveTask(ctx, io) {
         ...answerBounceLines(questions, matched),
       ].join('\n'))
       planBrief = b
+      stageComplete()
       continue
     }
     planEnv = env
@@ -2285,19 +2325,25 @@ export function driveTask(ctx, io) {
       S.growth.push(record)
       io.log({ at: io.now(), plan_growth: record })
     } catch { /* measurement is never load-bearing */ }
-
     if (round >= 2) {
       const carve = validateCarve(env.details)
       io.log({ at: io.now(), carve_verdict: { round, verdict: carve.verdict, defect: carve.defect } })
-      if (!carve.verdict) return escalate('plan-carve', carve.why, env.artifacts || [],
-        { carve: { verdict: null, slices: [], defect: null } })
-      if (carve.verdict === 'carve') return escalate('plan-carve',
-        `the planner returned carve_verdict=carve on plan round ${round} — the plan is too large to build whole; the slices below are the human's starting point${carve.defect ? ` (slice list defect: ${carve.defect})` : ''}`,
-        env.artifacts || [], { carve: { verdict: 'carve', slices: carve.slices, defect: carve.defect } })
+      if (!carve.verdict) {
+        stageComplete()
+        return escalate('plan-carve', carve.why, env.artifacts || [],
+          { carve: { verdict: null, slices: [], defect: null } })
+      }
+      if (carve.verdict === 'carve') {
+        stageComplete()
+        return escalate('plan-carve',
+          `the planner returned carve_verdict=carve on plan round ${round} — the plan is too large to build whole; the slices below are the human's starting point${carve.defect ? ` (slice list defect: ${carve.defect})` : ''}`,
+          env.artifacts || [], { carve: { verdict: 'carve', slices: carve.slices, defect: carve.defect } })
+      }
     }
-
-    // ---- 1b. CHECK (only when a tech-lead is seated) ---------------------------
-    if (!ctx.roles.includes('tech-lead')) break
+    if (!ctx.roles.includes('tech-lead')) {
+      stageComplete()
+      break
+    }
     stage(`check:r${round}`)
     const planPath = env.details?.plan_path || art('plan.md')
     const checkBrief = art(`check-brief-r${round}.md`)
@@ -2312,14 +2358,22 @@ export function driveTask(ctx, io) {
     ].join('\n'))
     const check = assignAndWait('tech-lead', checkBrief, 'plan-check')
     const v = verdictOf(check)
-    if (v === 'pass') break
+    if (v === 'pass') {
+      stageComplete()
+      stageComplete()
+      break
+    }
     if (round >= limits.plan_rounds + extraPlanRounds) {
       const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
       const c = consultLead(
         `The plan check still says revise after ${round} round(s). Grant one more plan round, accept the latest plan anyway, or escalate?`,
         options, [planPath, check.details?.check_path || art('plan-check.md')],
       )
-      if (c.decision === 'escalate') return escalate('plan-check', c.reason)
+      if (c.decision === 'escalate') {
+        stageComplete()
+        stageComplete()
+        return escalate('plan-check', c.reason)
+      }
       if (c.decision === 'bounce') {
         grant('plan-check', round)
         extraPlanRounds += 1
@@ -2328,8 +2382,12 @@ export function driveTask(ctx, io) {
         io.writeFile(b, planRevisionBrief(round, check))
         planBrief = b
         planEnv = null
+        stageComplete()
+        stageComplete()
         continue
       }
+      stageComplete()
+      stageComplete()
       break // accept: proceed on the latest plan
     }
     const b = art(`plan-bounce-r${round}.md`)
@@ -2337,6 +2395,8 @@ export function driveTask(ctx, io) {
     io.writeFile(b, planRevisionBrief(round, check))
     planBrief = b
     planEnv = null
+    stageComplete()
+    stageComplete()
   }
   if (!plans) {
     const sourced = variant === DIRECTED_STAGE_HEAD ? driveDirectedRound() : driveTriageRound()   // ⚓ B1
@@ -2344,15 +2404,8 @@ export function driveTask(ctx, io) {
     planEnv = sourced.plan
   }
   if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds + extraPlanRounds} rounds`)
-
   const planPath = planEnv.details?.plan_path || art('plan.md')
-  // Put the plan of record on screen, once (io.showDoc is OPTIONAL — an io
-  // without it behaves exactly as before, stage sequence included). cmux's
-  // markdown viewer live-watches the file and the plan path is stable for the
-  // whole task, so ONE mount covers every later revision: there is deliberately
-  // no close-and-remount cycle here.
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
-
   const scopeFiles = planEnv.details?.files_in_scope
   if (!Array.isArray(scopeFiles) || scopeFiles.length === 0) {
     return escalate('plan', 'planner envelope carries no files_in_scope — the scope gate cannot run without it', planEnv.artifacts || [])
@@ -2372,10 +2425,6 @@ export function driveTask(ctx, io) {
   const inScope = scopeMatcher(scopeFiles)
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
-
-  // #250: what the diff touches decides who reviews it. Protected scope demands
-  // the judge tier's reviewer cell; anything less stops the run here rather than
-  // reviewing under an under-graded seat.
   const floorHits = protectedHits(scopeFiles, ctx.protectedPaths)
   if (floorHits.length > 0) {
     const floor = sensitivityFloor(floorHits)
@@ -2385,18 +2434,7 @@ export function driveTask(ctx, io) {
         planEnv.artifacts || [])
     }
   }
-
-  // ---- 1c. ACCEPTANCE GATE, gate-first (fusion-harness pattern) ---------------
-  // The planner may author an executable acceptance gate in the TASK DIR
-  // (outside the repo — immutable to the builder by construction): a command
-  // that exits 0 iff what-was-asked is what-got-built. Two rules, enforced
-  // mechanically: the gate is written BEFORE any build, and the BASELINE run
-  // must fail RED — a green baseline means the gate is vacuous or the work
-  // already exists, and either way the planner hears about it loudly (the
-  // exact defect class the v2 plan review caught by hand, mechanized).
   let gateCmd = planEnv.details?.gate_cmd || null
-  // The declaration is FIXED for the task: a gate repair may not replace it, so
-  // a repair must preserve its check identifiers (the repair brief says so).
   const declared = planEnv.details?.mutations
   const mutations = declared == null ? [] : declared
   if (declared != null) {
@@ -2414,14 +2452,7 @@ export function driveTask(ctx, io) {
   }
   let gateRepairs = 0
   let gateReverified = null // set only when a MID-RUN repair is accepted:
-                            // true = proven red on the pristine tree,
-                            // false = io has no runClean, the proof could not run
   const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
-  // #168 / ADR-030 §3: the driver MEASURES whether the gate discriminates —
-  // whether its verdict differs between the built tree and the pristine one.
-  // Identity is DRIVER-OWNED and is not the command string: the repair brief
-  // expressly permits returning an identical command, and editing gate.mjs in
-  // place leaves `node …/gate.mjs` byte-identical (:583-588).
   let gateGeneration = 1
   let gateProvenGeneration = null // the generation whose proof is already recorded
   let gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
@@ -2431,27 +2462,13 @@ export function driveTask(ctx, io) {
   let checkProofOutput = null  // the mutated run of the first check that was not killed
   let checkProofNote = null    // a CONTAINED io failure during the pass (never loses a build)
   let checkProofVerdict = null // 'proven' | 'failed' | 'unproven' | null — the PER-CHECK
-                               // verdict, BESIDE the whole-gate one. `unproven` is what an
-                               // INTERRUPTED pass says: absence of evidence, never a claim.
   let checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
   let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
+  gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null)
   const resetCheckProof = () => {
     checkProofs = null; checkProofOutput = null; checkProofNote = null
     checkProofVerdict = null; checkProofPending = null
   }
-
-  // The proof, recorded ONCE per generation at that generation's first pristine
-  // run — the repair re-proof when there is one, otherwise the gate's first
-  // green. It is never rerun per build round: the property cannot change unless
-  // the generation does. Returns the pristine result when one was obtained, so
-  // the repair path can keep its own (unchanged) escalate-on-green behavior.
-  //
-  // This is evidence ABOUT the gate and may NEVER become a new way to lose a
-  // build (ADR-030, ratification amendment). io.runClean is optional, and
-  // seatIo.runClean THROWS on a failed stash push/pop (crew/seat-io.mjs:261,266);
-  // both cases record 'unproven' and the run continues untouched. The throw's
-  // message — which names the builder's work sitting in the stash — is kept on
-  // details.gate and journalled, never swallowed.
   const recordGateProof = (label) => {
     resetCheckProof()                     // FIRST, before every early return: a
     gateProvenGeneration = gateGeneration  // generation never inherits the previous
@@ -2464,20 +2481,18 @@ export function driveTask(ctx, io) {
       settleProof(null)
       return null
     }
+    stage(label)
     let pristine
     try {
-      stage(label)
       pristine = runGate(label, gateCmd, io.runClean, true)
     } catch (err) {
       gateDiscrimination = 'unproven'
       gateProofNote = err.message
       io.log({ at: io.now(), gate_proof_unproven: err.message, gate_generation: gateGeneration })
       settleProof(null)
+      stageComplete()
       return null
     }
-    // The FULL predicate (:76-82), not bare non-zero exit: a crash, a missing
-    // summary, or an errored check is not discrimination. A green pristine run
-    // is 'failed' whatever it printed.
     gateProofOutput = pristine.output
     const defect = pristine.ok
       ? "the gate is STILL green at baseline (pristine tree, the builder's changes set aside), so its verdict does not depend on the work"
@@ -2486,28 +2501,13 @@ export function driveTask(ctx, io) {
     gateProofNote = defect // null when proven; the throw path sets it above
     if (gateDiscrimination === 'proven' && mutations.length > 0) checkProofPending = gateGeneration
     settleProof(parseGateSummary(pristine.output))
+    stageComplete()
     return pristine
   }
-
   const percheckNote = (row) => `the per-check proof did not kill ${JSON.stringify(row?.check)}: ${row?.why}`
-  // The note the repair path SHOWS: a per-check failure explains itself, and the
-  // whole-gate note (gateProofNote) stays the whole-gate truth.
   const proofNote = () => (checkProofVerdict === 'failed'
     ? percheckNote((checkProofs || []).find((row) => row.outcome === 'survived' || row.outcome === 'unapplied'))
     : gateProofNote)
-
-  // Per-CHECK discrimination (#330). The whole-gate proof shows the gate's verdict
-  // depends on the work; it cannot show that any INDIVIDUAL check does. Each
-  // declared mutation is applied to the BUILT tree, the gate re-runs, and the
-  // INTENDED check must print a FAIL line. Rules that are not negotiable:
-  //  - io.run, never io.runClean: ADR-030's 1 + gate_repairs bound counts PRISTINE
-  //    runs and does not move.
-  //  - the caller must hold an OBSERVED green for this generation (see the call site).
-  //  - every mutation is restored from the exact string that was read, in a finally.
-  //    A restore that cannot be PROVEN by byte comparison is fatal: the tree carries
-  //    the driver's own edit and must never be committed.
-  //  - a failure BEFORE any write is contained evidence, never a lost build
-  //    (ADR-030 ratification amendment).
   const completeCheckProof = (label) => {
     checkProofPending = null
     stage(label)
@@ -2567,6 +2567,7 @@ export function driveTask(ctx, io) {
     // vacuous check passing the whole-gate proof, one level down.
     checkProofVerdict = survivor ? 'failed' : checkProofNote ? 'unproven' : 'proven'
     settleCheckProof()
+    stageComplete()
     return survivor
   }
 
@@ -2685,10 +2686,12 @@ export function driveTask(ctx, io) {
       ].join('\n'))
       const rep = assignAndWait(GATE_CUSTODIAN, b, 'gate-repair')
       if (!(rep.status === 'done' && rep.details?.gate_cmd)) {
+        stageComplete()
         return { escalation: gateEscalate(`the gate could not be repaired after a failed discrimination proof (${GATE_CUSTODIAN} returned ${rep.status}: ${rep.summary || 'no detail'}) — ${proofNote()}. Gate: ${gateCmd}`) }
       }
       acceptRepairedGate(rep.details.gate_cmd, `gate-reverify:${gateRepairs}`)
       repaired = true
+      stageComplete()
     }
     return { repaired }
   }
@@ -2697,18 +2700,26 @@ export function driveTask(ctx, io) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
     if (baseline.ok) {
-      if (noGateCustodian()) return gateCustodyEscalate('the gate ran GREEN at baseline, so it is vacuous or the work already exists')
+      if (noGateCustodian()) {
+        stageComplete()
+        return gateCustodyEscalate('the gate ran GREEN at baseline, so it is vacuous or the work already exists')
+      }
+      stageComplete()
       stage('gate-baseline:green-bounce')
       const b = art('gate-vacuous-bounce.md')
       io.writeFile(b, `# Gate bounce: baseline ran GREEN\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe plan's acceptance gate passed BEFORE any work was built. Either the gate does not actually check the requested change, or the work already exists. Fix the gate (or report the work as already done via status insufficient):\n\n    ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
       const env2 = assignAndWait(GATE_CUSTODIAN, b, 'gate-fix')
       if (env2.status !== 'done' || !env2.details?.gate_cmd) {
+        stageComplete()
         return gateEscalate(`baseline-green gate could not be repaired (${GATE_CUSTODIAN} returned ${env2.status}: ${env2.summary || 'no detail'})`)
       }
       gateHistory.push(gateCmd)
       gateCmd = env2.details.gate_cmd
       const re = runGate('gate-baseline:recheck', gateCmd)
-      if (re.ok) return gateEscalate('repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
+      if (re.ok) {
+        stageComplete()
+        return gateEscalate('repaired gate STILL green at baseline — vacuous acceptance cannot be built against')
+      }
       // Red — but red HOW? (#153, #440). The repaired gate exits non-zero exactly
       // as a gate whose every check THREW does, so without the same recheck the
       // defective-red branch applies below, a repair may trade a vacuous green
@@ -2725,22 +2736,34 @@ export function driveTask(ctx, io) {
       // gateRepairs, exactly like the vacuous-green bounce above.
       let defect = baselineGateDefect(baseline.output)
       if (defect) {
-        if (noGateCustodian()) return gateCustodyEscalate(`the gate did not RUN at baseline: ${defect}`)
+        if (noGateCustodian()) {
+          stageComplete()
+          return gateCustodyEscalate(`the gate did not RUN at baseline: ${defect}`)
+        }
+        stageComplete()
         stage('gate-baseline:defect-bounce')
         const b = art('gate-defect-bounce.md')
         io.writeFile(b, `# Gate bounce: the gate did not RUN\n\nYou hold gate custody after plan acceptance: read the plan, then repair the gate.\n\nThe plan's gate exited non-zero, but that is not proof it is red for the right reason: ${defect}.\n\nA baseline is only acceptable when every check RAN and failed. Repair the gate so it executes end to end, and print a final summary line the driver can read:\n\n    ${GATE_SUMMARY_PREFIX} {"total":<n>,"failed":<n>,"errored":0}\n\nDo not weaken or remove a check to make this pass — a check that cannot run must be FIXED, not deleted. Preserve the old gate under a suffixed copy.\n\nGate: ${gateCmd}\n\nOutput:\n${baseline.output.slice(-2000)}\n\nOriginal brief: ${ctx.briefFile}${mutations.length > 0 ? stableIdentifierNote() : ''}`)
         const env3 = assignAndWait(GATE_CUSTODIAN, b, 'gate-fix')
         if (env3.status !== 'done' || !env3.details?.gate_cmd) {
+          stageComplete()
           return gateEscalate(`defective gate could not be repaired (${GATE_CUSTODIAN} returned ${env3.status}: ${env3.summary || 'no detail'})`)
         }
         gateHistory.push(gateCmd)
         gateCmd = env3.details.gate_cmd
         const re = runGate('gate-baseline:recheck', gateCmd)
-        if (re.ok) return gateEscalate('repaired gate is GREEN at baseline — vacuous acceptance cannot be built against')
+        if (re.ok) {
+          stageComplete()
+          return gateEscalate('repaired gate is GREEN at baseline — vacuous acceptance cannot be built against')
+        }
         defect = baselineGateDefect(re.output)
-        if (defect) return gateEscalate(`repaired gate STILL does not run at baseline: ${defect}`)
+        if (defect) {
+          stageComplete()
+          return gateEscalate(`repaired gate STILL does not run at baseline: ${defect}`)
+        }
       }
     }
+    stageComplete()
   }
 
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
@@ -2781,6 +2804,7 @@ export function driveTask(ctx, io) {
     const reviewerAHasFindings = (reviewFindings(aEnv?.details)?.findings?.length || 0) > 0
     if (!aEnv || aEnv.status !== 'done' || !reviewerAVerdict) {
       panelDegraded('reviewer')
+      stageComplete()
       return aEnv
     }
 
@@ -2797,10 +2821,12 @@ export function driveTask(ctx, io) {
       bEnv = assignAndWait(panel.partner, bBrief, 'panel-b')
     } catch {
       panelDegraded(panel.partner)
+      stageComplete()
       return aEnv
     }
     if (!bEnv || bEnv.status !== 'done' || !verdictOf(bEnv)) {
       panelDegraded(panel.partner)
+      stageComplete()
       return aEnv
     }
 
@@ -2835,10 +2861,12 @@ export function driveTask(ctx, io) {
       adjEnv = assignAndWait(panel.adjudicator, adjBrief, 'panel-adjudication')
     } catch {
       panelDegraded(panel.adjudicator)
+      stageComplete()
       return aEnv
     }
     if (!adjEnv || adjEnv.status !== 'done') {
       panelDegraded(panel.adjudicator)
+      stageComplete()
       return aEnv
     }
 
@@ -2944,6 +2972,7 @@ export function driveTask(ctx, io) {
       findings,
       panel: review.details.panel,
     }
+    stageComplete()
     return review
   }
   const reviewBounceBrief = (round, reviewPath) => {
@@ -2972,7 +3001,10 @@ export function driveTask(ctx, io) {
           ...questionConsultLines('builder', questions)].join('\n'),
         ['bounce', 'escalate'], [buildBrief, ...(env.artifacts || [])],
       )
-      if (c.decision === 'escalate') return escalate('build', c.reason, env.artifacts || [])
+      if (c.decision === 'escalate') {
+        stageComplete()
+        return escalate('build', c.reason, env.artifacts || [])
+      }
       if (finalRound()) extraRounds += 1 // the granted bounce needs a round to land in
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('build', 'builder')
@@ -2984,27 +3016,35 @@ export function driveTask(ctx, io) {
         ...answerBounceLines(questions, matched),
       ].join('\n'))
       buildBrief = b; buildNote = 'build-fix'
+      stageComplete()
       continue
     }
     builderEnv = env
+    stageComplete()
 
     // Gate A (mechanical): scope by git, never by self-report.
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
     const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
     if (gateFenceHits.length > 0) {
+      stageComplete()
       return escalate('scope',
         `the build crossed another live lane's fence: ${fenceBreachList(gateFenceHits)} — a file a sibling crew owns is never a bounce, it is a human's call`)
     }
     const outOfScope = outOfScopeFiles(changed, inScope)
     if (outOfScope.length > 0) {
-      if (!plans || finalRound()) return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
+      if (!plans || finalRound()) {
+        stageComplete()
+        return escalate('scope', `out-of-scope edits persisted: ${outOfScope.join(', ')}`)
+      }
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('scope', 'builder')
       io.writeFile(b, `# Scope bounce (round ${round})\n\nThese files are OUTSIDE the plan's scope — revert them or stop touching them:\n${outOfScope.map((f) => `- ${f}`).join('\n')}\n\nIn-scope set:\n${scopeFiles.map((f) => `- ${f}`).join('\n')}\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'scope-fix'
+      stageComplete()
       continue
     }
+    stageComplete()
 
     // Gate B (mechanical): the validation lane, run by code.
     stage(`lane:r${round}`)
@@ -3015,15 +3055,20 @@ export function driveTask(ctx, io) {
           `The validation lane is still red after ${round} rounds. Bounce once more with guidance, or escalate?`,
           ['bounce', 'escalate'], [planPath, journal],
         )
-        if (c.decision !== 'bounce') return escalate('lane', c.reason)
+        if (c.decision !== 'bounce') {
+          stageComplete()
+          return escalate('lane', c.reason)
+        }
         extraRounds += 1
       }
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('lane', 'builder')
       io.writeFile(b, `# Lane bounce (round ${round})\n\nThe validation lane is RED. Make it green:\n\n    ${lane}\n\nFailures:\n${laneRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
       buildBrief = b; buildNote = 'lane-fix'
+      stageComplete()
       continue
     }
+    stageComplete()
 
     // Gate B2 (mechanical): the acceptance gate, when the plan authored one.
     // Failures feed back VERBATIM; repeated failures trigger ONE build-vs-gate
@@ -3043,7 +3088,10 @@ export function driveTask(ctx, io) {
         io.writeFile(tBrief, `# Gate triage (round ${round})\n\nThe acceptance gate keeps failing. Decide which is defective — read the plan at ${planPath} then the gate command and its output, then the diff in ${ctx.checkout}.\n\nGate: ${gateCmd}\nOutput:\n${gateRes.output.slice(-3000)}\n\nReply with details {"defect": "build" | "gate", "reason": "..."}.`)
         const triage = assignAndWait('reviewer', tBrief, 'gate-triage')
         if (triage.status === 'done' && triage.details?.defect === 'gate') {
-          if (noGateCustodian()) return gateCustodyEscalate(`the reviewer triaged the repeated gate failures as a GATE defect: ${triage.details?.reason || 'no reason given'}`)
+          if (noGateCustodian()) {
+            stageComplete()
+            return gateCustodyEscalate(`the reviewer triaged the repeated gate failures as a GATE defect: ${triage.details?.reason || 'no reason given'}`)
+          }
           gateRepairs += 1
           stage(`gate-repair:${gateRepairs}`)
           const rBrief = art('gate-repair-bounce.md')
@@ -3057,7 +3105,10 @@ export function driveTask(ctx, io) {
             // already spent here, so a failed re-proof escalates — with the
             // diagnosis that actually applies.
             const settled = settleFailedProof()
-            if (settled.escalation) return settled.escalation
+            if (settled.escalation) {
+              stageComplete()
+              return settled.escalation
+            }
             gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd) // re-run immediately; no builder round consumed
           }
         }
@@ -3069,7 +3120,10 @@ export function driveTask(ctx, io) {
       if (gateRes.ok && gateProvenGeneration !== gateGeneration) {
         recordGateProof(`gate-proof:${gateGeneration}`)
         const settled = settleFailedProof()
-        if (settled.escalation) return settled.escalation
+        if (settled.escalation) {
+          stageComplete()
+          return settled.escalation
+        }
         if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
       // Per-CHECK proof, post-green BY CONSTRUCTION. An observed green built-tree
@@ -3082,7 +3136,10 @@ export function driveTask(ctx, io) {
         completeCheckProof(`gate-proof:${gateGeneration}:checks`)
         if (!gateProofFatal && checkProofVerdict !== 'failed') break
         const settled = settleFailedProof()
-        if (settled.escalation) return settled.escalation
+        if (settled.escalation) {
+          stageComplete()
+          return settled.escalation
+        }
         if (settled.repaired) gateRes = runGate(`gate-repair:${gateRepairs}`, gateCmd)
       }
       if (!gateRes.ok) {
@@ -3093,7 +3150,11 @@ export function driveTask(ctx, io) {
           )
           if (c.decision !== 'bounce') {
             const settled = convergeSettle({ why: c.reason, where: 'gate', gateOutput: gateRes.output })
-            if (settled) return settled
+            if (settled) {
+              stageComplete()
+              return settled
+            }
+            stageComplete()
             return gateEscalate(c.reason)
           }
           extraRounds += 1
@@ -3102,9 +3163,11 @@ export function driveTask(ctx, io) {
         failureUpgrade('gate', 'builder')
         io.writeFile(b, `# Gate bounce (round ${round})\n\nThe ACCEPTANCE GATE is red — the build does not yet do what was asked. The gate is immutable to you; make the build satisfy it:\n\n    ${gateCmd}\n\nFailures (verbatim):\n${gateRes.output.slice(-4000)}\n\nPlan: ${planPath}`)
         buildBrief = b; buildNote = 'gate-fix'
+        stageComplete()
         continue
       }
       lastGateOutput = gateRes.output
+      stageComplete()
     }
 
     // Gate C (judgment, but enum-consumed): the reviewer. An unreadable
@@ -3119,7 +3182,11 @@ export function driveTask(ctx, io) {
         )
         if (c.decision === 'escalate') {
           const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
-          if (settled) return settled
+          if (settled) {
+            stageComplete()
+            return settled
+          }
+          stageComplete()
           return escalate('review', c.reason)
         }
         if (c.decision === 'bounce') {
@@ -3130,6 +3197,7 @@ export function driveTask(ctx, io) {
           failureUpgrade('review', 'builder')
           io.writeFile(b, reviewBounceBrief(round, lastReviewPath))
           buildBrief = b; buildNote = 'review-fix'
+          stageComplete()
           continue build
         }
         const settledAccept = settleAccept(c, 'review-exhausted')
@@ -3137,13 +3205,21 @@ export function driveTask(ctx, io) {
         // commit the build and open a PR — the viz-intake outcome under another name.
         // It fails closed to the human, and a distinct `where` keeps it out of the
         // regrant path (crew/escalation-policy.mjs:174-181) without editing it.
-        if (settledAccept.refusedMustFix) return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
+        if (settledAccept.refusedMustFix) {
+          stageComplete()
+          return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
+        }
         if (!settledAccept.ok) {
           const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
-          if (settled) return settled
+          if (settled) {
+            stageComplete()
+            return settled
+          }
+          stageComplete()
           return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
         }
         accepted = acceptedViaLabel(settledAccept.record)
+        stageComplete()
         break build
       }
       const roundNo = reviews + 1
@@ -3172,7 +3248,7 @@ export function driveTask(ctx, io) {
       const counted = v === 'revise'
       if (counted) reviews += 1
       io.log({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews } })
-      if (v === 'pass') { stage('review:pass'); accepted = 'review pass'; break build }
+      if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
       if (v === 'revise') {
         if (finalRound()) {
           const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
@@ -3182,7 +3258,11 @@ export function driveTask(ctx, io) {
           )
           if (c.decision === 'escalate') {
             const settled = convergeSettle({ why: c.reason, where: 'review', gateOutput: lastGateOutput, gateRed: false })
-            if (settled) return settled
+            if (settled) {
+              stageComplete()
+              return settled
+            }
+            stageComplete()
             return escalate('review', c.reason)
           }
           if (c.decision === 'bounce') {
@@ -3193,6 +3273,7 @@ export function driveTask(ctx, io) {
             failureUpgrade('review', 'builder')
             io.writeFile(b, reviewBounceBrief(round, lastReviewPath))
             buildBrief = b; buildNote = 'review-fix'
+            stageComplete()
             continue build
           }
           const settledAccept = settleAccept(c, 'build-exhausted')
@@ -3200,19 +3281,28 @@ export function driveTask(ctx, io) {
           // commit the build and open a PR — the viz-intake outcome under another name.
           // It fails closed to the human, and a distinct `where` keeps it out of the
           // regrant path (crew/escalation-policy.mjs:174-181) without editing it.
-          if (settledAccept.refusedMustFix) return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
+          if (settledAccept.refusedMustFix) {
+            stageComplete()
+            return escalate('refuted-must-fix', settledAccept.why, [], { accept_decision: settledAccept.record })
+          }
           if (!settledAccept.ok) {
             const settled = convergeSettle({ why: settledAccept.why, where: 'review', gateOutput: lastGateOutput, gateRed: false })
-            if (settled) return settled
+            if (settled) {
+              stageComplete()
+              return settled
+            }
+            stageComplete()
             return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
           }
           accepted = acceptedViaLabel(settledAccept.record)
+          stageComplete()
           break build
         }
         const b = art(`build-bounce-r${round}.md`)
         failureUpgrade('review', 'builder')
         io.writeFile(b, reviewBounceBrief(round, review.details?.review_path || art('review.md')))
         buildBrief = b; buildNote = 'review-fix'
+        stageComplete()
         continue build
       }
       const c = consultLead(
@@ -3220,9 +3310,13 @@ export function driveTask(ctx, io) {
         ['bounce', 'escalate'], [revBrief, ...(review.artifacts || [])],
         { exclude: 'reviewer' },
       )
-      if (c.decision === 'escalate') return escalate('review', c.reason)
+      if (c.decision === 'escalate') {
+        stageComplete()
+        return escalate('review', c.reason)
+      }
       // nothing to refund: an unreadable verdict was never charged (`counted` above),
       // and the loop re-asks the reviewer in place under the same round number.
+      stageComplete()
     }
   }
   if (!builderEnv || !accepted) {
@@ -3233,17 +3327,20 @@ export function driveTask(ctx, io) {
   stage('suite')
   const suiteRes = io.run(ctx.suite)
   if (!suiteRes.ok) {
+    stageComplete()
     return escalate('suite', `full suite red after acceptance — this needs eyes:\n${suiteRes.output.slice(-2000)}`)
   }
+  stageComplete()
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log({ at: io.now(), commit_subject: 'fallback-from-plan-summary' })
   const committing = io.changedFiles().filter(inScope)
   S.commit = io.commit(committing, message)
+  stageComplete()
   stage('done')
 
-  return {
+  const result = {
     status: 'done',
     summary: `Task ${ctx.task} complete: committed ${S.commit} (${committing.length} files), suite green, ${accepted}. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), journal],
@@ -3252,7 +3349,9 @@ export function driveTask(ctx, io) {
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
-      gate: gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null,
+      gate: gateBlock(),
     },
   }
+  stageComplete()
+  return result
 }

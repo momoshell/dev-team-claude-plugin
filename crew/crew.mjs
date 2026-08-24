@@ -1739,7 +1739,7 @@ export function runCmd(args, deps = {}) {
   const dirty = execSync('git status --porcelain', { cwd: checkout, encoding: 'utf8' }).trim()
   if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
 
-  const journal = join(paths.dir, 'journal.jsonl')
+  const journal = join(paths.dir, 'journal.jsonl'); const head = readHead(checkout); logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug })
   const protectedFloor = checkoutProtectedPaths({ checkout })
   logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
@@ -1793,7 +1793,7 @@ export function runCmd(args, deps = {}) {
   // package.json's scripts.test and crew/child.mjs's default;
   // crew/crew.test.mjs pins the three-way agreement.
   const ctx = {
-    task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal,
+    task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal, head,
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
@@ -1844,7 +1844,7 @@ export function runCmd(args, deps = {}) {
       status: 'escalation',
       summary: `Task ${taskSlug} needs a human: the driver crashed (${err.message})`,
       artifacts: [journal],
-      details: { stages: null, commit: null, dissents: [], escalation: { where: err.stage || 'driver', why: err.message } },
+      details: { stages: stagesFromJournal(journal), commit: null, dissents: [], escalation: { where: err.stage || 'driver', why: err.message } },
     }
   }
   // Outcome-gated recovery state (#165): an escalation leaves a parked/null
@@ -1894,6 +1894,42 @@ export function runCmd(args, deps = {}) {
   const taskReturn = archived ? crew.task_return.replace(paths.dir, archived) : crew.task_return
   process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
   process.exitCode = runExitCode(result)
+}
+
+// The run-start anchor. A crew dir's journal is append-only ACROSS runs, so the
+// stage list a crashed run's envelope carries must be bounded to the run that
+// crashed. This row is that boundary, and it carries the HEAD the run began at.
+export const RUN_START_EVENT = 'run-start'
+
+// The checkout's HEAD at run start (#583 §1.4): nothing in crew/ records it
+// today, and without it a resume cannot refuse "the worktree has moved on".
+export function readHead(checkout, deps = {}) {
+  const exec = deps.execSync || execSync
+  let out
+  try { out = exec('git rev-parse HEAD', { cwd: checkout, encoding: 'utf8' }) }
+  catch { return null }              // a git that cannot answer is an ABSENT head, never a dead run
+  return String(out).trim() || null
+}
+
+// The stage list a crashed run's envelope carries. The driver's `S` dies with
+// the throw, so the stages are read back from the journal this run already
+// wrote: stage() logs one `{ stage: <label> }` row per entry (crew/drive.mjs)
+// and the scan restarts at every run-start row, so only THIS run's stages come
+// back. `null` means the journal itself was unreadable — which is not the same
+// claim as "no stage ran".
+export function stagesFromJournal(path, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  let text
+  try { text = String(read(path, 'utf8')) } catch { return null }
+  const stages = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event === RUN_START_EVENT) { stages.length = 0; continue }
+    if (typeof row?.stage === 'string') stages.push(row.stage)
+  }
+  return stages
 }
 
 // A seat's readiness, layered so it stays agent-agnostic:

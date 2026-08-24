@@ -26,3 +26,14 @@ it **a second way** before killing, reassigning, or tearing down a seat. An
 unreadable journal, missing return, unknown timestamp, or interrupted probe is
 unknown—not proof of idle, death, or failure. For the instrument cases behind
 surprising readings, continue with [`references/instruments.md`](instruments.md).
+
+## Transcript growth is the liveness signal
+
+The reliable signals are ordered: **transcript mtime** first, then the pane's
+**token counters compared across two readings**, then **the spinner, which is worthless**. In particular, a spinner and an elapsed timer are not evidence of life:
+surface can remain present while a seat has stopped mid-turn. The threshold and
+classifier are implemented at `crew/seat-io.mjs:50`; when a wait expires, the
+driver names the state as `the seat is STALE:`, `the seat REFUSED:`, or `the seat
+is WORKING:`. A `seat-stale` row in `journal.jsonl` is the in-flight warning
+that arrives before the budget does. A stale reading names a state; it does not
+kill a seat (#567 owns the action).

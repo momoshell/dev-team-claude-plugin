@@ -6061,3 +6061,28 @@ test('both charters state where the planner stops and the lead takes over', () =
   assert.match(planner.slice(planner.indexOf('domain ends when your plan is accepted')), /lead/)
   assert.doesNotMatch(planner, /## Perspective assignments/)
 })
+
+test('a missing envelope escalation carries stale, refused and working diagnoses', () => {
+  for (const text of [
+    'the seat is STALE: planner produced its last transcript frame 5000s ago',
+    'the seat REFUSED: planner — the provider says: Overloaded (transient)',
+    'the seat is WORKING: planner produced a transcript frame 3s ago and simply exceeded its 1800s budget',
+  ]) {
+    const io = fakeIo({ envelopes: { 'planner:1': null } })
+    io.waitDiagnosis = () => ({ state: text.includes('STALE') ? 'stale' : text.includes('REFUSED') ? 'refused' : 'working', text })
+    assert.throws(() => driveTask(CTX, io), new RegExp(`planner: no valid envelope at planner:1 within 1800s — ${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+  }
+})
+
+test('an io without waitDiagnosis preserves the plain missing-envelope escalation', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': null } })
+  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope at planner:1 within 1800s$/)
+})
+
+test('waitDiagnosis is not consulted when an envelope is present but shape-invalid', () => {
+  const io = fakeIo({ envelopes: { 'planner:1': {} } })
+  let consulted = 0
+  io.waitDiagnosis = () => { consulted += 1; return { state: 'stale', text: 'should not appear' } }
+  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope at planner:1 within 1800s$/)
+  assert.equal(consulted, 0)
+})

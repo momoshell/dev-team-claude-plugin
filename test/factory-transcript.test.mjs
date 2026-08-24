@@ -7,6 +7,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
   mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync,
+  symlinkSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
@@ -329,24 +330,29 @@ test('RESOLUTION S4: a non-UUID-shaped dispatch_id is treated as missing, never 
   assert.equal(stats.resolution_ambiguous || 0, 0)
 })
 
-test('RESOLUTION M2: a file deleted between the existence check and the stat (TOCTOU) degrades to no-match, never throws', () => {
-  // resolveTranscript's contract is "never throw, return null on any
-  // refusal." A single throwIfNoEntry:false statSync call (rather than a
-  // separate existsSync + statSync pair) means there is no longer a window
-  // in which a deleted file can be observed as existing and then throw on
-  // stat — verified here for the general "file never exists" case, since
-  // deterministically hitting the exact microsecond race window between two
-  // syscalls isn't practical from a single-threaded test without stubbing
-  // node:fs (which this module deliberately imports directly, unmockable
-  // without a loader hook). Production code uses the race-proof single-call
-  // form regardless.
+test('RESOLUTION M2: a candidate whose stat FAILS (a symlink loop) degrades to no-match and never throws, and the race-proof single-stat form is pinned in source', () => {
+  // The ENOENT half of a delete-between-check-and-stat is closed by SHAPE:
+  // one throwIfNoEntry:false stat instead of an existsSync/statSync pair, so
+  // a vanished file is indistinguishable from one that never existed and no
+  // fixture can tell them apart — that half is pinned on the source text
+  // below. The half a fixture CAN stage is the other failure a stat on a
+  // still-listed entry can produce: a symlink loop makes statSync throw
+  // ELOOP, which throwIfNoEntry does not suppress, so it exercises the
+  // catch-all that keeps every stat failure inside the never-throw contract.
   const projectsDir = nextDir()
   mkdirSync(join(projectsDir, 'proj-a'), { recursive: true })
-  const goneId = '00000000-0000-4000-8000-0000000000ff'
+  const loopId = '00000000-0000-4000-8000-0000000000ff'
+  const loopPath = join(projectsDir, 'proj-a', `${loopId}.jsonl`)
+  symlinkSync(loopPath, loopPath)
   const stats = {}
-  assert.doesNotThrow(() => resolveTranscript({ record: { dispatch_id: goneId }, projectsDir, stats }))
-  const result = resolveTranscript({ record: { dispatch_id: goneId }, projectsDir, stats })
+  assert.doesNotThrow(() => resolveTranscript({ record: { dispatch_id: loopId }, projectsDir, stats }), 'a failing stat must never escape the never-throw contract')
+  const result = resolveTranscript({ record: { dispatch_id: loopId }, projectsDir, stats })
   assert.equal(result, null)
+  assert.equal(stats.resolution_missing, 2, 'an unstattable candidate counts as a miss, never as a match')
+  const candidateStatCalls = transcriptSrc.match(/\bstatSync\s*\(\s*candidate\b/g) || []
+  assert.equal(candidateStatCalls.length, 1, 'the candidate must have exactly ONE throwIfNoEntry:false stat call')
+  const statLine = (transcriptSrc.match(/^\s*(?:const )?st = .*$/m) || [''])[0].trim().replace(/^const /, '')
+  assert.equal(statLine, 'st = statSync(candidate, { throwIfNoEntry: false })', 'the candidate stat must stay ONE throwIfNoEntry:false call, never an existsSync/statSync pair')
 })
 
 test('RESOLUTION: the dash-encoding is never derived (source-text needle: no code path constructs a project-dir name from a cwd)', () => {
@@ -411,13 +417,11 @@ test('IMPORT FIREWALL (direction 2): no crew decision module (drive.mjs, crew.mj
 
 // ---------------------------------------------------------------------------
 // SEEDED-MARKER MUTATION TEST: no task-controlled byte survives the
-// reduction into returned JSON, stderr, or any file under stateDir/taskDir.
+// reduction into returned JSON, stderr, or any file under the transcript dir.
 // ---------------------------------------------------------------------------
 
-test('SEEDED MARKER: a hostile transcript\'s marker text appears in no returned object, no stderr, and no file under stateDir/taskDir', () => {
+test('SEEDED MARKER: a hostile transcript\'s marker text appears in no returned object and no stderr, and the reducer leaves the ONE directory it is handed byte-identical', () => {
   const MARKER = 'DEVTEAM-SEEDED-MARKER-7f3c9a'
-  const stateDir = nextDir()
-  const taskDir = nextDir()
 
   const path = writeTranscript([
     assistantLine({
@@ -431,6 +435,20 @@ test('SEEDED MARKER: a hostile transcript\'s marker text appears in no returned 
     }),
     userToolResultLine({ toolUseId: 'toolu_hostile', isError: false, timestamp: '2026-08-09T00:00:04.000Z', body: `tool result body carrying the marker: ${MARKER}` }),
   ])
+
+  // The reducer is handed exactly one directory: the one holding the
+  // transcript (it derives the subagents dir from it). Snapshotting THAT is
+  // the only write-freedom claim a call to readUsage/readToolCalls can
+  // falsify — a stateDir/taskDir the reducer never receives cannot.
+  const transcriptDir = dirname(path)
+  const treeOf = (dir) => readdirSync(dir, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const p = join(entry.parentPath, entry.name)
+      return `${p.slice(dir.length + 1)}\u0000${readFileSync(p, 'utf8')}`
+    })
+    .sort()
+  const beforeTree = treeOf(transcriptDir)
 
   const originalWrite = process.stderr.write
   let capturedStderr = ''
@@ -450,19 +468,7 @@ test('SEEDED MARKER: a hostile transcript\'s marker text appears in no returned 
   assert.doesNotMatch(capturedStderr, new RegExp(MARKER), 'stderr must never carry the marker')
   assert.equal(toolCalls[0].tool, 'other', 'a marker-laden tool name must not match the closed KNOWN_TOOL_NAMES set')
 
-  function scanForMarker(dir) {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      const p = join(dir, entry.name)
-      if (entry.isDirectory()) {
-        if (scanForMarker(p)) return true
-      } else if (statSync(p).isFile() && readFileSync(p, 'utf8').includes(MARKER)) {
-        return true
-      }
-    }
-    return false
-  }
-  assert.equal(scanForMarker(stateDir), false, 'no file under stateDir may carry the marker')
-  assert.equal(scanForMarker(taskDir), false, 'no file under taskDir may carry the marker')
+  assert.deepEqual(treeOf(transcriptDir), beforeTree, 'the reducer must create, delete or change no file in the transcript directory it is handed')
 })
 
 // ---------------------------------------------------------------------------

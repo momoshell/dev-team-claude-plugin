@@ -445,6 +445,10 @@ const LEDGER_SANDBOX_EXEMPT = new Map([
   }],
 ])
 const TRIPWIRE_SELF = 'test/factory-env.test.mjs'
+// Every tree that carries test files, and every tree that carries production
+// code — not the two the scan happened to start with (#552 N5).
+const LEDGER_TEST_SCAN_DIRS = ['crew', 'test', 'commands', 'skills']
+const LEDGER_PROD_SCAN_DIRS = ['crew', 'scripts', 'visualizer', 'commands', 'skills']
 
 // MUTATION A1: removing the openRun registry key lets the aliased opener pass unnamed.
 test('ledger sandbox tripwire — alias imports retain the exported opener door', () => {
@@ -527,7 +531,9 @@ test('ledger sandbox tripwire — every registered door is live and carries its 
 
 test('ledger sandbox tripwire — every production home default resolves to a registered door', () => {
   const offenders = []
-  for (const file of [...productionFilesUnder('crew'), ...productionFilesUnder('scripts'), ...productionFilesUnder('visualizer')]) {
+  const scanned = LEDGER_PROD_SCAN_DIRS.flatMap((dir) => productionFilesUnder(dir))
+  assert.ok(scanned.length >= 40, `expected at least 40 scanned production files, found ${scanned.length}`)
+  for (const file of scanned) {
     const source = readFileSync(join(ROOT, file), 'utf8')
     const code = maskCode(source)
     const lines = source.split('\n')
@@ -552,7 +558,9 @@ test('ledger sandbox tripwire — every production home default resolves to a re
 
 test('ledger sandbox tripwire — every test file is either not a writer or sandboxed', () => {
   const offenders = []
-  for (const file of [...testFilesUnder('crew'), ...testFilesUnder('test')]) {
+  const scanned = LEDGER_TEST_SCAN_DIRS.flatMap((dir) => testFilesUnder(dir))
+  assert.ok(scanned.length >= 45, `expected at least 45 scanned test files, found ${scanned.length}`)
+  for (const file of scanned) {
     if (file === TRIPWIRE_SELF || LEDGER_SANDBOX_EXEMPT.has(file)) continue
     const verdict = ledgerSandboxVerdict(readFileSync(join(ROOT, file), 'utf8'), posix.dirname(file))
     if (!['not-a-writer', 'sandboxed'].includes(verdict)) offenders.push(`${file} (${verdict})`)

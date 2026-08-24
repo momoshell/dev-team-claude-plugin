@@ -9,7 +9,7 @@
 import { test as nodeTest, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync,
+  mkdtempSync, rmSync, readFileSync, existsSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -83,10 +83,11 @@ test('below-floor emitter never touches node:sqlite: the mirror db file is never
     stateDir: dir, repoSlug: 'r', taskSlug: 't', dbPath, nodeVersion: BELOW_FLOOR_VERSION, stderr: { write: () => {} },
   })
   emitter.startRun()
-  // No assertion beyond "did not throw" is needed to prove sqlite was
-  // never reached — ledger.mjs's own degraded path never opens the db file
-  // at all (ensureDb short-circuits before the lazy node:sqlite require).
   assert.equal(emitter.stats().dropped, 0)
+  // The title's claim, asserted rather than argued: ledger.mjs's degraded
+  // path short-circuits before the lazy node:sqlite require, so nothing may
+  // exist at dbPath afterwards.
+  assert.equal(existsSync(dbPath), false, 'the below-floor path must never create the mirror db file')
 })
 
 test('this file contains no node:test exclusion directive (self-assertion; word-boundary aware to tolerate "skipped" as a status value)', () => {

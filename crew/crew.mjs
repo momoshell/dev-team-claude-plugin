@@ -2133,6 +2133,8 @@ export function teardownCore(paths, crew, deps = {}) {
   const seats = rows.length
     ? settleFn({ teardown: () => rows, log: io?.log, emit: io?.emit })
     : null
+  const seatsAbsent = seats ? null : teardownAbsentCause(crew)
+  if (seatsAbsent) try { io?.log?.({ at: new Date().toISOString(), event: 'seat-teardown-absent', cause: seatsAbsent }) } catch { /* the journal is never load-bearing */ }
   const descendantTaskDir = paths.taskDir || join(paths.dir, 'task')
   const settleRootsFn = deps.settleSeatRoots || settleSeatRoots
   const reclaimFn = deps.reclaimDescendants || reclaimDescendants
@@ -2142,13 +2144,11 @@ export function teardownCore(paths, crew, deps = {}) {
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'seat-root-settle-failed', error: err.message }) } catch {} }
   try { descendants = reclaimFn({ taskDir: descendantTaskDir, log: io?.log, emit: io?.emit }) }
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'descendant-reclaim-failed', error: err.message }) } catch {} }
-  // Full timestamp, not date-only: a second same-day run of the same slug
-  // must never ENOTEMPTY onto the first run's archive.
+  // Full timestamp, not date-only: a second same-day run of the same slug must never ENOTEMPTY onto the first run's archive.
   const archived = `${paths.dir}.archive-${new Date().toISOString().replace(/[:.]/g, '-')}`
   renameSyncFn(paths.dir, archived)
-  return { archived, seats, roots, descendants }
+  return { archived, seats, seats_absent: seatsAbsent, roots, descendants }
 }
-
 export function teardownCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
@@ -2171,15 +2171,46 @@ export function teardownCmd(args, deps = {}) {
   finally { try { emitter?.dispose() } catch { /* instrumentation is never load-bearing */ } }
   const { archived, seats } = record
   const tally = seats ? { seats: seats.seats, proven: seats.proven, failed: seats.failed, unproven: seats.unproven, recorded: seats.recorded, record_failed: seats.record_failed } : null
-  process.stdout.write(`${JSON.stringify({ archived, seats: tally })}\n`)
+  process.stdout.write(`${JSON.stringify({ archived, seats: tally, seats_absent: record.seats_absent ?? null })}\n`)
   // A seat this verb could not prove dead — `failed` (measured alive) and
   // `unproven` (unknown) alike — or a row that never reached the ledger, is a
   // RESULT, not a silent success. `proven !== seats` covers both non-proven
   // outcomes with one comparison; do not special-case one of them.
-  if (seats && (seats.proven !== seats.seats || seats.recorded !== seats.seats)) process.exitCode = 1
+  if (seats && (seats.proven !== seats.seats || seats.recorded !== seats.seats)) process.exitCode = TEARDOWN_EXIT_UNPROVEN
   const d = record.descendants
-  if (d && (d.incomplete > 0 || d.record_failed > 0)) process.exitCode = 1
+  if (d && (d.incomplete > 0 || d.record_failed > 0)) process.exitCode = TEARDOWN_EXIT_UNPROVEN
+  // An ABSENCE is neither a success nor a measured failure: it gets its own
+  // status, and a measured failure above OUTRANKS it — 1 is never downgraded
+  // to 4. `!seats` is exactly `rows.length === 0` in teardownCore (:2133-2135).
+  if (!seats && process.exitCode !== TEARDOWN_EXIT_UNPROVEN) process.exitCode = TEARDOWN_EXIT_SEATLESS
   return record
+}
+
+// Teardown's exit-status vocabulary, the sibling of RUN_EXIT_CODES (:1692).
+// `1` is a MEASURED failure — a seat proven alive, a row that never reached the
+// ledger. An ABSENCE is weaker evidence than that and must not borrow its
+// status, but it must not borrow 0's either: a teardown that measured nothing
+// is not a teardown that proved every seat dead, and the operator reading the
+// exit status ALONE is the one this distinction exists for.
+export const TEARDOWN_EXIT_UNPROVEN = 1
+export const TEARDOWN_EXIT_SEATLESS = 4
+
+// The named basis for a sweep that produced no row, in the shape ledger.mjs
+// spells its own absences (scripts/factory/ledger.mjs:318). `seats: null` next
+// to `archived` is skimmable; a sentence is not.
+export const TEARDOWN_ABSENT_CAUSES = Object.freeze({
+  headless: 'no seat in this crew carries a pane surface — every member ran on a surface-less transport, so this sweep had nothing to probe and proved nothing; those seat processes are the descendant reclaim\'s to account for, never this tally\'s',
+  surface_unrecorded: 'at least one seat records the pane transport (or records no transport at all) yet carries no surface id, so a pane it may still own is INVISIBLE to this sweep — unmeasured, never a measured zero',
+  no_members: 'the crew record carries no members at all, so no seat could be probed and nothing about this crew\'s panes was measured — unmeasured, never a measured zero',
+})
+
+// The classifier, the sibling of usageAbsentCause (scripts/factory/ledger.mjs:327).
+export function teardownAbsentCause(crew) {
+  const members = Object.values(crew?.members || {})
+  if (members.length === 0) return TEARDOWN_ABSENT_CAUSES.no_members
+  return members.every((m) => (m?.transport || DEFAULT_TRANSPORT) !== DEFAULT_TRANSPORT)
+    ? TEARDOWN_ABSENT_CAUSES.headless
+    : TEARDOWN_ABSENT_CAUSES.surface_unrecorded
 }
 
 export class UsageError extends Error { constructor(message) { super(message); this.name = 'UsageError'; this.usage = true } }

@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -36,6 +36,7 @@ import {
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
+import { scratchDir } from '../test/helpers.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
@@ -3009,8 +3010,66 @@ test('teardownCore reports no pane sweep for a crew with no pane seat', () => {
       io: { log: (row) => journal.push(row), emit: () => true },
     })
     assert.equal(record.seats, null)
+    assert.equal(record.seats_absent, TEARDOWN_ABSENT_CAUSES.headless)
+    const absent = journal.filter((row) => row.event === 'seat-teardown-absent')
+    assert.equal(absent.length, 1)
+    assert.equal(absent[0].cause, TEARDOWN_ABSENT_CAUSES.headless)
     assert.equal(journal.some((row) => row.event === 'seat-teardown-sweep'), false)
   } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('teardownAbsentCause discriminates the three absences', () => {
+  const headless = teardownAbsentCause({ members: { builder: { surface_id: null, transport: 'headless-rpc' } } })
+  const surfaceUnrecorded = teardownAbsentCause({ members: { builder: { surface_id: null, transport: 'pane' } } })
+  const transportUnrecorded = teardownAbsentCause({ members: { builder: { surface_id: null } } })
+  const noMembers = teardownAbsentCause({ members: {} })
+  assert.equal(headless, TEARDOWN_ABSENT_CAUSES.headless)
+  assert.equal(surfaceUnrecorded, TEARDOWN_ABSENT_CAUSES.surface_unrecorded)
+  assert.equal(transportUnrecorded, TEARDOWN_ABSENT_CAUSES.surface_unrecorded)
+  assert.equal(noMembers, TEARDOWN_ABSENT_CAUSES.no_members)
+  assert.equal(new Set(Object.values(TEARDOWN_ABSENT_CAUSES)).size, 3)
+})
+
+test('teardownCmd exits TEARDOWN_EXIT_SEATLESS when it measured no seat', async () => {
+  const home = scratchDir('crew-teardown-seatless-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-teardown-seatless-checkout-')
+  const task = 'teardown-seatless'
+  const dir = testCrewDir(home, checkout, task)
+  mkdirSync(join(dir, 'returns'), { recursive: true })
+  mkdirSync(join(dir, 'task'), { recursive: true })
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({
+    schema_version: 3, task, checkout, workspace_id: null, roles: ['builder'],
+    members: { builder: { surface_id: null, pane_id: null, transport: 'headless-rpc' } },
+    task_return: join(dir, 'returns', 'task.json'),
+  }, null, 2))
+  const dbPath = join(home, 'ledger.db')
+  const previousDb = process.env.DEVTEAM_LEDGER_DB
+  const savedExit = process.exitCode
+  const stdoutWrite = process.stdout.write
+  let output = ''
+  try {
+    process.env.DEVTEAM_LEDGER_DB = dbPath
+    process.exitCode = undefined
+    process.stdout.write = (chunk) => { output += String(chunk); return true }
+    let record
+    await withHome(home, () => {
+      record = teardownCmd({ task, checkout }, {
+        closeSurface: () => true, closeWorkspace: () => true, probe: () => { throw new Error('surface-less seat must not be probed') }, sleep: () => {},
+      })
+    })
+    const payload = JSON.parse(output.trim())
+    assert.equal(record.seats, null)
+    assert.equal(record.seats_absent, TEARDOWN_ABSENT_CAUSES.headless)
+    assert.equal(payload.seats, null)
+    assert.equal(typeof payload.seats_absent, 'string')
+    assert.ok(payload.seats_absent.length > 0)
+    assert.equal(process.exitCode, TEARDOWN_EXIT_SEATLESS)
+  } finally {
+    process.stdout.write = stdoutWrite
+    process.exitCode = savedExit
+    if (previousDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = previousDb
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('teardownCmd records every pane seat in the ledger and exits 0', async () => {
@@ -3030,16 +3089,22 @@ test('teardownCmd records every pane seat in the ledger and exits 0', async () =
   const dbPath = join(home, 'ledger.db')
   const previousDb = process.env.DEVTEAM_LEDGER_DB
   const savedExit = process.exitCode
+  const stdoutWrite = process.stdout.write
+  let output = ''
   try {
     process.env.DEVTEAM_LEDGER_DB = dbPath
     process.exitCode = undefined
+    process.stdout.write = (chunk) => { output += String(chunk); return true }
     let record
     await withHome(home, () => {
       record = teardownCmd({ task, checkout }, {
         closeSurface: () => true, closeWorkspace: () => true, probe: () => false, sleep: () => {},
       })
     })
+    const payload = JSON.parse(output.trim())
     assert.deepEqual({ seats: record.seats.seats, proven: record.seats.proven, recorded: record.seats.recorded }, { seats: 2, proven: 2, recorded: 2 })
+    assert.equal(record.seats_absent, null)
+    assert.equal(payload.seats_absent, null)
     assert.equal(process.exitCode, undefined)
     assert.equal(existsSync(record.archived), true)
     const sidecar = JSON.parse(readFileSync(join(record.archived, 'ledger', 'run.json'), 'utf8'))
@@ -3051,6 +3116,7 @@ test('teardownCmd records every pane seat in the ledger and exits 0', async () =
       assert.ok(rows.every((row) => row.adw_id === sidecar.adw_id && row.outcome === 'proven' && row.transport === 'pane'))
     }
   } finally {
+    process.stdout.write = stdoutWrite
     process.exitCode = savedExit
     if (previousDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = previousDb
     rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
@@ -3094,7 +3160,8 @@ test('teardownCmd exits non-zero without proof of death or without a positive re
         assert.equal(record.seats.recorded, 0)
         assert.equal(record.seats.record_failed, 2)
       } else assert.equal(record.seats.recorded, 2)
-      assert.equal(process.exitCode, 1)
+      assert.equal(process.exitCode, TEARDOWN_EXIT_UNPROVEN)
+      assert.notEqual(process.exitCode, TEARDOWN_EXIT_SEATLESS)
     } finally {
       process.exitCode = savedExit
       if (previousDb === undefined) delete process.env.DEVTEAM_LEDGER_DB; else process.env.DEVTEAM_LEDGER_DB = previousDb

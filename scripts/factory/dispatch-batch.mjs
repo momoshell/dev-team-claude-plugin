@@ -33,6 +33,8 @@ const RUN_FAILED = 'run-failed'
 const DEPENDENCY_CYCLE = 'dependency-cycle'
 const DEPENDENCY_UNKNOWN = 'dependency-unknown'
 const DEPENDENT_BASE_STALE = 'dependent-base-stale'
+const ANCHOR_PIN_UNFENCED = 'anchor-pin-unfenced'
+const PLAN_SCOPE_OUTSIDE_FENCE = 'plan-scope-outside-fence'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -55,7 +57,15 @@ export const REFUSAL_REASONS = Object.freeze([
   DEPENDENCY_CYCLE,
   DEPENDENCY_UNKNOWN,
   DEPENDENT_BASE_STALE,
+  ANCHOR_PIN_UNFENCED,
+  PLAN_SCOPE_OUTSIDE_FENCE,
 ])
+
+// The scan reads anchors.json manifests, which are machine-readable. Prose file:line
+// citations in .md files are not, and a heuristic over prose would refuse every doc that
+// mentions a line number. The check therefore states what it cannot see rather than
+// implying a completeness it does not have.
+export const ANCHOR_BLIND_SPOT = 'BLIND SPOT: prose file:line citations in .md files are not discoverable from anchors.json and this check does not find them; look for them by hand before re-dispatching this lane'
 
 // These two names belong to the compiler. The batch dispatcher parses its
 // refusal text but deliberately does not add compiler names to its own list.
@@ -309,7 +319,58 @@ export function relatedLanes(graph, a, b) {
   return Boolean(graph.ancestors.get(a)?.has(b) || graph.ancestors.get(b)?.has(a))
 }
 
-export function checkFences({ fences, lanes, graph } = {}) {
+// Every skills/<name>/anchors.json in ONE pass, keyed by the file each pin targets. A
+// lane loop must never re-read a manifest: the scan is O(manifests), not O(lanes x files).
+export function collectAnchorPins({ checkout, deps } = {}) {
+  const d = normalDeps(deps)
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const byFile = new Map()
+  const manifests = []
+  let names
+  try { names = d.readdirSync(join(root, 'skills')) } catch { return { byFile, manifests } }
+  if (!Array.isArray(names)) return { byFile, manifests }
+  for (const raw of names) {
+    const name = typeof raw === 'string' ? raw : raw?.name
+    if (typeof name !== 'string') continue
+    const manifest = `skills/${name}/anchors.json`
+    const path = join(root, manifest)
+    let parsed
+    try {
+      if (!d.existsSync(path)) continue
+      parsed = JSON.parse(d.readFileSync(path, 'utf8'))
+    } catch { continue }
+    manifests.push(manifest)
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue
+    for (const key of Object.keys(parsed)) {
+      const at = key.lastIndexOf(':')
+      if (at < 1 || !/^\d+$/.test(key.slice(at + 1))) continue
+      const file = normaliseRepoPath(key.slice(0, at))
+      if (!byFile.has(file)) byFile.set(file, new Map())
+      const perManifest = byFile.get(file)
+      if (!perManifest.has(manifest)) perManifest.set(manifest, [])
+      perManifest.get(manifest).push(key)
+    }
+  }
+  return { byFile, manifests }
+}
+
+export function anchorPinsOutsideFence({ surface, fenceFiles, pins } = {}) {
+  const inFence = scopeMatcher(Array.isArray(fenceFiles) ? fenceFiles : [])
+  const matchesSurface = scopeMatcher(Array.isArray(surface) ? surface : [])
+  const byFile = pins && pins.byFile instanceof Map ? pins.byFile : new Map()
+  const found = []
+  for (const [file, perManifest] of byFile) {
+    if (!matchesSurface(file)) continue
+    for (const [manifest, keys] of perManifest) {
+      if (inFence(manifest)) continue
+      found.push({ file, manifest, keys: [...keys].sort() })
+    }
+  }
+  return found
+}
+
+export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
+  const d = normalDeps(deps)
   const entries = fenceEntriesOf(fences).map(normaliseFence)
   const batchLanes = Array.isArray(lanes) ? lanes : []
   const byLane = new Map(entries.map((entry) => [entry.lane, entry]))
@@ -336,6 +397,7 @@ export function checkFences({ fences, lanes, graph } = {}) {
     }
   }
 
+  const pins = collectAnchorPins({ checkout, deps: d })
   const perLane = {}
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
@@ -348,6 +410,16 @@ export function checkFences({ fences, lanes, graph } = {}) {
     if (!ownSurface.every(matchOwn)) {
       const outside = ownSurface.filter((path) => !matchOwn(path))
       refuse(`lane ${name} where path(s) outside own fence: ${outside.join(', ')}`, WHERE_OUTSIDE_FENCE)
+    }
+
+    // A pin outside the fence is a scope a lane cannot satisfy: any insertion above a
+    // pinned line shifts it, and the lane cannot edit the manifest that would re-anchor
+    // it. b217-treefingerprint escalated at build:r3 for exactly this; b220, the same
+    // work with the two anchors.json added, landed first time.
+    const unfencedPins = anchorPinsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, pins })
+    if (unfencedPins.length > 0) {
+      const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
+      refuse(`lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; add the pinning manifest to this lane's fence, or narrow the lane. ${ANCHOR_BLIND_SPOT}`, ANCHOR_PIN_UNFENCED)
     }
 
     const siblings = []
@@ -379,6 +451,23 @@ export function checkFences({ fences, lanes, graph } = {}) {
     }
   }
   return { perLane }
+}
+
+// A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a
+// planner could declare a write surface wider than the brief asked for and collide with
+// nothing only by luck. The lane's own fence is the authority the driver's plan-accept
+// never consulted (crew/drive.mjs:2419 checks siblings only). Refuse and NAME the paths:
+// silently narrowing a declaration is how a fence stops meaning anything.
+export function checkPlanScope({ lane, declared, files } = {}) {
+  const name = laneNameOf(lane)
+  const fenceFiles = (Array.isArray(files) ? files : []).map(normaliseRepoPath)
+  const inFence = scopeMatcher(fenceFiles)
+  const paths = (Array.isArray(declared) ? declared : []).map(normaliseRepoPath)
+  const outside = paths.filter((path) => !inFence(path))
+  if (outside.length > 0) {
+    refuse(`lane ${name} plan declares files_in_scope outside the lane fence: ${outside.join(', ')}; the lane fence is ${fenceFiles.join(', ') || 'empty'}`, PLAN_SCOPE_OUTSIDE_FENCE)
+  }
+  return { lane: name, declared: paths, fence: fenceFiles }
 }
 
 export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
@@ -839,7 +928,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   const transport = resolveTransport({ runFlags })
   const lanes = readBatch({ batchDir, deps: d })
   const { waves, graph } = planWaves({ lanes })
-  const fenceReport = checkFences({ fences, lanes, graph })
+  const fenceReport = checkFences({ fences, lanes, graph, checkout, deps: d })
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
   // branches, so an unsupported --variant reached here after the probe and was
   // reported as `branch-taken` when the real cause was an invalid run option

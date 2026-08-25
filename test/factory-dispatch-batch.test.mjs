@@ -9,11 +9,14 @@ import {
   BOOT_TRANSPORT,
   PANE_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
+  ANCHOR_BLIND_SPOT,
   REFUSAL_REASONS,
   REQUEST_SUFFIX,
   STALE_READ_ACK,
   checkArrival,
   checkFences,
+  checkPlanScope,
+  collectAnchorPins,
   crewJsonPath,
   compileLane,
   dispatchBatch,
@@ -39,6 +42,12 @@ function put(path, content) {
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, content)
   return path
+}
+
+function anchorFixtures(checkout, manifests) {
+  for (const [skill, pins] of Object.entries(manifests)) {
+    put(join(checkout, 'skills', skill, 'anchors.json'), typeof pins === 'string' ? pins : JSON.stringify(pins))
+  }
 }
 
 function request(ask = 'measure one owned source behavior', where = ['crew/owned.mjs']) {
@@ -264,6 +273,136 @@ test('checkFences pins own coverage, register membership, and scope entry shape'
     fences: [{ lane: 'lane-a', files: 'crew/owned.mjs' }],
     lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'] }],
   }), 'scope-entry-invalid')
+})
+
+test('an anchor pin outside the lane fence refuses and names the manifest and its line keys', () => {
+  const checkout = join(root, 'anchor-unfenced-checkout')
+  anchorFixtures(checkout, {
+    devops: {
+      'crew/crew.mjs:664': 'export function reseat(',
+      'crew/crew.mjs:1881': 'const KEEP_ON_DONE = false',
+    },
+  })
+  assert.throws(() => checkFences({
+    fences: [entry('lane-a', ['crew/crew.mjs', 'crew/crew.test.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/crew.mjs'] }],
+    checkout,
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'anchor-pin-unfenced'
+    && error.message.includes('crew/crew.mjs')
+    && error.message.includes('skills/devops/anchors.json')
+    && error.message.includes('crew/crew.mjs:664')
+    && error.message.includes('crew/crew.mjs:1881')
+    && error.message.includes(ANCHOR_BLIND_SPOT))
+})
+
+test('a directory write surface catches a pinned descendant outside its fence', () => {
+  const checkout = join(root, 'anchor-directory-checkout')
+  anchorFixtures(checkout, {
+    devops: { 'crew/subdir/owned.mjs:12': 'export const OWNED = 1' },
+  })
+  assert.throws(() => checkFences({
+    fences: [entry('lane-a', ['crew/subdir/'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/subdir/'] }],
+    checkout,
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'anchor-pin-unfenced'
+    && error.message.includes('crew/subdir/owned.mjs')
+    && error.message.includes('skills/devops/anchors.json'))
+})
+
+test("b220's corrected fence owns both pinning manifests and passes silently", () => {
+  const checkout = join(root, 'anchor-fenced-checkout')
+  anchorFixtures(checkout, {
+    'crew-recovery': { 'crew/crew.mjs:664': 'export function reseat(' },
+    devops: {
+      'crew/crew.mjs:1881': 'const KEEP_ON_DONE = false',
+      'crew/crew.mjs:2133': 'function paneCommand(role',
+    },
+  })
+  const files = [
+    'crew/crew.mjs',
+    'crew/crew.test.mjs',
+    'skills/crew-recovery/anchors.json',
+    'skills/crew-recovery/references/closeout.md',
+    'skills/devops/anchors.json',
+    'skills/devops/SKILL.md',
+    'skills/devops/references/worktrees.md',
+    'skills/devops/references/processes.md',
+    'crew/tree-fingerprint.mjs',
+    'crew/tree-fingerprint.test.mjs',
+  ]
+  const report = checkFences({
+    fences: [entry('b220-treefingerprint', files)],
+    lanes: [{
+      lane: 'b220-treefingerprint',
+      where: files.slice(0, 8),
+      creates: files.slice(8),
+    }],
+    checkout,
+  })
+  assert.deepEqual(report.perLane['b220-treefingerprint'].creates, files.slice(8))
+})
+
+test('a batch touching no pinned file passes and reads each manifest once', () => {
+  const checkout = join(root, 'anchor-count-checkout')
+  anchorFixtures(checkout, {
+    'backend-node': { 'crew/arms.mjs:12': 'export function arm(' },
+    'crew-dispatch': { 'scripts/factory/dispatch-batch.mjs:18': "TRANSPORT_CONFLICT = 'transport-conflict'" },
+    'crew-recovery': { 'crew/crew.mjs:664': 'export function reseat(' },
+    devops: { 'crew/crew.mjs:1881': 'const KEEP_ON_DONE = false' },
+  })
+  let reads = 0
+  const deps = {
+    readFileSync: (path, encoding) => {
+      if (String(path).endsWith('anchors.json')) reads += 1
+      return readFileSync(path, encoding)
+    },
+  }
+  const lanes = ['lane-a', 'lane-b', 'lane-c']
+  assert.doesNotThrow(() => checkFences({
+    fences: lanes.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`])),
+    lanes: lanes.map((lane) => ({ lane, where: [`crew/owned-${lane}.mjs`] })),
+    checkout,
+    deps,
+  }))
+  assert.equal(reads, 4)
+})
+
+test('a plan declaring a path outside the lane fence refuses and names only the offender', () => {
+  assert.throws(() => checkPlanScope({
+    lane: 'lane-a',
+    declared: ['crew/crew.mjs', 'skills/other/anchors.json'],
+    files: ['crew/crew.mjs'],
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'plan-scope-outside-fence'
+    && error.message.includes('skills/other/anchors.json'))
+})
+
+test('a strict subset and a created path inside the fence both pass', () => {
+  assert.doesNotThrow(() => checkPlanScope({
+    lane: 'lane-a',
+    declared: ['crew/crew.mjs'],
+    files: ['crew/crew.mjs', 'crew/crew.test.mjs'],
+  }))
+  assert.doesNotThrow(() => checkPlanScope({
+    lane: 'lane-a',
+    declared: ['crew/new/file.mjs', './crew/new/other.mjs'],
+    files: ['crew/new/'],
+  }))
+})
+
+test('collectAnchorPins skips an unreadable or malformed manifest', () => {
+  const checkout = join(root, 'anchor-malformed-checkout')
+  anchorFixtures(checkout, {
+    valid: { 'crew/owned.mjs:12': 'export const OWNED = 1' },
+    malformed: 'not json',
+  })
+  assert.doesNotThrow(() => {
+    const pins = collectAnchorPins({ checkout })
+    assert.deepEqual([...pins.byFile.keys()], ['crew/owned.mjs'])
+    assert.deepEqual(pins.manifests, ['skills/valid/anchors.json'])
+  })
 })
 
 test('created paths are covered by the own fence, cannot leak to a sibling, and are reported per lane', () => {
@@ -685,6 +824,35 @@ test('--dry-run plans branch probes but creates no worktree', () => {
   })
   assert.equal(report.dryRun, true)
   assert.equal(spawned.some(({ args }) => args.includes('worktree')), false)
+})
+
+test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', () => {
+  const checkout = gitFixture()
+  const batch = join(checkout, 'pinned-dry-run-batch')
+  mkdirSync(batch)
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure pinned dry-run behavior', ['src/owned.mjs'])))
+  const fences = [entry('lane-a', ['src/owned.mjs'])]
+  const deps = { existsSync: () => false, spawn: () => ({ status: 1 }), log: () => {} }
+  const withoutManifest = dispatchBatch({
+    batchDir: batch,
+    fences,
+    checkout,
+    parentDir: root,
+    outDir: join(root, 'pinned-dry-run-out'),
+    runFlags: { 'dry-run': true },
+    deps,
+  })
+  anchorFixtures(checkout, { devops: { 'crew/other.mjs:12': 'export const OTHER = 1' } })
+  const withManifest = dispatchBatch({
+    batchDir: batch,
+    fences,
+    checkout,
+    parentDir: root,
+    outDir: join(root, 'pinned-dry-run-out'),
+    runFlags: { 'dry-run': true },
+    deps,
+  })
+  assert.equal(JSON.stringify(withManifest.plans), JSON.stringify(withoutManifest.plans))
 })
 
 test('normalDeps supplies the house-style dependency surface', () => {

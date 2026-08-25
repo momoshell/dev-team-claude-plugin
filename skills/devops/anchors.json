@@ -1,8 +1,6 @@
 {
   "crew/arms.mjs:650": "spawnRefusal('worktree-exists'",
   "crew/arms.mjs:661": "worktree', 'add', '-b'",
-  "crew/crew.mjs:1881": "done       -> auto-teardown",
-  "crew/crew.mjs:664": "unknown boot descendant refusal",
   "crew/daemon.mjs:114": "export const DAEMON_COMMANDS = Object.freeze",
   "crew/daemon.mjs:1271": "socket.on('error', () => finish(false))",
   "crew/daemon.mjs:385": "options.root || join(homedir(), '.crew', 'daemon')",
@@ -35,5 +33,7 @@
   "skills/qa-test-writing/references/tooling.md:65": "detached worktree **shares the object store and must be removed**",
   "skills/qa-test-writing/references/tooling.md:89": "compound `cd` that silently changed what a relative path meant",
   "tasks/cmux-mode/spike-findings.md:58": "Ancestry chain observed:",
-  "crew/seat-io.mjs:1934": "common git dir from every linked worktree"
+  "crew/seat-io.mjs:1934": "common git dir from every linked worktree",
+  "crew/crew.mjs:1882": "done       -> auto-teardown",
+  "crew/crew.mjs:665": "unknown boot descendant refusal"
 }

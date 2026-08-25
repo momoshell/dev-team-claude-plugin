@@ -19,9 +19,12 @@ import {
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
-  advisorManifest, assertAdvisorManifest,
+  advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
 } from './crew.mjs'
-import { runChild, resolveValidationLane as resolveChildValidationLane } from './child.mjs'
+import {
+  runChild, resolveValidationLane as resolveChildValidationLane,
+  packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH,
+} from './child.mjs'
 import { daemon } from './daemon.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
@@ -4278,27 +4281,75 @@ test('a degraded emitter is inert for the adapter and drive', () => {
   }
 })
 
-test('package, crew, child, and CI test lanes stay identical and bounded', () => {
+test('every suite surface derives from package.json, the one owner', () => {
   const packagePath = new URL('../package.json', import.meta.url)
+  const packageFile = fileURLToPath(packagePath)
   const crewPath = new URL('./crew.mjs', import.meta.url)
   const childPath = new URL('./child.mjs', import.meta.url)
   const workflowPath = new URL('../.github/workflows/test.yml', import.meta.url)
   const packageLane = JSON.parse(readFileSync(packagePath, 'utf8')).scripts?.test
-  const crewMatch = readFileSync(crewPath, 'utf8').match(/suite:\s*args\.suite\s*\|\|\s*'([^']*)'/)
-  const childMatch = readFileSync(childPath, 'utf8').match(/suite:\s*spec\.suite\s*\|\|\s*'([^']*)'/)
-  const workflowRuns = [...readFileSync(workflowPath, 'utf8').matchAll(/^\s*-\s*run:\s*(.+?)\s*$/gm)].map((match) => match[1])
-  const agreement = 'package.json scripts.test, crew/crew.mjs default, crew/child.mjs default, and .github/workflows/test.yml CI lane must be changed together'
+  const OWNER_PROBE = 'node --test --test-timeout=30000 "**/b214-owner-probe.test.mjs"'
+  const ownerDir = scratchDir('crew-suite-owner-')
+  const probePath = join(ownerDir, 'package.json')
+  const refusalPath = join(ownerDir, 'refusal.json')
+  const absentPath = join(ownerDir, 'absent.json')
+  const resolvers = [packageSuite, childPackageSuite]
+  const assertRefusal = (resolver, path) => {
+    assert.throws(() => resolver({ path }), (err) => {
+      assert.equal(err.reason, SUITE_REFUSAL)
+      assert.match(err.message, /\[suite-unreadable\]/)
+      return true
+    })
+  }
+  try {
+    writeFileSync(probePath, `  ${JSON.stringify({ scripts: { test: OWNER_PROBE } })}  `)
+    for (const resolver of resolvers) {
+      assert.equal(resolver(), packageLane)
+      assert.equal(resolver({ path: probePath }), OWNER_PROBE)
+    }
 
-  assert.ok(crewMatch, `expected the crew.mjs default suite in ${crewPath}`)
-  assert.ok(childMatch, `expected the child.mjs default suite in ${childPath}`)
-  assert.equal(crewMatch[1], packageLane, agreement)
-  assert.equal(childMatch[1], packageLane, agreement)
+    for (const value of [
+      {}, { scripts: {} }, { scripts: { test: '   ' } }, { scripts: { test: 7 } }, '{not json',
+    ]) {
+      writeFileSync(refusalPath, typeof value === 'string' ? value : JSON.stringify(value))
+      for (const resolver of resolvers) assertRefusal(resolver, refusalPath)
+    }
+    for (const resolver of resolvers) assertRefusal(resolver, absentPath)
+  } finally { rmSync(ownerDir, { recursive: true, force: true }) }
+
+  assert.equal(SUITE_OWNER_PATH, packageFile)
+  assert.equal(CHILD_SUITE_OWNER_PATH, packageFile)
+
+  for (const [name, path] of [['crew.mjs', crewPath], ['child.mjs', childPath]]) {
+    const matchingLines = readFileSync(path, 'utf8').split('\n').flatMap((line, index) => /node\s+--test/.test(line) ? [`${index + 1}:${line}`] : [])
+    assert.deepEqual(matchingLines, [], `${name} still carries suite-command literals at ${matchingLines.join(', ')}`)
+  }
+  const crewSource = readFileSync(crewPath, 'utf8')
+  const childSource = readFileSync(childPath, 'utf8')
+  assert.match(crewSource, /suite:\s*args\.suite\s*\|\|\s*packageSuite\(\)/)
+  assert.match(childSource, /ctx\.suite\s*=\s*spec\.suite\s*\|\|\s*packageSuite\(\)/)
+
+  const workflowRuns = [...readFileSync(workflowPath, 'utf8').matchAll(/^\s*-\s*run:\s*(.+?)\s*$/gm)].map((match) => match[1])
   assert.ok(workflowRuns.some((run) => /^npm (run )?test$/.test(run)), `expected npm test in ${workflowPath}`)
   assert.ok(!workflowRuns.some((run) => /^node\s+--test\b/.test(run)), `CI must not invoke raw node --test in ${workflowPath}`)
 
   const timeout = packageLane?.match(/--test-timeout=(\d+)/)
   assert.ok(timeout, `expected --test-timeout in package.json scripts.test at ${packagePath}`)
   assert.ok(Number(timeout[1]) >= 30000, `expected package.json scripts.test timeout >= 30000ms at ${packagePath}`)
+})
+
+test("a child run with no suite in its spec drives the owner's command", () => {
+  const f = childSignalFixture()
+  let seen = null
+  try {
+    runChild({ crew_dir: f.crewDir, task: 'child-signal', brief_file: f.brief, checkout: f.root, ledger_db: f.ledger }, {
+      preflight: false,
+      seatIo: () => ({ log: () => {} }),
+      driveTask: (ctx) => { seen = ctx; return { status: 'done', summary: '', artifacts: [], details: {} } },
+      env: { DEVTEAM_LEDGER_DB: f.ledger },
+    })
+    assert.equal(seen.suite, JSON.parse(readFileSync(new URL('../package.json', import.meta.url))).scripts.test)
+  } finally { rmSync(f.root, { recursive: true, force: true }) }
 })
 
 // --- capability register ----------------------------------------------------

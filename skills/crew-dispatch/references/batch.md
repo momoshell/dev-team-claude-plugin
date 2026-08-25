@@ -42,7 +42,7 @@ one.
 `scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
 over a batch directory of request JSONs and a fence register, refusing the
 batch at the first failed check rather than proceeding
-(`scripts/factory/dispatch-batch.mjs:29`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+(`scripts/factory/dispatch-batch.mjs:30`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
@@ -63,12 +63,24 @@ indistinguishable from an intent. A created path is still part of the lane's
 write surface: it must sit inside the lane's own fence (**`where-outside-fence`**)
 and outside every sibling's (**`sibling-leak`**).
 
-## A dispatched batch is headless by design
+## A dispatched batch lets the caller choose its transport
 
-Boot passes `--headless-all` for every lane, so a dispatched lane has
-`workspace_id` null and no panes — there is no workspace to open, and an
-operator who goes looking for one is hunting for something that was never
-created. This is the factory mode, not a fault, so the closing output states
-the transport it booted (`scripts/factory/dispatch-batch.mjs:67`,
-`BOOT_TRANSPORT = 'headless-all'`). Follow a lane by its crew dir, journal and
-run log.
+The transport is the caller's choice. **headless is the software-factory mode and the DEFAULT**,
+so an unflagged batch is unchanged and behaves exactly as before. The two
+transport names and the refusal are pinned in the dispatcher:
+`BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
+`TRANSPORT_CONFLICT = 'transport-conflict'`
+(`scripts/factory/dispatch-batch.mjs:73`,
+`scripts/factory/dispatch-batch.mjs:74`,
+`scripts/factory/dispatch-batch.mjs:18`).
+
+`--headless-all` explicitly selects the factory transport. `--panes` selects
+pane mode by the ABSENCE of `--headless-all`, because `crew.mjs boot` knows no
+`--panes` flag. Both flags together refuse `transport-conflict` rather than
+picking silently. The pane mode exists for the interval in which a running
+lane has no other surface.
+
+A pane lane is verified by the `workspace_id` boot RETURNED, not by argv. The
+closing line names each returned workspace, so an operator can go to it;
+headless output instead says `workspace_id is null` and directs the operator
+to the crew dir, journal and run log.

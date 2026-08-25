@@ -15,6 +15,7 @@ import { TIER_NAMES, gatherFences, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
+const TRANSPORT_CONFLICT = 'transport-conflict'
 const LANE_UNFENCED = 'lane-unfenced'
 const SCOPE_ENTRY_INVALID = 'scope-entry-invalid'
 const WHERE_OUTSIDE_FENCE = 'where-outside-fence'
@@ -33,6 +34,7 @@ const RUN_FAILED = 'run-failed'
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
   BATCH_UNREADABLE,
+  TRANSPORT_CONFLICT,
   LANE_UNFENCED,
   SCOPE_ENTRY_INVALID,
   WHERE_OUTSIDE_FENCE,
@@ -60,11 +62,16 @@ export const REQUEST_SUFFIX = '.request.json'
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
 export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier'])
-// The transport a dispatched batch boots. Headless is the software-factory
-// mode, so this is the correct default — but it means no cmux workspace and
-// no panes exist, and the closing output has to SAY so. One constant, so the
-// flag boot passes and the transport the output names cannot drift apart.
+// The transports a dispatched batch can boot. Headless is the software-factory
+// mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
+// before this flag existed. #617 made the transport STATED; it is choosable
+// here because the observability meant to replace panes does not exist yet, so
+// until the visualizer can monitor a live lane a pane workspace is the only
+// surface a running lane has. Both constants ARE their flag names: one string
+// for the flag boot passes, the flag the caller types, and the transport the
+// closing line names, so the three cannot drift apart.
 export const BOOT_TRANSPORT = 'headless-all'
+export const PANE_TRANSPORT = 'panes'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 
 export class BatchRefusal extends Error {
@@ -589,7 +596,19 @@ export function crewJsonPath({ checkout, lane } = {}) {
   return join(homedir(), '.crew', slug(basename(checkout)), slug(lane), 'crew.json')
 }
 
-function bootCommand({ lane, laneDir, tier, registerPath }) {
+// The transport is a CALLER's choice with headless as the default, so both
+// flags at once is a NAMED refusal: a silent precedence is how a whole session
+// went by without anyone noticing which transport had booted (#617).
+export function resolveTransport({ runFlags = {} } = {}) {
+  const panes = runFlags[PANE_TRANSPORT] === true || runFlags[PANE_TRANSPORT] === 'true'
+  const headless = runFlags[BOOT_TRANSPORT] === true || runFlags[BOOT_TRANSPORT] === 'true'
+  if (panes && headless) {
+    refuse(`--${PANE_TRANSPORT} and --${BOOT_TRANSPORT} name different transports; pass exactly one`, TRANSPORT_CONFLICT)
+  }
+  return panes ? PANE_TRANSPORT : BOOT_TRANSPORT
+}
+
+function bootCommand({ lane, laneDir, tier, registerPath, transport }) {
   return {
     file: 'node',
     args: [
@@ -599,7 +618,10 @@ function bootCommand({ lane, laneDir, tier, registerPath }) {
       '--tier', tier,
       '--fences', registerPath,
       '--lane', lane,
-      '--' + BOOT_TRANSPORT,
+      // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
+      // a pane seat is what boot produces WITHOUT --headless-all, so the pane
+      // transport is the ABSENCE of this flag, never a flag of its own.
+      ...(transport === BOOT_TRANSPORT ? ['--' + BOOT_TRANSPORT] : []),
     ],
     cwd: laneDir,
   }
@@ -656,6 +678,7 @@ function runCommand({ lane, laneDir, briefPath, files, variant, keep, runFlags =
 
 export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, deps } = {}) {
   const d = normalDeps(deps)
+  const transport = resolveTransport({ runFlags })
   const lanes = readBatch({ batchDir, deps: d })
   const fenceReport = checkFences({ fences, lanes })
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
@@ -737,7 +760,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   const arrivals = []
   for (const item of settled) {
     let boot
-    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath })) } catch (err) {
+    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport })) } catch (err) {
       refuse(`crew boot failed for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
     }
     if (!boot || boot.status !== 0) {
@@ -748,8 +771,16 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
       refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, FENCE_NOT_ARRIVED)
     }
+    // A pane boot's proof is what boot RETURNED, not the argv it was given:
+    // crew.mjs writes workspace_id null whenever no workspace was created
+    // (crew/crew.mjs:1626), and a --panes lane with a null workspace is exactly
+    // the silent degradation this flag exists to remove.
+    const workspaceId = typeof crew.workspace_id === 'string' && crew.workspace_id.trim() ? crew.workspace_id : null
+    if (transport === PANE_TRANSPORT && !workspaceId) {
+      refuse(`crew boot under --${PANE_TRANSPORT} produced no workspace for ${item.lane}: crew.json workspace_id is ${JSON.stringify(crew.workspace_id ?? null)}`, BOOT_FAILED)
+    }
     const arrival = checkArrival({ crew, lane: item.lane, batchTotal: lanes.length })
-    arrivals.push({ ...item, crewPath: path, arrival })
+    arrivals.push({ ...item, crewPath: path, arrival, workspaceId })
   }
 
   const runs = []
@@ -781,20 +812,23 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     }
     const watchArgs = ['scripts/factory/crew-watch.mjs', item.lane, '--follow']
     d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} command=node ${watchArgs.join(' ')}`)
-    runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root } })
+    runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId })
   }
 
   // Keeping the workspaces is a CHOICE, so the dispatcher states it and names
   // the command that undoes it. crew.mjs self-tears-down only on a done run
   // without --keep (crew/crew.mjs:1888); an escalated lane is kept either way.
-  d.log(`dispatch-batch: transport=${BOOT_TRANSPORT} — every seat booted headless, so this batch created no cmux workspace and no panes (workspace_id is null); headless is the software-factory mode. Follow a lane by the crew dir and journal above, never by a workspace`)
+  const workspaces = runs.map((item) => `${item.lane}=${item.workspaceId}`).join(', ')
+  d.log(transport === PANE_TRANSPORT
+    ? `dispatch-batch: transport=${PANE_TRANSPORT} — every seat booted into a cmux pane, so each lane HAS a workspace to open: ${workspaces}. Headless is the software-factory mode and the default; panes exist for the interval in which a running lane has no other surface`
+    : `dispatch-batch: transport=${BOOT_TRANSPORT} — every seat booted headless, so this batch created no cmux workspace and no panes (workspace_id is null); headless is the software-factory mode. Follow a lane by the crew dir and journal above, never by a workspace`)
   d.log(keep
     ? 'dispatch-batch: workspaces keep=true — every lane workspace and crew dir is kept for inspection; pass --no-keep to let a lane that finishes done tear itself down'
     : 'dispatch-batch: workspaces keep=false — a lane that finishes done tears itself down and archives its crew dir; an escalated lane is kept either way')
   for (const item of runs) {
     d.log(`dispatch-batch: teardown lane=${item.lane} command=node crew/crew.mjs teardown --task ${item.lane} --checkout ${item.laneDir}`)
   }
-  return { lanes: runs, plans, registerPath, outDir: outputDir, keep }
+  return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport }
 }
 
 export function parseCliArgs(argv) {
@@ -806,7 +840,7 @@ export function parseCliArgs(argv) {
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
   ])
-  const booleanFlags = new Set(['dry-run', 'force', 'no-keep'])
+  const booleanFlags = new Set(['dry-run', 'force', 'no-keep', PANE_TRANSPORT, BOOT_TRANSPORT])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (typeof argument !== 'string' || !argument.startsWith('--')) {

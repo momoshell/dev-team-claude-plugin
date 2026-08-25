@@ -23,11 +23,15 @@ export const LIMITS = Object.freeze({
   plan_rounds: 2, // planner attempts (initial + bounces)
   build_rounds: 3, // builder attempts across lane/scope/review bounces
   review_rounds: 2, // reviewer verdicts
-  extra_rounds: 1, // lead-granted rounds at REVIEW / PLAN-CHECK exhaustion
+  extra_rounds: 1, // lead-granted rounds PER exhaustion point (EXTRA_ROUND_POINTS); total bound = extra_rounds x EXTRA_ROUND_POINTS.length
   lead_consults: 4, // total decision consults per task
   gate_fails_to_triage: 2, // gate failures before build-vs-gate-defect triage
   gate_repairs: 1, // the gate's author may repair it at most once per task
 })
+
+// A shared counter let b209-journalchannel's measured plan-check grant starve review;
+// keep each exhaustion point on its own bound.
+const EXTRA_ROUND_POINTS = Object.freeze(['plan-check', 'review'])
 
 // --- the per-role seat wait budget ---------------------------------------------
 // The measured bases for these numbers, kept as the answer to "why these values"
@@ -792,6 +796,18 @@ export function growthLines(record) {
   return [
     '## Plan growth (evidence, never a verdict — no measurement here can fail a run)',
     `round=${record.round} plan_bytes=${record.plan_bytes} plan_delta=${record.plan_delta} gate_bytes=${record.gate_bytes} gate_delta=${record.gate_delta} combined_bytes=${record.combined_bytes} round1_combined_bytes=${record.round1_combined_bytes} files_in_scope=${record.files_in_scope_count} ratio=${record.ratio} divergent=${record.divergent}`,
+  ]
+}
+
+// The signal was measured, journalled and printed since the record existed, but
+// nothing read it back; this consumer supplies evidence only — code never decides here.
+export function divergenceConsultLines(record) {
+  if (!record || record.divergent !== true) return []
+  return [
+    '',
+    '## DIVERGENCE (ADR-030 §4 as amended at §9.3)',
+    `Plan round ${record.round} measures combined plan+gate ${record.combined_bytes} bytes against round 1's ${record.round1_combined_bytes} — ratio ${record.ratio}, at or past the ratified factor of ${GROWTH_DIVERGENCE_FACTOR}.`,
+    'A diverging plan is growing rather than converging, and the measured history is that the next round produces another wrong shape rather than a smaller one. This is EVIDENCE, not a verdict: bounce, accept and escalate all remain open and the choice is yours.',
   ]
 }
 
@@ -1964,11 +1980,15 @@ export function driveTask(ctx, io) {
   }
 
   // A lead-granted extra round at an exhaustion point that could not grant
-  // before. `limits.extra_rounds` is the bound, and it is enforced by NOT
-  // OFFERING 'bounce' once spent — an out-of-set answer already escalates
+  // before. `limits.extra_rounds` is the bound PER POINT, and it is enforced by
+  // NOT OFFERING 'bounce' once spent — an out-of-set answer already escalates
   // (askLead), so a lead that asks anyway fails toward the human.
-  const canGrant = () => S.grants.length < limits.extra_rounds
+  const canGrant = (where) => {
+    if (!EXTRA_ROUND_POINTS.includes(where)) throw new Error(`unknown extra-round point ${JSON.stringify(where)}`)
+    return S.grants.filter((g) => g.where === where).length < limits.extra_rounds
+  }
   const grant = (where, round) => {
+    if (!EXTRA_ROUND_POINTS.includes(where)) throw new Error(`unknown extra-round point ${JSON.stringify(where)}`)
     S.grants.push({ where, round })
     io.log(recordRow({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } }))
   }
@@ -2259,6 +2279,7 @@ export function driveTask(ctx, io) {
   let planEnv = null
   let planBrief = ctx.briefFile
   let extraPlanRounds = 0
+  let divergenceConsulted = false
   const planRevisionBrief = (round, check) => {
     const checkPath = check.details?.check_path || art('plan-check.md')
     return [
@@ -2363,10 +2384,26 @@ export function driveTask(ctx, io) {
       stageComplete()
       break
     }
-    if (round >= limits.plan_rounds + extraPlanRounds) {
-      const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
+    // The point of decision. Exhaustion reaches it as it always did; a round
+    // MEASURED divergent reaches it one round early, so the plan that is
+    // growing is ended by a decision instead of discovered at exhaustion. The
+    // early arrival costs no grant: rounds still remain, and the bounce is
+    // funded by them. It is ADDITIONAL to a later exhaustion consult, never a
+    // replacement for one — S.consults counts both.
+    const growth = S.growth.at(-1)
+    const diverging = growth?.round === round && growth.divergent === true
+    const divergenceReady = diverging && !divergenceConsulted
+    const exhausted = round >= limits.plan_rounds + extraPlanRounds
+    if (exhausted || divergenceReady) {
+      if (divergenceReady) divergenceConsulted = true
+      const options = !exhausted || canGrant('plan-check') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
       const c = consultLead(
-        `The plan check still says revise after ${round} round(s). Grant one more plan round, accept the latest plan anyway, or escalate?`,
+        [
+          exhausted
+            ? `The plan check still says revise after ${round} round(s). Grant one more plan round, accept the latest plan anyway, or escalate?`
+            : `The plan check says revise after ${round} round(s) and the plan is measured DIVERGING. Bounce it for another round, accept the latest plan anyway, or escalate?`,
+          ...divergenceConsultLines(diverging ? growth : null),
+        ].join('\n'),
         options, [planPath, check.details?.check_path || art('plan-check.md')],
       )
       if (c.decision === 'escalate') {
@@ -2375,8 +2412,7 @@ export function driveTask(ctx, io) {
         return escalate('plan-check', c.reason)
       }
       if (c.decision === 'bounce') {
-        grant('plan-check', round)
-        extraPlanRounds += 1
+        if (exhausted) { grant('plan-check', round); extraPlanRounds += 1 }
         const b = art(`plan-bounce-r${round}.md`)
         failureUpgrade('plan', 'planner')
         io.writeFile(b, planRevisionBrief(round, check))
@@ -3175,7 +3211,7 @@ export function driveTask(ctx, io) {
     // for a reviewer's malformed envelope.
     while (true) {
       if (reviews >= limits.review_rounds + extraReviews) {
-        const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
+        const options = canGrant('review') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
         const c = consultLead(
           acceptQuestion(`Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`),
           options, [planPath, lastReviewPath],
@@ -3251,7 +3287,7 @@ export function driveTask(ctx, io) {
       if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
       if (v === 'revise') {
         if (finalRound()) {
-          const options = canGrant() ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
+          const options = canGrant('review') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
           const c = consultLead(
             acceptQuestion(`Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`),
             options, [planPath, lastReviewPath],

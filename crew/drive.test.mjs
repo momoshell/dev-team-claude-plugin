@@ -24,7 +24,7 @@ import {
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, acceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
-  CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines,
+  CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines, divergenceConsultLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
   MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines, applyPrescriptionLines,
   VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, EXECUTIONS, WRITE_SURFACES, ENVELOPE_FIELD_KINDS,
@@ -4412,6 +4412,242 @@ test('growthRecord and growthLines use the cumulative two-times threshold and nu
   assert.match(growthLines(nulls).join('\n'), /plan_bytes=null.*gate_bytes=null.*combined_bytes=null.*ratio=null.*divergent=false/)
 })
 
+const divergentPlanScenario = (leadDecision) => {
+  const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  let io
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv({ details }),
+      'tech-lead:1': checkEnv('revise'),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
+        io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(20)
+        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': checkEnv('revise'),
+      'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'tech-lead:3': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': leadEnv(leadDecision),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  return { io, result: driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io) }
+}
+
+test('a diverging plan round reaches the deciding seat one round early', () => {
+  const { io, result } = divergentPlanScenario('escalate')
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-check')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 2)
+})
+
+test('the divergence consult names the measured ratio, not merely the fact', () => {
+  const { io } = divergentPlanScenario('escalate')
+  const decision = io.calls.writes[`${TD}/decision-1.md`]
+  assert.match(decision, /DIVERGENCE/)
+  assert.match(decision, /round 1's 20/)
+  assert.match(decision, /40 bytes/)
+  assert.match(decision, /ratio 2/)
+})
+
+test('a diverging round leaves bounce, accept and escalate all open', () => {
+  const { io } = divergentPlanScenario('escalate')
+  const decision = io.calls.writes[`${TD}/decision-1.md`]
+  for (const option of ['bounce', 'accept', 'escalate']) assert.match(decision, new RegExp(`^- ${option}$`, 'm'))
+})
+
+test('a bounce at a diverging round is funded by the rounds that remain, not by a grant', () => {
+  const { io, result } = divergentPlanScenario('bounce')
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 3)
+  assert.deepEqual(result.details.extra_rounds_granted, [])
+})
+
+const divergeThenExhaustPlanScenario = () => {
+  const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  let io
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv({ details }),
+      'tech-lead:1': checkEnv('revise'),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
+        io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(20)
+        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': checkEnv('revise'),
+      'planner:3': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(10)
+        io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(10)
+        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:3': checkEnv('revise'),
+      'planner:4': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'tech-lead:4': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  return { io, result: driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io) }
+}
+
+test('an early divergence consult precedes the exhaustion consult, it does not replace it', () => {
+  const { io, result } = divergeThenExhaustPlanScenario()
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 2)
+  assert.deepEqual(result.details.extra_rounds_granted, [{ where: 'plan-check', round: 3 }])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 4)
+})
+
+test('a round below the ratified factor surfaces nothing', () => {
+  const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  let io
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': () => {
+        io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
+        io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(19)
+        return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+      },
+      'tech-lead:2': checkEnv('revise'),
+      'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
+      'tech-lead:3': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX_TL, limits: { plan_rounds: 3 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(Object.keys(io.calls.writes).some((path) => /decision-\d+b?\.md$/.test(path)), false)
+})
+
+const persistentDivergenceScenario = () => {
+  const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
+  const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
+  let io
+  const growingPlan = () => {
+    io.calls.files[`${TD}/plan.md`] = 'x'.repeat(20)
+    io.calls.files[`${TD}/gate.mjs`] = 'x'.repeat(20)
+    return planEnv({ details: { ...details, carve_verdict: 'proceed' } })
+  }
+  io = fakeIo({
+    files,
+    envelopes: {
+      'planner:1': planEnv({ details }), 'tech-lead:1': checkEnv('revise'),
+      'planner:2': growingPlan, 'tech-lead:2': checkEnv('revise'),
+      'planner:3': growingPlan, 'tech-lead:3': checkEnv('revise'),
+      'planner:4': growingPlan, 'tech-lead:4': checkEnv('revise'),
+      'planner:5': growingPlan, 'tech-lead:5': checkEnv('revise'),
+      'planner:6': growingPlan, 'tech-lead:6': checkEnv('approve'),
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  return { io, result: driveTask({ ...CTX_TL, limits: { plan_rounds: 5 } }, io) }
+}
+
+test('a persistent divergence consults once before exhaustion and preserves its grant', () => {
+  const { io, result } = persistentDivergenceScenario()
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 2)
+  assert.deepEqual(result.details.extra_rounds_granted, [{ where: 'plan-check', round: 5 }])
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 6)
+})
+
+const bothExhaustionPointsScenario = (secondReviewLead = null) => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': planEnv(), 'planner:2': planEnv(), 'planner:3': planEnv(),
+      'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'), 'tech-lead:3': checkEnv('approve'),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv('changes-needed'),
+      'reviewer:3': reviewEnv(secondReviewLead ? 'changes-needed' : 'pass'),
+      'lead:1': leadEnv('bounce'), 'lead:2': leadEnv('bounce'), 'lead:3': leadEnv(secondReviewLead || 'bounce'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  return { io, result: driveTask(CTX_TL, io) }
+}
+
+test('a plan-check grant leaves a review-exhaustion grant available', () => {
+  const { result } = bothExhaustionPointsScenario()
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.extra_rounds_granted, [
+    { where: 'plan-check', round: 2 }, { where: 'review', round: 3 },
+  ])
+})
+
+test('the per-point bound still holds at each point', () => {
+  const { io, result } = bothExhaustionPointsScenario('bounce')
+  assert.equal(result.status, 'escalation')
+  assert.deepEqual(result.details.extra_rounds_granted, [
+    { where: 'plan-check', round: 2 }, { where: 'review', round: 3 },
+  ])
+  assert.doesNotMatch(io.calls.writes[`${TD}/decision-3.md`], /^- bounce$/m)
+})
+
+const HEALTHY_RESULT = {
+  status: 'done',
+  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | suite | commit | done',
+  artifacts: [`${TD}/plan.md`, `${TD}/review.md`, `${TD}/journal.jsonl`],
+  details: {
+    commit: 'abc1234',
+    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'],
+    files_committed: ['a.mjs', 'a.test.mjs'],
+    consults: 0,
+    dissents: [],
+    accepted_via: 'review pass',
+    escalation: null,
+    extra_rounds_granted: [],
+    growth: [{
+      round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null,
+      combined_bytes: null, round1_combined_bytes: null, files_in_scope_count: 2,
+      ratio: null, divergent: false,
+    }],
+    modifiers: [],
+    gate: null,
+  },
+}
+
+test('a run that exhausts nothing and diverges on nothing is unchanged', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX_TL, io)
+  assert.deepEqual(result, HEALTHY_RESULT)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 0)
+  assert.equal(io.calls.commits.length, 1)
+})
+
+test('divergenceConsultLines only describes a measured divergent record', () => {
+  assert.deepEqual(divergenceConsultLines(null), [])
+  assert.deepEqual(divergenceConsultLines({ divergent: false }), [])
+  assert.deepEqual(divergenceConsultLines(42), [])
+  const lines = divergenceConsultLines({ divergent: true, round: 2, combined_bytes: 40, round1_combined_bytes: 20, ratio: 2 })
+  assert.match(lines.join('\n'), /round 2/)
+  assert.match(lines.join('\n'), /40 bytes/)
+  assert.match(lines.join('\n'), /20/)
+  assert.match(lines.join('\n'), /ratio 2/)
+})
+
 test('divergent growth is evidence in both the round-2 check and revision briefs, never a verdict', () => {
   const files = { [`${TD}/plan.md`]: 'x'.repeat(10), [`${TD}/gate.mjs`]: 'x'.repeat(10) }
   const details = { ...planEnv().details, gate_path: `${TD}/gate.mjs` }
@@ -4430,6 +4666,7 @@ test('divergent growth is evidence in both the round-2 check and revision briefs
       'planner:3': planEnv({ details: { ...details, carve_verdict: 'proceed' } }),
       'tech-lead:3': checkEnv('approve'),
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+      'lead:1': leadEnv('bounce'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],

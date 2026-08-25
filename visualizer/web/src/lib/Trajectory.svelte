@@ -1,79 +1,72 @@
 <script>
-  import { buildTrajectory, focusTrajectory, projectSpan } from './spans.js'
+  import { applyRead, clearFocus, initialJournalState, journalPulse, select, setRange, setReveal, shouldRead, trajectoryView } from './live.js'
+  import { PANEL_REFRESH_MS } from './panels.js'
   let { run } = $props()
-  let payload = $state({ rows: [], channels: { record: null, operational: null }, skipped_malformed: 0, skipped_line_numbers: [], dir: null, degraded: false, error: undefined })
-  let reveal = $state(false)
-  let selected = $state(null)
-  let range = $state(null)
-  let error = $state('')
-  let dragFrom = $state(null)
+  let state = $state(initialJournalState())
+  let now = $state(Date.now())
+  let dragFrom = null
   async function load() {
     try {
       const params = new URLSearchParams({ repo_slug: run.repo_slug || '', task_slug: run.goal || '', adw_id: run.adw_id || '' })
       const response = await fetch(`/api/journal?${params}`)
       const data = await response.json()
       if (!response.ok) throw new Error(data.error || `request failed (${response.status})`)
-      payload = data
-    } catch (err) { error = err.message }
+      state = applyRead(state, { ok: true, payload: data }, Date.now())
+    } catch (err) { state = applyRead(state, { ok: false, error: err.message }, Date.now()) }
+    now = Date.now()
   }
   $effect(() => { const id = run.adw_id; if (id) void load() })
-  let operational_channel = $derived(payload.channels.operational ?? null)
-  let trajectory = $derived(buildTrajectory(payload.rows, { operational_channel, reveal }))
-  let origin = $derived(trajectory.spans.length ? Math.min(...trajectory.spans.map((span) => span.started_at)) : 0)
-  let total = $derived(Math.max(1, (trajectory.spans.length ? Math.max(...trajectory.spans.map((span) => span.ended_at ?? span.started_at)) : 0) - origin))
-  let focus = $derived(range ? focusTrajectory(trajectory, range.from, range.to) : null)
-  let focusedSpans = $derived(focus ? focus.spans : trajectory.spans)
-  let focusedRows = $derived(focus ? focus.rows : trajectory.rows)
+  // No clock of its own: App.svelte's existing anyRunning timer publishes the pulse.
+  $effect(() => journalPulse.subscribe(() => { if (shouldRead({ running: run.running })) void load() }))
+  let view = $derived(trajectoryView(state, { now, refresh_ms: run.running ? PANEL_REFRESH_MS : null }))
   // The drag reads the geometry of a RAIL, the same box the bars are laid out in,
   // so the interval the operator sees is the interval that is selected.
   function fraction(event) {
     const box = event.currentTarget.getBoundingClientRect()
     return box.width > 0 ? Math.min(1, Math.max(0, (event.clientX - box.left) / box.width)) : 0
   }
-  function down(event) { dragFrom = origin + fraction(event) * total; range = null }
+  function down(event) { dragFrom = view.origin + fraction(event) * view.total; state = setRange(state, null) }
   function up(event) {
     if (dragFrom == null) return
-    const to = origin + fraction(event) * total
-    range = { from: Math.min(dragFrom, to), to: Math.max(dragFrom, to) }
+    const to = view.origin + fraction(event) * view.total
+    state = setRange(state, { from: Math.min(dragFrom, to), to: Math.max(dragFrom, to) })
     dragFrom = null
   }
-  function clear() { range = null; selected = null }
-  function seconds(span) { return `${Math.round(span.duration_ms / 1000)}s` }
 </script>
 <section class="panel"><h2>Trajectory</h2>
-  {#if error}<p class="error">{error}</p>{/if}
-  {#if payload.degraded || payload.error}<p class="error">journal unavailable — {payload.error || 'the reader reported a degraded read'}</p>{/if}
-  {#if payload.skipped_malformed > 0}<p class="muted">{payload.skipped_malformed} malformed line(s) skipped: {payload.skipped_line_numbers.join(', ')}</p>{/if}
-  {#if trajectory.excluded_no_timestamp > 0}<p class="muted">{trajectory.excluded_no_timestamp} row(s) carry no usable timestamp and are excluded rather than dated</p>{/if}
-  {#each trajectory.anomalies as anomaly}<p class="muted">{anomaly.kind}: {anomaly.label} (expected {anomaly.expected ?? 'no open stage'})</p>{/each}
+  {#if view.freshness.stale}<p class="error">{view.freshness.label}</p>{/if}
+  <p class="muted">{view.freshness.refresh_label}</p>
+  {#if view.degraded}<p class="error">journal unavailable — {view.payload_error || 'the reader reported a degraded read'}</p>{/if}
+  {#if view.skipped_malformed > 0}<p class="muted">{view.skipped_malformed} malformed line(s) skipped: {view.skipped_line_numbers.join(', ')}</p>{/if}
+  {#if view.excluded_no_timestamp > 0}<p class="muted">{view.excluded_no_timestamp} row(s) carry no usable timestamp and are excluded rather than dated</p>{/if}
+  {#each view.anomalies as anomaly}<p class="muted">{anomaly.kind}: {anomaly.label} (expected {anomaly.expected ?? 'no open stage'})</p>{/each}
   <div class="overview">
-    {#each focusedSpans as span (span.started_index)}
-      {@const box = projectSpan(span, origin, total)}
+    {#each view.spans as span (span.started_index)}
       <div class="lane">
         <span class="name" title={span.label}>{span.label}</span>
         <span class="rail" onmousedown={down} onmouseup={up} role="presentation">
-          {#if box.marker}
-            <span class="marker" style={`left:${box.left * 100}%`}></span>
+          {#if span.box.marker}
+            <span class="marker" style={`left:${span.box.left * 100}%`}></span>
           {:else}
-            <span class="bar" style={`left:${box.left * 100}%;width:${box.width * 100}%`}></span>
+            <span class="bar" style={`left:${span.box.left * 100}%;width:${span.box.width * 100}%`}></span>
           {/if}
         </span>
-        <span class="took">{box.marker ? 'in flight' : seconds(span)}</span>
+        <span class="took">{span.took}</span>
       </div>
     {/each}
   </div>
   <div class="controls">
-    <label><input type="checkbox" bind:checked={reveal} /> reveal operational</label>
-    <span class="muted">{reveal ? `${trajectory.hidden_operational} operational row(s) revealed` : `${trajectory.hidden_operational} operational row(s) hidden`}</span>
-    {#if range}<button onclick={clear}>clear focus</button>{/if}
+    <label><input type="checkbox" checked={state.reveal} onchange={(event) => { state = setReveal(state, event.currentTarget.checked) }} /> reveal operational</label>
+    <span class="muted">{state.reveal ? `${view.hidden_operational} operational row(s) revealed` : `${view.hidden_operational} operational row(s) hidden`}</span>
+    {#if state.range}<button onclick={() => { state = clearFocus(state) }}>clear focus</button>{/if}
   </div>
   <table class="ledger"><thead><tr><th>#</th><th>event</th><th>channel</th><th>detail</th></tr></thead><tbody>
-    {#each focusedRows as row (row.index)}
-      <tr class:selected={selected === row.index} onclick={() => { selected = row.index }}><td>{row.index}</td><td>{row.event}</td><td>{row.channel ?? '—'}</td><td class="detail">{row.detail}</td></tr>
+    {#each view.rows as row (row.index)}
+      <tr class:selected={state.selected === row.index} onclick={() => { state = select(state, row.index) }}><td>{row.index}</td><td>{row.event}</td><td>{row.channel ?? '—'}</td><td class="detail">{row.detail}</td></tr>
     {/each}
   </tbody></table>
-  {#if selected != null}
-    {@const row = trajectory.rows.find((entry) => entry.index === selected)}
+  {#if state.selected != null}
+    {@const row = view.all_rows.find((entry) => entry.index === state.selected)}
     {#if row}<pre class="inspector">{JSON.stringify(row.row, null, 2)}</pre>{/if}
   {/if}
 </section>

@@ -1,6 +1,7 @@
 <script>
   import { getReturns, getSessions } from './lib/api.js'
   import { DEFAULT_FILTERS, createSemaphore, fleetView } from './lib/fleet.js'
+  import { journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import Filters from './lib/Filters.svelte'
   import FleetTable from './lib/FleetTable.svelte'
@@ -98,6 +99,8 @@
       now = Date.now()
       error = ''
       probeEnvelopes(nextRuns)
+      // The fleet just re-read; anything watching a lane reads on this same tick.
+      journalPulse.pulse()
     } catch (err) {
       if (generation === refreshGeneration) {
         error = err.message || 'session request failed'

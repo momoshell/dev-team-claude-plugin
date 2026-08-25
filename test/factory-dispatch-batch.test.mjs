@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
   BatchRefusal,
+  BOOT_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
   REFUSAL_REASONS,
   REQUEST_SUFFIX,
@@ -119,10 +120,15 @@ function gitFixture() {
 
 test('readBatch reads request JSON, normalises where paths, and sorts lanes', () => {
   const batch = makeBatch()
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify({
+    ...request('measure lane-a source behavior'), creates: ['./crew/x.mjs'],
+  }))
   const lanes = readBatch({ batchDir: batch })
   assert.deepEqual(lanes.map(({ lane }) => lane), ['lane-a', 'lane-b'])
   assert.equal(lanes[0].name, 'lane-a.request.json')
   assert.deepEqual(lanes[0].where, ['crew/owned.mjs'])
+  assert.deepEqual(lanes[0].creates, ['crew/x.mjs'])
+  assert.deepEqual(lanes[0].request.creates, ['./crew/x.mjs'])
   assert.equal(lanes[0].request.ask, 'measure lane-a source behavior')
 })
 
@@ -157,6 +163,10 @@ test('checkFences pins own coverage, register membership, and scope entry shape'
   }), 'where-outside-fence')
   refusal(() => checkFences({
     fences: [entry('lane-a', ['crew/owned.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'], creates: ['crew/not-owned.mjs'] }],
+  }), 'where-outside-fence')
+  refusal(() => checkFences({
+    fences: [entry('lane-a', ['crew/owned.mjs'])],
     lanes: [{ lane: 'lane-b', where: ['crew/owned.mjs'] }],
   }), 'lane-unfenced')
   refusal(() => checkFences({
@@ -171,6 +181,24 @@ test('checkFences pins own coverage, register membership, and scope entry shape'
     fences: [{ lane: 'lane-a', files: 'crew/owned.mjs' }],
     lanes: [{ lane: 'lane-a', where: ['crew/owned.mjs'] }],
   }), 'scope-entry-invalid')
+})
+
+test('created paths are covered by the own fence, cannot leak to a sibling, and are reported per lane', () => {
+  assert.throws(() => checkFences({
+    fences: [
+      entry('lane-a', ['skills/crew-dispatch/']),
+      entry('lane-b', ['skills/crew-dispatch/references/new.md']),
+    ],
+    lanes: [{ lane: 'lane-a', where: [], creates: ['./skills/crew-dispatch/references/new.md'] }],
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'sibling-leak'
+    && error.message.includes('skills/crew-dispatch/references/new.md'))
+
+  const report = checkFences({
+    fences: [entry('lane-a', ['crew/new/']), entry('lane-b', ['docs/reference/'])],
+    lanes: [{ lane: 'lane-a', where: [], creates: ['./crew/new/file.mjs'] }],
+  })
+  assert.deepEqual(report.perLane['lane-a'].creates, ['crew/new/file.mjs'])
 })
 
 test('crew state paths and arrival checks use the runtime slug and exact sibling count', () => {
@@ -660,6 +688,23 @@ test('the compiler receives exactly the four schema request keys', () => {
   }
 })
 
+test('creates reaches the compiler as an optional fifth key while tier remains dispatch-only', () => {
+  const result = dispatchFixture({
+    label: 'creates-request',
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'judge', creates: ['./crew/new-a.mjs'] }) },
+    fences: [
+      entry('lane-a', ['crew/owned-lane-a.mjs', 'crew/new-a.mjs']),
+      entry('lane-b', ['crew/owned-lane-b.mjs']),
+    ],
+  })
+  const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  const laneA = compiles.find(({ args }) => args.some((arg) => String(arg).endsWith('/lane-a.compile-request.json')))
+  const parsed = JSON.parse(readFileSync(laneA.args[laneA.args.indexOf('--request') + 1], 'utf8'))
+  assert.deepEqual(Object.keys(parsed).sort(), ['ask', 'creates', 'done_means', 'out_of_scope', 'where'])
+  assert.deepEqual(parsed.creates, ['./crew/new-a.mjs'])
+  assert.equal(Object.hasOwn(parsed, 'tier'), false)
+})
+
 test('a lane tier below its protected floor refuses tier-floor-conflict', () => {
   const requestBody = requestFor('lane-a', { tier: 'mechanical', where: ['crew/drive.mjs'] })
   assert.throws(() => dispatchFixture({
@@ -697,8 +742,15 @@ test('parseCliArgs accepts --no-keep as a boolean override', () => {
   assert.deepEqual(parseCliArgs(['--batch', 'b', '--no-keep']), { batch: 'b', 'no-keep': true })
 })
 
-test('closing output states the keep policy and names one teardown command per lane', () => {
+test('closing output states the transport, keep policy, and names one teardown command per lane', () => {
   const result = dispatchFixture({ label: 'closing-output' })
+  const transport = result.logs.filter((line) => line.startsWith('dispatch-batch: transport='))
+  assert.equal(transport.length, 1)
+  assert.equal(transport[0].startsWith(`dispatch-batch: transport=${BOOT_TRANSPORT}`), true)
+  assert.match(transport[0], /workspace_id is null/)
+  const boots = result.spawned.filter(({ args }) => args.includes('boot'))
+  assert.equal(boots.length, 2)
+  assert.equal(boots.every(({ args }) => args.includes('--headless-all')), true)
   assert.equal(result.logs.filter((line) => line.startsWith('dispatch-batch: workspaces keep=true')).length, 1)
   for (const lane of ['lane-a', 'lane-b']) {
     assert.ok(result.logs.includes(

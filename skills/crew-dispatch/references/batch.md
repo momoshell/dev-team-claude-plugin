@@ -8,7 +8,7 @@ Dispatch a batch in this order, and record what refuses at each boundary:
 3. Run the two-pass compile. Generate the `reads` list from the compiler's own
    refusal text: **`coupled-source-unfenced`** and the reverse spare-ack refusal
    **`stale-read-ack`**. A `where` path that does not exist refuses
-   **`missing-path`** (`scripts/factory/make-brief.mjs:108`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:109`, `STALE_READ_ACK = 'stale-read-ack'`).
+   **`missing-path`** (`scripts/factory/make-brief.mjs:112`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:113`, `STALE_READ_ACK = 'stale-read-ack'`).
 4. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for own-file
    coverage and zero sibling leaks.
 5. Check the protected floor with **`protectedHitsIn`** over
@@ -45,3 +45,30 @@ batch at the first failed check rather than proceeding
 (`scripts/factory/dispatch-batch.mjs:29`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
+
+## A lane can declare what it will create
+
+A `where` path must exist, so a lane whose deliverable is a NEW file could not
+be dispatched at all: the dispatcher creates the worktrees itself, so there is
+no moment at which an operator can commit a stub first. A request therefore
+carries an optional `creates` list, verified by the OPPOSITE condition — the
+path must NOT exist and its parent directory must — which refuses
+**`creates-exists`** and **`creates-parent-missing`**
+(`scripts/factory/make-brief.mjs:119`, `CREATES_EXISTS = 'creates-exists'`).
+`missing-path` is untouched: it still refuses every `where` path that is
+absent, because that is the check which catches the commonest brief typo.
+The compiler EXEMPTS and the dispatcher never seeds a stub — a seeded stub
+would satisfy `missing-path` for whatever path was mistyped, making a typo
+indistinguishable from an intent. A created path is still part of the lane's
+write surface: it must sit inside the lane's own fence (**`where-outside-fence`**)
+and outside every sibling's (**`sibling-leak`**).
+
+## A dispatched batch is headless by design
+
+Boot passes `--headless-all` for every lane, so a dispatched lane has
+`workspace_id` null and no panes — there is no workspace to open, and an
+operator who goes looking for one is hunting for something that was never
+created. This is the factory mode, not a fault, so the closing output states
+the transport it booted (`scripts/factory/dispatch-batch.mjs:67`,
+`BOOT_TRANSPORT = 'headless-all'`). Follow a lane by its crew dir, journal and
+run log.

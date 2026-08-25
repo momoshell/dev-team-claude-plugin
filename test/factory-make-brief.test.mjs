@@ -5,7 +5,7 @@ import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -13,11 +13,11 @@ import { spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
-  LADDER_BANDS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
+  LADDER_BANDS, OPTIONAL_REQUEST_KEYS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
   MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
   readLadderBands, renderBrief, renderProposalBlock, resolveWriteSurface, validateAsk,
-  validateScopeEntries, verifyWhere,
+  validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
@@ -250,6 +250,101 @@ test('a missing where path refuses by name and a blank ask refuses', () => {
   const blank = run(root, ['--request', request(root, { ask: '   ' }), '--checkout', root])
   assert.equal(blank.status, 2)
   assert.match(blank.stderr, /blank-ask/)
+})
+
+test('an optional creates declaration compiles, renders after verified paths, and joins authored scope', () => {
+  const root = fixture('creates-happy')
+  const { brief } = compile(root, { creates: ['lib/new-widget.mjs'] })
+  const where = section(brief, '## Where').trim().split('\n')
+  assert.deepEqual(where, [
+    'verified · file · lib/widget.mjs',
+    'verified · file · config/thing.yml',
+    'declared · created · lib/new-widget.mjs',
+  ])
+  const writeLine = section(brief, '## Conventions').split('\n').find((line) => line.startsWith('files_in_scope'))
+  assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/new-widget.mjs, lib/widget.mjs')
+  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates'])
+})
+
+test('creates verifies the opposite existence pair and reuses scope shape checks', () => {
+  const root = fixture('creates-validation')
+  assert.deepEqual(verifyCreates({ checkout: root, creates: ['lib/new-widget.mjs'] }), [
+    { path: 'lib/new-widget.mjs', kind: 'created' },
+  ])
+  assert.throws(() => verifyCreates({ checkout: root, creates: ['lib/widget.mjs'] }), (error) => error.reason === 'creates-exists')
+  assert.throws(() => verifyCreates({ checkout: root, creates: ['nope/new-widget.mjs'] }), (error) => error.reason === 'creates-parent-missing')
+  assert.throws(() => verifyCreates({ checkout: root, creates: ['lib/new-widget.mjs', 'lib/new-widget.mjs'] }), (error) => error.reason === 'wrong-type')
+  for (const entry of [
+    join(root, 'lib', 'absolute.mjs'), 'lib/*.mjs', 'lib/../new-widget.mjs', 'lib/new-dir/', 'Lib/new-widget.mjs',
+  ]) {
+    assert.throws(() => verifyCreates({ checkout: root, creates: [entry] }), (error) => (
+      error.reason === 'scope-entry-shape' || error.reason === 'scope-entry-case'
+    ), entry)
+  }
+  assert.ok(REFUSAL_REASONS.includes('creates-exists'))
+  assert.ok(REFUSAL_REASONS.includes('creates-parent-missing'))
+})
+
+test('creates refuses symlinked parent segments and classifies a present leaf as existing', () => {
+  const root = fixture('creates-symlink')
+  const outside = nextRoot('creates-outside')
+  mkdirSync(join(outside, 'nested'))
+  symlinkSync(outside, join(root, 'link'))
+  symlinkSync('lib/widget.mjs', join(root, 'present-link.mjs'))
+  git(root, ['add', 'link', 'present-link.mjs'])
+
+  for (const entry of ['link/new-widget.mjs', 'link/nested/new-widget.mjs']) {
+    assert.throws(() => verifyCreates({ checkout: root, creates: [entry] }), (error) => error.reason === 'creates-parent-missing', entry)
+  }
+  assert.throws(() => verifyCreates({ checkout: root, creates: ['present-link.mjs'] }), (error) => error.reason === 'creates-exists')
+  const result = run(root, [
+    '--request', request(root, { creates: ['link/new-widget.mjs'] }), '--checkout', root,
+  ])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /creates-parent-missing/)
+  const presentInBoth = run(root, [
+    '--request', request(root, { where: ['present-link.mjs'], creates: ['present-link.mjs'] }), '--checkout', root,
+  ])
+  assert.equal(presentInBoth.status, 2)
+  assert.match(presentInBoth.stderr, /creates-exists/)
+  assert.equal(existsSync(join(outside, 'new-widget.mjs')), false)
+})
+
+test('creates keeps missing-path strict in both where/creates directions and accepts an empty list', () => {
+  const root = fixture('creates-controls')
+  const absentInBoth = run(root, [
+    '--request', request(root, { where: ['lib/new-widget.mjs'], creates: ['lib/new-widget.mjs'] }), '--checkout', root,
+  ])
+  assert.equal(absentInBoth.status, 2)
+  assert.match(absentInBoth.stderr, /missing-path/)
+
+  const existsInBoth = run(root, [
+    '--request', request(root, { where: ['lib/widget.mjs'], creates: ['lib/widget.mjs'] }), '--checkout', root,
+  ])
+  assert.equal(existsInBoth.status, 2)
+  assert.match(existsInBoth.stderr, /creates-exists/)
+
+  const whereAbsent = run(root, [
+    '--request', request(root, { where: ['lib/new-widget.mjs'], creates: ['config/new-widget.yml'] }), '--checkout', root,
+  ])
+  assert.equal(whereAbsent.status, 2)
+  assert.match(whereAbsent.stderr, /missing-path/)
+
+  const without = compile(root, {}, [], 'without-creates.md').brief
+  const empty = compile(root, { creates: [] }, [], 'empty-creates.md').brief
+  assert.equal(without, empty)
+})
+
+test('a fenced lane keeps a created path on the fence write-surface basis', () => {
+  const root = fixture('creates-fenced')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/new-widget.mjs'] }],
+  }, null, 2)}\n`)
+  const { brief } = compile(root, { creates: ['lib/new-widget.mjs'] }, [
+    '--fences', fencesPath, '--lane', 'own',
+  ])
+  const writeLine = section(brief, '## Conventions').split('\n').find((line) => line.startsWith('files_in_scope'))
+  assert.equal(writeLine, 'files_in_scope (expected write surface; basis: fence register, lane "own"): lib/new-widget.mjs, lib/widget.mjs')
 })
 
 test('validateAsk rejects short and heading-restating asks, while genuine asks pass', () => {
@@ -1358,7 +1453,7 @@ test('compiler and emitter proposal declarations stay in agreement', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 19)
+  assert.equal(REFUSAL_REASONS.length, 21)
   assert.ok(REFUSAL_REASONS.includes('scope-directory-unslashed'))
   assert.ok(REFUSAL_REASONS.includes('scope-entry-shape'))
   assert.ok(REFUSAL_REASONS.includes('scope-entry-case'))
@@ -1367,6 +1462,8 @@ test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.ok(REFUSAL_REASONS.includes('profile-unreadable'))
   assert.ok(REFUSAL_REASONS.includes('profile-unratified'))
   assert.ok(REFUSAL_REASONS.includes('bad-protected'))
+  assert.ok(REFUSAL_REASONS.includes('creates-exists'))
+  assert.ok(REFUSAL_REASONS.includes('creates-parent-missing'))
 })
 
 test('the compiler parses cleanly with node --check', () => {

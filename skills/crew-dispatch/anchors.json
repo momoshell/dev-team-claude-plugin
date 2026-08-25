@@ -5,7 +5,9 @@
   "crew/drive.test.mjs:2513": "'/path/that/does/not/exist'",
   "crew/protected-paths.mjs:24": "export function resolveProtectedPaths(extra)",
   "scripts/factory/dispatch-batch.mjs:29": "FENCE_NOT_ARRIVED = 'fence-not-arrived'",
-  "scripts/factory/make-brief.mjs:108": "COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'",
-  "scripts/factory/make-brief.mjs:109": "STALE_READ_ACK = 'stale-read-ack'",
+  "scripts/factory/dispatch-batch.mjs:67": "BOOT_TRANSPORT = 'headless-all'",
+  "scripts/factory/make-brief.mjs:112": "COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'",
+  "scripts/factory/make-brief.mjs:113": "STALE_READ_ACK = 'stale-read-ack'",
+  "scripts/factory/make-brief.mjs:119": "CREATES_EXISTS = 'creates-exists'",
   "scripts/factory/make-brief.mjs:1251": "a recorded baseline is a fact about a commit and is never consumed"
 }

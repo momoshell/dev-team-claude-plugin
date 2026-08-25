@@ -60,6 +60,11 @@ export const REQUEST_SUFFIX = '.request.json'
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
 export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier'])
+// The transport a dispatched batch boots. Headless is the software-factory
+// mode, so this is the correct default — but it means no cmux workspace and
+// no panes exist, and the closing output has to SAY so. One constant, so the
+// flag boot passes and the transport the output names cannot drift apart.
+export const BOOT_TRANSPORT = 'headless-all'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 
 export class BatchRefusal extends Error {
@@ -125,6 +130,12 @@ function laneNameOf(lane) {
 function laneWhereOf(lane) {
   if (lane && Array.isArray(lane.where)) return lane.where.map(normaliseRepoPath)
   if (lane && Array.isArray(lane.request?.where)) return lane.request.where.map(normaliseRepoPath)
+  return []
+}
+
+function laneCreatesOf(lane) {
+  if (lane && Array.isArray(lane.creates)) return lane.creates.map(normaliseRepoPath)
+  if (lane && Array.isArray(lane.request?.creates)) return lane.request.creates.map(normaliseRepoPath)
   return []
 }
 
@@ -218,6 +229,7 @@ export function readBatch({ batchDir, deps } = {}) {
       request,
       tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
       where: request.where.map(normaliseRepoPath),
+      creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
     })
   }
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
@@ -256,9 +268,11 @@ export function checkFences({ fences, lanes } = {}) {
     const own = byLane.get(name)
     const ownFiles = own.files.map(normaliseRepoPath)
     const ownWhere = laneWhereOf(lane)
+    const ownCreates = laneCreatesOf(lane)
     const matchOwn = scopeMatcher(ownFiles)
-    if (!ownWhere.every(matchOwn)) {
-      const outside = ownWhere.filter((path) => !matchOwn(path))
+    const ownSurface = [...ownWhere, ...ownCreates]
+    if (!ownSurface.every(matchOwn)) {
+      const outside = ownSurface.filter((path) => !matchOwn(path))
       refuse(`lane ${name} where path(s) outside own fence: ${outside.join(', ')}`, WHERE_OUTSIDE_FENCE)
     }
 
@@ -271,12 +285,20 @@ export function checkFences({ fences, lanes } = {}) {
         const leaked = ownFiles.filter(matchSibling)
         refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')}`, SIBLING_LEAK)
       }
+      // A created path can hide from the fence-vs-fence check above: this lane may
+      // own it only through a directory prefix while a sibling owns it literally,
+      // and a register-only sibling is never visited as `name`.
+      const leakedCreates = ownCreates.filter(matchSibling)
+      if (leakedCreates.length > 0) {
+        refuse(`lane ${name} creates path(s) inside sibling ${sibling.lane}'s fence: ${leakedCreates.join(', ')}`, SIBLING_LEAK)
+      }
       siblings.push({ lane: sibling.lane, files: siblingFiles })
     }
     perLane[name] = {
       lane: name,
       files: ownFiles,
       where: ownWhere,
+      creates: ownCreates,
       reads: Array.isArray(own.reads) ? own.reads : [],
       siblings,
     }
@@ -577,7 +599,7 @@ function bootCommand({ lane, laneDir, tier, registerPath }) {
       '--tier', tier,
       '--fences', registerPath,
       '--lane', lane,
-      '--headless-all',
+      '--' + BOOT_TRANSPORT,
     ],
     cwd: laneDir,
   }
@@ -765,6 +787,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   // Keeping the workspaces is a CHOICE, so the dispatcher states it and names
   // the command that undoes it. crew.mjs self-tears-down only on a done run
   // without --keep (crew/crew.mjs:1888); an escalated lane is kept either way.
+  d.log(`dispatch-batch: transport=${BOOT_TRANSPORT} — every seat booted headless, so this batch created no cmux workspace and no panes (workspace_id is null); headless is the software-factory mode. Follow a lane by the crew dir and journal above, never by a workspace`)
   d.log(keep
     ? 'dispatch-batch: workspaces keep=true — every lane workspace and crew dir is kept for inspection; pass --no-keep to let a lane that finishes done tear itself down'
     : 'dispatch-batch: workspaces keep=false — a lane that finishes done tears itself down and archives its crew dir; an escalated lane is kept either way')

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync as fsExistsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
@@ -10,6 +10,7 @@ import {
   PANE_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
   ANCHOR_BLIND_SPOT,
+  ANCHOR_PIN_WARNING_PREFIX,
   REFUSAL_REASONS,
   REQUEST_SUFFIX,
   STALE_READ_ACK,
@@ -275,40 +276,128 @@ test('checkFences pins own coverage, register membership, and scope entry shape'
   }), 'scope-entry-invalid')
 })
 
-test('an anchor pin outside the lane fence refuses and names the manifest and its line keys', () => {
-  const checkout = join(root, 'anchor-unfenced-checkout')
-  anchorFixtures(checkout, {
-    devops: {
-      'crew/crew.mjs:664': 'export function reseat(',
-      'crew/crew.mjs:1881': 'const KEEP_ON_DONE = false',
+function warningFixture(checkout) {
+  const manifests = {
+    'backend-node': {
+      'crew/drive.mjs:124': 'a',
+      'crew/drive.mjs:238': 'b',
+      'crew/drive.mjs:244': 'c',
+      'crew/drive.test.mjs:4158': 'd',
+      'crew/drive.test.mjs:4159': 'e',
     },
-  })
-  assert.throws(() => checkFences({
-    fences: [entry('lane-a', ['crew/crew.mjs', 'crew/crew.test.mjs'])],
-    lanes: [{ lane: 'lane-a', where: ['crew/crew.mjs'] }],
+    'crew-dispatch': {
+      'crew/drive.mjs:23': 'f',
+      'crew/drive.mjs:44': 'g',
+      'crew/drive.mjs:339': 'h',
+    },
+    'crew-recovery': {
+      'crew/drive.mjs:2511': 'i',
+      'crew/drive.test.mjs:2513': 'j',
+    },
+  }
+  anchorFixtures(checkout, manifests)
+  return {
+    files: ['crew/drive.mjs', 'crew/drive.test.mjs'],
+    manifestPaths: Object.keys(manifests).map((skill) => `skills/${skill}/anchors.json`),
+    keys: Object.values(manifests).flatMap((pins) => Object.keys(pins)),
+  }
+}
+
+test('trips-and-dispatches: an unfenced anchor scan returns with the per-lane report intact', () => {
+  const checkout = join(root, 'anchor-warning-checkout')
+  const fixture = warningFixture(checkout)
+  const report = checkFences({
+    fences: [entry('lane-a', fixture.files)],
+    lanes: [{ lane: 'lane-a', where: fixture.files }],
     checkout,
-  }), (error) => error instanceof BatchRefusal
-    && error.reason === 'anchor-pin-unfenced'
-    && error.message.includes('crew/crew.mjs')
-    && error.message.includes('skills/devops/anchors.json')
-    && error.message.includes('crew/crew.mjs:664')
-    && error.message.includes('crew/crew.mjs:1881')
-    && error.message.includes(ANCHOR_BLIND_SPOT))
+    deps: { log: () => {} },
+  })
+  assert.deepEqual(report.perLane['lane-a'].files, fixture.files)
+  assert.deepEqual(report.perLane['lane-a'].where, fixture.files)
+  assert.equal(report.warnings.length, 1)
 })
 
-test('a directory write surface catches a pinned descendant outside its fence', () => {
+test('an anchor warning names both pinned files, all manifests, and every line key', () => {
+  const checkout = join(root, 'anchor-warning-details-checkout')
+  const fixture = warningFixture(checkout)
+  const report = checkFences({
+    fences: [entry('lane-a', fixture.files)],
+    lanes: [{ lane: 'lane-a', where: fixture.files }],
+    checkout,
+    deps: { log: () => {} },
+  })
+  const text = report.warnings[0].text
+  for (const token of [...fixture.files, ...fixture.manifestPaths, ...fixture.keys]) {
+    assert.equal(text.includes(token), true, `warning omitted ${token}`)
+  }
+})
+
+test('an anchor warning carries the blind-spot sentence', () => {
+  const checkout = join(root, 'anchor-warning-blind-spot-checkout')
+  const fixture = warningFixture(checkout)
+  const report = checkFences({
+    fences: [entry('lane-a', fixture.files)],
+    lanes: [{ lane: 'lane-a', where: fixture.files }],
+    checkout,
+    deps: { log: () => {} },
+  })
+  assert.equal(report.warnings[0].text.includes(ANCHOR_BLIND_SPOT), true)
+})
+
+test('dry-run warns with the anchor prefix and every line key', () => {
+  const checkout = join(root, 'anchor-warning-dry-run-checkout')
+  const fixture = warningFixture(checkout)
+  const batch = join(root, 'anchor-warning-dry-run-batch')
+  mkdirSync(batch)
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure the anchor warning', fixture.files)))
+  const logs = []
+  const report = dispatchBatch({
+    batchDir: batch,
+    fences: [entry('lane-a', fixture.files)],
+    checkout,
+    parentDir: root,
+    outDir: join(root, 'anchor-warning-dry-run-out'),
+    runFlags: { 'dry-run': true },
+    deps: {
+      existsSync: (path) => String(path).endsWith('anchors.json') ? fsExistsSync(path) : false,
+      spawn: () => ({ status: 1 }),
+      log: (line) => logs.push(String(line)),
+    },
+  })
+  assert.equal(report.dryRun, true)
+  const warning = logs.find((line) => line.includes(ANCHOR_PIN_WARNING_PREFIX))
+  assert.ok(warning)
+  for (const key of fixture.keys) assert.equal(warning.includes(key), true, `dry-run omitted ${key}`)
+})
+
+test('a lane that owns every pinning manifest is silent', () => {
+  const checkout = join(root, 'anchor-warning-owned-checkout')
+  const fixture = warningFixture(checkout)
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', [...fixture.files, ...fixture.manifestPaths])],
+    lanes: [{ lane: 'lane-a', where: fixture.files }],
+    checkout,
+    deps: { log: (line) => logs.push(String(line)) },
+  })
+  assert.equal(report.warnings.length, 0)
+  assert.equal(logs.some((line) => line.includes(ANCHOR_PIN_WARNING_PREFIX)), false)
+})
+
+test('a directory write surface still warns for a pinned descendant', () => {
   const checkout = join(root, 'anchor-directory-checkout')
   anchorFixtures(checkout, {
     devops: { 'crew/subdir/owned.mjs:12': 'export const OWNED = 1' },
   })
-  assert.throws(() => checkFences({
+  const report = checkFences({
     fences: [entry('lane-a', ['crew/subdir/'])],
     lanes: [{ lane: 'lane-a', where: ['crew/subdir/'] }],
     checkout,
-  }), (error) => error instanceof BatchRefusal
-    && error.reason === 'anchor-pin-unfenced'
-    && error.message.includes('crew/subdir/owned.mjs')
-    && error.message.includes('skills/devops/anchors.json'))
+    deps: { log: () => {} },
+  })
+  assert.equal(report.warnings.length, 1)
+  assert.equal(report.warnings[0].text.includes('crew/subdir/owned.mjs'), true)
+  assert.equal(report.warnings[0].text.includes('skills/devops/anchors.json'), true)
 })
 
 test("b220's corrected fence owns both pinning manifests and passes silently", () => {

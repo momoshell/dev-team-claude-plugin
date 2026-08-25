@@ -46,6 +46,15 @@ batch at the first failed check rather than proceeding
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
+`anchor-pin-unfenced` protects a write lane from b217's lost-lane failure: moving a
+pinned source line without the manifest that anchors it leaves the repository's anchors
+wrong. The machine scan reads `anchors.json`; prose file:line citations in `.md` files
+are its blind spot and must still be checked by hand.
+
+`plan-scope-outside-fence` refuses a planner's declaration wider than its own fence. A
+fence denies siblings' declared surfaces, not unclaimed paths, so silently narrowing
+`files_in_scope` would make the fence meaningless.
+
 ## A lane can declare what it will create
 
 A `where` path must exist, so a lane whose deliverable is a NEW file could not
@@ -70,8 +79,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:83`,
-`scripts/factory/dispatch-batch.mjs:84`,
+(`scripts/factory/dispatch-batch.mjs:93`,
+`scripts/factory/dispatch-batch.mjs:94`,
 `scripts/factory/dispatch-batch.mjs:18`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects

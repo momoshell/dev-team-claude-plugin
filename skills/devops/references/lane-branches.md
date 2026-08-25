@@ -11,25 +11,25 @@ Preserve the open review until its outcome and teardown policy are decided.
 Status: this preservation rule is unbacked here; see `evidence.md`.
 
 Never publish from a worker path.
-Exhibit: `scripts/factory/ci-watch.mjs:265`.
+Status: no checkout implementation reachable from a production entry point publishes a branch; see `evidence.md`.
 
 The worker-path gate runs before branch resolution or construction of push argv.
-Exhibit: `scripts/factory/ci-watch.mjs:265`.
+Status: this ordering rule is unbacked here; see `evidence.md`.
 
 The linked-worktree probe compares the two Git directory locations.
-Exhibit: `scripts/factory/ci-watch.mjs:240`.
+Status: no reachable checkout implementation performs this probe; see `evidence.md`.
 
 A checkout under the crew root is also treated as a worker path.
-Exhibit: `scripts/factory/ci-watch.mjs:246`.
+Status: this crew-root rule is unbacked here; see `evidence.md`.
 
 A missing checkout refuses publication instead of guessing its location.
-Exhibit: `scripts/factory/ci-watch.mjs:265`.
+Status: this fail-closed publication rule is unbacked here; see `evidence.md`.
 
 An unresolved branch refuses publication instead of pushing a default.
-Exhibit: `scripts/factory/ci-watch.mjs:265`.
+Status: this branch-resolution rule is unbacked here; see `evidence.md`.
 
 Keep lane work and host publication as separate lifecycle stages.
-Exhibit: `scripts/factory/ci-watch.mjs:265`.
+Status: this lifecycle separation is unbacked here; see `evidence.md`.
 
 Do not treat a green local test as permission to delete a remote branch.
 Status: this deletion safeguard is unbacked here; see `evidence.md`.
@@ -41,7 +41,7 @@ An interrupted network request leaves the PR state unknown.
 Status: this interrupted-network edge is unbacked here; see `evidence.md`.
 
 An empty branch name is an invalid publication input.
-Exhibit: `scripts/factory/ci-watch.mjs:277`.
+Status: this input-validity rule is unbacked here; see `evidence.md`.
 
 Use the evidence register when an operational platform behavior lacks a checkout
 exhibit.
@@ -51,8 +51,8 @@ The cost of a premature close is lost review context and an altered PR state.
 Status: this platform cost is unbacked here; see `evidence.md`.
 
 The cost of worker-path publishing is a lane writing to the host remote.
-Exhibit: `scripts/factory/ci-watch.mjs:265`.
+Status: this publication cost is unbacked here; see `evidence.md`.
 
-The source exhibit proves the worker refusal; it does not prove GitHub's close
-behavior, which remains explicitly unbacked.
+No local exhibit proves the worker refusal, and none proves GitHub's close
+behavior; both remain explicitly unbacked.
 Register: `skills/devops/references/evidence.md`.

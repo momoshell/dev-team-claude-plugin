@@ -6,6 +6,7 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
+import { createJournalSource } from './journal-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
@@ -192,6 +193,7 @@ export function startServer(options = {}) {
   const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
+  const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
   const server = createServer(async (req, res) => {
     // #544: the request target and the Host header are both attacker-chosen, and
@@ -225,6 +227,13 @@ export function startServer(options = {}) {
         const repo_slug = url.searchParams.get('repo_slug'), task_slug = url.searchParams.get('task_slug')
         if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = returns.listEnvelopes({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
+        return json(res, 200, { schema, ...result })
+      }
+      if (url.pathname === '/api/journal') {
+        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        const journalRepo = url.searchParams.get('repo_slug'), journalTask = url.searchParams.get('task_slug')
+        if (!journalRepo || !journalTask) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
+        const result = journal.readJournal({ repo_slug: journalRepo, task_slug: journalTask, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/roster') {

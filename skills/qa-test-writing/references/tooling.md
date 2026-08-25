@@ -3,7 +3,7 @@
 ## The suite
 
 ```bash
-npm test          # node --test --test-timeout=30000
+npm test          # node --test --test-timeout=30000 "**/*.test.mjs"
 ```
 
 Builtins-only: no test framework, no runner dependency. `node --test` with

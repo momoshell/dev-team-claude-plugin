@@ -8,7 +8,7 @@ Logic lives in plain .js modules under visualizer/web/src/lib/ and is tested wit
 
 Put anything worth asserting in a deterministic `lib/*.js` shaper or reducer, where `node:test` can pass explicit data and assert the result. Do not move logic into markup merely to make a component look shorter: without a DOM harness, that logic can only be covered indirectly or pinned as source.
 
-The package declares `svelte`, `vite`, and `@sveltejs/vite-plugin-svelte` as development dependencies and runs `node --test --test-timeout=30000` from `package.json`. The measured suite is source-oriented: 17 `readFileSync` sites read `.svelte` files under `test/visualizer-*.test.mjs`.
+The package declares `svelte`, `vite`, and `@sveltejs/vite-plugin-svelte` as development dependencies and runs `node --test --test-timeout=30000 "**/*.test.mjs"` from `package.json`. The measured suite is source-oriented: 17 `readFileSync` sites read `.svelte` files under `test/visualizer-*.test.mjs`.
 
 ## Source pins are exact
 

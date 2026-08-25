@@ -31,3 +31,15 @@ test('testCheckout creates a slug-stable checkout for mixed-case prefixes', () =
     if (fixture) rmSync(fixture.root, { recursive: true, force: true })
   }
 })
+
+// The #551 duplication audit's null result, pinned rather than left as prose:
+// the audit record is at the foot of ./fixtures.mjs. The tripwire in
+// test/helpers.test.mjs catches a re-declared helper by NAME, from its own
+// fixed list; this catches ANY export of this module that helpers.mjs already
+// owns, whether or not that name was on the list when the list was written.
+test('the fixture module re-declares nothing test/helpers.mjs already exports', async () => {
+  const fixtures = await import('./fixtures.mjs')
+  const helpers = await import('./helpers.mjs')
+  const overlap = Object.keys(fixtures).filter((name) => name in helpers)
+  assert.deepEqual(overlap, [], 'these fixture exports duplicate test/helpers.mjs — import them instead')
+})

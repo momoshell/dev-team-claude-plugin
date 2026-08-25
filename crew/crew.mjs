@@ -1797,7 +1797,7 @@ export function runCmd(args, deps = {}) {
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
-    roles: crew.roles, lane: validationLane.lane, suite: args.suite || 'node --test --test-timeout=30000', variant,
+    roles: crew.roles, lane: validationLane.lane, suite: args.suite || 'node --test --test-timeout=30000 "**/*.test.mjs"', variant,
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),

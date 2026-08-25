@@ -9,7 +9,7 @@ import {
 import { join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { ROOT, scratchDir } from './helpers.mjs'
+import { ROOT, scratchDir, gitResult } from './helpers.mjs'
 import {
   ACTOR_CLAIM_MAX_CHARS, DEFAULT_INTAKE_CONFIG, MAX_SWEEP_TICKS, PREMISE_REFERENCE_CAP,
   REQUIRED_INTAKE_CONFIG_KEYS, SWEEP_USAGE, bodyDigest, compileIntakeBrief,
@@ -62,12 +62,11 @@ function callerCheckout() {
   mkdirSync(join(root, 'test'), { recursive: true })
   writeFileSync(join(root, 'lib', 'widget.mjs'), 'export function widgetLoop() { return 1 }\n')
   writeFileSync(join(root, 'test', 'widget.test.mjs'), "import { widgetLoop } from '../lib/widget.mjs'\nwidgetLoop()\n")
-  const git = (...args) => spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' })
-  assert.equal(git('init', '-q').status, 0)
-  assert.equal(git('config', 'user.email', 'factory@example.test').status, 0)
-  assert.equal(git('config', 'user.name', 'factory-test').status, 0)
-  assert.equal(git('add', '-A').status, 0)
-  assert.equal(git('-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-q', '-m', 'fixture').status, 0)
+  assert.equal(gitResult(root, 'init', '-q').status, 0)
+  assert.equal(gitResult(root, 'config', 'user.email', 'factory@example.test').status, 0)
+  assert.equal(gitResult(root, 'config', 'user.name', 'factory-test').status, 0)
+  assert.equal(gitResult(root, 'add', '-A').status, 0)
+  assert.equal(gitResult(root, '-c', 'commit.gpgsign=false', 'commit', '--no-verify', '-q', '-m', 'fixture').status, 0)
   callerCheckoutMemo = root
   return root
 }

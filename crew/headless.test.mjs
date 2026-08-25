@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   classifyRun, foldUsage, headlessIo, recogniseProviderCondition, recogniseSeatRefusal,
-  SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, shq, updateCrewJson,
+  SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, updateCrewJson,
 } from './headless.mjs'
 import { startFileWriter } from '../test/helpers.mjs'
 
@@ -184,7 +184,13 @@ test('seat refusal recognition stays closed, ordered, and actionable', () => {
   }
   assert.equal(Object.isFrozen(SEAT_REFUSALS), true)
   assert.deepEqual(SEAT_REFUSALS.map((row) => row.member), ['overflowed', 'quota', 'rejected', 'suspended', 'transient'])
-  assert.deepEqual(Object.keys(SEAT_REFUSAL_ACTIONS).sort(), SEAT_REFUSALS.map((row) => row.member).sort())
+  assert.equal(SEAT_REFUSALS.some((row) => row.member === UNCLASSIFIED_REFUSAL), false)
+  assert.deepEqual(Object.keys(SEAT_REFUSAL_ACTIONS).sort(), [...SEAT_REFUSALS.map((row) => row.member), UNCLASSIFIED_REFUSAL].sort())
+  assert.equal(Object.isFrozen(SEAT_REFUSAL_ACTIONS), true)
+  for (const action of Object.values(SEAT_REFUSAL_ACTIONS)) assert.ok(['reprompt', 'end', 'journal', 'reprompt-on-silence'].includes(action))
+  assert.equal(SEAT_REFUSAL_ACTIONS.rejected, 'reprompt')
+  assert.equal(SEAT_REFUSAL_ACTIONS.quota, 'end')
+  assert.equal(SEAT_REFUSAL_ACTIONS[UNCLASSIFIED_REFUSAL], 'reprompt-on-silence')
 })
 
 test('an unrecognised, missing, empty or unreadable stderr carries no recognition', () => {

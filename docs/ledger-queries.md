@@ -71,14 +71,14 @@ The same retired pane explanation remains in `visualizer/server/shape.mjs:12` an
 
 The verbs above answer questions about **runs**. A question about **seat behaviour over time** — how long a seat goes between frames, and whether that differs by how the run ended — is not in the ledger at all: the frames live in the adapter transcript homes, one JSONL file per session. Until now those questions were answered by hand-written throwaway node scripts. DuckDB answers them as one query, and can `ATTACH` the ledger `READ_ONLY` in the same session so a question spanning transcripts and run outcomes is a join rather than a script.
 
-**duckdb is operator tooling: never in package.json, never imported by any .mjs, never run by a seat or gate.** It owns no data and writes nothing. Installed out of band (`/opt/homebrew/bin/duckdb`, v1.5.5 when these recipes were run, 2026-08-24); the repo's zero-runtime-dependency and dependency-free-suite properties are unaffected because nothing in the repo reaches for it.
+**duckdb is operator tooling: never in package.json, never imported by any .mjs, never run by a seat or gate.** It owns no data and writes no row anywhere; a `READ_ONLY` attach does, however, create the `-wal` and `-shm` sidecars beside a quiet database (recipe D). Installed out of band (`/opt/homebrew/bin/duckdb`, v1.5.5 when these recipes were run, 2026-08-24); the repo's zero-runtime-dependency and dependency-free-suite properties are unaffected because nothing in the repo reaches for it.
 
 | Question | Command |
 | --- | --- |
 | How long does a seat go between frames, and does 900s still sit above healthy mid-turn work? | `duckdb` — recipe A below, the unified frame view over both adapter homes. Prints one row per adapter × gap bucket with n, p50, p90, p99, p99.9 and the count over 900s. The unit is one inter-frame gap. |
 | Does that gap distribution differ by the run's terminal status? | `duckdb` — recipe B below, the same view joined to the `ATTACH`ed ledger's `sessions` rows. Prints one row per terminal status. The unit is one inter-frame gap, attributed to the settled run whose window contains it. |
 | Does the reader survive a transcript whose final line is still being written, and does it say what it skipped? | `duckdb` — recipe C below. Prints lines read, lines skipped as torn, and frames usable. The unit is one JSONL line. |
-| Is the ATTACHed ledger safe to read while a crew is writing it? | `duckdb` — recipe D below, run against a WAL fixture with the writer connection held open. Prints the reader's view before and after an uncheckpointed commit. The unit is one read. |
+| Is the ATTACHed ledger safe to read while a crew is writing it? | `duckdb` — recipe D below, run against a WAL fixture with the writer connection held open. Prints the reader's view during an uncommitted transaction, during a held write lock, after rollback, and before/after a quiet `READ_ONLY` attach's sidecars. The unit is one read. |
 | Which runs escalated, where, and why? | `duckdb` — recipe E below. `returns/task.json` carries `details.escalation` as `{where, why}` while the ledger carries only the escalation phase. The unit is one run attempt. |
 | Is an escalation a mechanism failure or a reasoned dead end? | `duckdb` — recipe F below, recipe E plus a stated `why`-prose classifier. The unit is one escalation; the mechanism share is a floor, never exact. |
 | Does lane size predict plan rounds or escalation? | `duckdb` — recipe G below, joining planner mutation/scope records to `returns/task.json`. The unit is one lane. |
@@ -88,7 +88,9 @@ The verbs above answer questions about **runs**. A question about **seat behavio
 
 ### The unified frame view
 
-The two adapter homes carry the same events in different shapes, and a question about seat behaviour has to span both — `~/.pi/agent/sessions/<dir>/*.jsonl` holds the **builder** and **reviewer** seats, `~/.claude/projects/<dir>/*.jsonl` holds the **lead**, **planner** and **tech-lead** seats. `filename=true` is what makes them joinable: the adapter is the home the row came from and the lane is `dt-<lane>` in the path, so neither has to be carried in the frame.
+The two adapter homes carry the same events in different shapes, and a question about seat behaviour has to span both — `~/.pi/agent/sessions/<dir>/*.jsonl` holds the **builder** and **reviewer** seats, `~/.claude/projects/<dir>/*.jsonl` holds the **lead**, **planner** and **tech-lead** seats. `frames` is a `VIEW`, not a materialised table, with columns `(adapter, file, lane, ts, role, stop_reason, owes)`. `filename=true` supplies `file`; `adapter` comes from the adapter home in the path and `lane` is `dt-<lane>` from that path, so both are available without being carried in the frame. `ts` is the timestamp cast to `TIMESTAMPTZ`.
+
+Pi supplies `role` from `message.role` and `stop_reason` from `message.stopReason`. On the claude side, `role` maps from `type`, while `stop_reason` maps from `message.stop_reason` on an assistant frame and from `message.content[0].type` on a user frame. That is why the two adapters normalise into one view without misreporting either shape.
 
 A frame is normalised to one derived column, `owes` — what the transcript owed next when that frame landed:
 
@@ -108,39 +110,42 @@ Re-derives the distribution that `TRANSCRIPT_STALE_MS` (`crew/seat-io.mjs:50`) r
 ```sh
 duckdb <<'SQL'
 -- Recipe A — inter-frame gap distribution, both adapter homes, one shape.
+-- `frames` is a VIEW, not a materialised table: it is the single normalisation
+-- both adapters are read through, and every later recipe selects from it.
 -- Window pinned so the recorded output stays reproducible.
-CREATE OR REPLACE TABLE raw AS
-SELECT 'pi' AS adapter, filename, timestamp, type, message
-FROM read_json_auto('~/.pi/agent/sessions/*/*.jsonl', filename=true, union_by_name=true,
-                    ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
-UNION ALL
-SELECT 'claude', filename, timestamp, type, message
-FROM read_json_auto('~/.claude/projects/*/*.jsonl', filename=true, union_by_name=true,
-                    ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'});
-
-CREATE OR REPLACE TABLE frames AS
-SELECT adapter, filename,
+CREATE OR REPLACE VIEW frames AS
+SELECT adapter, filename AS file,
        regexp_extract(filename, 'dt-([A-Za-z0-9._-]+?)-*/', 1) AS lane,
-       CAST(timestamp AS TIMESTAMPTZ) AS at_local,
-       CASE
-         WHEN adapter='pi' AND json_extract_string(message,'$.role')='assistant'
-              AND json_extract_string(message,'$.stopReason')='toolUse' THEN 'owes-tool'
-         WHEN adapter='pi' AND json_extract_string(message,'$.role')='toolResult' THEN 'owes-model'
-         WHEN adapter='claude' AND type='assistant'
-              AND json_extract_string(message,'$.stop_reason')='tool_use' THEN 'owes-tool'
-         WHEN adapter='claude' AND type='user'
-              AND json_extract_string(message,'$.content[0].type')='tool_result' THEN 'owes-model'
-         ELSE 'other'
-       END AS owes
-FROM raw WHERE timestamp IS NOT NULL;
+       CAST(timestamp AS TIMESTAMPTZ) AS ts,
+       role, stop_reason,
+       CASE WHEN adapter='pi'     AND role='assistant' AND stop_reason='toolUse'  THEN 'owes-tool'
+            WHEN adapter='pi'     AND role='toolResult'                           THEN 'owes-model'
+            WHEN adapter='claude' AND role='assistant' AND stop_reason='tool_use' THEN 'owes-tool'
+            WHEN adapter='claude' AND role='user'      AND stop_reason='tool_result' THEN 'owes-model'
+            ELSE 'other' END AS owes
+FROM (
+  SELECT 'pi' AS adapter, filename, timestamp,
+         json_extract_string(message,'$.role') AS role,
+         json_extract_string(message,'$.stopReason') AS stop_reason
+  FROM read_json_auto('~/.pi/agent/sessions/*/*.jsonl', filename=true, union_by_name=true,
+                      ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
+  WHERE timestamp IS NOT NULL
+  UNION ALL
+  SELECT 'claude', filename, timestamp,
+         type,
+         CASE WHEN type='assistant' THEN json_extract_string(message,'$.stop_reason')
+              WHEN type='user'      THEN json_extract_string(message,'$.content[0].type') END
+  FROM read_json_auto('~/.claude/projects/*/*.jsonl', filename=true, union_by_name=true,
+                      ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
+  WHERE timestamp IS NOT NULL
+);
 
-CREATE OR REPLACE TABLE gaps AS
-SELECT *, epoch(at_local) - epoch(lag(at_local) OVER w) AS gap_s, lag(owes) OVER w AS powes
-FROM frames WINDOW w AS (PARTITION BY filename ORDER BY at_local, owes);
+SELECT adapter, count(DISTINCT file) AS files FROM frames
+WHERE ts < TIMESTAMPTZ '2026-08-24T15:00:00Z' GROUP BY 1 ORDER BY 1;
 
-SELECT adapter, count(DISTINCT filename) AS files
-FROM frames WHERE at_local < TIMESTAMPTZ '2026-08-24T15:00:00Z' GROUP BY 1 ORDER BY 1;
-
+WITH gaps AS (
+  SELECT *, epoch(ts) - epoch(lag(ts) OVER w) AS gap_s, lag(owes) OVER w AS powes
+  FROM frames WINDOW w AS (PARTITION BY file ORDER BY ts, owes))
 SELECT adapter,
        CASE WHEN powes IN ('owes-tool','owes-model') THEN 'mid-turn' ELSE 'idle' END AS bucket,
        count(*) AS n,
@@ -149,8 +154,7 @@ SELECT adapter,
        round(quantile_disc(gap_s,0.99)::DOUBLE,1)  AS p99,
        round(quantile_disc(gap_s,0.999)::DOUBLE,1) AS p999,
        sum(CASE WHEN gap_s > 900 THEN 1 ELSE 0 END) AS over_900s
-FROM gaps
-WHERE gap_s IS NOT NULL AND at_local < TIMESTAMPTZ '2026-08-24T15:00:00Z'
+FROM gaps WHERE gap_s IS NOT NULL AND ts < TIMESTAMPTZ '2026-08-24T15:00:00Z'
 GROUP BY 1,2 ORDER BY 1,2;
 SQL
 ```
@@ -176,13 +180,15 @@ Recorded output, run 2026-08-24 on duckdb v1.5.5:
 └─────────┴──────────┴────────┴────────┴────────┴────────┴─────────┴───────────┘
 ```
 
+Re-run command: `bash /Users/x/.crew/dt-b229-ledgerwal/b229-ledgerwal/task/reference-recipe-a.sh` (the Recipe A `duckdb <<'SQL'` block above), measured 2026-08-25 on DuckDB v1.5.5. The pi half is byte-identical on re-run: `pi|880` and `pi|mid-turn|52833|0.05|15.9|80.7|525.7|37`. The claude half is not: files moved **1047→1046**, mid-turn n **124783→124676**, mid-turn p99 **70.4→70.5**, and idle n **86393→86325**. The reason is unresolved: the pin freezes the pi corpus, but claude transcript files under `~/.claude/projects/` are removed or rewritten behind it. The pi reproduction is the view's proof; the claude figures are a **snapshot, not a reproducible constant**.
+
 **The pi half reproduces the hand-measured #590 distribution exactly** — 880 files, mid-turn n=52833, p50 0.05s, p90 15.9s, p99 80.7s, p99.9 525.7s, 37 gaps over 900s, and idle p90 422.0s. That is the proof the view is right; the claude half is then read on the same terms.
 
 **verdict against #597:** claude mid-turn p99.9 does not exceed 900s. Measured over 1047 claude transcript files, claude mid-turn gaps are n=124783, p50 0.1s, p90 5.1s, p99 70.4s, p99.9 386.5s, with 49 gaps over 900s — 0.039% of mid-turn gaps, against pi's 0.070%. The 900s threshold was sampled from the pi home only and applied to every role by `waitForEnvelope`; measured, that extrapolation holds. The claude seats are, if anything, further inside it. No change to `TRANSCRIPT_STALE_MS` follows from this and none is made here (#590).
 
 ### Recipe B — the same gaps, split by terminal status
 
-What the hand-written path cannot do at all: attribute each gap to the run it happened in and split by how that run ended. The join key is the lane in the transcript path against `sessions.task_slug`, bounded by the session's own window. Only **settled** sessions are joined (`ended_at IS NOT NULL`) — a `running` row has no terminal status yet, and its status will change under the query.
+What the hand-written path cannot do at all: attribute each gap to the run it happened in and split by how that run ended. The join key is the lane in the transcript path against `sessions.task_slug`, bounded by the session's own window. Only **settled** sessions are joined (`ended_at IS NOT NULL`) — a `running` row has no terminal status yet, and its status will change under the query. Each `duckdb` invocation is its own session, so Recipe B repeats the same `frames` view definition by necessity.
 
 ```sh
 duckdb <<SQL
@@ -192,31 +198,36 @@ duckdb <<SQL
 INSTALL sqlite; LOAD sqlite;
 ATTACH '$HOME/.dev-team/factory/ledger.db' AS L (TYPE sqlite, READ_ONLY);
 
-CREATE OR REPLACE TABLE frames AS
-SELECT 'pi' AS adapter, filename,
+CREATE OR REPLACE VIEW frames AS
+SELECT adapter, filename AS file,
        regexp_extract(filename, 'dt-([A-Za-z0-9._-]+?)-*/', 1) AS lane,
-       CAST(timestamp AS TIMESTAMPTZ) AS at_local,
-       CASE WHEN json_extract_string(message,'$.role')='assistant'
-                 AND json_extract_string(message,'$.stopReason')='toolUse' THEN 'owes-tool'
-            WHEN json_extract_string(message,'$.role')='toolResult' THEN 'owes-model'
+       CAST(timestamp AS TIMESTAMPTZ) AS ts,
+       role, stop_reason,
+       CASE WHEN adapter='pi'     AND role='assistant' AND stop_reason='toolUse'  THEN 'owes-tool'
+            WHEN adapter='pi'     AND role='toolResult'                           THEN 'owes-model'
+            WHEN adapter='claude' AND role='assistant' AND stop_reason='tool_use' THEN 'owes-tool'
+            WHEN adapter='claude' AND role='user'      AND stop_reason='tool_result' THEN 'owes-model'
             ELSE 'other' END AS owes
-FROM read_json_auto('~/.pi/agent/sessions/*/*.jsonl', filename=true, union_by_name=true,
-                    ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
-WHERE timestamp IS NOT NULL
-UNION ALL
-SELECT 'claude', filename,
-       regexp_extract(filename, 'dt-([A-Za-z0-9._-]+?)-*/', 1),
-       CAST(timestamp AS TIMESTAMPTZ),
-       CASE WHEN type='assistant' AND json_extract_string(message,'$.stop_reason')='tool_use' THEN 'owes-tool'
-            WHEN type='user' AND json_extract_string(message,'$.content[0].type')='tool_result' THEN 'owes-model'
-            ELSE 'other' END
-FROM read_json_auto('~/.claude/projects/*/*.jsonl', filename=true, union_by_name=true,
-                    ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
-WHERE timestamp IS NOT NULL;
+FROM (
+  SELECT 'pi' AS adapter, filename, timestamp,
+         json_extract_string(message,'$.role') AS role,
+         json_extract_string(message,'$.stopReason') AS stop_reason
+  FROM read_json_auto('~/.pi/agent/sessions/*/*.jsonl', filename=true, union_by_name=true,
+                      ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
+  WHERE timestamp IS NOT NULL
+  UNION ALL
+  SELECT 'claude', filename, timestamp,
+         type,
+         CASE WHEN type='assistant' THEN json_extract_string(message,'$.stop_reason')
+              WHEN type='user'      THEN json_extract_string(message,'$.content[0].type') END
+  FROM read_json_auto('~/.claude/projects/*/*.jsonl', filename=true, union_by_name=true,
+                      ignore_errors=true, columns={timestamp:'VARCHAR', type:'VARCHAR', message:'JSON'})
+  WHERE timestamp IS NOT NULL
+);
 
 CREATE OR REPLACE TABLE gaps AS
-SELECT *, epoch(at_local) - epoch(lag(at_local) OVER w) AS gap_s, lag(owes) OVER w AS powes
-FROM frames WINDOW w AS (PARTITION BY filename ORDER BY at_local, owes);
+SELECT *, epoch(ts) - epoch(lag(ts) OVER w) AS gap_s, lag(owes) OVER w AS powes
+FROM frames WINDOW w AS (PARTITION BY file ORDER BY ts, owes);
 
 SELECT s.status AS terminal_status, count(*) AS n,
        round(quantile_disc(g.gap_s,0.5)::DOUBLE,2)   AS p50,
@@ -229,14 +240,14 @@ JOIN L.sessions s
  AND s.task_slug not in ('x','daemon80','unfenced-child','fence-scope','fence-plan','daemon-null-lane')
  AND s.ended_at IS NOT NULL
  AND CAST(s.ended_at AS TIMESTAMPTZ) < TIMESTAMPTZ '2026-08-24T15:00:00Z'
- AND g.at_local >= CAST(s.started_at AS TIMESTAMPTZ)
- AND g.at_local <  CAST(s.ended_at   AS TIMESTAMPTZ)
+ AND g.ts >= CAST(s.started_at AS TIMESTAMPTZ)
+ AND g.ts <  CAST(s.ended_at   AS TIMESTAMPTZ)
 WHERE g.gap_s IS NOT NULL AND g.powes IN ('owes-tool','owes-model')
 GROUP BY 1 ORDER BY n DESC;
 SQL
 ```
 
-Recorded output, run 2026-08-25T15:09:34Z (with the fixture-slug exclusion):
+Recorded output, run 2026-08-25T17:38:34Z (with the fixture-slug exclusion):
 
 ```text
 ┌─────────────────┬───────┬────────┬────────┬────────┬───────────┐
@@ -290,39 +301,71 @@ The ledger is in WAL mode and a live lane holds it open. A reader that sees a to
 
 ```sh
 # Recipe D — is the ATTACHed sqlite reader safe while a crew is WRITING the
-# ledger? Demonstrated on a fixture in WAL mode with the writer connection open.
+# ledger? Demonstrated on a fixture in WAL mode with the writer connection open,
+# through an uncommitted transaction and a held write lock. Never the real ledger.
 d=$(mktemp -d)
-export FIXTURE="$d/t.db"
-node --input-type=module -e "
+cat > "$d/probe.mjs" <<'EOF'
 import { DatabaseSync } from 'node:sqlite'
 import { execFileSync } from 'node:child_process'
-const p = process.env.FIXTURE
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
+
+const dir = process.argv[2]
+const p = join(dir, 't.db')
+const read = () => {
+  try {
+    return execFileSync('duckdb', ['-noheader', '-list', '-c',
+      `INSTALL sqlite; LOAD sqlite; ATTACH '${p}' AS L (TYPE sqlite, READ_ONLY);` +
+      ` SELECT count(*), coalesce(string_agg(v, ',' ORDER BY id), '-') FROM L.t;`],
+      { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim()
+  } catch (e) { return 'ERROR: ' + String(e.stderr || e.message).trim().split('\n')[0] }
+}
+const sidecars = () => ['-shm', '-wal'].filter(s => existsSync(p + s)).map(s => 't.db' + s).join(', ') || 'none'
+
 const db = new DatabaseSync(p)
 db.exec('PRAGMA journal_mode=WAL')
 db.exec('CREATE TABLE t(id INTEGER PRIMARY KEY, v TEXT)')
-db.exec(\"INSERT INTO t(v) VALUES ('committed-A'),('committed-B')\")
-const read = () => execFileSync('duckdb', ['-noheader','-list','-c',
-  \"INSTALL sqlite; LOAD sqlite; ATTACH '\" + p + \"' AS L (TYPE sqlite, READ_ONLY);\" +
-  \" SELECT count(*), string_agg(v, ',' ORDER BY id) FROM L.t;\"], { encoding: 'utf8' }).trim()
-const before = read()
-db.exec(\"INSERT INTO t(v) VALUES ('committed-C')\")
-const after = read()
+db.exec("INSERT INTO t(v) VALUES ('A'),('B')")
+console.log('writer open, 2 rows committed to WAL :', read())
+db.exec('BEGIN')
+db.exec("INSERT INTO t(v) VALUES ('DIRTY-C')")
+console.log('writer mid-transaction, UNCOMMITTED  :', read())
+db.exec('COMMIT')
+console.log('committed to WAL, NOT checkpointed   :', read())
+db.exec('BEGIN IMMEDIATE')
+db.exec("INSERT INTO t(v) VALUES ('DIRTY-D')")
+console.log('writer holding the WRITE LOCK        :', read())
+db.exec('ROLLBACK')
+console.log('after the writer ROLLBACK            :', read())
 db.close()
-const closed = read()
-console.log('writer-open, 2 rows committed to WAL :', before)
-console.log('writer-open, 3rd row committed to WAL:', after)
-console.log('writer-closed, WAL checkpointed      :', closed)
-" 2>&1
+console.log('writer closed, WAL checkpointed      :', read())
+
+// the same reader against a QUIET database whose sidecars are absent
+for (const s of ['-wal', '-shm']) if (existsSync(p + s)) rmSync(p + s)
+console.log('quiet db, sidecars before READ_ONLY  :', sidecars())
+read()
+console.log('quiet db, sidecars after  READ_ONLY  :', sidecars())
+EOF
+node "$d/probe.mjs" "$d"
 rm -rf "$d"
 ```
 
 ```text
-writer-open, 2 rows committed to WAL : 2|committed-A,committed-B
-writer-open, 3rd row committed to WAL: 3|committed-A,committed-B,committed-C
-writer-closed, WAL checkpointed      : 3|committed-A,committed-B,committed-C
+writer open, 2 rows committed to WAL : 2|A,B
+writer mid-transaction, UNCOMMITTED  : 2|A,B
+committed to WAL, NOT checkpointed   : 3|A,B,DIRTY-C
+writer holding the WRITE LOCK        : 3|A,B,DIRTY-C
+after the writer ROLLBACK            : 3|A,B,DIRTY-C
+writer closed, WAL checkpointed      : 3|A,B,DIRTY-C
+quiet db, sidecars before READ_ONLY  : none
+quiet db, sidecars after  READ_ONLY  : t.db-shm, t.db-wal
 ```
 
-**WAL hazard, measured:** the ATTACHed sqlite reader sees committed-but-uncheckpointed WAL rows while the writer still holds the connection open — the third row, committed after the first read, is visible on the second read, and the post-close read agrees. Reading a live ledger `READ_ONLY` is therefore safe; it is a consistent snapshot as of the last commit, not a stale copy of the main database file and not a torn one. This says nothing about a write, which is why every recipe attaches `READ_ONLY`.
+**WAL hazard, measured:** the ATTACHed sqlite reader sees committed-but-uncheckpointed WAL rows while the writer still holds the connection open — the third row, committed after the first read, is visible on the second read, and the post-close read agrees. The uncommitted row is **invisible**: the reader never sees a dirty or torn row, so a number read from a live ledger is a consistent snapshot as of the last commit. A held write lock does not lock the reader out — there is no `SQLITE_BUSY` and no retry loop needed.
+
+Therefore a recipe may be run while a batch is live. The operator must still discount rows for `running` sessions: they are incomplete, and their terminal status can change under the query (Recipe B joins only `ended_at IS NOT NULL` for exactly this reason). A rate computed mid-batch is a floor over settled runs, not a final number. The attach is not filesystem-inert: it creates `-wal` and `-shm` beside a quiet database. That is harmless for a live ledger that already has those sidecars, but it is not nothing, which is why the claim above was corrected. Every recipe still attaches `READ_ONLY`; this measurement says nothing about a write.
+
+**What remains unmeasured (#7):** this measures one writer and one reader on one machine. It does not measure a reader on another host over a network filesystem, where SQLite's WAL shared-memory index does not work at all; a writer killed mid-commit; or a writer implementation other than `node:sqlite` `DatabaseSync`, the same library the ledger uses.
 
 ### Recipe E — every escalation, where and why
 

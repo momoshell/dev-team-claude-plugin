@@ -31,6 +31,13 @@ artifacts before answering; a warm judge beats a cold one.
                 "refuted": [{"id": "<finding id>", "evidence": "<why it is not real>"}] }
    The residuals and refuted fields are optional generally, but REQUIRED when
    the decision is accept at an exhaustion consult whose brief lists findings.
+   At a PLAN-CHECK accept the same residuals field takes one extra property:
+   {"id": "<a label you choose>", "type": "cosmetic|correctness-unverified",
+    "summary": "<the gap in one sentence>"}. summary is REQUIRED there and is
+   omitted from a keyed review-exhaustion claim, where the canonical finding
+   supplies that text; the field name and the two type values are the same in
+   both. refuted has no plan-check counterpart — there are no finding ids to
+   refute.
 
 When the brief lists numbered questions, `answers` are REQUIRED: answer every
 id in the one decision. An id you leave out is delivered to the member marked
@@ -96,6 +103,22 @@ gate pass; make it correct.
   guidance) or the call is above your station (posture changes, scope
   changes, anything touching what a human promised someone else). Escalating
   early on a wrong premise is cheaper than three doomed bounces.
+
+## Two things that cost a lane to rediscover
+
+- **For a judgement field, the plan is a contract, and it is not amendable after
+  acceptance.** The planner's `details.mutations` and `files_in_scope` are its
+  envelope, not yours; no seat can amend them once the plan is accepted, and the
+  planner is never assigned again. If closing a gap would need a new gate check
+  label or a new mutation entry, that is a fact about the run you RECORD — not a
+  reason to invent an amendment.
+- **`correctness-unverified` is code-refused into escalation.** That is a fact
+  about the FIELD and it is one expression of it; it is not a statement about
+  which stage you are standing in. An accept offered at plan-check is a real
+  option, and it records `details.residuals` using the same field and type
+  vocabulary as an exhaustion accept, plus the `summary` this stage has no
+  canonical finding to supply — so name the gap and accept, rather than
+  concluding that no valid accept exists here.
 
 ## Hard rules
 

@@ -1135,6 +1135,10 @@ export function reviewOutcome(role, env) {
   }
 }
 
+// One clamp for the free text a residual or a refutation carries into the
+// journal, shared by both residual validators so the bound cannot drift.
+const boundedText = (text) => (text.length > REFUTATION_EVIDENCE_MAX ? `${text.slice(0, REFUTATION_EVIDENCE_MAX - 1)}…` : text)
+
 // Validate an exhaustion-time accept against the canonical finding set.
 // `findings` is the normalized array from the LAST reviewer envelope that
 // carried one. Returns sanitized claims and every validation failure; the
@@ -1202,12 +1206,9 @@ export function validateAcceptDecision(input = {}) {
   const residualsOut = residualClaims
     .filter(({ id, type }) => id !== null && findingById.has(id) && RESIDUAL_TYPES.includes(type))
     .map(({ id, type }) => ({ id, type, severity: findingById.get(id).severity }))
-  const bounded = (text) => text.length > REFUTATION_EVIDENCE_MAX
-    ? `${text.slice(0, REFUTATION_EVIDENCE_MAX - 1)}…`
-    : text
   const refutedOut = refutedClaims
     .filter(({ id, evidenceValid }) => id !== null && findingById.has(id) && evidenceValid)
-    .map(({ id, evidence }) => ({ id, severity: findingById.get(id).severity, evidence: bounded(evidence) }))
+    .map(({ id, evidence }) => ({ id, severity: findingById.get(id).severity, evidence: boundedText(evidence) }))
   const unverified = residualsOut
     .filter((residual) => residual.type === 'correctness-unverified')
     .map((residual) => residual.id)
@@ -1243,6 +1244,66 @@ export function acceptContractLines(findings) {
     'Refuting a must-fix is recorded WITH your evidence and then escalates to a human every time: code can check that evidence exists, never that it is true. It is not an accept route — refute a must-fix only when you want a person to read the argument. A refuted should-fix still accepts.',
   )
   return lines
+}
+
+// The SAME residual field and the SAME type vocabulary, validated where there
+// is no canonical finding set to key it to. A plan-check consult has none — the
+// tech-lead envelope carries a verdict and a path, never ids (crew/drive.mjs:2380)
+// — so the keyed checks in validateAcceptDecision (unknown/omitted/duplicate id
+// against the reviewer's set) are the only part that does not travel, and a
+// per-residual summary supplies the text and identity context that a canonical
+// finding supplies on the keyed path. The ESCALATING KIND
+// does not move: a correctness-unverified residual is still refused into
+// escalation by the caller, exactly as on the review path (crew/drive.mjs:1141).
+// b209-journalchannel escalated because this stage offered an accept that
+// recorded nothing; the fix is the record, never a new vocabulary.
+// Total by construction: malformed lead details never throw.
+export function validatePlanResiduals(residuals, refuted) {
+  const errors = []
+  const error = (id, why) => errors.push({ id: id ?? null, why })
+  // refuted is a KEYED claim — it names a reviewer finding id, and this stage has
+  // none. Unsupported here therefore FAILS CLOSED: dropping it in silence would
+  // accept a run as "named none" while the lead had named a gap, which is the
+  // exact honesty defect this lane exists to remove. Absent or empty is fine.
+  if (refuted != null) {
+    if (!Array.isArray(refuted)) error(null, 'refuted must be an array')
+    else if (refuted.length > 0) error(null, 'refuted is not supported at a plan-check accept: there are no finding ids to refute — record the gap in residuals instead')
+  }
+  const raw = residuals == null ? [] : residuals
+  const entries = Array.isArray(raw) ? raw : []
+  if (!Array.isArray(raw)) error(null, 'residuals must be an array')
+  const seen = new Set()
+  const out = []
+  for (const entry of entries) {
+    const isObject = entry !== null && typeof entry === 'object' && !Array.isArray(entry)
+    const id = isObject && typeof entry.id === 'string' && entry.id.trim() !== '' ? entry.id.trim() : null
+    const type = isObject ? entry.type : undefined
+    const summary = isObject && typeof entry.summary === 'string' ? entry.summary.trim() : ''
+    if (id === null) error(null, 'missing id')
+    if (!RESIDUAL_TYPES.includes(type)) error(id, 'unknown residual type')
+    if (summary === '') error(id, 'empty residual summary')
+    if (id !== null && seen.has(id)) error(id, 'duplicate id')
+    if (id !== null) seen.add(id)
+    if (id === null || !RESIDUAL_TYPES.includes(type) || summary === '') continue
+    out.push({ id, type, summary: boundedText(summary) })
+  }
+  const unverified = out.filter(({ type }) => type === 'correctness-unverified').map(({ id }) => id)
+  const result = { ok: errors.length === 0, residuals: out, refuted: [], unverified, refuted_must_fix: [] }
+  if (errors.length > 0) result.errors = errors
+  return result
+}
+
+// The vocabulary b209's lead could not find. An accept at plan-check is offered
+// with the residual field NAMED, so a lead holding a known gap records it instead
+// of spending the run's escalation to say it in prose.
+export function planAcceptContractLines() {
+  return [
+    '',
+    'An accept RECORDS what you already know: details.residuals: [{id, type, summary}] — id is a short label you choose,',
+    `type is one of ${RESIDUAL_TYPES.join(' or ')}, and summary states the gap in one sentence.`,
+    'A residual typed correctness-unverified is legitimate but asks a human, so code refuses it into escalation — the same rule as at review exhaustion. That is a fact about the FIELD, not about which stage you are standing in.',
+    'An accept naming no residual is still an accept, and is recorded as one that named none. Never invent a residual to fill the field.',
+  ]
 }
 
 // accepted_via DESCRIBES THE RECORD. A label that contradicts the record is
@@ -1508,12 +1569,20 @@ export function driveTask(ctx, io) {
   }
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
-  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null, seqHighWater: 0 }
+  const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null, seqHighWater: 0, planAccept: null }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
   const journal = ctx.journal || art('journal.jsonl')
   let gateBlock = () => null
+  // One shape for every terminal, under the details key this driver already uses
+  // for a typed accept (crew/drive.mjs:3246,3255,3322,3331): a plan-check accept
+  // that recorded something is in the run's record wherever the run ends, and a
+  // run that never reached one adds no key at all, so the loop every lane runs
+  // stays byte-identical without it. It is spread BEFORE ...extraDetails in
+  // escalate(), so a LATER terminal's own accept_decision still wins the envelope
+  // and the superseded plan-check row stays in the journal.
+  const acceptDecisionBlock = () => (S.planAccept ? { accept_decision: S.planAccept } : {})
 
   // Instrumentation is never load-bearing (ADR-024/026 clause 1): the
   // emitter itself never throws, and this try/catch means an io that does
@@ -1826,6 +1895,7 @@ export function driveTask(ctx, io) {
         dissents: S.dissents, accepted_via: null, escalation: { where, why },
         extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
         gate: gateBlock(),
+        ...acceptDecisionBlock(),
         converge: {
           pr: { number: pr.number, url: pr.url }, draft: true, issues, residuals,
           gate_summary: { line: gateSummary.line, total: gateSummary.total, failed: gateSummary.failed, errored: gateSummary.errored },
@@ -1999,6 +2069,7 @@ export function driveTask(ctx, io) {
       stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
       gate: gateBlock(),
+      ...acceptDecisionBlock(),
       seq_high_water: S.seqHighWater,
       gate_attempt_high_water: gateAttempt,
       cursor: roundCursor(S.stages),
@@ -2022,9 +2093,11 @@ export function driveTask(ctx, io) {
   // array is always checked against the latest canonical set and recorded.
   function settleAccept(c, where) {
     const findings = S.acceptFindings
-    const check = findings === null
-      ? { ok: true, residuals: [], refuted: [], unverified: [], refuted_must_fix: [] }
-      : validateAcceptDecision({ findings, residuals: c.residuals, refuted: c.refuted })
+    const check = where === 'plan-check'
+      ? validatePlanResiduals(c.residuals, c.refuted)
+      : findings === null
+        ? { ok: true, residuals: [], refuted: [], unverified: [], refuted_must_fix: [] }
+        : validateAcceptDecision({ findings, residuals: c.residuals, refuted: c.refuted })
     const errors = check.errors || []
     const refusedMustFix = check.refuted_must_fix || []
     const outcome = check.ok && check.unverified.length === 0 && refusedMustFix.length === 0 ? 'accepted' : 'escalated'
@@ -2045,6 +2118,13 @@ export function driveTask(ctx, io) {
       refuted_must_fix: refusedMustFix,
       errors,
     }
+    // Conditional-LATEST state, not plan-only state: once a plan-check accept has
+    // opened the slot, every later typed decision supersedes it, so the terminals
+    // that pass no extraDetails (done at crew/drive.mjs:3388, converge at :1828)
+    // return the decision that actually completed or converged the run rather than
+    // a stale one. A run with no plan-check accept never opens the slot, which is
+    // what keeps review and build exhaustion byte-identical.
+    if (where === 'plan-check' || S.planAccept !== null) S.planAccept = record
     io.log(recordRow({ at: io.now(), accept_decision: record }))
     emit({ kind: 'accept-decision', ...record })
     return { ok: outcome === 'accepted', why, record, refusedMustFix: refusedMustFix.length > 0 }
@@ -2402,6 +2482,7 @@ export function driveTask(ctx, io) {
           exhausted
             ? `The plan check still says revise after ${round} round(s). Grant one more plan round, accept the latest plan anyway, or escalate?`
             : `The plan check says revise after ${round} round(s) and the plan is measured DIVERGING. Bounce it for another round, accept the latest plan anyway, or escalate?`,
+          ...planAcceptContractLines(),
           ...divergenceConsultLines(diverging ? growth : null),
         ].join('\n'),
         options, [planPath, check.details?.check_path || art('plan-check.md')],
@@ -2422,9 +2503,18 @@ export function driveTask(ctx, io) {
         stageComplete()
         continue
       }
+      // Accept RECORDS. b209-journalchannel escalated at this exact break because
+      // it "records nothing": the lead knew the residual gap exactly and had
+      // nowhere to put it, so it spent the run's escalation to say so in prose.
+      const settledPlan = settleAccept(c, 'plan-check')
+      if (!settledPlan.ok) {
+        stageComplete()
+        stageComplete()
+        return escalate('plan-check', settledPlan.why)
+      }
       stageComplete()
       stageComplete()
-      break // accept: proceed on the latest plan
+      break // accept: proceed on the latest plan, with the residual recorded
     }
     const b = art(`plan-bounce-r${round}.md`)
     failureUpgrade('plan', 'planner')
@@ -3386,6 +3476,7 @@ export function driveTask(ctx, io) {
       dissents: S.dissents, accepted_via: accepted, escalation: null,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
       gate: gateBlock(),
+      ...acceptDecisionBlock(),
     },
   }
   stageComplete()

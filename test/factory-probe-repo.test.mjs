@@ -11,6 +11,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, relative } from 'node:path'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { ROOT } from './helpers.mjs'
+import { slug } from '../crew/slug.mjs'
 import {
   FIELD_KIND_NAMES, FIELD_KINDS, INTAKE_BOARD_FIELD, INTAKE_BOARD_REFUSALS,
   INTAKE_COLUMN_ROLES, LOAD_BEARING, PROFILE_VERSION,
@@ -157,7 +158,10 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   // repo_key is remote-derived and stable; repo_slug is the checkout DIRECTORY's
   // name, which differs per worktree, on CI, and on main. Deriving it is the
   // point — a hardcoded value passes only in the worktree it was written in.
-  assert.equal(profile.repo_slug, basename(ROOT))
+  // The DERIVED value is what to compare against: probeRepo runs the name through
+  // slug(), so the raw basename matches only while the directory name happens to
+  // be its own slug. dt-b231-helperdedupB was the worktree where it did not.
+  assert.equal(profile.repo_slug, slug(basename(ROOT)))
   assert.deepEqual(profile.fields.test_command.value, 'npm test')
   assert.equal(profile.fields.test_command.status, 'proposed')
   assert.match(profile.fields.test_command.source, /package\.json/)
@@ -185,6 +189,21 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   }
   assert.equal(profile.meta.gh_consulted, false)
   assert.equal(profile.meta.body_digest, profileDigest(profile))
+})
+
+// The ROOT assertion above cannot prove the derivation on its own: in a worktree
+// whose directory name is already its own slug, basename(ROOT) and
+// slug(basename(ROOT)) agree, so the raw-basename spelling passed for as long as
+// every lane name happened to be lowercase. This pins the rule against a path
+// that is NOT its own slug. coldFixture reuses the file's single fixtureRoot on
+// purpose: test/factory-env.test.mjs freezes this file at exactly one mkdtemp
+// call site, by equality, so a fixture root of its own would turn that red.
+test('repo_slug is slugified, so an uppercase checkout directory still probes', () => {
+  const root = coldFixture('Upper-Case')
+  assert.notEqual(basename(root), slug(basename(root)))
+  const profile = probeRepo({ checkout: root })
+  assert.equal(profile.repo_slug, slug(basename(root)))
+  assert.match(profile.repo_slug, /^[a-z0-9-]+$/)
 })
 
 function fieldRejectingGh(label) {

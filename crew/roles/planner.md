@@ -137,6 +137,11 @@ outside the builder's reach. Rules the driver enforces mechanically:
   catch-and-rethrow shape is in
   `skills/qa-test-writing/references/gates.md` (Mechanics that bite). #581
   Call `scripts/factory/absence.mjs` rather than hand-rolling `git grep`.
+- A check may assert only against an authoritative stream or mutable data,
+  never against the presence of a service, method, key or symbol. A gate check
+  that reads a name into existence is the vacuous shape
+  `test/vacuity.test.mjs` exists to catch; see
+  `skills/qa-test-writing/references/vacuity.md`. #623
 - Map every explicit requirement in the brief to a concrete check; print
   failures as `expected X, found Y, at PATH` (they feed back verbatim to
   the builder).

@@ -1114,6 +1114,22 @@ function proposeShape(protectedHits) {
   }
 }
 
+// #291 step 3: `mechanical` has no reinforced column. A mechanical SHAPE priced
+// above the mechanical column is a MISCLASSIFICATION, not a cheap reinforcement:
+// the compiler says so and asks for the shape to be reproposed. It rewrites
+// neither proposal — "a tier is proposed, never decided".
+const MISCLASSIFIED_PREFIX = 'misclassified · shape mechanical has no reinforced column'
+
+// MUTATION M2: widen this guard and the note stops discriminating — it becomes
+// a line every reinforced brief carries.
+// MUTATION M1: invert the column comparison and a mechanical shape priced
+// frontier carries no note at all.
+function noteMisclassification(shape, strength, complexityTier) {
+  if (shape !== 'mechanical' || strength == null) return null
+  if (strength === STRENGTH_BY_COMPLEXITY.mechanical) return null
+  return `${MISCLASSIFIED_PREFIX}: complexity ${complexityTier} prices ${strength} — repropose the shape`
+}
+
 function proposeStrength(complexityTier, signals, ladderBands) {
   const band = STRENGTH_BY_COMPLEXITY[complexityTier] ?? null
   const reasons = [
@@ -1132,6 +1148,7 @@ function absentProposal(reasons, signals) {
   return {
     tier: null, shape: null, strength: null,
     reasons, shapeReasons: [...reasons], strengthReasons: [...reasons], signals,
+    misclassification: null,
   }
 }
 
@@ -1244,7 +1261,10 @@ export function proposeTier({ where, discovery, protectedPaths = DEFAULT_PROTECT
 
   const { shape, reasons: shapeReasons } = proposeShape(signals.protectedHits)
   const { strength, reasons: strengthReasons } = proposeStrength(complexityTier, signals, ladderBands)
-  return { tier, shape, strength, reasons, shapeReasons, strengthReasons, signals }
+  return {
+    tier, shape, strength, reasons, shapeReasons, strengthReasons, signals,
+    misclassification: noteMisclassification(shape, strength, complexityTier),
+  }
 }
 
 function formatCountBasis(profileBaseline, supplied) {
@@ -1532,6 +1552,10 @@ export function renderProposedTier(proposal) {
   const strengthReasons = proposal && Array.isArray(proposal.strengthReasons)
     ? proposal.strengthReasons.filter((reason) => typeof reason === 'string' && reason.length > 0)
     : []
+  const misclassification = proposal && typeof proposal.misclassification === 'string'
+    && proposal.misclassification.startsWith(MISCLASSIFIED_PREFIX)
+    ? proposal.misclassification
+    : null
   return [
     'PROPOSAL ONLY — compiled from mechanical signals. The orchestrator confirms',
     'or overrides this at boot; the compiler never decides the tier.',
@@ -1544,6 +1568,7 @@ export function renderProposedTier(proposal) {
     `proposed strength: ${strength || 'no proposal'}`,
     'because (complexity signals):',
     ...(strengthReasons.length ? strengthReasons.map((reason) => `- ${reason}`) : ['- no complexity signals were available']),
+    ...(misclassification ? [misclassification] : []),
   ].join('\n')
 }
 

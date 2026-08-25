@@ -193,6 +193,27 @@ function section(brief, heading) {
   return (end === -1 ? rest : rest.slice(0, end)).join('\n')
 }
 
+function proposalFor(sourceCount, protectedPaths = []) {
+  return proposeTier({
+    where: Array.from({ length: sourceCount }, (_, index) => ({ path: `lib/source-${index}.mjs`, kind: 'file' })),
+    discovery: {
+      candidates: Array.from({ length: sourceCount }, (_, index) => `lib/source-${index}.mjs`),
+      tripwires: [],
+      broadKeys: [],
+    },
+    protectedPaths,
+  })
+}
+
+function compiledProposal(proposal) {
+  return renderBrief({
+    request: { ask: 'ask', done_means: 'done', out_of_scope: 'out' },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+    proposal,
+  })
+}
+
 function ratified(value) {
   return {
     status: 'ratified',
@@ -1235,6 +1256,51 @@ test('renderProposedTier labels tier, shape, and strength in risk then complexit
   assert.match(rendered, /proposed strength: frontier/)
   assert.match(rendered, /because \(complexity signals\):/)
   assert.ok(rendered.indexOf('proposed shape:') < rendered.indexOf('proposed strength:'))
+})
+
+test('a mechanical shape priced above its column is named a misclassification in the brief', () => {
+  const body = section(compiledProposal(proposalFor(5)), '## Proposed tier')
+  const line = body.split('\n').find((candidate) => /misclassified/i.test(candidate))
+  assert.ok(line)
+  assert.match(line, /repropose the shape/)
+  assert.match(line, /mechanical/)
+  assert.match(line, /frontier/)
+})
+
+test('the misclassification discriminates by shape and complexity', () => {
+  const cases = [
+    proposalFor(1),
+    proposalFor(5),
+    proposalFor(5, ['lib/source-0.mjs', 'lib/source-1.mjs']),
+  ]
+  const carriesMisclassification = cases.map((proposal) => /misclassified/i.test(
+    section(compiledProposal(proposal), '## Proposed tier'),
+  ))
+  assert.deepEqual(carriesMisclassification, [false, true, false])
+  assert.equal(carriesMisclassification.filter(Boolean).length, 1)
+  assert.ok(carriesMisclassification[1])
+})
+
+test('the misclassification flag rewrites neither proposal or proposal fence', () => {
+  const proposal = proposalFor(5)
+  const body = section(compiledProposal(proposal), '## Proposed tier')
+  assert.equal(proposal.shape, 'mechanical')
+  assert.equal(proposal.strength, 'frontier')
+  assert.equal(proposal.tier, 'judge')
+  const fence = body.match(/```proposal\n([\s\S]*?)\n```/)
+  assert.ok(fence)
+  assert.deepEqual(JSON.parse(fence[1]), { shape: 'mechanical', strength: 'frontier' })
+})
+
+test('governance survives a frugal strength', () => {
+  const proposal = proposalFor(1, ['lib/source-0.mjs'])
+  const body = section(compiledProposal(proposal), '## Proposed tier')
+  // One protected hit is the ratified build shape floor; strength remains frugal.
+  assert.equal(proposal.shape, 'build')
+  assert.equal(proposal.strength, 'utility')
+  assert.equal(proposal.tier, 'build')
+  assert.match(body, /proposed shape: build/)
+  assert.match(body, /proposed strength: utility/)
 })
 
 test('protected-path risk leaves the legacy tier and protected hits unchanged', () => {

@@ -189,12 +189,32 @@ function parseExit(path, readFileSync, existsSync) {
   } catch { return null }
 }
 
-function envelopeAt(path, existsSync, readFileSync) {
-  if (!existsSync(path)) return null
-  try {
-    const env = JSON.parse(readFileSync(path, 'utf8'))
-    return env && typeof env === 'object' ? env : null
-  } catch { return null }
+// An UNREADABLE envelope is not an ABSENT one. crew/seat-io.mjs:1369
+// readEnvelopeFile already states the rule and is the reference implementation;
+// this cannot CALL it, because the import direction is seat-io ->
+// headless-rpc -> headless (the writeCrewJson rationale at :215), so the shape
+// is mirrored here ONCE and headless-rpc imports it rather than growing a
+// second copy. `stage` is the caller's own so cellFailureKind
+// (crew/seat-io.mjs:1059) maps it onto the EXISTING 'unusable-envelope' kind:
+// no new vocabulary, and no repair of the seat's own file.
+export function readEnvelopeOrThrow(path, { existsSync, readFileSync, stage, role = null }) {
+  if (!path || !existsSync(path)) return null
+  let raw
+  // A read that loses a race with a rename, or that comes back denied, is an
+  // ABSENCE and not a defect: the next poll sees the file. Only bytes we
+  // actually read and cannot parse are terminal.
+  try { raw = String(readFileSync(path, 'utf8')) } catch { return null }
+  let value
+  try { value = JSON.parse(raw) } catch (err) {
+    const parseFailure = new Error(`unusable envelope at ${path}: the file EXISTED (${raw.length} bytes) and is not JSON this driver can read: ${err.message}`)
+    parseFailure.stage = stage
+    if (role) parseFailure.role = role
+    parseFailure.raw = raw   // reading is not authoring: the exact bytes travel with
+    // the failure so a re-ask can tell "not re-emitted yet" from "re-emitted and
+    // still broken", and nothing ever writes them back.
+    throw parseFailure
+  }
+  return value && typeof value === 'object' ? value : null
 }
 
 function adapterFor(adapters, role) {
@@ -330,7 +350,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   function activePath(role) { return join(root, `.${role}.active.json`) }
   function readState(path) { return readJsonTri(path, { existsSync: exists, readFileSync: read }) ?? null }
   function activeRun(role) { return readState(activePath(role)) }
-  function readEnvelope(returnPath) { return envelopeAt(returnPath, exists, read) }
+  function readEnvelope(returnPath, role) { return readEnvelopeOrThrow(returnPath, { existsSync: exists, readFileSync: read, stage: 'headless-parse-error', role }) }
   function allocateRun() {
     mkdir(root, { recursive: true })
     let n = 0
@@ -434,11 +454,26 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     log({ at: now(), event: 'headless-spawn', role, id, pid: child.pid, dir, returnPath })
     return { id, returnPath }
   }
+  // An unreadable envelope is TERMINAL, and it leaves this transport the way
+  // every other terminal outcome does: the outcome journalled and the spend
+  // emitted before the failure travels. Nothing here rewrites the seat's file.
+  function readEnvelopeOrFail(run) {
+    try { return readEnvelope(run.returnPath, run.role) }
+    catch (err) {
+      const exitCode = parseExit(run.exit, read, exists)
+      const stream = parseStream(run.stream, read, exists)
+      recordOutcome(run, 'parse-error', stream, exitCode)
+      emitUsage(run, stream.usage)
+      const condition = capturedCondition(run, read, exists)
+      if (condition) err.providerCondition = condition
+      throw err
+    }
+  }
   function wait(returnPath, timeoutS) {
     const run = runs.get(returnPath) || { role: 'unknown', returnPath, stream: '', exit: '' }
     const deadline = now() + Number(timeoutS) * 1000
     while (now() < deadline) {
-      const env = readEnvelope(returnPath)
+      const env = readEnvelopeOrFail(run)
       if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
       if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); throw outcomeError(run, outcome) }
@@ -457,7 +492,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       if (proven) store.clear({ key: run.role, reservation_id: run.reservation_id })
       else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id })
     }
-    const raced = readEnvelope(returnPath)
+    const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
     const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true })
     recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); throw outcomeError(run, outcome)

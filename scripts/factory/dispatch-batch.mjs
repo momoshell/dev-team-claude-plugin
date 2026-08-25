@@ -30,6 +30,9 @@ const BOOT_FAILED = 'boot-failed'
 const FENCE_NOT_ARRIVED = 'fence-not-arrived'
 const FENCE_COUNT_MISMATCH = 'fence-count-mismatch'
 const RUN_FAILED = 'run-failed'
+const DEPENDENCY_CYCLE = 'dependency-cycle'
+const DEPENDENCY_UNKNOWN = 'dependency-unknown'
+const DEPENDENT_BASE_STALE = 'dependent-base-stale'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -49,6 +52,9 @@ export const REFUSAL_REASONS = Object.freeze([
   FENCE_NOT_ARRIVED,
   FENCE_COUNT_MISMATCH,
   RUN_FAILED,
+  DEPENDENCY_CYCLE,
+  DEPENDENCY_UNKNOWN,
+  DEPENDENT_BASE_STALE,
 ])
 
 // These two names belong to the compiler. The batch dispatcher parses its
@@ -56,12 +62,16 @@ export const REFUSAL_REASONS = Object.freeze([
 export const COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'
 export const STALE_READ_ACK = 'stale-read-ack'
 
+export const PREDECESSOR_ESCALATED = 'predecessor-escalated'
+export const PREDECESSOR_UNSETTLED = 'predecessor-unsettled'
+export const DISPATCH_BASE_REF = 'main'
+
 export const REQUEST_SUFFIX = '.request.json'
 
 // Keys a lane's request carries for the DISPATCHER, not for the compiler. The
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier'])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on'])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -191,6 +201,11 @@ function splitDispatchKeys(parsed, requestPath) {
   if (Object.prototype.hasOwnProperty.call(dispatch, 'tier') && !TIER_NAMES.includes(dispatch.tier)) {
     refuse(`request ${requestPath} names an unknown tier ${JSON.stringify(dispatch.tier)}; expected one of ${TIER_NAMES.join(', ')}`, BATCH_UNREADABLE)
   }
+  if (Object.prototype.hasOwnProperty.call(dispatch, 'depends_on')
+      && (!Array.isArray(dispatch.depends_on)
+        || !dispatch.depends_on.every((dep) => typeof dep === 'string' && dep.trim() !== ''))) {
+    refuse(`request ${requestPath} has an invalid depends_on; expected an array of non-empty strings`, BATCH_UNREADABLE)
+  }
   return { dispatch, request }
 }
 
@@ -235,6 +250,7 @@ export function readBatch({ batchDir, deps } = {}) {
       name,
       request,
       tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
+      depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: request.where.map(normaliseRepoPath),
       creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
     })
@@ -242,7 +258,58 @@ export function readBatch({ batchDir, deps } = {}) {
   return lanes.sort((a, b) => a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0)
 }
 
-export function checkFences({ fences, lanes } = {}) {
+export function planWaves({ lanes } = {}) {
+  const batchLanes = Array.isArray(lanes) ? lanes : []
+  const laneNames = batchLanes.map(laneNameOf)
+  const byName = new Map(batchLanes.map((lane) => [laneNameOf(lane), lane]))
+  const deps = new Map()
+  let hasEdges = false
+  for (const lane of batchLanes) {
+    const name = laneNameOf(lane)
+    const declared = Array.isArray(lane?.depends_on) ? lane.depends_on : []
+    const unique = []
+    for (const dep of declared) {
+      if (!byName.has(dep)) refuse(`lane ${name} depends_on names a lane that is not in this batch: ${dep}`, DEPENDENCY_UNKNOWN)
+      if (!unique.includes(dep)) unique.push(dep)
+    }
+    deps.set(name, unique)
+    if (unique.length > 0) hasEdges = true
+  }
+
+  const depsOf = (name) => deps.get(name) || []
+  const ancestors = new Map(laneNames.map((name) => [name, new Set()]))
+  const pending = [...laneNames]
+  const placed = new Set()
+  const waves = []
+  while (pending.length > 0) {
+    const ready = pending.filter((lane) => depsOf(lane).every((dep) => placed.has(dep)))
+    if (ready.length === 0) {
+      const cycle = [...pending].sort()
+      refuse(`dependency cycle among lanes: ${cycle.join(', ')}`, DEPENDENCY_CYCLE)
+    }
+    waves.push(ready)
+    for (const name of ready) {
+      const ownAncestors = ancestors.get(name)
+      for (const dep of depsOf(name)) {
+        ownAncestors.add(dep)
+        for (const ancestor of ancestors.get(dep) || []) ownAncestors.add(ancestor)
+      }
+      placed.add(name)
+    }
+    const readySet = new Set(ready)
+    for (let index = pending.length - 1; index >= 0; index -= 1) {
+      if (readySet.has(pending[index])) pending.splice(index, 1)
+    }
+  }
+  return { waves, graph: { deps, ancestors, hasEdges } }
+}
+
+export function relatedLanes(graph, a, b) {
+  if (!graph || !(graph.ancestors instanceof Map)) return false
+  return Boolean(graph.ancestors.get(a)?.has(b) || graph.ancestors.get(b)?.has(a))
+}
+
+export function checkFences({ fences, lanes, graph } = {}) {
   const entries = fenceEntriesOf(fences).map(normaliseFence)
   const batchLanes = Array.isArray(lanes) ? lanes : []
   const byLane = new Map(entries.map((entry) => [entry.lane, entry]))
@@ -288,7 +355,8 @@ export function checkFences({ fences, lanes } = {}) {
       if (sibling.lane === name) continue
       const siblingFiles = sibling.files.map(normaliseRepoPath)
       const matchSibling = scopeMatcher(siblingFiles)
-      if (ownFiles.some(matchSibling)) {
+      const inherited = relatedLanes(graph, name, sibling.lane)
+      if (!inherited && ownFiles.some(matchSibling)) {
         const leaked = ownFiles.filter(matchSibling)
         refuse(`lane ${name} own fence overlaps sibling ${sibling.lane}: ${leaked.join(', ')}`, SIBLING_LEAK)
       }
@@ -296,7 +364,7 @@ export function checkFences({ fences, lanes } = {}) {
       // own it only through a directory prefix while a sibling owns it literally,
       // and a register-only sibling is never visited as `name`.
       const leakedCreates = ownCreates.filter(matchSibling)
-      if (leakedCreates.length > 0) {
+      if (!inherited && leakedCreates.length > 0) {
         refuse(`lane ${name} creates path(s) inside sibling ${sibling.lane}'s fence: ${leakedCreates.join(', ')}`, SIBLING_LEAK)
       }
       siblings.push({ lane: sibling.lane, files: siblingFiles })
@@ -353,7 +421,7 @@ export function createWorktrees({ plans, checkout, deps } = {}) {
     try {
       result = d.spawn({
         file: 'git',
-        args: ['-C', root, 'worktree', 'add', '-b', plan.branch, plan.dir, 'main'],
+        args: ['-C', root, 'worktree', 'add', '-b', plan.branch, plan.dir, DISPATCH_BASE_REF],
         cwd: root,
       })
     } catch (err) {
@@ -596,6 +664,72 @@ export function crewJsonPath({ checkout, lane } = {}) {
   return join(homedir(), '.crew', slug(basename(checkout)), slug(lane), 'crew.json')
 }
 
+function outcomeFromPath(path, d) {
+  let exists
+  try { exists = d.existsSync(path) } catch {
+    return { found: true, outcome: { status: null, commit: null, path } }
+  }
+  if (!exists) return { found: false, outcome: null }
+  try {
+    const envelope = JSON.parse(d.readFileSync(path, 'utf8'))
+    return {
+      found: true,
+      outcome: {
+        status: typeof envelope?.status === 'string' ? envelope.status : null,
+        commit: typeof envelope?.details?.commit === 'string' ? envelope.details.commit : null,
+        path,
+      },
+    }
+  } catch {
+    return { found: true, outcome: { status: null, commit: null, path } }
+  }
+}
+
+export function laneOutcome({ lane, laneDir, deps } = {}) {
+  const d = normalDeps(deps)
+  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane }))
+  const livePath = join(crewDir, 'returns', 'task.json')
+  const live = outcomeFromPath(livePath, d)
+  if (live.found) return live.outcome
+
+  const parent = dirname(crewDir)
+  const base = `${basename(crewDir)}.archive-`
+  let names
+  try { names = d.readdirSync(parent) } catch {
+    return { status: null, commit: null, path: null }
+  }
+  if (!Array.isArray(names)) return { status: null, commit: null, path: null }
+  const archives = names
+    .map((name) => typeof name === 'string' ? name : name?.name)
+    .filter((name) => typeof name === 'string' && name.startsWith(base))
+    .sort()
+    .reverse()
+  for (const archive of archives) {
+    const path = join(parent, archive, 'returns', 'task.json')
+    const result = outcomeFromPath(path, d)
+    if (result.found) return result.outcome
+  }
+  return { status: null, commit: null, path: null }
+}
+
+export function baseContains({ commit, base, checkout, deps } = {}) {
+  if (typeof commit !== 'string' || commit.trim() === ''
+      || typeof base !== 'string' || base.trim() === '') return false
+  const d = normalDeps(deps)
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  let probe
+  try {
+    probe = d.spawn({
+      file: 'git',
+      args: ['-C', root, 'merge-base', '--is-ancestor', commit, base],
+      cwd: root,
+    })
+  } catch {
+    return false
+  }
+  return probe?.status === 0
+}
+
 // The transport is a CALLER's choice with headless as the default, so both
 // flags at once is a NAMED refusal: a silent precedence is how a whole session
 // went by without anyone noticing which transport had booted (#617).
@@ -676,33 +810,120 @@ function runCommand({ lane, laneDir, briefPath, files, variant, keep, runFlags =
   return { file: 'node', args, cwd: laneDir }
 }
 
+function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, wave }) {
+  const args = ['node', 'scripts/factory/dispatch-batch.mjs']
+  const add = (flag, value) => {
+    if (value === undefined || value === null || value === '') return
+    args.push(`--${flag}`, String(value))
+  }
+  add('batch', batchDir)
+  add('fences', typeof runFlags.fences === 'string' ? runFlags.fences : fences)
+  add('checkout', checkout)
+  add('parent', parentDir)
+  add('out', outDir)
+  add('tier', runFlags.tier ?? tier)
+  add('variant', runFlags.variant ?? variant)
+  for (const flag of [
+    'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
+    'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
+  ]) add(flag, runFlags[flag])
+  for (const flag of ['no-keep', PANE_TRANSPORT, BOOT_TRANSPORT, 'force']) {
+    if (runFlags[flag] === true) args.push(`--${flag}`)
+  }
+  add('wave', wave)
+  return args.join(' ')
+}
+
 export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, deps } = {}) {
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
   const lanes = readBatch({ batchDir, deps: d })
-  const fenceReport = checkFences({ fences, lanes })
+  const { waves, graph } = planWaves({ lanes })
+  const fenceReport = checkFences({ fences, lanes, graph })
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
   // branches, so an unsupported --variant reached here after the probe and was
   // reported as `branch-taken` when the real cause was an invalid run option
   // (RV3-1). A refusal must name the cause it measured, not the first one it
   // tripped over. Ordering is the whole fix — both refusals still fire.
   preflightRunOptions({ variant, runFlags })
-  const plans = planWorktrees({ lanes, parentDir, checkout, deps: d })
+
+  const waveRaw = runFlags.wave === undefined || runFlags.wave === null ? 1 : runFlags.wave
+  const waveText = String(waveRaw).trim()
+  const waveNumber = /^\d+$/.test(waveText) ? Number(waveText) : NaN
+  if (!Number.isSafeInteger(waveNumber) || waveNumber < 1 || waveNumber > waves.length) {
+    refuse(`invalid --wave ${JSON.stringify(waveRaw)}; this batch has ${waves.length} wave(s)`, BATCH_UNREADABLE)
+  }
+  const dispatchedNames = waves[waveNumber - 1]
+  const waveLanes = lanes.filter((lane) => dispatchedNames.includes(lane.lane))
+  const laneNames = lanes.map(laneNameOf)
+  const waveOf = new Map(waves.flatMap((wave, index) => wave.map((name) => [name, index + 1])))
+  const depsOf = (name) => graph.deps.get(name) || []
+  const deferred = laneNames.filter((name) => !dispatchedNames.includes(name))
+    .map((name) => ({ lane: name, wave: waveOf.get(name), predecessors: depsOf(name) }))
   const keep = runFlags['no-keep'] !== true
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
-  if (dryRun) {
-    d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
-    return { dryRun: true, plans, lanes, fences: fenceReport }
-  }
-
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
-  try { mkdirSync(outputDir, { recursive: true }) } catch (err) {
-    refuse(`cannot create dispatch output directory ${outputDir}: ${err?.message || String(err)}`, COMPILE_REFUSED)
-  }
   const registerPath = typeof runFlags.fences === 'string' && runFlags.fences.trim()
     ? resolve(runFlags.fences)
     : join(outputDir, 'dispatch.fences.json')
+  const unstarted = []
+
+  const logWaveState = () => {
+    if (waves.length > 1) {
+      d.log(`dispatch-batch: waves=${waves.length} wave=${waveNumber} lanes=${dispatchedNames.join(',')}`)
+      for (const item of deferred) {
+        d.log(`dispatch-batch: deferred lane=${item.lane} wave=${item.wave} after=${item.predecessors.join(',')} resume=${resumeCommand({ batchDir, fences: registerPath, checkout: root, parentDir: parent, outDir: outputDir, tier, variant, runFlags, wave: item.wave })}`)
+      }
+      for (const item of unstarted) {
+        d.log(`dispatch-batch: unstarted lane=${item.lane} reason=${item.reason} predecessor=${item.predecessor}`)
+      }
+    }
+  }
+
+  if (waveNumber > 1) {
+    const blocked = []
+    for (const lane of waveLanes) {
+      for (const dep of depsOf(lane.lane)) {
+        const outcome = laneOutcome({ lane: dep, laneDir: join(parent, 'dt-' + dep), deps: d })
+        if (outcome.status !== 'done') {
+          blocked.push({
+            lane: lane.lane,
+            reason: outcome.status === 'escalation' ? PREDECESSOR_ESCALATED : PREDECESSOR_UNSETTLED,
+            predecessor: dep,
+          })
+          break
+        }
+        const baseRef = DISPATCH_BASE_REF
+        if (!baseContains({ commit: outcome.commit, base: baseRef, checkout: root, deps: d })) refuse(`lane ${lane.lane} depends on ${dep} whose result ${outcome.commit || 'none'} is not contained in the dispatch base ${baseRef}; merge it before dispatching wave ${waveNumber}`, DEPENDENT_BASE_STALE)
+      }
+    }
+    if (blocked.length > 0) {
+      const first = blocked[0]
+      const byLane = new Map(blocked.map((item) => [item.lane, item]))
+      for (const lane of waveLanes) {
+        unstarted.push(byLane.get(lane.lane) || {
+          lane: lane.lane,
+          reason: 'wave-stopped',
+          predecessor: first.lane,
+        })
+      }
+      logWaveState()
+      return { lanes: [], plans: [], registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted }
+    }
+  }
+  if (dryRun) {
+    const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
+    d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
+    return { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted }
+  }
+  logWaveState()
+  const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
+
+  try { mkdirSync(outputDir, { recursive: true }) } catch (err) {
+    refuse(`cannot create dispatch output directory ${outputDir}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+  }
   if (!runFlags.fences) {
     const data = registerData({ fences, registerPath, d })
     try { writeFileSync(registerPath, JSON.stringify(data, null, 2) + '\n') } catch (err) {
@@ -717,7 +938,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   // so it can never be mistaken for an authored request, even when --out points
   // at the batch directory itself.
   const compileRequests = new Map()
-  for (const lane of lanes) {
+  for (const lane of waveLanes) {
     const requestPath = join(outputDir, `${lane.lane}${COMPILE_REQUEST_SUFFIX}`)
     try { writeFileSync(requestPath, JSON.stringify(lane.request, null, 2) + '\n') } catch (err) {
       refuse(`cannot write compiler request ${requestPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
@@ -828,7 +1049,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   for (const item of runs) {
     d.log(`dispatch-batch: teardown lane=${item.lane} command=node crew/crew.mjs teardown --task ${item.lane} --checkout ${item.laneDir}`)
   }
-  return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport }
+  return { lanes: runs, plans, registerPath, outDir: outputDir, keep, transport, waves, wave: waveNumber, deferred, unstarted }
 }
 
 export function parseCliArgs(argv) {
@@ -836,7 +1057,7 @@ export function parseCliArgs(argv) {
   const flags = {}
   const positional = []
   const valueFlags = new Set([
-    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'variant',
+    'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'variant', 'wave',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
   ])

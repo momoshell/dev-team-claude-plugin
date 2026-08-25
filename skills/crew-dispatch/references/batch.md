@@ -70,8 +70,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:73`,
-`scripts/factory/dispatch-batch.mjs:74`,
+(`scripts/factory/dispatch-batch.mjs:83`,
+`scripts/factory/dispatch-batch.mjs:84`,
 `scripts/factory/dispatch-batch.mjs:18`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
@@ -84,3 +84,32 @@ A pane lane is verified by the `workspace_id` boot RETURNED, not by argv. The
 closing line names each returned workspace, so an operator can go to it;
 headless output instead says `workspace_id is null` and directs the operator
 to the crew dir, journal and run log.
+
+## A declared edge serialises only the waves it names
+
+A **wave** is a topological level of the declared graph. The operator authors
+an edge in the request; it is never inferred, because an inferred ordering is
+one nobody can audit. Unknown names and cycles refuse by name: **dependency-unknown**
+and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:34`
+and `scripts/factory/dispatch-batch.mjs:33`.
+
+A wave runs only after every predecessor reached `done`, **never on an `escalation`**.
+A dependent lane briefed against work that did not land is
+worse than a lane that never started, so the wave stops and reports its lanes
+unstarted with the predecessor named (`predecessor-escalated`).
+
+Disjointness is **disjoint within a wave**, inherited across an edge: writing
+what your predecessor wrote is the point, while two lanes in one wave are
+never related, so one predicate gives both halves. An unrelated lane gains
+nothing from someone else's edge.
+
+A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
+its ground truth, baseline, and tripwires are the moved tree's. Containment is
+probed; a base that does not carry the predecessor's commit refuses
+**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:35`) rather than
+compiling against a stale tree.
+
+Each wave is one invocation (`--wave`), because `run` is backgrounded and this
+file already forbids nesting a waiter inside another background call. Wave
+one reports later waves as deferred with the resume command, and a later
+invocation enforces the predecessor outcome before it creates any worktree.

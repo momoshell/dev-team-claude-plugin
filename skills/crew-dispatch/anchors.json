@@ -5,11 +5,14 @@
   "crew/drive.test.mjs:2513": "'/path/that/does/not/exist'",
   "crew/protected-paths.mjs:24": "export function resolveProtectedPaths(extra)",
   "scripts/factory/dispatch-batch.mjs:30": "FENCE_NOT_ARRIVED = 'fence-not-arrived'",
-  "scripts/factory/dispatch-batch.mjs:73": "BOOT_TRANSPORT = 'headless-all'",
-  "scripts/factory/dispatch-batch.mjs:74": "PANE_TRANSPORT = 'panes'",
   "scripts/factory/dispatch-batch.mjs:18": "TRANSPORT_CONFLICT = 'transport-conflict'",
   "scripts/factory/make-brief.mjs:112": "COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'",
   "scripts/factory/make-brief.mjs:113": "STALE_READ_ACK = 'stale-read-ack'",
   "scripts/factory/make-brief.mjs:119": "CREATES_EXISTS = 'creates-exists'",
-  "scripts/factory/make-brief.mjs:1251": "a recorded baseline is a fact about a commit and is never consumed"
+  "scripts/factory/make-brief.mjs:1251": "a recorded baseline is a fact about a commit and is never consumed",
+  "scripts/factory/dispatch-batch.mjs:83": "BOOT_TRANSPORT = 'headless-all'",
+  "scripts/factory/dispatch-batch.mjs:84": "PANE_TRANSPORT = 'panes'",
+  "scripts/factory/dispatch-batch.mjs:33": "DEPENDENCY_CYCLE = 'dependency-cycle'",
+  "scripts/factory/dispatch-batch.mjs:34": "DEPENDENCY_UNKNOWN = 'dependency-unknown'",
+  "scripts/factory/dispatch-batch.mjs:35": "DEPENDENT_BASE_STALE = 'dependent-base-stale'"
 }

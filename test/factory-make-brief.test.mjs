@@ -10,7 +10,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
-import { ROOT } from './helpers.mjs'
+import { git, ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   LADDER_BANDS, OPTIONAL_REQUEST_KEYS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
@@ -43,12 +43,6 @@ function put(root, relative, body) {
   mkdirSync(dirname(target), { recursive: true })
   writeFileSync(target, body)
   return target
-}
-
-function git(root, args) {
-  const result = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' })
-  assert.equal(result.status, 0, `${args.join(' ')} failed: ${result.stderr}`)
-  return result
 }
 
 function fixture(label, {
@@ -117,8 +111,8 @@ function fixture(label, {
       ].join('\n'))
     }
   }
-  git(root, ['init', '-q'])
-  git(root, ['add', '-A'])
+  git(root, 'init', '-q')
+  git(root, 'add', '-A')
   return root
 }
 
@@ -159,12 +153,12 @@ function committedFixture(label) {
   }, null, 2)}\n`)
   put(root, 'lib/widget.mjs', "export const WIDGET_CACHE_FILE = 'out/widget.json'\n")
   put(root, 'test/widget.test.mjs', "test('fixture test', () => {})\n")
-  git(root, ['init', '-q', '-b', 'main'])
-  git(root, ['config', 'user.email', 'factory@test.invalid'])
-  git(root, ['config', 'user.name', 'factory test'])
-  git(root, ['add', '-A'])
-  git(root, ['commit', '-q', '-m', 'fixture'])
-  const sha = git(root, ['rev-parse', 'HEAD']).stdout.trim()
+  git(root, 'init', '-q', '-b', 'main')
+  git(root, 'config', 'user.email', 'factory@test.invalid')
+  git(root, 'config', 'user.name', 'factory test')
+  git(root, 'add', '-A')
+  git(root, 'commit', '-q', '-m', 'fixture')
+  const sha = git(root, 'rev-parse', 'HEAD').trim()
   return { root, marker, command, sha }
 }
 
@@ -291,7 +285,7 @@ test('creates refuses symlinked parent segments and classifies a present leaf as
   mkdirSync(join(outside, 'nested'))
   symlinkSync(outside, join(root, 'link'))
   symlinkSync('lib/widget.mjs', join(root, 'present-link.mjs'))
-  git(root, ['add', 'link', 'present-link.mjs'])
+  git(root, 'add', 'link', 'present-link.mjs')
 
   for (const entry of ['link/new-widget.mjs', 'link/nested/new-widget.mjs']) {
     assert.throws(() => verifyCreates({ checkout: root, creates: [entry] }), (error) => error.reason === 'creates-parent-missing', entry)
@@ -407,7 +401,7 @@ test('exported symbols, error codes, and written filenames each find their test'
     "test('written filename pin out/widget.json', () => {})",
     '',
   ].join('\n'))
-  git(root, ['add', '-A'])
+  git(root, 'add', '-A')
   const { brief } = compile(root)
   const tripwireBody = section(brief, '## Tripwires')
   assert.match(tripwireBody, /- test\/symbol-pin\.test\.mjs · .*computeWidget/)

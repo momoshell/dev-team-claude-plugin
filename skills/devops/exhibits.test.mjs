@@ -50,5 +50,5 @@ test('daemon paths agree with the default root', () => {
 // something the target repeats, and this test reddens — the old pin passed
 // while the line said something else entirely (#550).
 test('every devops path:line anchor carries what the prose claims', () => {
-  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: join(HERE, 'anchors.json'), minAnchors: 85 }), 85)
+  assert.equal(assertAnchorsPinned({ root: ROOT, skillDir: HERE, manifestPath: join(HERE, 'anchors.json'), minAnchors: 71 }), 71)
 })

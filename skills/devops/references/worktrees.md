@@ -16,10 +16,10 @@ A directory-only `.git` search therefore finds primary checkouts only.
 Exhibit: `scripts/pr-review-window.sh:61-62`.
 
 Probe linked status by comparing `--git-dir` with `--git-common-dir`.
-Exhibit: `scripts/factory/ci-watch.mjs:240`.
+Status: no reachable checkout implementation performs this probe; see `evidence.md`.
 
 Different values identify a linked checkout in the worker-path probe.
-Exhibit: `scripts/factory/ci-watch.mjs:240`.
+Status: no reachable checkout implementation performs this probe; see `evidence.md`.
 
 The common Git directory is shared by linked lanes.
 Exhibit: `crew/seat-io.mjs:1934`.

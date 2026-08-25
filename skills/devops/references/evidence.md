@@ -39,15 +39,20 @@ The related safeguards are also unbacked: preserving the open review, refusing
 to trust a green local test or absent PR lookup, and handling an interrupted
 network request without a deletion verdict.
 
+The same search found no branch-publication implementation reachable from a
+production entry point, so the worker-path refusal, the crew-root worker path,
+the missing-checkout and unresolved-branch refusals, the gate's ordering ahead of
+branch resolution, and the empty-branch-name rule in `lane-branches.md` are all
+unbacked here too.
+
 Ship the warning as unbacked, not as a local fact.
 
 ### Unknown linked-worktree probe and removal
 
-The linked-worktree probe catches a failed `rev-parse` and sets `linked = false`.
-Exhibit: `scripts/factory/ci-watch.mjs:242-244`.
+A whole-tree search found no linked-worktree probe reachable from a production
+entry point, so the probe rule in `worktrees.md` has no local exhibit.
 
-That branch does not prove a safe worktree removal path, and no local removal
-implementation ties the failed probe to teardown.
+No local removal implementation ties a failed probe to teardown either.
 
 Keep the fail-closed removal rule in `worktrees.md` marked unbacked until a
 measured fixture covers this probe outcome.

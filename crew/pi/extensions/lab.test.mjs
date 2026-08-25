@@ -3,13 +3,10 @@ import assert from 'node:assert/strict'
 import { spawnSync as nodeSpawnSync } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join } from 'node:path'
 import * as mod from './lab.ts'
 import * as capabilities from '../../capabilities.mjs'
-import { scratchDir } from '../../../test/helpers.mjs'
-
-const ROOT = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
+import { ROOT, scratchDir } from '../../../test/helpers.mjs'
 
 function temp(prefix = 'lab-test-') {
   return realpathSync(scratchDir(prefix))

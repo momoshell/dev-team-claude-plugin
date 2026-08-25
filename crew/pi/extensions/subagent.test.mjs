@@ -1,16 +1,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
-import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { scratchDir } from '../../../test/helpers.mjs'
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT, scratchDir } from '../../../test/helpers.mjs'
 
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import * as mod from './subagent.ts'
 import * as adapter from '../../adapters/adapter-pi.mjs'
 import * as capabilities from '../../capabilities.mjs'
 import * as rpc from '../../headless-rpc.mjs'
 
-const ROOT = resolve(fileURLToPath(new URL('../../../', import.meta.url)))
 const EXTENSION = fileURLToPath(new URL('./subagent.ts', import.meta.url))
 const FINDINGS = {
   summary: 'one sentence',

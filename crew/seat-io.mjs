@@ -19,12 +19,12 @@ import {
 } from './headless.mjs'
 import { headlessRpcIo as defaultHeadlessRpcIo, teardownOutcome } from './headless-rpc.mjs'
 import { LIVENESS, PHASES, reservationEngine, markerLockName } from './reclaim.mjs'
+import { operationalRow, recordRow } from './drive.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRecords } from './adapters/adapter-claude.mjs'
 import { readSessionUsage } from '../scripts/factory/transcript.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { hostLoad, loadPolicy } from './host-load.mjs'
-
 export const DEFAULT_TRANSPORT = 'pane'
 export const HEADLESS_TRANSPORT = 'headless-json'
 export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
@@ -472,7 +472,7 @@ export function descendantCapture({ taskDir, log, deps = {} } = {}) {
       }
     }
     if (discoveries > 0 || captures > 0 || discoveryFailures > 0) {
-      callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-capture', records: discoveries, captures, discovery_failures: discoveryFailures }))
+      callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-capture', records: discoveries, captures, discovery_failures: discoveryFailures })))
     }
     return { ...zeroCaptureSummary(true), records: discoveries, captures, discovery_failures: discoveryFailures }
   }
@@ -684,9 +684,9 @@ export function settleSeatRoots({ taskDir, log, deps = {} } = {}) {
         root_liveness: result.root_liveness, root_settled: result.root_settled,
       })
     } catch { /* leave the record retryable for a later teardown */ }
-    callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'seat-root-settle', ...record, ...result }))
+    callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'seat-root-settle', ...record, ...result })))
   }
-  callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'seat-root-settle-sweep', ...summary }))
+  callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'seat-root-settle-sweep', ...summary })))
   return summary
 }
 
@@ -713,7 +713,7 @@ export function reclaimDescendants({ taskDir, log, emit, deps = {} } = {}) {
   const storeDir = descendantStorePath(taskDir)
   if (!storeDir || !fsExistsSync(storeDir)) {
     const empty = zeroSweepSummary(sweepId)
-    callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...empty }))
+    callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...empty })))
     return empty
   }
   const entries = descendantRecordEntries(storeDir)
@@ -721,7 +721,7 @@ export function reclaimDescendants({ taskDir, log, emit, deps = {} } = {}) {
   summary.records = 0
   summary.skipped = entries.filter((entry) => entry.record.swept_at != null).length
   if (!entries.length) {
-    callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...summary }))
+    callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...summary })))
     return summary
   }
   const engine = descendantEngine(taskDir, deps)
@@ -828,14 +828,14 @@ export function reclaimDescendants({ taskDir, log, emit, deps = {} } = {}) {
         outcome, reason, coverage_outcome: 'unproven', coverage_reason: coverage,
         created_at: recordTimestamp(deps),
       }
-      callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim', ...row }))
+      callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-reclaim', ...row })))
       let receipt = true
       if (typeof emit === 'function') {
         receipt = callTeardownCallback(() => emit({ kind: 'seat-reclaim', ...row }) === true) === true
         if (receipt) summary.recorded += 1
         else {
           summary.record_failed += 1
-          callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-record-failed', ...row }))
+          callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-reclaim-record-failed', ...row })))
         }
       }
       const terminal = (outcome === 'proven' || (captured === 0 && rootLiveness === LIVENESS.DEAD)) && receipt
@@ -851,10 +851,10 @@ export function reclaimDescendants({ taskDir, log, emit, deps = {} } = {}) {
       } catch { /* row remains retryable if its durable stamp could not be written */ }
     } catch (err) {
       summary.retryable += 1
-      callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-error', key: entry.key, reason: 'probe-unknown' }))
+      callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-reclaim-error', key: entry.key, reason: 'probe-unknown' })))
     }
   }
-  callTeardownCallback(() => log?.({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...summary }))
+  callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'descendant-reclaim-sweep', ...summary })))
   return summary
 }
 
@@ -1267,7 +1267,7 @@ export function settleSeatTeardown(io, deps = {}) {
   let recordFailed = 0
   for (const seat of rows) {
     tally[seat.outcome] = (tally[seat.outcome] ?? 0) + 1
-    try { io?.log?.({ at: at(), event: 'seat-teardown', ...seat }) } catch { /* journal is diagnostics */ }
+    try { io?.log?.(operationalRow({ at: at(), event: 'seat-teardown', ...seat })) } catch { /* journal is diagnostics */ }
     // No emitter at all is an ABSENCE, not a failed write: neither counter
     // moves, and `seats` still says how many rows went unrecorded.
     // Ownership of the ledger key: seat_teardowns is unique on (adw_id, role)
@@ -1289,15 +1289,15 @@ export function settleSeatTeardown(io, deps = {}) {
     if (ok) { recorded += 1; continue }
     recordFailed += 1
     try {
-      io?.log?.({ at: at(), event: 'seat-teardown-record-failed',
-        role: seat.role ?? null, outcome: seat.outcome, reason: seat.reason ?? null })
+      io?.log?.(operationalRow({ at: at(), event: 'seat-teardown-record-failed',
+        role: seat.role ?? null, outcome: seat.outcome, reason: seat.reason ?? null }))
     } catch { /* journal is diagnostics */ }
   }
   const summary = { seats: rows.length, ...tally, recorded, record_failed: recordFailed }
   // Written even when it is zero: the journal is the archive and always says
   // teardown ran, while the ledger is the query surface and carries one row
   // per seat.
-  try { io?.log?.({ at: at(), event: 'seat-teardown-sweep', ...summary }) } catch {}
+  try { io?.log?.(operationalRow({ at: at(), event: 'seat-teardown-sweep', ...summary })) } catch {}
   let descendants = null
   try { descendants = io?.reclaimDescendants?.() ?? null } catch { descendants = null }
   return { ...summary, rows, ...(descendants ? { descendants } : {}) }
@@ -1735,9 +1735,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       const action = Object.hasOwn(SEAT_REFUSAL_ACTIONS, policyKey) ? SEAT_REFUSAL_ACTIONS[policyKey] : 'journal'
       const note = (outcome, extra = {}) => {
         try {
-          io.log({ event: 'seat-refusal', role, id: info?.id ?? null, member: frame.member,
+          io.log(recordRow({ event: 'seat-refusal', role, id: info?.id ?? null, member: frame.member,
             source: frame.source, message: frame.message, at: frame.at, outcome,
-            ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}), ...extra })
+            ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}), ...extra }))
         } catch { /* refusal journalling is diagnostics, never load-bearing */ }
       }
       if (action === 'end') {
@@ -1796,7 +1796,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     if (!role || staleNoted.has(role)) return
     if (record.at - record.latest < TRANSCRIPT_STALE_MS) return
     staleNoted.add(role)
-    try { io.log({ at: record.at, event: 'seat-stale', role, id: info?.id ?? null, last_frame_at: record.latest, stale_ms: record.at - record.latest, threshold_ms: TRANSCRIPT_STALE_MS }) }
+    try { io.log(operationalRow({ at: record.at, event: 'seat-stale', role, id: info?.id ?? null, last_frame_at: record.latest, stale_ms: record.at - record.latest, threshold_ms: TRANSCRIPT_STALE_MS })) }
     catch { /* the journal is diagnostics, never load-bearing for a wait */ }
   }
   const armSilenceWatch = (info, frame) => {
@@ -1819,10 +1819,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     const decision = silenceReaskDecision({ frameAt: watch.frameAt, latest: growthFor(info), at, sentAt: watch.sentAt })
     const note = (outcome, extra = {}) => {
       try {
-        io.log({
+        io.log(recordRow({
           at, event: 'seat-silence-reask', role: info?.role ?? null, id: info?.id ?? null, returnPath,
           outcome, why: decision.why, silent_ms: at - (watch.sentAt ?? watch.frameAt), ...extra,
-        })
+        }))
       } catch { /* the journal is diagnostics, never load-bearing for a wait */ }
     }
     if (decision.act === 'wait') return null
@@ -1870,7 +1870,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       asked: reasked.has(returnPath),
     })
     const note = (outcome, extra = {}) => {
-      try { io.log({ at: now(), event: 'envelope-reask', role, id: info?.id ?? null, returnPath, outcome, ...extra }) }
+      try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: info?.id ?? null, returnPath, outcome, ...extra })) }
       catch { /* the journal is diagnostics, never load-bearing for a wait */ }
     }
     if (!decision.ask) {
@@ -1966,12 +1966,12 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       for (const record of records) {
         try {
           const fold = readSessionUsage({ transcriptPath: record.transcript_path })
-          io.log({
+          io.log(operationalRow({
             event: 'pane-usage', role: info.role, id: info.id ?? null,
             session_id: record.session_id, parent: fold.parent_usage ?? null,
             subagents: fold.subagent_usage ?? null, subagent_files: fold.subagent_files ?? 0,
             measured: fold.measured === true,
-          })
+          }))
         } catch { /* the journal is diagnostics, never load-bearing */ }
       }
     } catch { /* ADR-026: pane usage measurement is never load-bearing */ }
@@ -2078,8 +2078,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           }
           failure = recovery.error || err
         }
-        if (failure.stage === 'seat-died') io.log({ at: now(), seat_died: info?.role || 'unknown', returnPath })
-        if (failure.stage === 'substrate-gone') io.log({ at: now(), substrate_gone: info?.role || 'unknown', returnPath })
+        if (failure.stage === 'seat-died') io.log(recordRow({ at: now(), seat_died: info?.role || 'unknown', returnPath }))
+        if (failure.stage === 'substrate-gone') io.log(recordRow({ at: now(), substrate_gone: info?.role || 'unknown', returnPath }))
         const refusal = lastRefusal.get(info?.role)
         if (refusal) failure.seatRefusal = refusal.member
         noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
@@ -2227,10 +2227,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         catch (err) { rows.push({ role: null, outcome: 'unproven', reason: 'teardown-threw', why: String(err?.message ?? err) }) }
       }
       try {
-        logLine(join(paths.dir, 'journal.jsonl'), {
+        logLine(join(paths.dir, 'journal.jsonl'), operationalRow({
           at: new Date(now()).toISOString(), event: 'teardown-transports',
           declared, transports: swept, init_failed: initFailed, seats: rows.length,
-        })
+        }))
       } catch { /* diagnostics only */ }
       return rows
     },
@@ -2421,7 +2421,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           record.persist_error = `${persisted.reason}${persisted.error ? `: ${persisted.error}` : ''}`
           process.stderr.write(`warning: reseat of ${roleName} to ${rung.rung} was NOT persisted to crew.json (${record.persist_error}) — the file still names the previous cell\n`)
         }
-        try { io.log({ at: now(), reseat: record }) } catch { /* journal is diagnostics */ }
+        try { io.log(recordRow({ at: now(), reseat: record })) } catch { /* journal is diagnostics */ }
         if (record.persisted === false) return { applied: true, persisted: false, why: record.persist_error, from, to, rung: rung.rung }
         return { applied: true, from, to, rung: rung.rung }
       } catch (err) {
@@ -2484,7 +2484,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         // republish this process's whole copy (#539).
         const saved = updateCrewJson(paths, (disk) => { disk.doc_viewer = crew.doc_viewer; return true }, { writeFileSync, renameSync, readFileSync, existsSync })
         if (!saved.ok && saved.reason !== 'absent') throw new Error(`crew.json not updated (${saved.reason})`)
-        logLine(join(paths.dir, 'journal.jsonl'), { at: new Date(now()).toISOString(), event: 'doc-viewer', path, surface_id: crew.doc_viewer.surface_id })
+        logLine(join(paths.dir, 'journal.jsonl'), operationalRow({ at: new Date(now()).toISOString(), event: 'doc-viewer', path, surface_id: crew.doc_viewer.surface_id }))
       } catch (err) {
         process.stderr.write(`warning: plan viewer mount failed (${err.message}) — continuing\n`)
       }

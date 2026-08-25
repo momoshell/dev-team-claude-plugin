@@ -1543,7 +1543,7 @@ export function driveTask(ctx, io) {
       entry = { outcome: 'transport', why: `io.reseat threw: ${err?.message ?? err}` }
     }
     const record = { modifier: FAILURE_UPGRADE, kind, role, ...entry }
-    try { S.modifiers.push(record); io.log({ at: io.now(), modifier: record }) } catch { /* never load-bearing */ }
+    try { S.modifiers.push(record); io.log(recordRow({ at: io.now(), modifier: record })) } catch { /* never load-bearing */ }
     emit({
       kind: 'modifier', modifier: record.modifier, bounce: kind, role,
       outcome: record.outcome, why: record.why ?? null,
@@ -1575,7 +1575,7 @@ export function driveTask(ctx, io) {
     }
     const why = [`protected paths: ${hits.join(', ')}`, entry.why].filter(Boolean).join(' — ')
     const record = { modifier: SENSITIVITY_FLOOR, kind: 'plan-accept', role: 'reviewer', paths: hits, ...entry, why }
-    try { S.modifiers.push(record); io.log({ at: io.now(), modifier: record }) } catch { /* never load-bearing */ }
+    try { S.modifiers.push(record); io.log(recordRow({ at: io.now(), modifier: record })) } catch { /* never load-bearing */ }
     emit({ kind: 'modifier', modifier: record.modifier, bounce: 'plan-accept', role: 'reviewer',
       outcome: record.outcome, why: record.why, from: record.from ?? null, to: record.to ?? null, rung: record.rung ?? null })
     return record
@@ -1585,13 +1585,13 @@ export function driveTask(ctx, io) {
   const stageComplete = () => {
     const label = openStages.pop()
     if (label === undefined) return
-    io.log({ at: io.now(), stage_done: label })
+    io.log(recordRow({ at: io.now(), stage_done: label }))
   }
   const stage = (label) => {
     const violation = undeclaredStage(shape, label)
     if (violation) throw fail('variant', `the ${variant} shape ${violation}`)
     openStages.push(label)
-    S.stages.push(label); io.log({ at: io.now(), stage: label }); io.status?.(label); emit({ kind: 'stage', label })
+    S.stages.push(label); io.log(recordRow({ at: io.now(), stage: label })); io.status?.(label); emit({ kind: 'stage', label })
   }
 
   // Per-run gate invocation counter. The ledger's gate_results is UNIQUE on
@@ -1657,7 +1657,7 @@ export function driveTask(ctx, io) {
     // `already-dead` is the nothing-happened case; the journal records the
     // invocations that signalled something or could not prove a death.
     if (reap.outcome !== 'already-dead') {
-      io.log({ at: io.now(), gate_reap: { name, attempt: gateAttempt, ...reap } })
+      io.log(operationalRow({ at: io.now(), gate_reap: { name, attempt: gateAttempt, ...reap } }))
     }
     emit({ kind: 'gate', name, attempt: gateAttempt, ok: !!res.ok, cmd, summary: parseGateSummary(res.output), generation: gateGeneration, pristine, reap })
     return res
@@ -1688,7 +1688,7 @@ export function driveTask(ctx, io) {
     const why = gateAuthoredOutside
       ? `the ${variant} gate is authored outside the crew by the orchestrator, so no seat may repair it — ${diagnosis}. Gate: ${gateCmd}`
       : `no lead seated (mechanical tier): the acceptance gate needs a repair this crew cannot make — ${diagnosis}. Gate: ${gateCmd}`
-    io.log({ at: io.now(), no_lead_escalation: why })
+    io.log(recordRow({ at: io.now(), no_lead_escalation: why }))
     return gateEscalate(why)
   }
 
@@ -1711,7 +1711,7 @@ export function driveTask(ctx, io) {
     stage('converge:suite')
     const suiteRes = io.run(ctx.suite)
     if (!suiteRes.ok) {
-      io.log({ at: io.now(), converge_declined: 'suite red' })
+      io.log(recordRow({ at: io.now(), converge_declined: 'suite red' }))
       emit({ kind: 'converge', action: 'declined', where: 'suite', why: 'suite red' })
       stageComplete()
       return null
@@ -1721,7 +1721,7 @@ export function driveTask(ctx, io) {
     stage('converge:issues')
     const residuals = residualList({ findings: S.lastReview?.findings ?? null, gateSummary, gateRed })
     if (residuals.length === 0) {
-      io.log({ at: io.now(), converge_declined: 'no residuals' })
+      io.log(recordRow({ at: io.now(), converge_declined: 'no residuals' }))
       emit({ kind: 'converge', action: 'declined', where: 'residuals', why: 'no residuals to record' })
       stageComplete()
       return null
@@ -1737,14 +1737,14 @@ export function driveTask(ctx, io) {
         })
       } catch (err) {
         const detail = err?.message ?? String(err)
-        io.log({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail })
+        io.log(recordRow({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail }))
         emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
         stageComplete()
         return null
       }
       if (!filed || !Number.isInteger(filed.number)) {
         const detail = `malformed issue result for ${residual.id}`
-        io.log({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail })
+        io.log(recordRow({ at: io.now(), converge_declined: 'issue filing failed', residual: residual.id, why: detail }))
         emit({ kind: 'converge', action: 'declined', where: 'issues', residual: residual.id, why: detail })
         stageComplete()
         return null
@@ -1758,7 +1758,7 @@ export function driveTask(ctx, io) {
     stage('converge:commit')
     const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
     const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
-    if (!hasCommitSubject) io.log({ at: io.now(), commit_subject: 'fallback-from-plan-summary' })
+    if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
     const committing = io.changedFiles().filter(inScope)
     S.commit = io.commit(committing, message)
     emit({ kind: 'converge', action: 'committed', commit: S.commit, files: committing.length })
@@ -1824,12 +1824,12 @@ export function driveTask(ctx, io) {
     const { id, returnPath } = io.assign({ role, briefFile, note })
     const seq = /^d(\d+)$/.exec(id)?.[1]
     if (seq) S.seqHighWater = Math.max(S.seqHighWater, Number(seq))
-    io.log({ at: io.now(), assign: id, role, brief: briefFile })
+    io.log(recordRow({ at: io.now(), assign: id, role, brief: briefFile }))
     emit({ kind: 'assign', id, role, brief: briefFile })
     const env = io.wait(returnPath, waits[role] || 1200)
     const review = reviewOutcome(role, env)
     emit({ kind: 'envelope', id, role, status: env?.status || 'no-envelope', ...(review ? { review } : {}) })
-    if (review) io.log({ at: io.now(), review_outcome: { dispatch: id, ...review } })
+    if (review) io.log(recordRow({ at: io.now(), review_outcome: { dispatch: id, ...review } }))
     // The canonical set follows the rule lastReview already follows: a reviewer
     // envelope that CARRIES a findings array replaces it; one that carries no
     // findings key at all leaves it intact (#542). An EMPTY array is truthy and
@@ -1840,7 +1840,7 @@ export function driveTask(ctx, io) {
     if (review?.findings) S.acceptFindings = review.findings
     if (review?.findings) S.lastReview = review
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
-      io.log({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } })
+      io.log(recordRow({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } }))
     }
     if (!validEnvelope(env, role, id)) {
       // env == null was already recorded by io.wait as a 'timeout'; this branch
@@ -1849,7 +1849,7 @@ export function driveTask(ctx, io) {
       const diagnosis = env == null ? io.waitDiagnosis?.(returnPath) : null       // verbatim: mutation A9
       throw fail(role, `no valid envelope at ${returnPath} within ${waits[role]}s${diagnosis?.text ? ` — ${diagnosis.text}` : ''}`)
     }
-    io.log({ at: io.now(), envelope: id, role, status: env.status })
+    io.log(recordRow({ at: io.now(), envelope: id, role, status: env.status }))
     return env
   }
 
@@ -1864,7 +1864,7 @@ export function driveTask(ctx, io) {
     // below is unchanged.
     if (!ctx.roles.includes('lead')) {
       const reason = `no lead seated (mechanical tier): ${question}`
-      io.log({ at: io.now(), no_lead_escalation: reason })
+      io.log(recordRow({ at: io.now(), no_lead_escalation: reason }))
       return { decision: 'escalate', reason }
     }
     S.consults += 1
@@ -1901,7 +1901,7 @@ export function driveTask(ctx, io) {
     const perspective = pEnv.status === 'done'
       ? `${pEnv.details?.perspective || pEnv.summary || '(empty perspective)'} [recommends: ${recommendation || 'unstated'}; confidence: ${pEnv.details?.confidence || 'unstated'}]`
       : `(${from} returned ${pEnv.status}: ${pEnv.summary || 'no detail'})`
-    io.log({ at: io.now(), perspective_from: from, recommendation, consult: S.consults })
+    io.log(recordRow({ at: io.now(), perspective_from: from, recommendation, consult: S.consults }))
 
     const second = askLead(
       `${question}\n\n## Independent perspective from ${from} (gathered unseeded)\n${perspective}`,
@@ -1919,7 +1919,7 @@ export function driveTask(ctx, io) {
     if (recommendation && recommendation !== second.decision) {
       const dissent = { from, recommendation, lead_decision: second.decision, consult: S.consults }
       S.dissents.push(dissent)
-      io.log({ at: io.now(), dissent })
+      io.log(recordRow({ at: io.now(), dissent }))
       emit({ kind: 'dissent', ...dissent })
       if (second.decision === 'accept' && recommendation === 'escalate') {
         return { decision: 'escalate', reason: `lead accepted but ${from} independently recommended escalate — on the lenient path a single judge asking for a human is binding` }
@@ -1955,7 +1955,7 @@ export function driveTask(ctx, io) {
     if (env.status !== 'done' || !allowed.includes(d.decision)) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
     }
-    io.log({ at: io.now(), decision: d.decision, consult: S.consults, round, reason: d.reason })
+    io.log(recordRow({ at: io.now(), decision: d.decision, consult: S.consults, round, reason: d.reason }))
     emit({ kind: 'decision', decided: d.decision, why: d.reason || '', consult: S.consults, round })
     return {
       decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from,
@@ -1970,7 +1970,7 @@ export function driveTask(ctx, io) {
   const canGrant = () => S.grants.length < limits.extra_rounds
   const grant = (where, round) => {
     S.grants.push({ where, round })
-    io.log({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } })
+    io.log(recordRow({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } }))
   }
 
   function escalate(where, why, extraArtifacts = [], extraDetails = {}) {
@@ -2025,7 +2025,7 @@ export function driveTask(ctx, io) {
       refuted_must_fix: refusedMustFix,
       errors,
     }
-    io.log({ at: io.now(), accept_decision: record })
+    io.log(recordRow({ at: io.now(), accept_decision: record }))
     emit({ kind: 'accept-decision', ...record })
     return { ok: outcome === 'accepted', why, record, refusedMustFix: refusedMustFix.length > 0 }
   }
@@ -2108,7 +2108,7 @@ export function driveTask(ctx, io) {
     }
     stage('envelope-accept')
     const observedFields = envelopeFieldsPresent(env, shape)
-    io.log({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: observedFields } })
+    io.log(recordRow({ at: io.now(), envelope_accepted: { variant, seat, files_changed: 0, fields: observedFields } }))
     stageComplete()
     stage('done')
     const result = {
@@ -2208,10 +2208,10 @@ export function driveTask(ctx, io) {
       }
       scope = asked
     }
-    io.log({ at: io.now(), triage: {
+    io.log(recordRow({ at: io.now(), triage: {
       variant, seat: 'planner', scope_source: shape.sources.scope, lane_source: shape.sources.lane,
       gate_source: shape.sources.gate, inherited: inherited.length, scope: scope.length,
-    } })
+    } }))
     stageComplete()
     return { plan: {
       status: 'done', role: 'planner', summary: env.summary,
@@ -2239,10 +2239,10 @@ export function driveTask(ctx, io) {
       stageComplete()
       return { stop: escalate(variant, `a ${variant} run takes its validation lane from the dispatch (--validation-lane) and ctx carries none`) }
     }
-    io.log({ at: io.now(), directed: {
+    io.log(recordRow({ at: io.now(), directed: {
       variant, seat: null, scope_source: shape.sources.scope, lane_source: shape.sources.lane,
       gate_source: shape.sources.gate, scope: directed.files_in_scope.length,
-    } })
+    } }))
     stageComplete()
     return { plan: {
       status: 'done', role: null, summary: `directed by the task brief at ${ctx.briefFile}`,
@@ -2275,7 +2275,7 @@ export function driveTask(ctx, io) {
     if (env.status !== 'done') {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
-      if (asked) io.log({ at: io.now(), member_questions: { role: 'planner', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } })
+      if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'planner', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
       const c = consultLead(
         [`The planner returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce it with guidance, or escalate?`,
           ...questionConsultLines('planner', questions)].join('\n'),
@@ -2286,7 +2286,7 @@ export function driveTask(ctx, io) {
         return escalate('plan', c.reason, env.artifacts || [])
       }
       const matched = matchAnswers(questions, c.answers)
-      if (questions.length > 0) io.log({ at: io.now(), question_answers: { role: 'planner', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } })
+      if (questions.length > 0) io.log(recordRow({ at: io.now(), question_answers: { role: 'planner', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } }))
       const b = art(`plan-bounce-r${round}.md`)
       failureUpgrade('plan', 'planner')
       io.writeFile(b, [
@@ -2313,7 +2313,7 @@ export function driveTask(ctx, io) {
         if (typeof value === 'string'
           && value.startsWith(`${ctx.taskDir}/`)
           && !value.split('/').some((segment) => segment === '.' || segment === '..')) return value
-        try { io.log({ at: io.now(), gate_path_rejected: value }) } catch { /* evidence only */ }
+        try { io.log(recordRow({ at: io.now(), gate_path_rejected: value })) } catch { /* evidence only */ }
         return null
       }
       const record = growthRecord(S.growth.at(-1), S.growth[0], {
@@ -2323,11 +2323,11 @@ export function driveTask(ctx, io) {
         files_in_scope_count: Array.isArray(env.details?.files_in_scope) ? env.details.files_in_scope.length : null,
       })
       S.growth.push(record)
-      io.log({ at: io.now(), plan_growth: record })
+      io.log(recordRow({ at: io.now(), plan_growth: record }))
     } catch { /* measurement is never load-bearing */ }
     if (round >= 2) {
       const carve = validateCarve(env.details)
-      io.log({ at: io.now(), carve_verdict: { round, verdict: carve.verdict, defect: carve.defect } })
+      io.log(recordRow({ at: io.now(), carve_verdict: { round, verdict: carve.verdict, defect: carve.defect } }))
       if (!carve.verdict) {
         stageComplete()
         return escalate('plan-carve', carve.why, env.artifacts || [],
@@ -2473,7 +2473,7 @@ export function driveTask(ctx, io) {
     resetCheckProof()                     // FIRST, before every early return: a
     gateProvenGeneration = gateGeneration  // generation never inherits the previous
     const settleProof = (summary) => {
-      io.log({ at: io.now(), gate_discrimination: gateDiscrimination, gate_generation: gateGeneration, gate_summary: summary, gate_proof_note: gateProofNote })
+      io.log(recordRow({ at: io.now(), gate_discrimination: gateDiscrimination, gate_generation: gateGeneration, gate_summary: summary, gate_proof_note: gateProofNote }))
       emit({ kind: 'discrimination', generation: gateGeneration, verdict: gateDiscrimination, summary, note: gateProofNote })
     }
     if (typeof io.runClean !== 'function') {
@@ -2488,7 +2488,7 @@ export function driveTask(ctx, io) {
     } catch (err) {
       gateDiscrimination = 'unproven'
       gateProofNote = err.message
-      io.log({ at: io.now(), gate_proof_unproven: err.message, gate_generation: gateGeneration })
+      io.log(recordRow({ at: io.now(), gate_proof_unproven: err.message, gate_generation: gateGeneration }))
       settleProof(null)
       stageComplete()
       return null
@@ -2557,7 +2557,7 @@ export function driveTask(ctx, io) {
       }
     } catch (err) {
       checkProofNote = err?.message || String(err)
-      io.log({ at: io.now(), gate_check_proof_unproven: checkProofNote, gate_generation: gateGeneration })
+      io.log(recordRow({ at: io.now(), gate_check_proof_unproven: checkProofNote, gate_generation: gateGeneration }))
       gateProofFatal = dirtyAfterFailure(active, err)
     }
     checkProofs = rows
@@ -2606,8 +2606,8 @@ export function driveTask(ctx, io) {
   // fenced to lane b36, so persistence beside gate_discriminations is a follow-up
   // lane, by decision, not by omission.
   const settleCheckProof = () => {
-    io.log({ at: io.now(), gate_check_discrimination: checkProofVerdict, gate_generation: gateGeneration,
-      gate_check_discriminations: checkProofs, ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {}) })
+    io.log(recordRow({ at: io.now(), gate_check_discrimination: checkProofVerdict, gate_generation: gateGeneration,
+      gate_check_discriminations: checkProofs, ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {}) }))
     emit({ kind: 'check-discrimination', generation: gateGeneration, verdict: checkProofVerdict,
       checks: checkProofs, note: checkProofNote ?? null })
   }
@@ -2784,7 +2784,7 @@ export function driveTask(ctx, io) {
   let panelBounceFindings = ''
   const panelStandingQuestion = 'state the invariant the prior rounds\' instances share; does this diff close it?'
   const panelLog = (entry) => {
-    try { io.log({ at: io.now(), ...entry }) } catch { /* panel evidence is never load-bearing */ }
+    try { io.log(recordRow({ at: io.now(), ...entry })) } catch { /* panel evidence is never load-bearing */ }
   }
   const panelDegraded = (role) => panelLog({ panel_degraded: role })
   const panelReview = (n, panel) => {
@@ -2995,7 +2995,7 @@ export function driveTask(ctx, io) {
     if (env.status !== 'done') {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
-      if (asked) io.log({ at: io.now(), member_questions: { role: 'builder', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } })
+      if (asked) io.log(recordRow({ at: io.now(), member_questions: { role: 'builder', round, total: questions.length, ids: questions.map((q) => q.id), rejected: asked.rejected } }))
       const c = consultLead(
         [`The builder returned status=${env.status} on round ${round}: ${env.summary || ''}. Bounce with guidance, or escalate?`,
           ...questionConsultLines('builder', questions)].join('\n'),
@@ -3009,7 +3009,7 @@ export function driveTask(ctx, io) {
       const b = art(`build-bounce-r${round}.md`)
       failureUpgrade('build', 'builder')
       const matched = matchAnswers(questions, c.answers)
-      if (questions.length > 0) io.log({ at: io.now(), question_answers: { role: 'builder', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } })
+      if (questions.length > 0) io.log(recordRow({ at: io.now(), question_answers: { role: 'builder', round, answered: matched.answered.map((a) => a.id), unanswered: matched.unanswered, rejected: matched.rejected } }))
       io.writeFile(b, [
         `# Build bounce (round ${round})`, '', c.guidance, '',
         `Plan: ${planPath}`,
@@ -3247,7 +3247,7 @@ export function driveTask(ctx, io) {
       // is exactly what the old `reviews -= 1` refund below did.
       const counted = v === 'revise'
       if (counted) reviews += 1
-      io.log({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews } })
+      io.log(recordRow({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews } }))
       if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
       if (v === 'revise') {
         if (finalRound()) {
@@ -3334,7 +3334,7 @@ export function driveTask(ctx, io) {
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
-  if (!hasCommitSubject) io.log({ at: io.now(), commit_subject: 'fallback-from-plan-summary' })
+  if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   const committing = io.changedFiles().filter(inScope)
   S.commit = io.commit(committing, message)
   stageComplete()
@@ -3355,3 +3355,37 @@ export function driveTask(ctx, io) {
   stageComplete()
   return result
 }
+
+// --- the journal channel split (#608's producer half) --------------------------
+// The journal is two interleaved streams and said so nowhere. Measured on
+// b199-resumestate's 872-row archive: 747 rows (85.7%) are teardown bookkeeping
+// and 78 (8.9%) are the run of record, so a reader of journal.jsonl reads the
+// heartbeat and calls it the run. A consumer could not separate them without
+// pattern-matching event names — and the driver's own rows carry no `event` key
+// at all (crew/drive.mjs:1594,1827,1852), so a name-matcher is blind to all 38 of
+// its emit sites and silently misfiles the next one someone adds. That is how the
+// 85% happened, so the channel is decided at the EMIT SITE: every journal write in
+// this file and in crew/seat-io.mjs names one of the two wrappers below, and the
+// suite refuses a write that names neither.
+//
+// This is the FENCED PRODUCER HALF. Eight more modules write to the same journal
+// (crew/crew.mjs, crew/child.mjs, crew/headless.mjs, crew/headless-rpc.mjs, the
+// three pi extensions, scripts/factory/lane-watch.mjs) and are out of this lane's
+// fence; the vocabulary is exported so wiring them is one line per site.
+//
+// record      — what the task DID: stages and their completions, assignments,
+//               envelopes, decisions, consults, dissents, seat refusals, re-asks,
+//               seat deaths and reseats, gate outcomes, escalations.
+// operational — the machinery keeping processes and surfaces tidy, and the
+//               liveness OBSERVATIONS that only watch it: descendant capture and
+//               reclaim, seat-root settle, teardown sweeps, process group reaping,
+//               transcript staleness, pane-usage accounting, viewer surfaces.
+export const JOURNAL_CHANNELS = Object.freeze({ record: 'record', operational: 'operational' })
+export const JOURNAL_CHANNEL_NAMES = Object.freeze(Object.keys(JOURNAL_CHANNELS))
+
+// ADDITIVE by construction, and in this order for a reason: the payload spreads
+// FIRST so no existing key can be lost, and the channel is stamped LAST so the
+// emit site's choice always wins over a `channel` arriving inside a spread
+// payload (crew/drive.mjs:2787 spreads a caller-built panel entry).
+export const recordRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.record })
+export const operationalRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.operational })

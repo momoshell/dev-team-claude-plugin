@@ -1789,15 +1789,15 @@ export function runCmd(args, deps = {}) {
   // name as timed out instead of ending as an anonymous SIGTERM.
   // --test-timeout is per-test: it bounds one hung test, not a pathological
   // whole-suite case. A wall-clock bound on the lane would be a driver change,
-  // deliberately not done here. Keep this string identical to
-  // package.json's scripts.test and crew/child.mjs's default;
-  // crew/crew.test.mjs pins the three-way agreement.
+  // deliberately not done here. Read the suite command from package.json's
+  // scripts.test owner; crew/crew.test.mjs pins that both run entrypoints
+  // derive from it.
   const ctx = {
     task: taskSlug, briefFile, taskDir: paths.taskDir, checkout, journal, head,
     protectedPaths: protectedFloor.paths,
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
-    roles: crew.roles, lane: validationLane.lane, suite: args.suite || 'node --test --test-timeout=30000 "**/*.test.mjs"', variant,
+    roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant,
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
@@ -2327,6 +2327,23 @@ export function assertUsage(verb, args) {
       throw new UsageError(`crew.mjs ${verb} requires --${flag} ${shape}`)
     }
   }
+}
+
+// package.json's scripts.test is the one suite-command owner (#616); this
+// resolver reads it rather than repeating its value in a run surface.
+export const SUITE_OWNER_PATH = join(HERE, '..', 'package.json')
+export const SUITE_REFUSAL = 'suite-unreadable'
+
+export function packageSuite({ path = SUITE_OWNER_PATH, readFile = readFileSync } = {}) {
+  let parsed
+  try { parsed = JSON.parse(String(readFile(path, 'utf8'))) } catch (err) {
+    throw Object.assign(new Error(`cannot read the suite command from ${path}: ${err.message} [${SUITE_REFUSAL}]`), { reason: SUITE_REFUSAL })
+  }
+  const suite = parsed?.scripts?.test
+  if (typeof suite !== 'string' || suite.trim() === '') {
+    throw Object.assign(new Error(`${path} declares no scripts.test — the suite command has one owner and it is missing [${SUITE_REFUSAL}]`), { reason: SUITE_REFUSAL })
+  }
+  return suite.trim()
 }
 
 const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }

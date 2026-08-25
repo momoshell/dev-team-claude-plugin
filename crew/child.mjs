@@ -22,6 +22,27 @@ import { paneSeat, isObject } from './daemon.mjs'
 import { slugOrNull } from './slug.mjs'
 
 const SELF_PATH = fileURLToPath(import.meta.url)
+// The duplication is the read, never the value. The import firewall below is
+// why child.mjs deliberately does not route through crew.mjs; both entrypoints
+// read the same package owner from their module paths. This deliberately does
+// NOT route through runChild's injected readFileSync seam: that seam carries
+// run state, while the owner is part of the checkout this module was loaded
+// from, and several existing tests inject a readFileSync that only answers
+// crew.json.
+export const SUITE_OWNER_PATH = resolvePath(SELF_PATH, '..', '..', 'package.json')
+export const SUITE_REFUSAL = 'suite-unreadable'
+
+export function packageSuite({ path = SUITE_OWNER_PATH, readFile = fsReadFileSync } = {}) {
+  let parsed
+  try { parsed = JSON.parse(String(readFile(path, 'utf8'))) } catch (err) {
+    throw Object.assign(new Error(`cannot read the suite command from ${path}: ${err.message} [${SUITE_REFUSAL}]`), { reason: SUITE_REFUSAL })
+  }
+  const suite = parsed?.scripts?.test
+  if (typeof suite !== 'string' || suite.trim() === '') {
+    throw Object.assign(new Error(`${path} declares no scripts.test — the suite command has one owner and it is missing [${SUITE_REFUSAL}]`), { reason: SUITE_REFUSAL })
+  }
+  return suite.trim()
+}
 
 function childArguments(argv) {
   if (isObject(argv) && !Array.isArray(argv)) return argv
@@ -133,11 +154,11 @@ export function runChild(argv, injected = {}) {
     roles: roles.filter((role) => role !== 'lead'),
     continuation: spec.continuation === true,
     seatedRoles: [...roles],
-    // This is the same lane as package.json's scripts.test; reasoning lives in
-    // crew/crew.mjs's ctx block, and crew/crew.test.mjs pins the agreement.
-    // lane is RESOLVED below, inside the try, so a malformed one becomes this
-    // run's child-preflight escalation rather than a throw out of fork.
-    lane: null, suite: spec.suite || 'node --test --test-timeout=30000 "**/*.test.mjs"',
+    // The suite is read from package.json's scripts.test owner; reasoning lives
+    // in crew/crew.mjs's ctx block, and crew/crew.test.mjs pins the agreement.
+    // lane and suite are both RESOLVED below, inside the try, so an unreadable
+    // one becomes this run's child-preflight escalation rather than a throw out of fork.
+    lane: null, suite: null,
     ...(spec.variant ? { variant: spec.variant } : {}),
   }
   const failure = (err) => ({
@@ -209,6 +230,7 @@ export function runChild(argv, injected = {}) {
     // resolves --validation-lane/--lane.
     const validationLane = resolveValidationLane({ validationLane: spec.validation_lane, lane: spec.lane })
     ctx.lane = validationLane.lane
+    ctx.suite = spec.suite || packageSuite()
     if (strictPreflight) {
       // The shape's DECLARED seats, not the tier three: an envelope shape runs
       // exactly the seats crew/variants.mjs declares (crew/crew.mjs:assertSeats

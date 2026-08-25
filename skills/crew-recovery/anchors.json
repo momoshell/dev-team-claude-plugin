@@ -3,7 +3,7 @@
   "crew/seat-io.mjs:50": "export const TRANSCRIPT_STALE_MS = 900_000",
   "crew/drive.mjs:2511": "const completeCheckProof = (label) => {",
   "scripts/factory/make-brief.mjs:657": "function colourNeutralEnv(base = process.env)",
-  "crew/crew.mjs:1883": "escalation -> NEVER teardown",
-  "crew/crew.mjs:2179": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
-  "crew/crew.mjs:2133": "const seats = rows.length"
+  "crew/crew.mjs:1884": "escalation -> NEVER teardown",
+  "crew/crew.mjs:2134": "const seats = rows.length",
+  "crew/crew.mjs:2243": "seats.proven !== seats.seats || seats.recorded !== seats.seats"
 }

@@ -39,10 +39,10 @@ Exhibit/pointer: `skills/qa-test-writing/references/tooling.md:13-16` for that t
 This skill adds only the removal and registration half of that shared concern.
 
 A completed run may auto-teardown its workspace.
-Exhibit: `crew/crew.mjs:1881`.
+Exhibit: `crew/crew.mjs:1882`.
 
 An escalated run retains its workspace as human-readable context.
-Exhibit: `crew/crew.mjs:1881`.
+Exhibit: `crew/crew.mjs:1882`.
 
 An unknown Git probe is not permission to remove a checkout.
 Status: this fail-closed removal rule is unbacked here; see `evidence.md`.

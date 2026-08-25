@@ -40,6 +40,7 @@ import {
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
 import { scratchDir } from '../test/helpers.mjs'
+import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree } from './tree-fingerprint.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
@@ -5009,4 +5010,145 @@ test('stagesFromJournal bounds stages at the last run-start and handles unreadab
     assert.deepEqual(stagesFromJournal(path), [])
     assert.equal(stagesFromJournal(join(dir, 'missing.jsonl')), null)
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+// --- tree fingerprint at teardown (#621) ------------------------------------
+// A fingerprint is a BASELINE and is only worth taking once every writer was
+// proved dead. These build REAL git checkouts (test/fixtures.mjs's testCheckout
+// makes a plain directory, so it can never be measured) and assert what was
+// WRITTEN, never that a function was called. scratchDir only: crew.test.mjs's
+// raw-temp count is frozen at 84 in test/factory-env.test.mjs:725.
+const FP_CLEAN_ROOTS = { records: 0, settled: 0, already_dead: 0, unidentified: 0, failed: 0, unproven: 0 }
+const FP_CLEAN_DESCENDANTS = {
+  sweep_id: 'fp', records: 0, swept: 0, skipped: 0, retryable: 0, snapshot_ok: true,
+  groups: 0, reclaimed: 0, live: 0, identity_refused: 0, probe_unknown: 0,
+  signalled: 0, recorded: 0, record_failed: 0, incomplete: 0, coverage_outcome: 'unproven',
+}
+
+function fpCheckout(prefix) {
+  const root = scratchDir(prefix)
+  const checkout = join(root, 'checkout')
+  mkdirSync(checkout)
+  execSync('git init -q && git add -A', { cwd: checkout })
+  writeFileSync(join(checkout, 'keep.txt'), 'keep\n')
+  writeFileSync(join(checkout, 'edit.txt'), 'before\n')
+  execSync('git add -A && git -c user.email=t@t -c user.name=t commit -qm seed', { cwd: checkout })
+  return checkout
+}
+
+function fpTeardown({ checkout, members, probe = () => false, roots = FP_CLEAN_ROOTS, descendants = FP_CLEAN_DESCENDANTS, realRename = false }) {
+  const dir = join(scratchDir('crew-fingerprint-'), 'crew')
+  mkdirSync(join(dir, 'task'), { recursive: true })
+  const record = teardownCore({ dir, taskDir: join(dir, 'task') }, { task: 'fp', checkout, workspace_id: null, members }, {
+    closeSurface: () => true, closeWorkspace: () => true,
+    ...(realRename ? {} : { renameSync: () => {} }),
+    settleSeatRoots: () => (roots === null ? null : { ...roots }),
+    reclaimDescendants: () => (descendants === null ? null : { ...descendants }),
+    probe, sleep: () => {}, io: { log: () => {}, emit: () => true },
+  })
+  return { dir, record }
+}
+
+test('teardownCore records a fingerprint once every writer was proved dead', () => {
+  const checkout = fpCheckout('crew-fp-proven-')
+  const { dir, record } = fpTeardown({ checkout, members: {
+    planner: { surface_id: 's-planner', transport: 'pane' },
+    builder: { surface_id: 's-builder', transport: 'pane' },
+  } })
+  assert.equal(record.seats.proven, record.seats.seats)
+  assert.equal(record.fingerprint.recorded, true)
+  const written = JSON.parse(readFileSync(join(dir, FINGERPRINT_FILE), 'utf8'))
+  assert.equal(written.checkout, checkout)
+  assert.ok(Object.hasOwn(written.fingerprint.entries, 'keep.txt'))
+  assert.equal(typeof written.fingerprint.at, 'string')
+  assert.deepEqual(written.roots, FP_CLEAN_ROOTS)
+  assert.deepEqual(written.descendants, FP_CLEAN_DESCENDANTS)
+})
+
+test('a teardown that measured no seat records no fingerprint and says why', () => {
+  const checkout = fpCheckout('crew-fp-absent-')
+  const { dir, record } = fpTeardown({
+    checkout,
+    members: { builder: { surface_id: null, transport: 'headless-rpc' } },
+    probe: () => { throw new Error('a surface-less seat must never be probed') },
+  })
+  assert.equal(record.seats, null)
+  assert.equal(existsSync(join(dir, FINGERPRINT_FILE)), false)
+  assert.equal(record.fingerprint.withheld, FINGERPRINT_WITHHELD.unmeasured)
+})
+
+test('a seat measured alive records no fingerprint and says why', () => {
+  const checkout = fpCheckout('crew-fp-alive-')
+  const { dir, record } = fpTeardown({ checkout, members: { builder: { surface_id: 's-builder', transport: 'pane' } }, probe: () => true })
+  assert.notEqual(record.seats.proven, record.seats.seats)
+  assert.equal(existsSync(join(dir, FINGERPRINT_FILE)), false)
+  assert.equal(record.fingerprint.withheld, FINGERPRINT_WITHHELD.seats_unproven)
+})
+
+test('proven panes over an unproven seat ROOT record no fingerprint', () => {
+  const checkout = fpCheckout('crew-fp-root-')
+  const { dir, record } = fpTeardown({
+    checkout,
+    members: { builder: { surface_id: 's-builder', transport: 'pane' } },
+    roots: { ...FP_CLEAN_ROOTS, records: 1, unproven: 1 },
+  })
+  assert.equal(record.seats.proven, record.seats.seats)
+  assert.equal(existsSync(join(dir, FINGERPRINT_FILE)), false)
+  assert.equal(record.fingerprint.withheld, FINGERPRINT_WITHHELD.writer_unproven)
+})
+
+test('proven panes over a live or retryable descendant record no fingerprint', () => {
+  const checkout = fpCheckout('crew-fp-desc-')
+  for (const descendants of [
+    { ...FP_CLEAN_DESCENDANTS, records: 1, groups: 1, live: 1, retryable: 1, incomplete: 1 },
+    { ...FP_CLEAN_DESCENDANTS, records: 2, retryable: 2, record_failed: 1 },
+    null,
+  ]) {
+    const { dir, record } = fpTeardown({ checkout, members: { builder: { surface_id: 's-builder', transport: 'pane' } }, descendants })
+    assert.equal(record.seats.proven, record.seats.seats)
+    assert.equal(existsSync(join(dir, FINGERPRINT_FILE)), false, `descendants ${JSON.stringify(descendants)} must write no record`)
+    assert.equal(record.fingerprint.withheld, FINGERPRINT_WITHHELD.writer_unproven)
+  }
+})
+
+test('the reported fingerprint path survives the archive rename', () => {
+  const checkout = fpCheckout('crew-fp-archive-')
+  const { record } = fpTeardown({ checkout, members: { builder: { surface_id: 's-builder', transport: 'pane' } }, realRename: true })
+  assert.equal(record.fingerprint.recorded, true)
+  assert.equal(record.fingerprint.file, FINGERPRINT_FILE)
+  assert.equal(record.fingerprint.path, join(record.archived, FINGERPRINT_FILE))
+  assert.equal(existsSync(record.fingerprint.path), true)
+  assert.equal(checkRecordedTree(record.archived).outcome, FINGERPRINT_OUTCOMES.unchanged)
+})
+
+test('the b175 shape: a change after teardown is a stated fact, not a discovery', () => {
+  const checkout = fpCheckout('crew-fp-b175-')
+  const { dir, record } = fpTeardown({ checkout, members: { builder: { surface_id: 's-builder', transport: 'pane' } } })
+  assert.equal(record.fingerprint.recorded, true)
+  writeFileSync(join(checkout, 'edit.txt'), 'a gate kill-mutation applied after teardown\n')
+  writeFileSync(join(checkout, 'late.txt'), 'late\n')
+  const found = checkRecordedTree(dir)
+  assert.equal(found.outcome, FINGERPRINT_OUTCOMES.changed)
+  assert.deepEqual(found.modified, ['edit.txt'])
+  assert.deepEqual(found.added, ['late.txt'])
+  assert.equal(found.record_path, join(dir, FINGERPRINT_FILE))
+  assert.equal(typeof found.recorded_at, 'string')
+})
+
+// C1 (round 3): the summary a LIVE zero-group root produces when its receipt
+// also failed is byte-identical to the summary a DEAD zero-group root produces
+// when only its receipt failed — `live` counts groups (crew/seat-io.mjs:756),
+// the root-alive branch only sets a reason (:758-759), `incomplete` needs a
+// captured group (:844), and :837 with :841-843 increment both counters for the
+// one row. The aggregate cannot tell them apart, so neither may mint a baseline.
+test('proven panes over a retryable row a receipt failure cannot explain away record nothing', () => {
+  const checkout = fpCheckout('crew-fp-ambiguous-')
+  const { dir, record } = fpTeardown({
+    checkout,
+    members: { builder: { surface_id: 's-builder', transport: 'pane' } },
+    descendants: { ...FP_CLEAN_DESCENDANTS, records: 1, retryable: 1, record_failed: 1 },
+  })
+  assert.equal(record.seats.proven, record.seats.seats)
+  assert.equal(existsSync(join(dir, FINGERPRINT_FILE)), false)
+  assert.equal(record.fingerprint.withheld, FINGERPRINT_WITHHELD.writer_unproven)
 })

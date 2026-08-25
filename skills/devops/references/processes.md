@@ -1,10 +1,10 @@
 # Stray processes and reclaim
 
 Offer a reclaim command; never kill, signal, or reap an unasked process.
-Exhibit: `crew/crew.mjs:664-666`.
+Exhibit: `crew/crew.mjs:665-667`.
 
 Boot refuses stale descendants and prints the command for a human to run.
-Exhibit: `crew/crew.mjs:664-666`.
+Exhibit: `crew/crew.mjs:665-667`.
 
 The sweep is dry-run by default until `--reclaim` is supplied.
 Exhibit: `scripts/factory/reap-stale.mjs:251-254`.
@@ -56,4 +56,4 @@ The cost of skipping archived directories is a leak hidden by its name.
 Exhibit: `scripts/factory/reap-stale.mjs:105-107`.
 
 Never turn an offer into an automatic signal.
-Exhibit: `crew/crew.mjs:664-666`.
+Exhibit: `crew/crew.mjs:665-667`.

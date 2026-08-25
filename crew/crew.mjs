@@ -42,6 +42,7 @@ import { execSync } from 'node:child_process'
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
+import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord } from './drive.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
@@ -2144,10 +2145,73 @@ export function teardownCore(paths, crew, deps = {}) {
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'seat-root-settle-failed', error: err.message }) } catch {} }
   try { descendants = reclaimFn({ taskDir: descendantTaskDir, log: io?.log, emit: io?.emit }) }
   catch (err) { try { io?.log?.({ at: new Date().toISOString(), event: 'descendant-reclaim-failed', error: err.message }) } catch {} }
+  // INVARIANT — one writer at a time, CONDITIONALLY. Three sweeps have just run
+  // over this crew's writers: the pane seats, then their seat ROOTS, then their
+  // descendant groups. Whether they SETTLED them is exactly what
+  // fingerprintWithheld below adjudicates, and the invariant holds only on the
+  // branch where it does:
+  //
+  //   withheld === null  -> the three sweeps support that invariant:
+  //                         from here until the archive rename the driver (or
+  //                         the operator recovering it) is the ONLY thing that
+  //                         may write into this checkout, so a later change to
+  //                         the tree means a writer nobody accounted for. A
+  //                         baseline is recorded, and checkRecordedTree
+  //                         (crew/tree-fingerprint.mjs) turns that later change
+  //                         from a discovery into a stated fact.
+  //   withheld !== null  -> the invariant is UNPROVED — a pane, a seat root or a
+  //                         descendant group was not seen dead, or the summary
+  //                         cannot tell an unresolved row from a receipt
+  //                         failure. NO baseline is recorded, and the cause says
+  //                         which. Saying "one writer" here would state as fact
+  //                         the opposite of the data beside it.
+  //
+  // Why this exists: on b175-paneusage a seat still alive during a hand recovery
+  // applied one of its own gate kill-mutations here, and it merged by ordering
+  // luck alone. The scope gate cannot see that — it adjudicates PATHS, not
+  // content, and it runs before a run, never during a recovery. Detect and
+  // report: nothing here blocks, kills or reverts.
+  //
+  // A PROVEN PANE TALLY IS NOT PROOF OF DEATH. `seats` speaks only about panes;
+  // `roots` and `descendants` speak about the OS processes behind them, and
+  // either sweep can come back null (it threw, :2143-2146) or measured but
+  // unresolved. fingerprintWithheld consumes all four, so a still-live seat
+  // root can never license a baseline over the tree it is writing.
+  //
+  // LEASE DECISION: no. A real writer lease — atomic, acquired, its holder
+  // nameable — is deliberately NOT built, and the reason is recorded here so
+  // the next reader does not re-derive it: this checkout has exactly ONE
+  // legitimate writer by design, so the failure mode is never contention
+  // between two writers that a lease would arbitrate; it is a seat that should
+  // already be dead. A lease would not have stopped b175 either — the stale
+  // seat held none to lose and would have written anyway. Detection was what
+  // was missing; exclusion was not. Introducing a SECOND legitimate writer is
+  // the trigger to revisit this, and it belongs to its own lane.
+  //
+  // Recording is instrumentation and never load-bearing: a teardown that works
+  // today behaves exactly as it does today, plus the record.
+  const recordFingerprintFn = deps.recordTreeFingerprint || recordTreeFingerprint
+  const withheld = fingerprintWithheld({ seats, seatsAbsent, roots, descendants })
+  let fingerprint = null
+  try {
+    fingerprint = withheld
+      ? { recorded: false, path: null, withheld: withheld.cause, detail: withheld.detail }
+      : recordFingerprintFn(paths.dir, crew?.checkout ?? null, { task: crew?.task ?? null, seats, roots, descendants }, deps)
+  } catch (err) {
+    fingerprint = { recorded: false, path: null, error: err.message }
+  }
+  // The journal row carries the archive-stable RELATIVE name, never the
+  // pre-rename absolute path: this row is written before the rename below, and
+  // an absolute path that stops existing one line later is not a locator.
+  try { io?.log?.({ at: new Date().toISOString(), event: 'tree-fingerprint', recorded: fingerprint.recorded === true, file: fingerprint.recorded === true ? FINGERPRINT_FILE : null, withheld: fingerprint.withheld ?? null, absent: fingerprint.absent ?? null, error: fingerprint.error ?? null }) } catch { /* the journal is never load-bearing */ }
   // Full timestamp, not date-only: a second same-day run of the same slug must never ENOTEMPTY onto the first run's archive.
   const archived = `${paths.dir}.archive-${new Date().toISOString().replace(/[:.]/g, '-')}`
   renameSyncFn(paths.dir, archived)
-  return { archived, seats, seats_absent: seatsAbsent, roots, descendants }
+  // The record moved with the dir, so rebase its locator onto the archive: the
+  // absolute path recordTreeFingerprint returned named the pre-rename dir and
+  // does not exist any more.
+  if (fingerprint?.recorded === true) fingerprint = { ...fingerprint, path: join(archived, FINGERPRINT_FILE), file: FINGERPRINT_FILE }
+  return { archived, seats, seats_absent: seatsAbsent, roots, descendants, fingerprint }
 }
 export function teardownCmd(args, deps = {}) {
   const taskSlug = slug(args.task)
@@ -2171,7 +2235,7 @@ export function teardownCmd(args, deps = {}) {
   finally { try { emitter?.dispose() } catch { /* instrumentation is never load-bearing */ } }
   const { archived, seats } = record
   const tally = seats ? { seats: seats.seats, proven: seats.proven, failed: seats.failed, unproven: seats.unproven, recorded: seats.recorded, record_failed: seats.record_failed } : null
-  process.stdout.write(`${JSON.stringify({ archived, seats: tally, seats_absent: record.seats_absent ?? null })}\n`)
+  process.stdout.write(`${JSON.stringify({ archived, seats: tally, seats_absent: record.seats_absent ?? null, fingerprint: record.fingerprint ?? null })}\n`)
   // A seat this verb could not prove dead — `failed` (measured alive) and
   // `unproven` (unknown) alike — or a row that never reached the ledger, is a
   // RESULT, not a silent success. `proven !== seats` covers both non-proven
@@ -2181,12 +2245,12 @@ export function teardownCmd(args, deps = {}) {
   if (d && (d.incomplete > 0 || d.record_failed > 0)) process.exitCode = TEARDOWN_EXIT_UNPROVEN
   // An ABSENCE is neither a success nor a measured failure: it gets its own
   // status, and a measured failure above OUTRANKS it — 1 is never downgraded
-  // to 4. `!seats` is exactly `rows.length === 0` in teardownCore (:2133-2135).
+  // to 4. `!seats` is exactly `rows.length === 0` in teardownCore (:2134-2136).
   if (!seats && process.exitCode !== TEARDOWN_EXIT_UNPROVEN) process.exitCode = TEARDOWN_EXIT_SEATLESS
   return record
 }
 
-// Teardown's exit-status vocabulary, the sibling of RUN_EXIT_CODES (:1692).
+// Teardown's exit-status vocabulary, the sibling of RUN_EXIT_CODES (:1693).
 // `1` is a MEASURED failure — a seat proven alive, a row that never reached the
 // ledger. An ABSENCE is weaker evidence than that and must not borrow its
 // status, but it must not borrow 0's either: a teardown that measured nothing
@@ -2239,10 +2303,10 @@ export const KNOWN_FLAGS = Object.freeze({
 // Every flag on every verb declares whether it CARRIES A VALUE or MEANS TRUE.
 // A flag with no entry here is a flag with no value contract, and assertUsage
 // refuses it rather than letting parseArgs' boolean fallback
-// (crew/crew.mjs:2126) decide: `--suite` at the end of an argv line became
+// (crew/crew.mjs:2127) decide: `--suite` at the end of an argv line became
 // boolean true, Node coerced it into the shell argv, and `/bin/sh -c true`
 // exited 0 with empty output — a GREEN full-suite stage that ran nothing
-// (#538). Same posture as resolveValidationLane (:418): validate, refuse from
+// (#538). Same posture as resolveValidationLane (:419): validate, refuse from
 // a closed set, name the flag.
 export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
 export const FLAG_VALUE_CONTRACT = Object.freeze({
@@ -2254,13 +2318,13 @@ export const FLAG_VALUE_CONTRACT = Object.freeze({
   suite: 'value', 'claude-bin': 'value', 'timeout-s': 'value',
   'memory-dir': 'value', 'memory-backend': 'value', 'memory-budget-bytes': 'value',
   // --headless and --headless-rpc take a comma-separated ROLE LIST; bare, they
-  // degrade to an empty list (:469-473) — a silent no-op, not a boolean.
+  // degrade to an empty list (:470-474) — a silent no-op, not a boolean.
   headless: 'value', 'headless-rpc': 'value',
-  // --headless-all is a switch: seatTransport (:485-487) already refuses any
+  // --headless-all is a switch: seatTransport (:486-488) already refuses any
   // value but true, because it names no roles — it asks every seat to pick a
   // headless transport.
   'headless-all': 'boolean',
-  // --keep is a switch: runCmd reads only its truthiness (:1886) to skip the
+  // --keep is a switch: runCmd reads only its truthiness (:1887) to skip the
   // auto-teardown a done run would otherwise perform.
   keep: 'boolean',
 })

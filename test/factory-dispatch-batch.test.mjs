@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process'
 import {
   BatchRefusal,
   BOOT_TRANSPORT,
+  PANE_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
   REFUSAL_REASONS,
   REQUEST_SUFFIX,
@@ -22,6 +23,7 @@ import {
   readsFromRefusal,
   readBatch,
   reconcileTier,
+  resolveTransport,
   tierFloor,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { scratchDir } from './helpers.mjs'
@@ -403,6 +405,7 @@ function dispatchFixture({
   fences,
   batchTier = 'mechanical',
   runFlags = {},
+  workspaceFor = (lane) => `ws-${lane}`,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -429,6 +432,7 @@ function dispatchFixture({
         return JSON.stringify({
           lane_name: lane,
           lane_fence: names.filter((candidate) => candidate !== lane).map((sibling) => ({ lane: sibling, files: [] })),
+          workspace_id: workspaceFor(lane),
         })
       }
       return readFileSync(text, encoding || 'utf8')
@@ -740,6 +744,56 @@ test('keep defaults on, --no-keep removes it, and the report states the choice',
 
 test('parseCliArgs accepts --no-keep as a boolean override', () => {
   assert.deepEqual(parseCliArgs(['--batch', 'b', '--no-keep']), { batch: 'b', 'no-keep': true })
+})
+
+test('parseCliArgs accepts both transport flags as booleans and refuses duplicates', () => {
+  assert.deepEqual(parseCliArgs(['--batch', 'b', '--panes']), { batch: 'b', panes: true })
+  assert.deepEqual(parseCliArgs(['--batch', 'b', '--headless-all']), { batch: 'b', 'headless-all': true })
+  refusal(() => parseCliArgs(['--batch', 'b', '--panes', '--panes']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--batch', 'b', '--headless-all', '--headless-all']), 'batch-unreadable')
+})
+
+test('resolveTransport defaults headless, selects panes, and refuses conflicting choices', () => {
+  assert.equal(resolveTransport(), BOOT_TRANSPORT)
+  assert.equal(resolveTransport({ runFlags: { panes: true } }), PANE_TRANSPORT)
+  refusal(() => resolveTransport({ runFlags: { panes: true, 'headless-all': true } }), 'transport-conflict')
+})
+
+test('default dispatch reports headless transport and every boot carries its flag', () => {
+  const result = dispatchFixture({ label: 'default-transport' })
+  const boots = result.spawned.filter(({ args }) => args.includes('boot'))
+  assert.equal(result.report.transport, BOOT_TRANSPORT)
+  assert.equal(boots.every(({ args }) => args.includes('--headless-all')), true)
+})
+
+test('--panes dispatch omits transport flags and reports returned workspaces', () => {
+  const result = dispatchFixture({ label: 'panes-argv-and-report', runFlags: { panes: true } })
+  const boots = result.spawned.filter(({ args }) => args.includes('boot'))
+  assert.equal(boots.every(({ args }) => !args.includes('--headless-all') && !args.includes('--panes')), true)
+  assert.deepEqual(result.report.lanes.map(({ lane, workspaceId }) => ({ lane, workspaceId })), [
+    { lane: 'lane-a', workspaceId: 'ws-lane-a' },
+    { lane: 'lane-b', workspaceId: 'ws-lane-b' },
+  ])
+})
+
+test('--panes dispatch refuses when boot returns a null workspace_id', () => {
+  assert.throws(() => dispatchFixture({
+    label: 'panes-null-workspace',
+    runFlags: { panes: true },
+    workspaceFor: () => null,
+  }), (err) => err instanceof BatchRefusal
+    && err.reason === 'boot-failed'
+    && err.message.includes('crew.json workspace_id is null'))
+})
+
+test('pane closing output names each returned workspace', () => {
+  const result = dispatchFixture({ label: 'panes-closing-output', runFlags: { panes: true } })
+  const transport = result.logs.filter((line) => line.startsWith('dispatch-batch: transport='))
+  assert.equal(transport.length, 1)
+  assert.equal(transport[0].startsWith(`dispatch-batch: transport=${PANE_TRANSPORT}`), true)
+  assert.match(transport[0], /lane-a=ws-lane-a/)
+  assert.match(transport[0], /lane-b=ws-lane-b/)
+  assert.doesNotMatch(transport[0], /workspace_id is null/)
 })
 
 test('closing output states the transport, keep policy, and names one teardown command per lane', () => {

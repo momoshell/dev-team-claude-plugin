@@ -34,6 +34,8 @@ const DEPENDENCY_CYCLE = 'dependency-cycle'
 const DEPENDENCY_UNKNOWN = 'dependency-unknown'
 const DEPENDENT_BASE_STALE = 'dependent-base-stale'
 const PLAN_SCOPE_OUTSIDE_FENCE = 'plan-scope-outside-fence'
+const GRAPH_UNMEASURED = 'graph-unmeasured'
+const LANE_SHAPE_INVALID = 'lane-shape-invalid'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -57,6 +59,8 @@ export const REFUSAL_REASONS = Object.freeze([
   DEPENDENCY_UNKNOWN,
   DEPENDENT_BASE_STALE,
   PLAN_SCOPE_OUTSIDE_FENCE,
+  GRAPH_UNMEASURED,
+  LANE_SHAPE_INVALID,
 ])
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
@@ -83,7 +87,7 @@ export const REQUEST_SUFFIX = '.request.json'
 // Keys a lane's request carries for the DISPATCHER, not for the compiler. The
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on'])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant'])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -149,11 +153,15 @@ function normaliseRepoPath(value) {
   return normal.startsWith('./') ? normal.slice(2) : normal
 }
 
+// A lane whose name cannot be resolved used to become '' and then vanish from every
+// map keyed by name — the graph simply lost it. Refuse by name instead (#634).
 function laneNameOf(lane) {
-  if (typeof lane === 'string') return lane
-  if (lane && typeof lane.lane === 'string') return lane.lane
-  if (lane && typeof lane.name === 'string') return lane.name
-  return String(lane ?? '')
+  const resolved = typeof lane === 'string' ? lane
+    : typeof lane?.lane === 'string' ? lane.lane
+      : typeof lane?.name === 'string' ? lane.name
+        : null
+  if (resolved === null || resolved.trim() === '') refuse(`cannot resolve a lane name from ${JSON.stringify(lane)}; a lane is a non-empty string, or an object carrying a non-empty lane or name string`, LANE_SHAPE_INVALID)
+  return resolved
 }
 
 function laneWhereOf(lane) {
@@ -218,6 +226,10 @@ function splitDispatchKeys(parsed, requestPath) {
         || !dispatch.depends_on.every((dep) => typeof dep === 'string' && dep.trim() !== ''))) {
     refuse(`request ${requestPath} has an invalid depends_on; expected an array of non-empty strings`, BATCH_UNREADABLE)
   }
+  if (Object.prototype.hasOwnProperty.call(dispatch, 'variant')
+      && (typeof dispatch.variant !== 'string' || dispatch.variant.trim() === '')) {
+    refuse(`request ${requestPath} has an invalid variant; expected a non-empty string naming one of ${VARIANT_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  }
   return { dispatch, request }
 }
 
@@ -262,6 +274,7 @@ export function readBatch({ batchDir, deps } = {}) {
       name,
       request,
       tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
+      variant: typeof dispatch.variant === 'string' ? dispatch.variant : null,
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: request.where.map(normaliseRepoPath),
       creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
@@ -271,7 +284,11 @@ export function readBatch({ batchDir, deps } = {}) {
 }
 
 export function planWaves({ lanes } = {}) {
-  const batchLanes = Array.isArray(lanes) ? lanes : []
+  // An empty wave list from a non-empty batch is never a legitimate answer, and the call
+  // that produced one was planWaves(lanes): an ARRAY where the options object belongs
+  // destructures to undefined and silently plans nothing (#634).
+  if (!Array.isArray(lanes)) refuse(`planWaves requires { lanes: [...] } and received ${JSON.stringify(lanes)}; passing the lane array itself plans no waves at all`, LANE_SHAPE_INVALID)
+  const batchLanes = lanes
   const laneNames = batchLanes.map(laneNameOf)
   const byName = new Map(batchLanes.map((lane) => [laneNameOf(lane), lane]))
   const deps = new Map()
@@ -376,6 +393,14 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   const entries = fenceEntriesOf(fences).map(normaliseFence)
   const batchLanes = Array.isArray(lanes) ? lanes : []
   const byLane = new Map(entries.map((entry) => [entry.lane, entry]))
+
+  // An absent graph is UNMEASURED edges, not "no edges": relatedLanes reads false for every
+  // pair, so an exemption this register does carry is reported as a sibling-leak that does
+  // not exist. That false premise cost b224-fencechecks a lane at plan:r1 (#634). With no
+  // edge declared anywhere the graph is irrelevant and the answer is unchanged.
+  const declaredEdges = batchLanes.some((lane) => Array.isArray(lane?.depends_on) && lane.depends_on.length > 0)
+  const hasGraph = Boolean(graph && graph.ancestors instanceof Map)
+  if (declaredEdges && !hasGraph) refuse(`checkFences cannot judge sibling-leak for a batch that declares depends_on edges without the graph that carries them; pass the graph planWaves returns`, GRAPH_UNMEASURED)
 
   // Check the register's membership before inspecting its shapes: a batch lane
   // can never fall through to an implicit, unfenced write surface.
@@ -858,10 +883,24 @@ function bootCommand({ lane, laneDir, tier, registerPath, transport }) {
   }
 }
 
-function preflightRunOptions({ variant, runFlags = {} } = {}) {
-  const selected = variant ?? runFlags.variant
-  if (selected !== undefined && selected !== null && !VARIANT_NAMES.includes(String(selected))) {
-    refuse(`unknown run variant: ${selected}`, RUN_FAILED)
+function preflightRunOptions({ variant, runFlags = {}, lanes = [] } = {}) {
+  // Both variant checks are PER LANE now: --variant stays the batch default and a lane's own
+  // request key wins, so a scout rides in a batch of full lanes (#634). The closed name set
+  // and the ctx-lane shapes that require --validation-lane move together.
+  const selections = [{ lane: null, selected: variant ?? runFlags.variant }]
+  for (const lane of Array.isArray(lanes) ? lanes : []) {
+    if (typeof lane?.variant === 'string') selections.push({ lane: laneNameOf(lane), selected: lane.variant })
+  }
+  const validationLane = runFlags['validation-lane']
+  for (const { lane, selected } of selections) {
+    const where = lane ? ` for lane ${lane}` : ''
+    if (selected !== undefined && selected !== null && !VARIANT_NAMES.includes(String(selected))) {
+      refuse(`unknown run variant${where}: ${selected}`, RUN_FAILED)
+    }
+    if (VARIANTS[String(selected ?? 'full')]?.sources?.lane === 'ctx'
+        && (typeof validationLane !== 'string' || validationLane.trim() === '')) {
+      refuse(`run variant ${selected}${where} requires --validation-lane`, RUN_FAILED)
+    }
   }
   const rounds = [
     ['plan-rounds', 10], ['build-rounds', 10], ['review-rounds', 10],
@@ -882,11 +921,6 @@ function preflightRunOptions({ variant, runFlags = {} } = {}) {
     if (!/^\d+$/.test(text) || Number(text) < 1 || Number(text) > 21600) {
       refuse(`invalid run option --${flag}: ${raw}`, RUN_FAILED)
     }
-  }
-  const lane = runFlags['validation-lane']
-  if (VARIANTS[String(selected ?? 'full')]?.sources?.lane === 'ctx'
-      && (typeof lane !== 'string' || lane.trim() === '')) {
-    refuse(`run variant ${selected} requires --validation-lane`, RUN_FAILED)
   }
 }
 
@@ -942,7 +976,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   // reported as `branch-taken` when the real cause was an invalid run option
   // (RV3-1). A refusal must name the cause it measured, not the first one it
   // tripped over. Ordering is the whole fix — both refusals still fire.
-  preflightRunOptions({ variant, runFlags })
+  preflightRunOptions({ variant, runFlags, lanes })
 
   const waveRaw = runFlags.wave === undefined || runFlags.wave === null ? 1 : runFlags.wave
   const waveText = String(waveRaw).trim()
@@ -1069,10 +1103,11 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     // batch default for every lane that does not name one. The floor still wins
     // and tier-floor-conflict still refuses, per lane.
     const requested = laneEntry?.tier ?? tier
+    const laneVariant = laneEntry?.variant ?? variant
     const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} settled=${result.tier}`)
-    settled.push({ ...item, plan, floor, tier: result.tier })
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier}`)
+    settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant })
   }
 
   const arrivals = []
@@ -1115,7 +1150,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
           laneDir: item.plan.dir,
           briefPath: item.brief,
           files,
-          variant,
+          variant: item.variant,
           keep,
           runFlags,
         }),

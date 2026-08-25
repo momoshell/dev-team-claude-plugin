@@ -1028,7 +1028,7 @@ test('a lane tier seats that lane while a sibling takes the batch default', () =
 test('the compiler receives exactly the four schema request keys', () => {
   const result = dispatchFixture({
     label: 'clean-request',
-    requests: { 'lane-a': requestFor('lane-a', { tier: 'judge' }) },
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'judge', variant: 'scout' }) },
   })
   const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
   assert.equal(compiles.length, 2)
@@ -1067,6 +1067,114 @@ test('creates reaches the compiler as an optional fifth key while tier remains d
   assert.deepEqual(Object.keys(parsed).sort(), ['ask', 'creates', 'done_means', 'out_of_scope', 'where'])
   assert.deepEqual(parsed.creates, ['./crew/new-a.mjs'])
   assert.equal(Object.hasOwn(parsed, 'tier'), false)
+})
+
+test('readBatch splits a lane variant and leaves the compiler request clean', () => {
+  const batch = makeBatch(['lane-a', 'lane-b'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { variant: 'scout' })))
+  const lanes = readBatch({ batchDir: batch })
+  assert.equal(lanes.find(({ lane }) => lane === 'lane-a').variant, 'scout')
+  assert.equal(lanes.find(({ lane }) => lane === 'lane-b').variant, null)
+  assert.equal(Object.hasOwn(lanes.find(({ lane }) => lane === 'lane-a').request, 'variant'), false)
+})
+
+test('a batch mixes lane variants while preserving the batch default', () => {
+  const result = dispatchFixture({
+    label: 'lane-variants',
+    names: ['lane-a', 'lane-b', 'lane-c'],
+    requests: { 'lane-b': requestFor('lane-b', { variant: 'scout' }) },
+  })
+  const runs = result.spawned.filter(({ args }) => args.includes('run'))
+  const variants = Object.fromEntries(runs.map(({ args }) => {
+    const lane = args[args.indexOf('--task') + 1]
+    return [lane, args[args.indexOf('--variant') + 1]]
+  }))
+  assert.deepEqual(variants, { 'lane-a': 'full', 'lane-b': 'scout', 'lane-c': 'full' })
+  const settled = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
+  assert.ok(settled.some((line) => line.includes('lane=lane-b') && line.includes('variant=scout variant_from=lane')))
+  assert.ok(settled.some((line) => line.includes('lane=lane-a') && line.includes('variant=full variant_from=batch')))
+  assert.ok(settled.some((line) => line.includes('lane=lane-c') && line.includes('variant=full variant_from=batch')))
+})
+
+test('lane variants are preflighted by name and ctx lanes require validation', () => {
+  assert.throws(() => dispatchFixture({
+    label: 'lane-unknown-variant',
+    requests: { 'lane-b': requestFor('lane-b', { variant: 'not-a-variant' }) },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'run-failed'
+    && error.message.includes('lane-b')
+    && error.message.includes('not-a-variant'))
+  assert.throws(() => dispatchFixture({
+    label: 'lane-repair-without-validation',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { variant: 'repair' }) },
+  }), (error) => error instanceof BatchRefusal && error.reason === 'run-failed'
+    && error.message.includes('lane-a')
+    && error.message.includes('--validation-lane'))
+  const repaired = dispatchFixture({
+    label: 'lane-repair-with-validation',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { variant: 'repair' }) },
+    runFlags: { 'validation-lane': 'lane-a' },
+  })
+  const run = repaired.spawned.find(({ args }) => args.includes('run'))
+  assert.equal(run.args[run.args.indexOf('--variant') + 1], 'repair')
+})
+
+test('invalid lane variant shapes refuse batch-unreadable at the request path', () => {
+  for (const variant of [42, '']) {
+    const batch = makeBatch(['lane-a'])
+    put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { variant })))
+    assert.throws(() => readBatch({ batchDir: batch }), (error) => error instanceof BatchRefusal
+      && error.reason === 'batch-unreadable'
+      && error.message.includes(`${batch}/lane-a${REQUEST_SUFFIX}`))
+  }
+})
+
+test('a batch without lane variants keeps the full variant on every run', () => {
+  const result = dispatchFixture({ label: 'no-lane-variants' })
+  const runs = result.spawned.filter(({ args }) => args.includes('run'))
+  assert.equal(runs.length, 2)
+  for (const { args } of runs) {
+    const index = args.indexOf('--variant')
+    assert.equal(index >= 0, true)
+    assert.equal(args[index + 1], 'full')
+  }
+})
+
+test('checkFences refuses declared edges without a measured graph', () => {
+  const fences = [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])]
+  const lanes = [
+    { lane: 'lane-a', where: ['crew/shared.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: ['crew/shared.mjs'], depends_on: ['lane-a'] },
+  ]
+  assert.throws(() => checkFences({ fences, lanes, checkout: root, deps: { readdirSync: () => [], log: () => {} } }), (error) => error instanceof BatchRefusal
+    && error.reason === 'graph-unmeasured'
+    && error.message.includes('depends_on'))
+  const { graph } = planWaves({ lanes })
+  assert.doesNotThrow(() => checkFences({ fences, lanes, graph, checkout: root, deps: { readdirSync: () => [], log: () => {} } }))
+  const disjoint = [
+    { lane: 'lane-a', where: ['crew/owned-a.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: ['crew/owned-b.mjs'], depends_on: [] },
+  ]
+  assert.doesNotThrow(() => checkFences({
+    fences: [entry('lane-a', ['crew/owned-a.mjs']), entry('lane-b', ['crew/owned-b.mjs'])],
+    lanes: disjoint,
+    checkout: root,
+    deps: { readdirSync: () => [], log: () => {} },
+  }))
+})
+
+test('planWaves refuses the lane array argument shape', () => {
+  const lanes = [{ lane: 'lane-a', depends_on: [] }, { lane: 'lane-b', depends_on: ['lane-a'] }]
+  refusal(() => planWaves(lanes), 'lane-shape-invalid')
+  assert.deepEqual(planWaves({ lanes }).waves, [['lane-a'], ['lane-b']])
+})
+
+test('planWaves refuses an unresolvable lane name with the offending object', () => {
+  assert.throws(() => planWaves({ lanes: [{ id: 'lane-a' }] }), (error) => error instanceof BatchRefusal
+    && error.reason === 'lane-shape-invalid'
+    && error.message.includes('{"id":"lane-a"}'))
 })
 
 test('a lane tier below its protected floor refuses tier-floor-conflict', () => {

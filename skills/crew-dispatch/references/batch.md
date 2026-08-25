@@ -87,8 +87,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:95`,
-`scripts/factory/dispatch-batch.mjs:96`,
+(`scripts/factory/dispatch-batch.mjs:99`,
+`scripts/factory/dispatch-batch.mjs:100`,
 `scripts/factory/dispatch-batch.mjs:18`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
@@ -101,6 +101,22 @@ A pane lane is verified by the `workspace_id` boot RETURNED, not by argv. The
 closing line names each returned workspace, so an operator can go to it;
 headless output instead says `workspace_id is null` and directs the operator
 to the crew dir, journal and run log.
+
+## A scout rides in a mixed-variant batch
+
+`--variant` is the batch default and each `<lane>.request.json` may name its own
+`variant`, so a `scout` no longer needs a batch directory of its own. The key is
+dispatch-only: it is split off before the compiler's closed schema sees the request,
+exactly as `tier` and `depends_on` are.
+
+**A scout's fence entry participates in sibling-leak, unchanged.** A `writes: 'none'`
+lane writes nothing, so its entry is really its READ surface — but the register is one
+list of file claims and the dispatcher cannot tell the two apart at fence-check time:
+`writes` lives in the variant, and the entry is what every sibling is measured against.
+Exempting read-only lanes would let a scout be granted files a build lane owns, and the
+first thing that notices would be the build lane's scope gate. So fence a scout NARROWLY —
+name only what it must read exclusively — or declare a `depends_on` edge, which is the
+one exemption that exists.
 
 ## A declared edge serialises only the waves it names
 

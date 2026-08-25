@@ -6,9 +6,9 @@ import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ROOT as REPO } from '../../test/helpers.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
-const REPO = fileURLToPath(new URL('../../', import.meta.url))
 const SCOUT = join(REPO, 'crew/pi/agents/scout.json')
 const DOC = join(HERE, 'references/findings-shape.md')
 

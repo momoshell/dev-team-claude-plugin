@@ -39,7 +39,7 @@ import {
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
-import { scratchDir } from '../test/helpers.mjs'
+import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree } from './tree-fingerprint.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
 
@@ -66,7 +66,7 @@ const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.set
 const floorMajor = Number.parseInt(NODE_FLOOR, 10)
 const nodeMeetsLedgerFloor = Number.parseInt(process.versions.node, 10) >= floorMajor
 
-const CLI_REPO_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
+const CLI_REPO_ROOT = ROOT
 const CREW_REPO_ROOT = CLI_REPO_ROOT
 const CLI_PROBE_TASK = 'b120-usage-probe'
 const CLI_PROBE_BRIEF = join(tmpdir(), 'b120-usage-probe-brief.md')

@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { ROOT } from './helpers.mjs'
+import { ROOT, sqliteAvailable } from './helpers.mjs'
 // Inlined from the retired legacy runtime's contract (scripts/cmux/contract.mjs):
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
@@ -47,14 +47,6 @@ const SCRIPT = join(ROOT, 'scripts', 'factory', 'ledger.mjs')
 
 const require = createRequire(import.meta.url)
 
-function sqliteAvailable() {
-  try {
-    require('node:sqlite')
-    return true
-  } catch {
-    return false
-  }
-}
 const SQLITE_OK = sqliteAvailable()
 const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 

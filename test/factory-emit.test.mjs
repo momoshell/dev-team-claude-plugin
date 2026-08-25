@@ -12,8 +12,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { spawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { createRequire } from 'node:module'
-import { ROOT } from './helpers.mjs'
+import { ROOT, sqliteAvailable } from './helpers.mjs'
 import { openRun, recordCellFailure, _resetNoticeGuardsForTest, main } from '../scripts/factory/emit.mjs'
 import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.mjs'
 
@@ -30,15 +29,6 @@ import { openLedger, PAYLOAD_KEYS, NODE_FLOOR } from '../scripts/factory/ledger.
 // test/factory-ledger.test.mjs's own SKIP pattern exactly (this is the one
 // other file in the split allowed to contain a skip — see
 // test/factory-emit-floor.test.mjs for the zero-condition-excluded half).
-const require = createRequire(import.meta.url)
-function sqliteAvailable() {
-  try {
-    require('node:sqlite')
-    return true
-  } catch {
-    return false
-  }
-}
 const SQLITE_OK = sqliteAvailable()
 const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NODE_FLOOR})`
 

@@ -46,10 +46,18 @@ batch at the first failed check rather than proceeding
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
-`anchor-pin-unfenced` protects a write lane from b217's lost-lane failure: moving a
-pinned source line without the manifest that anchors it leaves the repository's anchors
-wrong. The machine scan reads `anchors.json`; prose file:line citations in `.md` files
-are its blind spot and must still be checked by hand.
+`anchor-pin-unfenced` reports; it **does not refuse**. The scan names every
+`anchors.json` pin on a lane's write surface whose manifest is outside its fence —
+the sweep that cost `b217-treefingerprint` a lane when it was done by hand — and
+emits it as a warning in dispatch output and in `--dry-run`, where the fence is
+chosen. It stopped refusing because **#635** made a shifted anchor repairable:
+content found once at a new line is relocated and reported, so a pin outside the
+fence is no longer a scope the lane cannot satisfy, and refusing on it falsely
+blocked three of five lanes in one batch. What is still fatal is **rot** (content
+nowhere) and **ambiguity** (content more than once), caught by each skill's own
+`exhibits.test.mjs` when they actually happen rather than predicted before the
+lane runs. The machine scan reads `anchors.json`; prose file:line citations in
+`.md` files are its blind spot and must still be checked by hand.
 
 `plan-scope-outside-fence` refuses a planner's declaration wider than its own fence. A
 fence denies siblings' declared surfaces, not unclaimed paths, so silently narrowing
@@ -79,8 +87,8 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:93`,
-`scripts/factory/dispatch-batch.mjs:94`,
+(`scripts/factory/dispatch-batch.mjs:95`,
+`scripts/factory/dispatch-batch.mjs:96`,
 `scripts/factory/dispatch-batch.mjs:18`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects

@@ -33,7 +33,6 @@ const RUN_FAILED = 'run-failed'
 const DEPENDENCY_CYCLE = 'dependency-cycle'
 const DEPENDENCY_UNKNOWN = 'dependency-unknown'
 const DEPENDENT_BASE_STALE = 'dependent-base-stale'
-const ANCHOR_PIN_UNFENCED = 'anchor-pin-unfenced'
 const PLAN_SCOPE_OUTSIDE_FENCE = 'plan-scope-outside-fence'
 
 export const REFUSAL_REASONS = Object.freeze([
@@ -57,7 +56,6 @@ export const REFUSAL_REASONS = Object.freeze([
   DEPENDENCY_CYCLE,
   DEPENDENCY_UNKNOWN,
   DEPENDENT_BASE_STALE,
-  ANCHOR_PIN_UNFENCED,
   PLAN_SCOPE_OUTSIDE_FENCE,
 ])
 
@@ -66,6 +64,10 @@ export const REFUSAL_REASONS = Object.freeze([
 // mentions a line number. The check therefore states what it cannot see rather than
 // implying a completeness it does not have.
 export const ANCHOR_BLIND_SPOT = 'BLIND SPOT: prose file:line citations in .md files are not discoverable from anchors.json and this check does not find them; look for them by hand before re-dispatching this lane'
+
+// The scan survives; the refusal does not. #635 made a shifted anchor repairable, so a
+// pin outside a lane's fence is a fact an operator should SEE, not a batch outcome.
+export const ANCHOR_PIN_WARNING_PREFIX = 'dispatch-batch: WARNING anchor-pin-unfenced:'
 
 // These two names belong to the compiler. The batch dispatcher parses its
 // refusal text but deliberately does not add compiler names to its own list.
@@ -398,6 +400,7 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   }
 
   const pins = collectAnchorPins({ checkout, deps: d })
+  const warnings = []
   const perLane = {}
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
@@ -412,14 +415,19 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
       refuse(`lane ${name} where path(s) outside own fence: ${outside.join(', ')}`, WHERE_OUTSIDE_FENCE)
     }
 
-    // A pin outside the fence is a scope a lane cannot satisfy: any insertion above a
-    // pinned line shifts it, and the lane cannot edit the manifest that would re-anchor
-    // it. b217-treefingerprint escalated at build:r3 for exactly this; b220, the same
-    // work with the two anchors.json added, landed first time.
+    // #635 made a shift REPAIRABLE: content found once at a new line is relocated and
+    // reported, not failed. The premise this check refused on — "the lane cannot edit the
+    // manifest that would re-anchor it" — therefore no longer implies a failure, and the
+    // refusal falsely blocked three of five lanes in one batch. The SCAN stays: it names
+    // every pin in one shot, the sweep that cost b217-treefingerprint a lane when done by
+    // hand. Rot and ambiguity are still fatal and are still caught where they become
+    // facts — the skill's own exhibits.test.mjs — not by a static pre-dispatch guess.
     const unfencedPins = anchorPinsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, pins })
     if (unfencedPins.length > 0) {
       const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
-      refuse(`lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; add the pinning manifest to this lane's fence, or narrow the lane. ${ANCHOR_BLIND_SPOT}`, ANCHOR_PIN_UNFENCED)
+      const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; a shift is repairable with node skills/qa-test-writing/anchor-pin.mjs --repair <skill dir>, so this does not block dispatch; rot and ambiguity still fail in the skill's own exhibits.test.mjs. ${ANCHOR_BLIND_SPOT}`
+      warnings.push({ lane: name, pins: unfencedPins, text })
+      d.log(text)
     }
 
     const siblings = []
@@ -450,7 +458,7 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
       siblings,
     }
   }
-  return { perLane }
+  return { perLane, warnings }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a

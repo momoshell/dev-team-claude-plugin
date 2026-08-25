@@ -5,6 +5,7 @@ import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
   BatchRefusal,
+  baseContains,
   BOOT_TRANSPORT,
   PANE_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
@@ -16,9 +17,11 @@ import {
   crewJsonPath,
   compileLane,
   dispatchBatch,
+  laneOutcome,
   main,
   normalDeps,
   parseCliArgs,
+  planWaves,
   planWorktrees,
   readsFromRefusal,
   readBatch,
@@ -141,6 +144,66 @@ test('readBatch refuses an unreadable directory and an empty batch by name', () 
   refusal(() => readBatch({ batchDir: empty }), 'batch-empty')
 })
 
+test('readBatch splits depends_on from the compiler request and preserves unique order', () => {
+  const batch = makeBatch(['lane-a'])
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', {
+    depends_on: ['lane-b', 'lane-b', 'lane-c'],
+  })))
+  const [lane] = readBatch({ batchDir: batch })
+  assert.deepEqual(lane.depends_on, ['lane-b', 'lane-c'])
+  assert.equal(Object.hasOwn(lane.request, 'depends_on'), false)
+})
+
+test('malformed depends_on values refuse batch-unreadable at their request path', () => {
+  for (const depends_on of ['lane-a', [1], ['']]) {
+    const batch = makeBatch(['lane-a'])
+    put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(requestFor('lane-a', { depends_on })))
+    assert.throws(() => readBatch({ batchDir: batch }), (error) => error instanceof BatchRefusal
+      && error.reason === 'batch-unreadable'
+      && error.message.includes(`${batch}/lane-a${REQUEST_SUFFIX}`))
+  }
+})
+
+test('planWaves places chains and diamonds in topological levels', () => {
+  assert.deepEqual(planWaves({ lanes: [
+    { lane: 'lane-a', depends_on: [] },
+    { lane: 'lane-b', depends_on: ['lane-a'] },
+  ] }).waves, [['lane-a'], ['lane-b']])
+  assert.deepEqual(planWaves({ lanes: [
+    { lane: 'lane-a', depends_on: [] },
+    { lane: 'lane-b', depends_on: ['lane-a'] },
+    { lane: 'lane-c', depends_on: ['lane-a'] },
+    { lane: 'lane-d', depends_on: ['lane-b', 'lane-c'] },
+  ] }).waves, [['lane-a'], ['lane-b', 'lane-c'], ['lane-d']])
+})
+
+test('planWaves refuses cycles, self-edges, and unknown predecessors by name', () => {
+  assert.throws(() => planWaves({ lanes: [
+    { lane: 'lane-a', depends_on: ['lane-b'] },
+    { lane: 'lane-b', depends_on: ['lane-a'] },
+  ] }), (error) => error instanceof BatchRefusal
+    && error.reason === 'dependency-cycle'
+    && error.message.includes('lane-a') && error.message.includes('lane-b'))
+  refusal(() => planWaves({ lanes: [{ lane: 'lane-a', depends_on: ['lane-a'] }] }), 'dependency-cycle')
+  assert.throws(() => planWaves({ lanes: [{ lane: 'lane-a', depends_on: ['missing'] }] }), (error) => error instanceof BatchRefusal
+    && error.reason === 'dependency-unknown'
+    && error.message.includes('missing')
+    && !error.message.includes('dependency cycle'))
+})
+
+test('planWaves records transitive ancestors and the no-edges wave', () => {
+  const planned = planWaves({ lanes: [
+    { lane: 'lane-a', depends_on: [] },
+    { lane: 'lane-b', depends_on: ['lane-a'] },
+    { lane: 'lane-c', depends_on: ['lane-b'] },
+  ] })
+  assert.equal(planned.graph.hasEdges, true)
+  assert.deepEqual([...planned.graph.ancestors.get('lane-c')], ['lane-b', 'lane-a'])
+  const flat = planWaves({ lanes: [{ lane: 'lane-b' }, { lane: 'lane-a' }] })
+  assert.deepEqual(flat.waves, [['lane-b', 'lane-a']])
+  assert.equal(flat.graph.hasEdges, false)
+})
+
 test('worktree-exists and branch-taken are first checks with named refusals', () => {
   refusal(() => planWorktrees({
     lanes: ['lane-a'], parentDir: root, checkout: root,
@@ -156,6 +219,24 @@ test('checkFences refuses sibling leakage before any worktree subprocess', () =>
   const fences = [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])]
   const lanes = [{ lane: 'lane-a', where: ['crew/shared.mjs'] }, { lane: 'lane-b', where: ['crew/shared.mjs'] }]
   refusal(() => checkFences({ fences, lanes }), 'sibling-leak')
+})
+
+test('checkFences inherits an overlap only across its declared edge', () => {
+  const fences = [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])]
+  const edge = [
+    { lane: 'lane-a', where: ['crew/shared.mjs'], depends_on: [] },
+    { lane: 'lane-b', where: ['crew/shared.mjs'], depends_on: ['lane-a'] },
+  ]
+  const { graph } = planWaves({ lanes: edge })
+  assert.doesNotThrow(() => checkFences({ fences, lanes: edge, graph }))
+  refusal(() => checkFences({ fences, lanes: edge.map((lane) => ({ ...lane, depends_on: [] })) }), 'sibling-leak')
+  const unrelated = [
+    ...edge,
+    { lane: 'lane-c', where: ['crew/shared.mjs'], depends_on: [] },
+  ]
+  const unrelatedFences = [...fences, entry('lane-c', ['crew/shared.mjs'])]
+  const unrelatedGraph = planWaves({ lanes: unrelated }).graph
+  refusal(() => checkFences({ fences: unrelatedFences, lanes: unrelated, graph: unrelatedGraph }), 'sibling-leak')
 })
 
 test('checkFences pins own coverage, register membership, and scope entry shape', () => {
@@ -406,6 +487,8 @@ function dispatchFixture({
   batchTier = 'mechanical',
   runFlags = {},
   workspaceFor = (lane) => `ws-${lane}`,
+  outcomes = {},
+  ancestor = () => 0,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -417,7 +500,8 @@ function dispatchFixture({
   const logs = []
   const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
   const deps = {
-    existsSync: () => false,
+    existsSync: (path) => String(path).endsWith('returns/task.json')
+      && Object.hasOwn(outcomes, laneFromOutcomePath(String(path))),
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
     readFileSync: (path, encoding) => {
       const text = String(path)
@@ -427,6 +511,7 @@ function dispatchFixture({
         return JSON.stringify(authored[lane])
       }
       if (text.endsWith('.brief.md')) return briefWithBlockOnly
+      if (text.endsWith('returns/task.json')) return JSON.stringify(outcomes[laneFromOutcomePath(text)])
       if (text.endsWith('/crew.json')) {
         const lane = text.split('/').at(-2)
         return JSON.stringify({
@@ -440,6 +525,7 @@ function dispatchFixture({
     spawn: (call) => {
       spawned.push(call)
       const args = (call.args || []).map(String)
+      if (args.includes('merge-base')) return { status: ancestor(args), stdout: '', stderr: '' }
       if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
       return { status: 0, stdout: '', stderr: '' }
     },
@@ -461,6 +547,10 @@ function dispatchFixture({
 
 function basenameOf(path) {
   return String(path).split('/').at(-1)
+}
+
+function laneFromOutcomePath(path) {
+  return String(path).split('/').at(-3)
 }
 
 test('a four-lane batch measures the baseline once', () => {
@@ -692,6 +782,19 @@ test('the compiler receives exactly the four schema request keys', () => {
   }
 })
 
+test('a dispatched depends_on lane still compiles with exactly the schema keys', () => {
+  const result = dispatchFixture({
+    label: 'depends-on-request',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2' },
+    outcomes: { 'lane-a': { status: 'done', details: { commit: 'a'.repeat(40) } } },
+  })
+  const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  assert.equal(compiles.length, 1)
+  const path = compiles[0].args[compiles[0].args.indexOf('--request') + 1]
+  assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort(), ['ask', 'done_means', 'out_of_scope', 'where'])
+})
+
 test('creates reaches the compiler as an optional fifth key while tier remains dispatch-only', () => {
   const result = dispatchFixture({
     label: 'creates-request',
@@ -811,4 +914,149 @@ test('closing output states the transport, keep policy, and names one teardown c
       `dispatch-batch: teardown lane=${lane} command=node crew/crew.mjs teardown --task ${lane} --checkout ${join(result.parent, `dt-${lane}`)}`,
     ))
   }
+})
+
+test('wave one dispatches only its level and reports later lanes as deferred', () => {
+  const result = dispatchFixture({
+    label: 'wave-one',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+  })
+  assert.deepEqual(result.report.waves, [['lane-a'], ['lane-b']])
+  assert.deepEqual(result.report.lanes.map(({ lane }) => lane), ['lane-a'])
+  assert.deepEqual(result.report.deferred, [{ lane: 'lane-b', wave: 2, predecessors: ['lane-a'] }])
+  assert.deepEqual(result.report.unstarted, [])
+  assert.equal(result.spawned.filter(({ args }) => args.includes('boot')).length, 1)
+  assert.ok(result.logs.some((line) => line.includes('deferred lane=lane-b') && line.includes('after=lane-a') && line.includes('--wave 2')))
+})
+
+test('wave two stops behind escalation or an unsettled predecessor', () => {
+  const escalated = dispatchFixture({
+    label: 'wave-escalated',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2' },
+    outcomes: { 'lane-a': { status: 'escalation', details: {} } },
+  })
+  assert.equal(escalated.spawned.filter(({ args }) => args.includes('boot')).length, 0)
+  assert.deepEqual(escalated.report.unstarted, [{ lane: 'lane-b', reason: 'predecessor-escalated', predecessor: 'lane-a' }])
+
+  const unsettled = dispatchFixture({
+    label: 'wave-unsettled',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2' },
+  })
+  assert.deepEqual(unsettled.report.unstarted, [{ lane: 'lane-b', reason: 'predecessor-unsettled', predecessor: 'lane-a' }])
+  assert.equal(unsettled.spawned.length, 0)
+})
+
+test('wave two refuses a stale predecessor base and dispatches when containment is proven', () => {
+  const commit = 'c'.repeat(40)
+  assert.throws(() => dispatchFixture({
+    label: 'wave-stale-base',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2' },
+    outcomes: { 'lane-a': { status: 'done', details: { commit } } },
+    ancestor: () => 1,
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'dependent-base-stale'
+    && error.message.includes('lane-a') && error.message.includes(commit))
+
+  const contained = dispatchFixture({
+    label: 'wave-contained-base',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2' },
+    outcomes: { 'lane-a': { status: 'done', details: { commit } } },
+    ancestor: () => 0,
+  })
+  assert.equal(contained.spawned.filter(({ args }) => args.includes('merge-base')).length, 1)
+  assert.deepEqual(contained.report.lanes.map(({ lane }) => lane), ['lane-b'])
+})
+
+test('wave selection rejects a number outside the planned range', () => {
+  assert.throws(() => dispatchFixture({
+    label: 'wave-out-of-range',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '3' },
+  }), (error) => error instanceof BatchRefusal && error.reason === 'batch-unreadable'
+    && error.message.includes('2 wave(s)'))
+})
+
+test('an unflagged no-edges dispatch adds no wave output and reports empty deferrals', () => {
+  const result = dispatchFixture({ label: 'no-edges' })
+  assert.equal(result.logs.filter((line) => /wave|deferred|unstarted/i.test(line)).length, 0)
+  assert.equal(result.report.waves.length, 1)
+  assert.deepEqual(result.report.deferred, [])
+  assert.deepEqual(result.report.unstarted, [])
+
+  const dry = dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
+  assert.deepEqual(dry.logs, [JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans })])
+  assert.equal(dry.logs[0].startsWith('{"dispatch":"dry-run","plans":['), true)
+  assert.equal(dry.report.waves.length, 1)
+  assert.deepEqual(dry.report.deferred, [])
+  assert.deepEqual(dry.report.unstarted, [])
+})
+
+test('dry-run wave selection still gates unsettled and stale predecessors', () => {
+  const blocked = dispatchFixture({
+    label: 'dry-wave-unsettled',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2', 'dry-run': true },
+  })
+  assert.deepEqual(blocked.report.unstarted, [{ lane: 'lane-b', reason: 'predecessor-unsettled', predecessor: 'lane-a' }])
+  assert.equal(blocked.spawned.length, 0)
+  assert.equal(blocked.logs.some((line) => line.startsWith('{"dispatch":"dry-run"')), false)
+
+  const commit = 'd'.repeat(40)
+  assert.throws(() => dispatchFixture({
+    label: 'dry-wave-stale',
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { wave: '2', 'dry-run': true },
+    outcomes: { 'lane-a': { status: 'done', details: { commit } } },
+    ancestor: () => 1,
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'dependent-base-stale'
+    && error.message.includes(commit))
+})
+
+test('laneOutcome reads live and newest archived envelopes defensively', () => {
+  const laneDir = '/tmp/dt-lane-a'
+  const live = join(dirname(crewJsonPath({ checkout: laneDir, lane: 'lane-a' })), 'returns', 'task.json')
+  const archiveNew = join(dirname(dirname(dirname(live))), 'lane-a.archive-new', 'returns', 'task.json')
+  const outcome = laneOutcome({
+    lane: 'lane-a',
+    laneDir,
+    deps: {
+      existsSync: (path) => path === live ? false : path === archiveNew,
+      readdirSync: () => ['lane-a.archive-old', 'lane-a.archive-new'],
+      readFileSync: () => JSON.stringify({ status: 'done', details: { commit: 'a'.repeat(40) } }),
+    },
+  })
+  assert.equal(outcome.status, 'done')
+  assert.equal(outcome.commit, 'a'.repeat(40))
+  assert.equal(outcome.path, archiveNew)
+
+  const unreadable = laneOutcome({ lane: 'lane-a', laneDir, deps: {
+    existsSync: (path) => path === live,
+    readFileSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) },
+    readdirSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) },
+  } })
+  assert.deepEqual(unreadable, { status: null, commit: null, path: live })
+})
+
+test('baseContains treats only a measured zero probe as containment', () => {
+  const calls = []
+  assert.equal(baseContains({ commit: 'a', base: 'main', checkout: '/repo', deps: {
+    spawn: (call) => { calls.push(call); return { status: 0 } },
+  } }), true)
+  assert.deepEqual(calls[0].args, ['-C', '/repo', 'merge-base', '--is-ancestor', 'a', 'main'])
+  assert.equal(baseContains({ commit: 'a', base: 'main', checkout: '/repo', deps: {
+    spawn: () => ({ status: 1 }),
+  } }), false)
+  assert.equal(baseContains({ commit: null, base: 'main', checkout: '/repo', deps: {
+    spawn: () => ({ status: 0 }),
+  } }), false)
+})
+
+test('parseCliArgs accepts --wave and refuses its missing value', () => {
+  assert.deepEqual(parseCliArgs(['--batch', 'b', '--wave', '2']), { batch: 'b', wave: '2' })
+  refusal(() => parseCliArgs(['--batch', 'b', '--wave']), 'batch-unreadable')
 })

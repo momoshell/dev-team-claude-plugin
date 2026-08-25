@@ -6,10 +6,10 @@ import assert from 'node:assert/strict'
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ROOT } from '../test/helpers.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
-const REPO = fileURLToPath(new URL('../', import.meta.url))
-const SKILLS = join(REPO, 'skills')
+const SKILLS = join(ROOT, 'skills')
 
 // command file -> the skills whose procedure it dispatches to
 const DISPATCHES_TO = {

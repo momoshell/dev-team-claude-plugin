@@ -53,6 +53,28 @@ after(() => {
   }
 })
 
+// A wait observes the CONDITION it asserts, never a duration. The 400ms sleep
+// this replaces lost its race on 2026-08-24: four lane suites ran npm test
+// concurrently, the spawned child below had not yet installed its finalizer
+// when the SIGTERM landed, and b207-duckdb — a 259-line documentation diff that
+// touched no code — was escalated for it. Same shape as the waiter in
+// crew/daemon.test.mjs. On the deadline this throws naming what was missing and
+// how long it waited, so the failure reads as a timeout and not as a bad value.
+async function waitFor(condition, what, { timeout = 10_000, interval = 10 } = {}) {
+  const started = Date.now()
+  for (;;) {
+    const value = condition()
+    if (value) return value
+    const elapsed = Date.now() - started
+    if (elapsed >= timeout) {
+      throw new Error(`timed out after ${elapsed}ms waiting for ${typeof what === 'function' ? what() : what}`)
+    }
+    // FIXED SLEEP: the poll cadence of this waiter itself, not a stand-in for a
+    // condition — the condition is re-read on every tick.
+    await new Promise((resolve) => setTimeout(resolve, interval))
+  }
+}
+
 function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], {
     encoding: 'utf8',
@@ -295,11 +317,34 @@ test('below-floor (degraded) finalizer still records endSession(fail) and endPro
     ledger.startSession({ adw_id: 'deg-1', repo_slug: 'r', task_slug: 't' });
     ledger.startProcess({ adw_id: 'deg-1', dispatch_id: 'd', pid: process.pid, command: 'child' });
     ledger.installFinalizer({ adw_id: 'deg-1' });
+    process.stdout.write('ready');
     setInterval(() => {}, 1000);
   `
-  const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: 'ignore' }))
-  await new Promise((resolve) => setTimeout(resolve, 400))
-  const exitInfo = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ code, signal })))
+  const child = trackChild(spawn(process.execPath, ['--input-type=module', '-e', program], { stdio: ['ignore', 'pipe', 'pipe'] }))
+  let childOut = ''
+  let childErr = ''
+  let exited = false
+  child.stdout.setEncoding('utf8')
+  child.stdout.on('data', (chunk) => { childOut += chunk })
+  child.stderr.setEncoding('utf8')
+  child.stderr.on('data', (chunk) => { childErr += chunk })
+  // Registered before the wait, not after it: an exit that arrives while the
+  // wait is still polling must not be missed.
+  const exitInfo = new Promise((resolve) => child.on('exit', (code, signal) => { exited = true; resolve({ code, signal }) }))
+  const kindsSoFar = () => {
+    if (!existsSync(jsonlPath)) return []
+    return readFileSync(jsonlPath, 'utf8').split('\n').filter(Boolean)
+      .map((l) => JSON.parse(l)).filter((l) => l.args && l.args.adw_id === 'deg-1').map((l) => l.kind)
+  }
+  const readyForSigterm = () => {
+    if (exited) throw new Error(`the child exited before it was ready — stderr: ${childErr}`)
+    const kinds = kindsSoFar()
+    return childOut.includes('ready') && kinds.includes('startSession') && kinds.includes('startProcess')
+  }
+  const describeReady = () => `the child to write its startSession and startProcess JSONL lines and install its SIGTERM finalizer — saw kinds [${kindsSoFar().join(', ')}], stdout=${JSON.stringify(childOut)}, stderr=${JSON.stringify(childErr)}`
+  // The readiness token is written only AFTER installFinalizer, so observing it
+  // means the child has a listener for the signal about to be sent.
+  await waitFor(readyForSigterm, describeReady)
   child.kill('SIGTERM')
   const { code, signal } = await exitInfo
   assert.ok(signal === 'SIGTERM' || code === 143, `expected the child to terminate on SIGTERM, got code=${code} signal=${signal}`)

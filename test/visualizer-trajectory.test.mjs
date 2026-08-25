@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
 import { buildTrajectory, focusTrajectory, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
+import { applyRead, createPulse, initialJournalState, select, setRange, setReveal, shouldRead, trajectoryView } from '../visualizer/web/src/lib/live.js'
 import { JOURNAL_CHANNELS } from '../crew/drive.mjs'
 import { scratchDir, treeDigest } from './helpers.mjs'
 
@@ -226,4 +227,113 @@ test('projectSpan uses a marker without a width for an open span', () => {
   const box = projectSpan({ started_at: 50, ended_at: null }, 0, 100)
   assert.deepEqual(box, { left: 0.5, marker: true })
   assert.equal('width' in box, false)
+})
+
+function growingPayload(count) {
+  const rows = [{ at: 0, stage: 'live-stage' }]
+  for (let index = 1; index < count; index += 1) rows.push({ at: index * 1000, event: `event-${index}` })
+  return {
+    ok: true,
+    payload: {
+      rows,
+      channels: { record: 'record', operational: 'operational' },
+      skipped_malformed: 0,
+      skipped_line_numbers: [],
+      dir: null,
+      degraded: false,
+    },
+  }
+}
+
+const fakeNow = (read) => 1000 + read * 3000
+
+test('a running lane re-reads on the shared pulse and the new rows appear', () => {
+  const pulse = createPulse()
+  const journal = [growingPayload(2), growingPayload(4), growingPayload(6)]
+  let state = initialJournalState()
+  let next = 0
+  const read = () => {
+    state = applyRead(state, journal[next], fakeNow(next))
+    next += 1
+  }
+  read()
+  let calls = 0
+  const stop = pulse.subscribe(() => {
+    if (!shouldRead({ running: true })) return
+    calls += 1
+    read()
+  })
+  pulse.pulse()
+  pulse.pulse()
+  stop()
+  const view = trajectoryView(state, { now: fakeNow(next), refresh_ms: 3000 })
+  assert.equal(calls, 2)
+  assert.equal(state.reads, 3)
+  assert.equal(view.rows.length, 6)
+  assert.equal(view.rows[view.rows.length - 1].event, 'event-5')
+})
+
+test('a finished run reads once and a pulse does not re-read it', () => {
+  const pulse = createPulse()
+  const journal = [growingPayload(2), growingPayload(4), growingPayload(6)]
+  let state = initialJournalState()
+  let next = 0
+  const read = () => {
+    state = applyRead(state, journal[next], fakeNow(next))
+    next += 1
+  }
+  read()
+  let calls = 0
+  const stop = pulse.subscribe(() => {
+    if (!shouldRead({ running: false })) return
+    calls += 1
+    read()
+  })
+  pulse.pulse()
+  pulse.pulse()
+  stop()
+  const view = trajectoryView(state, { now: fakeNow(next), refresh_ms: null })
+  assert.equal(calls, 0)
+  assert.equal(state.reads, 1)
+  assert.equal(view.rows.length, 2)
+  assert.equal(view.rows[view.rows.length - 1].event, 'event-1')
+})
+
+test('a drag selection, a row selection and the reveal toggle survive a read that adds rows', () => {
+  let state = applyRead(initialJournalState(), growingPayload(2), fakeNow(0))
+  const range = { from: 500, to: 1500 }
+  state = setRange(state, range)
+  state = select(state, 1)
+  state = setReveal(state, true)
+  state = applyRead(state, growingPayload(6), fakeNow(1))
+  const view = trajectoryView(state, { now: fakeNow(1), refresh_ms: 3000 })
+  assert.deepEqual(state.range, range)
+  assert.equal(state.selected, 1)
+  assert.equal(state.reveal, true)
+  assert.equal(view.all_rows.length, 6)
+  assert.equal(view.all_rows[view.all_rows.length - 1].event, 'event-5')
+})
+
+test('a failed read states staleness and dates the last successful read', () => {
+  const good = applyRead(initialJournalState(), growingPayload(4), fakeNow(0))
+  const broken = applyRead(good, { ok: false, error: 'request failed (503)' }, fakeNow(1))
+  const view = trajectoryView(broken, { now: fakeNow(1), refresh_ms: 3000 })
+  assert.equal(broken.read_at, fakeNow(0))
+  assert.deepEqual(view.rows.map((row) => row.event), ['stage', 'event-1', 'event-2', 'event-3'])
+  assert.equal(view.freshness.stale, true)
+  assert.match(view.freshness.label, /request failed \(503\)/)
+  assert.match(view.freshness.label, /read 3s ago/)
+})
+
+test('an open span stays a marker after a read that did not close it, and the axis rescales', () => {
+  const first = applyRead(initialJournalState(), growingPayload(2), fakeNow(0))
+  const grown = applyRead(first, growingPayload(6), fakeNow(1))
+  const before = trajectoryView(first, { now: fakeNow(1), refresh_ms: 3000 })
+  const after = trajectoryView(grown, { now: fakeNow(2), refresh_ms: 3000 })
+  const span = after.spans.find((entry) => entry.label === 'live-stage')
+  assert.equal(after.total > before.total, true)
+  assert.equal(span.box.marker, true)
+  assert.equal('width' in span.box, false)
+  assert.equal(span.took, 'in flight')
+  assert.deepEqual(Object.keys(span).filter((key) => DURATION_KEY.test(key)), [])
 })

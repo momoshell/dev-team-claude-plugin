@@ -3,8 +3,8 @@ import { acceptRows } from './panels.js'
 export const ROLE_ORDER = Object.freeze(['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
 
 const EFFORT_WHY = 'not recorded per run — agent_sessions carries model but no effort column (scripts/factory/ledger.mjs:406-426); effort is recorded only on cell_failures and modifier_attempts rows (crew/seat-io.mjs:264-265, 285-288)'
-const CONTEXT_WHY = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
-const MODEL_WHY = 'not measured — no agent_sessions row for this dispatch (a pane seat lands none by design, crew/seat-io.mjs:399-410)'
+const CONTEXT_WHY = 'claude pane seats land an agent_sessions row via emitPaneUsage (crew/seat-io.mjs:1940); pi/codex pane seats land none because only claude ships a reader (crew/seat-io.mjs:877), so pane totals are a floor; no live transport records occupancy — headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
+const MODEL_WHY = 'not measured — no agent_sessions row carries a model for this dispatch (a pi/codex pane seat ships no usage reader, crew/seat-io.mjs:877)'
 const MUST_FIX_WHY = 'predates this measurement — the review recorded no must-fix count'
 const ARTIFACT_WHY = 'artifact bytes are not served: no endpoint serves file bytes and server.mjs is fenced this batch'
 

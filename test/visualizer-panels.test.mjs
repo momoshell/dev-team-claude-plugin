@@ -696,6 +696,26 @@ test('laneRows shows a measured model beside an unmeasured effort mark', () => {
   assert.equal(result.lanes[0].header.effort_mark.dashed, true)
 })
 
+test('laneRows does not deny an agent-backed row when context columns are NULL', () => {
+  const result = laneRows({ phase_lanes: 'agent', phases: [{ id: 1, lane: 1 }], agents: [{ role: 'builder', lane: 1 }] })
+  const title = result.lanes[0].header.context_mark.title
+  assert.doesNotMatch(title, /no agent_sessions row at all/)
+  assert.match(title, /both columns NULL/)
+  assert.match(title, /U-4/)
+})
+
+test('laneRows explains an unmeasured model without denying its agent row', () => {
+  const result = laneRows({ phase_lanes: 'agent', phases: [{ id: 1, lane: 1 }], agents: [{ role: 'builder', lane: 1 }] })
+  const title = result.lanes[0].header.model_mark.title
+  assert.doesNotMatch(title, /no agent_sessions row for this dispatch/)
+  assert.match(title, /no agent_sessions row carries a model/)
+})
+
+test('laneRows gives a seat-supplied context reason precedence over the constant', () => {
+  const result = laneRows({ phase_lanes: 'agent', phases: [{ id: 1, lane: 1 }], agents: [{ role: 'builder', lane: 1, context_pending: 'seat supplied context reason' }] })
+  assert.equal(result.lanes[0].header.context_mark.title, 'seat supplied context reason')
+})
+
 test('bounceArrows pairs changes-needed reviews and distinguishes null from zero', () => {
   const result = bounceArrows({ phases: [{ id: 1, seq: 1, name: 'review:r1' }, { id: 2, seq: 2, name: 'build:r2' }, { id: 3, seq: 3, name: 'review:r2' }, { id: 4, seq: 4, name: 'build:r3' }], reviews: [{ verdict: 'changes-needed', must_fix: null }, { verdict: 'changes-needed', must_fix: 0 }] })
   assert.equal(result.arrows[0].must_fix, null)

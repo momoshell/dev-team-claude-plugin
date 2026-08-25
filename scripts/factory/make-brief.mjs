@@ -38,7 +38,7 @@
 // filename.
 
 import {
-  existsSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync,
+  existsSync, lstatSync, readFileSync, realpathSync, readdirSync, statSync, writeFileSync,
 } from 'node:fs'
 import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { spawnSync } from 'node:child_process'
@@ -49,6 +49,10 @@ import {
 import { resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 
 const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'])
+// A lane may declare files it will CREATE. The key is OPTIONAL, so every
+// request authored before it existed stays valid, and it is a COMPILER key
+// rather than a dispatch-only one: the compiler is what exempts the path.
+export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates'])
 const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
 const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const ERROR_CODE = /^[a-z0-9]+(?:[-:][a-z0-9]+)+$/
@@ -112,6 +116,8 @@ const PROFILE_UNRATIFIED = 'profile-unratified'
 const SCOPE_DIRECTORY_UNSLASHED = 'scope-directory-unslashed'
 const SCOPE_ENTRY_SHAPE = 'scope-entry-shape'
 const SCOPE_ENTRY_CASE = 'scope-entry-case'
+const CREATES_EXISTS = 'creates-exists'
+const CREATES_PARENT_MISSING = 'creates-parent-missing'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -133,6 +139,8 @@ export const REFUSAL_REASONS = Object.freeze([
   SCOPE_DIRECTORY_UNSLASHED,
   SCOPE_ENTRY_SHAPE,
   SCOPE_ENTRY_CASE,
+  CREATES_EXISTS,
+  CREATES_PARENT_MISSING,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -362,7 +370,7 @@ export function validateRequest(request, { taskName } = {}) {
     refuseUsage('request must be a JSON object', WRONG_TYPE)
   }
   for (const key of Object.keys(request)) {
-    if (!REQUEST_KEYS.includes(key)) {
+    if (!REQUEST_KEYS.includes(key) && !OPTIONAL_REQUEST_KEYS.includes(key)) {
       refuseUsage(`unknown request key: ${key}`, UNKNOWN_KEY)
     }
   }
@@ -378,6 +386,13 @@ export function validateRequest(request, { taskName } = {}) {
   for (const path of request.where) {
     if (typeof path !== 'string') refuseUsage('every where entry must be a string', WRONG_TYPE)
     if (!path.trim()) refuseUsage('every where entry must be non-blank', MISSING_LINE)
+  }
+  if (Object.prototype.hasOwnProperty.call(request, 'creates')) {
+    if (!Array.isArray(request.creates)) refuseUsage('creates must be an array', WRONG_TYPE)
+    for (const path of request.creates) {
+      if (typeof path !== 'string') refuseUsage('every creates entry must be a string', WRONG_TYPE)
+      if (!path.trim()) refuseUsage('every creates entry must be non-blank', MISSING_LINE)
+    }
   }
   for (const key of ['done_means', 'out_of_scope']) {
     if (typeof request[key] !== 'string') refuseUsage(`${key} must be a string`, WRONG_TYPE)
@@ -416,6 +431,55 @@ export function verifyWhere({ checkout, where }) {
     // valid path. The return keeps the author's spelling for rendering.
     if (!root) refuseUsage(`checkout is not a git repository: ${checkout}`, NOT_A_GIT_REPO)
     return { path: entry, kind: stat.isDirectory() ? 'directory' : 'file' }
+  })
+}
+
+// The OPPOSITE of verifyWhere, deliberately: an edited path must exist, a
+// created path must NOT, and its parent directory must — so a typo in a
+// declared creation is still caught instead of waved through. The compiler
+// EXEMPTS rather than the dispatcher SEEDING a stub, because a seeded stub
+// makes a typo indistinguishable from an intent: the stub satisfies
+// verifyWhere for whatever path was written. Shape (glob, absolute, . or ..,
+// wrong case) is already validateScopeEntries' business, so only the
+// existence pair is new here.
+export function verifyCreates({ checkout, creates = [] } = {}) {
+  if (!Array.isArray(creates)) refuseUsage('creates must be an array', WRONG_TYPE)
+  const root = gitRoot(checkout)
+  validateScopeEntries({ checkout, files: creates, context: 'creates' })
+  const seen = new Set()
+  return creates.map((entry) => {
+    const normalised = normaliseRepoPath(entry)
+    if (normalised.endsWith('/')) {
+      refuseUsage(`creates entry must name a file, not a directory: ${entry}`, SCOPE_ENTRY_SHAPE)
+    }
+    const absolute = absoluteWhere(root, normalised)
+    const relativePath = relative(root, absolute).split(sep).join('/')
+    if (relativePath === '' || relativePath === '..' || relativePath.startsWith('../')) {
+      refuseUsage(`creates path has no parent directory in the checkout: ${entry}`, CREATES_PARENT_MISSING)
+    }
+    let pathSegment = root
+    for (const segment of relativePath.split('/').filter(Boolean)) {
+      pathSegment = join(pathSegment, segment)
+      let segmentStat = null
+      try { segmentStat = lstatSync(pathSegment) } catch (error) {
+        if (error?.code === 'ENOENT') break
+        refuseUsage(`creates path includes a symlink or inaccessible segment: ${entry}`, CREATES_PARENT_MISSING)
+      }
+      if (segmentStat.isSymbolicLink()) {
+        refuseUsage(`creates path ${pathSegment === absolute ? 'already exists' : 'includes a symlink or inaccessible segment'}: ${entry}`, pathSegment === absolute ? CREATES_EXISTS : CREATES_PARENT_MISSING)
+      }
+    }
+    if (seen.has(relativePath)) refuseUsage(`creates path is listed twice: ${entry}`, WRONG_TYPE)
+    seen.add(relativePath)
+    let stat = null
+    try { stat = statSync(absolute) } catch { stat = null }
+    if (stat) refuseUsage(`creates path already exists: ${entry}`, CREATES_EXISTS)
+    let parent = null
+    try { parent = statSync(dirname(absolute)) } catch { parent = null }
+    if (!parent || !parent.isDirectory()) {
+      refuseUsage(`creates path has no parent directory in the checkout: ${entry}`, CREATES_PARENT_MISSING)
+    }
+    return { path: relativePath, kind: 'created' }
   })
 }
 
@@ -471,70 +535,6 @@ function addQuotedKeys(source, keys) {
       }
     }
   }
-}
-
-function normaliseSourceInput(source, filePath = '') {
-  if (source && typeof source === 'object' && !Array.isArray(source)) {
-    filePath = source.file || source.path || ''
-    source = source.source || ''
-  }
-  if (filePath && typeof filePath === 'object') filePath = filePath.file || filePath.path || ''
-  return { source, filePath }
-}
-
-function exportedSymbols(source) {
-  const symbols = new Set()
-  for (const match of source.matchAll(EXPORTED_DECLARATION)) symbols.add(match[1])
-  for (const match of source.matchAll(EXPORTED_LIST)) {
-    for (const part of match[1].split(',')) {
-      const item = part.trim()
-      if (!item) continue
-      const alias = item.match(/\bas\s+([A-Za-z_$][\w$]*)/) || item.match(/^([A-Za-z_$][\w$]*)/)
-      if (alias) symbols.add(alias[1])
-    }
-  }
-  return symbols
-}
-
-function isCodeFile(filePath) {
-  return !nonEmptyString(filePath)
-    || CODE_EXTENSIONS.includes(extname(String(filePath)).toLowerCase())
-}
-
-export function extractSymbols(source, filePath = '') {
-  ({ source, filePath } = normaliseSourceInput(source, filePath))
-  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
-  if (!isCodeFile(filePath)) return []
-  return [...exportedSymbols(source)].filter((key) => key.length >= 4).sort()
-}
-
-export function extractKeys(source, filePath = '') {
-  ({ source, filePath } = normaliseSourceInput(source, filePath))
-  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
-  const keys = new Set()
-  if (nonEmptyString(filePath)) keys.add(normaliseRepoPath(filePath))
-  if (isCodeFile(filePath)) {
-    for (const symbol of exportedSymbols(source)) keys.add(symbol)
-    addQuotedKeys(source, keys)
-  }
-  return [...keys].filter((key) => key.length >= 4).sort()
-}
-
-function grepHits(checkout, key) {
-  let result
-  try {
-    result = spawnSync('git', ['-C', checkout, 'grep', '-l', '-F', '-e', key, '--', '.'], {
-      encoding: 'utf8',
-      timeout: 30_000,
-    })
-  } catch {
-    return []
-  }
-  if (!result || (result.status !== 0 && result.status !== 1)) return []
-  return String(result.stdout || '')
-    .split(/\r?\n/)
-    .map((line) => normaliseRepoPath(line.trim()))
-    .filter(Boolean)
 }
 
 function isTripwireFile(file) {
@@ -934,9 +934,9 @@ export function validateScopeEntries({ checkout, files = [], context = '' } = {}
   return files
 }
 
-export function resolveWriteSurface({ fences, lane, where = [] } = {}) {
+export function resolveWriteSurface({ fences, lane, where = [], creates = [] } = {}) {
   if (lane == null) {
-    const files = [...new Set(where.map((entry) => normaliseRepoPath(entry.path)))].sort()
+    const files = [...new Set([...where.map((entry) => normaliseRepoPath(entry.path)), ...creates.map((entry) => normaliseRepoPath(entry.path))])].sort()
     return { lane: null, basis: 'where', files, reads: [] }
   }
   if (!nonEmptyString(lane)) refuseUsage('--lane requires a value', MISSING_LINE)
@@ -1272,6 +1272,70 @@ function formatCountBasis(profileBaseline, supplied) {
   return `${rendered} (profile records a ratified baseline, not used)`
 }
 
+function normaliseSourceInput(source, filePath = '') {
+  if (source && typeof source === 'object' && !Array.isArray(source)) {
+    filePath = source.file || source.path || ''
+    source = source.source || ''
+  }
+  if (filePath && typeof filePath === 'object') filePath = filePath.file || filePath.path || ''
+  return { source, filePath }
+}
+
+function exportedSymbols(source) {
+  const symbols = new Set()
+  for (const match of source.matchAll(EXPORTED_DECLARATION)) symbols.add(match[1])
+  for (const match of source.matchAll(EXPORTED_LIST)) {
+    for (const part of match[1].split(',')) {
+      const item = part.trim()
+      if (!item) continue
+      const alias = item.match(/\bas\s+([A-Za-z_$][\w$]*)/) || item.match(/^([A-Za-z_$][\w$]*)/)
+      if (alias) symbols.add(alias[1])
+    }
+  }
+  return symbols
+}
+
+function isCodeFile(filePath) {
+  return !nonEmptyString(filePath)
+    || CODE_EXTENSIONS.includes(extname(String(filePath)).toLowerCase())
+}
+
+export function extractSymbols(source, filePath = '') {
+  ({ source, filePath } = normaliseSourceInput(source, filePath))
+  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
+  if (!isCodeFile(filePath)) return []
+  return [...exportedSymbols(source)].filter((key) => key.length >= 4).sort()
+}
+
+export function extractKeys(source, filePath = '') {
+  ({ source, filePath } = normaliseSourceInput(source, filePath))
+  if (typeof source !== 'string') refuseUsage('source must be a string', WRONG_TYPE)
+  const keys = new Set()
+  if (nonEmptyString(filePath)) keys.add(normaliseRepoPath(filePath))
+  if (isCodeFile(filePath)) {
+    for (const symbol of exportedSymbols(source)) keys.add(symbol)
+    addQuotedKeys(source, keys)
+  }
+  return [...keys].filter((key) => key.length >= 4).sort()
+}
+
+function grepHits(checkout, key) {
+  let result
+  try {
+    result = spawnSync('git', ['-C', checkout, 'grep', '-l', '-F', '-e', key, '--', '.'], {
+      encoding: 'utf8',
+      timeout: 30_000,
+    })
+  } catch {
+    return []
+  }
+  if (!result || (result.status !== 0 && result.status !== 1)) return []
+  return String(result.stdout || '')
+    .split(/\r?\n/)
+    .map((line) => normaliseRepoPath(line.trim()))
+    .filter(Boolean)
+}
+
 const BASELINE_UNREADABLE = 'unreadable-baseline'
 const BASELINE_MALFORMED = 'malformed-baseline'
 
@@ -1399,8 +1463,11 @@ function generatedGrep(discovery) {
   return `grep -rn "${keys.join('\\|')}" crew/ test/ scripts/ docs/`
 }
 
-function renderWhere(where) {
-  return where.map((entry) => `verified · ${entry.kind} · ${entry.path}`).join('\n')
+function renderWhere(where, creates = []) {
+  return [
+    ...where.map((entry) => `verified · ${entry.kind} · ${entry.path}`),
+    ...creates.map((entry) => `declared · created · ${entry.path}`),
+  ].join('\n')
 }
 
 function renderTripwires(discovery) {
@@ -1544,6 +1611,7 @@ function renderValidation(baseline, discovery) {
 export function renderBrief(gathered) {
   const request = gathered.request || gathered
   const where = gathered.where || []
+  const creates = gathered.creates || []
   const discovery = gathered.discovery || gathered.tripwires || { candidates: [], tripwires: [], broadKeys: [] }
   const baseline = gathered.baseline || { lane: null, pass: null, fail: null, status: 'unknown', reason: 'not-gathered' }
   const supplied = gathered.supplied ?? null
@@ -1551,7 +1619,7 @@ export function renderBrief(gathered) {
   const fences = Object.prototype.hasOwnProperty.call(gathered, 'fences') ? gathered.fences : null
   const writeSurface = Object.prototype.hasOwnProperty.call(gathered, 'writeSurface')
     ? gathered.writeSurface
-    : resolveWriteSurface({ fences, lane: gathered.lane ?? null, where })
+    : resolveWriteSurface({ fences, lane: gathered.lane ?? null, where, creates })
   const coupling = gathered.coupling ?? crossCheckCoupling({ discovery, writeSurface, enforce: false })
   const proposal = gathered.proposal ?? proposeTier({ where, discovery })
   const lines = [
@@ -1562,7 +1630,7 @@ export function renderBrief(gathered) {
     renderProposedTier(proposal),
     renderProposalBlock(proposal),
     '## Where',
-    renderWhere(where),
+    renderWhere(where, creates),
     '## Done means',
     request.done_means,
     '## Tripwires',
@@ -1697,6 +1765,7 @@ function compile(flags) {
   validateRequest(request, { taskName })
   const checkout = gitRoot(flags.checkout || process.cwd())
   const where = verifyWhere({ checkout, where: request.where })
+  const creates = verifyCreates({ checkout, creates: request.creates ?? [] })
   const discovery = discoverTripwires({ checkout, files: where })
   const profileResult = gatherProfile({
     checkout,
@@ -1715,7 +1784,7 @@ function compile(flags) {
   // sibling profile-ci-shape lane), so they deliberately stay out of wiring.
   const { lane, laneBasis } = laneFromProfile(testCommand)
   const fences = gatherFences({ fencesPath: flags.fences, checkout })
-  const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where })
+  const writeSurface = resolveWriteSurface({ fences, lane: flags.lane ?? null, where, creates })
   if (writeSurface.basis === 'fences') validateScopeEntries({ checkout, files: writeSurface.files })
   const coupling = crossCheckCoupling({ discovery, writeSurface })
   const command = resolveBaselineCommand({ checkout, lane })
@@ -1733,6 +1802,7 @@ function compile(flags) {
   const content = renderBrief({
     request,
     where,
+    creates,
     discovery,
     coupling,
     baseline,

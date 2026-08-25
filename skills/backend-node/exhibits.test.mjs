@@ -4,8 +4,8 @@ import { readFileSync } from 'node:fs'
 import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ROOT } from '../../test/helpers.mjs'
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const FIREWALL = join(ROOT, 'crew/daemon.test.mjs')
 const IMPORT_TEST = join(ROOT, 'crew/pi/extensions/subagent.test.mjs')

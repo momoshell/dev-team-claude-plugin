@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentLine } from './driver.mjs'
-import { shq, classifyRun, updateCrewJson } from './headless.mjs'
+import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { translateDeny } from './adapters/adapter-pi.mjs'
@@ -162,14 +162,6 @@ function parseExit(path, read, exists) {
   try {
     const n = Number(String(read(path, 'utf8')).trim())
     return Number.isFinite(n) ? n : null
-  } catch { return null }
-}
-
-function envelopeAt(path, read, exists) {
-  if (!path || !exists(path)) return null
-  try {
-    const value = JSON.parse(String(read(path, 'utf8')))
-    return value && typeof value === 'object' ? value : null
   } catch { return null }
 }
 
@@ -626,7 +618,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
           emitUsage(turn, seat, turn.usage); finishTurn(seat); throw responseError(turn.role, frame)
         }
       }
-      const env = envelopeAt(returnPath, read, exists)
+      // An UNREADABLE envelope is TERMINAL and an ABSENT one is not: the one
+      // reader for both headless transports is crew/headless.mjs's, mirroring
+      // crew/seat-io.mjs:1369. The turn is finished and the spend emitted
+      // the way every other terminal outcome here does before the failure travels.
+      let env
+      try { env = readEnvelopeOrThrow(returnPath, { existsSync: exists, readFileSync: read, stage: 'rpc-parse-error', role: turn.role }) }
+      catch (err) {
+        log({ at: now(), rpc_outcome: 'parse-error', role: turn.role, id: turn.id })
+        emitUsage(turn, seat, turn.usage)
+        finishTurn(seat)
+        throw err
+      }
       const exitCode = parseExit(seat.exit, read, exists)
       if (env) {
         const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: env, timedOut: false })

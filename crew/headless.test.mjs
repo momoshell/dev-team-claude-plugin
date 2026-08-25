@@ -7,7 +7,19 @@ import {
   classifyRun, foldUsage, headlessIo, recogniseProviderCondition, recogniseSeatRefusal,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, updateCrewJson,
 } from './headless.mjs'
+import { cellFailureKind } from './seat-io.mjs'
 import { startFileWriter } from '../test/helpers.mjs'
+
+// The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
+// unparseable on ONE literal newline inside the `summary` string value.
+function b200Bytes(bytes = 1921) {
+  const head = '{\n  "assignment_id": "d1",\n  "role": "builder",\n  "status": "done",\n  "summary": "deduplicated the helper\nand ran the lane green: '
+  const tail = '",\n  "artifacts": ["/tmp/plan.md"],\n  "details": {}\n}\n'
+  const raw = `${head}${'x'.repeat(bytes - Buffer.byteLength(head) - Buffer.byteLength(tail))}${tail}`
+  assert.equal(Buffer.byteLength(raw), bytes)
+  assert.throws(() => JSON.parse(raw), SyntaxError)
+  return raw
+}
 
 function makeFixture(overrides = {}, roles = ['builder']) {
   const dir = mkdtempSync(join(tmpdir(), 'headless-extra-'))
@@ -109,6 +121,63 @@ test('wait returns an envelope as soon as it appears', () => {
     const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
     writeFileSync(run.returnPath, JSON.stringify({ assignment_id: 'd1', status: 'done' }))
     assert.deepEqual(f.io.wait(run.returnPath, 1), { assignment_id: 'd1', status: 'done' })
+  } finally { f.cleanup() }
+})
+
+test('a 1921-byte envelope with a literal newline is UNREADABLE, not absent', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const bytes = b200Bytes()
+    writeFileSync(run.returnPath, bytes)
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => {
+      assert.equal(err.stage, 'headless-parse-error')
+      assert.equal(cellFailureKind(err), 'unusable-envelope')
+      assert.equal(err.role, 'builder')
+      assert.equal(err.raw, bytes)
+      assert.equal(err.message.includes('1921 bytes'), true)
+      return true
+    })
+    assert.equal(readFileSync(run.returnPath, 'utf8'), bytes)
+  } finally { f.cleanup() }
+})
+
+test('a missing file and a denied read both stay a re-pollable absence', () => {
+  let clock = 0
+  const missing = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill: () => {} })
+  try {
+    const run = missing.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    assert.throws(() => missing.io.wait(run.returnPath, 30), (err) => err.stage === 'headless-timeout')
+  } finally { missing.cleanup() }
+
+  clock = 0
+  let attempts = 0
+  const realRead = readFileSync
+  const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  const unreadable = makeFixture({
+    now: () => clock,
+    sleep: () => { clock += 5000 },
+    kill: () => {},
+    readFileSync: (path, ...args) => {
+      if (String(path).includes('/returns/')) { attempts += 1; throw denied }
+      return realRead(path, ...args)
+    },
+  })
+  try {
+    const run = unreadable.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    writeFileSync(run.returnPath, b200Bytes())
+    assert.throws(() => unreadable.io.wait(run.returnPath, 30), (err) => err.stage === 'headless-timeout')
+    assert.ok(attempts > 1)
+  } finally { unreadable.cleanup() }
+})
+
+test('a parseable envelope is returned unchanged', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const envelope = { assignment_id: run.id, role: 'builder', status: 'done', summary: 'ok', details: { keep: true } }
+    writeFileSync(run.returnPath, JSON.stringify(envelope))
+    assert.deepEqual(f.io.wait(run.returnPath, 1), envelope)
   } finally { f.cleanup() }
 })
 

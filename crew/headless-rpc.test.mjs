@@ -10,6 +10,18 @@ import {
   carriesOwnSpend, emptyTurnEnvelope, foldRpcUsage, headlessRpcIo, isBusyRefusal, PROMPT_REFUSAL_RETRIES,
   rpcCommand, seatCommandPath, SETTLE_GATE_POLLS, splitFrames, steerFrame, teardownOutcome,
 } from './headless-rpc.mjs'
+import { cellFailureKind } from './seat-io.mjs'
+
+// The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
+// unparseable on ONE literal newline inside the `summary` string value.
+function b200Bytes(bytes = 1921) {
+  const head = '{\n  "assignment_id": "d1",\n  "role": "builder",\n  "status": "done",\n  "summary": "deduplicated the helper\nand ran the lane green: '
+  const tail = '",\n  "artifacts": ["/tmp/plan.md"],\n  "details": {}\n}\n'
+  const raw = `${head}${'x'.repeat(bytes - Buffer.byteLength(head) - Buffer.byteLength(tail))}${tail}`
+  assert.equal(Buffer.byteLength(raw), bytes)
+  assert.throws(() => JSON.parse(raw), SyntaxError)
+  return raw
+}
 
 function fixture(options = {}) {
   const dir = options.dir || mkdtempSync(join(tmpdir(), 'headless-rpc-'))
@@ -266,6 +278,54 @@ test('agent_end alone is not completion and times out', () => {
     const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
     writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl'), '{"type":"agent_end"}\n')
     assert.throws(() => f.io.wait(run.returnPath, 1), (err) => err.stage === 'rpc-timeout')
+  } finally { f.cleanup() }
+})
+
+test('a 1921-byte envelope with a literal newline is UNREADABLE, not a settled no-envelope', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run)
+    const bytes = b200Bytes()
+    writeFileSync(run.returnPath, bytes)
+    assert.throws(() => f.io.wait(run.returnPath, 1), (err) => {
+      assert.equal(err.stage, 'rpc-parse-error')
+      assert.equal(cellFailureKind(err), 'unusable-envelope')
+      assert.equal(err.role, 'builder')
+      assert.equal(err.raw, bytes)
+      const lie = emptyTurnEnvelope({ id: run.id, role: 'builder', returnPath: run.returnPath }).summary
+      assert.equal(err.message.includes(lie), false)
+      return true
+    })
+    assert.equal(readFileSync(run.returnPath, 'utf8'), bytes)
+  } finally { f.cleanup() }
+})
+
+test('a denied read stays a re-pollable absence', () => {
+  let clock = 0
+  const realRead = readFileSync
+  const denied = Object.assign(new Error('permission denied'), { code: 'EACCES' })
+  const f = fixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: () => {},
+    readFileSync: (path, ...args) => {
+      if (String(path).includes('/returns/')) throw denied
+      return realRead(path, ...args)
+    },
+  })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => f.io.wait(run.returnPath, 30), (err) => err.stage === 'rpc-timeout')
+  } finally { f.cleanup() }
+})
+
+test('a parseable envelope is returned unchanged', () => {
+  const f = fixture()
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run)
+    assert.equal(f.io.wait(run.returnPath, 1).status, 'done')
   } finally { f.cleanup() }
 })
 

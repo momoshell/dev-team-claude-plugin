@@ -70,9 +70,10 @@ export function checkAnchors({ root, docs, manifest }) {
   try {
     anchors = collectAnchors({ docs })
   } catch (error) {
-    return { anchors: 0, failures: [`citation docs could not be read (${error?.code || error?.message || String(error)})`] }
+    return { anchors: 0, failures: [`citation docs could not be read (${error?.code || error?.message || String(error)})`], shifted: [] }
   }
   const failures = []
+  const shifted = []
   const declarations = manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : {}
   const cited = new Set(anchors.map(({ key }) => key))
 
@@ -80,45 +81,57 @@ export function checkAnchors({ root, docs, manifest }) {
     const { lines, failure } = readTargetLines(root, anchor)
     if (failure) { failures.push(failure); continue }
 
-    if (anchor.line < 1 || anchor.line > lines.length) {
-      failures.push(`${anchor.key}: line is out of range (target has ${lines.length} lines)`)
-      continue
-    }
     if (!Object.hasOwn(declarations, anchor.key)) {
       failures.push(`${anchor.key}: manifest has no entry`)
       continue
     }
     const expected = declarations[anchor.key]
+    // Three outcomes, never two (#582's fourth ask). isDistinctive keeps both HARD
+    // ones with the message they have always carried: content that appears nowhere
+    // is ROT and content on more than one line is AMBIGUOUS. Past that gate exactly
+    // one line carries the text, so the cited line either IS that line (pinned) or
+    // is not (shifted) - and a shift is repairable, not a failure. The cited line is
+    // deliberately no longer range-checked ahead of the content: a citation past EOF
+    // whose content is found once is a shift, and one found nowhere is rot.
     if (!isDistinctive(lines, expected)) {
       failures.push(`${anchor.key}: expected ${display(expected)} must be at least ${MIN_EXPECTED_LENGTH} non-space characters and occur on exactly one target line`)
       continue
     }
-    const current = lines[anchor.line - 1]
-    if (!lineCarries(current, expected)) {
-      const moved = lines.findIndex((line) => lineCarries(line, expected))
-      const movedAt = moved === -1 ? 'unknown' : moved + 1
-      failures.push(`expected ${display(expected)} at ${anchor.key}, found ${display(current)}; the text is now at line ${movedAt}`)
-    }
+    const at = lines.findIndex((line) => lineCarries(line, expected)) + 1
+    if (at === anchor.line) continue
+    shifted.push({ key: anchor.key, rel: anchor.rel, from: anchor.line, to: at, nextKey: `${anchor.rel}:${at}` })
   }
 
   for (const key of Object.keys(declarations)) {
     if (!cited.has(key)) failures.push(`${key}: manifest entry is orphaned (no citation)`)
   }
 
-  return { anchors: anchors.length, failures }
+  return { anchors: anchors.length, failures, shifted }
 }
 
-export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors }) {
+export function checkSkillAnchors({ root, skillDir, manifestPath }) {
   let manifest
   try {
     manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
   } catch (error) {
     throw new Error(`could not read anchor manifest ${manifestPath}: ${error?.message || String(error)}`)
   }
-  const result = checkAnchors({ root, docs: skillDocs(skillDir), manifest })
+  return checkAnchors({ root, docs: skillDocs(skillDir), manifest })
+}
+
+// Returns the anchor COUNT as a primitive. Both callers assert it under
+// node:assert/strict (skills/backend-node/exhibits.test.mjs:52 and
+// skills/devops/exhibits.test.mjs:53) and neither may be edited by the lane that
+// made a shift non-fatal, so a boxed or object return would redden two exhibits
+// this lane must leave alone. The shifts are reported two other ways instead:
+// through `log`, so a shift is never SILENT in a suite run, and through
+// checkSkillAnchors for a caller that wants the records themselves.
+export function assertAnchorsPinned({ root, skillDir, manifestPath, minAnchors, log = console.warn }) {
+  const result = checkSkillAnchors({ root, skillDir, manifestPath })
   const failures = [...result.failures]
   if (result.anchors < minAnchors) failures.push(`expected at least ${minAnchors} anchors, found ${result.anchors}`)
   if (failures.length > 0) throw new Error(failures.join('\n'))
+  for (const shift of result.shifted) log(`shifted ${shift.key} -> line ${shift.to}; repair with: node skills/qa-test-writing/anchor-pin.mjs --repair ${skillDir}`)
   return result.anchors
 }
 

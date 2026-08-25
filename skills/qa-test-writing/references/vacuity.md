@@ -8,6 +8,16 @@ Measured in this repo by the `b131-vacuity` scout (2026-08-22, issue #476):
 neutralisation recorded for every one. The ratio is quoted with its denominator
 on purpose; "several tests are weak" is not a finding.
 
+## What a check may assert
+
+A check may assert only against an authoritative stream or mutable data,
+never against the presence of a service, method, key or symbol. Asserting that
+a name exists — a key, an export, a method — passes whether the behaviour
+behind it works or not: #578 shipped a `doesNotMatch`
+against a key that is never serialised, #603's tripwire matched only a column-0
+`function`, and #581's guard could only pass by finding hits. `test/vacuity.test.mjs`
+is the tripwire over the test tree for that shape.
+
 ## The method: mutation, not reading
 
 You cannot see vacuity by reading. Neutralise the behaviour and re-run.

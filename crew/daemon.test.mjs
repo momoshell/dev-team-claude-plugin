@@ -3249,7 +3249,7 @@ test('seatIo teardown sweeps every declared headless-rpc transport', () => {
   assert.deepEqual(ok.rows.map(({ role }) => role).sort(), ['builder', 'reviewer'])
   assert.deepEqual(ok.logs.find(({ event }) => event === 'teardown-transports'), {
     at: ok.logs.find(({ event }) => event === 'teardown-transports').at,
-    event: 'teardown-transports', declared: ['builder', 'reviewer'], transports: ['headless-rpc'],
+    event: 'teardown-transports', channel: 'operational', declared: ['builder', 'reviewer'], transports: ['headless-rpc'],
     init_failed: [], seats: 2,
   })
 

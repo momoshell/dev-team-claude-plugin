@@ -17,7 +17,7 @@ import { runChild } from './child.mjs'
 import {
   driveTask, LIMITS, WAITS_S, WAIT_ROLES, WAIT_FLAGS, WAIT_REFUSALS, WAIT_SECONDS_MIN, WAIT_SECONDS_MAX,
   refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
-  FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES,
+  FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, recordRow, operationalRow,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
@@ -4514,7 +4514,7 @@ test('an omitted gate_path journals an explicit null rejection value', () => {
   const rejection = io.calls.logs.find((line) => Object.hasOwn(line, 'gate_path_rejected'))
   assert.ok(rejection)
   assert.equal(rejection.gate_path_rejected, null)
-  assert.deepEqual(JSON.parse(JSON.stringify(rejection)), { at: 0, gate_path_rejected: null })
+  assert.deepEqual(JSON.parse(JSON.stringify(rejection)), { at: 0, gate_path_rejected: null, channel: 'record' })
 })
 
 test('a wildly divergent run still reaches commit', () => {
@@ -6290,4 +6290,139 @@ test('runCmd carries the start HEAD and fills a crashed run stage list', () => {
     assert.deepEqual(run.envelope.details.stages, ['plan:r1', 'build:r1'])
     assert.equal(run.envelope.details.escalation.where, 'driver')
   } finally { process.exitCode = previousExitCode }
+})
+
+// The source inventory deliberately mirrors the acceptance gate's two projections:
+// event discriminators and top-level payload keys are independently pinned.
+const DRIVE_SINK = /(?:io\?\.log\?\.\(|io\.log\(|(?<![.\w])log\?\.\(|logLine\(join\(paths\.dir, 'journal\.jsonl'\), )/g
+function drivePayloadElements(text, from) {
+  let i = from
+  while (i < text.length && text[i] !== '{') i += 1
+  if (text[i] !== '{') return null
+  i += 1
+  const parts = []
+  let buf = ''
+  let depth = 0
+  while (i < text.length) {
+    const c = text[i]
+    const two = text.slice(i, i + 2)
+    if (two === '//') { while (i < text.length && text[i] !== '\n') i += 1; continue }
+    if (two === '/*') { i = text.indexOf('*/', i); if (i < 0) return null; i += 2; continue }
+    if (c === "'" || c === '"' || c === '`') {
+      const q = c
+      let j = i + 1
+      while (j < text.length) { if (text[j] === '\\') { j += 2; continue } if (text[j] === q) break; j += 1 }
+      buf += text.slice(i, j + 1); i = j + 1; continue
+    }
+    if (c === '{' || c === '[' || c === '(') { depth += 1; buf += c; i += 1; continue }
+    if (c === ']' || c === ')') { depth -= 1; buf += c; i += 1; continue }
+    if (c === '}') { if (depth === 0) { parts.push(buf); break } depth -= 1; buf += c; i += 1; continue }
+    if (c === ',' && depth === 0) { parts.push(buf); buf = ''; i += 1; continue }
+    buf += c; i += 1
+  }
+  const collapse = (s) => s.trim().replace(/\s+/g, ' ')
+  const events = []
+  const keys = []
+  for (const raw of parts.map(collapse).filter((s) => s.length > 0)) {
+    let m = raw.match(/^event\s*:\s*'([^']*)'/); if (m) { events.push(`event='${m[1]}'`); continue }
+    if (raw.startsWith('...')) { keys.push(`...${collapse(raw.slice(3))}`); continue }
+    m = raw.match(/^([A-Za-z_$][\w$]*)\s*:/); if (m) { keys.push(m[1]); continue }
+    m = raw.match(/^([A-Za-z_$][\w$]*)$/); if (m) { keys.push(m[1]); continue }
+    m = raw.match(/^'([^']*)'\s*:/); if (m) { keys.push(m[1]); continue }
+    keys.push(raw)
+  }
+  return { events: events.join(' '), keys: keys.join(' ') }
+}
+function driveJournalSites(text) {
+  DRIVE_SINK.lastIndex = 0
+  const out = []
+  let hit
+  while ((hit = DRIVE_SINK.exec(text)) !== null) {
+    const line = text.slice(0, hit.index).split('\n').length
+    const after = text.slice(hit.index + hit[0].length)
+    const payload = drivePayloadElements(text, hit.index + hit[0].length)
+    out.push({
+      line,
+      wrapper: after.startsWith('recordRow(') ? 'recordRow' : after.startsWith('operationalRow(') ? 'operationalRow' : null,
+      events: payload?.events ?? null,
+      keys: payload?.keys ?? null,
+    })
+  }
+  return out
+}
+const DRIVE_JOURNAL_EXPECTED = Object.freeze([
+  ['recordRow', '', 'at modifier'],
+  ['recordRow', '', 'at modifier'],
+  ['recordRow', '', 'at stage_done'],
+  ['recordRow', '', 'at stage'],
+  ['operationalRow', '', 'at gate_reap'],
+  ['recordRow', '', 'at no_lead_escalation'],
+  ['recordRow', '', 'at converge_declined'],
+  ['recordRow', '', 'at converge_declined'],
+  ['recordRow', '', 'at converge_declined residual why'],
+  ['recordRow', '', 'at converge_declined residual why'],
+  ['recordRow', '', 'at commit_subject'],
+  ['recordRow', '', 'at assign role brief'],
+  ['recordRow', '', 'at review_outcome'],
+  ['recordRow', '', 'at review_findings_note'],
+  ['recordRow', '', 'at envelope role status'],
+  ['recordRow', '', 'at no_lead_escalation'],
+  ['recordRow', '', 'at perspective_from recommendation consult'],
+  ['recordRow', '', 'at dissent'],
+  ['recordRow', '', 'at decision consult round reason'],
+  ['recordRow', '', 'at extra_round_granted'],
+  ['recordRow', '', 'at accept_decision'],
+  ['recordRow', '', 'at envelope_accepted'],
+  ['recordRow', '', 'at triage'],
+  ['recordRow', '', 'at directed'],
+  ['recordRow', '', 'at member_questions'],
+  ['recordRow', '', 'at question_answers'],
+  ['recordRow', '', 'at gate_path_rejected'],
+  ['recordRow', '', 'at plan_growth'],
+  ['recordRow', '', 'at carve_verdict'],
+  ['recordRow', '', 'at gate_discrimination gate_generation gate_summary gate_proof_note'],
+  ['recordRow', '', 'at gate_proof_unproven gate_generation'],
+  ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
+  ['recordRow', '', 'at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})'],
+  ['recordRow', '', 'at ...entry'],
+  ['recordRow', '', 'at member_questions'],
+  ['recordRow', '', 'at question_answers'],
+  ['recordRow', '', 'at review_round'],
+  ['recordRow', '', 'at commit_subject'],
+])
+
+test('the journal channel vocabulary is closed, exported and additive', () => {
+  assert.equal(Object.isFrozen(JOURNAL_CHANNELS), true)
+  assert.deepEqual(JOURNAL_CHANNELS, { record: 'record', operational: 'operational' })
+  assert.deepEqual([...JOURNAL_CHANNEL_NAMES], ['record', 'operational'])
+  assert.equal(Object.isFrozen(JOURNAL_CHANNEL_NAMES), true)
+  assert.deepEqual(recordRow({ at: 't', stage: 'plan' }), { at: 't', stage: 'plan', channel: 'record' })
+  assert.deepEqual(operationalRow({ at: 't', event: 'descendant-capture', records: 3 }), {
+    at: 't', event: 'descendant-capture', records: 3, channel: 'operational',
+  })
+  assert.equal(operationalRow({ channel: 'record' }).channel, 'operational')
+})
+
+test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
+  const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
+  const sites = driveJournalSites(text)
+  assert.equal(sites.length, 38)
+  assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
+  assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
+  assert.equal(sites.find(({ wrapper }) => wrapper === 'operationalRow').keys, 'at gate_reap')
+})
+
+test('a full drive writes no journal row without a channel', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.ok(io.calls.logs.length > 0)
+  for (const row of io.calls.logs) {
+    assert.ok(JOURNAL_CHANNEL_NAMES.includes(row.channel), `${JSON.stringify(row)} carries no channel`)
+  }
 })

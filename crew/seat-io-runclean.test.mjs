@@ -12,6 +12,7 @@ import {
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
+import { JOURNAL_CHANNEL_NAMES } from './drive.mjs'
 import { git, ROOT, scratchDir, startFileWriter } from '../test/helpers.mjs'
 import { teardownCore } from './crew.mjs'
 
@@ -60,6 +61,138 @@ function addLane(fixture, name, tracked) {
 function makeIo({ repoDir, paths }) {
   return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
 }
+
+// The seat-side inventory mirrors gate.mjs: event discriminators and payload
+// keys are separate projections, and the three forwarding sinks are excluded.
+const SEAT_SINK = /(?:io\?\.log\?\.\(|io\.log\(|(?<![.\w])log\?\.\(|logLine\(join\(paths\.dir, 'journal\.jsonl'\), )/g
+const SEAT_PASS_THROUGH = new Set([
+  'log: (obj) => io.log(obj),',
+  "log: (obj) => logLine(join(paths.dir, 'journal.jsonl'), obj),",
+  "log(obj) { logLine(join(paths.dir, 'journal.jsonl'), obj) },",
+])
+function seatPayloadElements(text, from) {
+  let i = from
+  while (i < text.length && text[i] !== '{') i += 1
+  if (text[i] !== '{') return null
+  i += 1
+  const parts = []
+  let buf = ''
+  let depth = 0
+  while (i < text.length) {
+    const c = text[i]
+    const two = text.slice(i, i + 2)
+    if (two === '//') { while (i < text.length && text[i] !== '\n') i += 1; continue }
+    if (two === '/*') { i = text.indexOf('*/', i); if (i < 0) return null; i += 2; continue }
+    if (c === "'" || c === '"' || c === '`') {
+      const q = c
+      let j = i + 1
+      while (j < text.length) { if (text[j] === '\\') { j += 2; continue } if (text[j] === q) break; j += 1 }
+      buf += text.slice(i, j + 1); i = j + 1; continue
+    }
+    if (c === '{' || c === '[' || c === '(') { depth += 1; buf += c; i += 1; continue }
+    if (c === ']' || c === ')') { depth -= 1; buf += c; i += 1; continue }
+    if (c === '}') { if (depth === 0) { parts.push(buf); break } depth -= 1; buf += c; i += 1; continue }
+    if (c === ',' && depth === 0) { parts.push(buf); buf = ''; i += 1; continue }
+    buf += c; i += 1
+  }
+  const collapse = (s) => s.trim().replace(/\s+/g, ' ')
+  const events = []
+  const keys = []
+  for (const raw of parts.map(collapse).filter((s) => s.length > 0)) {
+    let m = raw.match(/^event\s*:\s*'([^']*)'/); if (m) { events.push(`event='${m[1]}'`); continue }
+    if (raw.startsWith('...')) { keys.push(`...${collapse(raw.slice(3))}`); continue }
+    m = raw.match(/^([A-Za-z_$][\w$]*)\s*:/); if (m) { keys.push(m[1]); continue }
+    m = raw.match(/^([A-Za-z_$][\w$]*)$/); if (m) { keys.push(m[1]); continue }
+    m = raw.match(/^'([^']*)'\s*:/); if (m) { keys.push(m[1]); continue }
+    keys.push(raw)
+  }
+  return { events: events.join(' '), keys: keys.join(' ') }
+}
+function seatJournalSites(text) {
+  SEAT_SINK.lastIndex = 0
+  const lines = text.split('\n')
+  const out = []
+  let hit
+  while ((hit = SEAT_SINK.exec(text)) !== null) {
+    const line = text.slice(0, hit.index).split('\n').length
+    if (SEAT_PASS_THROUGH.has(lines[line - 1].trim())) continue
+    const after = text.slice(hit.index + hit[0].length)
+    const payload = seatPayloadElements(text, hit.index + hit[0].length)
+    out.push({
+      line,
+      wrapper: after.startsWith('recordRow(') ? 'recordRow' : after.startsWith('operationalRow(') ? 'operationalRow' : null,
+      events: payload?.events ?? null,
+      keys: payload?.keys ?? null,
+    })
+  }
+  return out
+}
+const SEAT_JOURNAL_EXPECTED = Object.freeze([
+  ['operationalRow', "event='descendant-capture'", 'at records captures discovery_failures'],
+  ['operationalRow', "event='seat-root-settle'", 'at ...record ...result'],
+  ['operationalRow', "event='seat-root-settle-sweep'", 'at ...summary'],
+  ['operationalRow', "event='descendant-reclaim-sweep'", 'at ...empty'],
+  ['operationalRow', "event='descendant-reclaim-sweep'", 'at ...summary'],
+  ['operationalRow', "event='descendant-reclaim'", 'at ...row'],
+  ['operationalRow', "event='descendant-reclaim-record-failed'", 'at ...row'],
+  ['operationalRow', "event='descendant-reclaim-error'", 'at key reason'],
+  ['operationalRow', "event='descendant-reclaim-sweep'", 'at ...summary'],
+  ['operationalRow', "event='seat-teardown'", 'at ...seat'],
+  ['operationalRow', "event='seat-teardown-record-failed'", 'at role outcome reason'],
+  ['operationalRow', "event='seat-teardown-sweep'", 'at ...summary'],
+  ['recordRow', "event='seat-refusal'", "role id member source message at outcome ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}) ...extra"],
+  ['operationalRow', "event='seat-stale'", 'at role id last_frame_at stale_ms threshold_ms'],
+  ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
+  ['recordRow', "event='envelope-reask'", 'at role id returnPath outcome ...extra'],
+  ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
+  ['recordRow', '', 'at seat_died returnPath'],
+  ['recordRow', '', 'at substrate_gone returnPath'],
+  ['operationalRow', "event='teardown-transports'", 'at declared transports init_failed seats'],
+  ['recordRow', '', 'at reseat'],
+  ['operationalRow', "event='doc-viewer'", 'at path surface_id'],
+])
+
+test('every journal emit site in seat-io is inventoried, wrapped and on the right channel', () => {
+  const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
+  for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
+  const sites = seatJournalSites(text)
+  assert.equal(sites.length, 22)
+  assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
+  assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 16)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
+})
+
+test('the teardown family stamps the operational channel at the sink', () => {
+  const root = scratchDir('journal-channel-capture-')
+  const taskDir = join(root, 'task')
+  const transportDir = join(taskDir, DESCENDANT_STORE_DIRS['headless-json'])
+  mkdirSync(transportDir, { recursive: true })
+  writeFileSync(join(transportDir, '.builder.active.json'), JSON.stringify({
+    reservation_id: 'reservation-channel', key: 'builder', phase: 'running', role: 'builder', id: 'd-channel',
+    dir: join('headless', 'd-channel'), pid: process.pid, owner: { pid: process.pid, startedAt: Date.now() },
+  }))
+  const snapshot = () => ({ ok: true, rows: new Map([[process.pid, { pid: process.pid, ppid: 1, pgid: process.pid, start: 'root' }]]) })
+  const captured = []
+  try {
+    const result = descendantCapture({ taskDir, log: (row) => captured.push(row), deps: { snapshot } }).round()
+    const row = captured.find((entry) => entry.event === 'descendant-capture')
+    assert.equal(row.channel, 'operational')
+    assert.equal(row.event, 'descendant-capture')
+    assert.equal(row.records, result.records)
+    assert.equal(row.captures, result.captures)
+    assert.equal(row.discovery_failures, result.discovery_failures)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+
+  const logged = []
+  settleSeatTeardown({
+    teardown: () => [{ role: 'builder', outcome: 'proven', reason: 'probe-dead' }],
+    log: (row) => logged.push(row), emit: () => true,
+  })
+  for (const row of logged) {
+    assert.ok(JOURNAL_CHANNEL_NAMES.includes(row.channel), `${JSON.stringify(row)} carries no channel`)
+  }
+})
 
 test('descendant capture distinguishes valid, malformed and absent markers', () => {
   const snapshot = () => ({ ok: true, rows: new Map([[process.pid, { pid: process.pid, ppid: 1, pgid: process.pid, start: 'root' }]]) })
@@ -378,7 +511,7 @@ test('a seatless crew remains a measured zero in the transport journal', () => {
     const lines = journal.filter((row) => row.event === 'teardown-transports')
     assert.equal(lines.length, 1)
     assert.equal(lines[0].seats, 0)
-    assert.deepEqual(Object.keys(lines[0]).sort(), ['at', 'declared', 'event', 'init_failed', 'seats', 'transports'])
+    assert.deepEqual(Object.keys(lines[0]).sort(), ['at', 'channel', 'declared', 'event', 'init_failed', 'seats', 'transports'])
   })
 })
 
@@ -593,7 +726,7 @@ test('seatIo policy matrix acts on every refusal member without parking quota', 
   assert.deepEqual(declined.journal.find((row) => row.event === 'seat-refusal'), {
     event: 'seat-refusal', role: 'builder', id: 'd1', member: 'rejected', source: 'pi',
     message: 'prompt_cache_retention is not supported on this model', at: LIVENESS_PROBE_MS,
-    outcome: 'declined', why: 'no surface_id',
+    outcome: 'declined', why: 'no surface_id', channel: 'record',
   })
 
   for (const [member, message] of [

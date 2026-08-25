@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import http from 'node:http'
 import net from 'node:net'
 import { spawnSync } from 'node:child_process'
-import { writeFileSync, readFileSync, existsSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { writeFileSync, readFileSync, existsSync, globSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ROOT, rawRequest, scratchDir, startFileWriter, writeTornFile } from './helpers.mjs'
@@ -201,7 +201,14 @@ const LOCAL_REPO_ROOT = new RegExp([
 const HELPER_SELF = 'test/helpers.mjs'
 const HELPER_SELF_TEST = 'test/helpers.test.mjs'
 const HELPER_SCAN_DIRS = ['commands', 'crew', 'scripts', 'skills', 'test', 'visualizer']
-const HELPER_SCAN_EXTRA = ['test/fixtures.mjs', 'test/helpers.mjs']
+// Derived, never hand-listed. A literal list stops covering the next shared
+// module someone adds beside the test files, and a detector that scans
+// nothing passes (#551).
+function sharedTestModules(dir = 'test') {
+  return readdirSync(join(ROOT, dir)).sort()
+    .map((name) => `${dir}/${name}`)
+    .filter((rel) => rel.endsWith('.mjs') && !rel.endsWith('.test.mjs') && statSync(join(ROOT, rel)).isFile())
+}
 
 function localHelperSites(source) {
   return [...source.matchAll(LOCAL_HELPER_DECL)].length + [...source.matchAll(LOCAL_REPO_ROOT)].length
@@ -217,7 +224,7 @@ function helperTestFiles(dir, out = []) {
 }
 
 function helperScannedFiles() {
-  return [...HELPER_SCAN_DIRS.flatMap((dir) => helperTestFiles(dir)), ...HELPER_SCAN_EXTRA]
+  return [...HELPER_SCAN_DIRS.flatMap((dir) => helperTestFiles(dir)), ...sharedTestModules()]
 }
 
 // Frozen, not forgiven. Each of these carries a local copy this lane did not
@@ -287,4 +294,64 @@ test('helper duplication tripwire — the detector flags a hand-rolled copy and 
   assert.equal(localHelperSites("import { git, sqliteAvailable } from './helpers.mjs'\n"), 0)
   assert.equal(localHelperSites("const HERE = fileURLToPath(new URL('./', import.meta.url))\n"), 0)
   assert.equal(localHelperSites('  return function git(where, args) {}\n'), 0)
+})
+
+// --- suite discovery contract (#551 F0) -------------------------------------
+// test/helpers.mjs and test/fixtures.mjs are helper modules, and until this
+// lane `node --test` collected and EXECUTED them as test files: node's default
+// pattern set includes `**/test/**/*.?(c|m)js`, which matches every .mjs under
+// a directory named test whatever the file is called, so no rename inside
+// test/ could have fixed it. The suite command now declares its discovery
+// pattern explicitly. The pattern is READ from package.json rather than
+// restated here — a second copy is the copy that goes stale, which is the
+// whole lesson of the D1-D6 clusters.
+//
+// Node's other default patterns are *-test.?(c|m)js, test-*.?(c|m)js and
+// test.?(c|m)js. The narrowed pattern collects none of them, so a file named
+// that way would be silently uncollected — and an uncollected test file
+// reports nothing at all, which is the one failure a suite never shows you.
+const DROPPED_NAME_FORMS = /(?:^|\/)(?:[^/]*-test|test-[^/]*|test)\.(?:c|m)?js$/
+
+function suiteDiscoveryPatterns() {
+  const lane = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')).scripts?.test ?? ''
+  const tokens = []
+  const re = /"([^"]*)"|(\S+)/g
+  let match
+  while ((match = re.exec(lane)) !== null) tokens.push(match[1] !== undefined ? match[1] : match[2])
+  return tokens.slice(1).filter((token) => !token.startsWith('-'))
+}
+
+function repoFiles(dir = '.', out = []) {
+  for (const name of readdirSync(join(ROOT, dir)).sort()) {
+    if (name === '.git' || name === 'node_modules') continue
+    const rel = dir === '.' ? name : `${dir}/${name}`
+    if (statSync(join(ROOT, rel)).isDirectory()) repoFiles(rel, out)
+    else out.push(rel)
+  }
+  return out
+}
+
+test('the suite command declares a discovery pattern that collects no shared helper module', () => {
+  const patterns = suiteDiscoveryPatterns()
+  assert.ok(patterns.length > 0, 'package.json scripts.test declares no explicit discovery pattern, so node --test falls back to defaults that collect every .mjs under test/')
+  const matched = new Set(globSync(patterns, { cwd: ROOT }))
+  const shared = sharedTestModules()
+  assert.ok(shared.length >= 2, `expected the shared test modules to be discovered, found ${JSON.stringify(shared)}`)
+  for (const module of shared) {
+    assert.equal(matched.has(module), false, `${module} is a helper module and must not be collected as a test file by ${JSON.stringify(patterns)}`)
+  }
+})
+
+test('the narrowed discovery pattern still collects every test file in the tree', () => {
+  const patterns = suiteDiscoveryPatterns()
+  assert.ok(patterns.length > 0, 'package.json scripts.test declares no explicit discovery pattern')
+  const matched = new Set(globSync(patterns, { cwd: ROOT }))
+  const present = repoFiles().filter((rel) => rel.endsWith('.test.mjs'))
+  assert.ok(present.length >= 50, `expected at least 50 test files in the tree, found ${present.length}`)
+  assert.deepEqual(present.filter((rel) => !matched.has(rel)), [])
+})
+
+test('no file carries a test-shaped name the narrowed pattern would drop', () => {
+  const orphans = repoFiles().filter((rel) => DROPPED_NAME_FORMS.test(rel))
+  assert.deepEqual(orphans, [], "these files are named for one of node --test's other default patterns, which the narrowed pattern never collects")
 })

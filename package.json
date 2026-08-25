@@ -5,7 +5,7 @@
   "description": "Dev-only metadata for the dev-team Claude Code plugin (tests/CI). Not part of the plugin runtime.",
   "engines": { "node": ">=26.0.0" },
   "scripts": {
-    "test": "node --test --test-timeout=30000",
+    "test": "node --test --test-timeout=30000 \"**/*.test.mjs\"",
     "ledger:sessions": "node scripts/factory/ledger.mjs sessions",
     "ledger:phases": "node scripts/factory/ledger.mjs phases",
     "ledger:tail": "node scripts/factory/ledger.mjs tail",

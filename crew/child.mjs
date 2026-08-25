@@ -137,7 +137,7 @@ export function runChild(argv, injected = {}) {
     // crew/crew.mjs's ctx block, and crew/crew.test.mjs pins the agreement.
     // lane is RESOLVED below, inside the try, so a malformed one becomes this
     // run's child-preflight escalation rather than a throw out of fork.
-    lane: null, suite: spec.suite || 'node --test --test-timeout=30000',
+    lane: null, suite: spec.suite || 'node --test --test-timeout=30000 "**/*.test.mjs"',
     ...(spec.variant ? { variant: spec.variant } : {}),
   }
   const failure = (err) => ({

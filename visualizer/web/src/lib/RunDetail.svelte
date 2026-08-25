@@ -6,6 +6,7 @@
   import ReviewPanel from './ReviewPanel.svelte'
   import AcceptPanel from './AcceptPanel.svelte'
   import EventStream from './EventStream.svelte'
+  import Trajectory from './Trajectory.svelte'
   import PhasePanel from './PhasePanel.svelte'
   let { run, phase = null, onback = () => {}, onphase = () => {} } = $props()
   let returns = $state({ envelopes: [], task: null }), events = $state([]), selectedPhase = $state(null), error = $state('')
@@ -28,6 +29,7 @@
   <EnvelopeInspector {run} {returns} />
   <ReviewPanel {run} {returns} />
   <AcceptPanel {run} {returns} />
+  <Trajectory {run} />
   <EventStream {run} />
 </main>
 <style>.detail { max-width:1200px; margin:auto; padding:1rem; display:grid; gap:1rem; }.detail > header { display:flex; align-items:center; gap:1rem; }.detail h1 { margin:.2rem 0; }.detail p { color:var(--muted); }.error { color:#b42318; }</style>

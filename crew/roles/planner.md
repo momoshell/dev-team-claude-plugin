@@ -136,6 +136,7 @@ outside the builder's reach. Rules the driver enforces mechanically:
   with the forbidden thing present and to pass once it was removed. The
   catch-and-rethrow shape is in
   `skills/qa-test-writing/references/gates.md` (Mechanics that bite). #581
+  Call `scripts/factory/absence.mjs` rather than hand-rolling `git grep`.
 - Map every explicit requirement in the brief to a concrete check; print
   failures as `expected X, found Y, at PATH` (they feed back verbatim to
   the builder).

@@ -52,7 +52,25 @@ executes. It is the task's definition of done, expressed as something that runs.
   an errored check is not a failed check, and the driver refuses a baseline
   with either one non-zero (#581, PR #577).
 
+An absence check MUST be demonstrated red by ADDING the thing it forbids, not merely observed red at baseline.
+"red at baseline" is not evidence for an absence check when it can be red by ERRORING on the no-match status.
+
 ### The absence-check shape (copy this)
+
+Call the shared helper `scripts/factory/absence.mjs` instead of hand-rolling `git grep`.
+
+The gate lives outside the repo tree, so import the helper by absolute path; the gate lives in the task dir, not the repo tree, and the repo root comes from `process.cwd()`:
+
+```js
+    import { join } from 'node:path'
+    import { pathToFileURL } from 'node:url'
+
+    // the gate lives in the task dir, not the repo tree, so the import is by path
+    const REPO = process.cwd()
+    const { absenceFailure } = await import(pathToFileURL(join(REPO, 'scripts/factory/absence.mjs')).href)
+    const failure = absenceFailure({ needle: NEEDLE, paths: ['crew/', 'scripts/'], cwd: REPO })
+    if (failure) return failure
+```
 
 Wrong — the throw lands precisely when the criterion is met:
 
@@ -74,6 +92,8 @@ Right — exit 1 with empty stdout is the pass; every other failure still throws
       hits = String(err.stdout ?? '').trim()
     }
     if (hits) return `expected no reference to ${NEEDLE}, found ${hits}`
+
+The shared helper applies this catch-and-rethrow shape for you; pair it with the positive control below.
 
 Exit 1 does not prove the search looked where you meant. A pathspec naming a
 directory that does not exist also exits 1 with empty stdout **and empty

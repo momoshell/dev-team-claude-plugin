@@ -3,9 +3,9 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ROOT } from '../../test/helpers.mjs'
 import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 
 function readText(path) {

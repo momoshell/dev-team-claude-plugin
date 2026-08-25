@@ -3,10 +3,10 @@ import assert from 'node:assert/strict'
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { ROOT } from '../../test/helpers.mjs'
 import { checkAnchors, collectAnchors, skillDocs } from '../qa-test-writing/anchor-pin.mjs'
 import { PROTECTED_PATHS, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const TIER = join(HERE, 'references/tier.md')
 const MIN_ANCHORS = 8

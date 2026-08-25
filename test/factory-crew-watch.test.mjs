@@ -1,6 +1,6 @@
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_EVENTS,
   KEYED_EVENTS,
+  PENDING_BOUND_S,
   WATCHDOG_INTERVAL_S,
   boundedReport,
   createState,
   formatEvent,
+  follow,
   lineLabels,
   main,
   orphaned,
@@ -123,6 +125,58 @@ test('a pending lane is rediscovered after its directory appears', () => {
   assert.match(second.lines[0], /\[not-yet\].*seat-teardown/)
 })
 
+test('a lane armed before it boots still waits and then follows it', () => {
+  const root = world()
+  const now = NOW
+  const d = { ...QUIET, ppid: () => 777, now: () => now }
+  const state = createState({ root, names: ['not-yet'], watchdog: false, bootPpid: 777, deps: d })
+  const first = tick(state, d)
+  assert.equal(first.stop, false)
+  seedLane(root, { task: 'not-yet', journalLines: [{ at: NOW, event: 'seat-teardown' }], settled: true })
+  const second = tick(state, d)
+  assert.equal(second.stop, true)
+  assert.equal(second.reason, 'settled')
+  assert.equal(second.lines.length, 1)
+  assert.match(second.lines[0], /\[not-yet\].*seat-teardown/)
+})
+
+test('--pending-s never restores the unbounded wait the operator asked for', () => {
+  const root = world()
+  let now = NOW
+  const d = { ...QUIET, ppid: () => 777, now: () => now }
+  const state = createState({ root, names: ['never-booted'], pendingS: null, watchdog: false, bootPpid: 777, deps: d })
+  assert.equal(tick(state, d).stop, false)
+  now += PENDING_BOUND_S * 10 * 1000
+  const result = tick(state, d)
+  assert.equal(result.stop, false)
+  assert.notEqual(result.reason, 'unresolved')
+})
+
+test('a watcher armed on a name that never resolves refuses instead of waiting', async () => {
+  const root = world()
+  seedLane(root, { task: 'b231-helperdedupb', journalLines: [{ at: NOW, stage: 'done' }], settled: true })
+  let now = NOW
+  let sleeps = 0
+  const sentinel = new Error('unbounded wait sentinel')
+  const d = {
+    ...QUIET,
+    ppid: () => 777,
+    now: () => now,
+    stdout: () => {},
+    sleep: async (ms) => {
+      sleeps += 1
+      if (sleeps > 200) throw sentinel
+      now += ms
+    },
+  }
+  const state = createState({ root, names: ['b231-helperdedupB'], bootPpid: 777, deps: d })
+  await assert.rejects(follow(state, d), (err) => err !== sentinel
+    && err.name === 'WatchUsageError'
+    && err.reason === 'lane-unresolved'
+    && err.message.includes('b231-helperdedupB')
+    && err.message.includes('live lanes: b231-helperdedupb'))
+})
+
 test('resolveLane prefers task names and also accepts lane ids', () => {
   const root = world()
   seedLane(root, { repo: 'dt-b86-docs', task: 'b86-docs-r2', journalLines: [] })
@@ -222,10 +276,12 @@ test('parseArgs is bounded by default and validates options', () => {
   assert.deepEqual(base.events, [...DEFAULT_EVENTS])
   assert.equal(base.silenceS, undefined)
   assert.equal(base.loadPerCore, undefined)
+  assert.equal(base.pendingS, PENDING_BOUND_S)
   const flagged = parseArgs(['--all', '--follow', '--no-watchdog', '--interval', '7', '--events', 'commit, done', '--silence-s', '600', '--load-per-core', '2'])
   assert.deepEqual(flagged, {
-    names: [], all: true, follow: true, watchdog: false, events: ['commit', 'done'], intervalS: 7, silenceS: 600, loadPerCore: 2,
+    names: [], all: true, follow: true, watchdog: false, events: ['commit', 'done'], intervalS: 7, silenceS: 600, loadPerCore: 2, pendingS: PENDING_BOUND_S,
   })
+  assert.equal(parseArgs(['--follow', 'x', '--pending-s', 'never']).pendingS, null)
   for (const argv of [
     ['--nope'],
     [],
@@ -240,6 +296,11 @@ test('parseArgs is bounded by default and validates options', () => {
     ['--all', '--load-per-core', '-1'],
     ['--all', '--load-per-core', 'abc'],
     ['--all', '--silence-s', '600', '--silence-s', '600'],
+    ['x', '--follow', '--pending-s', '0'],
+    ['x', '--follow', '--pending-s', 'abc'],
+    ['x', '--follow', '--pending-s', '-1'],
+    ['x', '--follow', '--pending-s', '1', '--pending-s', '1'],
+    ['x', '--pending-s', '30'],
   ]) {
     assert.throws(() => parseArgs(argv), { name: 'WatchUsageError' })
   }
@@ -262,6 +323,34 @@ test('the refusal exits 2 through main', async () => {
   assert.match(stderr.join(''), /--silence-s/)
   assert.match(stderr.join(''), /--follow/)
   assert.equal(stdout.join(''), '')
+})
+
+test('the unresolved refusal exits 2 through main', async () => {
+  const home = world()
+  seedLane(join(home, '.crew'), { task: 'b231-helperdedupb', journalLines: [{ at: NOW, stage: 'done' }], settled: true })
+  let now = NOW
+  const stdout = []
+  const stderr = []
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    const status = await main(['b231-helperdedupB', '--follow', '--pending-s', '1', '--interval', '0.05'], {
+      ...QUIET,
+      ppid: () => 777,
+      now: () => now,
+      stdout: (text) => stdout.push(text),
+      stderr: (text) => stderr.push(text),
+      onSignal: () => {},
+      sleep: async (ms) => { now += ms },
+    })
+    assert.equal(status, 2)
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+  }
+  const text = stderr.join('')
+  assert.match(text, /b231-helperdedupB/)
+  assert.match(text, /\[reason: lane-unresolved\]/)
 })
 
 test('the follow arm still accepts a threshold and still reaches the pass', () => {
@@ -362,6 +451,57 @@ test('watchdogLine states each threshold value and origin', () => {
   assert.equal(watchdogLine(), '[watchdog] silence_s=300 (default) load_per_core=4 (default)')
   assert.equal(watchdogLine({ silenceS: 600 }), '[watchdog] silence_s=600 (operator) load_per_core=4 (default)')
   assert.equal(watchdogLine({ watchdog: false }), '[watchdog] off')
+})
+
+test('a torn-down lane resolves from the archive and the archive walk stays lazy', async () => {
+  const archiveRoot = world()
+  seedLane(archiveRoot, {
+    task: 'retired-lane.archive-2026-08-20T23-25-28-377Z',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r2' }],
+  })
+  const report = boundedReport({ root: archiveRoot, names: ['retired-lane'], now: NOW, deps: deps() })
+  assert.deepEqual(report.lines, ['[retired-lane] stage=build:r2 age=700s status=archived'])
+  let now = NOW + (PENDING_BOUND_S * 1000) + 1
+  const archiveDeps = {
+    ...QUIET,
+    ppid: () => 777,
+    now: () => now,
+    stdout: () => {},
+    sleep: async (ms) => { now += ms },
+  }
+  const archiveState = createState({ root: archiveRoot, names: ['retired-lane'], watchdog: false, bootPpid: 777, deps: archiveDeps })
+  assert.equal(await follow(archiveState, archiveDeps), 0)
+
+  const countRootReads = (root, names) => {
+    let reads = 0
+    const countedDeps = {
+      ...deps(),
+      readdirSync: (path, options) => {
+        if (path === root) reads += 1
+        return readdirSync(path, options)
+      },
+    }
+    boundedReport({ root, names, now: NOW, deps: countedDeps })
+    return reads
+  }
+  const liveRoot = world()
+  seedLane(liveRoot, { task: 'live-a', settled: true })
+  seedLane(liveRoot, { task: 'live-b', settled: true })
+  assert.equal(countRootReads(liveRoot, ['live-a', 'live-b']), 1)
+  const missingRoot = world()
+  seedLane(missingRoot, { task: 'live-a', settled: true })
+  assert.equal(countRootReads(missingRoot, ['live-a', 'ghost']), 2)
+})
+
+test('every named lane resolving and terminal still settles at exit 0', async () => {
+  const root = world()
+  seedLane(root, { task: 'finished', journalLines: [{ at: NOW, stage: 'done' }], settled: true })
+  const d = { ...QUIET, ppid: () => 777, now: () => NOW, stdout: () => {} }
+  const state = createState({ root, names: ['finished'], watchdog: false, bootPpid: 777, deps: d })
+  const result = tick(state, d)
+  assert.equal(result.stop, true)
+  assert.equal(result.reason, 'settled')
+  assert.equal(await follow(state, d), 0)
 })
 
 test('follow has no process-spawning surface and no child after one tick', async () => {

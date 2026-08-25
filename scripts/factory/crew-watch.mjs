@@ -14,6 +14,22 @@ export const KEYED_EVENTS = Object.freeze(['review_outcome', 'gate_check_discrim
 export const READOUT_INTERVAL_S = 2
 export const WATCHDOG_INTERVAL_S = 30
 
+// The bound on a name that has not resolved yet. `pending` is legitimate — a
+// watcher may be armed BEFORE a lane boots — but an UNBOUNDED pending wait is
+// fail-open in the one layer whose job is to tell "not finished" from "never
+// started": it looks exactly like the lane it cannot find (#640). So the wait is
+// bounded by default and `--pending-s never` is how an operator ASKS for the
+// unbounded one, in writing.
+//
+// Normalising the name through slug() would have hidden this incident (the
+// operator types `b231-helperdedupB`, the crew dir carries `b231-helperdedupb`);
+// normalising through slug() is REFUSED all the same, because it would also
+// swallow a genuine typo and would put a second copy of the slug rule — or a new
+// scripts/-to-crew/ import — in the observability path. The refusal below does
+// the job honestly instead: it names what never resolved AND the lanes that do
+// exist, so a one-letter miss is visible on the same line.
+export const PENDING_BOUND_S = 300
+
 export class WatchUsageError extends Error {
   constructor(message, reason = 'missing-line') {
     super(message)
@@ -48,7 +64,7 @@ export function parseArgs(argv) {
   const flags = {}
   const names = []
   const booleanFlags = new Set(['follow', 'all', 'no-watchdog'])
-  const valueFlags = new Set(['events', 'interval', 'silence-s', 'load-per-core'])
+  const valueFlags = new Set(['events', 'interval', 'silence-s', 'load-per-core', 'pending-s'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (!argument.startsWith('--')) {
@@ -86,12 +102,17 @@ export function parseArgs(argv) {
   }
   const silenceS = threshold('silence-s')
   const loadPerCore = threshold('load-per-core')
+  // `never` is the operator asking for the unbounded wait, in writing; anything
+  // else goes through the same finite-and-positive refusal as --interval.
+  const pendingS = flags['pending-s'] === undefined
+    ? PENDING_BOUND_S
+    : flags['pending-s'] === 'never' ? null : threshold('pending-s')
   // A threshold the watchdog can never consult must be REFUSED, not discarded: a
   // single-pass readout returns from main() before any watchPass, so accepting one
   // here is the same "looks like it works" defect the watchdog work was about. The
   // message names the MODE the flag belongs to, so it says what to do and not only
   // what went wrong; exit 2 comes from WatchUsageError (crew/crew.mjs:32).
-  const followOnly = ['silence-s', 'load-per-core'].filter((name) => flags[name] !== undefined)
+  const followOnly = ['silence-s', 'load-per-core', 'pending-s'].filter((name) => flags[name] !== undefined)
   if (flags.follow !== true && followOnly.length > 0) {
     throw new WatchUsageError(`watch: --${followOnly[0]} applies to --follow only; a single-pass readout runs no watchdog`)
   }
@@ -104,6 +125,7 @@ export function parseArgs(argv) {
     intervalS,
     silenceS,
     loadPerCore,
+    pendingS,
   }
 }
 
@@ -153,6 +175,13 @@ export function resolveArchivedLane(name, archives) {
   const matches = archives.filter((lane) => lane.task === name || lane.id === name || `${lane.repo}/${lane.task}` === name)
   if (matches.length === 0) return null
   return matches.slice().sort((a, b) => (a.archivedAt < b.archivedAt ? -1 : 1)).pop()
+}
+
+// The refusal NAMES what never resolved — and, beside it, the lanes that DO
+// exist, so a one-letter miss reads as a typo and not a mystery. Same shape as
+// dispatch-batch's dependency-unknown (scripts/factory/dispatch-batch.mjs:284).
+export function unresolvedRefusal({ names, boundS, live }) {
+  return new WatchUsageError(`watch: lane name(s) never resolved within ${boundS}s: ${names.join(', ')}; live lanes: ${live.length ? live.join(', ') : 'none'}`, 'lane-unresolved')
 }
 
 export function selectLanes({ root, names = [], all = false, deps = {} } = {}) {
@@ -239,13 +268,15 @@ export function orphaned(bootPpid, ppid) {
   return Number.isInteger(bootPpid) && Number.isInteger(ppid) && ppid !== bootPpid
 }
 
-export function createState({ root, names = [], all = false, events = [...DEFAULT_EVENTS], intervalS = READOUT_INTERVAL_S, watchdog = true, silenceS, loadPerCore, bootPpid, deps = {} } = {}) {
+export function createState({ root, names = [], all = false, events = [...DEFAULT_EVENTS], intervalS = READOUT_INTERVAL_S, watchdog = true, silenceS, loadPerCore, pendingS = PENDING_BOUND_S, bootPpid, deps = {} } = {}) {
   return {
     root,
     names,
     all,
     events,
     intervalMs: intervalS * 1000,
+    pendingMs: pendingS === null ? null : pendingS * 1000,
+    startedAt: null,
     watchdog,
     silenceS,
     loadPerCore,
@@ -260,6 +291,7 @@ export function tick(state, deps = {}) {
   const d = normalDeps(deps)
   const selected = selectLanes({ root: state.root, names: state.names, all: state.all, deps: d })
   const now = d.now()
+  if (state.startedAt == null) state.startedAt = now
   const lines = []
   for (const lane of selected.lanes) {
     const tail = readTail({ path: lane.journal, offset: state.offsets.get(lane.id) ?? 0, deps: d })
@@ -280,6 +312,9 @@ export function tick(state, deps = {}) {
     notes = pass.notes
   }
   if (orphaned(state.bootPpid, d.ppid())) return { lines, notes, stop: true, reason: 'orphaned' }
+  if (state.pendingMs !== null && selected.pending.length > 0 && now - state.startedAt >= state.pendingMs) {
+    return { lines, notes, stop: true, reason: 'unresolved', unresolved: [...selected.pending] }
+  }
   if (selected.pending.length === 0 && selected.lanes.every((lane) => !laneActive(lane, readJournal(lane.journal, d)))) {
     return { lines, notes, stop: true, reason: 'settled' }
   }
@@ -291,6 +326,9 @@ export async function follow(state, deps = {}) {
   for (;;) {
     const result = tick(state, d)
     for (const line of result.lines) d.stdout(`${line}\n`)
+    if (result.reason === 'unresolved') {
+      throw unresolvedRefusal({ names: result.unresolved, boundS: state.pendingMs / 1000, live: discoverLanes(state.root, d).map((lane) => lane.task).sort() })
+    }
     if (result.stop || state.stopped) return 0
     await d.sleep(state.intervalMs)
   }
@@ -306,7 +344,7 @@ export async function main(argv, deps = {}) {
       for (const line of report.lines) d.stdout(`${line}\n`)
       return 0
     }
-    const state = createState({ root, names: flags.names, all: flags.all, events: flags.events, intervalS: flags.intervalS, watchdog: flags.watchdog, silenceS: flags.silenceS, loadPerCore: flags.loadPerCore, deps: d })
+    const state = createState({ root, names: flags.names, all: flags.all, events: flags.events, intervalS: flags.intervalS, watchdog: flags.watchdog, silenceS: flags.silenceS, loadPerCore: flags.loadPerCore, pendingS: flags.pendingS, deps: d })
     d.stdout(`${watchdogLine({ watchdog: flags.watchdog, silenceS: flags.silenceS, loadThreshold: flags.loadPerCore })}\n`)
     const stop = () => { state.stopped = true }
     d.onSignal('SIGINT', stop)

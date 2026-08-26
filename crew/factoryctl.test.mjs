@@ -6,8 +6,8 @@ import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
 import {
-  attachVerb, commitIssues, completionLogPath, connect, formatRows, main,
-  parseArgs, pendingVerb, readCompletionLog, runVerb, terminalRunLine,
+  attachVerb, commitIssues, completionLogPath, connect, ESCALATION_BOUND_MS, formatRows, main,
+  parseArgs, pendingVerb, readCompletionLog, runVerb, terminalRunLine, waitingVerb,
 } from './factoryctl.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
@@ -626,7 +626,7 @@ test('factoryctl usage lists every verb', async () => {
   try {
     const result = await invoke(f, ['wat'])
     assert.equal(result.code, 2)
-    assert.ok(result.stderr.includes('usage: factoryctl <run|ls|attach|send|pending>'), result.stderr)
+    assert.ok(result.stderr.includes('usage: factoryctl <run|ls|attach|send|pending|waiting>'), result.stderr)
   } finally { f.cleanup() }
 })
 
@@ -671,6 +671,7 @@ test('an escalated lane naming a commit is not listed', () => {
   const f = pendingUnit({
     specs: [{ name: 'escalated-lane', text: `${JSON.stringify({ status: 'escalation', commit: sha })}\n` }],
     branches: { [sha]: 'escalated-lane' },
+    completionLog: completionLine({ lane: 'escalated-lane', commit: sha, outcome: 'escalation' }),
   })
   assert.deepEqual(f.output.rows, [])
   assert.equal(f.output.counts.not_done, 1)
@@ -883,4 +884,378 @@ test('main routes pending without connecting to a daemon', async () => {
   })
   assert.equal(code, 0)
   assert.equal(touched, false)
+})
+
+const WAITING_AT = '2026-08-24T00:00:00.000Z'
+const WAITING_HOUR = 60 * 60 * 1000
+
+function waitingRecord(over = {}) {
+  return {
+    at: WAITING_AT, lane: 'waiting-lane', run: 'waiting-run', outcome: 'escalation', commit: null,
+    checkout: '/fixture/checkout', crew_dir: '/fixture/crew', archived: null,
+    task_return: '/fixture/returns/task.json', ...over,
+  }
+}
+
+function writeWaitingLog(root, textOrRecords) {
+  const text = Array.isArray(textOrRecords) ? `${textOrRecords.map((record) => JSON.stringify(record)).join('\n')}\n` : textOrRecords
+  writeFileSync(completionLogPath({ root, env: {} }), text)
+}
+
+function runWaiting(root, args = {}, deps = {}) {
+  let stdout = ''
+  const result = waitingVerb({ _: ['waiting'], json: true, 'crew-root': root, ...args }, {
+    readFileSync: (...args) => readFileSync(...args),
+    now: () => Date.parse(WAITING_AT) + WAITING_HOUR,
+    spawnSync: () => ({ status: 0, stdout: '', stderr: '' }),
+    teardown: () => ({ ok: true, archived: null, reason: null }),
+    stdout: (text) => { stdout += text },
+    env: {},
+    ...deps,
+  })
+  return { result, stdout, output: args.json === false ? null : JSON.parse(stdout) }
+}
+
+test('waiting lists an escalated lane whose crew directory is gone', () => {
+  // Pins completion-log reach even when the live crew directory and task return are absent.
+  const root = scratchDir('factoryctl-waiting-gone-')
+  const record = waitingRecord({
+    lane: 'gone-human', run: 'run-gone-human',
+    crew_dir: join(root, 'gone-crew'), task_return: join(root, 'gone-crew', 'returns', 'task.json'),
+  })
+  writeWaitingLog(root, [record])
+  const { output } = runWaiting(root)
+  assert.equal(output.rows.length, 1)
+  assert.equal(output.rows[0].workspace_present, false)
+  assert.equal(output.rows[0].where, 'unknown')
+  assert.equal(output.rows[0].reason, 'task-return-unreadable')
+})
+
+test('waiting reads escalation detail, run id and time from the completion record run', () => {
+  // Pins the row to its own durable task return rather than a reused lane's current state.
+  const root = scratchDir('factoryctl-waiting-detail-')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'task.json')
+  const checkout = join(root, 'checkout')
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  mkdirSync(checkout, { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'gate', why: 'gate output is red' } } }))
+  writeWaitingLog(root, [waitingRecord({
+    lane: 'detail-lane', run: 'run-detail', crew_dir: crewDir, checkout, task_return: taskReturn,
+  })])
+  const { output } = runWaiting(root, {}, { now: () => Date.parse(WAITING_AT) + 1.5 * WAITING_HOUR })
+  assert.deepEqual(output.rows[0], {
+    run: 'run-detail', lane: 'detail-lane', where: 'gate', why: 'gate output is red',
+    escalated_at: WAITING_AT, age_h: 1.5, workspace: crewDir, workspace_present: true,
+    checkout, state: 'waiting', resolutions: ['repair', 'plan-rounds', 'park'], reason: null,
+    preserved: null, archived: null, action: null, source: 'completion-log',
+  })
+})
+
+test('47h is waiting and 49h is expired with a faked clock', () => {
+  // Pins the injectable read-time bound and its strict greater-than comparison.
+  const root = scratchDir('factoryctl-waiting-bound-')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'task.json')
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'fence crossed' } } }))
+  writeWaitingLog(root, [waitingRecord({ crew_dir: crewDir, task_return: taskReturn })])
+  const at = Date.parse(WAITING_AT)
+  assert.equal(ESCALATION_BOUND_MS, 48 * WAITING_HOUR)
+  assert.equal(runWaiting(root, {}, { now: () => at + 47 * WAITING_HOUR }).output.rows[0].state, 'waiting')
+  assert.equal(runWaiting(root, {}, { now: () => at + 49 * WAITING_HOUR }).output.rows[0].state, 'expired')
+})
+
+test('the default waiting invocation mutates nothing', () => {
+  // Pins the safe-by-construction default: no preservation or teardown without an action flag.
+  const root = scratchDir('factoryctl-waiting-default-')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'task.json')
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'old escalation' } } }))
+  writeWaitingLog(root, [waitingRecord({ crew_dir: crewDir, task_return: taskReturn })])
+  const before = treeSnapshot(root)
+  const calls = []
+  const teardowns = []
+  const { output } = runWaiting(root, {}, {
+    now: () => Date.parse(WAITING_AT) + 400 * WAITING_HOUR,
+    spawnSync: (...args) => { calls.push(args); return { status: 0, stdout: '', stderr: '' } },
+    teardown: (info) => { teardowns.push(info); return { ok: true, archived: null, reason: null } },
+  })
+  assert.equal(output.rows[0].state, 'expired')
+  assert.deepEqual(treeSnapshot(root), before)
+  assert.equal(teardowns.length, 0)
+  const tokens = calls.flatMap(([, argv]) => argv.map(String))
+  for (const token of ['commit', 'add', 'push', 'checkout', 'branch']) assert.equal(tokens.includes(token), false)
+})
+
+test('--dry-run wins over --expire in either order', () => {
+  // Pins explicit dry-run precedence regardless of command-line flag order.
+  for (const args of [{ 'dry-run': true, expire: true }, { expire: true, 'dry-run': true }]) {
+    const root = scratchDir('factoryctl-waiting-dry-run-')
+    const crewDir = join(root, 'crew')
+    const taskReturn = join(crewDir, 'returns', 'task.json')
+    mkdirSync(join(crewDir, 'returns'), { recursive: true })
+    writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'old escalation' } } }))
+    const record = waitingRecord({ crew_dir: crewDir, task_return: taskReturn })
+    writeWaitingLog(root, [record])
+    const before = treeSnapshot(root)
+    const calls = []
+    const teardowns = []
+    const { output } = runWaiting(root, args, {
+      now: () => Date.parse(WAITING_AT) + 400 * WAITING_HOUR,
+      spawnSync: (...call) => { calls.push(call); return { status: 0, stdout: '', stderr: '' } },
+      teardown: (info) => { teardowns.push(info); return { ok: true, archived: null, reason: null } },
+    })
+    assert.equal(output.counts.dry_run, true)
+    assert.equal(output.rows[0].state, 'expired')
+    assert.equal(teardowns.length, 0)
+    assert.deepEqual(treeSnapshot(root), before)
+    assert.equal(calls.some(([, argv]) => argv.includes('commit')), false)
+  }
+})
+
+test('--expire preserves before teardown and carries the verified ref', () => {
+  // Pins git cat-file verification and preservation ordering before teardown.
+  const root = scratchDir('factoryctl-waiting-expire-')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'task.json')
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'old escalation' } } }))
+  const record = waitingRecord({ checkout: join(root, 'checkout'), crew_dir: crewDir, task_return: taskReturn })
+  writeWaitingLog(root, [record])
+  const events = []
+  const spawnSync = (command, argv, options) => {
+    events.push({ kind: 'git', command, argv: [...argv], options })
+    const args = argv.slice(2)
+    if (args[0] === 'rev-parse') return { status: 0, stdout: 'preserved-sha\n', stderr: '' }
+    return { status: 0, stdout: '', stderr: '' }
+  }
+  const teardown = (info) => {
+    events.push({ kind: 'teardown', info })
+    return { ok: true, archived: join(root, 'archive'), reason: null }
+  }
+  const { output } = runWaiting(root, { expire: true }, {
+    now: () => Date.parse(WAITING_AT) + 400 * WAITING_HOUR, spawnSync, teardown,
+  })
+  const row = output.rows[0]
+  const verifyIndex = events.findIndex((event) => event.kind === 'git' && event.argv.slice(2)[0] === 'cat-file')
+  const teardownIndex = events.findIndex((event) => event.kind === 'teardown')
+  assert.ok(verifyIndex >= 0)
+  assert.ok(verifyIndex < teardownIndex)
+  assert.equal(events[teardownIndex].info.preserved, 'preserved-sha')
+  assert.equal(row.preserved, 'preserved-sha')
+  assert.equal(row.state, 'expired')
+})
+
+test('--expire refuses teardown when preservation add fails', () => {
+  // Pins the preservation failure guard so an expired workspace is never torn down without a ref.
+  const root = scratchDir('factoryctl-waiting-preserve-fail-')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'task.json')
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'old escalation' } } }))
+  writeWaitingLog(root, [waitingRecord({ crew_dir: crewDir, task_return: taskReturn })])
+  const calls = []
+  const teardowns = []
+  const spawnSync = (command, argv) => {
+    calls.push({ command, argv: [...argv] })
+    if (argv.slice(2)[0] === 'add') return { status: 1, stdout: '', stderr: 'permission denied' }
+    return { status: 0, stdout: '', stderr: '' }
+  }
+  const { output } = runWaiting(root, { expire: true }, {
+    now: () => Date.parse(WAITING_AT) + 400 * WAITING_HOUR,
+    spawnSync, teardown: (info) => { teardowns.push(info); return { ok: true, archived: null, reason: null } },
+  })
+  assert.equal(teardowns.length, 0)
+  assert.equal(output.rows[0].reason, 'preserve-add-failed')
+  assert.equal(output.rows[0].preserved, null)
+  assert.equal(calls.some(({ argv }) => argv.includes('commit')), false)
+})
+
+test('--expire refuses teardown when preservation commit fails', () => {
+  // Pins a failed commit as a preservation failure, never as a clean no-op with a stale ref.
+  const root = scratchDir('factoryctl-waiting-commit-fail-')
+  const checkout = join(root, 'checkout')
+  const crewDir = join(root, 'crew')
+  const taskReturn = join(crewDir, 'returns', 'task.json')
+  mkdirSync(checkout, { recursive: true })
+  mkdirSync(join(crewDir, 'returns'), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'old escalation' } } }))
+  writeWaitingLog(root, [waitingRecord({ checkout, crew_dir: crewDir, task_return: taskReturn })])
+  const calls = []
+  const teardowns = []
+  const spawnSync = (command, argv) => {
+    calls.push({ command, argv: [...argv] })
+    const args = argv.slice(2)
+    if (args[0] === 'add') return { status: 0, stdout: '', stderr: '' }
+    if (args[0] === 'diff') return { status: 1, stdout: '', stderr: '' }
+    if (args[0] === 'commit') return { status: 1, stdout: '', stderr: 'signing failed' }
+    return { status: 0, stdout: 'stale-head\\n', stderr: '' }
+  }
+  const { output } = runWaiting(root, { expire: true }, {
+    now: () => Date.parse(WAITING_AT) + 400 * WAITING_HOUR,
+    spawnSync, teardown: (info) => { teardowns.push(info); return { ok: true, archived: null, reason: null } },
+  })
+  assert.equal(output.rows[0].reason, 'preserve-commit-failed')
+  assert.equal(output.rows[0].preserved, null)
+  assert.equal(output.rows[0].action, null)
+  assert.equal(teardowns.length, 0)
+  assert.equal(calls.some(({ argv }) => argv.includes('commit')), true)
+  assert.equal(calls.some(({ argv }) => argv.includes('rev-parse')), false)
+})
+
+test('--expire refuses absent, empty, and relative checkout paths', () => {
+  // Pins expiry as non-actionable unless the recorded checkout is an absolute path.
+  for (const checkout of [undefined, '', 'relative-checkout']) {
+    const root = scratchDir('factoryctl-waiting-checkout-')
+    const crewDir = join(root, 'crew')
+    const taskReturn = join(crewDir, 'returns', 'task.json')
+    mkdirSync(join(crewDir, 'returns'), { recursive: true })
+    writeFileSync(taskReturn, JSON.stringify({ details: { escalation: { where: 'scope', why: 'old escalation' } } }))
+    writeWaitingLog(root, [waitingRecord({ lane: `bad-checkout-${String(checkout)}`, checkout, crew_dir: crewDir, task_return: taskReturn })])
+    const before = treeSnapshot(root)
+    const calls = []
+    const teardowns = []
+    const { output } = runWaiting(root, { expire: true }, {
+      now: () => Date.parse(WAITING_AT) + 400 * WAITING_HOUR,
+      spawnSync: (...call) => { calls.push(call); return { status: 0, stdout: '', stderr: '' } },
+      teardown: (info) => { teardowns.push(info); return { ok: true, archived: null, reason: null } },
+    })
+    assert.equal(output.rows[0].state, 'expired')
+    assert.equal(output.rows[0].reason, 'checkout-unusable')
+    assert.equal(output.rows[0].action, null)
+    assert.equal(output.rows[0].preserved, null)
+    assert.equal(calls.length, 0)
+    assert.equal(teardowns.length, 0)
+    assert.deepEqual(treeSnapshot(root), before)
+  }
+})
+
+test('--resolve tears down and archives only the named lane', () => {
+  // Pins explicit lane resolution and leaves every other escalation untouched.
+  const root = scratchDir('factoryctl-waiting-resolve-')
+  const first = waitingRecord({ lane: 'resolve-me', run: 'run-resolve' })
+  const second = waitingRecord({ lane: 'leave-me', run: 'run-leave' })
+  writeWaitingLog(root, [first, second])
+  const teardowns = []
+  const { output } = runWaiting(root, { resolve: 'resolve-me' }, {
+    teardown: (info) => { teardowns.push(info); return { ok: true, archived: `${info.lane}.archive`, reason: null } },
+  })
+  assert.equal(teardowns.length, 1)
+  assert.equal(teardowns[0].lane, 'resolve-me')
+  const resolved = output.rows.find((row) => row.lane === 'resolve-me')
+  const untouched = output.rows.find((row) => row.lane === 'leave-me')
+  assert.equal(resolved.action, 'resolved')
+  assert.equal(resolved.archived, 'resolve-me.archive')
+  assert.equal(output.counts.resolved, 1)
+  assert.equal(untouched.action, null)
+})
+
+test('--resolve with no value refuses before reading the completion log', async () => {
+  // Pins parseArgs boolean handling as a usage error before any file or daemon access.
+  const root = scratchDir('factoryctl-waiting-resolve-arg-')
+  let read = false
+  let stderr = ''
+  const code = await main(['waiting', '--resolve', '--crew-root', root], {
+    readFileSync: () => { read = true; throw new Error('must not read') },
+    stdout: () => {}, stderr: (text) => { stderr += text }, env: {},
+  })
+  assert.equal(code, 1)
+  assert.match(stderr, /waiting --resolve requires <lane>/)
+  assert.equal(read, false)
+})
+
+test('waiting filters completion records to escalations in both directions', () => {
+  // Pins waiting as the escalation queue, excluding done records reserved for pending.
+  const root = scratchDir('factoryctl-waiting-outcomes-')
+  writeWaitingLog(root, [
+    waitingRecord({ lane: 'done-lane', run: 'run-done', outcome: 'done' }),
+    waitingRecord({ lane: 'escalated-lane', run: 'run-escalated' }),
+  ])
+  const { output } = runWaiting(root)
+  assert.equal(output.rows.length, 1)
+  assert.equal(output.rows[0].lane, 'escalated-lane')
+  assert.equal(output.counts.escalations, 1)
+})
+
+test('an unreadable completion log is unknown, never an empty queue', () => {
+  // Pins an I/O failure as a typed unknown result rather than a false empty result.
+  const root = scratchDir('factoryctl-waiting-unreadable-')
+  let stdout = ''
+  const result = waitingVerb({ _: ['waiting'], json: true, 'crew-root': root }, {
+    readFileSync: () => { const error = new Error('I/O failure'); error.code = 'EIO'; throw error },
+    spawnSync: () => ({ status: 0, stdout: '', stderr: '' }),
+    now: () => Date.parse(WAITING_AT), teardown: () => ({ ok: true, archived: null, reason: null }),
+    stdout: (text) => { stdout += text }, env: {},
+  })
+  const output = JSON.parse(stdout)
+  assert.equal(result.counts.log, 'unknown')
+  assert.equal(output.rows.length, 1)
+  assert.equal(output.rows[0].state, 'unknown')
+  assert.equal(output.rows[0].reason, 'completion-log-unreadable')
+  assert.doesNotMatch(stdout, /no lane is waiting on a human/)
+})
+
+test('an absent completion log prints an explicit empty result and summary', () => {
+  // Pins absent and unreadable logs as distinct operator-visible states.
+  const root = scratchDir('factoryctl-waiting-empty-')
+  const { result, stdout } = runWaiting(root, { json: false })
+  assert.equal(result.counts.log, 'absent')
+  assert.equal(result.rows.length, 0)
+  assert.match(stdout, /no lane is waiting on a human — no escalation record in this crew root is unresolved/)
+  assert.match(stdout, /waiting: 0 .* completion-log: absent/)
+})
+
+test('malformed completion lines are skipped and counted', () => {
+  // Pins malformed-line accounting while retaining valid escalation records.
+  const root = scratchDir('factoryctl-waiting-malformed-')
+  const good = waitingRecord({ lane: 'good-lane' })
+  writeWaitingLog(root, `${JSON.stringify(good)}\nnot json\n{"lane":"truncated\n`)
+  const { output } = runWaiting(root)
+  assert.equal(output.counts.malformed, 2)
+  assert.equal(output.rows.length, 1)
+  assert.equal(output.rows[0].lane, 'good-lane')
+})
+
+test('a task return without an escalation block is typed unknown', () => {
+  // Pins a thin return envelope as a visible unknown row rather than silently dropping it.
+  const root = scratchDir('factoryctl-waiting-thin-return-')
+  const taskReturn = join(root, 'crew', 'returns', 'task.json')
+  mkdirSync(join(root, 'crew', 'returns'), { recursive: true })
+  writeFileSync(taskReturn, JSON.stringify({ status: 'escalation' }))
+  writeWaitingLog(root, [waitingRecord({ crew_dir: join(root, 'crew'), task_return: taskReturn })])
+  const { output } = runWaiting(root)
+  assert.equal(output.rows[0].state, 'unknown')
+  assert.equal(output.rows[0].reason, 'escalation-absent')
+  assert.equal(output.rows[0].where, 'unknown')
+})
+
+test('waiting makes no gh or network call', () => {
+  // Pins the daemon-free, network-free default path for the escalation queue.
+  const root = scratchDir('factoryctl-waiting-no-network-')
+  writeWaitingLog(root, [waitingRecord()])
+  const calls = []
+  let network = false
+  runWaiting(root, {}, {
+    spawnSync: (...call) => { calls.push(call); return { status: 0, stdout: '', stderr: '' } },
+    net: { connect: () => { network = true; throw new Error('network should not be touched') } },
+  })
+  assert.equal(network, false)
+  assert.equal(calls.some(([command]) => command === 'gh'), false)
+})
+
+test('main routes waiting without connecting to a daemon', async () => {
+  // Pins waiting beside pending on the daemon-free route.
+  const root = scratchDir('factoryctl-waiting-no-daemon-')
+  let touched = false
+  let stdout = ''
+  const code = await main(['waiting', '--crew-root', root], {
+    env: { CREW_DAEMON_ROOT: join(root, 'nobody-listens') },
+    net: { connect: () => { touched = true; throw new Error('daemon should not be touched') } },
+    stdout: (text) => { stdout += text }, stderr: () => {},
+  })
+  assert.equal(code, 0)
+  assert.equal(touched, false)
+  assert.match(stdout, /no lane is waiting on a human/)
 })

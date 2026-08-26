@@ -12,9 +12,11 @@ import {
   ANCHOR_BLIND_SPOT,
   ANCHOR_PIN_WARNING_PREFIX,
   REFUSAL_REASONS,
+  DRY_RUN_BLIND_SPOT,
   REQUEST_SUFFIX,
   STALE_READ_ACK,
   checkArrival,
+  checkDirectedBrief,
   checkFences,
   checkPlanScope,
   collectAnchorPins,
@@ -33,6 +35,7 @@ import {
   resolveTransport,
   tierFloor,
 } from '../scripts/factory/dispatch-batch.mjs'
+import { parseDirectedBrief } from '../crew/drive.mjs'
 import { scratchDir } from './helpers.mjs'
 
 const root = scratchDir('factory-dispatch-batch-')
@@ -89,6 +92,15 @@ const briefWithBlockOnly = [
   '{',
   '  "shape": "judge",',
   '  "strength": "workhorse"',
+  '}',
+  '```',
+].join('\n')
+
+const directedBrief = [
+  '```directed',
+  '{',
+  '  "gate_cmd": "npm test",',
+  '  "files_in_scope": ["crew/owned-lane-a.mjs"]',
   '}',
   '```',
 ].join('\n')
@@ -229,6 +241,49 @@ test('checkFences refuses sibling leakage before any worktree subprocess', () =>
   const fences = [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])]
   const lanes = [{ lane: 'lane-a', where: ['crew/shared.mjs'] }, { lane: 'lane-b', where: ['crew/shared.mjs'] }]
   refusal(() => checkFences({ fences, lanes }), 'sibling-leak')
+})
+
+test('checkFences refuses a register superset by name', () => {
+  assert.throws(() => checkFences({
+    fences: [entry('lane-a', ['crew/owned-a.mjs']), entry('lane-b', ['crew/owned-b.mjs'])],
+    lanes: [{ lane: 'lane-a', where: ['crew/owned-a.mjs'] }],
+    deps: { readdirSync: () => [], log: () => {} },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'fence-register-mismatch'
+    && error.message.includes('lane-b')
+    && error.message.includes('fence-count-mismatch'))
+})
+
+test('checkFences still refuses a batch lane absent from the register', () => {
+  // This is the pre-existing direction of the same invariant: batch membership without a register entry.
+  refusal(() => checkFences({
+    fences: [entry('lane-a', ['crew/owned-a.mjs'])],
+    lanes: [
+      { lane: 'lane-a', where: ['crew/owned-a.mjs'] },
+      { lane: 'lane-b', where: ['crew/owned-b.mjs'] },
+    ],
+  }), 'lane-unfenced')
+})
+
+test('dispatchBatch refuses a register superset before any worktree exists', () => {
+  const spawned = []
+  const batch = makeBatch(['lane-a'])
+  assert.throws(() => dispatchBatch({
+    batchDir: batch,
+    fences: [entry('lane-a', ['crew/owned.mjs']), entry('lane-b', ['crew/owned-lane-b.mjs'])],
+    checkout: root,
+    parentDir: root,
+    outDir: join(root, 'register-superset-dry-run-out'),
+    tier: 'mechanical',
+    variant: 'full',
+    runFlags: { 'dry-run': true },
+    deps: {
+      existsSync: () => false,
+      spawn: (call) => { spawned.push(call); return { status: 1, stdout: '', stderr: '' } },
+      log: () => {},
+    },
+  }), (error) => error instanceof BatchRefusal && error.reason === 'fence-register-mismatch')
+  assert.equal(spawned.length, 0)
 })
 
 test('checkFences inherits an overlap only across its declared edge', () => {
@@ -500,14 +555,14 @@ test('created paths are covered by the own fence, cannot leak to a sibling, and 
       entry('lane-a', ['skills/crew-dispatch/']),
       entry('lane-b', ['skills/crew-dispatch/references/new.md']),
     ],
-    lanes: [{ lane: 'lane-a', where: [], creates: ['./skills/crew-dispatch/references/new.md'] }],
+    lanes: [{ lane: 'lane-a', where: [], creates: ['./skills/crew-dispatch/references/new.md'] }, { lane: 'lane-b', where: [] }],
   }), (error) => error instanceof BatchRefusal
     && error.reason === 'sibling-leak'
     && error.message.includes('skills/crew-dispatch/references/new.md'))
 
   const report = checkFences({
     fences: [entry('lane-a', ['crew/new/']), entry('lane-b', ['docs/reference/'])],
-    lanes: [{ lane: 'lane-a', where: [], creates: ['./crew/new/file.mjs'] }],
+    lanes: [{ lane: 'lane-a', where: [], creates: ['./crew/new/file.mjs'] }, { lane: 'lane-b', where: [] }],
   })
   assert.deepEqual(report.perLane['lane-a'].creates, ['crew/new/file.mjs'])
 })
@@ -714,6 +769,7 @@ function dispatchFixture({
   fences,
   batchTier = 'mechanical',
   runFlags = {},
+  brief = briefWithBlockOnly,
   workspaceFor = (lane) => `ws-${lane}`,
   outcomes = {},
   ancestor = () => 0,
@@ -738,7 +794,7 @@ function dispatchFixture({
         const lane = name.slice(0, -REQUEST_SUFFIX.length)
         return JSON.stringify(authored[lane])
       }
-      if (text.endsWith('.brief.md')) return briefWithBlockOnly
+      if (text.endsWith('.brief.md')) return brief
       if (text.endsWith('returns/task.json')) return JSON.stringify(outcomes[laneFromOutcomePath(text)])
       if (text.endsWith('/crew.json')) {
         const lane = text.split('/').at(-2)
@@ -1121,6 +1177,59 @@ test('lane variants are preflighted by name and ctx lanes require validation', (
   assert.equal(run.args[run.args.indexOf('--variant') + 1], 'repair')
 })
 
+test('a directed lane whose brief fails the parser refuses before boot', () => {
+  const brief = briefWithBlockOnly
+  const defect = parseDirectedBrief(brief).defect
+  const spawned = []
+  const batch = makeBatch(['lane-a'])
+  assert.throws(() => dispatchBatch({
+    batchDir: batch,
+    fences: [entry('lane-a', ['crew/owned.mjs'])],
+    checkout: root,
+    parentDir: root,
+    outDir: join(root, 'directed-invalid-out'),
+    tier: 'mechanical',
+    variant: 'directed',
+    runFlags: { 'validation-lane': 'npm test' },
+    deps: {
+      existsSync: () => false,
+      readFileSync: (path, encoding) => String(path).endsWith('.brief.md')
+        ? brief
+        : readFileSync(path, encoding || 'utf8'),
+      spawn: (call) => {
+        spawned.push(call)
+        return (call.args || []).includes('rev-parse')
+          ? { status: 1, stdout: '', stderr: '' }
+          : { status: 0, stdout: '', stderr: '' }
+      },
+      log: () => {},
+    },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'directed-brief-invalid'
+    && error.message.includes(defect))
+  assert.equal(spawned.some(({ args }) => (args || []).includes('boot')), false)
+})
+
+test('a valid directed brief still dispatches the lane', () => {
+  const result = dispatchFixture({
+    label: 'directed-valid',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { variant: 'directed' }) },
+    runFlags: { 'validation-lane': 'npm test' },
+    brief: directedBrief,
+  })
+  assert.deepEqual(result.report.lanes.map(({ lane }) => lane), ['lane-a'])
+})
+
+test('checkDirectedBrief leaves every other variant alone', () => {
+  assert.deepEqual(checkDirectedBrief({
+    lane: 'lane-a',
+    variant: 'full',
+    briefPath: join(root, 'missing-directed-brief.md'),
+    deps: { readFileSync: () => { throw new Error('must not read') } },
+  }), { lane: 'lane-a', variant: 'full', checked: false })
+})
+
 test('invalid lane variant shapes refuse batch-unreadable at the request path', () => {
   for (const variant of [42, '']) {
     const batch = makeBatch(['lane-a'])
@@ -1353,7 +1462,7 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
   assert.deepEqual(result.report.unstarted, [])
 
   const dry = dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
-  assert.deepEqual(dry.logs, [JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans })])
+  assert.deepEqual(dry.logs, [JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }), DRY_RUN_BLIND_SPOT])
   assert.equal(dry.logs[0].startsWith('{"dispatch":"dry-run","plans":['), true)
   assert.equal(dry.report.waves.length, 1)
   assert.deepEqual(dry.report.deferred, [])

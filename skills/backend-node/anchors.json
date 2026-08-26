@@ -34,9 +34,11 @@
   "scripts/factory/ledger.mjs:4626": "unknown verb: ${verb}",
   "scripts/factory/reap-stale.mjs:75": "export const REAP_ACCOUNTING = Object.freeze",
   "skills/qa-test-writing/references/absence.md:3": "value nobody measured is recorded as absent",
-  "test/factory-ci-watch.test.mjs:208": "specifiers.filter((specifier) => !specifier.startsWith('node:'))",
   "test/factory-emit.test.mjs:1403": "CLI: emit-cli-unknown-flag-refusal",
-  "test/factory-intake.test.mjs:1116": "assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:'))",
+  "test/factory-intake.test.mjs:1109": "intake.mjs names exactly the two non-node static module imports",
+  "test/factory-intake.test.mjs:1112": "assert.equal((uncommented.match(/import\\s*\\(/g) || []).length, 0)",
+  "test/factory-intake.test.mjs:1114": "const specifiers = [...uncommented.matchAll(",
+  "test/factory-intake.test.mjs:1115": "assert.deepEqual(specifiers.filter((specifier) => !specifier.startsWith('node:')), ['./ledger.mjs', './make-brief.mjs'])",
   "test/factory-ledger.test.mjs:2811": "refused.status, 2, refused.stderr",
   "test/factory-ledger.test.mjs:2813": "unknown flag --untill",
   "test/factory-ledger.test.mjs:2818": "payload.until, '2026-08-21T01:00:00.000Z'"

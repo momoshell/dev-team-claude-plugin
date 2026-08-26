@@ -1,8 +1,8 @@
 // factoryctl owns nothing — the daemon owns the workers, the registry and the projection; this is a socket client that prints.
 import netDefault from 'node:net'
 import { spawnSync as cpSpawnSync } from 'node:child_process'
-import { readFileSync as fsReadFileSync, statSync as fsStatSync } from 'node:fs'
-import { basename, dirname, join, resolve as resolvePath } from 'node:path'
+import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, statSync as fsStatSync } from 'node:fs'
+import { basename, dirname, isAbsolute, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
@@ -408,7 +408,7 @@ export function terminalRunLine(text) {
 
 const DONE_WITH_COMMIT = (terminal) => terminal?.status === 'done' && typeof terminal?.commit === 'string' && terminal.commit.length > 0
 
-// Every git call is read-only and local: no fetch, no remote round trip.
+// Every git call is read-only and local except the --expire preservation commit below; no fetch or remote round trip.
 export function gitRunner(d, repo) {
   return (...args) => {
     let result
@@ -636,17 +636,267 @@ export function pendingVerb(args, deps = {}) {
 }
 // --- pending publication (#678): READ-ONLY REGION END -------------------------
 
+// --- waiting on a human (#528): the escalation queue -------------------------
+// `pending` above answers "what is waiting on a PUSH". This region answers a
+// different question — "what is waiting on a HUMAN, since when, and what does it
+// need" — and the two never share a verb: #687 asserts an escalated lane never
+// appears in `pending`, because it is not pending a push.
+//
+// The row source is the durable completion record (#687), never a live crew dir:
+// an escalated lane holds its workspace by design, but the workspace can still be
+// removed, and the record outlives it. `where` and `why` come from that run's own
+// returns/task.json.
+//
+// There is NO daemon here: expiry is classified at READ time against an injectable
+// clock, and the destructive half is an explicit operator flag.
+
+// 48h — two working days. An escalated lane holds a whole workspace (a worktree,
+// a crew dir, warm panes), and the measured recovery window on this factory is
+// same-day-or-next: teardown after recovery was missed 4x on 2026-08-21 (#528).
+// Revisable when the real distribution of human response time is measured.
+export const ESCALATION_BOUND_MS = 48 * 60 * 60 * 1000
+
+export const WAITING_STATES = Object.freeze({ WAITING: 'waiting', EXPIRED: 'expired', UNKNOWN: 'unknown' })
+
+// The moves the driver can actually accept, keyed by the escalation stage
+// crew/drive.mjs emits (skills/crew-recovery/references/escalations.md holds the
+// closed set and its operator guidance). An unlisted stage takes the default set
+// rather than an empty one — never claim a human has no move.
+export const DEFAULT_RESOLUTIONS = Object.freeze(['rerun-widened-fence', 'repair', 'plan-rounds', 'park'])
+export const RESOLUTIONS_BY_WHERE = Object.freeze({
+  scope: ['rerun-widened-fence', 'park'],
+  'triage-scope': ['rerun-widened-fence', 'park'],
+  plan: ['plan-rounds', 'rerun-widened-fence', 'park'],
+  'plan-check': ['plan-rounds', 'park'],
+  'plan-carve': ['rerun-widened-fence', 'park'],
+  'sensitivity-floor': ['rerun-widened-fence', 'park'],
+  build: ['repair', 'plan-rounds', 'park'],
+  review: ['repair', 'park'],
+  'refuted-must-fix': ['repair', 'park'],
+  residuals: ['repair', 'park'],
+  gate: ['repair', 'plan-rounds', 'park'],
+  suite: ['repair', 'park'],
+  triage: ['repair', 'park'],
+  lane: ['rerun-widened-fence', 'park'],
+  envelope: ['repair', 'park'],
+  issues: ['repair', 'park'],
+  full: ['repair', 'plan-rounds', 'park'],
+  scout: ['rerun-widened-fence', 'park'],
+  repair: ['repair', 'park'],
+  directed: ['rerun-widened-fence', 'plan-rounds', 'park'],
+})
+
+export function resolutionsFor(where) {
+  return [...(RESOLUTIONS_BY_WHERE[where] || DEFAULT_RESOLUTIONS)]
+}
+
+const CREW_CLI = join(dirname(fileURLToPath(import.meta.url)), 'crew.mjs')
+
+// Teardown is crew.mjs's verb and stays there: this file shells out to it rather
+// than importing it, because crew.mjs imports completionLogPath from here and a
+// static cycle between the two is not worth one function call.
+function defaultTeardown({ lane, checkout }, d) {
+  let result
+  try { result = d.spawnSync(process.execPath, [CREW_CLI, 'teardown', '--task', lane, '--checkout', checkout], { encoding: 'utf8' }) }
+  catch (err) { return { ok: false, archived: null, reason: `teardown-spawn-failed: ${err?.message || String(err)}` } }
+  if (result?.error) return { ok: false, archived: null, reason: `teardown-spawn-failed: ${result.error.message || result.error}` }
+  let archived = null
+  try { archived = JSON.parse(String(result.stdout || '{}'))?.archived ?? null } catch { archived = null }
+  if (result.status !== 0) return { ok: false, archived, reason: `teardown-exit-${result.status}` }
+  return { ok: true, archived, reason: null }
+}
+
+export function waitingDeps(deps = {}) {
+  return {
+    readFileSync: deps.readFileSync || fsReadFileSync,
+    existsSync: deps.existsSync || fsExistsSync,
+    spawnSync: deps.spawnSync || cpSpawnSync,
+    now: deps.now || (() => Date.now()),
+    teardown: deps.teardown || defaultTeardown,
+    home: deps.home,
+  }
+}
+
+// Safe by construction: only --expire or --resolve turns the sweep destructive,
+// and an explicit --dry-run wins over it in either order (scripts/factory/reap-stale.mjs:251, #439).
+export function waitingFlags(args = {}) {
+  if (args.resolve === true) throw new Error('waiting --resolve requires <lane>')
+  const expire = args.expire === true
+  const resolve = typeof args.resolve === 'string' && args.resolve ? args.resolve : null
+  const explicitDryRun = args['dry-run'] === true
+  const dryRun = explicitDryRun || !(expire || resolve)
+  return { expire, resolve, dryRun }
+}
+
+// The escalation block drive.mjs composes (crew/drive.mjs:2133). Every absence is
+// TYPED: an unreadable envelope is `unknown` with a reason, never a row silently
+// dropped and never a `where` invented.
+export function escalationDetail(path, d) {
+  if (typeof path !== 'string' || !path) return { where: PENDING_UNKNOWN, why: PENDING_UNKNOWN, reason: 'task-return-absent' }
+  let text
+  try { text = d.readFileSync(path, 'utf8') } catch { return { where: PENDING_UNKNOWN, why: PENDING_UNKNOWN, reason: 'task-return-unreadable' } }
+  let envelope
+  try { envelope = JSON.parse(String(text)) } catch { return { where: PENDING_UNKNOWN, why: PENDING_UNKNOWN, reason: 'task-return-malformed' } }
+  const escalation = envelope?.details?.escalation
+  if (!escalation || typeof escalation.where !== 'string' || !escalation.where) {
+    return { where: PENDING_UNKNOWN, why: PENDING_UNKNOWN, reason: 'escalation-absent' }
+  }
+  return {
+    where: escalation.where,
+    why: typeof escalation.why === 'string' && escalation.why ? escalation.why : PENDING_UNKNOWN,
+    reason: null,
+  }
+}
+
+// Read-time classification, against an injected clock. Nothing fires by itself.
+export function classifyWaiting(record, { now, d }) {
+  const detail = escalationDetail(record.task_return, d)
+  const at = typeof record.at === 'string' && record.at ? Date.parse(record.at) : NaN
+  const age = Number.isFinite(at) ? now - at : null
+  const expired = age !== null && age > ESCALATION_BOUND_MS
+  const reason = detail.reason || (age === null ? 'escalated-at-unknown' : null)
+  const state = reason ? WAITING_STATES.UNKNOWN : (expired ? WAITING_STATES.EXPIRED : WAITING_STATES.WAITING)
+  return {
+    run: typeof record.run === 'string' && record.run ? record.run : PENDING_UNKNOWN,
+    lane: record.lane,
+    where: detail.where,
+    why: detail.why,
+    escalated_at: typeof record.at === 'string' && record.at ? record.at : PENDING_UNKNOWN,
+    age_h: age === null ? PENDING_UNKNOWN : Math.round((age / 3600000) * 10) / 10,
+    workspace: typeof record.crew_dir === 'string' ? record.crew_dir : PENDING_UNKNOWN,
+    workspace_present: typeof record.crew_dir === 'string' ? d.existsSync(record.crew_dir) : false,
+    checkout: typeof record.checkout === 'string' ? record.checkout : PENDING_UNKNOWN,
+    state,
+    resolutions: resolutionsFor(detail.where),
+    reason,
+    preserved: null,
+    archived: null,
+    action: null,
+    source: 'completion-log',
+  }
+}
+
+// The ONE write this file makes, and only behind --expire. Nothing is DELETED:
+// the tree becomes a WIP commit on whatever branch the lane checkout is on, and
+// that branch is the recovery handle. A clean tree commits nothing and HEAD is
+// already the ref, which is why the verdict is `rev-parse` plus `cat-file`, not
+// the commit's own exit status.
+export function preserveTree(git, lane) {
+  const added = git('add', '-A')
+  if (added.status !== 0) return { commit: null, reason: 'preserve-add-failed' }
+  const staged = git('diff', '--cached', '--quiet')
+  if (staged.status === 1) {
+    const committed = git('commit', '--no-verify', '-m', `wip(${lane}): preserve escalated tree before expiry`)
+    if (committed.status !== 0) return { commit: null, reason: 'preserve-commit-failed' }
+  } else if (staged.status !== 0) {
+    return { commit: null, reason: 'preserve-index-unknown' }
+  }
+  const head = git('rev-parse', 'HEAD')
+  if (head.status !== 0 || !head.stdout) return { commit: null, reason: 'preserve-no-head' }
+  if (git('cat-file', '-e', `${head.stdout}^{commit}`).status !== 0) return { commit: null, reason: 'preserve-unverified' }
+  return { commit: head.stdout, reason: null }
+}
+
+const WAITING_HEADERS = ['LANE', 'RUN', 'WHERE', 'WHY', 'ESCALATED-AT', 'AGE-H', 'STATE', 'WORKSPACE', 'HELD', 'RESOLUTIONS', 'PRESERVED', 'ACTION', 'WHY-NOT']
+const WAITING_KEYS = ['lane', 'run', 'where', 'why', 'escalated_at', 'age_h', 'state', 'workspace', 'workspace_present', 'resolutions', 'preserved', 'action', 'reason']
+
+export function formatWaiting({ rows, counts }) {
+  const summary = `waiting: ${counts.waiting} · expired: ${counts.expired} · unknown: ${counts.unknown} · escalations: ${counts.escalations} · records: ${counts.records} · malformed: ${counts.malformed} · completion-log: ${counts.log} · resolved: ${counts.resolved} · expired-acted: ${counts.expired_acted} · dry-run: ${counts.dry_run}`
+  if (!rows.length) return ['no lane is waiting on a human — no escalation record in this crew root is unresolved', summary].join('\n')
+  const values = rows.map((row) => WAITING_KEYS.map((key) => {
+    const value = row?.[key]
+    if (Array.isArray(value)) return value.join(',')
+    if (value === null || value === undefined) return key === 'reason' || key === 'preserved' || key === 'action' ? '-' : PENDING_UNKNOWN
+    return String(value)
+  }))
+  const widths = WAITING_HEADERS.map((header, index) => Math.max(header.length, ...values.map((value) => value[index].length)))
+  const line = (cells) => cells.map((cell, index) => (index === cells.length - 1 ? cell : cell.padEnd(widths[index]))).join('  ')
+  return [line(WAITING_HEADERS), ...values.map(line), summary].join('\n')
+}
+
+export function waitingVerb(args, deps = {}) {
+  const d = waitingDeps(deps)
+  const flags = waitingFlags(args)
+  const root = typeof args['crew-root'] === 'string' && args['crew-root'] ? resolvePath(args['crew-root']) : crewRoot({ home: d.home })
+  const now = d.now()
+  const waitingRows = []
+  const counts = {
+    log: 'absent', records: 0, escalations: 0, waiting: 0, expired: 0, unknown: 0, malformed: 0,
+    resolved: 0, expired_acted: 0, dry_run: flags.dryRun,
+  }
+  const completion = readCompletionLog(completionLogPath({ root, env: deps.env || process.env }), d)
+  counts.log = completion.state
+  counts.records = completion.records.length
+  counts.malformed = completion.malformed
+  // A log the reader could not OPEN is not an empty queue. It gets its own typed
+  // row, because "nothing is waiting on you" is the one answer this verb must
+  // never give by accident.
+  if (completion.state === PENDING_UNKNOWN) {
+    waitingRows.push({
+      run: PENDING_UNKNOWN, lane: PENDING_UNKNOWN, where: PENDING_UNKNOWN, why: PENDING_UNKNOWN,
+      escalated_at: PENDING_UNKNOWN, age_h: PENDING_UNKNOWN, workspace: PENDING_UNKNOWN, workspace_present: false,
+      checkout: PENDING_UNKNOWN, state: WAITING_STATES.UNKNOWN, resolutions: resolutionsFor(PENDING_UNKNOWN),
+      reason: 'completion-log-unreadable', preserved: null, archived: null, action: null, source: 'completion-log',
+    })
+  }
+  for (const record of completion.records) {
+    if (record.outcome !== 'escalation') continue
+    counts.escalations += 1
+    const row = classifyWaiting(record, { now, d })
+    // The destructive half, and the ONLY place this verb writes anything.
+    const actionableCheckout = typeof row.checkout === 'string' && isAbsolute(row.checkout)
+    if (!flags.dryRun && !actionableCheckout) {
+      row.reason = 'checkout-unusable'
+    } else if (!flags.dryRun && flags.resolve === row.lane) {
+      const torn = d.teardown({ lane: row.lane, checkout: row.checkout, crewDir: row.workspace, preserved: null }, d)
+      row.action = 'resolved'
+      row.archived = torn.archived
+      if (!torn.ok) row.reason = torn.reason
+      counts.resolved += 1
+    } else if (!flags.dryRun && flags.expire && row.state === WAITING_STATES.EXPIRED) {
+      const preserved = preserveTree(gitRunner(d, row.checkout), row.lane)
+      // Preserve BEFORE teardown, and never tear down without a ref that names a
+      // real commit — the ordering IS the safety property.
+      if (!preserved.commit) row.reason = preserved.reason
+      else {
+        row.preserved = preserved.commit
+        const torn = d.teardown({ lane: row.lane, checkout: row.checkout, crewDir: row.workspace, preserved: preserved.commit }, d)
+        row.archived = torn.archived
+        row.action = 'expired'
+        if (!torn.ok) row.reason = torn.reason
+        counts.expired_acted += 1
+      }
+    }
+    waitingRows.push(row)
+  }
+  for (const row of waitingRows) {
+    if (row.state === WAITING_STATES.EXPIRED) counts.expired += 1
+    else if (row.state === WAITING_STATES.UNKNOWN) counts.unknown += 1
+    else counts.waiting += 1
+  }
+  waitingRows.sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0))
+  const result = { rows: waitingRows, counts }
+  const stdout = outputSink(deps.stdout, process.stdout)
+  stdout(args.json ? `${JSON.stringify(result)}\n` : `${formatWaiting(result)}\n`)
+  return result
+}
+// --- waiting on a human (#528): END ------------------------------------------
+
 export async function main(argv, deps = {}) {
   const args = parseArgs(argv)
   const stderr = outputSink(deps.stderr, process.stderr)
   const verb = args._[0]
-  if (!['run', 'ls', 'attach', 'send', 'pending'].includes(verb)) {
-    stderr('usage: factoryctl <run|ls|attach|send|pending> ...\n')
+  if (!['run', 'ls', 'attach', 'send', 'pending', 'waiting'].includes(verb)) {
+    stderr('usage: factoryctl <run|ls|attach|send|pending|waiting> ...\n')
     return 2
   }
-  // `pending` reads; it never connects to a daemon and never starts one.
-  if (verb === 'pending') {
-    try { pendingVerb(args, deps); return 0 }
+  // `pending` and `waiting` read; they never connect to a daemon and never start one.
+  if (verb === 'pending' || verb === 'waiting') {
+    try {
+      if (verb === 'pending') pendingVerb(args, deps)
+      else waitingVerb(args, deps)
+      return 0
+    }
     catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 1 }
   }
 

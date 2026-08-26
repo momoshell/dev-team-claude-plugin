@@ -169,6 +169,35 @@ export const AGENT_NAME_CAP_BYTES = 128
 // leaves execute pending forever (evidence/spawn-timeout.out).
 export const CHILD_TIMEOUT_MS = 10 * 60 * 1000
 
+// The cumulative per-RUN spawn budget. NOT a concurrency limit: children are
+// already serialised by executionMode 'sequential' below, so what is missing is
+// a bound on how many are ever CREATED, not on how many run at once. Only the
+// cumulative one bounds cost.
+//
+// 24, argued from OUR seat costs rather than copied from the neighbour's 64.
+// The legitimate side: the crew's own documented fan-out is 2-4 scouts per
+// sweep (crew/roles/planner.md:13-14), and the seats that scout at all
+// (planner, tech-lead, reviewer) run at most about three rounds each, so the
+// busiest seat has roughly 4 x 3 = 12 warranted spawns in a run; 24 is that
+// with a doubling of headroom for a scout that has to be re-asked.
+// The ceiling side: a builder seat waits 2400s (crew/drive.mjs:48) and a child
+// may run for CHILD_TIMEOUT_MS, so wall-clock alone already bounds a SLOW loop
+// at about four children. This budget exists for the FAST loop — a child that
+// fails in a second costs a full spawn each time and a 2400s wait buys
+// thousands of them, which is exactly the unbounded fan-out #696 names.
+// A STATED DEFAULT, revisable when measured again — the SUBSTRATE_GRACE_MS
+// posture (crew/seat-io.mjs:44-52).
+export const SUBAGENT_SPAWN_BUDGET = 24
+
+// The outcome a budget refusal carries in its subagent_usage row. Distinct from
+// 'ok' and from 'refused' on purpose: a bound that is indistinguishable from a
+// subagent that ran and failed is a bound nobody can tune.
+export const SPAWN_BUDGET_OUTCOME = 'budget-refused'
+
+// The counter's file name. It sits beside the task dir, in the same directory
+// the journal already occupies (journalPathFrom below).
+export const SPAWN_COUNT_FILE = 'subagent-spawns.json'
+
 // Every code this validator can return, as a closed set. The refusal text is
 // built from these and NOTHING else, which is what bounds it: a payload cannot
 // lengthen the refusal, because the only strings that reach it come from here.
@@ -455,6 +484,57 @@ export function journalPathFrom(taskDir: string): string {
   return join(dirname(String(taskDir)), 'journal.jsonl')
 }
 
+export function spawnCountPathFrom(taskDir: string): string {
+  return join(dirname(String(taskDir)), SPAWN_COUNT_FILE)
+}
+
+// A sentinel, so the unparseable branch is one decidable line rather than a
+// control-flow trick inside a catch.
+const SPAWN_COUNT_UNPARSEABLE = Symbol('spawn-count-unparseable')
+
+// FAILS CLOSED, in every direction. An unbounded default is the bug this file
+// is fixing; reintroducing it as an error path would fix nothing. Absent is the
+// ONLY value that means zero, and absence is decided by ENOENT rather than by a
+// failed read: an existing-but-unreadable counter refuses.
+export function readSpawnCount(path: string, readFile: any): any {
+  let text
+  try {
+    text = readFile(path, 'utf8')
+  } catch (err: any) {
+    if (err?.code === 'ENOENT') return { count: 0 }
+    return { error: `the run's spawn counter exists but could not be read (${err?.message})` }
+  }
+  let parsed: any
+  try { parsed = JSON.parse(String(text)) } catch { parsed = SPAWN_COUNT_UNPARSEABLE }
+  if (parsed === SPAWN_COUNT_UNPARSEABLE) return { error: "the run's spawn counter is unparseable" }
+  const value = parsed?.spawns
+  if (!Number.isInteger(value) || value < 0) return { error: "the run's spawn counter is not a non-negative integer" }
+  return { count: value }
+}
+
+// Check-and-RESERVE, in one place: the count is incremented BEFORE the child is
+// spawned, because a child that fails in a second is exactly the loop the budget
+// bounds — counting only successes would leave the fast loop unbounded. A
+// counter that cannot be written refuses too: an uncountable spawn is an
+// unbounded spawn.
+export function reserveSpawn({ taskDir, readFile, writeFile, budget = SUBAGENT_SPAWN_BUDGET }: any): any {
+  const dir = String(taskDir || '')
+  if (!dir) return { error: `refused: the subagent spawn budget cannot be scoped to a run because CREW_TASK_DIR is unset; the budget of ${budget} spawns per run is enforced against the task dir` }
+  const path = spawnCountPathFrom(dir)
+  const read = readSpawnCount(path, readFile)
+  if (read.error) return { error: `refused: ${read.error}, at ${path}` }
+  const count = read.count
+  if (count >= budget) {
+    return { error: `refused: this run has spent its subagent spawn budget — ${count} of ${budget} cumulative spawns are already recorded for this run, and the budget does not reset per seat. The seat is fine and nothing failed; the budget is spent (SUBAGENT_SPAWN_BUDGET, counted at ${path})` }
+  }
+  try {
+    writeFile(path, `${JSON.stringify({ spawns: count + 1 })}\n`, { mode: 0o600 })
+  } catch (err: any) {
+    return { error: `refused: the run's spawn counter could not be recorded (${err?.message}), at ${path}` }
+  }
+  return { count: count + 1 }
+}
+
 // A bare presence key is how every other journal row discriminates itself.
 export function usageRow({ at, role, agent, spawnId, model, usage, outcome }: any): any {
   return {
@@ -577,6 +657,26 @@ export function createAgentTool(deps: any = {}) {
       }
       const binary = resolvePiBinary(deps)
       if (binary.error) return refuseEarly(`refused: ${binary.error}`)
+
+      // The SECOND, independent bound. Depth (above) says a subagent may not
+      // fan out again; this says a run may not fan out for ever. Placed last
+      // among the pre-spawn refusals so a malformed call cannot spend an
+      // allowance, and before the spawn so a fast-failing child still costs one.
+      const reserved = reserveSpawn({ taskDir, readFile, writeFile })
+      if (reserved.error) {
+        // Unlike every other pre-spawn refusal this one JOURNALS. A bound that
+        // hides its own operation is a bound nobody can tune (#696): the row
+        // carries an outcome distinct from a child that ran and failed, and a
+        // null model, because no child was ever chosen.
+        try {
+          if (taskDir) {
+            appendFile(journalPathFrom(taskDir), `${JSON.stringify(usageRow({
+              at: now(), role, agent: agentName, spawnId, model: null, usage: null, outcome: SPAWN_BUDGET_OUTCOME,
+            }))}\n`)
+          }
+        } catch { /* nothing to do */ }
+        return finish({ refused: reserved.error })
+      }
 
       // pi hands the session's authoritative model, thinking level and cwd on the
       // FIFTH argument (dist/core/extensions/types.d.ts:217, :223, :230). There is

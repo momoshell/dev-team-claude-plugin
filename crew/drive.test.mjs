@@ -12,6 +12,7 @@ import { regrantVerdict } from './escalation-policy.mjs'
 
 import { assertSeats, runCmd } from './crew.mjs'
 import { runChild } from './child.mjs'
+import { SEAT_REFUSAL_STAGE } from './seat-io.mjs'
 
 import {
   driveTask, LIMITS, WAITS_S, WAIT_ROLES, WAIT_FLAGS, WAIT_REFUSALS, WAIT_SECONDS_MIN, WAIT_SECONDS_MAX,
@@ -389,19 +390,17 @@ test('a later refused review accept supersedes the plan-check decision on conver
 
 test('a supplied wait budget reaches io.wait and names the seat overdue at that budget', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
-  assert.throws(
-    () => driveTask({ ...CTX, waits: { planner: 42 } }, io),
-    /planner: no valid envelope .* within 42s/,
-  )
+  const res = driveTask({ ...CTX, waits: { planner: 42 } }, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope .* within 42s/)
   assert.deepEqual(io.calls.waits[0], { returnPath: 'planner:1', timeoutS: 42 })
 })
 
 test('an absent wait budget resolves to the recorded WAITS_S value', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
-  assert.throws(
-    () => driveTask(CTX, io),
-    /planner: no valid envelope .* within 1800s/,
-  )
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope .* within 1800s/)
   assert.equal(io.calls.waits[0].timeoutS, WAITS_S.planner)
 })
 
@@ -1931,18 +1930,24 @@ test('lead timeout (no envelope) on a consult throws toward escalation, never si
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv({ status: 'blocked' }), 'lead:1': null },
   })
-  assert.throws(() => driveTask(CTX, io), /lead: no valid envelope/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /lead: no valid envelope/)
 })
 
 test('an arrived but invalid envelope emits unusable-envelope before the driver escalates', () => {
   const io = fakeIo({ emit: true, envelopes: { 'planner:1': { status: 'done', role: 'not-planner' } } })
-  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope/)
   assert.ok(io.calls.emits.some((event) => event.kind === 'cell-failure' && event.failure === 'unusable-envelope'))
 })
 
 test('a null envelope is not double-counted by the driver', () => {
   const io = fakeIo({ emit: true, envelopes: { 'planner:1': null } })
-  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope/)
   assert.equal(io.calls.emits.filter((event) => event.kind === 'cell-failure').length, 0)
 })
 
@@ -4255,7 +4260,9 @@ test('an envelope with a MISMATCHED assignment_id is rejected (stale-file replay
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv({ assignment_id: 'd9-from-a-previous-run' }) },
   })
-  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope/)
 })
 
 test('an envelope carrying its OWN assignment_id is accepted', () => {
@@ -6520,20 +6527,26 @@ test('a missing envelope escalation carries stale, refused and working diagnoses
   ]) {
     const io = fakeIo({ envelopes: { 'planner:1': null } })
     io.waitDiagnosis = () => ({ state: text.includes('STALE') ? 'stale' : text.includes('REFUSED') ? 'refused' : 'working', text })
-    assert.throws(() => driveTask(CTX, io), new RegExp(`planner: no valid envelope at planner:1 within 1800s — ${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
+    const res = driveTask(CTX, io)
+    assert.equal(res.status, 'escalation')
+    assert.match(res.details.escalation.why, new RegExp(`planner: no valid envelope at planner:1 within 1800s — ${text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`))
   }
 })
 
 test('an io without waitDiagnosis preserves the plain missing-envelope escalation', () => {
   const io = fakeIo({ envelopes: { 'planner:1': null } })
-  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope at planner:1 within 1800s$/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope at planner:1 within 1800s$/)
 })
 
 test('waitDiagnosis is not consulted when an envelope is present but shape-invalid', () => {
   const io = fakeIo({ envelopes: { 'planner:1': {} } })
   let consulted = 0
   io.waitDiagnosis = () => { consulted += 1; return { state: 'stale', text: 'should not appear' } }
-  assert.throws(() => driveTask(CTX, io), /planner: no valid envelope at planner:1 within 1800s$/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /planner: no valid envelope at planner:1 within 1800s$/)
   assert.equal(consulted, 0)
 })
 
@@ -6550,6 +6563,196 @@ const replayResumeStages = (io) => {
   return stack
 }
 const resumeKeys = ['stages', 'escalation', 'commit', 'dissents', 'extra_rounds_granted', 'growth', 'modifiers', 'gate', 'seq_high_water', 'gate_attempt_high_water', 'cursor', 'consults_spent', 'accept_findings', 'head']
+const CRASH_WHY = 'builder: no valid envelope at builder:3 within 2400s'
+const CRASH_STAGES = [
+  'plan:r1', 'gate-baseline', 'build:r1', 'build:r2', 'scope-gate:r2',
+  'lane:r2', 'gate:r2', 'gate-proof:1', 'review:r1', 'build:r3',
+]
+const CRASH_FINDINGS = [{ id: 'B263-1', severity: 'must-fix', location: 'a.mjs:7', summary: 'the distinctive finding' }]
+const crashIo = () => fakeIo({
+  envelopes: {
+    'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
+    'builder:1': { status: 'insufficient', role: 'builder', summary: 'the plan leaves a gap', artifacts: [], details: {} },
+    'lead:1': leadEnv('bounce'),
+    'builder:2': buildEnv(),
+    'reviewer:1': reviewEnv('changes-needed', CRASH_FINDINGS),
+    'builder:3': null,
+  },
+  cleanRuns: { 'gate-cmd': resumeRed() },
+  runs: {
+    'gate-cmd:1': resumeRed(), 'gate-cmd:2': resumeGreen(),
+    'gate-cmd:3': resumeGreen(), 'gate-cmd:4': resumeGreen(),
+    'lane-cmd': { ok: true, output: '' },
+    'suite-cmd': { ok: true, output: '' },
+  },
+  changed: ['a.mjs', 'a.test.mjs'], seqIds: true,
+})
+const crashRun = (ctx = { ...CTX, head: 'deadbeefcafe' }) => {
+  const io = crashIo()
+  return { envelope: driveTask(ctx, io), io }
+}
+const deliberateRun = () => {
+  const envelopes = {}
+  for (let n = 1; n <= 8; n += 1) {
+    envelopes[`planner:${n}`] = { status: 'insufficient', role: 'planner', summary: 'the brief leaves a gap', artifacts: [], details: {} }
+    envelopes[`lead:${n}`] = leadEnv('bounce')
+  }
+  const io = fakeIo({ envelopes, seqIds: true })
+  return { envelope: driveTask({ ...CTX, head: 'deadbeefcafe' }, io), io }
+}
+const carveRun = () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': { status: 'insufficient', role: 'planner', summary: 'thin', artifacts: [], details: {} },
+      'lead:1': leadEnv('bounce'),
+      'planner:2': planEnv({ details: { ...planEnv().details, carve_verdict: 'carve', carve_slices: [{ summary: 'slice one', files_in_scope: ['a.mjs'] }] } }),
+    }, seqIds: true,
+  })
+  return { envelope: driveTask({ ...CTX, head: 'deadbeefcafe' }, io), io }
+}
+const postCommitCrashRun = () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'], seqIds: true,
+  })
+  let boom = false
+  const originalLog = io.log
+  io.log = (row) => {
+    if (!boom && row && row.stage_done === 'commit') { boom = true; throw new Error('journal write failed after commit') }
+    originalLog(row)
+  }
+  let envelope = null
+  let thrown = null
+  try { envelope = driveTask({ ...CTX, head: 'deadbeefcafe' }, io) } catch (err) { thrown = err }
+  return { envelope, thrown, io, committed: boom }
+}
+const throwingWaitRun = (error) => {
+  const io = fakeIo({ seqIds: true })
+  io.wait = () => { throw error }
+  let envelope = null
+  let thrown = null
+  try { envelope = driveTask({ ...CTX, head: 'deadbeefcafe' }, io) } catch (err) { thrown = err }
+  return { envelope, thrown, io }
+}
+const escalationStageRows = (io) => io.calls.logs
+  .filter((row) => String(row?.stage ?? row?.stage_done ?? '').startsWith('escalate'))
+  .map((row) => row.stage ? `stage:${row.stage}` : `stage_done:${row.stage_done}`)
+
+test('T1 — one shape, both exits', () => {
+  const crash = crashRun().envelope
+  const deliberate = deliberateRun().envelope
+  assert.equal(crash.status, 'escalation')
+  assert.deepEqual(Object.keys(crash.details).sort(), Object.keys(deliberate.details).sort())
+  assert.deepEqual(Object.keys(crash.details).sort(), resumeKeys.slice().sort())
+})
+
+test('T2 — gate payload and attempt count', () => {
+  const { envelope } = crashRun()
+  assert.equal(envelope.details.gate.cmd, 'gate-cmd')
+  assert.equal(envelope.details.gate_attempt_high_water, 3)
+})
+
+test('T3 — the resume counters are measured', () => {
+  const { envelope } = crashRun()
+  assert.deepEqual(envelope.details.stages, CRASH_STAGES)
+  assert.deepEqual(envelope.details.cursor, { plan_round: 1, build_round: 3, review_round: 1 })
+  assert.equal(envelope.details.seq_high_water, 6)
+  assert.equal(envelope.details.consults_spent, 1)
+  assert.deepEqual(envelope.details.accept_findings, CRASH_FINDINGS)
+})
+
+test('T4 — the preserved crash values', () => {
+  const { envelope } = crashRun()
+  assert.deepEqual(envelope.details.escalation, { where: 'builder', why: CRASH_WHY })
+  assert.equal(envelope.summary, `Task t1 needs a human: the driver crashed (${CRASH_WHY})`)
+})
+
+test('T5 — the empty-message edge', () => {
+  const { envelope, thrown } = throwingWaitRun(new Error(''))
+  assert.equal(thrown, null)
+  assert.equal(envelope.details.escalation.why, '')
+  assert.equal(envelope.summary, 'Task t1 needs a human: the driver crashed ()')
+})
+
+test('T6 — a post-commit crash retains the measured commit', () => {
+  const run = postCommitCrashRun()
+  assert.equal(run.committed, true)
+  assert.equal(run.thrown, null)
+  assert.equal(run.envelope.details.commit, 'abc1234')
+  assert.deepEqual(Object.keys(run.envelope.details).sort(), resumeKeys.slice().sort())
+})
+
+test('T7 — head is acquired, not injected', () => {
+  const previousExitCode = process.exitCode
+  let expectedHead = null
+  try {
+    const run = runCmdFixture({}, (ctx) => {
+      expectedHead = String(spawnSync('git', ['rev-parse', 'HEAD'], { cwd: ctx.checkout, encoding: 'utf8' }).stdout).trim()
+      return driveTask(ctx, crashIo())
+    })
+    assert.match(run.ctx.head, /^[0-9a-f]{40}$/)
+    assert.equal(run.ctx.head, expectedHead)
+    assert.equal(run.envelope.details.head, expectedHead)
+  } finally { process.exitCode = previousExitCode }
+})
+
+test('T8 — journal stage rows', () => {
+  const crash = crashRun()
+  assert.deepEqual(escalationStageRows(crash.io), [])
+  const deliberate = deliberateRun()
+  assert.deepEqual(escalationStageRows(deliberate.io), ['stage:escalate:plan', 'stage_done:escalate:plan'])
+})
+
+test('T9 — the deliberate exit is unchanged', () => {
+  const { envelope, io } = deliberateRun()
+  assert.deepEqual(envelope.details.escalation, { where: 'plan', why: 'no accepted plan within 2 rounds' })
+  assert.equal(envelope.summary, 'Task t1 needs a human: no accepted plan within 2 rounds')
+  assert.deepEqual(Object.keys(envelope.details).sort(), resumeKeys.slice().sort())
+  assert.deepEqual(envelope.details.stages, ['plan:r1', 'plan:r2', 'escalate:plan'])
+  assert.deepEqual(envelope.details.cursor, { plan_round: 2, build_round: null, review_round: null })
+  assert.equal(envelope.details.seq_high_water, 4)
+  assert.equal(envelope.details.consults_spent, 2)
+  assert.equal(envelope.details.commit, null)
+  assert.equal(envelope.details.gate, null)
+  assert.equal(envelope.details.head, 'deadbeefcafe')
+  assert.deepEqual(io.calls.run, [])
+})
+
+test('T10 — extraDetails still reach the envelope and still land last', () => {
+  const { envelope } = carveRun()
+  assert.equal(envelope.details.escalation.where, 'plan-carve')
+  assert.deepEqual(envelope.details.carve, { verdict: 'carve', slices: [{ summary: 'slice one', files_in_scope: ['a.mjs'] }], defect: null })
+})
+
+test('T11 — a pre-arming throw still throws', () => {
+  const unknownIo = fakeIo()
+  assert.throws(() => driveTask({ ...CTX, variant: 'unknown-shape' }, unknownIo))
+  assert.equal(unknownIo.calls.assign.length, 0)
+  assert.equal(unknownIo.calls.logs.length, 0)
+  const badCtx = new Proxy({ ...CTX, variant: 'full' }, {
+    get(target, property, receiver) {
+      if (property === 'limits') return new Proxy({}, { ownKeys() { throw new Error('unexecutable shape') } })
+      return Reflect.get(target, property, receiver)
+    },
+  })
+  const badIo = fakeIo()
+  assert.throws(() => driveTask(badCtx, badIo), /unexecutable shape/)
+  assert.equal(badIo.calls.assign.length, 0)
+  assert.equal(badIo.calls.logs.length, 0)
+})
+
+test('T12 — the escape is exactly the seat-refusal class', () => {
+  const refusal = Object.assign(new Error('the provider says: not supported on this model'), { stage: SEAT_REFUSAL_STAGE, role: 'builder' })
+  const escaped = throwingWaitRun(refusal)
+  assert.equal(escaped.envelope, null)
+  assert.equal(escaped.thrown, refusal)
+  const builderError = Object.assign(new Error('builder failed'), { stage: 'builder' })
+  const converted = throwingWaitRun(builderError)
+  assert.equal(converted.thrown, null)
+  assert.equal(converted.envelope.status, 'escalation')
+  assert.equal(converted.envelope.details.escalation.where, 'builder')
+})
 
 test('every escalation exit carries the full resume key set', () => {
   const exits = [
@@ -6691,7 +6894,7 @@ test('a stage that outlives its first blocker is not completed early', () => {
   const control = run(leadEnv('bounce'))
   assert.ok(control.io.calls.logs.some((row) => row.stage_done === 'plan:r1'))
   const subject = run(null)
-  assert.ok(subject.result instanceof Error)
+  assert.equal(subject.result.status, 'escalation')
   assert.equal(subject.io.calls.assign.filter(({ role }) => role === 'lead').length, 1)
   assert.equal(subject.io.calls.logs.some((row) => row.stage_done === 'plan:r1'), false)
 })
@@ -6705,13 +6908,14 @@ test('nested panel child completes while unfinished review parent does not', () 
       'lead:1': { status: 'done', role: 'lead', details: { adjudications: [], closes_class: true } }, 'lead:2': null,
     }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }, changed: ['a.mjs'],
   })
-  assert.throws(() => driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 1 } }, io))
+  const result = driveTask({ ...CTX_TL, continuation: true, limits: { build_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
   assert.equal(io.calls.assign.filter(({ role }) => role === 'lead').length, 2)
   assert.ok(io.calls.logs.some((row) => row.stage_done === 'review:panel-r1'))
   assert.equal(io.calls.logs.some((row) => row.stage_done === 'review:r1'), false)
 })
 
-test('a failed stage entry row is never completed', () => {
+test('T13 — entered vs journal-recorded: a failed stage entry row is never completed', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     cleanRuns: { 'gate-cmd': resumeRed() }, runs: { 'gate-cmd:1': resumeRed(), 'gate-cmd:2': resumeGreen(), 'lane-cmd': { ok: true, output: '' } }, changed: ['a.mjs'],
@@ -6722,7 +6926,11 @@ test('a failed stage entry row is never completed', () => {
     if (!failed && row?.stage === 'gate-proof:1') { failed = true; throw new Error('journal write failed') }
     originalLog(row)
   }
-  assert.throws(() => driveTask(CTX, io), /journal write failed/)
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'escalation')
+  assert.match(res.details.escalation.why, /journal write failed/)
+  assert.equal(res.details.stages.at(-1), 'gate-proof:1')
+  assert.equal(io.calls.logs.some((row) => row.stage === 'gate-proof:1'), false)
   assert.equal(io.calls.logs.some((row) => row.stage_done === 'gate-proof:1'), false)
 })
 

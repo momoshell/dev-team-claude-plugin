@@ -1557,7 +1557,38 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 //                                                     // absent (every shipped io today)
 //                                                     // => behavior is exactly as before.
 //        now() -> ms }
+// #583 — the CLOSED set of throws that must still ESCAPE driveTask rather than
+// become this run's escalation envelope. A seat refusal is a permanent provider
+// rejection: a TRANSPORT classification the child maps to its own outcome, and
+// crew/crew.test.mjs:3888 pins that the identical error object escapes with its
+// provider text intact. Module-private: nothing outside this file branches on it.
+const CRASH_ESCAPE_STAGES = Object.freeze(['seat-refused'])
+
+// ONE `details` shape for both of this driver's exits. A deliberate escalation and
+// a CRASH are both outcomes of the same run, and the crash is the one an operator
+// most needs to resume: b254-retryvis crashed at `builder: no valid envelope
+// within 2700s` holding a gate-green build, and its envelope recorded no head, no
+// gate and no cursor because the throw left driveTask (thrown at
+// crew/drive.mjs:1936, boundary at crew/drive.mjs:3484) and was mapped to a
+// four-key envelope by crew/crew.mjs:1848 (and crew/child.mjs:166) — neither of
+// which can see this closure. Catching HERE is the only place the stage list, the
+// gate block, the cursor and the seat high-water marks still exist.
 export function driveTask(ctx, io) {
+  const crash = { envelope: null }
+  try {
+    return runTask(ctx, io, crash)
+  } catch (err) {
+    if (err && CRASH_ESCAPE_STAGES.includes(err.stage)) throw err
+    // A throw before the recorder is armed is a CALLER contract violation — an
+    // unknown variant, an unexecutable shape — with no run behind it: no stages,
+    // no journal rows, nothing to resume. It keeps throwing exactly as today.
+    if (!crash.envelope) throw err
+    // A recorder that cannot record must not replace the crash it was recording.
+    try { return crash.envelope(err) } catch { throw err }
+  }
+}
+
+function runTask(ctx, io, crash) {
   const variant = ctx.variant ?? DEFAULT_VARIANT
   if (!VARIANT_NAMES.includes(variant)) {
     throw fail('variant', `unknown variant ${JSON.stringify(variant)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
@@ -1685,6 +1716,29 @@ export function driveTask(ctx, io) {
   // every invocation lands its own row. It is driver-owned on purpose: the
   // emitter's bumpGateAttempt answers 0 when degraded, which would collide.
   let gateAttempt = 0
+  // The crash recorder is armed HERE, the first line at which escalationResult()
+  // can run: it reads S, gateBlock and gateAttempt, all initialised above. Every
+  // value crew/crew.mjs:1848 wrote is preserved — the summary keeps its `the driver
+  // crashed (...)` wrapper, `where` stays `err.stage || 'driver'`, and `why` stays
+  // the RAW message — so no downstream reader changes; only `details` grows.
+  // `terminal: false` records no stage row: the journal is out of #583's scope.
+  crash.envelope = (err) => {
+    // ONE derivation, with a NULLISH fallback. `||` would substitute 'Error' for a
+    // deliberately empty message, where crew/crew.mjs:1848 records '' and its
+    // summary records `()`; crew/drive.mjs:1866 already uses `??` for the same job.
+    const crashWhy = err?.message ?? String(err)
+    return escalationResult({
+      where: err?.stage || 'driver',
+      why: crashWhy,
+      summary: `Task ${ctx.task} needs a human: the driver crashed (${crashWhy})`,
+      commit: S.commit ?? null,
+      // A crash adds NO key of its own. The two exits' key sets are compared as
+      // SETS, and a resume reader must never have to branch on which exit wrote
+      // the record — so this stays empty rather than becoming a place to grow one.
+      extraDetails: {},
+      terminal: false,
+    })
+  }
   let lastGateOutput = null
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
@@ -2063,10 +2117,20 @@ export function driveTask(ctx, io) {
     io.log(recordRow({ at: io.now(), extra_round_granted: { where, round, consult: S.consults } }))
   }
 
-  function escalate(where, why, extraArtifacts = [], extraDetails = {}) {
-    stage(`escalate:${where}`)
+  // The ONE composer for an escalation's 14-key `details`. The two exits differ
+  // only in their explicit inputs. `terminal` decides whether a DELIBERATE
+  // terminal stage is recorded: escalate() records `escalate:<where>` and completes
+  // it exactly as it always has; the crash exit records nothing. `commit` is an
+  // input because ORDINARY deliberate escalations are all pre-commit (io.commit is
+  // crew/drive.mjs:3465, the last ordinary deliberate escalation is :3457) while a
+  // CRASH can land after it — and a hard-coded `commit: null` beside a real commit
+  // is a fabricated absence that reads as measured (#297). The post-commit
+  // `converge-pr` escalations (crew/drive.mjs:1868,1878) keep overriding it through
+  // extraDetails, which is why that spread stays LAST (crew/drive.test.mjs:5200).
+  function escalationResult({ where, why, summary, commit, artifacts = [], extraDetails = {}, terminal }) {
+    if (terminal) stage(`escalate:${where}`)
     const details = {
-      stages: S.stages, escalation: { where, why }, commit: null, dissents: S.dissents,
+      stages: S.stages, escalation: { where, why }, commit, dissents: S.dissents,
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
       gate: gateBlock(),
       ...acceptDecisionBlock(),
@@ -2078,14 +2142,16 @@ export function driveTask(ctx, io) {
       head: ctx.head ?? null,
       ...extraDetails,
     }
-    const result = {
-      status: 'escalation',
-      summary: `Task ${ctx.task} needs a human: ${why}`,
-      artifacts: [journal, ...extraArtifacts],
-      details,
-    }
-    stageComplete()
+    const result = { status: 'escalation', summary, artifacts: [journal, ...artifacts], details }
+    if (terminal) stageComplete()
     return result
+  }
+
+  function escalate(where, why, extraArtifacts = [], extraDetails = {}) {
+    return escalationResult({
+      where, why, summary: `Task ${ctx.task} needs a human: ${why}`,
+      commit: null, artifacts: extraArtifacts, extraDetails, terminal: true,
+    })
   }
 
   // Settle a lead accept at either exhaustion point. A missing findings array

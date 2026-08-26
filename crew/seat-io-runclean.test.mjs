@@ -1474,7 +1474,7 @@ test('waitState names a retrying seat above a stale one and leaves the other sta
   assert.match(verdict.text, /RETRYING/)
   assert.ok(verdict.text.includes('attempt 10/10'))
   assert.equal(waitState({ role: 'builder', latest: at - 1_000_000, refusal: null, at, timeoutS: 2400 }).state, 'stale')
-  assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: { member: 'transient', message: 'WebSocket error' }, at, timeoutS: 2400 }).state, 'refused')
+  assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: { member: 'transient', message: 'WebSocket error' }, at, timeoutS: 2400 }).state, 'working')
   assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: null, at, timeoutS: 2400 }).state, 'working')
   assert.equal(waitState({ role: 'builder', latest: null, refusal: null, at, timeoutS: 2400, retry: null }), null)
 })
@@ -1511,17 +1511,29 @@ test('waitState names stale, refused and working states and stays silent without
   assert.equal(stale.state, 'stale')
   assert.match(stale.text, /1000s ago/)
   assert.match(stale.text, /a spinner and an elapsed timer are not evidence of life/)
-  const refused = waitState({ role: 'builder', latest: at - 1000, refusal: { member: 'transient', message: 'WebSocket error' }, at, timeoutS: 2400 })
+  const refused = waitState({ role: 'builder', latest: at - 1000, refusal: { member: 'suspended', message: 'computer went to sleep' }, at, timeoutS: 2400 })
   assert.equal(refused.state, 'refused')
-  assert.match(refused.text, /WebSocket error/)
-  assert.match(refused.text, /transient/)
+  assert.match(refused.text, /computer went to sleep/)
   const working = waitState({ role: 'builder', latest: at - 500_000, refusal: null, at, timeoutS: 2400 })
   assert.equal(working.state, 'working')
   assert.match(working.text, /2400s budget/)
   assert.equal(waitState({ role: 'builder', latest: null, refusal: null, at, timeoutS: 2400 }), null)
-  for (const { member } of SEAT_REFUSALS) {
-    assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: { member, message: 'named condition' }, at, timeoutS: 2400 }).state, 'refused')
+  for (const row of SEAT_REFUSALS) {
+    const verdict = waitState({ role: 'builder', latest: at - 1000, refusal: { member: row.member, message: 'named condition' }, at, timeoutS: 2400 })
+    assert.equal(verdict.state, row.terminal ? 'refused' : 'working')
   }
+})
+
+test('waitState expires terminal refusal readings at the measured boundary', () => {
+  const at = 2_000_000
+  const verdict = (age, refusal = {}) => waitState({
+    role: 'builder', latest: at - 1000,
+    refusal: { member: 'suspended', message: 'computer went to sleep', ...refusal },
+    at, timeoutS: 2400,
+  })
+  assert.equal(verdict(300_000, { at: at - 300_000 }).state, 'working')
+  assert.equal(verdict(299_999, { at: at - 299_999 }).state, 'refused')
+  assert.equal(verdict(null).state, 'refused')
 })
 
 test('waitState never names an unclassified refusal frame', () => {
@@ -1624,6 +1636,19 @@ function withTranscriptSeat({ start = 0, timeoutS = 2000, transcriptPaths, statS
     return body({ io, paths, logs, events, env, assignment, clock: () => clock })
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
+
+test('waitForEnvelope consumes an envelope written at the deadline and times out after it', () => {
+  withTranscriptSeat({ timeoutS: 30, envelopeAt: 30_000 }, ({ env, events }) => {
+    assert.deepEqual(env, { status: 'done' })
+    assert.equal(events.some((event) => event.kind === 'cell-failure' && event.failure === 'timeout'), false)
+  })
+
+  withTranscriptSeat({ timeoutS: 30, envelopeAt: 35_000 }, ({ env, events, assignment }) => {
+    assert.equal(env, null)
+    assert.equal(events.some((event) => event.kind === 'cell-failure' && event.failure === 'timeout'), true)
+    assert.equal(events.some((event) => event.detail?.includes(`no envelope at ${assignment.returnPath}`)), true)
+  })
+})
 
 test('silenceReaskDecision gates one quiet re-send on measured transcript growth', () => {
   const frameAt = 1_000_000
@@ -1849,18 +1874,39 @@ test('the shipped pi transcript address chain filters only jsonl files and degra
   } finally { rmSync(root, { recursive: true, force: true }) }
 })
 
-test('a journalled transient refusal reaches the seatIo expiry diagnosis', () => {
+test('a journalled transient refusal reaches expiry as evidence, not as the state', () => {
   let sent = false
   withTranscriptSeat({ start: 1_000_000_000_000, transcriptPaths: () => ['/x/builder.jsonl'], statSync: true, refusalFrames: () => {
     if (sent) return []
     sent = true
     return [{ at: 1_000_000_030_000, member: 'transient', message: 'Overloaded', source: 'claude' }]
-  } }, ({ io, events, env, assignment }) => {
+  } }, ({ io, logs, events, env, assignment }) => {
     assert.equal(env, null)
     const verdict = io.waitDiagnosis(assignment.returnPath)
-    assert.equal(verdict.state, 'refused')
-    assert.match(verdict.text, /Overloaded/); assert.match(verdict.text, /transient/)
+    assert.equal(verdict.state, 'working')
+    assert.doesNotMatch(verdict.text, /REFUSED/)
     const timeout = events.find((event) => event.kind === 'cell-failure' && event.failure === 'timeout')
-    assert.ok(timeout); assert.match(timeout.detail, /the seat REFUSED:/); assert.match(timeout.detail, /the provider says: Overloaded/)
+    assert.ok(timeout); assert.match(timeout.detail, /\[refusal:transient\]/); assert.match(timeout.detail, /the provider says: Overloaded/)
+    assert.equal(logs.some((row) => row.event === 'seat-refusal' && row.outcome === 'journalled' && row.member === 'transient'), true)
+  })
+})
+
+test('a recovered transient followed by a stale transcript remains stale', () => {
+  let sent = false
+  withTranscriptSeat({
+    timeoutS: 61, transcriptPaths: () => ['/x/builder.jsonl'],
+    statSync: (_path, at) => ({ mtimeMs: at < 45_000 ? at : at - TRANSCRIPT_STALE_MS }),
+    refusalFrames: () => {
+      if (sent) return []
+      sent = true
+      return [{ at: 30_000, member: 'transient', message: 'WebSocket error', source: 'claude' }]
+    },
+  }, ({ io, events, env, assignment }) => {
+    assert.equal(env, null)
+    const verdict = io.waitDiagnosis(assignment.returnPath)
+    assert.equal(verdict.state, 'stale')
+    assert.match(verdict.text, /the seat is STALE:/)
+    assert.doesNotMatch(verdict.text, /the seat is WORKING:/)
+    assert.equal(events.some((event) => event.kind === 'cell-failure' && /the seat is STALE:/.test(event.detail)), true)
   })
 })

@@ -16,7 +16,7 @@ import { assignmentLine } from './driver.mjs'
 import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
-import { translateDeny } from './adapters/adapter-pi.mjs'
+import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
 
 export const WAIT_POLL_MS = 5000
 // pi refuses input while compacting, and compaction runs between
@@ -69,11 +69,24 @@ export function splitFrames(buffer) {
   return { lines, rest: input.subarray(start) }
 }
 
+const RPC_NO_GRANTS = Object.freeze({ tools: [], extensions: [], agents: [], skills: [] })
+
+// Live-probed facts: rpc honours both `-e` and `--tools`, and its allowlist
+// gates extension tools, so activating `agent` is mandatory rather than
+// decorative. Unlike the pane, this path passes an argv array and a spawn env
+// object, so it needs no shell quoting. The pane composes a shell string and
+// must quote its values. There is no advisor mirror, no configDir mirror, and
+// skills are mirrored only as explicit paths; discovery stays off.
 export function rpcCommand(spec = {}) {
   const {
     bin = 'pi', model, effort, sessionDir, sessionId, resume, promptFile,
-    deny, env = {},
+    deny, env = {}, grants = RPC_NO_GRANTS,
   } = spec
+  const piDeny = translateDeny(deny)
+  const fanout = (grants?.agents?.length ?? 0) > 0 ? [PI_SUBAGENT_TOOL] : []
+  const activatedTools = [...new Set([...PI_BUILTIN_TOOLS, ...(grants?.tools || []), ...fanout])]
+  const extensions = [...new Set(grants?.extensions || [])]
+  const skills = grants?.skills || []
   return {
     bin,
     args: [
@@ -82,10 +95,18 @@ export function rpcCommand(spec = {}) {
       '--session-dir', sessionDir,
       ...(resume ? ['--session', sessionId] : ['--session-id', sessionId]),
       '--append-system-prompt', promptFile,
-      ...(translateDeny(deny).length ? ['--exclude-tools', translateDeny(deny).join(',')] : []),
-      '--no-context-files', '--no-extensions', '--no-skills',
+      '--tools', activatedTools.join(','),
+      ...(piDeny.length ? ['--exclude-tools', piDeny.join(',')] : []),
+      '--no-context-files', '--no-extensions',
+      ...extensions.flatMap((extension) => ['-e', extension]),
+      ...(skills.length ? skills.flatMap((skill) => ['--skill', skill]) : ['--no-skills']),
     ],
-    env,
+    env: {
+      ...env,
+      ...(grants?.agents?.length
+        ? { CREW_PI_AGENTS: JSON.stringify(grants.agents.map(({ name, def }) => ({ name, def }))) }
+        : {}),
+    },
   }
 }
 
@@ -380,6 +401,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       role, model: member.model, effort: member.effort, sessionDir: dir,
       sessionId, resume, promptFile: join(taskDir || paths.taskDir, `role-${role}.md`),
       deny: member.deny, bin: bin || 'pi', taskDir: taskDir || paths.taskDir,
+      grants: adapters?.[role]?.grants,
       env: { ...process.env, DEVTEAM_WORKER: '1', CREW_ROLE: role, CREW_TASK_DIR: taskDir || paths.taskDir },
     })
     const args = command.args || []

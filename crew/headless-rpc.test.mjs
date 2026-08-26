@@ -44,7 +44,8 @@ function fixture(options = {}) {
   }
   const crew = options.crew || { checkout: dir, members: { builder: { model: 'model', transport: 'headless-rpc' } } }
   const adapter = { rpcCommand: (spec) => { specs.push(spec); return rpcCommand(spec) } }
-  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { builder: adapter }, bin: '/bin/pi', deps })
+  const adapterEntry = options.adapterEntry || (options.grants ? { adapter, grants: options.grants } : adapter)
+  const io = headlessRpcIo({ crew, paths, taskDir: paths.taskDir, checkout: dir, adapters: { builder: adapterEntry }, bin: '/bin/pi', deps })
   return { dir, paths, crew, io, writes, commands, specs, signals, cleanup: () => { if (!options.dir) rmSync(dir, { recursive: true, force: true }) } }
 }
 
@@ -64,8 +65,56 @@ test('splitFrames preserves LF framing and chunk rest', () => {
 })
 
 test('rpcCommand composes a resumable pi invocation', () => {
-  const c = rpcCommand({ bin: '/bin/pi', model: 'openai-codex/x', effort: 'high', sessionDir: '/tmp/s', sessionId: 's1', resume: true, promptFile: '/tmp/p', deny: 'Edit', env: { X: '1' } })
-  assert.deepEqual(c.args, ['--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1', '--append-system-prompt', '/tmp/p', '--exclude-tools', 'edit', '--no-context-files', '--no-extensions', '--no-skills'])
+  const common = { bin: '/bin/pi', model: 'openai-codex/x', effort: 'high', sessionDir: '/tmp/s', sessionId: 's1', resume: true, promptFile: '/tmp/p', deny: 'Edit', env: { X: '1' } }
+  const c = rpcCommand(common)
+  assert.deepEqual(c.args, [
+    '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
+    '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls', '--exclude-tools', 'edit',
+    '--no-context-files', '--no-extensions', '--no-skills',
+  ])
+  assert.deepEqual(c.env, { X: '1' })
+  assert.equal(Object.hasOwn(c.env, 'CREW_PI_AGENTS'), false)
+
+  const grants = {
+    tools: ['Task', 'Task'], extensions: ['/ext-a', '/ext-a', '/ext-b'],
+    agents: [{ name: 'scout', def: '/scout.json' }], skills: [],
+  }
+  const granted = rpcCommand({ ...common, grants })
+  assert.deepEqual(granted.args, [
+    '--mode', 'rpc', '--model', 'openai-codex/x', '--thinking', 'high', '--session-dir', '/tmp/s', '--session', 's1',
+    '--append-system-prompt', '/tmp/p', '--tools', 'read,bash,edit,write,grep,find,ls,Task,agent', '--exclude-tools', 'edit',
+    '--no-context-files', '--no-extensions', '-e', '/ext-a', '-e', '/ext-b', '--no-skills',
+  ])
+  assert.equal(granted.env.X, '1')
+  assert.deepEqual(JSON.parse(granted.env.CREW_PI_AGENTS), [{ name: 'scout', def: '/scout.json' }])
+
+  const bareGrants = { tools: [], extensions: [], agents: [], skills: [] }
+  const bare = rpcCommand({ ...common, grants: bareGrants })
+  const skilled = rpcCommand({ ...common, grants: { ...bareGrants, skills: ['/skill.md'] } })
+  const skillAt = skilled.args.indexOf('--skill')
+  assert.deepEqual(skilled.args.slice(skillAt, skillAt + 2), ['--skill', '/skill.md'])
+  assert.equal(skilled.args.includes('--no-skills'), false)
+  for (const command of [c, bare, granted, skilled]) {
+    assert.equal(command.args.some((arg) => arg === '--provider' || String(arg).startsWith('--provider=')), false)
+  }
+
+  const wrapped = fixture({ grants })
+  try {
+    wrapped.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.deepEqual(wrapped.specs.at(-1).grants, grants)
+    const wrappedCommand = JSON.parse(readFileSync(join(wrapped.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.equal(wrappedCommand.args[wrappedCommand.args.indexOf('--tools') + 1].split(',').includes('agent'), true)
+    assert.deepEqual(wrappedCommand.args.slice(wrappedCommand.args.indexOf('-e'), wrappedCommand.args.indexOf('-e') + 2), ['-e', '/ext-a'])
+  } finally { wrapped.cleanup() }
+
+  const bareFixture = fixture()
+  try {
+    bareFixture.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(bareFixture.specs.at(-1).grants, undefined)
+    const bareCommand = JSON.parse(readFileSync(join(bareFixture.paths.taskDir, 'headless-rpc', 'builder', 'cmd.json'), 'utf8'))
+    assert.equal(bareCommand.args[bareCommand.args.indexOf('--tools') + 1], 'read,bash,edit,write,grep,find,ls')
+    assert.equal(bareCommand.args.includes('-e'), false)
+  } finally { bareFixture.cleanup() }
 })
 
 test('recorded B6 capture remains LF-framed and carries the boundary events', () => {

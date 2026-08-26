@@ -474,11 +474,10 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
     join(process.cwd(), 'crew/pi/extensions/lab.ts'),
   ])
   assert.deepEqual(resolvedPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
-  await assert.rejects(
-    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' }),
-    (err) => err.reason === 'capability-shortfall'
-      && err.message === 'seat planner requires capability "subagents" but agent adapter "pi" declares subagents: false — refusing to boot a weaker seat (pass --allow-shortfall-planner subagents to boot it degraded on purpose)',
-  )
+  const headlessPlanner = await resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner' })
+  assert.equal(headlessPlanner.planner.transport, 'headless-rpc')
+  assert.deepEqual(headlessPlanner.planner.grants.agents, [{ name: 'scout', def: join(process.cwd(), 'crew/pi/agents/scout.json') }])
+  assert.equal(headlessPlanner.planner.adapter.capabilitiesFor({ transport: 'headless-rpc', grants: headlessPlanner.planner.grants }).subagents, true)
   // The reviewer is deliberately NOT subject to this: the roster seats
   // pi/terra on review at build/mechanical under the ratified review-vendor
   // rule, so requiring subagents there would make two of three tiers
@@ -493,10 +492,20 @@ test('seat requirements deliver pi scouts, preserve genuine shortfalls, and reje
     'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': 'subagents',
   })
   assert.equal(degradedPlanner.planner.name, 'pi')
-  await assert.rejects(
-    () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': 'tool_deny' }),
-    (err) => /planner/.test(err.message) && /subagents/.test(err.message) && /pi/.test(err.message),
-  )
+  const shortfallRoot = capabilityFixtureRoot()
+  try {
+    await assert.rejects(
+      () => resolveAdapters(
+        ['planner'],
+        { 'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': 'tool_deny' },
+        null,
+        { register: capabilityRegister(), root: shortfallRoot },
+      ),
+      (err) => /planner/.test(err.message)
+        && /subagents/.test(err.message)
+        && /pi/.test(err.message),
+    )
+  } finally { rmSync(shortfallRoot, { recursive: true, force: true }) }
   await assert.rejects(
     () => resolveAdapters(['planner'], { 'agent-planner': 'pi', 'headless-rpc': 'planner', 'allow-shortfall-planner': true }),
     /--allow-shortfall-planner needs a capability name/,

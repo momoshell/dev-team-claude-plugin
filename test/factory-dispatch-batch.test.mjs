@@ -13,6 +13,7 @@ import {
   ANCHOR_PIN_WARNING_PREFIX,
   REFUSAL_REASONS,
   DRY_RUN_BLIND_SPOT,
+  MISCLASSIFIED_PREFIX,
   REQUEST_SUFFIX,
   STALE_READ_ACK,
   checkArrival,
@@ -32,6 +33,7 @@ import {
   readsFromRefusal,
   readBatch,
   reconcileTier,
+  staffingFromBrief,
   resolveTransport,
   tierFloor,
 } from '../scripts/factory/dispatch-batch.mjs'
@@ -116,6 +118,17 @@ const briefWithQuotedTier = [
   '}',
   '```',
 ].join('\n')
+
+function staffingBrief({ shape, strength, tier = 'build', misclassification = null } = {}) {
+  return [
+    '## Proposed tier',
+    `proposed tier: ${tier}`,
+    `proposed shape: ${shape ?? 'no proposal'}`,
+    `proposed strength: ${strength ?? 'no proposal'}`,
+    ...(misclassification ? [misclassification] : []),
+    ...(shape === null && strength === null ? [] : ['```proposal', JSON.stringify({ shape, strength }, null, 2), '```']),
+  ].join('\n')
+}
 
 function entry(lane, files, reads = []) { return { lane, files, reads } }
 function refusal(fn, reason) {
@@ -770,6 +783,7 @@ function dispatchFixture({
   batchTier = 'mechanical',
   runFlags = {},
   brief = briefWithBlockOnly,
+  briefs = {},
   workspaceFor = (lane) => `ws-${lane}`,
   outcomes = {},
   ancestor = () => 0,
@@ -794,7 +808,10 @@ function dispatchFixture({
         const lane = name.slice(0, -REQUEST_SUFFIX.length)
         return JSON.stringify(authored[lane])
       }
-      if (text.endsWith('.brief.md')) return brief
+      if (text.endsWith('.brief.md')) {
+        const lane = basenameOf(text).slice(0, -'.brief.md'.length)
+        return briefs[lane] ?? brief
+      }
       if (text.endsWith('returns/task.json')) return JSON.stringify(outcomes[laneFromOutcomePath(text)])
       if (text.endsWith('/crew.json')) {
         const lane = text.split('/').at(-2)
@@ -1030,6 +1047,153 @@ test('compileLane performs at most two passes and carries compiler reads into a 
   const retry = calls[1].args[calls[1].args.indexOf('--fences') + 1]
   assert.notEqual(retry, register)
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads.map(({ file }) => file), ['crew/x.mjs'])
+})
+
+test('staffing pair comes from a real compiled brief proposal block', () => {
+  const checkout = gitFixture()
+  const batch = join(checkout, 'staffing-real-batch')
+  const out = join(checkout, 'staffing-real-out')
+  mkdirSync(batch)
+  mkdirSync(out)
+  const requestPath = put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure owned source behavior', ['src/owned.mjs'])))
+  const registerPath = put(join(out, 'dispatch.fences.json'), JSON.stringify({ lanes: [entry('lane-a', ['src/owned.mjs', 'src/coupled.mjs'], [])] }))
+  const briefPath = join(out, 'lane-a.brief.md')
+  const compiled = spawnSync(process.execPath, [
+    compiler, '--request', requestPath, '--checkout', checkout,
+    '--fences', registerPath, '--lane', 'lane-a', '--out', briefPath, '--force',
+    '--profile', join(checkout, 'missing-profile.json'),
+  ], { cwd: repoRoot, encoding: 'utf8' })
+  assert.equal(compiled.status, 0, `${compiled.stderr}\n${compiled.stdout}`)
+  const brief = readFileSync(briefPath, 'utf8')
+  const lines = brief.split('\n')
+  const start = lines.findIndex((line) => line.trim() === '```proposal')
+  assert.notEqual(start, -1)
+  const end = lines.findIndex((line, index) => index > start && line.trim() === '```')
+  assert.notEqual(end, -1)
+  const expected = JSON.parse(lines.slice(start + 1, end).join('\n'))
+  assert.ok(expected.shape)
+  assert.ok(expected.strength)
+  const result = compileLane({
+    lane: 'lane-a', batchDir: batch, laneDir: checkout, registerPath,
+    outDir: join(root, 'staffing-real-compile-out'), fences: [entry('lane-a', ['src/owned.mjs', 'src/coupled.mjs'], [])],
+    deps: {
+      spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+      readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, encoding || 'utf8'),
+    },
+  })
+  assert.equal(result.staffing.shape, expected.shape)
+  assert.equal(result.staffing.strength, expected.strength)
+  assert.notEqual(result.staffing.shape, null)
+  assert.notEqual(result.staffing.strength, null)
+})
+
+test('dispatch records shape and strength for each lane', () => {
+  const result = dispatchFixture({
+    label: 'staffing-pairs',
+    names: ['lane-a', 'lane-b'],
+    briefs: {
+      'lane-a': staffingBrief({ shape: 'mechanical', strength: 'workhorse' }),
+      'lane-b': staffingBrief({ shape: 'judge', strength: 'frontier' }),
+    },
+  })
+  const records = Object.fromEntries(['lane-a', 'lane-b'].map((lane) => [
+    lane, JSON.parse(readFileSync(join(result.out, `${lane}.dispatch.json`), 'utf8')),
+  ]))
+  assert.deepEqual(
+    { shape: records['lane-a'].shape, strength: records['lane-a'].strength },
+    { shape: 'mechanical', strength: 'workhorse' },
+  )
+  assert.deepEqual(
+    { shape: records['lane-b'].shape, strength: records['lane-b'].strength },
+    { shape: 'judge', strength: 'frontier' },
+  )
+  assert.notDeepEqual(
+    { shape: records['lane-a'].shape, strength: records['lane-a'].strength },
+    { shape: records['lane-b'].shape, strength: records['lane-b'].strength },
+  )
+  const lines = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
+  assert.ok(lines.some((line) => line.includes('lane=lane-a') && line.includes('shape=mechanical') && line.includes('strength=workhorse')))
+  assert.ok(lines.some((line) => line.includes('lane=lane-b') && line.includes('shape=judge') && line.includes('strength=frontier')))
+})
+
+test('dispatch records a compiler misclassification verbatim', () => {
+  const note = `${MISCLASSIFIED_PREFIX}: complexity build prices frontier — repropose the shape`
+  const result = dispatchFixture({
+    label: 'staffing-note',
+    names: ['lane-a'],
+    briefs: { 'lane-a': staffingBrief({ shape: 'mechanical', strength: 'frontier', misclassification: note }) },
+  })
+  const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.equal(record.misclassification, note)
+  assert.ok(result.logs.some((line) => line.startsWith('dispatch-batch: lane=lane-a ') && line.includes('misclassified=true')))
+})
+
+test('recording a misclassification changes no dispatch decisions', () => {
+  const note = `${MISCLASSIFIED_PREFIX}: complexity build prices frontier — repropose the shape`
+  const withNote = dispatchFixture({
+    label: 'staffing-note-present',
+    names: ['lane-a'],
+    briefs: { 'lane-a': staffingBrief({ shape: 'mechanical', strength: 'frontier', misclassification: note }) },
+  })
+  const withoutNote = dispatchFixture({
+    label: 'staffing-note-absent',
+    names: ['lane-a'],
+    briefs: { 'lane-a': staffingBrief({ shape: 'mechanical', strength: 'frontier' }) },
+  })
+  const first = JSON.parse(readFileSync(join(withNote.out, 'lane-a.dispatch.json'), 'utf8'))
+  const second = JSON.parse(readFileSync(join(withoutNote.out, 'lane-a.dispatch.json'), 'utf8'))
+  assert.deepEqual(first.tier, second.tier)
+  const differing = [...new Set([...Object.keys(first), ...Object.keys(second)])]
+    .filter((key) => key !== 'brief' && JSON.stringify(first[key]) !== JSON.stringify(second[key]))
+  assert.deepEqual(differing, ['misclassification'])
+})
+
+test('staffing absence records null axes and never invents a shape', () => {
+  const malformed = [
+    {
+      label: 'staffing-absent',
+      brief: staffingBrief({ shape: null, strength: null }),
+    },
+    {
+      label: 'staffing-unknown-shape',
+      brief: ['proposed tier: build', '```proposal', '{"shape":"wizard"}', '```'].join('\n'),
+    },
+    {
+      label: 'staffing-unparseable',
+      brief: ['proposed tier: build', '```proposal', 'not json', '```'].join('\n'),
+    },
+    {
+      label: 'staffing-two-blocks',
+      brief: [
+        'proposed tier: build',
+        '```proposal', '{"shape":"judge","strength":"frontier"}', '```',
+        '```proposal', '{"shape":"mechanical","strength":"workhorse"}', '```',
+      ].join('\n'),
+    },
+  ]
+  for (const { label, brief } of malformed) {
+    const result = dispatchFixture({ label, names: ['lane-a'], brief })
+    const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+    assert.equal(record.shape, null, `${label} shape`)
+    assert.equal(record.strength, null, `${label} strength`)
+    assert.notEqual(record.shape, 'mechanical', `${label} invented shape`)
+    assert.ok(result.logs.some((line) => line.includes('shape=absent strength=absent')), `${label} absence log`)
+  }
+})
+
+test('dispatcher misclassification literal stays pinned to the compiler', () => {
+  const source = readFileSync(join(repoRoot, 'scripts', 'factory', 'make-brief.mjs'), 'utf8')
+  assert.equal(source.includes(MISCLASSIFIED_PREFIX), true)
+})
+
+test('staffing fields append to the existing settled dispatch log line', () => {
+  const result = dispatchFixture({ label: 'staffing-log-order', names: ['lane-a'] })
+  const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: lane=lane-a '))
+  assert.ok(line)
+  assert.equal(line.startsWith(
+    'dispatch-batch: lane=lane-a forced=none proposed=none requested=mechanical requested_from=batch variant=full variant_from=batch settled=mechanical',
+  ), true)
+  assert.match(line, / shape=judge strength=workhorse misclassified=false$/)
 })
 
 function compileBriefProposal(brief, label) {

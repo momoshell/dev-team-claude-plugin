@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
-import { TIER_NAMES, gatherFences, validateRequest } from './make-brief.mjs'
+import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, gatherFences, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -103,6 +103,20 @@ export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', '
 export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
+
+// #291 step 3: the compiler computes SHAPE (risk) and STRENGTH (complexity) on two
+// axes and the dispatcher recorded only the collapsed tier word, so no operator and
+// no later ledger query could join a matrix cell to its cost or its outcome. The
+// pair is READ out of the compiler's own ```proposal block — never re-derived here,
+// because a second derivation is a second answer to a question already answered.
+export const DISPATCH_RECORD_SUFFIX = '.dispatch.json'
+// Absence is not zero: a brief carrying no proposal block records null, never a
+// stand-in shape. The word the log prints for that null.
+export const STAFFING_ABSENT = 'absent'
+// A copy of make-brief.mjs:1178, which is not exported and whose file this lane may
+// not touch. test/factory-dispatch-batch.test.mjs pins the two surfaces together.
+export const MISCLASSIFIED_PREFIX = 'misclassified · shape mechanical has no reinforced column'
+const ABSENT_STAFFING = Object.freeze({ shape: null, strength: null, misclassification: null })
 
 // A dry run reports success in the same tone a fully validated dispatch would, and an
 // operator read that as validation, split a batch and dispatched it twice (#658). Nothing has
@@ -667,6 +681,34 @@ function proposalFromBrief(text) {
   return match ? match[1].toLowerCase() : null
 }
 
+// Reads what the compiler already decided. The misclassification is a bare line in
+// the brief, not part of the block, so it is matched independently: a brief may
+// report one with or without a readable block.
+export function staffingFromBrief(text) {
+  if (typeof text !== 'string' || !text.trim()) return { ...ABSENT_STAFFING }
+  const lines = text.split('\n')
+  const misclassification = lines.map((line) => line.trim())
+    .find((line) => line.startsWith(MISCLASSIFIED_PREFIX)) || null
+  const fence = '```' + PROPOSAL_BLOCK
+  const blocks = []
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim() !== fence) continue
+    const end = lines.findIndex((line, j) => j > i && line.trim() === '```')
+    if (end < 0) break
+    blocks.push(lines.slice(i + 1, end).join('\n'))
+    i = end
+  }
+  if (blocks.length !== 1) return { ...ABSENT_STAFFING, misclassification }
+  let parsed
+  try { parsed = JSON.parse(blocks[0]) } catch { return { ...ABSENT_STAFFING, misclassification } }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { ...ABSENT_STAFFING, misclassification }
+  }
+  const shape = TIER_NAMES.includes(parsed.shape) ? parsed.shape : null
+  const strength = LADDER_BANDS.includes(parsed.strength) ? parsed.strength : null
+  return { shape, strength, misclassification }
+}
+
 export function measureBatchBaseline({ plans, outDir, checkout, deps } = {}) {
   const d = normalDeps(deps)
   if (!Array.isArray(plans) || plans.length < 2) return null
@@ -760,7 +802,7 @@ export function compileLane({ lane, batchDir, requestPath, laneDir, registerPath
     try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
       refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
-    return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief) }
+    return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief) }
   }
 
   const firstStderr = childFailure(result)
@@ -786,7 +828,7 @@ export function compileLane({ lane, batchDir, requestPath, laneDir, registerPath
   try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
     refuse(`compiler retry produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
-  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief) }
+  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief) }
 }
 
 export function tierFloor({ files, extra } = {}) {
@@ -1135,6 +1177,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   const laneByName = new Map(lanes.map((lane) => [lane.lane, lane]))
   const settled = []
   for (const item of compiled) {
+    const staffing = item.staffing || { ...ABSENT_STAFFING }
     const plan = plans.find((candidate) => candidate.lane === item.lane)
     const laneFence = fenceReport.perLane[item.lane]
     const floor = tierFloor({ files: laneFence.files, extra: runFlags.protectedPaths })
@@ -1146,8 +1189,26 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     const laneVariant = laneEntry?.variant ?? variant
     const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier}`)
-    settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant })
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'}`)
+    const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
+    const record = {
+      lane: item.lane,
+      shape: staffing.shape,
+      strength: staffing.strength,
+      misclassification: staffing.misclassification,
+      tier: {
+        forced: floor.forced || null,
+        proposed: item.proposed || null,
+        requested: requested || null,
+        settled: result.tier,
+      },
+      variant: laneVariant || null,
+      brief: item.brief,
+    }
+    try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
+      refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+    }
+    settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant, staffing, record: recordPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -1212,7 +1273,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     }
     const watchArgs = ['scripts/factory/crew-watch.mjs', item.lane, '--follow']
     d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} command=node ${watchArgs.join(' ')}`)
-    runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId })
+    runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId, staffing: item.staffing, record: item.record })
   }
 
   // Keeping the workspaces is a CHOICE, so the dispatcher states it and names

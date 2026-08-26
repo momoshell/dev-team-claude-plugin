@@ -26,6 +26,18 @@
     const box = event.currentTarget.getBoundingClientRect()
     return box.width > 0 ? Math.min(1, Math.max(0, (event.clientX - box.left) / box.width)) : 0
   }
+  // A retry marker says THIS seat is waiting on its provider. A substrate marker
+  // says the pane manager UNDER the seat went away, and #682 measured four drivers
+  // dying within 23 seconds of each other: the escalated colour, the taller tick and
+  // this title all say the outage is correlated across every lane in the batch, which
+  // is what a retry marker never says. An outage that has not recovered says so
+  // rather than naming a length.
+  function markerTitle(marker) {
+    if (marker.kind !== 'substrate') return `${marker.event} ${marker.detail}`
+    const episode = marker.outage_ms == null ? 'still open' : `${Math.round(marker.outage_ms / 1000)}s`
+    return `${marker.event} — pane-manager substrate outage (${episode}); correlated across every lane in this batch ${marker.detail}`
+  }
+
   function down(event) { dragFrom = view.origin + fraction(event) * view.total; state = setRange(state, null) }
   function up(event) {
     if (dragFrom == null) return
@@ -55,7 +67,12 @@
           {/if}
           <!-- Overlaid, never carved out: a retry NEVER splits or shortens the bar. -->
           {#each span.markers ?? [] as event (event.index)}
-            <span class="event-marker" title={`${event.event} ${event.detail}`} style={`left:${projectMarker(event.at_ms, view.origin, view.total).left * 100}%`}></span>
+            <!-- The band spans the down/recovered PAIR so the two ticks read as one
+                 episode. An outage still open draws NO band: never a fabricated width. -->
+            {#if event.outage_ms != null && event.down_at_ms != null}
+              <span class="outage" style={`left:${projectMarker(event.down_at_ms, view.origin, view.total).left * 100}%;width:${(event.outage_ms / view.total) * 100}%`}></span>
+            {/if}
+            <span class="event-marker" class:substrate={event.kind === 'substrate'} title={markerTitle(event)} style={`left:${projectMarker(event.at_ms, view.origin, view.total).left * 100}%`}></span>
           {/each}
         </span>
         <span class="took">{span.took}</span>
@@ -88,6 +105,10 @@
   .bar { position:absolute; top:.15rem; height:.6rem; min-width:2px; background:var(--accent, #3b82f6); border-radius:2px; }
   .marker { position:absolute; top:.05rem; width:0; border-left:2px solid var(--muted, #888); height:.8rem; }
   .event-marker { position:absolute; top:0; width:0; border-left:2px solid var(--status-running, #c38b18); height:.9rem; }
+  /* Distinct from the retry tick in colour AND in size: a substrate outage is the
+     ground under every seat in the batch, not this seat waiting on a provider. */
+  .event-marker.substrate { top:-.1rem; height:1.1rem; border-left-width:3px; border-left-color:var(--status-escalated, #ec835a); }
+  .outage { position:absolute; top:.25rem; height:.4rem; background:var(--status-escalated, #ec835a); opacity:.25; }
   .lane.driver .bar, .lane.driver .marker { background:var(--lane-color, var(--role-driver)); border-color:var(--lane-color, var(--role-driver)); }
   .lane.driver .actor { color:var(--lane-color, var(--role-driver)); }
   .took { color:var(--muted, #888); font-variant-numeric:tabular-nums; }

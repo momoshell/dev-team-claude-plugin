@@ -250,14 +250,15 @@ function frozenHelperSites(sites, why) {
 //   test/factory-ledger.test.mjs — converted by b230-helperdedupa (#642, 0fb580a)
 //   test/factory-make-brief.test.mjs — converted by b235-helperdedupb2 (#644, bd3d40d)
 //   test/version-agreement.test.mjs — converted by b235-helperdedupb2 (#644, bd3d40d)
+// Retired 2026-08-26 by lane b256-helperexempt2 (#551's cleanup lane), same rule:
+//   crew/crew.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
+//   crew/drive.test.mjs — converted by b248-helperdedupf (#656, 53bb1eb)
+//   skills/crew-dispatch/exhibits.test.mjs — converted by b243-helperdedupe (#650, 39e17e4)
+//   skills/devops/exhibits.test.mjs — converted by b248-helperdedupf (#656, 53bb1eb)
+//   skills/pr-review/findings-shape.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
 const HELPER_EXEMPT = new Map([
-  ['crew/crew.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one dirname(dirname(fileURLToPath())) repo-root derivation; outside this lane\'s fence, so frozen rather than converted')],
-  ['crew/drive.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../') repo-root derivation; owned by lane b199-resumestate, so frozen rather than converted")],
   ['skills/backend-node/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
-  ['skills/crew-dispatch/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
   ['skills/crew-recovery/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
-  ['skills/devops/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
-  ['skills/pr-review/findings-shape.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
   ['test/factory-ci-watch.test.mjs', frozenHelperSites(2, 'audited 2026-08-24: a local sqliteAvailable and a local git whose body returns the spawnSync result rather than stdout; outside this lane\'s fence, so frozen rather than converted')],
   ['test/factory-probe-repo.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one local git with a DIFFERENT identity (probe@example.invalid); outside this lane\'s fence, so frozen rather than converted')],
 ])
@@ -283,7 +284,7 @@ test('helper duplication tripwire — every exemption has a live, load-bearing w
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 10)
+  assert.equal(total, 5)
 })
 
 test('helper duplication tripwire — the detector flags a hand-rolled copy and clears an import', () => {

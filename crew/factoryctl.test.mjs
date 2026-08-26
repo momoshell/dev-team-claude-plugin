@@ -5,7 +5,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
-import { attachVerb, commitIssues, connect, formatRows, main, parseArgs, pendingVerb, runVerb, terminalRunLine } from './factoryctl.mjs'
+import {
+  attachVerb, commitIssues, completionLogPath, connect, formatRows, main,
+  parseArgs, pendingVerb, readCompletionLog, runVerb, terminalRunLine,
+} from './factoryctl.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
 const LEDGER_SANDBOX = mkdtempSync(join(tmpdir(), 'b136-factoryctl-ledger-'))
@@ -149,23 +152,47 @@ function pendingSpawn({ branches = {}, merged = new Set(), remoteBranches = new 
   return { spawnSync, calls }
 }
 
-function pendingUnit({ specs, branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {} } = {}) {
+function pendingUnit({ specs, branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {}, completionLog = null } = {}) {
   const root = scratchDir('factoryctl-pending-')
   const laneRoot = join(root, 'lanes')
   const repo = join(root, 'repo')
   mkdirSync(laneRoot, { recursive: true }); mkdirSync(repo, { recursive: true })
   const lanes = (specs || []).map((spec) => pendingLane(laneRoot, spec.name, spec.text, spec.options))
+  if (completionLog !== null) writeFileSync(completionLogPath({ root, env: {} }), completionLog)
   const d = pendingSpawn({ branches, merged, remoteBranches, messages, gh })
-  let stdout = ''
-  const result = pendingVerb({ _: ['pending'], json: true, 'crew-root': root, repo }, {
-    lanes: () => lanes,
-    readFileSync: (...args) => readFileSync(...args),
-    statSync: () => ({ mtime: new Date('2026-08-26T00:00:00.000Z') }),
-    spawnSync: d.spawnSync,
-    stdout: (text) => { stdout += text },
-    cwd: () => repo,
-  })
-  return { root, laneRoot, repo, lanes, result, output: JSON.parse(stdout), calls: d.calls }
+  const run = () => {
+    let stdout = ''
+    const result = pendingVerb({ _: ['pending'], json: true, 'crew-root': root, repo }, {
+      lanes: () => lanes,
+      readFileSync: (...args) => readFileSync(...args),
+      statSync: () => ({ mtime: new Date('2026-08-26T00:00:00.000Z') }),
+      spawnSync: d.spawnSync,
+      stdout: (text) => { stdout += text },
+      cwd: () => repo,
+      env: {},
+    })
+    return { result, output: JSON.parse(stdout) }
+  }
+  const first = run()
+  return { root, laneRoot, repo, lanes, result: first.result, output: first.output, run, calls: d.calls }
+}
+
+function completionLine({ lane, outcome = 'done', commit = null, at = '2026-08-26T00:00:00.000Z' }) {
+  return `${JSON.stringify({ at, lane, run: null, outcome, commit, checkout: '/fixture/checkout', crew_dir: '/fixture/crew', archived: null, task_return: '/fixture/returns/task.json' })}\n`
+}
+
+function withoutSource(rows) {
+  return rows.map(({ source, ...row }) => row)
+}
+
+function pendingRowsFixture() {
+  return {
+    specs: [
+      { name: 'reused-lane', text: `${JSON.stringify({ status: 'done', commit: 'stalecommit' })}\n` },
+      { name: 'plain-lane', text: `${JSON.stringify({ status: 'done', commit: 'plaincommit' })}\n` },
+    ],
+    branches: { stalecommit: 'reused-lane', plaincommit: 'plain-lane' },
+  }
 }
 
 function treeSnapshot(root) {
@@ -712,6 +739,91 @@ test('a done commit with no containing branch is unknown, not pending', () => {
   assert.equal(f.output.rows[0].branch, 'unknown')
 })
 
+test('the completion log lists a run whose crew directory is gone', () => {
+  const sha = 'gone-completion'
+  const f = pendingUnit({
+    specs: [],
+    branches: { [sha]: 'vanished-lane' },
+    completionLog: completionLine({ lane: 'vanished-lane', commit: sha }),
+  })
+  assert.equal(f.output.rows.length, 1)
+  assert.deepEqual(f.output.rows[0], {
+    lane: 'vanished-lane', commit: sha, branch: 'vanished-lane', issue: 'unknown',
+    done_at: '2026-08-26T00:00:00.000Z', remote: 'no', pr: 'none', state: 'pending', reason: null,
+    source: 'completion-log',
+  })
+})
+
+test('the completion log keeps a reused lane completion under its own commit', () => {
+  const f = pendingUnit({
+    specs: [{ name: 'reused-lane', text: `${JSON.stringify({ status: 'done', commit: 'later-commit' })}\n` }],
+    branches: { 'later-commit': 'reused-lane', 'earlier-commit': 'reused-lane' },
+    completionLog: completionLine({ lane: 'reused-lane', commit: 'earlier-commit' }),
+  })
+  const row = f.output.rows.find((candidate) => candidate.commit === 'earlier-commit')
+  assert.ok(row)
+  assert.equal(row.lane, 'reused-lane')
+  assert.equal(row.source, 'completion-log')
+  assert.equal(f.output.rows.filter((candidate) => candidate.lane === 'reused-lane').length, 2)
+})
+
+test('a completion record agreeing with run.log produces one row and confirms both sources', () => {
+  const sha = 'agreed-completion'
+  const f = pendingUnit({
+    specs: [{ name: 'agreed-lane', text: `${JSON.stringify({ status: 'done', commit: sha })}\n` }],
+    branches: { [sha]: 'agreed-lane' },
+    completionLog: completionLine({ lane: 'agreed-lane', commit: sha }),
+  })
+  assert.equal(f.output.rows.length, 1)
+  assert.equal(f.output.rows[0].source, 'both')
+  assert.equal(f.output.counts.completion_confirmed, 1)
+})
+
+test('deleting the completion log changes reach but not the crew-dir rows or scan counters', () => {
+  const fixture = pendingRowsFixture()
+  const completion = completionLine({ lane: 'reused-lane', commit: 'owncommit' })
+    + completionLine({ lane: 'vanished-lane', commit: 'gonecommit' })
+  const f = pendingUnit({ ...fixture, branches: { ...fixture.branches, owncommit: 'reused-lane', gonecommit: 'vanished-lane' }, completionLog: completion })
+  const present = f.output
+  rmSync(completionLogPath({ root: f.root, env: {} }), { force: true })
+  const absent = f.run().output
+  assert.equal(absent.counts.completion_log, 'absent')
+  for (const key of ['completion_records', 'completion_added', 'completion_confirmed', 'completion_malformed']) assert.equal(absent.counts[key], 0)
+  assert.deepEqual(withoutSource(absent.rows), [
+    {
+      lane: 'plain-lane', commit: 'plaincommit', branch: 'plain-lane', issue: 'unknown',
+      done_at: '2026-08-26T00:00:00.000Z', remote: 'no', pr: 'none', state: 'pending', reason: null,
+    },
+    {
+      lane: 'reused-lane', commit: 'stalecommit', branch: 'reused-lane', issue: 'unknown',
+      done_at: '2026-08-26T00:00:00.000Z', remote: 'no', pr: 'none', state: 'pending', reason: null,
+    },
+  ])
+  assert.ok(present.rows.length > absent.rows.length)
+  for (const row of absent.rows) assert.equal(row.source, 'run.log')
+  for (const key of ['scanned', 'running', 'not_done', 'no_run_log', 'published']) assert.equal(present.counts[key], absent.counts[key])
+})
+
+test('completion log absences and malformed lines are typed and counted', () => {
+  const completion = 'not json\n'
+    + completionLine({ lane: 'kept-lane', commit: 'kept-completion' })
+    + '{"lane":"truncated\n'
+  const f = pendingUnit({
+    specs: [], branches: { 'kept-completion': 'kept-lane' }, completionLog: completion,
+  })
+  assert.equal(f.output.counts.completion_log, 'ok')
+  assert.equal(f.output.counts.completion_malformed, 2)
+  assert.equal(f.output.rows.some((row) => row.lane === 'kept-lane' && row.commit === 'kept-completion'), true)
+  const unreadable = readCompletionLog('/missing/completions.jsonl', {
+    readFileSync: () => { const error = new Error('permission denied'); error.code = 'EACCES'; throw error },
+  })
+  assert.deepEqual(unreadable, { state: 'unknown', records: [], malformed: 0 })
+  const absent = readCompletionLog('/missing/completions.jsonl', {
+    readFileSync: () => { const error = new Error('missing'); error.code = 'ENOENT'; throw error },
+  })
+  assert.deepEqual(absent, { state: 'absent', records: [], malformed: 0 })
+})
+
 test('an empty crew root prints an explicit empty result and exits 0', async () => {
   const root = scratchDir('factoryctl-empty-')
   const repo = scratchDir('factoryctl-empty-repo-')
@@ -736,7 +848,8 @@ test('pending uses only read-only git and gh calls and changes no crew files', (
   mkdirSync(laneRoot, { recursive: true }); mkdirSync(repo, { recursive: true })
   const sha = 'readonly-commit'
   const lane = pendingLane(laneRoot, 'readonly-lane', `${JSON.stringify({ status: 'done', commit: sha })}\n`)
-  const d = pendingSpawn({ branches: { [sha]: 'readonly-lane' } })
+  writeFileSync(completionLogPath({ root, env: {} }), completionLine({ lane: 'gone-readonly-lane', commit: 'gone-readonly-commit' }))
+  const d = pendingSpawn({ branches: { [sha]: 'readonly-lane', 'gone-readonly-commit': 'gone-readonly-lane' } })
   const before = treeSnapshot(root)
   pendingVerb({ _: ['pending'], 'crew-root': root, repo, json: true }, {
     lanes: () => [lane],
@@ -744,6 +857,7 @@ test('pending uses only read-only git and gh calls and changes no crew files', (
     statSync: (...args) => statSync(...args),
     spawnSync: d.spawnSync,
     stdout: () => {},
+    env: {},
   })
   const after = treeSnapshot(root)
   assert.deepEqual(after, before)

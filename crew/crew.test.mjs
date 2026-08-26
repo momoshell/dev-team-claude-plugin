@@ -42,6 +42,7 @@ import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree } from './tree-fingerprint.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
+import { completionLogPath } from './factoryctl.mjs'
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
 // through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
@@ -558,6 +559,63 @@ async function withHome(home, fn) {
   process.env.HOME = home
   try { return await fn() }
   finally { if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous }
+}
+
+async function withCompletionEnv(home, log, fn) {
+  const keys = ['DEVTEAM_LEDGER_DB', 'DEVTEAM_LEDGER_DIR', 'CREW_COMPLETION_LOG']
+  const previous = Object.fromEntries(keys.map((key) => [key, process.env[key]]))
+  process.env.DEVTEAM_LEDGER_DIR = join(home, 'ledger')
+  process.env.DEVTEAM_LEDGER_DB = join(home, 'ledger', 'ledger.db')
+  process.env.CREW_COMPLETION_LOG = log
+  try { return await withHome(home, fn) }
+  finally {
+    for (const [key, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value
+    }
+  }
+}
+
+async function runCompletionFixture({ task, result, keep = true, append = null } = {}) {
+  const home = scratchDir(`crew-completion-${task}-home-`)
+  const { root: checkoutRoot, checkout } = testCheckout(`crew-completion-${task}-checkout-`)
+  const brief = join(home, 'brief.md')
+  const log = join(home, 'completions.jsonl')
+  writeFileSync(brief, '# completion brief\n')
+  execSync('git init -q', { cwd: checkout })
+  const previousExitCode = process.exitCode
+  const previousStdoutWrite = process.stdout.write
+  const previousStderrWrite = process.stderr.write
+  let output = ''
+  let errorOutput = ''
+  try {
+    await withCompletionEnv(home, log, async () => {
+      process.stdout.write = () => true
+      try {
+        await bootCmd(
+          { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+          { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+        )
+      } finally { process.stdout.write = previousStdoutWrite }
+      process.stdout.write = (chunk) => { output += String(chunk); return true }
+      process.stderr.write = (chunk) => { errorOutput += String(chunk); return true }
+      try {
+        runCmd(
+          { task, checkout, 'brief-file': brief, keep },
+          { drive: () => result, ...(append ? { appendCompletion: append } : {}) },
+        )
+      } finally {
+        process.stdout.write = previousStdoutWrite
+        process.stderr.write = previousStderrWrite
+      }
+    })
+    const exitCode = process.exitCode
+    const terminal = output.split('\n').map((line) => line.trim()).filter(Boolean)
+      .map((line) => { try { return JSON.parse(line) } catch { return null } }).find(Boolean)
+    return { home, checkout, crewDir: join(home, '.crew', 'checkout', task), log, terminal, exitCode, stderr: errorOutput }
+  } finally {
+    process.exitCode = previousExitCode
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 }
 
 async function withoutMemoryEnv(fn) {
@@ -1332,6 +1390,80 @@ test('run resolves, threads, and journals validation lanes without overloading f
     rmSync(home, { recursive: true, force: true })
     rmSync(checkoutRoot, { recursive: true, force: true })
   }
+})
+
+test('run appends one completion record per finishing run without rewriting earlier bytes', async () => {
+  const home = scratchDir('crew-completion-append-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-completion-append-checkout-')
+  const task = 'completion-append'
+  const brief = join(home, 'brief.md')
+  const log = join(home, 'completions.jsonl')
+  writeFileSync(brief, '# completion append brief\n')
+  execSync('git init -q', { cwd: checkout })
+  const firstResult = { status: 'done', summary: '', artifacts: [], details: { commit: 'first-commit', stages: [] } }
+  const secondResult = { status: 'done', summary: '', artifacts: [], details: { commit: 'second-commit', stages: [] } }
+  const previousExitCode = process.exitCode
+  try {
+    await withCompletionEnv(home, log, async () => {
+      await bootCmd(
+        { task, checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter() },
+      )
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => firstResult })
+      const first = readFileSync(log)
+      runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: () => secondResult })
+      const after = readFileSync(log)
+      assert.equal(after.subarray(0, first.length).equals(first), true)
+      const rows = after.toString('utf8').trim().split('\n').map((line) => JSON.parse(line))
+      assert.equal(rows.length, 2)
+      assert.deepEqual(rows.map((row) => row.commit), ['first-commit', 'second-commit'])
+      assert.deepEqual(rows.map((row) => row.outcome), ['done', 'done'])
+    })
+  } finally {
+    process.exitCode = previousExitCode
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
+})
+
+test('a failed completion append never changes the run terminal result or exit code', async () => {
+  const result = { status: 'done', summary: '', artifacts: [], details: { commit: 'control-commit', stages: [] } }
+  const control = await runCompletionFixture({ task: 'completion-control', result })
+  let calls = 0
+  const broken = await runCompletionFixture({
+    task: 'completion-broken', result,
+    append: () => { calls += 1; throw new Error('append denied') },
+  })
+  assert.equal(calls, 1)
+  assert.equal(broken.terminal.status, control.terminal.status)
+  assert.equal(broken.terminal.commit, control.terminal.commit)
+  assert.equal(broken.exitCode, control.exitCode)
+  assert.match(broken.stderr, /completion record not appended/)
+})
+
+test('completion records preserve both terminal outcomes and run-owned paths', async () => {
+  const cases = [
+    ['completion-done', { status: 'done', summary: '', artifacts: [], details: { commit: 'done-commit', stages: [] } }],
+    ['completion-escalation', { status: 'escalation', summary: 'needs review', artifacts: [], details: { commit: 'escalation-commit', stages: [], escalation: { why: 'review' } } }],
+  ]
+  for (const [task, result] of cases) {
+    const run = await runCompletionFixture({ task, result })
+    const record = JSON.parse(readFileSync(run.log, 'utf8').trim())
+    assert.equal(record.lane, task)
+    assert.equal(record.outcome, run.terminal.status)
+    assert.equal(record.commit, run.terminal.commit)
+    assert.equal(record.checkout, run.checkout)
+    assert.equal(record.crew_dir, run.crewDir)
+    assert.equal(record.archived, run.terminal.archived)
+    assert.equal(record.task_return, run.terminal.task_return)
+    assert.equal(Number.isNaN(Date.parse(record.at)), false)
+  }
+})
+
+test('completion log path accepts an override and otherwise defaults to the crew root', () => {
+  const root = scratchDir('crew-completion-path-')
+  const override = join(root, 'x.jsonl')
+  assert.equal(completionLogPath({ env: { CREW_COMPLETION_LOG: `  ${override}  ` } }), override)
+  assert.equal(completionLogPath({ root: join(root, 'root'), env: {} }), join(root, 'root', 'completions.jsonl'))
 })
 
 test('run wires the compiled brief into the session row', async () => {

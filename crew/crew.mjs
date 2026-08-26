@@ -32,7 +32,7 @@
 // Each verb refuses a flag it does not read with exit 2; --fences is boot-only,
 // and a bare --lane on run is the round validation lane.
 import {
-  existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync,
 } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
@@ -68,6 +68,7 @@ import {
   loadCapabilities, refuse, REGISTER_ROOT, resolvedGrantPath, pathExists, pathMessage,
 } from './capabilities.mjs'
 export { CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, assertGrantsBacked, effectiveCapabilities, grantsFor, loadCapabilities, refuse, validateCapabilities } from './capabilities.mjs'
+import { completionLogPath } from './factoryctl.mjs'
 import { hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 export { LOAD_ENV, hostLoad, loadPolicy, assertHostQuiet } from './host-load.mjs'
 
@@ -1708,6 +1709,30 @@ export function runExitCode(result) {
     : RUN_EXIT_UNEXPECTED
 }
 
+// The completion event (#687). run.log and the journal stay authoritative for
+// their own purposes; this is ADDITIVE. One line per finishing run, in a log that
+// OUTLIVES the crew dir the run used — because a crew dir is mutable, reusable
+// and removable, and the durable record must be none of those.
+export function completionRecord({ task, run = null, outcome, commit = null, checkout, crewDir, archived = null, taskReturn, at }) {
+  return { at, lane: task, run, outcome, commit, checkout, crew_dir: crewDir, archived, task_return: taskReturn }
+}
+
+// APPEND, never write: a second run of the same lane adds a second line and the
+// first stays byte-identical. The parent is created because a first run on a new
+// machine has no crew root yet. Every failure here is the CALLER's to swallow.
+export function appendCompletion(record, deps = {}) {
+  const path = deps.path || completionLogPath({ env: deps.env || process.env })
+  const append = deps.appendFileSync || appendFileSync
+  const mkdir = deps.mkdirSync || mkdirSync
+  mkdir(dirname(path), { recursive: true })
+  append(path, `${JSON.stringify(record)}\n`)
+  return path
+}
+
+function completionWarning(err, taskSlug) {
+  process.stderr.write(`warning: completion record not appended (${err.message}) — run.log stays the record for ${taskSlug}\n`)
+}
+
 export function runCmd(args, deps = {}) {
   // Refuse an unknown shape BEFORE any state is read, spawned or written —
   // the same posture as boot's assertCellsClosed and mixed-transport guards.
@@ -1729,7 +1754,7 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(variant, { validationLane })
-  const { drive = driveTask } = deps
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -1902,6 +1927,16 @@ export function runCmd(args, deps = {}) {
   }
   // After archive the envelope moves with the dir — report where it lives now.
   const taskReturn = archived ? crew.task_return.replace(paths.dir, archived) : crew.task_return
+  // The completion event, written BEFORE the process can exit and AFTER the
+  // archive has moved the envelope, so the record names where it actually lives.
+  // Best-effort, exactly the posture the archive failure above takes: a warning,
+  // never an error, and never a change to the status, exit code or terminal line.
+  const completion = completionRecord({
+    task: taskSlug, run: emitter?.adwId ?? null, outcome: result.status,
+    commit: result.details?.commit ?? null, checkout, crewDir: paths.dir,
+    archived, taskReturn, at: new Date().toISOString(),
+  })
+  try { appendCompletionDep(completion) } catch (err) { completionWarning(err, taskSlug) }
   process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
   process.exitCode = runExitCode(result)
 }

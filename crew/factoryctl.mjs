@@ -334,6 +334,53 @@ export async function attachVerb(args, deps = {}) {
 // PR, no teardown, no write to any crew dir.
 export const PENDING_UNKNOWN = 'unknown'
 
+// --- the completion log (#687) -----------------------------------------------
+// A crew directory is mutable, reusable and removable, so `run.log` answers for
+// whatever run holds the dir NOW: a reused dir serves the previous run's line and
+// a removed dir serves nothing. The completion log has neither property — one
+// line per finishing run, appended once, never rewritten, outliving the dir it
+// came from. It is an ADDITIONAL source under the SAME verb: with it absent,
+// `pending` answers exactly as it did before the log existed.
+export const COMPLETION_LOG_NAME = 'completions.jsonl'
+export const COMPLETION_LOG_ENV = 'CREW_COMPLETION_LOG'
+
+// ONE resolver, shared by the writer (crew/crew.mjs) and this reader, so the two
+// can never disagree about where the record lives. The env override is what makes
+// the path injectable: a test must never write into a real home (#672).
+export function completionLogPath({ root, home, env = process.env } = {}) {
+  const override = env?.[COMPLETION_LOG_ENV]
+  if (typeof override === 'string' && override.trim()) return resolvePath(override.trim())
+  return join(root || crewRoot({ home }), COMPLETION_LOG_NAME)
+}
+
+function validCompletion(row) {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false
+  if (typeof row.lane !== 'string' || !row.lane) return false
+  return typeof row.outcome === 'string' && row.outcome.length > 0
+}
+
+// Typed absences, never a silent empty: `absent` is a log nobody has written yet,
+// `unknown` is a log that exists and could not be read. Collapsing the two would
+// report "nothing pending" for a log the reader never opened, which is worse than
+// having no log at all. A malformed line is skipped and COUNTED.
+export function readCompletionLog(path, d) {
+  let text
+  try { text = d.readFileSync(path, 'utf8') } catch (err) {
+    if (err?.code === 'ENOENT') return { state: 'absent', records: [], malformed: 0 }
+    return { state: PENDING_UNKNOWN, records: [], malformed: 0 }
+  }
+  const records = []
+  let malformed = 0
+  for (const line of String(text).split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { malformed += 1; continue }
+    if (!validCompletion(row)) { malformed += 1; continue }
+    records.push(row)
+  }
+  return { state: 'ok', records, malformed }
+}
+
 export function pendingDeps(deps = {}) {
   return {
     lanes: deps.lanes || ((root) => [...discoverLanes(root), ...archivedLanes(root)]),
@@ -451,15 +498,35 @@ export function classifyLane(lane, ctx) {
       row: {
         lane: lane.task, commit: PENDING_UNKNOWN, branch: PENDING_UNKNOWN, issue: PENDING_UNKNOWN,
         done_at: doneAt, remote: PENDING_UNKNOWN, pr: PENDING_UNKNOWN, state: 'unknown', reason: 'run-log-unreadable',
+        source: 'run.log',
       },
     }
   }
+  return classifyTerminal({ task: lane.task, terminal, doneAt, ctx, source: 'run.log' })
+}
+
+// The same verdict for a run named by the completion log rather than by a crew
+// dir. The record carries its OWN run's outcome and commit, so a lane whose dir
+// was reused is judged on the run that wrote the record and never on whichever
+// run holds the dir now.
+export function classifyCompletion(record, ctx) {
+  const terminal = {
+    status: record.outcome,
+    commit: typeof record.commit === 'string' && record.commit ? record.commit : null,
+  }
+  const doneAt = typeof record.at === 'string' && record.at ? record.at : PENDING_UNKNOWN
+  return classifyTerminal({ task: record.lane, terminal, doneAt, ctx, source: 'completion-log' })
+}
+
+// The publication verdict for ONE finished run, whatever named it. Both sources
+// converge here, so `pending` keeps one classifier and one set of git questions.
+function classifyTerminal({ task, terminal, doneAt, ctx, source }) {
   if (!DONE_WITH_COMMIT(terminal)) {
     return { kind: 'skip', reason: terminal.status === 'done' ? 'done-without-commit' : 'not-done' }
   }
   const commit = terminal.commit
   const known = ctx.git('cat-file', '-e', `${commit}^{commit}`).status === 0
-  const branch = known ? resolveBranch(ctx.git, commit, lane.task, ctx.base) : PENDING_UNKNOWN
+  const branch = known ? resolveBranch(ctx.git, commit, task, ctx.base) : PENDING_UNKNOWN
   if (known && ctx.base && ctx.git('merge-base', '--is-ancestor', commit, ctx.base).status === 0) {
     return { kind: 'skip', reason: 'merged' }
   }
@@ -470,10 +537,11 @@ export function classifyLane(lane, ctx) {
     return {
       kind: 'unknown', reason: known ? 'branch-gone' : 'commit-not-in-repo',
       row: {
-        lane: lane.task, commit, branch: PENDING_UNKNOWN,
+        lane: task, commit, branch: PENDING_UNKNOWN,
         issue: known ? commitIssues(ctx.git('log', '-1', '--format=%B', commit).stdout) : PENDING_UNKNOWN,
         done_at: doneAt, remote: PENDING_UNKNOWN, pr: PENDING_UNKNOWN,
         state: 'unknown', reason: known ? 'branch-gone' : 'commit-not-in-repo',
+        source,
       },
     }
   }
@@ -483,7 +551,7 @@ export function classifyLane(lane, ctx) {
   return {
     kind: 'pending',
     row: {
-      lane: lane.task,
+      lane: task,
       commit,
       branch,
       issue: message.status === 0 ? commitIssues(message.stdout) : PENDING_UNKNOWN,
@@ -492,15 +560,16 @@ export function classifyLane(lane, ctx) {
       pr: pull.pr,
       state: 'pending',
       reason: known ? null : 'commit-not-in-repo',
+      source,
     },
   }
 }
 
-const PENDING_HEADERS = ['LANE', 'COMMIT', 'BRANCH', 'ISSUE', 'DONE-AT', 'REMOTE', 'PR', 'STATE', 'WHY']
-const PENDING_KEYS = ['lane', 'commit', 'branch', 'issue', 'done_at', 'remote', 'pr', 'state', 'reason']
+const PENDING_HEADERS = ['LANE', 'COMMIT', 'BRANCH', 'ISSUE', 'DONE-AT', 'REMOTE', 'PR', 'STATE', 'WHY', 'SOURCE']
+const PENDING_KEYS = ['lane', 'commit', 'branch', 'issue', 'done_at', 'remote', 'pr', 'state', 'reason', 'source']
 
 export function formatPending({ rows, counts }) {
-  const summary = `pending: ${counts.pending} · unknown: ${counts.unknown} · published: ${counts.published} · not-done: ${counts.not_done} · running: ${counts.running} · no-run-log: ${counts.no_run_log} · scanned: ${counts.scanned}`
+  const summary = `pending: ${counts.pending} · unknown: ${counts.unknown} · published: ${counts.published} · not-done: ${counts.not_done} · running: ${counts.running} · no-run-log: ${counts.no_run_log} · scanned: ${counts.scanned} · completion-log: ${counts.completion_log} · records: ${counts.completion_records} · added: ${counts.completion_added} · confirmed: ${counts.completion_confirmed} · malformed: ${counts.completion_malformed}`
   if (!rows.length) return ['no lanes are pending publication — no done lane in this crew root is waiting on a push', summary].join('\n')
   const values = rows.map((row) => PENDING_KEYS.map((key) => (row?.[key] == null ? (key === 'reason' ? '-' : PENDING_UNKNOWN) : String(row[key]))))
   const widths = PENDING_HEADERS.map((header, index) => Math.max(header.length, ...values.map((value) => value[index].length)))
@@ -517,7 +586,12 @@ export function pendingVerb(args, deps = {}) {
   const git = gitRunner(d, repo)
   const ctx = { d, git, repo, base: defaultBranch(git), remote: remoteName(git) }
   const pendingRows = []
-  const counts = { scanned: 0, pending: 0, unknown: 0, published: 0, not_done: 0, running: 0, no_run_log: 0 }
+  const index = new Map()
+  const counts = {
+    scanned: 0, pending: 0, unknown: 0, published: 0, not_done: 0, running: 0, no_run_log: 0,
+    completion_log: 'absent', completion_records: 0, completion_added: 0, completion_confirmed: 0, completion_malformed: 0,
+  }
+  const rowKey = (lane, commit) => `${lane}\u0000${commit ?? ''}`
   for (const lane of d.lanes(root)) {
     counts.scanned += 1
     const verdict = classifyLane(lane, ctx)
@@ -528,9 +602,30 @@ export function pendingVerb(args, deps = {}) {
       else counts.not_done += 1
       continue
     }
-    if (pendingRows.some((row) => row.lane === verdict.row.lane && row.commit === verdict.row.commit)) continue
+    if (index.has(rowKey(verdict.row.lane, verdict.row.commit))) continue
     if (verdict.kind === 'unknown') counts.unknown += 1
     else counts.pending += 1
+    index.set(rowKey(verdict.row.lane, verdict.row.commit), verdict.row)
+    pendingRows.push(verdict.row)
+  }
+  // The SECOND source, merged into the same rows under the same verb. A run both
+  // sources know is reported once and says so; a run only the log knows is added.
+  // The crew-dir scan's own counters above are never touched by this loop, which
+  // is what makes "delete the log and nothing is lost but reach" checkable.
+  const completion = readCompletionLog(completionLogPath({ root, env: deps.env || process.env }), d)
+  counts.completion_log = completion.state
+  counts.completion_records = completion.records.length
+  counts.completion_malformed = completion.malformed
+  for (const record of completion.records) {
+    const key = rowKey(record.lane, typeof record.commit === 'string' && record.commit ? record.commit : null)
+    const seen = index.get(key)
+    if (seen) { seen.source = 'both'; counts.completion_confirmed += 1; continue }
+    const verdict = classifyCompletion(record, ctx)
+    if (verdict.kind === 'skip') continue
+    counts.completion_added += 1
+    if (verdict.kind === 'unknown') counts.unknown += 1
+    else counts.pending += 1
+    index.set(key, verdict.row)
     pendingRows.push(verdict.row)
   }
   pendingRows.sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0))

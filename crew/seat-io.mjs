@@ -65,6 +65,19 @@ export const SILENCE_REASK_MS = 300_000   // verbatim: mutation G6
 // fix it — exactly once. The bound is DATA, not a loop: REASK_MAX asks per
 // assignment, and the re-ask's own wait is clamped so a hung seat cannot
 // double a stage budget.
+// #669: a refusal reading is a MEASUREMENT OF A MOMENT, never a standing
+// property of a seat. `lastRefusal` had no lifetime, so one WebSocket blip named
+// every later wait in the run `refused` — b254-retryvis escalated on a reading
+// minutes old while its builder was writing a gate-green envelope. 300_000 is the
+// bound SILENCE_REASK_MS above already carries and for the same measured
+// reason: over the #590 corpus p99 of gaps where a frame was OWED is 80.7s, so a
+// reading older than 300s describes a condition the seat has had ample room to
+// leave, and 300s is a third of TRANSCRIPT_STALE_MS, so the reading retires well
+// before the staleness instrument reaches its own verdict and the two can never
+// contradict each other. PRIVATE on purpose: this lane freezes both modules'
+// export sets, so the bound is proven at its boundary by behaviour, not by name.
+const REFUSAL_READING_MAX_MS = 300_000
+
 export const REASK_MAX = 1
 export const REASK_TIMEOUT_S = 600
 
@@ -1521,7 +1534,15 @@ export function waitState({ role, latest, refusal, at, timeoutS, staleMs = TRANS
   // input. An unclassified frame's raw provider message still travels in the
   // timeout evidence (§1g's existing `the provider says:` clause); it just does
   // not get to NAME the state.
-  const named = !!refusal && SEAT_REFUSALS.some((row) => row.member === refusal.member)   // verbatim: mutation A16
+  // #669: only a TERMINAL member may name `refused`, and only while its reading
+  // is FRESH. `transient` is `terminal: false`, so a seat that recovered falls
+  // through to the `working` arm below on its own measured frames — the arm
+  // ordering does not change, the membership test does. An unmeasured reading
+  // (no `at`) never expires: a NULL beats a value nobody measured (#297).
+  const row = refusal ? SEAT_REFUSALS.find((entry) => entry.member === refusal.member) ?? null : null   // verbatim: mutation A16
+  const readingAt = Number.isFinite(refusal?.at) ? refusal.at : null
+  const expired = readingAt !== null && at - readingAt >= REFUSAL_READING_MAX_MS
+  const named = !!row && row.terminal === true && !expired
   // RETRYING outranks STALE, and that ordering IS the #659 fix: a harness
   // retrying a provider call writes no transcript frame, so `latest` is frozen
   // at the instant the turn began and the stale arm below would name a live
@@ -1626,7 +1647,13 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
     }
     sleep(WAIT_POLL_MS)
   }
-  return null
+  // #669: the deadline is a CLOCK reading, not a measurement of the seat. A seat
+  // that wrote its envelope during the final poll interval loses every byte of
+  // it for no reason — b254-retryvis wrote `status: done` with a green gate five
+  // minutes after its driver had already exited on this return. One last read
+  // costs one stat, and the headless transport already does exactly this (its
+  // `raced` read, crew/headless.mjs).
+  return readEnvelope()   // #669: read once more at the deadline before declaring a timeout
 }
 
 const SUBSTRATE_DOWN = () => ({ alive: null, substrate: 'down' })

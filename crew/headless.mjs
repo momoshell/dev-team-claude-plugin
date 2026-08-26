@@ -33,12 +33,29 @@ export const PROVIDER_CONDITIONS = Object.freeze([
 
 // The refusal vocabulary is DATA, so adding a member is a data edit rather
 // than a new branch. Order is load-bearing: the first match wins.
+//
+// `terminal` is the second axis, and it is what a CONSUMER may name a state
+// from: a terminal member describes a condition the seat cannot leave on its
+// own, a non-terminal one describes a condition it routinely does leave.
+// `crew/seat-io.mjs`'s `waitState` is the only consumer that branches on it.
+//
+// DECISION (#669): `transient` STAYS in this vocabulary and is PARTITIONED by
+// the flag below. Removing it was the alternative and it was REJECTED:
+// PROVIDER_CONDITIONS carries only `overloaded` and `rate-limit`, so the other
+// alternates of the transient pattern — `connection closed`, `websocket`,
+// `internal server error`, `terminated`, `fetch failed` — would be left with no
+// detector at all, and with them would go the `seat-refusal` journal row, the
+// `err.seatRefusal` member on a failure, and `providerConditionDetail`'s
+// `[refusal:transient]` evidence. Partitioning keeps every byte of that
+// evidence and changes only which member is allowed to NAME a state.
 export const SEAT_REFUSALS = Object.freeze([
-  { member: 'overflowed', pattern: /context_length_exceeded|prompt is too long|exceeds the context window/i },
-  { member: 'quota', pattern: /\b(?:session|weekly) limit\b|usage limit (?:has been )?reached/i },
-  { member: 'rejected', pattern: /is not supported on this model|is not supported when using|invalid_request_error|no api key for provider|model not found|safeguards flagged/i },
-  { member: 'suspended', pattern: /computer went to sleep/i },
-  { member: 'transient', pattern: /overloaded_error|\boverloaded\b|rate_limit_error|\brate limit\b|connection closed|websocket|internal server error|\bterminated\b|fetch failed/i },
+  { member: 'overflowed', terminal: true, pattern: /context_length_exceeded|prompt is too long|exceeds the context window/i },
+  { member: 'quota', terminal: true, pattern: /\b(?:session|weekly) limit\b|usage limit (?:has been )?reached/i },
+  { member: 'rejected', terminal: true, pattern: /is not supported on this model|is not supported when using|invalid_request_error|no api key for provider|model not found|safeguards flagged/i },
+  { member: 'suspended', terminal: true, pattern: /computer went to sleep/i },
+  // The ONE recoverable member: a transient error is what a retry clears, so it
+  // never names `refused`, and its action is `journal` and nothing else.
+  { member: 'transient', terminal: false, pattern: /overloaded_error|\boverloaded\b|rate_limit_error|\brate limit\b|connection closed|websocket|internal server error|\bterminated\b|fetch failed/i },
 ])
 
 // A frame no pattern matched is not a frame that warrants no action: "we could

@@ -252,7 +252,11 @@ test('seat refusal recognition stays closed, ordered, and actionable', () => {
     assert.equal(recogniseProviderCondition(value), null)
   }
   assert.equal(Object.isFrozen(SEAT_REFUSALS), true)
+  for (const row of SEAT_REFUSALS) assert.equal(typeof row.terminal, 'boolean')
   assert.deepEqual(SEAT_REFUSALS.map((row) => row.member), ['overflowed', 'quota', 'rejected', 'suspended', 'transient'])
+  assert.deepEqual(SEAT_REFUSALS.filter((row) => row.terminal === true).map((row) => row.member), ['overflowed', 'quota', 'rejected', 'suspended'])
+  assert.deepEqual(SEAT_REFUSALS.filter((row) => row.terminal === false).map((row) => row.member), ['transient'])
+  for (const row of SEAT_REFUSALS.filter((entry) => entry.terminal === false)) assert.equal(SEAT_REFUSAL_ACTIONS[row.member], 'journal')
   assert.equal(SEAT_REFUSALS.some((row) => row.member === UNCLASSIFIED_REFUSAL), false)
   assert.deepEqual(Object.keys(SEAT_REFUSAL_ACTIONS).sort(), [...SEAT_REFUSALS.map((row) => row.member), UNCLASSIFIED_REFUSAL].sort())
   assert.equal(Object.isFrozen(SEAT_REFUSAL_ACTIONS), true)

@@ -21,6 +21,11 @@ import {
   REQUEST_SUFFIX,
   SEAT_FIELDS,
   STALE_READ_ACK,
+  SYMBOL_FANOUT_LIMIT,
+  TEST_REACH_BLIND_SPOT,
+  TEST_REACH_DEPTH,
+  TEST_REACH_ROW_LIMIT,
+  TEST_REACH_WARNING_PREFIX,
   checkArrival,
   checkDirectedBrief,
   checkFences,
@@ -172,6 +177,147 @@ function gitFixture() {
   }
   return dir
 }
+
+function reachFixture(name, { extraDirect = 0, files = {} } = {}) {
+  const checkout = join(root, `reach-${name}`)
+  mkdirSync(checkout, { recursive: true })
+  put(join(checkout, 'lib', 'widget.mjs'), 'export const widgetValue = 1\nexport function widgetShape() { return widgetValue }\n')
+  put(join(checkout, 'lib', 'caller.mjs'), "import { widgetShape } from './widget.mjs'\nexport const callerValue = widgetShape()\n")
+  put(join(checkout, 'lib', 'outer.mjs'), "import { callerValue } from './caller.mjs'\nexport const outerValue = callerValue\n")
+  put(join(checkout, 'test', 'direct.test.mjs'), "import { widgetShape } from '../lib/widget.mjs'\nwidgetShape()\n")
+  put(join(checkout, 'test', 'twohop.test.mjs'), "import { callerValue } from '../lib/caller.mjs'\nif (callerValue !== 1) throw new Error('x')\n")
+  put(join(checkout, 'test', 'threehop.test.mjs'), "import { outerValue } from '../lib/outer.mjs'\nif (outerValue !== 1) throw new Error('x')\n")
+  for (let index = 0; index < extraDirect; index += 1) {
+    put(join(checkout, 'test', `direct-${String(index).padStart(2, '0')}.test.mjs`), "import { widgetShape } from '../lib/widget.mjs'\nwidgetShape()\n")
+  }
+  for (const [file, body] of Object.entries(files)) put(join(checkout, file), body)
+  for (const args of [['init', '-q', checkout], ['-C', checkout, 'add', '-A']]) {
+    const result = spawnSync('git', args, { encoding: 'utf8' })
+    assert.equal(result.status, 0, `${args.join(' ')}: ${result.stderr}`)
+  }
+  return checkout
+}
+
+function reachReport(checkout, fenceFiles = ['lib/widget.mjs'], surface = fenceFiles, deps = {}) {
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', fenceFiles)],
+    lanes: [{ lane: 'lane-a', where: surface }],
+    checkout,
+    deps: { log: (line) => logs.push(String(line)), ...deps },
+  })
+  const warning = report.warnings.find((item) => item.kind === 'test-reach')
+  return { report, logs, warning, rows: warning?.reach || [] }
+}
+
+test('checkFences reports direct and two-hop test reach without refusing', () => {
+  const checkout = reachFixture('depth')
+  const { report, warning, rows } = reachReport(checkout)
+  assert.ok(warning)
+  assert.equal(rows.find((row) => row.test === 'test/direct.test.mjs')?.hops, 1)
+  assert.equal(rows.find((row) => row.test === 'test/twohop.test.mjs')?.hops, 2)
+  assert.equal(rows.some((row) => row.test === 'test/threehop.test.mjs'), false)
+  assert.equal(TEST_REACH_DEPTH, 2)
+  assert.equal(warning.text.includes('test/twohop.test.mjs'), true)
+  assert.equal(warning.text.includes(TEST_REACH_BLIND_SPOT), true)
+  assert.equal(REFUSAL_REASONS.some((reason) => reason.includes('reach')), false)
+  assert.ok(report.perLane['lane-a'])
+})
+
+test('dispatchBatch logs test reach during dry-run without changing the outcome', () => {
+  const checkout = reachFixture('dry-run')
+  const batch = join(checkout, 'reach-batch')
+  mkdirSync(batch)
+  put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure reach warning', ['lib/widget.mjs'])))
+  const logs = []
+  const report = dispatchBatch({
+    batchDir: batch,
+    fences: [entry('lane-a', ['lib/widget.mjs'])],
+    checkout,
+    parentDir: join(checkout, 'parents'),
+    outDir: join(checkout, 'reach-out'),
+    runFlags: { 'dry-run': true },
+    deps: {
+      spawn: (options) => options.args?.includes('ls-files')
+        ? spawnSync(options.file, options.args, { cwd: options.cwd, encoding: 'utf8' })
+        : { status: 1, stdout: '', stderr: '' },
+      log: (line) => logs.push(String(line)),
+    },
+  })
+  assert.equal(report.dryRun, true)
+  const warning = logs.find((line) => line.includes(TEST_REACH_WARNING_PREFIX))
+  assert.ok(warning)
+  assert.equal(warning.includes('test/twohop.test.mjs'), true)
+})
+
+test('symbol reach reports literal names and drops broad fan-out', () => {
+  const broadTests = Object.fromEntries(Array.from({ length: SYMBOL_FANOUT_LIMIT + 1 }, (_, index) => [
+    `test/common-${String(index).padStart(2, '0')}.test.mjs`, 'commonName\\n',
+  ]))
+  const checkout = reachFixture('symbols', {
+    files: {
+      'lib/loader.mjs': "export async function load(name) { return import(`./${name}.mjs`) }\\n",
+      'lib/broad.mjs': 'export const commonName = 1\\n',
+      'test/dynamic.test.mjs': "import { load } from '../lib/loader.mjs'\\nconst mod = await load('widget')\\nif (mod.widgetShape() !== 2) throw new Error('widgetShape changed')\\n",
+      ...broadTests,
+    },
+  })
+  const { warning, rows } = reachReport(checkout, ['lib/widget.mjs', 'lib/broad.mjs'])
+  const symbolRow = rows.find((row) => row.test === 'test/dynamic.test.mjs')
+  assert.ok(symbolRow)
+  assert.equal(symbolRow.how, 'symbol')
+  assert.equal(symbolRow.symbols.includes('widgetShape'), true)
+  assert.equal(warning.text.includes('widgetShape'), true)
+  assert.equal(rows.some((row) => row.symbols.includes('commonName')), false)
+})
+
+test('test reach enumerates only when fenced code exists and only once per batch', () => {
+  const noCode = reachFixture('no-code', { files: { 'docs/notes.md': '# notes\\n' } })
+  const noCodeCalls = []
+  const noCodeReport = checkFences({
+    fences: [entry('lane-a', ['docs/notes.md'])],
+    lanes: [{ lane: 'lane-a', where: ['docs/notes.md'] }],
+    checkout: noCode,
+    deps: {
+      spawn: (options) => { noCodeCalls.push(options); return { status: 0, stdout: '' } },
+      log: () => {},
+    },
+  })
+  assert.ok(noCodeReport.perLane['lane-a'])
+  assert.equal(noCodeCalls.length, 0)
+
+  const checkout = reachFixture('one-enumeration')
+  const calls = []
+  checkFences({
+    fences: [entry('lane-a', ['lib/widget.mjs']), entry('lane-b', ['lib/caller.mjs']), entry('lane-c', ['lib/outer.mjs'])],
+    lanes: [
+      { lane: 'lane-a', where: ['lib/widget.mjs'] },
+      { lane: 'lane-b', where: [] },
+      { lane: 'lane-c', where: [] },
+    ],
+    checkout,
+    deps: {
+      spawn: (options) => {
+        calls.push(options)
+        return spawnSync(options.file, options.args, { cwd: options.cwd, encoding: 'utf8' })
+      },
+      log: () => {},
+    },
+  })
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].args.includes('ls-files'), true)
+})
+
+test('test reach carries every row while warning text caps the listed rows', () => {
+  const checkout = reachFixture('row-limit', { extraDirect: TEST_REACH_ROW_LIMIT })
+  const { warning, rows } = reachReport(checkout)
+  assert.ok(warning)
+  assert.equal(rows.length, TEST_REACH_ROW_LIMIT + 2)
+  assert.equal(warning.text.includes(`listing at most ${TEST_REACH_ROW_LIMIT}`), true)
+  assert.equal(warning.text.includes('2 further row(s) not listed here and carried on the report'), true)
+  assert.equal(rows.filter((row) => row.hops === 1).length, TEST_REACH_ROW_LIMIT + 1)
+  assert.equal(rows.find((row) => row.test === 'test/twohop.test.mjs')?.hops, 2)
+})
 
 test('readBatch reads request JSON, normalises where paths, and sorts lanes', () => {
   const batch = makeBatch()

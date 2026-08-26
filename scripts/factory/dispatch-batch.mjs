@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
-import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, gatherFences, validateRequest } from './make-brief.mjs'
+import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -143,6 +143,181 @@ const ABSENT_STAFFING = Object.freeze({ shape: null, strength: null, misclassifi
 // booted here, so every check reading booted state is STRUCTURALLY unreachable; the closing
 // line names them rather than leaving an absence to read as a pass.
 export const DRY_RUN_BLIND_SPOT = 'dispatch-batch: dry-run BLIND SPOT — nothing booted, so every check that reads booted state is unreachable from here: fence arrival and the sibling count in a lane crew.json, boot and workspace failures, compiler refusals, and every journal or run outcome. A green dry run is not a validated dispatch.'
+
+export const TEST_REACH_DEPTH = 2
+export const TEST_REACH_ROW_LIMIT = 12
+export const SYMBOL_FANOUT_LIMIT = 8
+export const TEST_REACH_WARNING_PREFIX = 'dispatch-batch: WARNING test-reach-unfenced:'
+export const TEST_REACH_BLIND_SPOT = 'BLIND SPOT: this is a proxy in BOTH directions and names candidates, never proof. A test can assert the changed behaviour through a higher-level entry point without importing the changed file at all, and a computed dynamic import is invisible to a static scan — crew/crew.mjs loads every adapter that way. A test can equally import a fenced file without asserting anything about the part being changed. The literal symbol scan sees only whole-word occurrences of an exported name, is blind to a renamed re-export, and drops any symbol naming more than 8 test files as too broad to be evidence. Read the named files before choosing this fence; an unnamed one is not cleared.'
+const CODE_SUFFIX = /\.(?:mjs|js)$/
+const IMPORT_SPECIFIER = /(?:^|[\n;])\s*(?:import|export)[^\n;]*?from\s*['\"]([^'\"]+)['\"]|\bimport\(\s*['\"]([^'\"]+)['\"]\s*\)/g
+
+function emptyTestReach() {
+  return {
+    byFile: new Map(),
+    tests: new Map(),
+    files: [],
+    depth: TEST_REACH_DEPTH,
+    symbolsFor: () => [],
+  }
+}
+
+function sourceText(value) {
+  if (typeof value === 'string') return value
+  if (value == null) return ''
+  return String(value)
+}
+
+function repoPathFor(root, file) {
+  return join(root, ...normaliseRepoPath(file).split('/'))
+}
+
+function importedPath(file, specifier, codeFiles) {
+  if (typeof specifier !== 'string' || !specifier.startsWith('.')) return null
+  const target = normaliseRepoPath(join(dirname(file), specifier))
+  const candidates = [target, `${target}.mjs`, `${target}.js`, `${target}/index.mjs`, `${target}/index.js`]
+  return candidates.find((candidate) => codeFiles.has(candidate)) || null
+}
+
+function importsFrom(source, file, codeFiles) {
+  const imported = []
+  if (typeof source !== 'string' || source.length === 0) return imported
+  for (const match of source.matchAll(IMPORT_SPECIFIER)) {
+    const target = importedPath(file, match[1] || match[2], codeFiles)
+    if (target && !imported.includes(target)) imported.push(target)
+  }
+  return imported
+}
+
+export function collectTestReach({ checkout, deps } = {}) {
+  const d = normalDeps(deps)
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  let result
+  try {
+    result = d.spawn({
+      file: 'git',
+      args: ['-C', root, 'ls-files', '-z', '--cached', '--others', '--exclude-standard'],
+      cwd: root,
+    })
+  } catch {
+    return emptyTestReach()
+  }
+  if (!result || (result.status !== 0 && result.status !== null)) return emptyTestReach()
+  const files = [...new Set(sourceText(result.stdout)
+    .split('\0')
+    .map(normaliseRepoPath)
+    .filter(Boolean))].sort()
+  const codeFiles = new Set(files.filter((file) => CODE_SUFFIX.test(file)))
+  const sourceByFile = new Map()
+  const readSource = (file) => {
+    const normal = normaliseRepoPath(file)
+    if (sourceByFile.has(normal)) return sourceByFile.get(normal)
+    let source = ''
+    try { source = sourceText(d.readFileSync(repoPathFor(root, normal), 'utf8')) } catch { /* unreadable files cannot contribute edges or symbols */ }
+    sourceByFile.set(normal, source)
+    return source
+  }
+  const tests = new Map()
+  for (const file of files) {
+    if (codeFiles.has(file) && isTripwireFile(file)) tests.set(file, readSource(file))
+  }
+  const byFile = new Map()
+  const importsByFile = new Map()
+  const importsFor = (file) => {
+    const normal = normaliseRepoPath(file)
+    if (!importsByFile.has(normal)) importsByFile.set(normal, importsFrom(readSource(normal), normal, codeFiles))
+    return importsByFile.get(normal)
+  }
+  for (const [test, source] of tests) {
+    const seen = new Map([[test, 0]])
+    const pending = [{ file: test, hops: 0, source }]
+    while (pending.length > 0) {
+      const current = pending.shift()
+      if (current.hops >= TEST_REACH_DEPTH) continue
+      for (const file of importsFor(current.file)) {
+        const hops = current.hops + 1
+        if (hops <= TEST_REACH_DEPTH) {
+          const prior = seen.get(file)
+          if (prior !== undefined && prior <= hops) continue
+          seen.set(file, hops)
+          pending.push({ file, hops })
+          if (!byFile.has(file)) byFile.set(file, new Map())
+          const perTest = byFile.get(file)
+          if (!perTest.has(test) || hops < perTest.get(test)) perTest.set(test, hops)
+        }
+      }
+    }
+  }
+  const symbolCache = new Map()
+  const symbolsFor = (file) => {
+    const normal = normaliseRepoPath(file)
+    if (!codeFiles.has(normal)) return []
+    if (!symbolCache.has(normal)) symbolCache.set(normal, extractSymbols(readSource(normal), normal))
+    return symbolCache.get(normal)
+  }
+  return { byFile, tests, files, depth: TEST_REACH_DEPTH, symbolsFor }
+}
+
+function wholeWord(source, symbol) {
+  if (typeof source !== 'string' || typeof symbol !== 'string' || symbol.length === 0) return false
+  const escaped = symbol.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`\\b${escaped}\\b`).test(source)
+}
+
+export function testsOutsideFence({ surface, fenceFiles, reach } = {}) {
+  const ownSurface = (Array.isArray(surface) ? surface : []).filter((file) => typeof file === 'string').map(normaliseRepoPath)
+  const ownFence = (Array.isArray(fenceFiles) ? fenceFiles : []).filter((file) => typeof file === 'string').map(normaliseRepoPath)
+  const matchesSurface = scopeMatcher(ownSurface)
+  const inFence = scopeMatcher(ownFence)
+  const byTest = new Map()
+  const byFile = reach?.byFile instanceof Map ? reach.byFile : new Map()
+  for (const [fileValue, perTest] of byFile) {
+    const file = normaliseRepoPath(fileValue)
+    if (!matchesSurface(file) || !(perTest instanceof Map)) continue
+    for (const [testValue, hopsValue] of perTest) {
+      const test = normaliseRepoPath(testValue)
+      if (inFence(test)) continue
+      const hops = Number.isFinite(hopsValue) ? hopsValue : null
+      const row = byTest.get(test)
+      if (!row || row.hops === null || (hops !== null && hops < row.hops)) {
+        byTest.set(test, { test, file, hops, how: 'import', symbols: row ? row.symbols : [] })
+      }
+    }
+  }
+  const tests = reach?.tests instanceof Map ? reach.tests : new Map()
+  const files = (Array.isArray(reach?.files) ? reach.files : [])
+    .filter((file) => typeof file === 'string' && CODE_SUFFIX.test(file) && matchesSurface(file))
+  for (const owner of files) {
+    let symbols
+    try { symbols = reach?.symbolsFor?.(owner) } catch { symbols = [] }
+    if (!Array.isArray(symbols)) continue
+    for (const symbol of symbols) {
+      const hits = []
+      for (const [testValue, source] of tests) {
+        const test = normaliseRepoPath(testValue)
+        if (inFence(test) || test === owner) continue
+        if (wholeWord(source, symbol)) hits.push(test)
+      }
+      if (hits.length === 0 || hits.length > SYMBOL_FANOUT_LIMIT) continue
+      for (const test of hits) {
+        const row = byTest.get(test) || { test, file: owner, hops: null, how: 'symbol', symbols: [] }
+        if (!row.symbols.includes(symbol)) row.symbols = [...row.symbols, symbol].sort()
+        byTest.set(test, row)
+      }
+    }
+  }
+  return [...byTest.values()].sort((a, b) => {
+    const left = a.hops === null ? TEST_REACH_DEPTH + 1 : a.hops
+    const right = b.hops === null ? TEST_REACH_DEPTH + 1 : b.hops
+    return left - right || (a.test < b.test ? -1 : a.test > b.test ? 1 : 0)
+  })
+}
+
+function reachRowText(row) {
+  const hops = row.hops === null ? 'symbol-only' : `hops=${row.hops}`
+  const symbols = row.symbols.length > 0 ? ` symbols=${row.symbols.join(',')}` : ''
+  return `${row.test} -> ${row.file} (${hops}, how=${row.how}${symbols})`
+}
 
 export class BatchRefusal extends Error {
   constructor(message, reason) {
@@ -492,6 +667,15 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   }
 
   const pins = collectAnchorPins({ checkout, deps: d })
+  const scanRoot = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const fenceHasCode = entries.some((entry) => (Array.isArray(entry.files) ? entry.files : []).some((file) => {
+    if (typeof file !== 'string') return false
+    const path = normaliseRepoPath(file)
+    if (!CODE_SUFFIX.test(path) && !path.endsWith('/')) return false
+    try { return d.existsSync(join(scanRoot, ...path.split('/'))) } catch { return false }
+  }))
+  let reachIndex = null
+  const reachFor = () => (reachIndex ??= collectTestReach({ checkout: scanRoot, deps: d }))
   const warnings = []
   const perLane = {}
   for (const lane of batchLanes) {
@@ -518,8 +702,18 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
     if (unfencedPins.length > 0) {
       const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
       const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; a shift is repairable with node skills/qa-test-writing/anchor-pin.mjs --repair <skill dir>, so this does not block dispatch; rot and ambiguity still fail in the skill's own exhibits.test.mjs. ${ANCHOR_BLIND_SPOT}`
-      warnings.push({ lane: name, pins: unfencedPins, text })
+      warnings.push({ kind: 'anchor-pin', lane: name, pins: unfencedPins, text })
       d.log(text)
+    }
+
+    const reachRows = fenceHasCode ? testsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, reach: reachFor() }) : []
+    if (reachRows.length > 0) {
+      const listed = reachRows.slice(0, TEST_REACH_ROW_LIMIT).map(reachRowText).join('; ')
+      const omitted = reachRows.length - Math.min(reachRows.length, TEST_REACH_ROW_LIMIT)
+      const tail = omitted > 0 ? `; ${omitted} further row(s) not listed here and carried on the report` : ''
+      const reachText = `${TEST_REACH_WARNING_PREFIX} lane ${name} changes file(s) reached by ${reachRows.length} test file(s) outside its fence, nearest first (listing at most ${TEST_REACH_ROW_LIMIT}): ${listed}${tail}; a named test is a file to READ before this fence is chosen, not a refusal. ${TEST_REACH_BLIND_SPOT}`
+      warnings.push({ kind: 'test-reach', lane: name, reach: reachRows, text: reachText })
+      d.log(reachText)
     }
 
     const siblings = []

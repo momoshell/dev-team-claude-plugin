@@ -132,3 +132,141 @@ test('tier-zero notes are deterministic and tier one is journal-first', async ()
   assert.equal(sends[0].options.triggerTurn, undefined)
   rmSync(f.root, { recursive: true, force: true })
 })
+
+test('delta redaction names each kind it removes and leaves ordinary source alone', () => {
+  const githubSecret = 'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
+  const pemSecret = [
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'MIIBOgIBAAJBAK7A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y',
+    '-----END RSA PRIVATE KEY-----',
+  ].join('\n')
+  const jwtSecret = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+  const bearerSecret = 'bearer aB3dE5fG7hJ9kL1mN3pQ5rS7tU9v'
+  const authorizationSecret = 'Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ=='
+  const parameterizedAuthorization = 'Authorization: Signature keyId="client",signature="AbCdEf0123456789AbCdEf0123456789"'
+  const credentialLine = "const conf = { API_TOKEN: 'Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0' }"
+  const source = readFileSync(new URL('./advisor.ts', import.meta.url), 'utf8')
+  const ordinary = source.split('\n')
+    .filter((line) => line.includes("payloadKey: 'advisor_unavailable'") || line.includes("const UNKNOWN_KEY = 'unknown-key'"))
+    .join('\n')
+  const out = advisor.redactDelta([
+    githubSecret, pemSecret, jwtSecret, bearerSecret, authorizationSecret,
+    parameterizedAuthorization, credentialLine, ordinary,
+  ].join('\n'))
+
+  assert.equal(out.text.includes(githubSecret), false)
+  assert.equal(out.text.includes(pemSecret), false)
+  assert.equal(out.text.includes(jwtSecret), false)
+  assert.equal(out.text.includes(bearerSecret), false)
+  assert.equal(out.text.includes(authorizationSecret), false)
+  assert.equal(out.text.includes(parameterizedAuthorization), false)
+  assert.equal(out.text.includes('AbCdEf0123456789AbCdEf0123456789'), false)
+  assert.equal(out.text.includes(credentialLine), false)
+  assert.equal(out.text.includes('<redacted:github-token>'), true)
+  assert.equal(out.text.includes('<redacted:private-key>'), true)
+  assert.equal(out.text.includes('<redacted:jwt>'), true)
+  assert.equal(out.text.includes('<redacted:bearer-token>'), true)
+  assert.equal(out.text.includes('<redacted:authorization>'), true)
+  assert.equal(out.text.includes('Authorization: <redacted:authorization>'), true)
+  assert.equal(out.text.includes('<redacted:credential>'), true)
+  assert.deepEqual(out.counts, {
+    'private-key': 1, authorization: 2, 'bearer-token': 1,
+    credential: 1, jwt: 1, 'github-token': 1,
+  })
+  const clean = advisor.redactDelta(ordinary)
+  assert.equal(clean.text, ordinary)
+  assert.deepEqual(clean.counts, {})
+})
+
+test('every delta source is redacted before it is stored, sent or frozen', async () => {
+  const githubSecret = 'ghp_A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8'
+  const pemSecret = [
+    '-----BEGIN RSA PRIVATE KEY-----',
+    'MIIBOgIBAAJBAK7A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8S9t0U1v2W3x4Y',
+    '-----END RSA PRIVATE KEY-----',
+  ].join('\n')
+  const jwtSecret = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVPmB92K27uhbUJU1p1r_wW1gFWFOEjXk'
+  const bearerSecret = 'bearer aB3dE5fG7hJ9kL1mN3pQ5rS7tU9v'
+  const sources = [
+    {
+      secret: githubSecret, kind: 'github-token',
+      drive: (a, f) => {
+        const path = join(f.tree, 'outside-edit.mjs'); const content = `const token = '${githubSecret}'\nconst clean = 1\n`
+        writeFileSync(path, content)
+        const input = { path, edits: [{ oldText: 'x', newText: content.split('\n')[0] }] }
+        a.onToolCall(call('edit-source', 'edit', input), {}); a.onToolResult(result('edit-source', 'edit', input, 'ok'), {})
+      },
+    },
+    {
+      secret: pemSecret, kind: 'private-key',
+      drive: (a, f) => {
+        const path = join(f.tree, 'outside-write.mjs'); const content = `${pemSecret}\n`
+        writeFileSync(path, content)
+        const input = { path, content }
+        a.onToolCall(call('write-source', 'write', input), {}); a.onToolResult(result('write-source', 'write', input, 'ok'), {})
+      },
+    },
+    {
+      secret: jwtSecret, kind: 'jwt',
+      drive: (a, f) => {
+        const input = { path: join(f.tree, 'lib', 'widget.mjs'), offset: 1 }
+        a.onToolCall(call('read-source', 'read', input), {})
+        a.onToolResult(result('read-source', 'read', input, `const jwt = '${jwtSecret}'\n`), {})
+        const path = join(f.tree, 'trigger-read.mjs'); const content = 'const clean = 1\n'
+        writeFileSync(path, content)
+        const trigger = { path, edits: [{ oldText: 'x', newText: content.split('\n')[0] }] }
+        a.onToolCall(call('trigger-read', 'edit', trigger), {}); a.onToolResult(result('trigger-read', 'edit', trigger, 'ok'), {})
+      },
+    },
+    {
+      secret: bearerSecret, kind: 'bearer-token',
+      drive: (a, f) => {
+        const input = { command: 'npm test' }
+        a.onToolCall(call('bash-source', 'bash', input), {})
+        a.onToolResult(result('bash-source', 'bash', input, `not ok 1 - request rejected, sent ${bearerSecret} upstream`, true), {})
+        const path = join(f.tree, 'trigger-fail.mjs'); const content = 'const clean = 1\n'
+        writeFileSync(path, content)
+        const trigger = { path, edits: [{ oldText: 'x', newText: content.split('\n')[0] }] }
+        a.onToolCall(call('trigger-fail', 'edit', trigger), {}); a.onToolResult(result('trigger-fail', 'edit', trigger, 'ok'), {})
+      },
+    },
+  ]
+
+  let dirtyRows = null
+  for (const [index, source] of sources.entries()) {
+    const f = fixture(); const journal = sink(); const fetchFn = fetcher()
+    const a = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: f.taskDir }), deps: {
+      cwd: f.tree, taskDir: f.taskDir, appendFile: journal.appendFile,
+      readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2, fetchFn,
+    } })
+    try {
+      source.drive(a, f)
+      await a.settled()
+      const body = fetchFn.posts.map((post) => post.body).join('\n')
+      assert.equal(!body.includes(source.secret) && body.includes(`<redacted:${source.kind}>`), true, `redacted ${source.kind} source ${index + 1}`)
+      if (dirtyRows === null) dirtyRows = journal.rows.filter((row) => row.advisor_consult).map((row) => row.advisor_consult)
+    } finally {
+      rmSync(f.root, { recursive: true, force: true })
+    }
+  }
+
+  assert.deepEqual(dirtyRows[0].redacted, { 'github-token': 1 })
+
+  const cleanFixture = fixture(); const cleanJournal = sink(); const cleanFetch = fetcher()
+  const cleanAdvisor = advisor.createAdvisor({ env: env({ CREW_TASK_DIR: cleanFixture.taskDir }), deps: {
+    cwd: cleanFixture.tree, taskDir: cleanFixture.taskDir, appendFile: cleanJournal.appendFile,
+    readFile: (path) => readFileSync(path, 'utf8'), fileMtime: () => 2, fetchFn: cleanFetch,
+  } })
+  try {
+    const path = join(cleanFixture.tree, 'outside-clean.mjs'); const content = 'const clean = 1\n'
+    writeFileSync(path, content)
+    const input = { path, edits: [{ oldText: 'x', newText: content.split('\n')[0] }] }
+    cleanAdvisor.onToolCall(call('clean-source', 'edit', input), {})
+    cleanAdvisor.onToolResult(result('clean-source', 'edit', input, 'ok'), {})
+    await cleanAdvisor.settled()
+    const cleanRows = cleanJournal.rows.filter((row) => row.advisor_consult).map((row) => row.advisor_consult)
+    assert.deepEqual(cleanRows[0].redacted, {})
+  } finally {
+    rmSync(cleanFixture.root, { recursive: true, force: true })
+  }
+})

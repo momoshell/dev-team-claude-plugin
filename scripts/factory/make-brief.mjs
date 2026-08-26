@@ -188,6 +188,32 @@ discriminates (#168), resolve the repo from \`process.cwd()\`, name in a comment
 the mutation each check kills, never assert the checkout is clean. If your
 gate shells out to the suite, strip ANSI before parsing it (#240).`)
 
+// #672: a lane's gate runs in the SAME environment as its build, so a test that
+// only passes on the author's machine is invisible to it. b254-retryvis shipped a
+// green gate and a green suite and CI still failed on a worker binary the author
+// happened to have installed. Stated here rather than enforced by a lint: the
+// standing block reaches every future lane, a mechanical scan for "reaches a
+// resolution seam" is a bigger surface and its own lane.
+export const HOSTILE_ENV_BLOCK = Object.freeze(`Your gate runs in the SAME environment as your build, so an advantage your box
+happens to have is invisible to both: a resolved binary, a real \`$HOME\`, a
+populated \`$PATH\`. Run the test files this lane TOUCHED once more with those
+advantages removed —
+
+    env -u CREW_CLAUDE_BIN HOME=<an empty dir> node --test --test-reporter=tap <your touched test files>
+
+— and require it green. Not the whole suite: one extra run of your own files.
+\`b254-retryvis\` reported a gate at 29/0/0 and a suite at 2593/0 and CI still
+failed with \`no frozen headless worker binary found\`; its harness injected
+\`deps.headlessIo\`, but the worker binary resolves BEFORE that seam, so the mock
+was unreachable on a machine with no \`claude\` installed (#672).
+
+A new test that reaches a binary-resolution seam (\`resolveWorkerBin\` and its
+siblings) must do one of exactly two things: STUB the resolution —
+\`crew/crew.test.mjs:546\` sets \`CREW_CLAUDE_BIN\` around the call and restores it
+— or SKIP with a named reason — \`crew/adapter-pi.test.mjs:62\`,
+\`if (!command) return t.skip('pi is not installed on PATH')\`. Doing neither, on a
+path that resolves a binary, is the reviewable signal.`)
+
 // The task-specific write-surface and grep lines precede this unchanged
 // standing tail in the rendered Conventions block.
 export const CONVENTIONS_BLOCK = Object.freeze(`- The factory scripts carry a Node ≥26 floor; follow the existing
@@ -315,7 +341,8 @@ verbs, declare two entries or write a narrower sentence.
 Rationale: #409.`)
 
 function standingBlocks() {
-  return { acceptance: ACCEPTANCE_GATE_BLOCK, mutations: MUTATION_CONTRACT_BLOCK, conventions: CONVENTIONS_BLOCK }
+  const acceptance = [ACCEPTANCE_GATE_BLOCK, HOSTILE_ENV_BLOCK].join('\n\n')
+  return { acceptance, mutations: MUTATION_CONTRACT_BLOCK, conventions: CONVENTIONS_BLOCK }
 }
 
 export class BriefUsageError extends Error {

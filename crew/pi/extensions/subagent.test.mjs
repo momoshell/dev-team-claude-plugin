@@ -87,8 +87,10 @@ async function drive(extension, {
   killGraceMs = 1234,
   cwd,
   mkTempDir,
+  root: sharedRoot,
+  writeFile,
 } = {}) {
-  const root = scratchDir('subagent-suite-')
+  const root = sharedRoot || scratchDir('subagent-suite-')
   const taskDir = join(root, 'task')
   let definitionPath = defFile === undefined ? join(ROOT, 'crew/pi/agents/scout.json') : defFile
   if (defBody !== undefined) {
@@ -142,6 +144,7 @@ async function drive(extension, {
     killGraceMs,
   }
   if (mkTempDir) deps.mkTempDir = mkTempDir
+  if (writeFile) deps.writeFile = writeFile
   const tool = extension.createAgentTool(deps)
   const context = ctx === undefined
     ? { cwd: cwd === undefined ? root : cwd, model: { provider: 'openai-codex', id: 'gpt-5.6-luna' }, thinkingLevel: 'medium' }
@@ -527,6 +530,165 @@ test('cleanup removes the prompt file and its temp dir on every path', async () 
   const thrown = await driven(mod, { mkTempDir: () => temp2, spawnMode: 'throw' })
   assert.ok(thrown.result.details.refused)
   assert.equal(existsSync(temp2), false)
+})
+
+test('the spawn counter path is beside the task directory', () => {
+  assert.equal(mod.spawnCountPathFrom('/tmp/example-run/task'), '/tmp/example-run/subagent-spawns.json')
+})
+
+test('an absent spawn counter starts at zero while other read errors refuse', () => {
+  const absent = mod.readSpawnCount('/tmp/missing-counter', () => {
+    const error = new Error('missing')
+    error.code = 'ENOENT'
+    throw error
+  })
+  assert.equal(absent.count, 0)
+  assert.equal(absent.error, undefined)
+  const denied = mod.readSpawnCount('/tmp/denied-counter', () => {
+    const error = new Error('permission denied')
+    error.code = 'EPERM'
+    throw error
+  })
+  assert.match(denied.error, /could not be read/)
+})
+
+test('reserveSpawn increments the counter before allowing a child', () => {
+  let writtenPath = ''
+  let writtenBody = ''
+  let writtenOptions
+  const reserved = mod.reserveSpawn({
+    taskDir: '/tmp/example-run/task',
+    readFile: () => '{"spawns": 3}',
+    writeFile: (path, body, options) => {
+      writtenPath = path
+      writtenBody = body
+      writtenOptions = options
+    },
+    budget: 4,
+  })
+  assert.equal(reserved.count, 4)
+  assert.equal(writtenPath, '/tmp/example-run/subagent-spawns.json')
+  assert.equal(writtenBody, '{"spawns":4}\n')
+  assert.equal(writtenOptions.mode, 0o600)
+})
+
+test('the spawn budget is cumulative per run and refuses when it is spent', async () => {
+  assert.equal(Number.isInteger(mod.SUBAGENT_SPAWN_BUDGET), true)
+  assert.equal(mod.SUBAGENT_SPAWN_BUDGET > 0, true)
+  const root = scratchDir('subagent-budget-')
+  for (let i = 0; i < mod.SUBAGENT_SPAWN_BUDGET; i += 1) {
+    const run = await driven(mod, { root })
+    assert.equal(run.calls.length, 1, `spawn ${i + 1}`)
+    assert.equal(run.result.details.refused, undefined, `spawn ${i + 1}`)
+  }
+  const exhausted = await driven(mod, { root })
+  const refusal = refusedOf(exhausted.result)
+  assert.equal(exhausted.calls.length, 0)
+  assert.match(refusal, /^refused: /)
+  assert.match(refusal, /budget/i)
+  assert.equal(/the child /.test(refusal), false)
+})
+
+test('the budget is scoped to the run, not to the seat', async () => {
+  const root = scratchDir('subagent-budget-scope-')
+  for (let i = 0; i < mod.SUBAGENT_SPAWN_BUDGET; i += 1) await driven(mod, { root })
+  const reseated = await driven(mod, { root })
+  assert.match(refusedOf(reseated.result), /^refused: /)
+  assert.match(refusedOf(reseated.result), /budget/i)
+  assert.equal(reseated.calls.length, 0)
+  const other = await driven(mod)
+  assert.equal(other.result.details.refused, undefined)
+  assert.equal(other.calls.length, 1)
+})
+
+test('a corrupt spawn counter refuses rather than resetting', async () => {
+  for (const bytes of ['not json', '{"spawns":"3"}', '{"spawns":-1}', '{"spawns":1.5}', '{}']) {
+    const root = scratchDir('subagent-budget-corrupt-')
+    const taskDir = join(root, 'task')
+    const counter = mod.spawnCountPathFrom(taskDir)
+    writeFileSync(counter, bytes)
+    const run = await driven(mod, { root })
+    assert.equal(run.calls.length, 0, bytes)
+    assert.match(refusedOf(run.result), /^refused: /)
+    assert.equal(readFileSync(counter, 'utf8'), bytes, bytes)
+  }
+})
+
+test('an unset CREW_TASK_DIR refuses because the budget cannot be scoped', async () => {
+  const run = await driven(mod, { env: { CREW_TASK_DIR: undefined } })
+  assert.equal(run.calls.length, 0)
+  assert.match(refusedOf(run.result), /^refused: /)
+  assert.match(refusedOf(run.result), /cannot be scoped/i)
+})
+
+test('a counter that cannot be written refuses', async () => {
+  const run = await driven(mod, {
+    writeFile: () => {
+      const error = new Error('counter denied')
+      error.code = 'EACCES'
+      throw error
+    },
+  })
+  assert.equal(run.calls.length, 0)
+  assert.match(refusedOf(run.result), /^refused: /)
+  assert.match(refusedOf(run.result), /counter could not be recorded/i)
+})
+
+test('depth and the budget are independent bounds', async () => {
+  const depth = await driven(mod, { env: { [mod.DEPTH_ENV]: '1' } })
+  assert.match(refusedOf(depth.result), /spawn depth is already 1/)
+  assert.equal(depth.calls.length, 0)
+  assert.equal(existsSync(mod.spawnCountPathFrom(depth.taskDir)), false)
+
+  const spentRoot = scratchDir('subagent-budget-depth-')
+  const spentTaskDir = join(spentRoot, 'task')
+  writeFileSync(mod.spawnCountPathFrom(spentTaskDir), JSON.stringify({ spawns: mod.SUBAGENT_SPAWN_BUDGET }))
+  const budget = await driven(mod, { root: spentRoot })
+  assert.match(refusedOf(budget.result), /^refused: /)
+  assert.match(refusedOf(budget.result), /budget/i)
+  assert.equal(budget.calls.length, 0)
+})
+
+test('a budget refusal journals a row distinguishable from a failed spawn', async () => {
+  const root = scratchDir('subagent-budget-journal-')
+  const failed = await driven(mod, { root, code: 1 })
+  assert.equal(failed.calls.length, 1)
+  assert.equal(JSON.parse(failed.journal[0]).subagent_usage.outcome, 'refused')
+  for (let i = 1; i < mod.SUBAGENT_SPAWN_BUDGET; i += 1) {
+    const run = await driven(mod, { root })
+    assert.equal(run.result.details.refused, undefined, `spawn ${i + 1}`)
+  }
+  const exhausted = await driven(mod, { root })
+  assert.equal(exhausted.calls.length, 0)
+  assert.equal(exhausted.journal.length, mod.SUBAGENT_SPAWN_BUDGET + 1)
+  const row = JSON.parse(exhausted.journal.at(-1))
+  assert.equal(row.subagent_usage.outcome, mod.SPAWN_BUDGET_OUTCOME)
+  assert.equal(row.subagent_usage.model, null)
+  assert.equal(row.usage, null)
+})
+
+test('the refusal is bounded and payload-free', async () => {
+  const root = scratchDir('subagent-budget-payload-')
+  for (let i = 0; i < mod.SUBAGENT_SPAWN_BUDGET; i += 1) await driven(mod, { root })
+  const taskMarker = 'TASK_PAYLOAD_MARKER'
+  const agentMarker = 'AGENT_NAME_PAYLOAD_MARKER'
+  const allowedAgentName = 'A'.repeat(mod.AGENT_NAME_CAP_BYTES)
+  const hugeAgentName = `${allowedAgentName}${agentMarker}${'A'.repeat(52 * 1024)}`
+  const run = await driven(mod, {
+    root,
+    env: {
+      [mod.AGENTS_ENV]: JSON.stringify([{
+        name: allowedAgentName, def: join(ROOT, 'crew/pi/agents/scout.json'),
+      }]),
+    },
+    params: { agent: hugeAgentName, task: taskMarker },
+  })
+  const text = textOf(run.result)
+  assert.equal(byteLength(text) < mod.OUTPUT_CAP_BYTES, true)
+  assert.equal(text.includes(taskMarker), false)
+  assert.equal(text.includes(hugeAgentName), false)
+  assert.equal(text.includes(agentMarker), false)
+  assert.match(refusedOf(run.result), /budget/i)
 })
 
 test('toolResultPatch flags a refusal and only a refusal', () => {

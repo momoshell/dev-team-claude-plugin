@@ -1,6 +1,6 @@
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs'
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -17,8 +17,10 @@ import {
   follow,
   lineLabels,
   main,
+  newestTranscriptMs,
   orphaned,
   parseArgs,
+  transcriptHome,
   resolveLane,
   selectEvent,
   tick,
@@ -52,6 +54,22 @@ function journalObjects(path) {
   return readFileSync(path, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
 }
 
+function crewLane(root, { task = 'crew-lane', checkout = `/w/${task}`, members = {}, ...options } = {}) {
+  const lane = seedLane(root, { task, journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }], ...options })
+  writeFileSync(join(lane.dir, 'crew.json'), JSON.stringify({ schema_version: 3, task, checkout, members }))
+  return lane
+}
+
+function transcriptFrame(home, agent, checkout, ageS, name = 'frame.jsonl') {
+  const dir = transcriptHome({ agent, checkout, home })
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, name)
+  writeFileSync(path, '{}\n')
+  const when = (NOW - ageS * 1000) / 1000
+  utimesSync(path, when, when)
+  return path
+}
+
 after(() => rmSync(fixtureRoot, { recursive: true, force: true }))
 
 test('orphaned is pure and only reports an integer ppid change', () => {
@@ -82,6 +100,96 @@ test('bounded report shows active and settled lane status', () => {
     '[live] stage=build:r1 age=5s status=active',
     '[finished] stage=done age=8s status=settled',
   ])
+})
+
+test('seat liveness measures each seat in its own transcript home', () => {
+  const root = world()
+  const home = join(root, 'home')
+  const checkout = '/w/mixed'
+  crewLane(root, { task: 'mixed', checkout, members: { lead: { agent: 'claude' }, builder: { agent: 'pi' } } })
+  transcriptFrame(home, 'claude', checkout, 120)
+  transcriptFrame(home, 'pi', checkout, 30)
+  const report = boundedReport({ root, names: ['mixed'], now: NOW, deps: deps(NOW, { homedir: () => home }) })
+  assert.match(report.lines.find((line) => line.includes('seat=lead')), /transcript=120s/)
+  assert.match(report.lines.find((line) => line.includes('seat=builder')), /transcript=30s/)
+})
+
+test('transcriptHome derives both homes from an injected home and checkout', () => {
+  const checkout = '/w/x'
+  assert.equal(transcriptHome({ agent: 'claude', checkout, home: '/h' }), '/h/.claude/projects/-w-x')
+  assert.equal(transcriptHome({ agent: 'pi', checkout, home: '/h' }), '/h/.pi/agent/sessions/--w-x--')
+  assert.equal(transcriptHome({ agent: 'unknown', checkout, home: '/h' }), null)
+})
+
+test('claude-only, pi-only and mixed lanes read differently with the same roles', () => {
+  const root = world()
+  const home = join(root, 'home')
+  const members = { lead: { agent: 'claude' }, builder: { agent: 'pi' } }
+  const shapes = [
+    ['claude-only', { lead: { agent: 'claude' }, builder: { agent: 'claude' } }, [['claude', 10]]],
+    ['pi-only', { lead: { agent: 'pi' }, builder: { agent: 'pi' } }, [['pi', 20]]],
+    ['mixed', members, [['claude', 30], ['pi', 40]]],
+  ]
+  const readouts = shapes.map(([task, laneMembers, frames]) => {
+    const checkout = `/w/${task}`
+    crewLane(root, { task, checkout, members: laneMembers })
+    for (const [agent, ageS] of frames) transcriptFrame(home, agent, checkout, ageS)
+    return boundedReport({ root, names: [task], now: NOW, deps: deps(NOW, { homedir: () => home }) }).lines.filter((line) => line.includes(' seat='))
+  })
+  assert.equal(readouts.every((lines) => lines.length === 2), true)
+  assert.notDeepEqual(readouts[0], readouts[1])
+  assert.notDeepEqual(readouts[0], readouts[2])
+  assert.notDeepEqual(readouts[1], readouts[2])
+})
+
+test('a seat with no readable transcript home reads transcript=unknown', () => {
+  const root = world()
+  const home = join(root, 'home')
+  const checkout = '/w/no-transcript'
+  crewLane(root, { task: 'no-transcript', checkout, members: { lead: { agent: 'claude' }, builder: { agent: 'pi' } } })
+  const report = boundedReport({ root, names: ['no-transcript'], now: NOW, deps: deps(NOW, { homedir: () => home }) })
+  const lines = report.lines.filter((line) => line.includes(' seat='))
+  assert.equal(lines.length, 2)
+  assert.ok(lines.every((line) => line.includes('transcript=unknown')))
+  assert.ok(lines.every((line) => !line.includes('dead') && !line.includes('transcript=0s')))
+})
+
+test('an escalated lane still reports its seats beside settled status', () => {
+  const root = world()
+  const home = join(root, 'home')
+  const checkout = '/w/escalated'
+  crewLane(root, { task: 'escalated', checkout, members: { builder: { agent: 'pi' } }, journalLines: [{ at: NOW - 5_000, stage: 'escalate:review' }] })
+  transcriptFrame(home, 'pi', checkout, 30)
+  const report = boundedReport({ root, names: ['escalated'], now: NOW, deps: deps(NOW, { homedir: () => home }) })
+  assert.match(report.lines[0], /\[escalated\].*status=settled/)
+  assert.match(report.lines[1], /seat=builder agent=pi .*transcript=30s/)
+})
+
+test('newestTranscriptMs ignores non-jsonl entries and empty homes', () => {
+  const root = world()
+  const home = join(root, 'transcripts')
+  mkdirSync(home, { recursive: true })
+  const frame = join(home, 'frame.jsonl')
+  const other = join(home, 'newer.txt')
+  writeFileSync(frame, '{}\n')
+  writeFileSync(other, 'not a frame')
+  utimesSync(frame, (NOW - 60_000) / 1000, (NOW - 60_000) / 1000)
+  utimesSync(other, NOW / 1000, NOW / 1000)
+  assert.equal(newestTranscriptMs(home), NOW - 60_000)
+  assert.equal(newestTranscriptMs(join(root, 'absent')), null)
+  const empty = join(root, 'empty')
+  mkdirSync(empty, { recursive: true })
+  assert.equal(newestTranscriptMs(empty), null)
+})
+
+test('an unreadable or memberless crew yields no seat lines without throwing', () => {
+  const root = world()
+  const unreadable = seedLane(root, { task: 'unreadable', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  writeFileSync(join(unreadable.dir, 'crew.json'), '{not json')
+  crewLane(root, { task: 'memberless', members: {} })
+  const report = boundedReport({ root, names: ['unreadable', 'memberless'], now: NOW, deps: deps(NOW, { homedir: () => join(root, 'home') }) })
+  assert.equal(report.lines.filter((line) => line.includes(' seat=')).length, 0)
+  assert.equal(report.lines.length, 2)
 })
 
 test('boundedReport tells a retrying seat from a stale one and from a working one', () => {

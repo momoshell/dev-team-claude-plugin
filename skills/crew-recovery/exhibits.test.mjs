@@ -56,18 +56,28 @@ test('liveness.md names the retry exception and keeps the measured ordering', ()
     'headless lane cannot show this state and keeps reading `active`',
     'seat-stale` condition is retired only by measured growth or a completing envelope',
     'a budget that expired measured nothing',
+    'no lane in argv',
+    'zero pi seats by construction',
+    'builder and the reviewer',
+    'keyed on the checkout',
+    'unknown',
+    'never dead',
   ]) {
     assert.ok(text.includes(token), `liveness.md must name ${token}`)
   }
   assert.match(text, /recogniseProviderRetry[^\n]*crew\/seat-io\.mjs:\d+/)
+  assert.match(text, /scripts\/factory\/crew-watch\.mjs:\d+/)
 })
 
 // Mutation killed: changing either half of the post-publish order must fail the closeout evidence test.
 test('closeout keeps teardown last and verifies after it', () => {
   const text = readText(join(HERE, 'references/closeout.md'))
-  for (const token of ['preserve → commit → prove → suite → push+PR → teardown', 'immediately after teardown', 'merged blob', 'diff every PR', 'references/lane-branches.md', 'gh pr reopen']) {
+  for (const token of ['preserve → commit → prove → suite → push+PR → teardown', 'immediately after teardown', 'merged blob', 'diff every PR', 'references/lane-branches.md', 'gh pr reopen', '### Precondition: prove the tree QUIET first', 'two read']) {
     assert.ok(text.includes(token), `closeout.md must name ${token}`)
   }
+  const quietAt = text.indexOf('### Precondition: prove the tree QUIET first')
+  const copyAt = text.indexOf('cp -a')
+  assert.ok(quietAt < copyAt, 'closeout precondition must precede preserve-by-copy')
 })
 
 // Mutation killed: restoring the archive scratch recipe or removing first preservation must fail the proof test.

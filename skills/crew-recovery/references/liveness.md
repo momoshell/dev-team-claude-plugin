@@ -27,6 +27,18 @@ unreadable journal, missing return, unknown timestamp, or interrupted probe is
 unknown—not proof of idle, death, or failure. For the instrument cases behind
 surprising readings, continue with [`references/instruments.md`](instruments.md).
 
+## A lane grep cannot measure a pi seat
+
+A `claude` seat carries its lane in argv; a `pi` seat is a bare `pi` with no lane in argv. A lane-grep therefore finds zero pi seats by construction, and those seats are the builder and the reviewer. On the measured 2026-08-26 incident, an operator read the empty grep as “the builder is gone” and reported a lost builder while it had been writing code for two hours.
+
+Read the evidence in this order:
+
+1. The seat's transcript home: `~/.claude/projects/<checkout with / as ->` for claude, or `~/.pi/agent/sessions/-<checkout with / as ->--` for pi. The newest `*.jsonl` mtime advances while the seat works.
+2. The worktree's own newest file mtime.
+3. `crew-watch <lane>`, which prints one `seat=… agent=… home=… transcript=…` line per seat across both homes (`scripts/factory/crew-watch.mjs:121`).
+
+Both homes are keyed on the checkout, not the role, so a lane's two pi seats share one home and read the same age. A home with no readable transcript reads `unknown`, never dead.
+
 ## Transcript growth is the liveness signal
 
 The reliable signals are ordered: **transcript mtime** first, then the pane's

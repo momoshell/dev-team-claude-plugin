@@ -848,6 +848,42 @@ test('the planner charter tells the planner to grep the changed file’s own pat
   assert.doesNotMatch(discovery, /production/)
 })
 
+// The file nobody pinned is the file that rotted: tech-lead.md carried the whole
+// plan-check doctrine and no test read a byte of it (#698).
+test('the tech-lead charter documents envelope custody and the residual it cannot type', () => {
+  const charter = readFileSync(new URL('./roles/tech-lead.md', import.meta.url), 'utf8')
+  for (const token of [
+    'details.mutations', 'files_in_scope', 'details.residuals',
+    'correctness-unverified', 'verdictOf', 'applyPrescriptionLines',
+  ]) assert.ok(charter.includes(token), token)
+  const collapsed = charter.replace(/\s+/g, ' ')
+  assert.match(collapsed, /frozen at acceptance/)
+  assert.match(collapsed, /not amendable after acceptance/)
+  assert.match(collapsed, /VERDICT: revise[^.]*PRESCRIBES/)
+  assert.match(collapsed, /correctness-unverified[^.]*code-refused/)
+  assert.match(collapsed, /cannot type a residual/)
+})
+
+// Prose file:line citations are invisible to skills/*/anchors.json, so this
+// resolver is the only thing that can see them rot. It reads the cited LINE of
+// crew/drive.mjs, which is why a shifted anchor fails here instead of in a lane.
+test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the code it names', () => {
+  const charter = readFileSync(new URL('./roles/tech-lead.md', import.meta.url), 'utf8')
+  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8').split('\n')
+  const cited = [...charter.matchAll(/crew\/drive\.mjs:(\d+)/g)].map((match) => Number(match[1]))
+  assert.ok(cited.length >= 8, `expected at least 8 anchors, found ${cited.length}`)
+  for (const line of cited) {
+    const text = (source[line - 1] ?? '').trim()
+    assert.ok(text.length > 3 && !/^[)}\];,]+$/.test(text),
+      `crew/drive.mjs:${line} is ${JSON.stringify(text)} — a citation that resolves to nothing`)
+  }
+  // Both citation forms of the four anchors #698 found stale: the qualified
+  // `crew/drive.mjs:2299` and the bare `:2226` continuation the file also used.
+  for (const retired of [':2299', ':2226', ':2319', ':2217']) {
+    assert.equal(charter.includes(retired), false, `retired anchor ${retired}`)
+  }
+})
+
 test('skills are self-contained and verifiable on both vendors', () => {
   for (const name of SKILL_NAMES) {
     const dir = join(REPO_ROOT, '.agents', 'skills', name)

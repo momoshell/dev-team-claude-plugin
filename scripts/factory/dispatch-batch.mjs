@@ -8,7 +8,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
-import { scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
+import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { TIER_NAMES, gatherFences, validateRequest } from './make-brief.mjs'
@@ -36,6 +36,8 @@ const DEPENDENT_BASE_STALE = 'dependent-base-stale'
 const PLAN_SCOPE_OUTSIDE_FENCE = 'plan-scope-outside-fence'
 const GRAPH_UNMEASURED = 'graph-unmeasured'
 const LANE_SHAPE_INVALID = 'lane-shape-invalid'
+const FENCE_REGISTER_MISMATCH = 'fence-register-mismatch'
+const DIRECTED_BRIEF_INVALID = 'directed-brief-invalid'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -61,6 +63,8 @@ export const REFUSAL_REASONS = Object.freeze([
   PLAN_SCOPE_OUTSIDE_FENCE,
   GRAPH_UNMEASURED,
   LANE_SHAPE_INVALID,
+  FENCE_REGISTER_MISMATCH,
+  DIRECTED_BRIEF_INVALID,
 ])
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
@@ -99,6 +103,12 @@ export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', '
 export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
+
+// A dry run reports success in the same tone a fully validated dispatch would, and an
+// operator read that as validation, split a batch and dispatched it twice (#658). Nothing has
+// booted here, so every check reading booted state is STRUCTURALLY unreachable; the closing
+// line names them rather than leaving an absence to read as a pass.
+export const DRY_RUN_BLIND_SPOT = 'dispatch-batch: dry-run BLIND SPOT — nothing booted, so every check that reads booted state is unreachable from here: fence arrival and the sibling count in a lane crew.json, boot and workspace failures, compiler refusals, and every journal or run outcome. A green dry run is not a validated dispatch.'
 
 export class BatchRefusal extends Error {
   constructor(message, reason) {
@@ -483,6 +493,15 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
       siblings,
     }
   }
+  // The other half of the invariant the membership loop above measures (#658): a register may
+  // not be a SUPERSET of the batch it is dispatched with. A lane's sibling count is DERIVED
+  // from batch size, so such a register can only ever be caught at boot, as
+  // fence-count-mismatch, after every seat has been paid for. Both halves are decidable from
+  // these two inputs with nothing booted. This check runs LAST on purpose: no existing
+  // refusal changes the cause it names.
+  const batchNames = new Set(batchLanes.map(laneNameOf))
+  const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name))
+  if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}, and a lane's sibling count is derived from batch size, so this register can only refuse at boot as ${FENCE_COUNT_MISMATCH}`, FENCE_REGISTER_MISMATCH)
   return { perLane, warnings }
 }
 
@@ -501,6 +520,26 @@ export function checkPlanScope({ lane, declared, files } = {}) {
     refuse(`lane ${name} plan declares files_in_scope outside the lane fence: ${outside.join(', ')}; the lane fence is ${fenceFiles.join(', ') || 'empty'}`, PLAN_SCOPE_OUTSIDE_FENCE)
   }
   return { lane: name, declared: paths, fence: fenceFiles }
+}
+
+// #658: a directed lane's PLAN IS ITS BRIEF, and the compiled brief is an artefact the
+// dispatcher holds in hand before it boots anything. parseDirectedBrief is the authority the
+// driver itself uses (crew/drive.mjs:2332) and its own defect string is reported verbatim, so
+// one defect has one sentence rather than two that can drift. The variant is recognised by
+// what it DECLARES — sources.gate === 'brief' — exactly as preflightRunOptions recognises a
+// ctx validation lane, so a later shape whose gate comes from its brief is checked too.
+export function checkDirectedBrief({ lane, variant, briefPath, deps } = {}) {
+  const d = normalDeps(deps)
+  const name = laneNameOf(lane)
+  const resolved = String(variant ?? 'full')
+  if (VARIANTS[resolved]?.sources?.gate !== 'brief') return { lane: name, variant: resolved, checked: false }
+  let text = null
+  try { text = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
+    refuse(`cannot read the compiled brief for ${resolved} lane ${name} at ${briefPath}: ${err?.message || String(err)}`, DIRECTED_BRIEF_INVALID)
+  }
+  const parsed = parseDirectedBrief(text)
+  if (parsed.defect) refuse(`lane ${name} runs the ${resolved} shape, whose plan IS its brief, and ${briefPath} is not a plan this driver can run: ${parsed.defect}`, DIRECTED_BRIEF_INVALID)
+  return { lane: name, variant: resolved, checked: true, gate_cmd: parsed.gate_cmd, files_in_scope: parsed.files_in_scope }
 }
 
 export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
@@ -1047,6 +1086,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   if (dryRun) {
     const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
     d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
+    d.log(DRY_RUN_BLIND_SPOT)
     return { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted }
   }
   logWaveState()
@@ -1108,6 +1148,13 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
     d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier}`)
     settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant })
+  }
+
+  // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
+  // already on disk, and a defect in lane B's brief must not cost lane A's seats. Last in the
+  // pre-boot order on purpose: no existing refusal loses the cause it names.
+  for (const item of settled) {
+    checkDirectedBrief({ lane: item.lane, variant: item.variant, briefPath: item.brief, deps: d })
   }
 
   const arrivals = []

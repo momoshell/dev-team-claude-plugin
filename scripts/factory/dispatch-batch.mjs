@@ -12,6 +12,7 @@ import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidate
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
+import { archivedLanes, crewRoot, discoverLanes, laneActive, readJournal } from './lane-watch.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -39,6 +40,7 @@ const LANE_SHAPE_INVALID = 'lane-shape-invalid'
 const FENCE_REGISTER_MISMATCH = 'fence-register-mismatch'
 const DIRECTED_BRIEF_INVALID = 'directed-brief-invalid'
 const SEAT_FLOOR_CONFLICT = 'seat-floor-conflict'
+const CROSS_BATCH_COLLISION = 'cross-batch-collision'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -67,7 +69,11 @@ export const REFUSAL_REASONS = Object.freeze([
   FENCE_REGISTER_MISMATCH,
   DIRECTED_BRIEF_INVALID,
   SEAT_FLOOR_CONFLICT,
+  CROSS_BATCH_COLLISION,
 ])
+
+export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
+export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
 // citations in .md files are not, and a heuristic over prose would refuse every doc that
@@ -233,7 +239,10 @@ export function collectTestReach({ checkout, deps } = {}) {
     const pending = [{ file: test, hops: 0, source }]
     while (pending.length > 0) {
       const current = pending.shift()
-      if (current.hops >= TEST_REACH_DEPTH) continue
+      // ONE bound, not two. A second guard at the depth limit
+      // made the bound below unreachable-when-false, so widening the bound changed
+      // nothing and the R3 mutation PR #708 declared SURVIVED its own check. The walk
+      // still terminates: nothing is pushed above the bound. #699.
       for (const file of importsFor(current.file)) {
         const hops = current.hops + 1
         if (hops <= TEST_REACH_DEPTH) {
@@ -359,6 +368,7 @@ export function normalDeps(deps = {}) {
     existsSync: deps.existsSync || fsExistsSync,
     readFileSync: deps.readFileSync || fsReadFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
+    home: deps.home || homedir(),
     spawn: deps.spawn || ((options) => options?.background
       ? spawnBackground(options)
       : spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8' })),
@@ -630,6 +640,189 @@ export function anchorPinsOutsideFence({ surface, fenceFiles, pins } = {}) {
   return found
 }
 
+function repoCommonDir(checkout, d) {
+  if (typeof checkout !== 'string' || checkout.trim() === '') return null
+  const target = resolve(checkout)
+  let result
+  try {
+    result = d.spawn({
+      file: 'git',
+      args: ['-C', target, 'rev-parse', '--path-format=absolute', '--git-common-dir'],
+      cwd: target,
+    })
+  } catch {
+    return null
+  }
+  if (!result || result.error || result.signal || result.status !== 0) return null
+  const output = textOf(result.stdout).trim()
+  if (!output) return null
+  try { return resolve(output) } catch { return null }
+}
+
+function readCrewClaim(lane, d) {
+  try {
+    const parsed = JSON.parse(d.readFileSync(join(lane.dir, 'crew.json'), 'utf8'))
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { parsed: null, unreadable: true }
+    return { parsed, unreadable: false }
+  } catch {
+    return { parsed: null, unreadable: true }
+  }
+}
+
+function claimFor(parsed) {
+  return {
+    lane: typeof parsed?.lane_name === 'string' ? parsed.lane_name : null,
+    checkout: typeof parsed?.checkout === 'string' ? parsed.checkout : null,
+  }
+}
+
+export function liveLaneClaims({ checkout, batchNames, deps } = {}) {
+  const d = normalDeps(deps)
+  const root = crewRoot({ home: d.home })
+  let rootExists
+  try { rootExists = d.existsSync(root) } catch {
+    return { state: 'unreadable', root, live: [], own: [], foreign: [], unknown: [{ lane: null, reason: 'crew-root-unreadable' }], cleared: false }
+  }
+  if (!rootExists) return { state: 'absent', root, live: [], own: [], foreign: [], unknown: [], cleared: true }
+  try {
+    d.readdirSync(root)
+  } catch {
+    return { state: 'unreadable', root, live: [], own: [], foreign: [], unknown: [{ lane: null, reason: 'crew-root-unreadable' }], cleared: false }
+  }
+  const walkErrors = new Set()
+  const walkDeps = {
+    existsSync: (path) => {
+      try { return d.existsSync(path) } catch (err) {
+        walkErrors.add(String(path))
+        throw err
+      }
+    },
+    readFileSync: d.readFileSync,
+    readdirSync: (path, options) => {
+      try { return d.readdirSync(path, options) } catch (err) {
+        walkErrors.add(String(path))
+        throw err
+      }
+    },
+  }
+  let liveLanes = []
+  try { liveLanes = discoverLanes(root, walkDeps) } catch { /* the wrapper records a partial walk */ }
+  const activeLanes = liveLanes.filter((lane) => laneActive(lane, readJournal(lane.journal, walkDeps)))
+  const unknown = []
+  const records = activeLanes.map((lane) => {
+    const crew = readCrewClaim(lane, d)
+    return { lane, crew, claim: crew.unreadable ? null : claimFor(crew.parsed), repo: null }
+  })
+  const measured = records.filter(({ crew }) => !crew.unreadable)
+  const dispatchRepo = activeLanes.length > 0 ? repoCommonDir(checkout, d) : null
+  for (const record of measured) record.repo = repoCommonDir(record.claim.checkout, d)
+
+  const noteUnknown = (lane, reason) => unknown.push({ lane, reason })
+  const own = []
+  const foreign = []
+  const live = []
+  batchNames = batchNames instanceof Set ? batchNames : new Set(Array.isArray(batchNames) ? batchNames : [])
+  const sameRepo = (record) => record.repo && dispatchRepo && record.repo === dispatchRepo
+  const nonOwn = records.filter((record) => !record.crew.unreadable
+    && sameRepo(record)
+    && !batchNames.has(record.claim.lane))
+
+  const claims = new Map()
+  if (nonOwn.length > 0) {
+    const allLanes = [...liveLanes, ...archivedLanes(root, walkDeps)]
+    const byDir = new Map(records.map((record) => [record.lane.dir, record.crew]))
+    const sourceRepos = new Map(records.map((record) => [record.lane.dir, record.repo]))
+    const candidateNames = new Set(nonOwn.map((record) => record.claim.lane).filter((name) => typeof name === 'string' && name.trim() !== ''))
+    const candidateSiblings = new Map()
+    for (const record of nonOwn) {
+      if (!candidateSiblings.has(record.claim.lane)) candidateSiblings.set(record.claim.lane, new Set())
+      const siblings = candidateSiblings.get(record.claim.lane)
+      const fences = Array.isArray(record.crew.parsed?.lane_fence) ? record.crew.parsed.lane_fence : []
+      for (const entry of fences) {
+        if (typeof entry?.lane === 'string' && entry.lane.trim() !== '') siblings.add(entry.lane)
+      }
+    }
+    for (const lane of allLanes) {
+      const source = byDir.get(lane.dir) || readCrewClaim(lane, d)
+      if (source.unreadable) continue
+      const sourceClaim = claimFor(source.parsed)
+      const fences = Array.isArray(source.parsed?.lane_fence) ? source.parsed.lane_fence : []
+      const relevant = fences.filter((entry) => typeof entry?.lane === 'string'
+        && entry.lane.trim() !== '' && candidateNames.has(entry.lane)
+        && candidateSiblings.get(entry.lane)?.has(sourceClaim.lane) && Array.isArray(entry.files))
+      if (relevant.length === 0) continue
+      let sourceRepo
+      if (sourceRepos.has(lane.dir)) {
+        sourceRepo = sourceRepos.get(lane.dir)
+      } else {
+        sourceRepo = repoCommonDir(sourceClaim.checkout, d)
+        sourceRepos.set(lane.dir, sourceRepo)
+      }
+      if (!sourceRepo || !dispatchRepo || sourceRepo !== dispatchRepo) continue
+      for (const entry of relevant) {
+        if (!claims.has(entry.lane)) claims.set(entry.lane, new Set())
+        const files = claims.get(entry.lane)
+        for (const file of entry.files) {
+          if (typeof file === 'string') files.add(normaliseRepoPath(file))
+        }
+      }
+    }
+  }
+
+  for (const path of walkErrors) noteUnknown(null, 'crew-walk-incomplete')
+
+  for (const record of records) {
+    const lane = record.lane
+    const claim = record.claim || { lane: null, checkout: null }
+    if (record.crew.unreadable) {
+      noteUnknown(lane.task, 'crew-json-unreadable')
+      continue
+    }
+    if (!record.repo || !dispatchRepo) {
+      noteUnknown(lane.task, 'repo-unmeasured')
+      continue
+    }
+    if (record.repo !== dispatchRepo) {
+      foreign.push(lane.task)
+      continue
+    }
+    if (batchNames.has(claim.lane)) {
+      own.push(claim.lane)
+      continue
+    }
+    const files = claims.get(claim.lane)
+    if (!files) {
+      noteUnknown(lane.task, 'claim-unrecorded')
+      continue
+    }
+    live.push({ lane: claim.lane, dir: lane.dir, files: [...files].sort() })
+  }
+  const state = 'read'
+  const cleared = state === 'read' && unknown.length === 0
+  return { state, root, live, own, foreign, unknown, cleared }
+}
+
+export function crossBatchCollisions({ entries, live } = {}) {
+  const collisions = []
+  const ownEntries = Array.isArray(entries) ? entries : []
+  const liveLanes = Array.isArray(live) ? live : []
+  for (const entry of ownEntries) {
+    const ownFiles = (Array.isArray(entry?.files) ? entry.files : [])
+      .filter((file) => typeof file === 'string').map(normaliseRepoPath)
+    const matchOwn = scopeMatcher(ownFiles)
+    for (const current of liveLanes) {
+      const liveFiles = (Array.isArray(current?.files) ? current.files : [])
+        .filter((file) => typeof file === 'string').map(normaliseRepoPath)
+      const matchLive = scopeMatcher(liveFiles)
+      const collided = ownFiles.some(matchLive) || liveFiles.some(matchOwn)
+      if (!collided) continue
+      const files = [...new Set([...ownFiles.filter(matchLive), ...liveFiles.filter(matchOwn)])].sort()
+      collisions.push({ lane: entry.lane, live: current.lane, dir: current.dir, files })
+    }
+  }
+  return collisions
+}
+
 export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   const d = normalDeps(deps)
   const entries = fenceEntriesOf(fences).map(normaliseFence)
@@ -753,7 +946,27 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   const batchNames = new Set(batchLanes.map(laneNameOf))
   const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name))
   if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}, and a lane's sibling count is derived from batch size, so this register can only refuse at boot as ${FENCE_COUNT_MISMATCH}`, FENCE_REGISTER_MISMATCH)
-  return { perLane, warnings }
+  // Every check above reads only the register and the batch in hand; this one reads LIVE
+  // state OUTSIDE both. A cause an operator can fix from the register alone is named first
+  // and is never masked by one that depends on what else happens to be running.
+  //
+  // This REFUSES where the test-reach scan only warns, and the difference is not severity:
+  // the reach scan is a static proxy (#635 measured a heuristic refusal falsely blocking
+  // three of five lanes in one batch), while a collision here is a FACT read from a live
+  // lane's own persisted fence. An UNDETERMINED live set is neither — it warns, and it
+  // never reads as "no collision" (#678, #687).
+  const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
+  const collisions = crossBatchCollisions({ entries, live: crossBatch.live })
+  if (collisions.length > 0) {
+    const detail = collisions.map((row) => `lane ${row.lane} collides with live lane ${row.live} on ${row.files.join(', ')} (crew dir ${row.dir})`).join('; ')
+    refuse(`the fence register grants file(s) that a live lane outside this batch already holds: ${detail}; "ONE register, ONE batch" holds only while one batch runs at a time — settle, archive or narrow the named lane, or narrow this register`, CROSS_BATCH_COLLISION)
+  }
+  if (!crossBatch.cleared) {
+    const text = `${CROSS_BATCH_UNKNOWN_PREFIX} the live lane set could not be determined in full (crew root ${crossBatch.root}, state ${crossBatch.state}): ${crossBatch.unknown.map((row) => `${row.lane ?? 'crew-root'} (${row.reason})`).join('; ') || 'none named'}; this batch is NOT cleared against those lanes and this absence is not a clear. ${CROSS_BATCH_BLIND_SPOT}`
+    warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
+    d.log(text)
+  }
+  return { perLane, warnings, crossBatch }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a

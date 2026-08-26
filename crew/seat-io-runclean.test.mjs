@@ -1094,6 +1094,8 @@ function makeRetryHarness({ transport = 'pane', screen = () => '529 Overloaded Â
   const logs = []; const events = []; const sends = []
   const box = { clock: 0, reads: 0, returnPath: null, envelope: false }
   const returnFile = join(paths.returnsDir, 'd1.lead.json')
+  let workerBin = null
+  let priorWorkerBin = null
   const member = transport === HEADLESS_TRANSPORT
     ? { transport, agent: 'claude' }
     : { surface_id: 'surface-lead', transport: 'pane', agent: 'claude' }
@@ -1116,6 +1118,15 @@ function makeRetryHarness({ transport = 'pane', screen = () => '529 Overloaded Â
     deps.locate = (_tree, id) => id === 'surface-lead'
     if (refusalFrames) deps.refusalFrames = refusalFrames
   } else {
+    // `io.assign` resolves the frozen worker binary BEFORE it consults
+    // deps.headlessIo, so a machine without a claude install cannot reach the
+    // injected seam at all â€” CI runners have none, and this test is about the
+    // retry transition, not about binary resolution. Stub it the way
+    // crew/crew.test.mjs:550 does, and restore in cleanup().
+    workerBin = join(root, 'stub-claude')
+    writeFileSync(workerBin, '')
+    priorWorkerBin = process.env.CREW_CLAUDE_BIN
+    process.env.CREW_CLAUDE_BIN = workerBin
     deps.headlessIo = () => ({
       assign: () => ({ id: 'd1', returnPath: returnFile }),
       wait: () => null,
@@ -1125,7 +1136,13 @@ function makeRetryHarness({ transport = 'pane', screen = () => '529 Overloaded Â
   io.emit = (event) => events.push(event)
   const assignment = io.assign({ role: 'lead', briefFile: '/tmp/brief.md' })
   box.returnPath = assignment.returnPath
-  return { io, logs, events, sends, box, returnPath: box.returnPath, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { io, logs, events, sends, box, returnPath: box.returnPath, cleanup: () => {
+    if (workerBin !== null) {
+      if (priorWorkerBin === undefined) delete process.env.CREW_CLAUDE_BIN
+      else process.env.CREW_CLAUDE_BIN = priorWorkerBin
+    }
+    rmSync(root, { recursive: true, force: true })
+  } }
 }
 
 const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'

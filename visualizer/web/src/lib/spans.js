@@ -19,6 +19,11 @@ export function detailLine(row) {
   return text.length > 160 ? `${text.slice(0, 159)}…` : text
 }
 
+// The four operational rows PR #665 added. They are MARKERS on a bar, never spans:
+// a retry is work in progress, and drawing it as a gap reproduces exactly the
+// misreading #659 and #669 exist to prevent.
+export const MARKER_EVENTS = new Set(['seat-retrying', 'seat-retry-cleared', 'seat-stale', 'seat-stale-cleared'])
+
 const durationOf = (span) => (span.ended_at == null ? {} : { duration_ms: span.ended_at - span.started_at })
 const finish = (span) => ({ ...span, ...durationOf(span) })
 
@@ -43,8 +48,20 @@ export function buildTrajectory(rows = [], { operational_channel = null, reveal 
   const anomalies = []
   const openStages = []
   const openAssignments = new Map()
+  const openByRole = new Map()
   for (const entry of ordered) {
     const row = entry.row
+    if (MARKER_EVENTS.has(row.event)) {
+      // The owner is the assignment OPEN for this role at this instant. `id` here is
+      // the cell id and `assign` is the dispatch id: joining them finds nothing at
+      // all, silently. This walks `ordered`, so a marker is found whether or not
+      // the ledger reveals its operational row.
+      const ownerStack = openByRole.get(row.role ?? null)
+      const owner = ownerStack && ownerStack.length ? spans[ownerStack.at(-1)] : null
+      if (owner) owner.markers = [...(owner.markers ?? []), { event: row.event, at_ms: entry.at_ms, index: entry.index, detail: entry.detail }]
+      else anomalies.push({ kind: 'marker_unowned', label: row.event, role: row.role ?? null, expected: `an open assignment for role ${row.role ?? 'unknown'}`, index: entry.index, at_ms: entry.at_ms })
+      continue
+    }
     if (typeof row.stage === 'string') {
       const parent = openStages.length ? openStages[openStages.length - 1] : null
       const span = { family: 'stage', label: row.stage, id: null, role: null, status: null, started_at: entry.at_ms, started_index: entry.index, ended_at: null, ended_index: null, depth: openStages.length, parent }
@@ -73,17 +90,32 @@ export function buildTrajectory(rows = [], { operational_channel = null, reveal 
       spans.push(span)
       if (!openAssignments.has(key)) openAssignments.set(key, [])
       openAssignments.get(key).push(spans.length - 1)
+      if (!openByRole.has(span.role)) openByRole.set(span.role, [])
+      openByRole.get(span.role).push(spans.length - 1)
       continue
     }
     if (typeof row.envelope === 'string') {
       const key = `${row.envelope} ${row.role ?? ''}`
       const stack = openAssignments.get(key)
       if (!stack || !stack.length) continue
-      const span = spans[stack.pop()]
+      const spanIndex = stack.pop()
+      const span = spans[spanIndex]
       span.ended_at = entry.at_ms
       span.ended_index = entry.index
       span.status = row.status ?? null
+      const byRole = openByRole.get(span.role)
+      if (byRole) { const position = byRole.indexOf(spanIndex); if (position >= 0) byRole.splice(position, 1) }
     }
+  }
+  // A stage span with NO assignment span active across it is the DRIVER working.
+  // Both "has the lane stalled?" readings (#670) were this, and both were wrong.
+  // Overlap goes through spansActiveIn unchanged, so an open span stays open: it is
+  // never given an end, never extended to now, never given a duration.
+  const assignments = spans.filter((span) => span.family === 'assignment')
+  for (const span of spans) {
+    if (span.family !== 'stage') continue
+    if (spansActiveIn(assignments, span.started_at, span.ended_at ?? Infinity).length) span.actor = 'seat'
+    else span.actor = 'driver'
   }
   return {
     rows: visible,
@@ -114,4 +146,8 @@ export function focusTrajectory(trajectory, from, to) {
 export function projectSpan(span, origin, total_ms) {
   const left = total_ms > 0 ? (span.started_at - origin) / total_ms : 0
   return span.ended_at == null ? { left, marker: true } : { left, width: total_ms > 0 ? (span.ended_at - span.started_at) / total_ms : 0 }
+}
+
+export function projectMarker(at_ms, origin, total_ms) {
+  return { left: total_ms > 0 ? (at_ms - origin) / total_ms : 0 }
 }

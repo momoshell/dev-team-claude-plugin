@@ -1,5 +1,6 @@
 <script>
   import { applyRead, clearFocus, initialJournalState, journalPulse, select, setRange, setReveal, shouldRead, trajectoryView } from './live.js'
+  import { projectMarker } from './spans.js'
   import { PANEL_REFRESH_MS } from './panels.js'
   let { run } = $props()
   let state = $state(initialJournalState())
@@ -42,14 +43,20 @@
   {#each view.anomalies as anomaly}<p class="muted">{anomaly.kind}: {anomaly.label} (expected {anomaly.expected ?? 'no open stage'})</p>{/each}
   <div class="overview">
     {#each view.spans as span (span.started_index)}
-      <div class="lane">
-        <span class="name" title={span.label}>{span.label}</span>
+      <!-- The driver's own rail: a stage nobody is seated on is the driver working,
+           stated in a word and in --lane-5, not left as an inference (#673). -->
+      <div class="lane" class:driver={span.actor === 'driver'} style={span.actor === 'driver' ? '--lane-color: var(--lane-5)' : ''}>
+        <span class="name" title={span.label}>{span.label}{#if span.actor === 'driver'}<span class="actor micro"> driver</span>{/if}</span>
         <span class="rail" onmousedown={down} onmouseup={up} role="presentation">
           {#if span.box.marker}
             <span class="marker" style={`left:${span.box.left * 100}%`}></span>
           {:else}
             <span class="bar" style={`left:${span.box.left * 100}%;width:${span.box.width * 100}%`}></span>
           {/if}
+          <!-- Overlaid, never carved out: a retry NEVER splits or shortens the bar. -->
+          {#each span.markers ?? [] as event (event.index)}
+            <span class="event-marker" title={`${event.event} ${event.detail}`} style={`left:${projectMarker(event.at_ms, view.origin, view.total).left * 100}%`}></span>
+          {/each}
         </span>
         <span class="took">{span.took}</span>
       </div>
@@ -80,6 +87,9 @@
   .rail { position:relative; display:block; width:100%; height:.9rem; }
   .bar { position:absolute; top:.15rem; height:.6rem; min-width:2px; background:var(--accent, #3b82f6); border-radius:2px; }
   .marker { position:absolute; top:.05rem; width:0; border-left:2px solid var(--muted, #888); height:.8rem; }
+  .event-marker { position:absolute; top:0; width:0; border-left:2px solid var(--status-running, #c38b18); height:.9rem; }
+  .lane.driver .bar, .lane.driver .marker { background:var(--lane-color, var(--role-driver)); border-color:var(--lane-color, var(--role-driver)); }
+  .lane.driver .actor { color:var(--lane-color, var(--role-driver)); }
   .took { color:var(--muted, #888); font-variant-numeric:tabular-nums; }
   .ledger { width:100%; border-collapse:collapse; font-size:.85rem; }
   .ledger td, .ledger th { text-align:left; padding:.15rem .4rem; border-bottom:1px solid var(--line, #eee); }

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
-import { buildTrajectory, focusTrajectory, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
+import { buildTrajectory, focusTrajectory, MARKER_EVENTS, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
 import { applyRead, createPulse, initialJournalState, select, setRange, setReveal, shouldRead, trajectoryView } from '../visualizer/web/src/lib/live.js'
 import { JOURNAL_CHANNELS } from '../crew/drive.mjs'
 import { scratchDir, treeDigest } from './helpers.mjs'
@@ -336,4 +336,128 @@ test('an open span stays a marker after a read that did not close it, and the ax
   assert.equal('width' in span.box, false)
   assert.equal(span.took, 'in flight')
   assert.deepEqual(Object.keys(span).filter((key) => DURATION_KEY.test(key)), [])
+})
+
+const markerEvents = [...MARKER_EVENTS]
+const markerRowsFor = (role, id, start = 120) => markerEvents.map((event, index) => ({ at: start + index * 10, event, role, id, channel: JOURNAL_CHANNELS.operational }))
+const durationKeys = (span) => Object.keys(span).filter((key) => DURATION_KEY.test(key))
+const assignment = (result, label) => result.spans.find((span) => span.family === 'assignment' && span.label === label)
+const stage = (result, label) => result.spans.find((span) => span.family === 'stage' && span.label === label)
+
+test('trajectory marks every unassigned stage as driver work', () => {
+  const result = buildTrajectory([
+    { at: 0, stage: 'gate:r1' },
+    { at: 10, stage: 'gate-proof:1' },
+    { at: 20, stage: 'gate-proof:1:checks' },
+  ])
+  assert.deepEqual(result.spans.filter((span) => span.family === 'stage').map((span) => span.actor), ['driver', 'driver', 'driver'])
+})
+
+test('trajectory marks a stage containing an assignment as seat work', () => {
+  const result = buildTrajectory([
+    { at: 0, stage: 'plan:r1' },
+    { at: 100, assign: 'd1', role: 'planner' },
+    { at: 200, envelope: 'd1', role: 'planner', status: 'done' },
+    { at: 300, stage_done: 'plan:r1' },
+  ])
+  assert.equal(stage(result, 'plan:r1').actor, 'seat')
+})
+
+test('trajectory uses inclusive overlap at both stage boundaries', () => {
+  const result = buildTrajectory([
+    { at: 0, assign: 'left', role: 'builder' },
+    { at: 10, stage: 'straddling' },
+    { at: 20, envelope: 'left', role: 'builder', status: 'done' },
+    { at: 30, stage_done: 'straddling' },
+    { at: 40, assign: 'exact', role: 'builder' },
+    { at: 50, stage: 'closing-at-start' },
+    { at: 50, envelope: 'exact', role: 'builder', status: 'done' },
+    { at: 60, stage_done: 'closing-at-start' },
+  ])
+  assert.equal(stage(result, 'straddling').actor, 'seat')
+  assert.equal(stage(result, 'closing-at-start').actor, 'seat')
+})
+
+test('trajectory keeps open spans duration-free with or without markers', () => {
+  const base = [
+    { at: 0, stage: 'closed-stage' },
+    { at: 100, stage_done: 'closed-stage' },
+    { at: 200, stage: 'open-stage' },
+    { at: 300, assign: 'open-turn', role: 'builder' },
+    { at: 400, assign: 'closed-turn', role: 'planner' },
+    { at: 450, envelope: 'closed-turn', role: 'planner', status: 'done' },
+  ]
+  const withMarkers = [...base.slice(0, 4), ...markerRowsFor('builder', 'cell-open', 350), ...base.slice(4)]
+  const bare = buildTrajectory(base, { operational_channel: JOURNAL_CHANNELS.operational })
+  const marked = buildTrajectory(withMarkers, { operational_channel: JOURNAL_CHANNELS.operational })
+  for (const result of [bare, marked]) {
+    for (const span of result.spans.filter((entry) => entry.ended_at === null)) {
+      assert.equal('duration_ms' in span, false)
+      assert.deepEqual(durationKeys(span), [])
+    }
+  }
+  assert.deepEqual(bare.spans.filter((span) => span.ended_at === null).map(durationKeys), marked.spans.filter((span) => span.ended_at === null).map(durationKeys))
+  assert.equal(stage(marked, 'closed-stage').duration_ms, 100)
+  assert.equal(assignment(marked, 'closed-turn:planner').duration_ms, 50)
+})
+
+test('trajectory attaches all marker events without creating spans', () => {
+  const bareRows = [
+    { at: 100, assign: 'd-marker', role: 'builder' },
+    { at: 300, envelope: 'd-marker', role: 'builder', status: 'done' },
+  ]
+  const bare = buildTrajectory(bareRows, { operational_channel: JOURNAL_CHANNELS.operational })
+  const marked = buildTrajectory([bareRows[0], ...markerRowsFor('builder', 'cell-42'), bareRows[1]], { operational_channel: JOURNAL_CHANNELS.operational })
+  assert.equal(marked.spans.length, bare.spans.length)
+  assert.deepEqual(assignment(marked, 'd-marker:builder').markers.map(({ event, at_ms, index }) => ({ event, at_ms, index })), markerEvents.map((event, index) => ({ event, at_ms: 120 + index * 10, index: index + 1 })))
+})
+
+test('trajectory leaves open and closed owner bars unchanged by markers', () => {
+  for (const closed of [false, true]) {
+    const tail = closed ? [{ at: 300, envelope: 'd5', role: 'builder', status: 'done' }] : []
+    const bareRows = [{ at: 100, assign: 'd5', role: 'builder' }, ...tail]
+    const markedRows = [bareRows[0], ...markerRowsFor('builder', 'cell-9'), ...tail]
+    const bare = buildTrajectory(bareRows, { operational_channel: JOURNAL_CHANNELS.operational })
+    const marked = buildTrajectory(markedRows, { operational_channel: JOURNAL_CHANNELS.operational })
+    const before = assignment(bare, 'd5:builder')
+    const after = assignment(marked, 'd5:builder')
+    assert.equal(marked.spans.length, bare.spans.length)
+    for (const key of ['started_at', 'ended_at', 'started_index', 'duration_ms']) assert.equal(after[key], before[key])
+    assert.equal(after.markers.length, markerEvents.length)
+  }
+})
+
+test('trajectory joins marker ownership by role rather than cell id', () => {
+  const result = buildTrajectory([
+    { at: 100, assign: 'd6', role: 'planner' },
+    { at: 110, assign: 'd7', role: 'builder' },
+    { at: 150, event: 'seat-retrying', role: 'builder', id: 'cell-42', channel: JOURNAL_CHANNELS.operational },
+    { at: 400, envelope: 'd7', role: 'builder', status: 'done' },
+    { at: 500, envelope: 'd6', role: 'planner', status: 'done' },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  assert.deepEqual(assignment(result, 'd7:builder').markers.map((marker) => marker.event), ['seat-retrying'])
+  assert.deepEqual(assignment(result, 'd6:planner').markers ?? [], [])
+})
+
+test('trajectory collects operational markers independently of reveal', () => {
+  const rows = [
+    { at: 100, assign: 'd9', role: 'builder' },
+    ...markerRowsFor('builder', 'cell-9'),
+    { at: 300, envelope: 'd9', role: 'builder', status: 'done' },
+  ]
+  const hidden = buildTrajectory(rows, { operational_channel: JOURNAL_CHANNELS.operational, reveal: false })
+  const revealed = buildTrajectory(rows, { operational_channel: JOURNAL_CHANNELS.operational, reveal: true })
+  assert.deepEqual(assignment(hidden, 'd9:builder').markers, assignment(revealed, 'd9:builder').markers)
+  assert.equal(hidden.hidden_operational, 4)
+  assert.equal(hidden.rows.some((row) => markerEvents.includes(row.event)), false)
+})
+
+test('trajectory reports an unowned marker instead of dropping it', () => {
+  const result = buildTrajectory([
+    { at: 100, assign: 'd8', role: 'planner' },
+    { at: 150, event: 'seat-stale', role: 'builder', id: 'cell-7', channel: JOURNAL_CHANNELS.operational },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  const anomaly = result.anomalies.find((entry) => entry.kind === 'marker_unowned')
+  assert.deepEqual({ kind: anomaly.kind, label: anomaly.label, index: anomaly.index, at_ms: anomaly.at_ms }, { kind: 'marker_unowned', label: 'seat-stale', index: 1, at_ms: 150 })
+  assert.deepEqual(assignment(result, 'd8:planner').markers ?? [], [])
 })

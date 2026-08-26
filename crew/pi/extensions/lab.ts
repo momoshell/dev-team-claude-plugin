@@ -29,6 +29,15 @@
 // with mutate() and then executed with runSuite() therefore runs with the
 // host's authority. That boundary is declared in the tool description, every
 // result and every journal row, not hidden as a gap.
+//
+// STATED BOUNDARY (scout F3): --allow-fs-read bounds the NAME space, not the inode
+// space. Allowlist entries are matched LEXICALLY and are not realpath-resolved, so a
+// symlink placed inside an allowlisted directory reads whatever the uid can, and both
+// git archive and git clone preserve symlinks into a scratch. The HOST RPC surface is
+// contained: validateScratchPath() realpath-resolves and refuses path-escapes-scratch.
+// What is NOT contained is whatever the child reads through its own grant, and the
+// runSuite carve-out above. This is recorded, not closed; closing it means
+// realpath-walking a scratch tree, which is a larger surface than one lane.
 
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
@@ -47,7 +56,12 @@ export const LAB_ORIGIN_HEAD_REF = 'refs/remotes/origin/HEAD'
 // flag at all, so any occurrence is a widening whatever its value (ground truth 17).
 export const LAB_AUDIT_UNGRANTED = Object.freeze(['fs.write', 'child', 'net', 'worker'])
 export const LAB_AUDIT_WRITE_PROBES = Object.freeze(['/', '/tmp'])
-export const LAB_AUDIT_FORBIDDEN_ARGV = Object.freeze(['--allow-fs-write'])
+// Two independent checks for a boundary whose failure is TOTAL: --allow-child-process
+// voids containment outright, because the grandchild it permits is not under
+// --permission at all and the spawn wrapper that returns ERR_ACCESS_DENIED is gone with
+// it. LAB_AUDIT_UNGRANTED probes 'child' at runtime; this states the same prohibition in
+// argv, where whoever edits the launcher will read it.
+export const LAB_AUDIT_FORBIDDEN_ARGV = Object.freeze(['--allow-fs-write', '--allow-child-process'])
 // The flag exists only where the Net permission scope does: measured false on
 // node v24.15.0 and true on v26.5.1. process.permission.has('net') reads false
 // on BOTH when ungranted, so only the flag table discriminates.
@@ -65,6 +79,7 @@ export const LAB_OP_MAXBUFFER = 16 * 1024 * 1024
 export const LAB_SUITE_TIMEOUT_MS = 10 * 60 * 1000
 export const LAB_REAP_POLL_MS = 50
 export const LAB_REAP_POLLS_MAX = 40
+export const LAB_PS_TIMEOUT_MS = 2000
 export const LAB_STDIO_GRACE_MS = 250
 export const LAB_PROGRAM_CAP_BYTES = 64 * 1024
 export const LAB_OUTPUT_CAP_BYTES = 50 * 1024
@@ -96,7 +111,7 @@ export interface LabGrepHit { file: string; line: number; text: string }
 export interface LabGrepOptions { ignoreCase?: boolean; fixedString?: boolean; maxHits?: number; pathspec?: string[] }
 export interface LabGrepResult { pattern: string; hits: LabGrepHit[]; truncated: boolean }
 export interface LabMutateResult { file: string; count: number }
-export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean }
+export interface LabSuiteResult { paths: string[]; pass: number | null; fail: number | null; exit_code: number | null; host_authority: true; truncated: boolean; structural_failures: LabStructuralFailure[] }
 export interface LabAudit { runner: boolean; program: boolean; granted: string[]; execargv: string[]; node_options: string | null; net_enforceable: boolean }
 export interface LabApi {
   scratchCheckout(): Promise<LabScratch>
@@ -184,17 +199,48 @@ export function classifyDenial(err: any): any {
   return null
 }
 
-// Conservative bounded liveness polling — NOT a death detector. Only ESRCH
-// proves absence: EPERM means the pid exists and is not ours to signal, and an
-// unreaped zombie keeps signal zero positive forever.
+// A DECLARED MIRROR, not a second opinion. crew/seat-io.mjs:99 owns this repo's one
+// notion of the fact: a `Z` state means the process has terminated and the kernel is
+// holding its exit status for a parent that has not reaped it — a MEASURED death, not an
+// over-claim (ADR-030), and something process.kill(pid, 0) cannot see at all. These
+// extensions are deliberately zero-dependency on the crew runtime, so the semantics are
+// copied WITH the citation rather than imported from it.
+export function psStatIsZombie(stat: any): boolean {
+  return typeof stat === 'string' && stat.trim().startsWith('Z')
+}
+
+// pid <= 1 is refused, which is also what keeps this off the SUITE child's poll: that
+// one probes a negated process GROUP, and a group is not something ps -p can be asked
+// about. A ps that cannot answer is never evidence of death.
+export function psProcessIsZombie(pid: number, deps: any = {}): boolean {
+  if (!Number.isSafeInteger(pid) || pid <= 1) return false
+  const run = deps.spawnSync || nodeSpawnSync
+  try {
+    const result = run('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8', timeout: LAB_PS_TIMEOUT_MS })
+    return result?.status === 0 && String(result?.stdout || '').trim().split(/\s+/).some(psStatIsZombie)
+  } catch { return false }
+}
+
+// A settled child is one this host will stop waiting for: gone, or measured dead and
+// merely awaiting reap. 'child-unreaped' may only be settled against a process that is
+// neither.
+export function probeSettled(state: string): boolean {
+  return state === 'gone' || state === 'zombie'
+}
+
+// Conservative bounded liveness polling. Only ESRCH proves absence by signal, and EPERM
+// means the pid exists and is not ours to signal — but a zombie keeps signal zero
+// positive forever, so the ps mirror above is what separates a dead child awaiting reap
+// from a running one.
 export function livenessProbe(pid: number, deps: any = {}): string {
   const kill = deps.kill || ((one: number, signal: any) => process.kill(one, signal))
-  try { kill(pid, 0); return 'alive' }
+  const isZombie = deps.isZombie || ((one: number) => psProcessIsZombie(one, deps))
+  try { kill(pid, 0) }
   catch (err: any) {
     if (err?.code === 'ESRCH') return 'gone'
-    if (err?.code === 'EPERM') return 'alive'
-    return 'unknown'
+    if (err?.code !== 'EPERM') return 'unknown'
   }
+  return isZombie(pid) ? 'zombie' : 'alive'
 }
 
 // The child's startup audit, exported PURE so tests can drive every branch.
@@ -312,6 +358,34 @@ function boundedTextInfo(text: any, cap = LAB_OUTPUT_CAP_BYTES, lineCap = LAB_OU
   const lineTruncated = lines.length > lineCap
   const finalText = lineTruncated ? lines.slice(0, lineCap).join('\n') : byteText
   return { text: finalText, truncated: byteTruncated || lineTruncated }
+}
+
+export interface LabStructuralFailure { file: string; test: string; reason: string }
+
+// A lab scratch is `git clone --local`, and a local clone can never satisfy an assertion
+// about THIS repository's remote identity. That is a property of the lab, not a defect in
+// the tree under test, and the seat's program cannot know it — a bare fail: 1 reads as a
+// regression forever. Measured 2026-08-26 by cloning this worktree with `git clone --local`
+// and running `npm test`: exactly one failure, named here with its reason. No count is
+// subtracted anywhere; the consumer compares `fail` against these named entries.
+export const LAB_STRUCTURAL_FAILURES: readonly LabStructuralFailure[] = Object.freeze([Object.freeze({
+  file: 'test/factory-probe-repo.test.mjs',
+  test: 'self-hosting proposes the local lane, CI shape, conventions, and remote identity',
+  reason: 'it asserts profile.repo_key === momoshell__dev-team-claude-plugin, and git clone --local rewrites remote.origin.url to the source path, so the probe derives the scratch path instead and the assertion cannot pass in any local clone, ever',
+})])
+
+// Selected against the paths runSuite actually ran: no paths means the whole suite, an
+// exact path matches its own entry, and a path that is a DIRECTORY prefix carries every
+// entry beneath it.
+export function labStructuralFailures(paths: any = []): LabStructuralFailure[] {
+  const list = Array.isArray(paths) ? paths.map(String) : []
+  if (!list.length) return LAB_STRUCTURAL_FAILURES.map((one) => one)
+  return LAB_STRUCTURAL_FAILURES.filter((one) => list.some((prefix) => prefix === one.file || one.file.startsWith(`${prefix}/`)))
+}
+
+// The ONE construction site for the value the seat-authored program reads.
+export function labSuiteResult({ paths, pass, fail, exitCode, truncated }: any): LabSuiteResult {
+  return { paths, pass, fail, exit_code: exitCode, host_authority: true, truncated, structural_failures: labStructuralFailures(paths) }
 }
 
 export function parseTapSummary(text: string): any {
@@ -472,6 +546,7 @@ export function createLabTool(deps: any = {}) {
   const setTimer = deps.setTimeout || setTimeout
   const clearTimer = deps.clearTimeout || clearTimeout
   const kill = deps.kill || ((pid: number, signal: any) => process.kill(pid, signal))
+  const isZombie = deps.isZombie || ((pid: number) => psProcessIsZombie(pid))
   const execPath = deps.execPath || process.execPath
   const childTimeoutMs = deps.childTimeoutMs ?? LAB_CHILD_TIMEOUT_MS
   const killGraceMs = deps.killGraceMs ?? 2000
@@ -664,14 +739,14 @@ export function createLabTool(deps: any = {}) {
       const stripped = stripAnsi(suiteText)
       const summary = parseTapSummary(stripped)
       if (summary.pass === null || summary.fail === null) { finish({ refused: 'suite-failed', message: 'the suite produced no parseable TAP summary', output: suiteText, truncated: suiteTextTruncated }); return }
-      finish({ result: { paths, pass: summary.pass, fail: summary.fail, exit_code: parentCode, host_authority: true, truncated: suiteTextTruncated }, output: suiteText, truncated: suiteTextTruncated })
+      finish({ result: labSuiteResult({ paths, pass: summary.pass, fail: summary.fail, exitCode: parentCode, truncated: suiteTextTruncated }), output: suiteText, truncated: suiteTextTruncated })
     }
     const probeGroup = () => {
       if (settled) return
       const pid = Number(child?.pid || 0)
       const state = pid ? livenessProbe(-pid, { kill }) : 'gone'
       polls += 1
-      if (state === 'gone') {
+      if (probeSettled(state)) {
         clear(killTimer); killTimer = null
         if (parentClosed) finishFromParent()
         else {
@@ -719,7 +794,7 @@ export function createLabTool(deps: any = {}) {
       collector.end('stdout')
       collector.end('stderr')
       if (pollStarted) {
-        if (livenessProbe(-Number(child?.pid || 0), { kill }) === 'gone') finishFromParent()
+        if (probeSettled(livenessProbe(-Number(child?.pid || 0), { kill }))) finishFromParent()
         else if (pollTimer === null && !settled) probeGroup()
       } else {
         probeGroup()
@@ -985,9 +1060,9 @@ export function createLabTool(deps: any = {}) {
           const poll = () => {
             if (settled) return
             const pid = Number(child?.pid || 0)
-            const state = pid ? livenessProbe(pid, { kill }) : 'gone'
+            const state = pid ? livenessProbe(pid, { kill, isZombie }) : 'gone'
             polls += 1
-            if (state === 'gone') {
+            if (probeSettled(state)) {
               graceTimer = setTimer(() => {
                 graceTimer = null
                 if (!closed && !settled) settle('child-failed')

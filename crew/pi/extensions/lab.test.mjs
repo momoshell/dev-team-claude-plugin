@@ -153,6 +153,9 @@ test('the module is zero-dep and erasable', () => {
   assert.doesNotMatch(source, /^\s*enum\s/m)
   assert.doesNotMatch(source, /^\s*namespace\s/m)
   assert.equal(typeof mod.default, 'function')
+  assert.doesNotMatch(source, /from ['"]\.\.\//)
+  assert.doesNotMatch(source, /from ['"]\.\//)
+  assert.match(source, /crew\/seat-io\.mjs:99/)
 })
 
 test('the extension registers one lab tool and one result handler', () => {
@@ -248,8 +251,18 @@ test('classifyDenial covers permission, native and fetch shapes', () => {
 
 test('livenessProbe only treats ESRCH as gone', () => {
   for (const [code, want] of [['ESRCH', 'gone'], ['EPERM', 'alive'], ['EWHAT', 'unknown']]) {
-    assert.equal(mod.livenessProbe(3, { kill: () => { throw Object.assign(new Error(code), { code }) } }), want)
+    assert.equal(mod.livenessProbe(3, { kill: () => { throw Object.assign(new Error(code), { code }) }, isZombie: () => false }), want)
   }
+})
+
+test('the probe measures a zombie', () => {
+  assert.equal(mod.livenessProbe(3, { kill: () => {}, isZombie: () => true }), 'zombie')
+  assert.equal(mod.livenessProbe(3, { kill: () => {}, isZombie: () => false }), 'alive')
+  const runner = (stdout, status = 0) => () => ({ status, stdout })
+  assert.equal(mod.psProcessIsZombie(4242, { spawnSync: runner('Z+\n') }), true)
+  assert.equal(mod.psProcessIsZombie(4242, { spawnSync: runner('S+\n') }), false)
+  assert.equal(mod.psProcessIsZombie(4242, { spawnSync: runner('', 1) }), false)
+  assert.equal(mod.psProcessIsZombie(-4242, { spawnSync: runner('Z+\n') }), false)
 })
 
 test('parseTapSummary reads the last exact summary pair', () => {
@@ -398,7 +411,7 @@ test('read and mutate argument validation is host-side', async () => {
 // before it runs, so no escape is attempted at all. Both branches assert a
 // real refusal and neither admits an outcome of 'ok'.
 // The Net permission scope exists exactly where the --allow-net flag does:
-// measured false on node 20/22/24 and true on 26.5.1 (crew/pi/extensions/lab.ts:51-54
+// measured false on node 20/22/24 and true on 26.5.1 (crew/pi/extensions/lab.ts:65-68
 // is the same discriminator, read here independently in the host process).
 // At or above the repo's Node floor the boundary IS enforceable, so
 // 'net-unenforceable' is no longer an acceptable escape outcome — a suite that
@@ -453,6 +466,10 @@ test('auditGrants detects unreadable paths and every widening layer', () => {
   assert.equal(mod.auditGrants({ ...base, has: (key, path) => path !== '/p' }).program, false)
   assert.ok(mod.auditGrants({ ...base, has: (key, path) => key === 'fs.write' && path === '/' }).granted.includes('fs.write:/'))
   assert.ok(mod.auditGrants({ ...base, execArgv: ['--allow-fs-write=/narrow'] }).execargv.length)
+  const childArgv = mod.auditGrants({ ...base, execArgv: ['--allow-child-process'] })
+  assert.equal(childArgv.ok, false)
+  assert.ok(childArgv.execargv.includes('--allow-child-process'))
+  assert.match(mod.runnerSource('file:///tmp/p.mjs'), /--allow-child-process/)
   assert.equal(mod.auditGrants({ ...base, nodeOptions: '--require=bad' }).ok, false)
 })
 
@@ -650,7 +667,7 @@ test('an alive child at the reap budget settles child-unreaped', async () => {
     env: {}, isDirectory: () => true, mkTempDir: () => temp(), spawn: () => child,
     setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
     childTimeoutMs: 10, killGraceMs: 20, reapPollMs: 1, reapPollsMax: 3,
-    kill: () => {},
+    kill: () => {}, isZombie: () => false,
   })
   const pending = tool.execute('x', { program: 'await new Promise(() => {})' }, null, null, { cwd: ROOT })
   await flush()
@@ -663,6 +680,31 @@ test('an alive child at the reap budget settles child-unreaped', async () => {
   }
   const result = await pending
   assert.equal(result.details.refused, 'child-unreaped')
+  assert.equal(child.unreffed, true)
+})
+
+test('a zombie child settles without child-unreaped', async () => {
+  const clock = timers()
+  const child = fakeChild(4443)
+  const tool = mod.createLabTool({
+    env: {}, isDirectory: () => true, mkTempDir: () => temp(), spawn: () => child,
+    setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
+    childTimeoutMs: 10, killGraceMs: 20, reapPollMs: 1, reapPollsMax: 3,
+    kill: () => {}, isZombie: () => true,
+  })
+  const pending = tool.execute('x', { program: 'await new Promise(() => {})' }, null, null, { cwd: ROOT })
+  await flush()
+  clock.fire(clock.list.find((one) => one.ms === 10))
+  clock.fire(clock.list.find((one) => one.ms === 20))
+  for (let count = 0; count < 3; count += 1) {
+    const poll = clock.list.filter((one) => one.ms === 1 && !one.cleared && !one.fired).at(-1)
+    if (poll) clock.fire(poll)
+    await flush()
+  }
+  const grace = clock.list.find((one) => one.ms === mod.LAB_STDIO_GRACE_MS && !one.cleared && !one.fired)
+  if (grace) clock.fire(grace)
+  const result = await pending
+  assert.notEqual(result.details.refused, 'child-unreaped')
   assert.equal(child.unreffed, true)
 })
 
@@ -785,6 +827,22 @@ test('a red suite is data while a suite without TAP summary is suite-failed', as
   assert.equal(red.program.responses[1].ok, true)
   assert.equal(red.program.responses[1].value.fail, 1)
   assert.equal(red.program.responses[1].value.exit_code, 1)
+  assert.deepEqual(red.program.responses[1].value.structural_failures, [])
+
+  const structural = scriptedHarness({
+    requests: [
+      { id: 1, op: 'scratchCheckout', args: [] },
+      { id: 2, op: 'runSuite', args: [['test/factory-probe-repo.test.mjs']] },
+    ],
+    suite: { stdout: '# pass 1\n# fail 1\n', close: [1, null] },
+    deps: { kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
+  })
+  await structural.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  const failures = structural.program.responses[1].value.structural_failures
+  assert.equal(failures.length, 1)
+  assert.equal(failures[0].file, mod.LAB_STRUCTURAL_FAILURES[0].file)
+  assert.equal(failures[0].test, mod.LAB_STRUCTURAL_FAILURES[0].test)
+  assert.ok(failures[0].reason)
 
   const empty = scriptedHarness({
     requests: [
@@ -796,6 +854,20 @@ test('a red suite is data while a suite without TAP summary is suite-failed', as
   })
   await empty.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
   assert.equal(empty.program.responses[1].refused, 'suite-failed')
+})
+
+test('the structural failure selector follows suite paths', () => {
+  const all = mod.labStructuralFailures([])
+  assert.deepEqual(all, [...mod.LAB_STRUCTURAL_FAILURES])
+  const target = mod.LAB_STRUCTURAL_FAILURES[0]
+  assert.deepEqual(mod.labStructuralFailures([target.file]), [target])
+  assert.deepEqual(mod.labStructuralFailures(['test']), [target])
+  assert.deepEqual(mod.labStructuralFailures(['crew/pi/extensions/lab.test.mjs']), [])
+  for (const entry of all) {
+    const path = join(ROOT, entry.file)
+    assert.equal(existsSync(path), true)
+    assert.ok(readFileSync(path, 'utf8').includes(entry.test))
+  }
 })
 
 test('scratch clone mirrors origin values, absence, and detaches in three steps', async () => {

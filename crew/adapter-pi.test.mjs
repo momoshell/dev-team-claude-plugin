@@ -5,8 +5,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { accessSync, constants, readFileSync, realpathSync, statSync } from 'node:fs'
 import { delimiter, dirname, join, basename } from 'node:path'
-import { seatCommand, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
-import { SEAT_DEFAULTS, ROLE_ORDER } from './crew.mjs'
+import { seatCommand, capabilitiesFor, modelString, translateDeny, PI_BUILTIN_TOOLS, PI_PROVIDERS, PI_ADVISOR_EXTENSION, shellSingleQuote } from './adapters/adapter-pi.mjs'
+import { SEAT_DEFAULTS, ROLE_ORDER, assertFanoutCoherent } from './crew.mjs'
+import { childArgs, resolvePiBinary } from './pi/extensions/subagent.ts'
 
 const MODELS = ['sonnet', 'anthropic/claude-opus-5', 'openai-codex/gpt-5.6-luna']
 const EFFORTS = [undefined, 'low', 'high', 'xhigh', 'max']
@@ -172,6 +173,31 @@ test('ungranted pi seats disable extension and skill discovery across the full s
     assert.doesNotMatch(command, /(^|\s)--skill\s/, label)
     assert.equal(command.match(/(?:^|\s)--tools "([^"]*)"/)?.[1], PI_BUILTIN_TOOLS.join(','), label)
   }
+
+  const granted = { agents: [{ name: 'scout', def: '/tmp/scout.json' }] }
+  const empty = { agents: [] }
+  assert.equal(capabilitiesFor({ transport: 'headless-rpc', grants: granted }).subagents, true)
+  assert.equal(capabilitiesFor({ transport: 'headless-rpc', grants: empty }).subagents, false)
+  assert.equal(capabilitiesFor({ transport: 'pane', grants: granted }).subagents, true)
+  assert.equal(capabilitiesFor({ transport: 'pane', grants: empty }).subagents, false)
+  for (const transport of ['headless-json', 'unknown', undefined]) {
+    assert.throws(() => capabilitiesFor({ transport, grants: granted }), (err) => err.message.includes(String(transport)))
+  }
+
+  const binary = resolvePiBinary({ argv: ['/abs/node', '/abs/pi/dist/cli.js'], execPath: '/abs/node', existsSync: () => true })
+  assert.equal(binary.error, undefined)
+  assert.equal(binary.command, '/abs/node')
+  assert.deepEqual(binary.args, ['/abs/pi/dist/cli.js'])
+  const refused = resolvePiBinary({ argv: ['node', 'pi'], execPath: 'node', existsSync: () => false })
+  assert.ok(refused.error)
+  const child = childArgs({ def: { tools: ['read'], prompt: 'p' }, task: 't', promptFile: '/tmp/p', model: 'anthropic/x', thinking: 'high' })
+  assert.equal(child.some((arg) => arg === '--provider' || String(arg).startsWith('--provider=')), false)
+  assert.ok(child.includes('--no-extensions'))
+  assert.equal(child.includes('-e'), false)
+  assert.throws(
+    () => assertFanoutCoherent('builder', { agents: [{ name: 'scout', def: '/tmp/scout.json' }] }),
+    (err) => err.reason === 'grant-contradicts-deny',
+  )
 })
 
 test('granted pi seats append deduped activators and checkout-pinned extension, skill, and config paths', () => {

@@ -76,12 +76,10 @@ export function capabilitiesFor({ transport, grants } = {}) {
   if (!p) throw new Error(`adapter-pi: no capability profile for transport "${transport}" (shipped: ${Object.keys(PROFILES).join(', ')}) — refusing a guessed passthrough`)
   return Object.freeze({
     ...INVARIANT, ...p,
-    // PANE ONLY, deliberately: seatCommand is the only path that emits
-    // `-e <extension>` and the `agent` activator. rpcCommand
-    // (crew/headless-rpc.mjs:70-88) is --no-extensions with no -e and no
-    // --tools at all, so an rpc seat handed an agent grant would claim a
-    // capability it cannot load — a silently weaker seat.
-    subagents: transport === 'pane' && (grants?.agents?.length ?? 0) > 0,
+    // A FUNCTION OF THE GRANTS, on both transports (#693). It was pane-only
+    // while rpcCommand emitted neither `-e` nor `--tools`; it now emits both,
+    // live-probed against pi 0.84.3.
+    subagents: (grants?.agents?.length ?? 0) > 0,
   })
 }
 

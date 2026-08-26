@@ -37,6 +37,31 @@ test('the instruments checklist keeps each measured case', () => {
   }
 })
 
+// Mutation killed: dropping one retry exception or measured-ordering phrase must fail the liveness reference test.
+test('liveness.md names the retry exception and keeps the measured ordering', () => {
+  const text = readText(join(HERE, 'references/liveness.md'))
+  for (const token of [
+    'transcript mtime',
+    'the spinner, which is worthless',
+    'n=124,783, recorded as a snapshot',
+    'docs/ledger-queries.md` line 183',
+    'n=52,833 with 37 gaps over 900s',
+    '#590',
+    'provider retry loop',
+    'transcript mtime cannot see',
+    'the pane is authoritative',
+    'status=retrying',
+    '#659',
+    "seat's `seat-retrying` / `seat-retry-cleared` journal rows",
+    'headless lane cannot show this state and keeps reading `active`',
+    'seat-stale` condition is retired only by measured growth or a completing envelope',
+    'a budget that expired measured nothing',
+  ]) {
+    assert.ok(text.includes(token), `liveness.md must name ${token}`)
+  }
+  assert.match(text, /recogniseProviderRetry[^\n]*crew\/seat-io\.mjs:\d+/)
+})
+
 // Mutation killed: changing either half of the post-publish order must fail the closeout evidence test.
 test('closeout keeps teardown last and verifies after it', () => {
   const text = readText(join(HERE, 'references/closeout.md'))

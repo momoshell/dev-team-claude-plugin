@@ -9,7 +9,63 @@ import { join } from 'node:path'
 import { archivedLanes, crewRoot, discoverLanes, journalAt, laneActive, readJournal, resolveTunables, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
 import { fileURLToPath } from 'node:url'
 
-export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown'])
+export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown', 'seat-retrying', 'seat-retry-cleared'])
+// The cases behind one word. Until #659 `status=active` covered a working seat,
+// a retrying seat and a corpse alike, and an operator cannot act correctly on
+// one word for three states.
+//
+// EVIDENCE: this file reads the JOURNAL, and the journal carries what only the
+// seat could see. `seat-retrying` / `seat-retry-cleared` are written by a PANE
+// seat that read its own retry banner with `cmux read-screen`
+// (`recogniseProviderRetry`, crew/seat-io.mjs); `seat-stale` /
+// `seat-stale-cleared` by the measured transcript threshold. A HEADLESS lane has
+// no pane, journals no retry row and keeps reading `active` — the honest answer
+// when nothing measured it.
+//
+// These are TRANSITIONS, not statuses: each row turns one condition on or off
+// for one dispatch. Recency must not decide, because the liveness tick runs
+// sampleSeat before sampleGrowth, so a retrying seat whose transcript is already
+// frozen writes seat-retrying and then seat-stale on the SAME tick — and the
+// later row is a consequence of the retry, not a second fact.
+export const SEAT_TRANSITIONS = Object.freeze({
+  'seat-retrying': { condition: 'retrying', on: true },
+  'seat-retry-cleared': { condition: 'retrying', on: false },
+  'seat-stale': { condition: 'stale', on: true },
+  'seat-stale-cleared': { condition: 'stale', on: false },
+})
+// Explicit, and the same order waitState uses (crew/seat-io.mjs).
+export const CONDITION_PRECEDENCE = Object.freeze(['retrying', 'stale'])
+
+// A condition belongs to a DISPATCH, not a lane: one role's clear must never
+// retire another role's standing condition, and the same role's next dispatch is
+// a different seat-turn. The key is printable JSON on purpose — a control-byte
+// separator would make ordinary grep and diff treat this source as binary.
+function dispatchKey(line) { return JSON.stringify([line.id ?? null, line.role ?? null]) }
+
+export function seatCondition(lines) {
+  const standing = new Map()   // dispatch key -> Map(condition -> at)
+  for (const line of Array.isArray(lines) ? lines : []) {
+    const rule = line && typeof line.event === 'string' ? SEAT_TRANSITIONS[line.event] : null
+    if (!rule) continue
+    const key = dispatchKey(line)
+    let held = standing.get(key)
+    if (!held) { held = new Map(); standing.set(key, held) }
+    if (rule.on) held.set(rule.condition, journalAt(line.at))
+    else held.delete(rule.condition)
+  }
+  for (const condition of CONDITION_PRECEDENCE) {
+    let at = null
+    let found = false
+    for (const held of standing.values()) {
+      if (!held.has(condition)) continue
+      found = true
+      const when = held.get(condition)
+      if (when !== null && (at === null || when > at)) at = when
+    }
+    if (found) return { condition, at }
+  }
+  return null
+}
 export const KEYED_EVENTS = Object.freeze(['review_outcome', 'gate_check_discrimination'])
 export const READOUT_INTERVAL_S = 2
 export const WATCHDOG_INTERVAL_S = 30
@@ -218,8 +274,13 @@ export function boundedReport({ root, names = [], all = false, now, deps = {} } 
     const journal = readJournal(lane.journal, d)
     const stage = journal.lastStage ?? 'none'
     const ageS = journal.lastActivityAt === null ? 'none' : Math.floor((at - journal.lastActivityAt) / 1000)
-    const status = laneActive(lane, journal) ? 'active' : 'settled'
-    lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}`)
+    const active = laneActive(lane, journal)
+    const seat = active ? seatCondition(journal.lines) : null
+    const status = active ? (seat?.condition ?? 'active') : 'settled'
+    // The lane's `age` measures journal activity; a condition needs the age of
+    // ITS OWN observation, or a four-minute-old retry reads as current.
+    const seen = seat && seat.at !== null ? ` seen=${Math.max(0, Math.floor((at - seat.at) / 1000))}s` : ''
+    lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}${seen}`)
   }
   for (const lane of selected.archived) {
     const journal = readJournal(lane.journal, d)

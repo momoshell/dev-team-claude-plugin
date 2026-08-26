@@ -1,6 +1,7 @@
 {
   "crew/drive.mjs:44": "builder: 2400, reviewer: 1800",
   "crew/seat-io.mjs:50": "export const TRANSCRIPT_STALE_MS = 900_000",
+  "crew/seat-io.mjs:1478": "export function recogniseProviderRetry(text) {",
   "crew/drive.mjs:2511": "const completeCheckProof = (label) => {",
   "scripts/factory/make-brief.mjs:657": "function colourNeutralEnv(base = process.env)",
   "crew/crew.mjs:1884": "escalation -> NEVER teardown",

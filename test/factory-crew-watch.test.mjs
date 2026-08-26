@@ -84,6 +84,85 @@ test('bounded report shows active and settled lane status', () => {
   ])
 })
 
+test('boundedReport tells a retrying seat from a stale one and from a working one', () => {
+  const root = world()
+  seedLane(root, {
+    task: 'retrying',
+    journalLines: [
+      { at: NOW - 20_000, stage: 'build:r1' },
+      { at: NOW - 12_000, event: 'seat-retrying', id: 'd1', role: 'builder' },
+    ],
+  })
+  seedLane(root, {
+    task: 'stale',
+    journalLines: [
+      { at: NOW - 20_000, stage: 'build:r1' },
+      { at: NOW - 11_000, event: 'seat-stale', id: 'd2', role: 'builder' },
+    ],
+  })
+  seedLane(root, { task: 'working', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  seedLane(root, {
+    task: 'cleared',
+    journalLines: [
+      { at: NOW - 10_000, stage: 'build:r1' },
+      { at: NOW - 8_000, event: 'seat-retrying', id: 'd4', role: 'builder' },
+      { at: NOW - 2_000, event: 'seat-retry-cleared', id: 'd4', role: 'builder' },
+    ],
+  })
+  const report = boundedReport({ root, names: ['retrying', 'stale', 'working', 'cleared'], now: NOW, deps: deps() })
+  assert.deepEqual(report.lines, [
+    '[retrying] stage=build:r1 age=12s status=retrying seen=12s',
+    '[stale] stage=build:r1 age=11s status=stale seen=11s',
+    '[working] stage=build:r1 age=5s status=active',
+    '[cleared] stage=build:r1 age=2s status=active',
+  ])
+})
+
+test('a condition is scoped to its dispatch and retrying outranks stale on one tick', () => {
+  const sameTickRoot = world()
+  seedLane(sameTickRoot, {
+    task: 'same-tick',
+    journalLines: [
+      { at: NOW - 10_000, stage: 'build:r1' },
+      { at: NOW - 5_000, event: 'seat-retrying', id: 'd1', role: 'builder' },
+      { at: NOW - 5_000, event: 'seat-stale', id: 'd1', role: 'builder' },
+    ],
+  })
+  assert.match(boundedReport({ root: sameTickRoot, names: ['same-tick'], now: NOW, deps: deps() }).lines[0], /status=retrying seen=5s/)
+
+  const scopedRoot = world()
+  seedLane(scopedRoot, {
+    task: 'scoped',
+    journalLines: [
+      { at: NOW - 10_000, stage: 'build:r1' },
+      { at: NOW - 9_000, event: 'seat-stale', id: 'd2', role: 'builder' },
+      { at: NOW - 2_000, event: 'seat-stale-cleared', id: 'd1', role: 'lead' },
+    ],
+  })
+  assert.match(boundedReport({ root: scopedRoot, names: ['scoped'], now: NOW, deps: deps() }).lines[0], /status=stale seen=9s/)
+
+  const recoveredRoot = world()
+  seedLane(recoveredRoot, {
+    task: 'recovered',
+    journalLines: [
+      { at: NOW - 10_000, stage: 'build:r1' },
+      { at: NOW - 8_000, event: 'seat-stale', id: 'd3', role: 'builder' },
+      { at: NOW - 3_000, event: 'seat-stale-cleared', id: 'd3', role: 'builder' },
+    ],
+  })
+  assert.equal(boundedReport({ root: recoveredRoot, names: ['recovered'], now: NOW, deps: deps() }).lines[0], '[recovered] stage=build:r1 age=3s status=active')
+})
+
+test('retry transitions are selected through both default event construction paths', () => {
+  assert.equal(selectEvent({ event: 'seat-retrying' }, DEFAULT_EVENTS), true)
+  const parsed = parseArgs(['demo-lane'])
+  assert.equal(parsed.events.includes('seat-retrying'), true)
+  assert.equal(parsed.events.includes('seat-retry-cleared'), true)
+  const state = createState({ root: world(), names: ['demo-lane'] })
+  assert.equal(state.events.includes('seat-retrying'), true)
+  assert.equal(state.events.includes('seat-retry-cleared'), true)
+})
+
 test('--all reports live lanes only', () => {
   const root = world()
   seedLane(root, { task: 'live', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })

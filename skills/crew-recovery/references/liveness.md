@@ -37,3 +37,15 @@ driver names the state as `the seat is STALE:`, `the seat REFUSED:`, or `the sea
 is WORKING:`. A `seat-stale` row in `journal.jsonl` is the in-flight warning
 that arrives before the budget does. A stale reading names a state; it does not
 kill a seat (#567 owns the action).
+
+The historical Claude mid-turn sample is `n=124,783, recorded as a snapshot`; `docs/ledger-queries.md` line 183 records that qualifier rather than a reproducible constant. The reproducible pi validation is `n=52,833 with 37 gaps over 900s`, attributed to #590.
+
+## Exception: a provider retry loop
+
+A provider retry loop is the exception the transcript mtime cannot see: the pane is authoritative for the current retry banner, and `crew-watch` reports `status=retrying` rather than treating the frozen transcript as a stalled seat (#659). This does not repeal the ordering above for seat death; it names the one live provider state that has no transcript frame.
+
+The fact leaves the pane only through the seat's `seat-retrying` / `seat-retry-cleared` journal rows, so a headless lane cannot show this state and keeps reading `active`.
+
+A `seat-stale` condition is retired only by measured growth or a completing envelope; a budget that expired measured nothing.
+
+The `recogniseProviderRetry` reader is implemented at `crew/seat-io.mjs:1478`.

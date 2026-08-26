@@ -7,8 +7,8 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, saveCrew, seatIo, settleSeatTeardown,
+  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
@@ -141,6 +141,9 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='seat-teardown-record-failed'", 'at role outcome reason'],
   ['operationalRow', "event='seat-teardown-sweep'", 'at ...summary'],
   ['recordRow', "event='seat-refusal'", "role id member source message at outcome ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}) ...extra"],
+  ['operationalRow', "event='seat-retrying'", 'at role id attempt of retry_in_s condition source'],
+  ['operationalRow', "event='seat-retry-cleared'", 'at role id source'],
+  ['operationalRow', "event='seat-stale-cleared'", 'at role id'],
   ['operationalRow', "event='seat-stale'", 'at role id last_frame_at stale_ms threshold_ms'],
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath outcome ...extra'],
@@ -156,10 +159,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 22)
+  assert.equal(sites.length, 25)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 16)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 19)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
 })
 
@@ -950,8 +953,9 @@ test('provider recognition branches no adjudication, escalation, reseat or retry
       'crew/headless.mjs', 'crew/headless.test.mjs', 'crew/seat-io-runclean.test.mjs', 'crew/seat-io.mjs',
     ])
     const seatIoSource = readFileSync(join(ROOT, 'crew/seat-io.mjs'), 'utf8')
+    const executable = seatIoSource.replace(/\/\/.*$/gm, '')
     for (const pattern of [/overloaded_error/, /rate_limit_error/, /authentication_error/, /\b529\b/, /\b429\b/]) {
-      assert.doesNotMatch(seatIoSource, pattern)
+      assert.doesNotMatch(executable, pattern)
     }
   })
 })
@@ -1083,9 +1087,114 @@ function makeReaskHarness(fixture, { alive = true, onReask = null } = {}) {
   }
 }
 
+function makeRetryHarness({ transport = 'pane', screen = () => '529 Overloaded · Retrying in 6s · attempt 8/10', envelopeVisible = () => false, envelopeBody = () => JSON.stringify({ status: 'done' }), refusalFrames = null } = {}) {
+  const root = scratchDir('seat-retry-transitions-')
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  const logs = []; const events = []; const sends = []
+  const box = { clock: 0, reads: 0, returnPath: null, envelope: false }
+  const returnFile = join(paths.returnsDir, 'd1.lead.json')
+  let workerBin = null
+  let priorWorkerBin = null
+  const member = transport === HEADLESS_TRANSPORT
+    ? { transport, agent: 'claude' }
+    : { surface_id: 'surface-lead', transport: 'pane', agent: 'claude' }
+  const deps = {
+    now: () => box.clock,
+    sleep: (ms) => { box.clock += ms },
+    sendLine: (surface, line) => sends.push({ surface, line }),
+    assignmentLine: () => 'assignment',
+    logLine: (_path, row) => logs.push(row),
+    existsSync: (path) => path === box.returnPath ? envelopeVisible(box) : existsSync(path),
+    readFileSync: (path, enc) => path === box.returnPath ? envelopeBody(box) : readFileSync(path, enc),
+  }
+  if (transport === 'pane') {
+    deps.cmux = (verb) => {
+      if (verb !== 'read-screen') return { ok: true, stdout: '' }
+      box.reads += 1
+      return { ok: true, stdout: screen(box) }
+    }
+    deps.tree = () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-lead' }] }] }] }] })
+    deps.locate = (_tree, id) => id === 'surface-lead'
+    if (refusalFrames) deps.refusalFrames = refusalFrames
+  } else {
+    // `io.assign` resolves the frozen worker binary BEFORE it consults
+    // deps.headlessIo, so a machine without a claude install cannot reach the
+    // injected seam at all — CI runners have none, and this test is about the
+    // retry transition, not about binary resolution. Stub it the way
+    // crew/crew.test.mjs:550 does, and restore in cleanup().
+    workerBin = join(root, 'stub-claude')
+    writeFileSync(workerBin, '')
+    priorWorkerBin = process.env.CREW_CLAUDE_BIN
+    process.env.CREW_CLAUDE_BIN = workerBin
+    deps.headlessIo = () => ({
+      assign: () => ({ id: 'd1', returnPath: returnFile }),
+      wait: () => null,
+    })
+  }
+  const io = seatIo({ members: { lead: member } }, paths, process.cwd(), null, null, {}, deps)
+  io.emit = (event) => events.push(event)
+  const assignment = io.assign({ role: 'lead', briefFile: '/tmp/brief.md' })
+  box.returnPath = assignment.returnPath
+  return { io, logs, events, sends, box, returnPath: box.returnPath, cleanup: () => {
+    if (workerBin !== null) {
+      if (priorWorkerBin === undefined) delete process.env.CREW_CLAUDE_BIN
+      else process.env.CREW_CLAUDE_BIN = priorWorkerBin
+    }
+    rmSync(root, { recursive: true, force: true })
+  } }
+}
+
 const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done","summary":"finished\nthe build"}'
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
+
+test('both pane waits journal the retry transition and the wait exit retires it', () => {
+  const ordinary = makeRetryHarness({
+    envelopeVisible: (box) => box.envelope,
+    screen: (box) => { if (box.reads === 1) box.envelope = true; return '529 Overloaded · Retrying in 6s · attempt 8/10' },
+  })
+  try {
+    assert.deepEqual(ordinary.io.wait(ordinary.returnPath, 120), { status: 'done' })
+    assert.equal(ordinary.box.reads, 1)
+    assert.equal(ordinary.logs.filter((row) => row.event === 'seat-retrying').length, 1)
+    assert.equal(ordinary.logs.filter((row) => row.event === 'seat-retry-cleared').length, 1)
+  } finally { ordinary.cleanup() }
+
+  const malformed = makeRetryHarness({ envelopeVisible: () => true, envelopeBody: () => '{', screen: () => '529 Overloaded · Retrying in 6s · attempt 8/10' })
+  try {
+    assert.throws(() => malformed.io.wait(malformed.returnPath, 40), /unparseable|unusable|envelope/i)
+    assert.ok(malformed.box.reads >= 1)
+    assert.equal(malformed.logs.filter((row) => row.event === 'envelope-reask').length >= 1, true)
+    assert.equal(malformed.logs.filter((row) => row.event === 'seat-retrying').length, 1)
+    assert.equal(malformed.logs.filter((row) => row.event === 'seat-retry-cleared').length, 1)
+  } finally { malformed.cleanup() }
+
+  const throwing = makeRetryHarness({
+    refusalFrames: () => [{ at: 30_000, member: 'quota', message: 'session limit', source: 'claude' }],
+  })
+  try {
+    assert.throws(() => throwing.io.wait(throwing.returnPath, 60), /seat refused/)
+    assert.equal(throwing.logs.filter((row) => row.event === 'seat-retrying').length, 1)
+    assert.equal(throwing.logs.filter((row) => row.event === 'seat-retry-cleared').length, 1)
+  } finally { throwing.cleanup() }
+
+  const headless = makeRetryHarness({ transport: HEADLESS_TRANSPORT })
+  try {
+    assert.equal(headless.io.wait(headless.returnPath, 60), null)
+    assert.equal(headless.logs.some((row) => row.event === 'seat-retrying' || row.event === 'seat-retry-cleared'), false)
+  } finally { headless.cleanup() }
+
+  const climbing = makeRetryHarness({
+    screen: (box) => `529 Overloaded · Retrying in 6s · attempt ${box.reads === 1 ? 8 : 10}/10`,
+  })
+  try {
+    assert.equal(climbing.io.wait(climbing.returnPath, 61), null)
+    assert.equal(climbing.logs.filter((row) => row.event === 'seat-retrying').length, 1)
+    assert.equal(climbing.io.waitDiagnosis(climbing.returnPath).state, 'retrying')
+    assert.ok(climbing.io.waitDiagnosis(climbing.returnPath).text.includes('attempt 10/10'))
+  } finally { climbing.cleanup() }
+})
 
 test('a live steerable pane seat gets exactly one re-ask carrying the return path and the verbatim parse failure', () => {
   withRepo({ dirty: false }, (fixture) => {
@@ -1334,6 +1443,66 @@ test('showDoc updates doc_viewer without clobbering a concurrent member change',
     if (writer) await writer.stop()
     rmSync(root, { recursive: true, force: true })
   }
+})
+
+test('recogniseProviderRetry reads the measured retry banner and nothing else', () => {
+  const banner = `${String.fromCharCode(27)}[31m529 Overloaded${String.fromCharCode(27)}[39m · Retrying in 6s · attempt 8/10`
+  assert.deepEqual(recogniseProviderRetry(banner), {
+    retry_in_s: 6, attempt: 8, of: 10, condition: 'overloaded',
+  })
+  assert.equal(recogniseProviderRetry('Adjudicating (esc to interrupt · 142s)'), null)
+  assert.equal(recogniseProviderRetry('529 Overloaded · attempt 8/10'), null)
+  assert.equal(recogniseProviderRetry(null), null)
+})
+
+test('paneRetryFrame degrades to null for an absent surface, a failed read and a throw', () => {
+  const banner = '529 Overloaded · Retrying in 6s · attempt 8/10'
+  assert.deepEqual(paneRetryFrame('surface-builder', { cmux: () => ({ ok: true, stdout: banner }) }), {
+    retry_in_s: 6, attempt: 8, of: 10, condition: 'overloaded',
+  })
+  assert.equal(paneRetryFrame(null, { cmux: () => ({ ok: true, stdout: banner }) }), null)
+  assert.equal(paneRetryFrame('surface-builder', { cmux: () => ({ ok: false, stdout: banner }) }), null)
+  assert.equal(paneRetryFrame('surface-builder', { cmux: () => { throw new Error('EPERM') } }), null)
+  assert.equal(paneRetryFrame('surface-builder', { cmux: () => ({ ok: true, stdout: '' }) }), null)
+})
+
+test('waitState names a retrying seat above a stale one and leaves the other states alone', () => {
+  const at = 2_000_000
+  const retry = { retry_in_s: 6, attempt: 10, of: 10, condition: 'overloaded' }
+  const verdict = waitState({ role: 'builder', latest: at - 1_000_000, refusal: null, at, timeoutS: 2400, retry })
+  assert.equal(verdict.state, 'retrying')
+  assert.match(verdict.text, /RETRYING/)
+  assert.ok(verdict.text.includes('attempt 10/10'))
+  assert.equal(waitState({ role: 'builder', latest: at - 1_000_000, refusal: null, at, timeoutS: 2400 }).state, 'stale')
+  assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: { member: 'transient', message: 'WebSocket error' }, at, timeoutS: 2400 }).state, 'refused')
+  assert.equal(waitState({ role: 'builder', latest: at - 1000, refusal: null, at, timeoutS: 2400 }).state, 'working')
+  assert.equal(waitState({ role: 'builder', latest: null, refusal: null, at, timeoutS: 2400, retry: null }), null)
+})
+
+test('a stale condition survives a timeout and is retired only by measured growth', () => {
+  withTranscriptSeat({ timeoutS: 31, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: -1_000_000 }) }, ({ logs, env }) => {
+    assert.equal(env, null)
+    assert.equal(logs.filter((row) => row.event === 'seat-stale').length, 1)
+    assert.equal(logs.filter((row) => row.event === 'seat-stale-cleared').length, 0)
+  })
+
+  withTranscriptSeat({
+    timeoutS: 61, transcriptPaths: () => ['/x/builder.jsonl'],
+    statSync: (_path, at) => ({ mtimeMs: at >= 45_000 ? at - 1000 : -1_000_000 }),
+  }, ({ logs, env }) => {
+    assert.equal(env, null)
+    assert.equal(logs.filter((row) => row.event === 'seat-stale').length, 1)
+    assert.equal(logs.filter((row) => row.event === 'seat-stale-cleared').length, 1)
+  })
+
+  withTranscriptSeat({
+    timeoutS: 60, envelopeAt: 35_000, transcriptPaths: () => ['/x/builder.jsonl'],
+    statSync: () => ({ mtimeMs: -1_000_000 }),
+  }, ({ logs, env }) => {
+    assert.deepEqual(env, { status: 'done' })
+    assert.equal(logs.filter((row) => row.event === 'seat-stale').length, 1)
+    assert.equal(logs.filter((row) => row.event === 'seat-stale-cleared').length, 1)
+  })
 })
 
 test('waitState names stale, refused and working states and stays silent without growth', () => {

@@ -1445,13 +1445,70 @@ export function reaskBrief({ role, id, returnPath, message }) {
   ].join('\n')
 }
 
-// Which of three states a wait that expired was in. PURE, so the escalation text
+// --- provider retry: the state no transcript instrument can see -------------
+// b249-labdefects, 2026-08-25 (#659): a lead's provider request returned 529
+// Overloaded and the harness retried INSIDE one turn, the pane banner climbing
+// `attempt 8/10` -> `10/10` across ~4.5 minutes. A retry writes NO transcript
+// frame, so `transcriptGrowth` kept returning the pre-retry mtime and the stale
+// arm of `waitState` below would have named a live seat dead. The operator read
+// that frozen mtime as a stalled seat and nearly re-nudged a live turn.
+//
+// WHERE THE EVIDENCE COMES FROM, stated because an unmeasurable state declared
+// as measurable is the defect this fixes: the ONLY source is the PANE's
+// rendered text, read with `cmux read-screen`. Nothing else on this side
+// carries it — not the transcript, not the journal, not `paneProbe`, which
+// answers only that a surface exists. It follows that a headless seat
+// (HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT) has no pane and therefore
+// CANNOT report this state at all: `paneRetryFrame` returns null there, and
+// null is UNKNOWN — never "not retrying" (#297, a NULL beats a value nobody
+// measured).
+const PANE_RETRY_LINES = 40
+// The same CSI shape as crew/headless.mjs:68, kept local because that module is
+// outside this lane's fence. A pane frame is ANSI-laden and an unstripped
+// matcher can miss a banner split by a colour reset.
+const RETRY_ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
+// PRIVATE: implementation detail of recogniseProviderRetry, with no external
+// consumer.
+const PROVIDER_RETRY_BACKOFF = /retrying in (\d+)\s*s/i
+const PROVIDER_RETRY_ATTEMPT = /attempt (\d+)\s*\/\s*(\d+)/i
+
+// PURE, so the state is unit-testable without a pane. The BACKOFF clause is the
+// gate: a screen that never says it is retrying yields null, so the state is
+// read out of the banner and never inferred from a symbol (#623).
+export function recogniseProviderRetry(text) {
+  if (typeof text !== 'string' || !text) return null
+  const plain = text.replace(RETRY_ANSI_CSI, '')
+  const backoff = PROVIDER_RETRY_BACKOFF.exec(plain)
+  if (backoff === null) return null
+  const attempt = PROVIDER_RETRY_ATTEMPT.exec(plain)
+  return {
+    retry_in_s: Number(backoff[1]),
+    attempt: attempt ? Number(attempt[1]) : null,
+    of: attempt ? Number(attempt[2]) : null,
+    condition: recogniseProviderCondition(plain),
+  }
+}
+
+// The pane read. EVERY failure path returns null — no surface (the headless
+// case), a throwing or non-zero cmux, a stdout that is not a string. A reader
+// that could not read is UNKNOWN, and unknown never fabricates a state.
+export function paneRetryFrame(surfaceId, deps = {}) {
+  if (!surfaceId) return null
+  const run = deps.cmux || defaultCmux
+  let res
+  try { res = run('read-screen', ['--surface', surfaceId, '--lines', String(PANE_RETRY_LINES)]) }
+  catch { return null }
+  if (!res || res.ok !== true || typeof res.stdout !== 'string') return null
+  return recogniseProviderRetry(res.stdout)
+}
+
+// Which of four states a wait that expired was in. PURE, so the escalation text
 // is unit-testable without a seat. Precedence follows the evidence: a measured
 // stale transcript is the CURRENT state and outranks a refusal frame that may be
 // minutes old; a NAMED refusal outranks a bare budget overrun; a seat still
 // producing frames simply ran out of budget. This never kills or restarts
 // anything — naming the state is this lane, the action policy is #567's.
-export function waitState({ role, latest, refusal, at, timeoutS, staleMs = TRANSCRIPT_STALE_MS }) {
+export function waitState({ role, latest, refusal, at, timeoutS, staleMs = TRANSCRIPT_STALE_MS, retry = null }) {
   const measured = Number.isFinite(latest)                                        // verbatim: mutation A5
   const idleS = measured ? Math.max(0, Math.round((at - latest) / 1000)) : null
   // The brief's third state is "refused under a NAMED condition", so membership
@@ -1465,6 +1522,17 @@ export function waitState({ role, latest, refusal, at, timeoutS, staleMs = TRANS
   // timeout evidence (§1g's existing `the provider says:` clause); it just does
   // not get to NAME the state.
   const named = !!refusal && SEAT_REFUSALS.some((row) => row.member === refusal.member)   // verbatim: mutation A16
+  // RETRYING outranks STALE, and that ordering IS the #659 fix: a harness
+  // retrying a provider call writes no transcript frame, so `latest` is frozen
+  // at the instant the turn began and the stale arm below would name a live
+  // seat dead. This reading is a CURRENT pane measurement; the frozen mtime is
+  // the ABSENCE of one. It outranks a refusal frame for the same reason the
+  // existing comment gives for stale: a frame may be minutes old. `retry` is
+  // null on every headless seat and on every pane the reader could not read, so
+  // this arm cannot fire without evidence.
+  if (retry !== null) {                                                         // verbatim: mutation R2
+    return { state: 'retrying', text: `the seat is RETRYING: ${role} — its harness is retrying a provider call (attempt ${retry.attempt ?? '?'}/${retry.of ?? '?'}${retry.condition ? `, ${retry.condition}` : ''}), read from the pane; a retry writes no transcript frame, so the ${idleS === null ? 'unmeasured' : `${idleS}s-old`} last frame is not evidence of death` }
+  }
   if (measured && at - latest >= staleMs) {                                       // verbatim: mutation A2
     return { state: 'stale', text: `the seat is STALE: ${role} produced its last transcript frame ${idleS}s ago, past the ${Math.round(staleMs / 1000)}s staleness threshold — a spinner and an elapsed timer are not evidence of life` }
   }
@@ -1634,7 +1702,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const lastRefusal = new Map()       // role -> the last refusal frame seen, the evidence a failure quotes
   const lastGrowth = new Map()        // returnPath -> { at, latest }, the last measured transcript reading
   const lastDiagnosis = new Map()     // returnPath -> the state a wait expired in
-  const staleNoted = new Set()        // roles already journalled stale — one line per seat, never a loop
+  const staleNoted = new Set()        // returnPaths already warned — one per DISPATCH, re-armable
+  const lastRetry = new Map()         // returnPath -> the CURRENT pane retry reading, refreshed on every read
   const repromptedRefusals = new Set() // returnPaths already re-prompted — the bound, per assignment
   const silenceWatch = new Map()      // returnPath -> the unclassified frame being watched for silence
   const transportForPath = new Map()
@@ -1790,15 +1859,81 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     } catch { return null }
     return transcriptGrowth(files, deps)
   }
+  // Edge-triggered in the JOURNAL, level-tracked in memory. The rising edge is
+  // journalled once; the reading itself is refreshed on EVERY successful read,
+  // so an expiry diagnosis quotes attempt 10, not the attempt 8 that first
+  // crossed. A headless seat declines here and journals nothing: honest
+  // silence, never a claim of health.
+  const noteRetry = (info, returnPath, at) => {
+    try {
+      const member = crew.members?.[info?.role] || null
+      if (!info?.surface_id || (member?.transport && member.transport !== DEFAULT_TRANSPORT)) return
+      const reading = paneRetryFrame(info.surface_id, { cmux })
+      const standing = lastRetry.get(returnPath) ?? null
+      if (reading) {
+        lastRetry.set(returnPath, reading)                                      // verbatim: mutation P2
+        if (!standing) io.log(operationalRow({ at, event: 'seat-retrying', role: info.role, id: info.id ?? null, attempt: reading.attempt, of: reading.of, retry_in_s: reading.retry_in_s, condition: reading.condition, source: 'pane' }))
+      } else if (standing) {
+        clearRetry(info, returnPath, at)
+      }
+    } catch { /* the retry reading is evidence, never load-bearing for a wait */ }
+  }
+
+  // `waitForEnvelope` returns an arriving envelope BEFORE any probe
+  // (crew/seat-io.mjs:1499-1502), so the ordinary success shape — the retry
+  // succeeds, the seat writes its envelope, the next 5s poll reads it — never
+  // reaches another 30s sample. A reading only ever cleared by a later sample
+  // would therefore stand forever on the happy path.
+  const clearRetry = (info, returnPath, at) => {
+    if (!lastRetry.has(returnPath)) return
+    lastRetry.delete(returnPath)
+    try { io.log(operationalRow({ at, event: 'seat-retry-cleared', role: info?.role ?? null, id: info?.id ?? null, source: 'pane' })) }
+    catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+  }
+
+  // A stale row was TRUE WHEN WRITTEN; leaving it standing makes a recovered
+  // seat read stale for the life of the process. Only a MEASUREMENT retires it.
+  const clearStale = (info, returnPath, at) => {
+    if (!staleNoted.has(returnPath)) return
+    staleNoted.delete(returnPath)
+    try { io.log(operationalRow({ at, event: 'seat-stale-cleared', role: info?.role ?? null, id: info?.id ?? null })) }
+    catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+  }
+
+  // Retry state is retired at EVERY exit: the provider call ended, whatever
+  // ended it. Stale state is NOT. A budget that expired measured nothing about
+  // the transcript — `waitForEnvelope` returns null on its deadline without a
+  // further sample (:1497-1563) — so clearing stale there would turn a
+  // still-frozen seat `active` on the strength of a clock. Only a completing
+  // envelope (positive evidence the seat produced work) or measured
+  // sub-threshold growth in `noteGrowth` retires it. A lane that then settles or
+  // escalates is already non-active via `laneActive`.
+  const settleSeatConditions = (info, returnPath, at, envelope) => {
+    clearRetry(info, returnPath, at)
+    if (envelope != null) clearStale(info, returnPath, at)                      // verbatim: mutation X1
+  }
+
   const noteGrowth = (info, returnPath, record) => {
     lastGrowth.set(returnPath, record)
     const role = info?.role
-    if (!role || staleNoted.has(role)) return
-    if (record.at - record.latest < TRANSCRIPT_STALE_MS) return
-    staleNoted.add(role)
+    if (!role) return
+    if (record.at - record.latest < TRANSCRIPT_STALE_MS) { clearStale(info, returnPath, record.at); return }   // verbatim: mutation X2
+    if (staleNoted.has(returnPath)) return
+    staleNoted.add(returnPath)
     try { io.log(operationalRow({ at: record.at, event: 'seat-stale', role, id: info?.id ?? null, last_frame_at: record.latest, stale_ms: record.at - record.latest, threshold_ms: TRANSCRIPT_STALE_MS })) }
     catch { /* the journal is diagnostics, never load-bearing for a wait */ }
   }
+
+  // ONE sampler for both pane waits. Production has two waitForEnvelope call
+  // sites — the bounded malformed-envelope re-ask (:1899) and the ordinary wait
+  // (:2040) — and a retry storm during the re-ask was exactly as invisible as
+  // one during the wait. Neither call changes waitForEnvelope's exported
+  // signature: this is the caller's own arrow, as before.
+  const samplePane = (info, returnPath) => (at) => {
+    noteRetry(info, returnPath, at)
+    return sampleSeatRefusal({ ...info, returnPath }, at)
+  }
+
   const armSilenceWatch = (info, frame) => {
     const returnPath = info?.returnPath
     if (!returnPath) return
@@ -1907,7 +2042,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           return readEnvelopeFile(returnPath, { existsSync, readFileSync, role })
         },
         probeSeat: () => paneProbe(surfaceId, { tree, locate }),
-        sampleSeat: (at) => sampleSeatRefusal({ ...info, returnPath }, at),
+        sampleSeat: samplePane(info, returnPath),
         sampleGrowth: () => growthFor(info),
         onGrowth: (record) => noteGrowth(info, returnPath, record),
         onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
@@ -2034,6 +2169,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     wait(returnPath, timeoutS) {
       const transport = transportForPath.get(returnPath)
       const info = seatFor.get(returnPath)
+      let settled = null   // the envelope THIS wait produced, if any — the only positive completion evidence
       try {
         const env = transport
           ? transport.wait(returnPath, timeoutS)
@@ -2041,7 +2177,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
             probeSeat: info ? () => info.surface_id ? paneProbe(info.surface_id, { tree, locate }) : { alive: null, substrate: 'ok' } : null,
-            sampleSeat: info ? (at) => sampleSeatRefusal({ ...info, returnPath }, at) : null,
+            sampleSeat: info ? samplePane(info, returnPath) : null,
             sampleGrowth: info ? () => growthFor(info) : null,
             onGrowth: (record) => noteGrowth(info, returnPath, record),
             onAlive: (at) => {
@@ -2057,6 +2193,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           const verdict = waitState({
             role: info?.role || 'unknown', latest: lastGrowth.get(returnPath)?.latest ?? null,
             refusal: refusal ?? null, at: now(), timeoutS,                            // verbatim: mutation A15
+            retry: lastRetry.get(returnPath) ?? null,
           })
           if (verdict) lastDiagnosis.set(returnPath, verdict)                       // verbatim: mutation A8
           noteCellFailure(info?.role, info?.id, 'timeout', {
@@ -2064,6 +2201,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             seatRefusal: refusal?.member,
           })
         }
+        settled = env
         return env
       } catch (err) {
         let failure = err
@@ -2074,6 +2212,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             // cell defect — but the RUN continues as if the first envelope had
             // been readable.
             noteCellFailure(info?.role, info?.id, 'unusable-envelope', recovery.error || err)
+            settled = recovery.envelope
             return recovery.envelope
           }
           failure = recovery.error || err
@@ -2085,6 +2224,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         noteCellFailure(info?.role, info?.id, cellFailureKind(failure), failure)
         throw failure
       } finally {
+        // The condition rows are scoped to THIS dispatch; the dispatch is over.
+        try { settleSeatConditions(info, returnPath, now(), settled) } catch { /* never load-bearing */ }
         // A pane's hook side channel is the only usage source for this
         // transport. Measure in finally so a timeout or seat death still
         // records spend already written to the transcript.

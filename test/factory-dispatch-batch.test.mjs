@@ -4,17 +4,22 @@ import { existsSync as fsExistsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname, join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 import {
+  BAND_FLOOR_REASONS,
   BatchRefusal,
   baseContains,
+  batchSeatsFrom,
   BOOT_TRANSPORT,
   PANE_TRANSPORT,
   COUPLED_SOURCE_UNFENCED,
   ANCHOR_BLIND_SPOT,
   ANCHOR_PIN_WARNING_PREFIX,
   REFUSAL_REASONS,
+  DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
+  DISPATCH_ONLY_REQUEST_KEYS,
   MISCLASSIFIED_PREFIX,
   REQUEST_SUFFIX,
+  SEAT_FIELDS,
   STALE_READ_ACK,
   checkArrival,
   checkDirectedBrief,
@@ -33,8 +38,18 @@ import {
   readsFromRefusal,
   readBatch,
   reconcileTier,
+  seatChain,
+  seatFlagArgs,
+  seatFromSpec,
+  seatSpec,
+  shortfallFlagArgs,
   staffingFromBrief,
   resolveTransport,
+  ROSTER_PATH,
+  seatFloorRefusal,
+  seatRolesUnseated,
+  seatsDefect,
+  mergeSeats,
   tierFloor,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief } from '../crew/drive.mjs'
@@ -787,6 +802,8 @@ function dispatchFixture({
   workspaceFor = (lane) => `ws-${lane}`,
   outcomes = {},
   ancestor = () => 0,
+  spawnResult = () => ({ status: 0, stdout: '', stderr: '' }),
+  readObserver = () => {},
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -803,6 +820,7 @@ function dispatchFixture({
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
     readFileSync: (path, encoding) => {
       const text = String(path)
+      readObserver(text)
       if (text.endsWith(REQUEST_SUFFIX) && text.startsWith(batch)) {
         const name = basenameOf(text)
         const lane = name.slice(0, -REQUEST_SUFFIX.length)
@@ -828,7 +846,7 @@ function dispatchFixture({
       const args = (call.args || []).map(String)
       if (args.includes('merge-base')) return { status: ancestor(args), stdout: '', stderr: '' }
       if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
-      return { status: 0, stdout: '', stderr: '' }
+      return spawnResult(args, call)
     },
     log: (line) => logs.push(String(line)),
   }
@@ -1626,7 +1644,12 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
   assert.deepEqual(result.report.unstarted, [])
 
   const dry = dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
-  assert.deepEqual(dry.logs, [JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }), DRY_RUN_BLIND_SPOT])
+  assert.deepEqual(dry.logs, [
+    JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }),
+    'dispatch-batch: dry-run lane=lane-a tier=mechanical seats=none seats_from=none',
+    'dispatch-batch: dry-run lane=lane-b tier=mechanical seats=none seats_from=none',
+    DRY_RUN_BLIND_SPOT,
+  ])
   assert.equal(dry.logs[0].startsWith('{"dispatch":"dry-run","plans":['), true)
   assert.equal(dry.report.waves.length, 1)
   assert.deepEqual(dry.report.deferred, [])
@@ -1692,6 +1715,256 @@ test('baseContains treats only a measured zero probe as containment', () => {
   assert.equal(baseContains({ commit: null, base: 'main', checkout: '/repo', deps: {
     spawn: () => ({ status: 0 }),
   } }), false)
+})
+
+test('a request seats compile without carrying seats into the compiler request', () => {
+  const seats = { planner: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', effort: 'high' } }
+  assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes('seats'), true)
+  const result = dispatchFixture({
+    label: 'seats-request',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { seats }) },
+  })
+  const compile = result.spawned.find(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  assert.ok(compile)
+  const compiled = JSON.parse(readFileSync(compile.args[compile.args.indexOf('--request') + 1], 'utf8'))
+  assert.equal(Object.hasOwn(compiled, 'seats'), false)
+  assert.deepEqual(readBatch({ batchDir: result.batch })[0].seats, seats)
+})
+
+test('invalid seats shapes refuse batch-unreadable at the request path', () => {
+  const cases = [
+    [null, 'plain object'],
+    [{ planner: null }, 'role'],
+    [{ planner: { unknown: 'pi' } }, 'unknown'],
+    [{ planner: { agent: '' } }, 'non-empty'],
+  ]
+  for (const [seats, detail] of cases) {
+    const batch = makeBatch(['lane-a'])
+    const path = join(batch, `lane-a${REQUEST_SUFFIX}`)
+    put(path, JSON.stringify(requestFor('lane-a', { seats })))
+    assert.throws(() => readBatch({ batchDir: batch }), (error) => error instanceof BatchRefusal
+      && error.reason === 'batch-unreadable'
+      && error.message.includes(path)
+      && error.message.toLowerCase().includes(detail))
+  }
+})
+
+test('parseCliArgs accepts every batch seat flag and preserves generic refusals', () => {
+  assert.deepEqual(parseCliArgs([
+    '--agent-planner', 'pi', '--model-planner', 'raw', '--effort-planner', 'high',
+    '--allow-shortfall-planner', 'subagents',
+  ]), {
+    'agent-planner': 'pi',
+    'model-planner': 'raw',
+    'effort-planner': 'high',
+    'allow-shortfall-planner': 'subagents',
+  })
+  refusal(() => parseCliArgs(['--nonsense', 'x']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--agent-planner', 'pi', '--agent-planner', 'claude']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--allow-shortfall-planner']), 'batch-unreadable')
+})
+
+test('seat merge and forwarding helpers are deterministic and preserve field provenance', () => {
+  const batch = batchSeatsFrom({ 'model-planner': 'batch-model', 'agent-builder': 'batch-agent', 'allow-shortfall-planner': 'subagents' })
+  const lane = { planner: { agent: 'lane-agent', effort: 'high' } }
+  assert.deepEqual(batch, {
+    builder: { agent: 'batch-agent' },
+    planner: { model: 'batch-model', allow_shortfall: 'subagents' },
+  })
+  assert.deepEqual(mergeSeats(batch, lane), {
+    builder: { agent: 'batch-agent' },
+    planner: { agent: 'lane-agent', model: 'batch-model', effort: 'high', allow_shortfall: 'subagents' },
+  })
+  assert.deepEqual(seatChain(batch, lane), {
+    builder: { agent: { batch: 'batch-agent', lane: null, settled: 'batch-agent', from: 'batch' } },
+    planner: {
+      agent: { batch: null, lane: 'lane-agent', settled: 'lane-agent', from: 'lane' },
+      model: { batch: 'batch-model', lane: null, settled: 'batch-model', from: 'batch' },
+      effort: { batch: null, lane: 'high', settled: 'high', from: 'lane' },
+      allow_shortfall: { batch: 'subagents', lane: null, settled: 'subagents', from: 'batch' },
+    },
+  })
+  assert.deepEqual(seatFlagArgs(mergeSeats(batch, lane)), [
+    '--agent-builder', 'batch-agent', '--agent-planner', 'lane-agent',
+    '--model-planner', 'batch-model', '--effort-planner', 'high',
+  ])
+  assert.deepEqual(shortfallFlagArgs(mergeSeats(batch, lane)), ['--allow-shortfall-planner', 'subagents'])
+  assert.equal(seatSpec(mergeSeats(batch, lane)), 'builder.agent=batch-agent,planner.agent=lane-agent,planner.model=batch-model,planner.effort=high,planner.allow_shortfall=subagents')
+  assert.equal(seatFromSpec(batch, lane), 'builder.agent=batch,planner.agent=lane,planner.model=batch,planner.effort=lane,planner.allow_shortfall=batch')
+})
+
+test('boot argv carries regular seat flags before a declared shortfall waiver', () => {
+  const result = dispatchFixture({
+    label: 'seats-argv',
+    names: ['lane-a'],
+    requests: {
+      'lane-a': requestFor('lane-a', {
+        seats: { planner: { agent: 'pi', model: 'raw-model', effort: 'high' } },
+      }),
+    },
+    runFlags: { 'allow-shortfall-planner': 'subagents' },
+  })
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.ok(boot)
+  const at = boot.args.indexOf('--lane') + 2
+  assert.deepEqual(boot.args.slice(at, at + 8), [
+    '--agent-planner', 'pi', '--model-planner', 'raw-model', '--effort-planner', 'high',
+    '--allow-shortfall-planner', 'subagents',
+  ])
+})
+
+test('lane seat fields override batch defaults while batch fields fill gaps', () => {
+  const laneWins = dispatchFixture({
+    label: 'lane-seat-precedence',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { agent: 'pi' } } }) },
+    runFlags: { 'agent-planner': 'claude', 'model-planner': 'batch-model' },
+  })
+  const laneBoot = laneWins.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(laneBoot.args[laneBoot.args.indexOf('--agent-planner') + 1], 'pi')
+  assert.equal(laneBoot.args[laneBoot.args.indexOf('--model-planner') + 1], 'batch-model')
+  assert.ok(laneWins.logs.some((line) => line.includes('seats_from=planner.agent=lane,planner.model=batch')))
+
+  const batchWins = dispatchFixture({
+    label: 'batch-seat-default',
+    names: ['lane-a'],
+    runFlags: { 'agent-planner': 'claude' },
+  })
+  const batchBoot = batchWins.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(batchBoot.args[batchBoot.args.indexOf('--agent-planner') + 1], 'claude')
+  assert.ok(batchWins.logs.some((line) => line.includes('seats_from=planner.agent=batch')))
+})
+
+test('dispatch records a per-field seat chain and an empty chain for untouched lanes', () => {
+  const result = dispatchFixture({
+    label: 'seat-record',
+    names: ['lane-a', 'lane-b'],
+    requests: {
+      'lane-a': requestFor('lane-a', {
+        seats: { planner: { agent: 'pi', model: 'raw-model', effort: 'high' } },
+      }),
+    },
+  })
+  const overridden = JSON.parse(readFileSync(join(result.out, `lane-a${DISPATCH_RECORD_SUFFIX}`), 'utf8'))
+  const untouched = JSON.parse(readFileSync(join(result.out, `lane-b${DISPATCH_RECORD_SUFFIX}`), 'utf8'))
+  assert.deepEqual(overridden.seats.planner, {
+    agent: { batch: null, lane: 'pi', settled: 'pi', from: 'lane' },
+    model: { batch: null, lane: 'raw-model', settled: 'raw-model', from: 'lane' },
+    effort: { batch: null, lane: 'high', settled: 'high', from: 'lane' },
+  })
+  assert.deepEqual(untouched.seats, {})
+})
+
+test('an unseated seat override refuses before any lane boots', () => {
+  let boots = 0
+  assert.throws(() => dispatchFixture({
+    label: 'unseated-seat',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { seats: { 'tech-lead': { agent: 'pi' } } }) },
+    spawnResult: (args) => {
+      if (args.includes('boot')) boots += 1
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'seat-floor-conflict'
+    && error.message.includes('tech-lead'))
+  assert.equal(boots, 0)
+})
+
+test('an unreadable roster refuses seat overrides and no-seat dispatches never read it', () => {
+  assert.throws(() => seatRolesUnseated({
+    seats: { planner: { agent: 'pi' } },
+    tier: 'build',
+    deps: { readFileSync: () => { throw Object.assign(new Error('denied'), { code: 'EPERM' }) } },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'seat-floor-conflict'
+    && error.message.includes(ROSTER_PATH))
+  let rosterReads = 0
+  dispatchFixture({
+    label: 'no-roster-read',
+    names: ['lane-a'],
+    readObserver: (path) => { if (path === ROSTER_PATH) rosterReads += 1 },
+  })
+  assert.equal(rosterReads, 0)
+})
+
+test('boot band-floor refusals are distinct from capability shortfalls', () => {
+  const floorStderr = 'crew boot refused at crew/model-ladder.json [band-below-floor]'
+  assert.throws(() => dispatchFixture({
+    label: 'boot-band-floor',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { model: 'raw-model' } } }) },
+    spawnResult: (args) => args.includes('boot')
+      ? { status: 1, stdout: '', stderr: floorStderr }
+      : { status: 0, stdout: '', stderr: '' },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'seat-floor-conflict'
+    && error.message.includes('[band-below-floor]'))
+
+  const capabilityStderr = 'seat planner requires capability "subagents" — refusing to boot a weaker seat'
+  assert.throws(() => dispatchFixture({
+    label: 'boot-capability-shortfall',
+    names: ['lane-a'],
+    requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { agent: 'pi' } } }) },
+    spawnResult: (args) => args.includes('boot')
+      ? { status: 1, stdout: '', stderr: capabilityStderr }
+      : { status: 0, stdout: '', stderr: '' },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'boot-failed')
+  assert.equal(seatFloorRefusal(floorStderr), 'band-below-floor')
+  assert.equal(seatFloorRefusal(capabilityStderr), null)
+})
+
+test('protected-path seat overrides retain a forced judge tier', () => {
+  const result = dispatchFixture({
+    label: 'seat-protected-floor',
+    names: ['lane-a'],
+    batchTier: 'mechanical',
+    fences: [entry('lane-a', ['crew/model-ladder.json'])],
+    requests: {
+      'lane-a': requestFor('lane-a', {
+        where: ['crew/model-ladder.json'],
+        seats: { planner: { agent: 'pi' } },
+      }),
+    },
+  })
+  const boot = result.spawned.find(({ args }) => args.includes('boot'))
+  assert.equal(boot.args[boot.args.indexOf('--tier') + 1], 'judge')
+  const record = JSON.parse(readFileSync(join(result.out, `lane-a${DISPATCH_RECORD_SUFFIX}`), 'utf8'))
+  assert.equal(record.tier.forced, 'judge')
+  assert.equal(record.tier.settled, 'judge')
+})
+
+test('dry-run logs each lane seat settlement and keeps the blind spot unchanged', () => {
+  const result = dispatchFixture({
+    label: 'seat-dry-run',
+    names: ['lane-a'],
+    runFlags: { 'dry-run': true, 'agent-planner': 'claude' },
+    requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { agent: 'pi' } } }) },
+  })
+  assert.ok(result.logs.includes('dispatch-batch: dry-run lane=lane-a tier=mechanical seats=planner.agent=pi seats_from=planner.agent=lane'))
+  assert.ok(result.logs.includes(DRY_RUN_BLIND_SPOT))
+})
+
+test('resume commands re-emit every batch seat flag', () => {
+  const result = dispatchFixture({
+    label: 'seat-resume',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: { 'agent-planner': 'claude', 'model-planner': 'raw-model', 'allow-shortfall-planner': 'subagents' },
+  })
+  const deferred = result.logs.find((line) => line.includes('deferred lane=lane-b'))
+  assert.ok(deferred)
+  assert.match(deferred, /--agent-planner claude/)
+  assert.match(deferred, /--model-planner raw-model/)
+  assert.match(deferred, /--allow-shortfall-planner subagents/)
+})
+
+test('seat vocabulary stays mirrored to crew boot constants', () => {
+  const source = readFileSync(join(repoRoot, 'crew', 'crew.mjs'), 'utf8')
+  for (const prefix of Object.values(SEAT_FIELDS)) assert.equal(source.includes(prefix), true, prefix)
+  for (const reason of BAND_FLOOR_REASONS) assert.equal(source.includes(reason), true, reason)
 })
 
 test('parseCliArgs accepts --wave and refuses its missing value', () => {

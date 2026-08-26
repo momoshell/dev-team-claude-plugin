@@ -38,6 +38,7 @@ const GRAPH_UNMEASURED = 'graph-unmeasured'
 const LANE_SHAPE_INVALID = 'lane-shape-invalid'
 const FENCE_REGISTER_MISMATCH = 'fence-register-mismatch'
 const DIRECTED_BRIEF_INVALID = 'directed-brief-invalid'
+const SEAT_FLOOR_CONFLICT = 'seat-floor-conflict'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -65,6 +66,7 @@ export const REFUSAL_REASONS = Object.freeze([
   LANE_SHAPE_INVALID,
   FENCE_REGISTER_MISMATCH,
   DIRECTED_BRIEF_INVALID,
+  SEAT_FLOOR_CONFLICT,
 ])
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
@@ -91,7 +93,7 @@ export const REQUEST_SUFFIX = '.request.json'
 // Keys a lane's request carries for the DISPATCHER, not for the compiler. The
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant'])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant', 'seats'])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -103,6 +105,24 @@ export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', '
 export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
+
+// The four per-role boot flags crew.mjs already accepts (ROLE_FLAG_PREFIXES,
+// crew/crew.mjs:2488) and the request-key spelling of each. Mirrored rather
+// than imported: importing crew/crew.mjs would pull the whole boot graph into
+// a dispatcher that only needs four names. test/factory-dispatch-batch.test.mjs
+// pins the two surfaces together, exactly as MISCLASSIFIED_PREFIX is pinned.
+export const SEAT_FIELDS = Object.freeze({
+  agent: 'agent-', model: 'model-', effort: 'effort-', allow_shortfall: 'allow-shortfall-',
+})
+// The ratified staffing artifact. A lane may not staff a role its settled tier
+// does not seat, and crew/roster.json is where that is ratified.
+export const ROSTER_PATH = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
+// Boot's own closed band-floor reason enum (crew/crew.mjs:645). A boot refusal
+// carrying one of these is a ratified FLOOR refusal, not a generic boot failure,
+// and the dispatcher names it rather than swallowing it as boot-failed.
+export const BAND_FLOOR_REASONS = Object.freeze([
+  'ladder-unreadable', 'floor-unratified', 'band-unknown', 'band-below-floor',
+])
 
 // #291 step 3: the compiler computes SHAPE (risk) and STRENGTH (complexity) on two
 // axes and the dispatcher recorded only the collapsed tier word, so no operator and
@@ -232,6 +252,24 @@ function childFailure(result) {
   return stderr || error || signal || stdout || `exit ${String(result?.status)}`
 }
 
+function plainObject(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const prototype = Object.getPrototypeOf(value)
+  return prototype === Object.prototype || prototype === null
+}
+
+export function seatsDefect(value) {
+  if (!plainObject(value)) return 'expected a plain object of role seat overrides'
+  for (const [role, fields] of Object.entries(value)) {
+    if (!plainObject(fields)) return `role ${JSON.stringify(role)} must carry a plain object of seat fields`
+    for (const [field, setting] of Object.entries(fields)) {
+      if (!Object.hasOwn(SEAT_FIELDS, field)) return `role ${JSON.stringify(role)} names an unknown seat field ${JSON.stringify(field)}; expected ${Object.keys(SEAT_FIELDS).join(', ')}`
+      if (typeof setting !== 'string' || setting.length === 0) return `role ${JSON.stringify(role)} field ${field} must be a non-empty string`
+    }
+  }
+  return null
+}
+
 // A dispatch-only key travels with the lane it describes. The tier value is
 // checked here rather than at boot so a typo names its own file.
 function splitDispatchKeys(parsed, requestPath) {
@@ -253,6 +291,10 @@ function splitDispatchKeys(parsed, requestPath) {
   if (Object.prototype.hasOwnProperty.call(dispatch, 'variant')
       && (typeof dispatch.variant !== 'string' || dispatch.variant.trim() === '')) {
     refuse(`request ${requestPath} has an invalid variant; expected a non-empty string naming one of ${VARIANT_NAMES.join(', ')}`, BATCH_UNREADABLE)
+  }
+  if (Object.prototype.hasOwnProperty.call(dispatch, 'seats')) {
+    const defect = seatsDefect(dispatch.seats)
+    if (defect) refuse(`request ${requestPath} has an invalid seats: ${defect}`, BATCH_UNREADABLE)
   }
   return { dispatch, request }
 }
@@ -299,6 +341,7 @@ export function readBatch({ batchDir, deps } = {}) {
       request,
       tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
       variant: typeof dispatch.variant === 'string' ? dispatch.variant : null,
+      seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: request.where.map(normaliseRepoPath),
       creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
@@ -554,6 +597,28 @@ export function checkDirectedBrief({ lane, variant, briefPath, deps } = {}) {
   const parsed = parseDirectedBrief(text)
   if (parsed.defect) refuse(`lane ${name} runs the ${resolved} shape, whose plan IS its brief, and ${briefPath} is not a plan this driver can run: ${parsed.defect}`, DIRECTED_BRIEF_INVALID)
   return { lane: name, variant: resolved, checked: true, gate_cmd: parsed.gate_cmd, files_in_scope: parsed.files_in_scope }
+}
+
+export function seatRolesUnseated({ seats, tier, deps } = {}) {
+  const d = normalDeps(deps)
+  let roster
+  try {
+    roster = JSON.parse(d.readFileSync(ROSTER_PATH, 'utf8'))
+  } catch (err) {
+    refuse(`cannot read or parse ratified roster ${ROSTER_PATH}: ${err?.message || String(err)}`, SEAT_FLOOR_CONFLICT)
+  }
+  if (!plainObject(roster) || !plainObject(roster.tiers) || !plainObject(roster.tiers[tier])) {
+    refuse(`cannot read ratified roster ${ROSTER_PATH}: missing tiers.${tier}`, SEAT_FLOOR_CONFLICT)
+  }
+  const tierRoster = roster.tiers[tier]
+  return [...seatMaps(seats).keys()].filter((role) => !Object.hasOwn(tierRoster, role) || tierRoster[role] == null)
+}
+
+// Boot's reasons are a closed enum it renders as `[reason]` (crew/crew.mjs:654);
+// this reads that tag rather than the prose around it — the same posture
+// readsFromRefusal takes with the compiler.
+export function seatFloorRefusal(text) {
+  return BAND_FLOOR_REASONS.find((reason) => String(text ?? '').includes(`[${reason}]`)) || null
 }
 
 export function planWorktrees({ lanes, parentDir, checkout, deps } = {}) {
@@ -838,8 +903,8 @@ export function tierFloor({ files, extra } = {}) {
   return { hits, forced, floor: forced }
 }
 
-export function reconcileTier({ lane, forced, proposed, requested } = {}) {
-  if (forced && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
+export function reconcileTier({ lane, forced, proposed, requested, requestedFrom = 'lane' } = {}) {
+  if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
     refuse(`lane ${lane} requested tier ${requested} below protected floor ${forced}`, TIER_FLOOR_CONFLICT)
   }
   const known = [forced, proposed, requested].filter((tier) => TIER_NAMES.includes(tier))
@@ -945,7 +1010,118 @@ export function resolveTransport({ runFlags = {} } = {}) {
   return panes ? PANE_TRANSPORT : BOOT_TRANSPORT
 }
 
-function bootCommand({ lane, laneDir, tier, registerPath, transport }) {
+function seatMaps(value) {
+  const maps = new Map()
+  if (!plainObject(value)) return maps
+  for (const role of Object.keys(value).sort()) {
+    const fields = value[role]
+    if (!plainObject(fields)) continue
+    const fieldMap = new Map()
+    for (const field of Object.keys(SEAT_FIELDS)) {
+      if (Object.hasOwn(fields, field) && typeof fields[field] === 'string' && fields[field].length > 0) {
+        fieldMap.set(field, fields[field])
+      }
+    }
+    if (fieldMap.size > 0) maps.set(role, fieldMap)
+  }
+  return maps
+}
+
+function seatsObject(maps) {
+  return Object.fromEntries([...maps.entries()].map(([role, fields]) => [role, Object.fromEntries(fields)]))
+}
+
+export function batchSeatsFrom(runFlags = {}) {
+  const maps = new Map()
+  if (!runFlags || typeof runFlags !== 'object') return {}
+  for (const [flag, value] of Object.entries(runFlags)) {
+    const match = Object.entries(SEAT_FIELDS).find(([, prefix]) => flag.startsWith(prefix) && flag.length > prefix.length)
+    if (!match || typeof value !== 'string' || value.length === 0) continue
+    const [field, prefix] = match
+    const role = flag.slice(prefix.length)
+    if (!maps.has(role)) maps.set(role, new Map())
+    maps.get(role).set(field, value)
+  }
+  const ordered = new Map([...maps.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+  return seatsObject(ordered)
+}
+
+export function mergeSeats(batch, lane) {
+  const merged = new Map()
+  for (const source of [batch, lane]) {
+    for (const [role, fields] of seatMaps(source)) {
+      if (!merged.has(role)) merged.set(role, new Map())
+      const target = merged.get(role)
+      for (const [field, value] of fields) target.set(field, value)
+    }
+  }
+  const ordered = new Map([...merged.entries()].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+  return seatsObject(ordered)
+}
+
+export function seatChain(batch, lane) {
+  const batchMap = seatMaps(batch)
+  const laneMap = seatMaps(lane)
+  const roles = [...new Set([...batchMap.keys(), ...laneMap.keys()])].sort()
+  const chain = new Map()
+  for (const role of roles) {
+    const batchFields = batchMap.get(role) || new Map()
+    const laneFields = laneMap.get(role) || new Map()
+    const fields = new Map()
+    for (const field of Object.keys(SEAT_FIELDS)) {
+      if (!batchFields.has(field) && !laneFields.has(field)) continue
+      const fromLane = laneFields.has(field)
+      fields.set(field, {
+        batch: batchFields.get(field) ?? null,
+        lane: laneFields.get(field) ?? null,
+        settled: fromLane ? laneFields.get(field) : batchFields.get(field),
+        from: fromLane ? 'lane' : 'batch',
+      })
+    }
+    if (fields.size > 0) chain.set(role, fields)
+  }
+  return seatsObject(chain)
+}
+
+function seatEntries(seats, fields = Object.keys(SEAT_FIELDS)) {
+  const maps = seatMaps(seats)
+  const entries = []
+  for (const [role, values] of maps) {
+    for (const field of fields) {
+      if (values.has(field)) entries.push({ role, field, value: values.get(field) })
+    }
+  }
+  return entries
+}
+
+export function seatFlagArgs(seats) {
+  return seatEntries(seats, Object.keys(SEAT_FIELDS).filter((field) => field !== 'allow_shortfall'))
+    .flatMap(({ role, field, value }) => [`--${SEAT_FIELDS[field]}${role}`, value])
+}
+
+export function shortfallFlagArgs(seats) {
+  return seatEntries(seats, ['allow_shortfall'])
+    .flatMap(({ role, field, value }) => [`--${SEAT_FIELDS[field]}${role}`, value])
+}
+
+export function seatSpec(seats) {
+  const entries = seatEntries(seats)
+  return entries.length > 0 ? entries.map(({ role, field, value }) => `${role}.${field}=${value}`).join(',') : 'none'
+}
+
+export function seatFromSpec(batch, lane) {
+  const chain = seatChain(batch, lane)
+  const entries = []
+  for (const role of Object.keys(chain).sort()) {
+    for (const field of Object.keys(SEAT_FIELDS)) {
+      const cell = chain[role]?.[field]
+      if (cell) entries.push(`${role}.${field}=${cell.from}`)
+    }
+  }
+  return entries.length > 0 ? entries.join(',') : 'none'
+}
+
+function bootCommand({ lane, laneDir, tier, registerPath, transport, seats }) {
   return {
     file: 'node',
     args: [
@@ -955,6 +1131,8 @@ function bootCommand({ lane, laneDir, tier, registerPath, transport }) {
       '--tier', tier,
       '--fences', registerPath,
       '--lane', lane,
+      ...seatFlagArgs(seats),
+      ...shortfallFlagArgs(seats),
       // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
       // transport is the ABSENCE of this flag, never a flag of its own.
@@ -1039,6 +1217,10 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
   ]) add(flag, runFlags[flag])
+  for (const flag of Object.keys(runFlags).filter((flag) => Object.values(SEAT_FIELDS)
+    .some((prefix) => flag.startsWith(prefix) && flag.length > prefix.length)).sort()) {
+    add(flag, runFlags[flag])
+  }
   for (const flag of ['no-keep', PANE_TRANSPORT, BOOT_TRANSPORT, 'force']) {
     if (runFlags[flag] === true) args.push(`--${flag}`)
   }
@@ -1074,6 +1256,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     .map((name) => ({ lane: name, wave: waveOf.get(name), predecessors: depsOf(name) }))
   const keep = runFlags['no-keep'] !== true
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
+  const batchSeats = batchSeatsFrom(runFlags)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
@@ -1128,6 +1311,9 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   if (dryRun) {
     const plans = planWorktrees({ lanes: waveLanes, parentDir, checkout, deps: d })
     d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
+    for (const lane of waveLanes) {
+      d.log(`dispatch-batch: dry-run lane=${lane.lane} tier=${lane.tier ?? tier ?? 'none'} seats=${seatSpec(mergeSeats(batchSeats, lane.seats))} seats_from=${seatFromSpec(batchSeats, lane.seats)}`)
+    }
     d.log(DRY_RUN_BLIND_SPOT)
     return { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted }
   }
@@ -1183,13 +1369,14 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     const floor = tierFloor({ files: laneFence.files, extra: runFlags.protectedPaths })
     const laneEntry = laneByName.get(item.lane)
     // A lane's own tier is the requested tier for THAT lane; --tier stays the
-    // batch default for every lane that does not name one. The floor still wins
-    // and tier-floor-conflict still refuses, per lane.
+    // batch default for every lane that does not name one. A protected floor
+    // raises a lower batch default, while an explicit lane tier below it refuses.
     const requested = laneEntry?.tier ?? tier
     const laneVariant = laneEntry?.variant ?? variant
-    const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested })
+    const seats = mergeSeats(batchSeats, laneEntry?.seats)
+    const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch' })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
@@ -1202,13 +1389,14 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
         requested: requested || null,
         settled: result.tier,
       },
+      seats: seatChain(batchSeats, laneEntry?.seats),
       variant: laneVariant || null,
       brief: item.brief,
     }
     try { writeFileSync(recordPath, JSON.stringify(record, null, 2) + '\n') } catch (err) {
       refuse(`cannot write dispatch record ${recordPath}: ${err?.message || String(err)}`, COMPILE_REFUSED)
     }
-    settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant, staffing, record: recordPath })
+    settled.push({ ...item, plan, floor, tier: result.tier, variant: laneVariant, seats, staffing, record: recordPath })
   }
 
   // #658: every lane whose plan IS its brief is validated before ANY lane boots — the brief is
@@ -1216,15 +1404,21 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   // pre-boot order on purpose: no existing refusal loses the cause it names.
   for (const item of settled) {
     checkDirectedBrief({ lane: item.lane, variant: item.variant, briefPath: item.brief, deps: d })
+    if (Object.keys(item.seats).length > 0) {
+      const unseated = seatRolesUnseated({ seats: item.seats, tier: item.tier, deps: d })
+      if (unseated.length > 0) refuse(`lane ${item.lane} seat override(s) name role(s) the settled tier ${item.tier} does not seat: ${unseated.join(', ')}; crew/roster.json tiers.${item.tier} is the ratified staffing floor and a lane may not staff outside it`, SEAT_FLOOR_CONFLICT)
+    }
   }
 
   const arrivals = []
   for (const item of settled) {
     let boot
-    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport })) } catch (err) {
+    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport, seats: item.seats })) } catch (err) {
       refuse(`crew boot failed for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
     }
     if (!boot || boot.status !== 0) {
+      const floorReason = seatFloorRefusal(childFailure(boot))
+      if (floorReason) refuse(`crew boot refused ${item.lane} at a ratified floor [${floorReason}]: ${JSON.stringify(childFailure(boot))}`, SEAT_FLOOR_CONFLICT)
       refuse(`crew boot failed for ${item.lane}: ${JSON.stringify(childFailure(boot))}`, BOOT_FAILED)
     }
     const path = crewJsonPath({ checkout: item.plan.dir, lane: item.lane })
@@ -1314,7 +1508,8 @@ export function parseCliArgs(argv) {
       flags[name] = true
       continue
     }
-    if (!valueFlags.has(name)) refuse(`unknown option: --${name}`, BATCH_UNREADABLE)
+    const seatFlag = Object.values(SEAT_FIELDS).some((prefix) => name.startsWith(prefix) && name.length > prefix.length)
+    if (!seatFlag && !valueFlags.has(name)) refuse(`unknown option: --${name}`, BATCH_UNREADABLE)
     if (Object.prototype.hasOwnProperty.call(flags, name)) refuse(`duplicate --${name}`, BATCH_UNREADABLE)
     const value = argv[index + 1]
     if (value == null || (typeof value === 'string' && value.startsWith('--'))) {

@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
@@ -157,6 +157,8 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', "event='seat-refusal'", "role id member source message at outcome ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}) ...extra"],
   ['operationalRow', "event='seat-retrying'", 'at role id attempt of retry_in_s condition source'],
   ['operationalRow', "event='seat-retry-cleared'", 'at role id source'],
+  ['operationalRow', "event='seat-substrate-down'", 'at role id misses grace_ms'],
+  ['operationalRow', "event='seat-substrate-recovered'", 'at role id misses grace_ms'],
   ['operationalRow', "event='seat-stale-cleared'", 'at role id'],
   ['operationalRow', "event='seat-stale'", 'at role id last_frame_at stale_ms threshold_ms'],
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
@@ -173,10 +175,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 25)
+  assert.equal(sites.length, 27)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 19)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 21)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
 })
 
@@ -2011,6 +2013,60 @@ test('seatIo commit skips a planned-but-never-created path', () => {
     const recorded = git(fixture.root, 'show', '--name-status', '--format=', 'HEAD').trim().split('\n').filter(Boolean).map((line) => line.replace('\t', ' '))
     assert.deepEqual(recorded, ['M mod.txt'])
   } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('a seat waiting through a substrate outage is journalled and recovers', () => {
+  const root = scratchDir('substrate-journal-')
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  const crew = { members: { builder: { surface_id: 'surface-builder', transport: 'pane' } } }
+  let clock = 0
+  let returnPath = null
+  const journal = []
+  const priorBin = process.env.CREW_CLAUDE_BIN
+  const restoreBin = () => {
+    if (priorBin === undefined) delete process.env.CREW_CLAUDE_BIN
+    else process.env.CREW_CLAUDE_BIN = priorBin
+  }
+  try {
+    const io = seatIo(crew, paths, process.cwd(), null, null, {}, {
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      tree: () => {
+        const probe = Math.round(clock / LIVENESS_PROBE_MS)
+        if (probe >= 1 && probe <= 4) throw new Error('pane manager unavailable')
+        return { windows: [] }
+      },
+      locate: () => ({ id: 'surface-builder' }),
+      sendLine: () => {},
+      assignmentLine: () => 'assignment',
+      cmux: () => ({ ok: false, stdout: '' }),
+      logLine: (_path, row) => journal.push(row),
+      existsSync: (path) => path === returnPath
+        ? clock >= 6 * LIVENESS_PROBE_MS
+        : existsSync(path),
+      readFileSync: (path, ...args) => path === returnPath && clock >= 6 * LIVENESS_PROBE_MS
+        ? JSON.stringify({ status: 'done' })
+        : readFileSync(path, ...args),
+    })
+    process.env.CREW_CLAUDE_BIN = process.execPath
+    let assignment
+    try { assignment = io.assign({ role: 'builder', briefFile: join(root, 'brief.md') }) }
+    finally { restoreBin() }
+    returnPath = assignment.returnPath
+    assert.deepEqual(io.wait(returnPath, 1200), { status: 'done' })
+    const down = journal.filter((row) => row?.event === 'seat-substrate-down')
+    const recovered = journal.filter((row) => row?.event === 'seat-substrate-recovered')
+    assert.equal(down.length, 1)
+    assert.equal(down[0].role, 'builder')
+    assert.equal(down[0].grace_ms, SUBSTRATE_GRACE_MS)
+    assert.equal(recovered.length, 1)
+    assert.equal(recovered[0].misses, 4)
+    assert.equal(recovered[0].grace_ms, SUBSTRATE_GRACE_MS)
+  } finally {
+    restoreBin()
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('seatIo changedFiles keeps both sides of a rename', () => {

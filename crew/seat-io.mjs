@@ -31,8 +31,28 @@ export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
-// Bound substrate probes so a dead pane manager fails promptly without conflating per-seat liveness.
-export const SUBSTRATE_MISSES_TO_DIE = 2
+// #682, measured 2026-08-26: cmux stopped answering and FOUR lanes died within
+// 23 seconds of each other. Every driver probes the SAME pane manager, so a
+// substrate verdict is correlated BY CONSTRUCTION and its blast radius is every
+// lane running — unlike LIVENESS_MISSES_TO_DIE above, which governs one seat's
+// pane and can only cost one seat. The seats were never the problem: all four
+// delivered valid `status: done` envelopes 9 to 13 minutes AFTER their driver
+// had already exited, and 2 probes is 60 SECONDS of silence, which is not
+// evidence of a permanent outage. The counter already resets on any `ok` probe
+// (:1629-1630 below), so a self-healing substrate is distinguishable from a dead
+// one by simply waiting longer.
+// 900_000 is a STATED DEFAULT, revisable when measured again. Three reasons for
+// this number and not another: it is the smallest round bound above the 780s
+// (13-minute) self-heal actually observed; it is the same 900s this file already
+// treats as "dead" for a frozen transcript (TRANSCRIPT_STALE_MS below), so the
+// two instruments cannot contradict each other; and it still leaves a 1800s
+// planner seat half its budget to deliver after the substrate returns, which is
+// what keeps `substrate-gone` a REACHABLE verdict on every real seat budget
+// instead of collapsing silently into the timeout.
+export const SUBSTRATE_GRACE_MS = 900_000
+// DERIVED, never hand-set: the loop counts PROBES and the grace is stated in
+// TIME, so the two can never drift apart when the probe cadence changes.
+export const SUBSTRATE_MISSES_TO_DIE = Math.ceil(SUBSTRATE_GRACE_MS / LIVENESS_PROBE_MS)
 // b187-jsonleaf, 2026-08-24: a seat stopped mid-turn with NO error frame in any
 // store while the pane rendered a spinner and an incrementing timer for 83
 // minutes, its token counters byte-identical across 50 minutes, and a re-nudge
@@ -1580,7 +1600,7 @@ export function transcriptGrowth(paths, deps = {}) {
   return latest
 }
 
-export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onAlive, now, sleep }) {
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onSubstrate, onAlive, now, sleep }) {
   const started = now()
   let deadline = started + timeoutS * 1000
   let lastProbeAt = started
@@ -1626,8 +1646,18 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
       // owns that try/catch because it owns the emitter.
       if (alive === true) { misses = 0; if (onAlive) onAlive(current) }
       else if (alive === false) misses += 1
-      if (probe.substrate === 'down') substrateMisses += 1
-      else if (probe.substrate === 'ok') substrateMisses = 0
+      // The substrate is now SURVIVABLE for SUBSTRATE_GRACE_MS, so this wait can
+      // sit silently through minutes an operator must be able to account for.
+      // Edge-triggered, exactly like the retry family: the caller hears the
+      // RISING edge once, and hears the recovery only when a probe MEASURES it.
+      // Never load-bearing — the caller owns the try/catch, as it does for onAlive.
+      if (probe.substrate === 'down') {
+        substrateMisses += 1
+        if (substrateMisses === 1 && onSubstrate) onSubstrate({ at: current, state: 'down', misses: substrateMisses, graceMs: SUBSTRATE_GRACE_MS })
+      } else if (probe.substrate === 'ok') {
+        if (substrateMisses > 0 && onSubstrate) onSubstrate({ at: current, state: 'ok', misses: substrateMisses, graceMs: SUBSTRATE_GRACE_MS })
+        substrateMisses = 0   // a recovery is a MEASUREMENT: it forgives the outage that just ended
+      }
       if (misses >= LIVENESS_MISSES_TO_DIE) {
         const arrived = readEnvelope()
         if (arrived != null) return arrived
@@ -1639,7 +1669,7 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
       if (substrateMisses >= SUBSTRATE_MISSES_TO_DIE) {
         const arrivedLate = readEnvelope()
         if (arrivedLate != null) return arrivedLate
-        const err = new Error(`substrate gone: ${role} — the pane manager stopped answering (${SUBSTRATE_MISSES_TO_DIE} consecutive substrate probes), so every pane it owned is unreachable and no envelope arrived at ${returnPath}`)
+        const err = new Error(`substrate gone: ${role} — the pane manager stopped answering (${SUBSTRATE_MISSES_TO_DIE} consecutive substrate probes over ${SUBSTRATE_GRACE_MS / 1000}s), so every pane it owned is unreachable and no envelope arrived at ${returnPath}`)
         err.stage = 'substrate-gone'
         err.role = role
         throw err
@@ -1730,6 +1760,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const lastGrowth = new Map()        // returnPath -> { at, latest }, the last measured transcript reading
   const lastDiagnosis = new Map()     // returnPath -> the state a wait expired in
   const staleNoted = new Set()        // returnPaths already warned — one per DISPATCH, re-armable
+  const substrateNoted = new Set()   // returnPaths whose substrate outage is standing
   const lastRetry = new Map()         // returnPath -> the CURRENT pane retry reading, refreshed on every read
   const repromptedRefusals = new Set() // returnPaths already re-prompted — the bound, per assignment
   const silenceWatch = new Map()      // returnPath -> the unclassified frame being watched for silence
@@ -1918,6 +1949,22 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     catch { /* the journal is diagnostics, never load-bearing for a wait */ }
   }
 
+  // A survivable outage is a state, and a state nobody can see is what #682
+  // actually cost. Edge-triggered in the JOURNAL like the retry family: the
+  // rising edge is journalled once, and only a MEASURED `ok` probe retires it.
+  const noteSubstrate = (info, returnPath, record) => {
+    try {
+      if (record.state === 'down') {
+        if (substrateNoted.has(returnPath)) return
+        substrateNoted.add(returnPath)
+        io.log(operationalRow({ at: record.at, event: 'seat-substrate-down', role: info?.role ?? null, id: info?.id ?? null, misses: record.misses, grace_ms: SUBSTRATE_GRACE_MS }))
+        return
+      }
+      if (!substrateNoted.delete(returnPath)) return
+      io.log(operationalRow({ at: record.at, event: 'seat-substrate-recovered', role: info?.role ?? null, id: info?.id ?? null, misses: record.misses, grace_ms: SUBSTRATE_GRACE_MS }))
+    } catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+  }
+
   // A stale row was TRUE WHEN WRITTEN; leaving it standing makes a recovered
   // seat read stale for the life of the process. Only a MEASUREMENT retires it.
   const clearStale = (info, returnPath, at) => {
@@ -1937,6 +1984,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // escalates is already non-active via `laneActive`.
   const settleSeatConditions = (info, returnPath, at, envelope) => {
     clearRetry(info, returnPath, at)
+    // The wait ending measures nothing about the pane manager, so a recovery
+    // row here would be a claim nobody made; retire the standing edge silently.
+    substrateNoted.delete(returnPath)
     if (envelope != null) clearStale(info, returnPath, at)                      // verbatim: mutation X1
   }
 
@@ -2072,6 +2122,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         sampleSeat: samplePane(info, returnPath),
         sampleGrowth: () => growthFor(info),
         onGrowth: (record) => noteGrowth(info, returnPath, record),
+        onSubstrate: (record) => noteSubstrate(info, returnPath, record),
         onAlive: (at) => { try { io.emit?.({ kind: 'heartbeat', at, role }) } catch { /* never load-bearing */ } },
         now,
         sleep,
@@ -2207,6 +2258,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             sampleSeat: info ? samplePane(info, returnPath) : null,
             sampleGrowth: info ? () => growthFor(info) : null,
             onGrowth: (record) => noteGrowth(info, returnPath, record),
+            onSubstrate: (record) => noteSubstrate(info, returnPath, record),
             onAlive: (at) => {
               // An absent or refusing emitter is an ABSENCE, never a failed
               // write: the ledger is diagnostics, the wait is the run.

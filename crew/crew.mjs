@@ -373,8 +373,14 @@ export function resolveFilesInScope(args = {}, variant, taskReturn, deps = {}) {
   const details = envelope && typeof envelope === 'object' && !Array.isArray(envelope) && envelope.details && typeof envelope.details === 'object' && !Array.isArray(envelope.details)
     ? envelope.details : null
   if (!details) throw new Error(`failing-run envelope ${envelopePath} for ${variant} scope inheritance has no details object declaring a non-empty scope`)
-  // Mirror scripts/factory/ci-repair.mjs:108-110: prefer files_in_scope
-  // whenever the key is present, otherwise inherit files_committed.
+  // PRESENCE, not truthiness, decides which key is inherited. A finished run's
+  // envelope always carries files_committed (what it did) and carries
+  // files_in_scope only when the run narrowed its own scope — crew/drive.mjs:2264
+  // documents that optional narrowed list. So a files_in_scope key that is
+  // present but empty or malformed must REFUSE below rather than fall through:
+  // falling through would silently widen the repair to whatever the failing run
+  // happened to commit, past the scope it declared. crew/crew.test.mjs pins the
+  // present-but-empty refusal beside the two inheriting cases.
   const hasForwardScope = Object.prototype.hasOwnProperty.call(details, 'files_in_scope')
   const files = hasForwardScope ? details.files_in_scope : details.files_committed
   if (!Array.isArray(files) || files.length === 0) {
@@ -409,10 +415,12 @@ export function resolveLaneFence(args = {}, deps = {}) {
 
 // The ROUND VALIDATION LANE — a different thing from the fence-register lane
 // NAME above, which shares the --lane flag. --validation-lane is the spelling
-// with no second meaning; a bare --lane keeps working because
-// scripts/factory/ci-repair.mjs:270 dispatches a repair run that way, but a
-// --lane given WITH --fences is a register key and is never handed to the
-// driver as a command. Same posture as crew/limits.mjs: validate, refuse from
+// with no second meaning; a bare --lane keeps working because crew/factoryctl.mjs's
+// `run` verb takes --lane and has no --fences flag at all (crew/factoryctl.mjs:192),
+// and the daemon forwards it into the child spec unchanged, so a bare --lane is the
+// only spelling that path has; but a --lane given WITH --fences is a register key and
+// is never handed to the driver as a command.
+// Same posture as crew/limits.mjs: validate, refuse from
 // a closed set, and record the effective value and where it came from.
 // crew/child.mjs carries an identical copy (the import firewall is deliberate)
 // and crew/crew.test.mjs pins the two against one shared table.
@@ -645,9 +653,10 @@ export function refuseBandFloor(reason, message) {
   return Object.assign(new Error(`${message} [${reason}]`), { reason })
 }
 
-// #419: boot's own closed refusal set. A caller branches on `err.reason`
-// rather than parsing prose, exactly as PROFILE_REFUSALS does
-// (scripts/factory/ci-watch.mjs:29).
+// #419: boot's own closed refusal set. A caller branches on `err.reason` rather
+// than parsing prose — the same posture as BAND_FLOOR_REFUSALS above and
+// CAPABILITY_REFUSALS (crew/capabilities.mjs:9): the reasons are a frozen enum so
+// a caller never string-matches a message.
 export const BOOT_DESCENDANT_REFUSALS = Object.freeze([
   'descendants-alive', 'descendants-unknown', 'descendants-evidence-mismatch',
   'descendants-unreclaimed', 'descendants-sweep-failed',

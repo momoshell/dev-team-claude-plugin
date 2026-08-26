@@ -1700,7 +1700,7 @@ function tickRefusals(tick) {
 
 // The verb's whole body. main() is a thin shim over this: tests drive it with
 // injected deps, per the house rule that anything a test drives is a library
-// function taking deps (ci-watch.mjs:193, intake.mjs:510).
+// function taking deps (normalDeps at :547 below, dispatch-batch.mjs:162).
 export function sweepCommand({
   board, actor, checkout = process.cwd(),
   config = {}, deps = {}, ticks = 1, onStart = null,

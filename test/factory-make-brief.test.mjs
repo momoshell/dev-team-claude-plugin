@@ -1671,12 +1671,12 @@ test('extractSymbols is the exported-symbol half and tolerates object input', ()
   assert.deepEqual(extractSymbols("export const PublicValue = 1", 'docs/example.txt'), [])
 })
 
-test('real ci-watch discovery names its non-test callers without widening tripwires', () => {
-  const where = verifyWhere({ checkout: ROOT, where: ['scripts/factory/ci-watch.mjs'] })
+test('real limits discovery names its non-test callers without widening tripwires', () => {
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })
-  const caller = discovery.coupled.find((entry) => entry.file === 'scripts/factory/ci-repair.mjs')
+  const caller = discovery.coupled.find((entry) => entry.file === 'crew/child.mjs')
   assert.ok(caller)
-  assert.ok(caller.keys.includes('ciWatchRun'))
+  assert.ok(caller.keys.includes('resolveLimits'))
   assert.equal(discovery.coupled.some((entry) => entry.file === 'crew/arms.mjs'), false)
 })
 
@@ -1689,16 +1689,16 @@ test('real crew-drive discovery retains crew-child as an exported-symbol caller'
 })
 
 test('coupling refuses an unfenced caller and quiets when every caller is covered', () => {
-  const where = verifyWhere({ checkout: ROOT, where: ['scripts/factory/ci-watch.mjs'] })
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })
   assert.throws(() => crossCheckCoupling({
     discovery,
-    writeSurface: { basis: 'fences', files: ['scripts/factory/ci-watch.mjs'], reads: [] },
-  }), (error) => error.reason === 'coupled-source-unfenced' && /ci-repair\.mjs/.test(error.message))
+    writeSurface: { basis: 'fences', files: ['crew/limits.mjs'], reads: [] },
+  }), (error) => error.reason === 'coupled-source-unfenced' && /crew\/child\.mjs/.test(error.message))
   const quiet = crossCheckCoupling({
     discovery,
     writeSurface: { basis: 'fences', files: [
-      'scripts/factory/ci-watch.mjs',
+      'crew/limits.mjs',
       ...discovery.coupled.map((entry) => entry.file),
     ], reads: [] },
   })
@@ -1720,16 +1720,16 @@ test('a coupled fixture refuses a fence that omits its caller', () => {
 })
 
 test('a valid acknowledgement does not clear another unfenced coupled source', () => {
-  const where = verifyWhere({ checkout: ROOT, where: ['scripts/factory/ci-watch.mjs'] })
+  const where = verifyWhere({ checkout: ROOT, where: ['crew/limits.mjs'] })
   const discovery = discoverTripwires({ checkout: ROOT, files: where })
   assert.throws(() => crossCheckCoupling({
     discovery,
     writeSurface: {
       basis: 'fences',
-      files: ['scripts/factory/ci-watch.mjs'],
-      reads: [{ file: 'scripts/factory/ci-repair.mjs', why: 'read only here' }],
+      files: ['crew/limits.mjs'],
+      reads: [{ file: 'crew/child.mjs', why: 'read only here' }],
     },
-  }), (error) => error.reason === 'coupled-source-unfenced' && /ledger\.mjs/.test(error.message))
+  }), (error) => error.reason === 'coupled-source-unfenced' && /crew\/crew\.mjs/.test(error.message))
 })
 
 test('a coupled fixture renders an in-fence caller', () => {

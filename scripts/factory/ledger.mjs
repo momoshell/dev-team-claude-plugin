@@ -2093,8 +2093,12 @@ export function openLedger({
     if (args.conclusion != null) args.conclusion = String(args.conclusion).slice(0, 120)
     if (args.check_name != null) args.check_name = String(args.check_name).slice(0, 200)
     if (args.local_lane != null) args.local_lane = args.local_lane.slice(0, 500)
-    // Truncating a failure is the thing this column exists to prevent; the
-    // EXCERPT boundary is chosen in ci-watch.mjs and recorded in excerpt_source.
+    // Truncating a failure is the thing this column exists to prevent: excerpt is
+    // declared VERBATIM at its column (:634) and, unlike reason/conclusion/
+    // check_name/local_lane above, is never sliced here. The BOUNDARY is the
+    // capturing caller's, and excerpt_source names it so a reader can tell which
+    // boundary produced these bytes; this writer either passes them through whole
+    // or drops them whole and records excerpt_source 'redacted'.
     if (input.excerpt != null && args.excerpt === undefined) {
       args.excerpt = null
       args.excerpt_source = 'redacted'

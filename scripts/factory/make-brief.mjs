@@ -52,7 +52,7 @@ const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'
 // A lane may declare files it will CREATE. The key is OPTIONAL, so every
 // request authored before it existed stays valid, and it is a COMPILER key
 // rather than a dispatch-only one: the compiler is what exempts the path.
-export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates'])
+export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates', 'directed'])
 const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
 const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const ERROR_CODE = /^[a-z0-9]+(?:[-:][a-z0-9]+)+$/
@@ -118,6 +118,9 @@ const SCOPE_ENTRY_SHAPE = 'scope-entry-shape'
 const SCOPE_ENTRY_CASE = 'scope-entry-case'
 const CREATES_EXISTS = 'creates-exists'
 const CREATES_PARENT_MISSING = 'creates-parent-missing'
+const DIRECTED_UNKNOWN_KEY = 'directed-unknown-key'
+const DIRECTED_SHAPE = 'directed-shape'
+const DIRECTED_FENCE_COLLISION = 'directed-fence-collision'
 
 export const REFUSAL_REASONS = Object.freeze([
   MISSING_LINE,
@@ -141,6 +144,9 @@ export const REFUSAL_REASONS = Object.freeze([
   SCOPE_ENTRY_CASE,
   CREATES_EXISTS,
   CREATES_PARENT_MISSING,
+  DIRECTED_UNKNOWN_KEY,
+  DIRECTED_SHAPE,
+  DIRECTED_FENCE_COLLISION,
 ])
 
 export const BROAD_KEY_HIT_LIMIT = BROAD_KEY_LIMIT
@@ -154,6 +160,25 @@ export const SLOT_MARKER = 'UNFILLED SLOT'
 // declarations are pinned equal by test/factory-make-brief.test.mjs.
 export const PROPOSAL_BLOCK = 'proposal'
 export const PROPOSAL_KEYS = Object.freeze(['shape', 'strength'])
+
+// #657: a `directed` lane's PLAN IS ITS BRIEF, and until now the compiler had no
+// home for one — the only free-text field rendered exactly once was `out_of_scope`,
+// so b248 dispatched with its plan smuggled into the section that says what the lane
+// must NOT do. The pair below is RE-DECLARED, not imported: crew/drive.mjs is the
+// driver's lane and a compiler that imported it would couple every compiled brief to
+// the driver. test/factory-make-brief.test.mjs pins the pair equal to
+// crew/drive.mjs's DIRECTED_BLOCK and DIRECTED_KEYS — the same posture PROPOSAL_KEYS
+// holds with scripts/factory/emit.mjs.
+export const DIRECTED_BLOCK = 'directed'
+export const DIRECTED_KEYS = Object.freeze(['gate_cmd', 'files_in_scope'])
+
+// Recorded because nothing said it and the instinct is to commit one: a directed
+// lane's gate script cannot live in the repo at all.
+export const DIRECTED_GATE_NOTE = Object.freeze(`The gate named below lives outside the repo — in the batch directory — and
+\`gate_cmd\` names it by absolute path. A directed lane's write fence is its
+deliverable surface, so a committed gate script sits beyond the lane's own scope
+and the scope gate refuses it; the dispatcher creates the worktrees itself, so
+there is no moment to commit one either. The gate is the orchestrator's artefact.`)
 
 // Copied byte-for-byte from the converged brief's standing acceptance block.
 export const ACCEPTANCE_GATE_BLOCK = Object.freeze(`Planner authors it; **RED at baseline**, printing
@@ -365,6 +390,37 @@ export function validateAsk(ask, taskName) {
   return ask
 }
 
+// DECISION (#657 item 5) — a `directed` plan on a request whose resolved variant
+// cannot consume it is ACCEPTED, never refused. This compiler is variant-blind by
+// construction: dispatch-batch.mjs splits `variant`, `tier` and `depends_on` off as
+// DISPATCH_ONLY_REQUEST_KEYS before the closed schema ever sees the request, so
+// refusing on variant would need a fact this module is deliberately denied. The
+// block is inert in a non-directed brief — only the directed path calls
+// parseDirectedBrief — so what is checked here is the SHAPE, always, and never the
+// variant. What is NOT accepted is a key nothing reads: the compiler refuses exactly
+// the shape parseDirectedBrief refuses, four seats earlier.
+function validateDirected(plan) {
+  if (plan === undefined) return
+  if (!plan || typeof plan !== 'object' || Array.isArray(plan)) {
+    refuseUsage('directed must be a JSON object', DIRECTED_SHAPE)
+  }
+  const extra = Object.keys(plan).filter((key) => !DIRECTED_KEYS.includes(key))
+  if (extra.length) {
+    refuseUsage(`directed declares ${extra.join(', ')}, which nothing reads — the keys are exactly ${DIRECTED_KEYS.join(', ')}`, DIRECTED_UNKNOWN_KEY)
+  }
+  if (typeof plan.gate_cmd !== 'string' || !plan.gate_cmd.trim()) {
+    refuseUsage('directed.gate_cmd must be the non-empty command the driver runs as the acceptance gate', DIRECTED_SHAPE)
+  }
+  if (!Array.isArray(plan.files_in_scope) || plan.files_in_scope.length === 0) {
+    refuseUsage('directed.files_in_scope must be a non-empty list of repo-relative entries', DIRECTED_SHAPE)
+  }
+  for (const entry of plan.files_in_scope) {
+    if (typeof entry !== 'string' || !entry.trim()) {
+      refuseUsage('every directed.files_in_scope entry must be a non-blank string', DIRECTED_SHAPE)
+    }
+  }
+}
+
 export function validateRequest(request, { taskName } = {}) {
   if (!request || typeof request !== 'object' || Array.isArray(request)) {
     refuseUsage('request must be a JSON object', WRONG_TYPE)
@@ -398,6 +454,7 @@ export function validateRequest(request, { taskName } = {}) {
     if (typeof request[key] !== 'string') refuseUsage(`${key} must be a string`, WRONG_TYPE)
     if (!request[key].trim()) refuseUsage(`${key} must not be blank`, MISSING_LINE)
   }
+  validateDirected(request.directed)
   validateAsk(request.ask, taskName)
   return request
 }
@@ -1582,6 +1639,20 @@ export function renderProposalBlock(proposal) {
   return ['```' + PROPOSAL_BLOCK, JSON.stringify({ shape, strength }, null, 2), '```'].join('\n')
 }
 
+// The plan renders in EXACTLY ONE place. `ask` and `done_means` each render twice on
+// purpose and that is not changing (#657); this key exists so a plan never has to
+// ride inside a field that does.
+function renderDirectedPlan(plan) {
+  const body = {}
+  for (const key of DIRECTED_KEYS) body[key] = plan[key]
+  return [DIRECTED_GATE_NOTE, '', '```' + DIRECTED_BLOCK, JSON.stringify(body, null, 2), '```'].join('\n')
+}
+
+function directedSection(plan) {
+  if (!plan) return []
+  return ['## Directed plan', renderDirectedPlan(plan)]
+}
+
 function renderFences(fences) {
   if (fences == null) return 'no fence register supplied (`--fences` not given)'
   const lines = []
@@ -1651,6 +1722,7 @@ export function renderBrief(gathered) {
     `# Task: ${request.ask}`,
     '## The ask',
     request.ask,
+    ...directedSection(request.directed ?? null),
     '## Proposed tier',
     renderProposedTier(proposal),
     renderProposalBlock(proposal),
@@ -1685,7 +1757,17 @@ export function renderBrief(gathered) {
     standingBlocks().conventions,
     '',
   ]
-  return lines.join('\n')
+  const content = lines.join('\n')
+  // A request field may quote a plan; a BARE fence line inside one would hand the
+  // driver two blocks and escalate the lane at directed:r1 — the #657 failure itself.
+  // Refuse here rather than four seats later.
+  if (request.directed) {
+    const fences = content.split('\n').filter((line) => line.trim() === '```' + DIRECTED_BLOCK).length
+    if (fences !== 1) {
+      refuseUsage(`the rendered brief carries ${fences} \`\`\`${DIRECTED_BLOCK} fence lines — exactly one of them is the plan; no request field may carry a bare fence line`, DIRECTED_FENCE_COLLISION)
+    }
+  }
+  return content
 }
 
 function parseCliArgs(argv) {

@@ -176,9 +176,8 @@ test('writeTornFile refuses a prefix that parses', () => {
 //
 // Scope: *.test.mjs under the directories that hold test files, plus the shared
 // non-test test modules. Production modules are NEVER enumerated, so the indented
-// `return function git(where, args)` factories in crew/arms.mjs, crew/harvest.mjs
-// and scripts/factory/ci-watch.mjs cannot be flagged, by construction rather than
-// by exception. test/helpers.mjs is the one sanctioned implementation.
+// `return function git(where, args)` factories in crew/arms.mjs and
+// crew/harvest.mjs cannot be flagged, by construction rather than by exception.
 // Blind spot, stated: a test file under a NEW top-level directory is not scanned;
 // the count assertion below is the cheap guard against a scan that reads nothing.
 const HELPER_NAMES = 'sqliteAvailable|git|gitResult|treeDigest|scratchDir|rawRequest|startFileWriter|writeTornFile|makeSeedLane'
@@ -256,10 +255,16 @@ function frozenHelperSites(sites, why) {
 //   skills/crew-dispatch/exhibits.test.mjs — converted by b243-helperdedupe (#650, 39e17e4)
 //   skills/devops/exhibits.test.mjs — converted by b248-helperdedupf (#656, 53bb1eb)
 //   skills/pr-review/findings-shape.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
+// Retired 2026-08-26 by lane b264-ciretireb2 (#535 wave B2), which closes #551.
+// The first two were converted by lanes that have since landed and each measures
+// ZERO local sites today; the third was deleted with the module it tested, so the
+// exemption has nothing left to freeze:
+//   skills/backend-node/exhibits.test.mjs — converted by b247-helperdedupd (#655, eca14fc)
+//   skills/crew-recovery/exhibits.test.mjs — converted by b243-helperdedupe (#650, 39e17e4)
+//   test/factory-ci-*.test.mjs (2 sites) — retired by this lane with the unreached
+//     CI watcher module it tested (#535); named by glob because no live citation of
+//     those modules may survive this commit
 const HELPER_EXEMPT = new Map([
-  ['skills/backend-node/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
-  ['skills/crew-recovery/exhibits.test.mjs', frozenHelperSites(1, "audited 2026-08-24: one new URL('../../') repo-root derivation; outside this lane's fence, so frozen rather than converted")],
-  ['test/factory-ci-watch.test.mjs', frozenHelperSites(2, 'audited 2026-08-24: a local sqliteAvailable and a local git whose body returns the spawnSync result rather than stdout; outside this lane\'s fence, so frozen rather than converted')],
   ['test/factory-probe-repo.test.mjs', frozenHelperSites(1, 'audited 2026-08-24: one local git with a DIFFERENT identity (probe@example.invalid); outside this lane\'s fence, so frozen rather than converted')],
 ])
 
@@ -284,7 +289,7 @@ test('helper duplication tripwire — every exemption has a live, load-bearing w
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 5)
+  assert.equal(total, 1)
 })
 
 test('helper duplication tripwire — the detector flags a hand-rolled copy and clears an import', () => {

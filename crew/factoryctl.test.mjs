@@ -1,11 +1,12 @@
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
-import { attachVerb, connect, formatRows, main, parseArgs, runVerb } from './factoryctl.mjs'
+import { attachVerb, commitIssues, connect, formatRows, main, parseArgs, pendingVerb, runVerb, terminalRunLine } from './factoryctl.mjs'
+import { scratchDir } from '../test/helpers.mjs'
 
 const LEDGER_SANDBOX = mkdtempSync(join(tmpdir(), 'b136-factoryctl-ledger-'))
 const LEDGER_SANDBOX_PREVIOUS = process.env.DEVTEAM_LEDGER_DIR
@@ -102,6 +103,83 @@ async function enqueue(f, crewDir = f.crewDir) {
 }
 
 function returnFor(f, runId, crewDir = f.crewDir) { return join(crewDir, 'returns', `${runId}.task.json`) }
+
+function pendingLane(root, name, text, { task = name, archived = false, settled = true } = {}) {
+  const dir = join(root, name)
+  mkdirSync(dir, { recursive: true })
+  writeFileSync(join(dir, 'crew.json'), '{}')
+  writeFileSync(join(dir, 'journal.jsonl'), '')
+  if (text !== null) writeFileSync(join(dir, 'run.log'), text)
+  return { id: `repo/${name}`, repo: 'repo', task, dir, journal: join(dir, 'journal.jsonl'), taskDir: join(dir, 'task'), settled, archived, archivedAt: archived ? 'stamp' : null }
+}
+
+function pendingSpawn({ branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {} } = {}) {
+  const calls = []
+  const spawnSync = (command, argv, options) => {
+    calls.push({ command, argv: [...argv], options })
+    if (command === 'gh') {
+      const branch = argv[argv.indexOf('--head') + 1]
+      const response = gh[branch] ?? []
+      if (typeof response === 'function') return response(command, argv, options)
+      if (response && typeof response === 'object' && !Array.isArray(response)) return response
+      return { status: 0, stdout: JSON.stringify(response), stderr: '' }
+    }
+    if (command !== 'git') return { status: 127, stdout: '', stderr: 'unknown command' }
+    const args = argv.slice(2)
+    if (args[0] === 'rev-parse') return { status: 0, stdout: 'origin/main', stderr: '' }
+    if (args[0] === 'remote') return { status: 0, stdout: 'origin', stderr: '' }
+    if (args[0] === 'cat-file') {
+      const commit = String(args[2] || '').replace(/\^\{commit\}$/, '')
+      return { status: Object.prototype.hasOwnProperty.call(branches, commit) || merged.has(commit) ? 0 : 1, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'for-each-ref') {
+      const commit = args[2]
+      const branch = branches[commit]
+      return { status: 0, stdout: branch ? `${branch}\nmain\n` : 'main\n', stderr: '' }
+    }
+    if (args[0] === 'merge-base') return { status: merged.has(args[2]) ? 0 : 1, stdout: '', stderr: '' }
+    if (args[0] === 'show-ref') {
+      const ref = args.at(-1) || ''
+      const branch = ref.replace(/^refs\/remotes\/origin\//, '')
+      return { status: remoteBranches.has(branch) ? 0 : 1, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'log') return { status: 0, stdout: messages[args.at(-1)] || '', stderr: '' }
+    return { status: 1, stdout: '', stderr: 'unhandled git fixture call' }
+  }
+  return { spawnSync, calls }
+}
+
+function pendingUnit({ specs, branches = {}, merged = new Set(), remoteBranches = new Set(), messages = {}, gh = {} } = {}) {
+  const root = scratchDir('factoryctl-pending-')
+  const laneRoot = join(root, 'lanes')
+  const repo = join(root, 'repo')
+  mkdirSync(laneRoot, { recursive: true }); mkdirSync(repo, { recursive: true })
+  const lanes = (specs || []).map((spec) => pendingLane(laneRoot, spec.name, spec.text, spec.options))
+  const d = pendingSpawn({ branches, merged, remoteBranches, messages, gh })
+  let stdout = ''
+  const result = pendingVerb({ _: ['pending'], json: true, 'crew-root': root, repo }, {
+    lanes: () => lanes,
+    readFileSync: (...args) => readFileSync(...args),
+    statSync: () => ({ mtime: new Date('2026-08-26T00:00:00.000Z') }),
+    spawnSync: d.spawnSync,
+    stdout: (text) => { stdout += text },
+    cwd: () => repo,
+  })
+  return { root, laneRoot, repo, lanes, result, output: JSON.parse(stdout), calls: d.calls }
+}
+
+function treeSnapshot(root) {
+  const entries = []
+  const walk = (dir) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name))) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) { entries.push([path, 'directory']); walk(path) }
+      else entries.push([path, `file:${readFileSync(path).toString('base64')}`])
+    }
+  }
+  walk(root)
+  return entries
+}
 
 test('run forwards --variant, --files-in-scope, and --lane to enqueue and omits them when absent', async () => {
   const f = fixture()
@@ -516,11 +594,179 @@ test('send requires a run id and a message before connecting', async () => {
   } finally { await f.daemon.stop(); f.cleanup() }
 })
 
-test('factoryctl usage lists send', async () => {
+test('factoryctl usage lists every verb', async () => {
   const f = fixture()
   try {
     const result = await invoke(f, ['wat'])
     assert.equal(result.code, 2)
-    assert.match(result.stderr, /usage: factoryctl <run\\|ls\\|attach\\|send>/)
+    assert.ok(result.stderr.includes('usage: factoryctl <run|ls|attach|send|pending>'), result.stderr)
   } finally { f.cleanup() }
+})
+
+test('terminalRunLine returns the last parseable status frame', () => {
+  const text = `${JSON.stringify({ status: 'escalation', commit: null })}\nseat output that is not JSON\n${JSON.stringify({ status: 'done', commit: 'abc123' })}\n`
+  assert.deepEqual(terminalRunLine(text), { status: 'done', commit: 'abc123' })
+})
+
+test('terminalRunLine returns null without a JSON status frame', () => {
+  assert.equal(terminalRunLine('seat output\nnot json\n'), null)
+  assert.equal(terminalRunLine('{"status": 1}\n{"status": null}\n'), null)
+})
+
+test('commitIssues reads Refs trailers and otherwise returns unknown', () => {
+  assert.equal(commitIssues('feat: work\n\nRefs: #267, #268'), '#267 #268')
+  assert.equal(commitIssues('feat: work\n\nReviewed-by: crew'), 'unknown')
+})
+
+test('pending lists a done lane with its branch, issue, done time and remote', () => {
+  const sha = 'pending-commit'
+  const f = pendingUnit({
+    specs: [{ name: 'pending-lane', text: `${JSON.stringify({ status: 'done', commit: sha })}\n` }],
+    branches: { [sha]: 'pending-lane' },
+    remoteBranches: new Set(['pending-lane']),
+    messages: { [sha]: 'feat: pending work\n\nRefs: #267, #268' },
+  })
+  const row = f.output.rows[0]
+  assert.equal(f.output.rows.length, 1)
+  assert.equal(row.lane, 'pending-lane')
+  assert.equal(row.commit, sha)
+  assert.equal(row.branch, 'pending-lane')
+  assert.equal(row.issue, '#267 #268')
+  assert.equal(row.done_at, '2026-08-26T00:00:00.000Z')
+  assert.equal(row.remote, 'yes')
+  assert.equal(row.pr, 'none')
+  assert.equal(row.state, 'pending')
+  assert.equal(row.reason, null)
+})
+
+test('an escalated lane naming a commit is not listed', () => {
+  const sha = 'escalated-commit'
+  const f = pendingUnit({
+    specs: [{ name: 'escalated-lane', text: `${JSON.stringify({ status: 'escalation', commit: sha })}\n` }],
+    branches: { [sha]: 'escalated-lane' },
+  })
+  assert.deepEqual(f.output.rows, [])
+  assert.equal(f.output.counts.not_done, 1)
+})
+
+test('merged and open-PR lanes are published and not listed', () => {
+  const mergedSha = 'merged-commit'
+  const prSha = 'pr-commit'
+  const f = pendingUnit({
+    specs: [
+      { name: 'merged-lane', text: `${JSON.stringify({ status: 'done', commit: mergedSha })}\n` },
+      { name: 'pr-lane', text: `${JSON.stringify({ status: 'done', commit: prSha })}\n` },
+    ],
+    branches: { [mergedSha]: 'merged-lane', [prSha]: 'pr-lane' },
+    merged: new Set([mergedSha]),
+    gh: { 'pr-lane': [{ number: 42, state: 'OPEN' }] },
+  })
+  assert.deepEqual(f.output.rows, [])
+  assert.equal(f.output.counts.published, 2)
+})
+
+test('an unavailable gh query leaves the pending row with an unknown PR', () => {
+  const responses = [
+    () => { throw new Error('gh interrupted') },
+    { status: 1, stdout: '', stderr: 'gh unavailable' },
+    { status: 0, stdout: 'not json', stderr: '' },
+  ]
+  for (const response of responses) {
+    const sha = `gh-error-${responses.indexOf(response)}`
+    const f = pendingUnit({
+      specs: [{ name: 'pending-lane', text: `${JSON.stringify({ status: 'done', commit: sha })}\n` }],
+      branches: { [sha]: 'pending-lane' },
+      gh: { 'pending-lane': response },
+    })
+    assert.equal(f.output.rows.length, 1)
+    assert.equal(f.output.rows[0].pr, 'unknown')
+    assert.equal(f.output.rows[0].state, 'pending')
+  }
+})
+
+test('an archived unreadable run is unknown while a live unsettled one is running', () => {
+  const f = pendingUnit({
+    specs: [
+      { name: 'archived-lane', text: 'not a JSON frame\n', options: { task: 'archived-lane', archived: true, settled: true } },
+      { name: 'running-lane', text: 'seat output\n', options: { settled: false } },
+    ],
+  })
+  assert.equal(f.output.rows.length, 1)
+  assert.equal(f.output.rows[0].lane, 'archived-lane')
+  assert.equal(f.output.rows[0].state, 'unknown')
+  assert.equal(f.output.rows[0].reason, 'run-log-unreadable')
+  assert.equal(f.output.counts.unknown, 1)
+  assert.equal(f.output.counts.running, 1)
+})
+
+test('a done commit with no containing branch is unknown, not pending', () => {
+  const sha = 'branch-gone-commit'
+  const f = pendingUnit({
+    specs: [{ name: 'gone-lane', text: `${JSON.stringify({ status: 'done', commit: sha })}\n` }],
+    branches: { [sha]: null },
+    messages: { [sha]: 'feat: gone work\n\nRefs: #444' },
+  })
+  assert.equal(f.output.rows.length, 1)
+  assert.equal(f.output.rows[0].state, 'unknown')
+  assert.equal(f.output.rows[0].reason, 'branch-gone')
+  assert.equal(f.output.rows[0].branch, 'unknown')
+})
+
+test('an empty crew root prints an explicit empty result and exits 0', async () => {
+  const root = scratchDir('factoryctl-empty-')
+  const repo = scratchDir('factoryctl-empty-repo-')
+  let stdout = ''
+  let stderr = ''
+  const code = await main(['pending', '--crew-root', root, '--repo', repo], {
+    lanes: () => [],
+    spawnSync: () => ({ status: 1, stdout: '', stderr: '' }),
+    stdout: (text) => { stdout += text },
+    stderr: (text) => { stderr += text },
+  })
+  assert.equal(code, 0)
+  assert.match(stdout, /no lanes are pending publication/)
+  assert.match(stdout, /pending: 0 .* scanned: 0/)
+  assert.equal(stderr, '')
+})
+
+test('pending uses only read-only git and gh calls and changes no crew files', () => {
+  const root = scratchDir('factoryctl-readonly-')
+  const laneRoot = join(root, 'crew')
+  const repo = join(root, 'repo')
+  mkdirSync(laneRoot, { recursive: true }); mkdirSync(repo, { recursive: true })
+  const sha = 'readonly-commit'
+  const lane = pendingLane(laneRoot, 'readonly-lane', `${JSON.stringify({ status: 'done', commit: sha })}\n`)
+  const d = pendingSpawn({ branches: { [sha]: 'readonly-lane' } })
+  const before = treeSnapshot(root)
+  pendingVerb({ _: ['pending'], 'crew-root': root, repo, json: true }, {
+    lanes: () => [lane],
+    readFileSync: (...args) => readFileSync(...args),
+    statSync: (...args) => statSync(...args),
+    spawnSync: d.spawnSync,
+    stdout: () => {},
+  })
+  const after = treeSnapshot(root)
+  assert.deepEqual(after, before)
+  const forbidden = new Set(['push', 'fetch', 'pr', 'create', 'commit', 'update-ref', 'checkout', 'branch'])
+  const tokens = d.calls.flatMap(({ command, argv }) => [command, ...argv].map(String))
+  for (const token of ['push', 'fetch', 'commit', 'update-ref', 'checkout', 'branch']) assert.equal(tokens.includes(token), false, `unexpected ${token} call`)
+  assert.equal(tokens.includes('create'), false)
+  assert.equal(d.calls.some(({ command, argv }) => command === 'gh' && argv.includes('pr') && argv.includes('create')), false)
+  assert.equal([...forbidden].includes('pr') && d.calls.some(({ command }) => command === 'gh'), true)
+})
+
+test('main routes pending without connecting to a daemon', async () => {
+  const root = scratchDir('factoryctl-no-daemon-')
+  const d = pendingSpawn()
+  let touched = false
+  const code = await main(['pending', '--crew-root', root, '--repo', root], {
+    env: { CREW_DAEMON_ROOT: join(root, 'nobody-listens') },
+    lanes: () => [],
+    spawnSync: d.spawnSync,
+    net: { connect: () => { touched = true; throw new Error('daemon should not be touched') } },
+    stdout: () => {},
+    stderr: () => {},
+  })
+  assert.equal(code, 0)
+  assert.equal(touched, false)
 })

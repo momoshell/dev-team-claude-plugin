@@ -1,11 +1,14 @@
 // factoryctl owns nothing — the daemon owns the workers, the registry and the projection; this is a socket client that prints.
 import netDefault from 'node:net'
+import { spawnSync as cpSpawnSync } from 'node:child_process'
+import { readFileSync as fsReadFileSync, statSync as fsStatSync } from 'node:fs'
 import { basename, dirname, join, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { splitFrames } from './headless-rpc.mjs'
 import { VARIANTS } from './variants.mjs'
+import { archivedLanes, crewRoot, discoverLanes } from '../scripts/factory/lane-watch.mjs'
 
 export const DEFAULT_TIMEOUT_MS = 5000
 
@@ -324,13 +327,232 @@ export async function attachVerb(args, deps = {}) {
   }
 }
 
+// --- pending publication (#678): READ-ONLY REGION BEGIN -----------------------
+// A done lane commits to its branch and stops; nothing enumerates what is then
+// waiting to be published. This region answers that and MUTATES NOTHING: it
+// reads run.log, asks git read-only questions and asks `gh pr list`. No push, no
+// PR, no teardown, no write to any crew dir.
+export const PENDING_UNKNOWN = 'unknown'
+
+export function pendingDeps(deps = {}) {
+  return {
+    lanes: deps.lanes || ((root) => [...discoverLanes(root), ...archivedLanes(root)]),
+    readFileSync: deps.readFileSync || fsReadFileSync,
+    statSync: deps.statSync || fsStatSync,
+    spawnSync: deps.spawnSync || cpSpawnSync,
+    home: deps.home,
+  }
+}
+
+// The terminal line every run writes (crew/crew.mjs:1905). LAST wins: a run.log
+// carries seat noise and earlier frames, and only the last one is the outcome.
+export function terminalRunLine(text) {
+  const lines = String(text ?? '').split('\n')
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    const line = lines[index].trim()
+    if (!line.startsWith('{')) continue
+    let frame
+    try { frame = JSON.parse(line) } catch { continue }
+    if (!frame || typeof frame.status !== 'string') continue
+    return { status: frame.status, commit: typeof frame.commit === 'string' && frame.commit ? frame.commit : null }
+  }
+  return null
+}
+
+const DONE_WITH_COMMIT = (terminal) => terminal?.status === 'done' && typeof terminal?.commit === 'string' && terminal.commit.length > 0
+
+// Every git call is read-only and local: no fetch, no remote round trip.
+export function gitRunner(d, repo) {
+  return (...args) => {
+    let result
+    try { result = d.spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' }) }
+    catch (err) { return { status: 128, stdout: '', stderr: String(err?.message || err) } }
+    if (result?.error) return { status: 128, stdout: '', stderr: String(result.error.message || result.error) }
+    return { status: result?.status, stdout: String(result?.stdout || '').trim(), stderr: String(result?.stderr || '').trim() }
+  }
+}
+
+function defaultBranch(git) {
+  const head = git('rev-parse', '--abbrev-ref', 'origin/HEAD')
+  if (head.status === 0 && head.stdout) return head.stdout
+  for (const name of ['main', 'master']) {
+    if (git('show-ref', '--verify', '--quiet', `refs/heads/${name}`).status === 0) return name
+  }
+  return null
+}
+
+function remoteName(git) {
+  const listed = git('remote')
+  if (listed.status !== 0) return null
+  const first = listed.stdout.split('\n').map((line) => line.trim()).filter(Boolean)[0]
+  return first || null
+}
+
+function localName(branch) { return typeof branch === 'string' ? branch.replace(/^[^/]+\//, '') : branch }
+
+export function resolveBranch(git, commit, slug, base) {
+  const listed = git('for-each-ref', '--contains', commit, '--format=%(refname:short)', 'refs/heads')
+  if (listed.status !== 0) return PENDING_UNKNOWN
+  const names = listed.stdout.split('\n').map((line) => line.trim())
+    .filter(Boolean).filter((name) => name !== base && name !== localName(base))
+  if (names.includes(slug)) return slug
+  if (names.length === 1) return names[0]
+  return PENDING_UNKNOWN
+}
+
+function remoteState(git, branch, remote) {
+  if (branch === PENDING_UNKNOWN || !remote) return PENDING_UNKNOWN
+  const found = git('show-ref', '--verify', '--quiet', `refs/remotes/${remote}/${branch}`)
+  if (found.status === 0) return 'yes'
+  if (found.status === 1) return 'no'
+  return PENDING_UNKNOWN
+}
+
+// The issue the commit names, from the Refs trailer drive.mjs composes
+// (crew/drive.mjs:1530). No trailer is unknown, never "no issue".
+export function commitIssues(message) {
+  const match = String(message ?? '').match(/^Refs:\s*(.+)$/m)
+  if (!match) return PENDING_UNKNOWN
+  const issues = match[1].split(',').map((entry) => entry.trim()).filter(Boolean)
+  return issues.length ? issues.join(' ') : PENDING_UNKNOWN
+}
+
+// A MEASURED answer or unknown — never "unpublished" because nobody could ask.
+function pullRequestState(d, repo, branch) {
+  if (branch === PENDING_UNKNOWN) return { pr: PENDING_UNKNOWN, published: false }
+  let result
+  try { result = d.spawnSync('gh', ['pr', 'list', '--head', branch, '--state', 'all', '--json', 'number,state'], { cwd: repo, encoding: 'utf8' }) }
+  catch { return { pr: PENDING_UNKNOWN, published: false } }
+  if (result?.error || result?.status !== 0) return { pr: PENDING_UNKNOWN, published: false }
+  let listed
+  try { listed = JSON.parse(String(result.stdout || '')) } catch { return { pr: PENDING_UNKNOWN, published: false } }
+  if (!Array.isArray(listed)) return { pr: PENDING_UNKNOWN, published: false }
+  const open = listed.filter((entry) => {
+    const state = String(entry?.state || '').toUpperCase()
+    return state === 'OPEN' || state === 'MERGED'
+  })
+  if (open.length) return { pr: open.map((entry) => `#${entry?.number ?? '?'}`).join(' '), published: true }
+  return { pr: 'none', published: false }
+}
+
+export function classifyLane(lane, ctx) {
+  const runLog = join(lane.dir, 'run.log')
+  let text
+  try { text = ctx.d.readFileSync(runLog, 'utf8') } catch { return { kind: 'skip', reason: 'no-run-log' } }
+  let doneAt = PENDING_UNKNOWN
+  try { doneAt = ctx.d.statSync(runLog).mtime.toISOString() } catch { doneAt = PENDING_UNKNOWN }
+  const terminal = terminalRunLine(text)
+  if (terminal === null) {
+    // A LIVE lane with no terminal line yet is RUNNING, not unclassifiable: it
+    // has not finished, so it is not waiting to be published.
+    if (!lane.archived && !lane.settled) return { kind: 'skip', reason: 'running' }
+    return {
+      kind: 'unknown', reason: 'run-log-unreadable',
+      row: {
+        lane: lane.task, commit: PENDING_UNKNOWN, branch: PENDING_UNKNOWN, issue: PENDING_UNKNOWN,
+        done_at: doneAt, remote: PENDING_UNKNOWN, pr: PENDING_UNKNOWN, state: 'unknown', reason: 'run-log-unreadable',
+      },
+    }
+  }
+  if (!DONE_WITH_COMMIT(terminal)) {
+    return { kind: 'skip', reason: terminal.status === 'done' ? 'done-without-commit' : 'not-done' }
+  }
+  const commit = terminal.commit
+  const known = ctx.git('cat-file', '-e', `${commit}^{commit}`).status === 0
+  const branch = known ? resolveBranch(ctx.git, commit, lane.task, ctx.base) : PENDING_UNKNOWN
+  if (known && ctx.base && ctx.git('merge-base', '--is-ancestor', commit, ctx.base).status === 0) {
+    return { kind: 'skip', reason: 'merged' }
+  }
+  // Nothing to publish without a branch to push: the commit was merged under a
+  // different sha and its branch deleted, or the object is not this repo's. Say
+  // unknown — never "pending", which would claim work nobody can act on.
+  if (branch === PENDING_UNKNOWN) {
+    return {
+      kind: 'unknown', reason: known ? 'branch-gone' : 'commit-not-in-repo',
+      row: {
+        lane: lane.task, commit, branch: PENDING_UNKNOWN,
+        issue: known ? commitIssues(ctx.git('log', '-1', '--format=%B', commit).stdout) : PENDING_UNKNOWN,
+        done_at: doneAt, remote: PENDING_UNKNOWN, pr: PENDING_UNKNOWN,
+        state: 'unknown', reason: known ? 'branch-gone' : 'commit-not-in-repo',
+      },
+    }
+  }
+  const pull = pullRequestState(ctx.d, ctx.repo, branch)
+  if (pull.published) return { kind: 'skip', reason: 'pull-request' }
+  const message = known ? ctx.git('log', '-1', '--format=%B', commit) : { status: 1, stdout: '' }
+  return {
+    kind: 'pending',
+    row: {
+      lane: lane.task,
+      commit,
+      branch,
+      issue: message.status === 0 ? commitIssues(message.stdout) : PENDING_UNKNOWN,
+      done_at: doneAt,
+      remote: remoteState(ctx.git, branch, ctx.remote),
+      pr: pull.pr,
+      state: 'pending',
+      reason: known ? null : 'commit-not-in-repo',
+    },
+  }
+}
+
+const PENDING_HEADERS = ['LANE', 'COMMIT', 'BRANCH', 'ISSUE', 'DONE-AT', 'REMOTE', 'PR', 'STATE', 'WHY']
+const PENDING_KEYS = ['lane', 'commit', 'branch', 'issue', 'done_at', 'remote', 'pr', 'state', 'reason']
+
+export function formatPending({ rows, counts }) {
+  const summary = `pending: ${counts.pending} · unknown: ${counts.unknown} · published: ${counts.published} · not-done: ${counts.not_done} · running: ${counts.running} · no-run-log: ${counts.no_run_log} · scanned: ${counts.scanned}`
+  if (!rows.length) return ['no lanes are pending publication — no done lane in this crew root is waiting on a push', summary].join('\n')
+  const values = rows.map((row) => PENDING_KEYS.map((key) => (row?.[key] == null ? (key === 'reason' ? '-' : PENDING_UNKNOWN) : String(row[key]))))
+  const widths = PENDING_HEADERS.map((header, index) => Math.max(header.length, ...values.map((value) => value[index].length)))
+  const line = (cells) => cells.map((cell, index) => (index === cells.length - 1 ? cell : cell.padEnd(widths[index]))).join('  ')
+  return [line(PENDING_HEADERS), ...values.map(line), summary].join('\n')
+}
+
+export function pendingVerb(args, deps = {}) {
+  const d = pendingDeps(deps)
+  const root = typeof args['crew-root'] === 'string' && args['crew-root'] ? resolvePath(args['crew-root']) : crewRoot({ home: d.home })
+  const repo = typeof args.repo === 'string' && args.repo
+    ? resolvePath(args.repo)
+    : (typeof deps.cwd === 'function' ? deps.cwd() : process.cwd())
+  const git = gitRunner(d, repo)
+  const ctx = { d, git, repo, base: defaultBranch(git), remote: remoteName(git) }
+  const pendingRows = []
+  const counts = { scanned: 0, pending: 0, unknown: 0, published: 0, not_done: 0, running: 0, no_run_log: 0 }
+  for (const lane of d.lanes(root)) {
+    counts.scanned += 1
+    const verdict = classifyLane(lane, ctx)
+    if (verdict.kind === 'skip') {
+      if (verdict.reason === 'running') counts.running += 1
+      else if (verdict.reason === 'no-run-log') counts.no_run_log += 1
+      else if (verdict.reason === 'merged' || verdict.reason === 'pull-request') counts.published += 1
+      else counts.not_done += 1
+      continue
+    }
+    if (pendingRows.some((row) => row.lane === verdict.row.lane && row.commit === verdict.row.commit)) continue
+    if (verdict.kind === 'unknown') counts.unknown += 1
+    else counts.pending += 1
+    pendingRows.push(verdict.row)
+  }
+  pendingRows.sort((a, b) => (a.lane < b.lane ? -1 : a.lane > b.lane ? 1 : 0))
+  const result = { rows: pendingRows, counts }
+  const stdout = outputSink(deps.stdout, process.stdout)
+  stdout(args.json ? `${JSON.stringify(result)}\n` : `${formatPending(result)}\n`)
+  return result
+}
+// --- pending publication (#678): READ-ONLY REGION END -------------------------
+
 export async function main(argv, deps = {}) {
   const args = parseArgs(argv)
   const stderr = outputSink(deps.stderr, process.stderr)
   const verb = args._[0]
-  if (!['run', 'ls', 'attach', 'send'].includes(verb)) {
-    stderr('usage: factoryctl <run|ls|attach|send> ...\n')
+  if (!['run', 'ls', 'attach', 'send', 'pending'].includes(verb)) {
+    stderr('usage: factoryctl <run|ls|attach|send|pending> ...\n')
     return 2
+  }
+  // `pending` reads; it never connects to a daemon and never starts one.
+  if (verb === 'pending') {
+    try { pendingVerb(args, deps); return 0 }
+    catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 1 }
   }
 
   let session = null

@@ -621,7 +621,7 @@ function addQuotedKeys(source, keys) {
   }
 }
 
-function isTripwireFile(file) {
+export function isTripwireFile(file) {
   return TEST_FILE.test(file) || file.startsWith('test/')
 }
 

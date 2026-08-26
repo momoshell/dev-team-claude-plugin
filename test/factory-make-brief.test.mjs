@@ -15,7 +15,7 @@ import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
-  discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
+  discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
   MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
   readLadderBands, renderBrief, renderProposalBlock, resolveWriteSurface, validateAsk,
   validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
@@ -1820,6 +1820,12 @@ test('stale and malformed coupling acknowledgements refuse by input reason', () 
   ])
   assert.equal(notes.status, 2)
   assert.match(notes.stderr, /bad-fences/)
+})
+
+test('isTripwireFile recognises test suffixes and the test directory', () => {
+  assert.equal(isTripwireFile('crew/crew.test.mjs'), true)
+  assert.equal(isTripwireFile('test/helpers.mjs'), true)
+  assert.equal(isTripwireFile('crew/crew.mjs'), false)
 })
 
 test('no fence reports coupling without enforcing it', () => {

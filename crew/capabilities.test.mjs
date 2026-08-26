@@ -1,14 +1,16 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync } from 'node:fs'
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, rmSync, readdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  CAPABILITY_DELIVERY, CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, assertGrantsBacked,
-  effectiveCapabilities, grantsFor, loadCapabilities, refuse, validateCapabilities,
+  CAPABILITY_ADAPTERS, CAPABILITY_CLASSES, CAPABILITY_DELIVERY, CAPABILITY_PROBES,
+  CAPABILITY_REFUSALS, EMPTY_GRANTS, REGISTER_ROOT, assertGrantsBacked,
+  declaredCapabilities, effectiveCapabilities, grantsFor, loadCapabilities, probeCapability,
+  refuse, validateCapabilities,
 } from './capabilities.mjs'
 import { seatCommand, capabilitiesFor } from './adapters/adapter-claude.mjs'
-import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
+import { capabilitiesFor as piCapabilitiesFor, PI_SUBAGENT_TOOL } from './adapters/adapter-pi.mjs'
 
 function capabilityRegister(overrides = {}) {
   const grant = (extra = {}) => ({ tools: [], extensions: [], agents: [], skills: [], advisor: false, requires: [], ...extra })
@@ -233,4 +235,107 @@ test('effectiveCapabilities keys subagent delivery on the command line in both a
   assert.deepEqual(untouched, { effort: false, local_provider: true, tool_deny: false })
   assert.equal(Object.isFrozen(piBundle), true)
   assert.deepEqual(Object.keys(CAPABILITY_DELIVERY), ['subagents'])
+})
+
+test('every declared capability is classified with a recorded reason', async () => {
+  const adapters = readdirSync(join(REGISTER_ROOT, 'crew', 'adapters'))
+    .filter((file) => /^adapter-.+\.mjs$/.test(file) && !file.endsWith('.test.mjs'))
+    .map((file) => file.slice('adapter-'.length, -'.mjs'.length))
+    .sort()
+  assert.deepEqual([...CAPABILITY_ADAPTERS].sort(), adapters)
+
+  const shipped = loadCapabilities()
+  const declared = declaredCapabilities(shipped)
+  assert.deepEqual(declared, ['advisor', 'agents', 'extensions', 'skills', 'subagents@claude', 'subagents@pi'])
+  assert.deepEqual(Object.keys(CAPABILITY_PROBES).sort(), declared)
+
+  const injected = JSON.parse(readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8'))
+  injected.roles.builder.requires = ['telemetry']
+  const injectedDeclared = declaredCapabilities(injected)
+  assert.equal(injectedDeclared.includes('telemetry@claude'), true)
+  assert.equal(injectedDeclared.includes('telemetry@pi'), true)
+  assert.equal(Object.hasOwn(CAPABILITY_PROBES, 'telemetry@claude'), false)
+  assert.equal(Object.hasOwn(CAPABILITY_PROBES, 'telemetry@pi'), false)
+
+  for (const [key, entry] of Object.entries(CAPABILITY_PROBES)) {
+    assert.equal(CAPABILITY_CLASSES.includes(entry.class), true)
+    assert.equal(typeof entry.reason, 'string')
+    assert.equal(entry.reason.trim().length >= 40, true)
+    if (key === 'subagents@pi') assert.equal(entry.class, 'probe')
+    else assert.notEqual(entry.class, 'probe')
+  }
+
+  const advisor = await probeCapability('advisor')
+  assert.equal(advisor.probed, false)
+  assert.equal(advisor.ok, true)
+  assert.equal(advisor.reason, CAPABILITY_PROBES.advisor.reason)
+  const claude = await probeCapability('subagents@claude')
+  assert.equal(claude.probed, false)
+  assert.equal(claude.ok, true)
+  assert.equal(claude.reason, CAPABILITY_PROBES['subagents@claude'].reason)
+  for (const unknown of ['not-a-declared-capability', 'constructor', 'toString', '__proto__']) {
+    await assert.rejects(() => probeCapability(unknown), Error)
+  }
+})
+
+test('the pi subagents probe exercises the granted fan-out bundle', async () => {
+  const hadAgents = Object.hasOwn(process.env, 'CREW_PI_AGENTS')
+  const beforeAgents = process.env.CREW_PI_AGENTS
+  const result = await probeCapability('subagents@pi')
+  assert.deepEqual(result.failures, [])
+  assert.equal(result.ok, true)
+  assert.equal(result.probed, true)
+
+  const finding = (name) => result.findings.find((one) => one.name === name)
+  assert.deepEqual(finding('tool-enum')?.value, ['scout'])
+  assert.equal(finding('registered-tool')?.value, PI_SUBAGENT_TOOL)
+  const argv = finding('child-args')?.value || []
+  assert.equal(argv[argv.indexOf('--tools') + 1], 'read,grep,find,ls')
+  assert.equal(argv[argv.indexOf('--exclude-tools') + 1], 'edit,write,bash')
+  assert.equal(argv[argv.indexOf('--tools') + 1].includes('edit'), false)
+  assert.equal(argv[argv.indexOf('--tools') + 1].includes('write'), false)
+  assert.equal(argv[argv.indexOf('--tools') + 1].includes('bash'), false)
+  assert.deepEqual(finding('extensions-loaded')?.value, ['subagent.ts', 'lab.ts'])
+  assert.equal(Object.hasOwn(process.env, 'CREW_PI_AGENTS'), hadAgents)
+  assert.equal(process.env.CREW_PI_AGENTS, beforeAgents)
+})
+
+test('the pi subagents probe goes red when the register stops being true', async () => {
+  const source = readFileSync(new URL('./capabilities.json', import.meta.url), 'utf8')
+  const mutatedRegister = (mutate) => {
+    const raw = JSON.parse(source)
+    mutate(raw)
+    return loadCapabilities({ register: raw })
+  }
+
+  const missingDefinition = await probeCapability('subagents@pi', {
+    register: mutatedRegister((raw) => {
+      raw.roles.planner.by_agent.pi.agents = [{ name: 'scout', def: 'crew/pi/agents/nope.json' }]
+    }),
+  })
+  assert.equal(missingDefinition.ok, false)
+  assert.equal(missingDefinition.failures.some((failure) => failure.includes('crew/pi/agents/nope.json')), true)
+
+  const wrongName = await probeCapability('subagents@pi', {
+    register: mutatedRegister((raw) => {
+      raw.roles.planner.by_agent.pi.agents = [{ name: 'wanderer', def: 'crew/pi/agents/scout.json' }]
+    }),
+  })
+  assert.equal(wrongName.ok, false)
+  assert.equal(wrongName.failures.length > 0, true)
+
+  const missingExtensions = await probeCapability('subagents@pi', {
+    register: mutatedRegister((raw) => { raw.roles.planner.by_agent.pi.extensions = [] }),
+  })
+  assert.equal(missingExtensions.ok, false)
+  assert.equal(missingExtensions.failures.some((failure) => failure.includes('extensions')), true)
+
+  const builderClaim = mutatedRegister((raw) => { raw.roles.builder.requires = ['subagents'] })
+  const builderDeclared = declaredCapabilities(builderClaim)
+  assert.equal(builderDeclared.includes('subagents@claude'), true)
+  assert.equal(builderDeclared.includes('subagents@pi'), true)
+  assert.equal(Object.hasOwn(CAPABILITY_PROBES, 'subagents@claude'), true)
+  assert.equal(Object.hasOwn(CAPABILITY_PROBES, 'subagents@pi'), true)
+  const plannerProbe = await probeCapability('subagents@pi', { register: builderClaim })
+  assert.equal(plannerProbe.ok, true)
 })

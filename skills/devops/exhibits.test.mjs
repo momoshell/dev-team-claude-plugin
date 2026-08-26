@@ -5,7 +5,7 @@ import { assertAnchorsPinned } from '../qa-test-writing/anchor-pin.mjs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url))
+import { ROOT } from '../../test/helpers.mjs'
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const DAEMON = join(ROOT, 'crew/daemon.mjs')
 const REAP = join(ROOT, 'scripts/factory/reap-stale.mjs')

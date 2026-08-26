@@ -4,11 +4,10 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { scratchDir } from '../test/helpers.mjs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
 
 import { join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { regrantVerdict } from './escalation-policy.mjs'
 
 import { assertSeats, runCmd } from './crew.mjs'
@@ -201,7 +200,6 @@ const CTX_DIRECTED = Object.freeze({
 })
 const TRIAGE_NOTE = `${TD}/triage.md`
 const TRIAGE_FILES = { [TRIAGE_NOTE]: '# Triage\n\nfix the off-by-one in a.mjs\n' }
-const REPO_ROOT = fileURLToPath(new URL('../', import.meta.url))
 const SKILL_NAMES = ['review-procedure', 'ast-grep-codemod']
 const triageEnv = (over = {}) => ({
   status: 'done', role: 'planner', summary: 'triaged', artifacts: [TRIAGE_NOTE], details: { plan_path: TRIAGE_NOTE }, ...over,

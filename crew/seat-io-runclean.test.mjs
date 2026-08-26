@@ -62,6 +62,20 @@ function makeIo({ repoDir, paths }) {
   return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
 }
 
+function commitRepo(tag, files) {
+  const root = scratchDir(`crew-commit-${tag}-`)
+  git(root, 'init', '-q')
+  // commit() shells out to plain `git`, which inherits no identity from the
+  // test helper; configure the repo itself for a lane with an empty HOME.
+  git(root, 'config', 'user.email', 'crew@example.invalid')
+  git(root, 'config', 'user.name', 'Crew Test')
+  for (const name of files) writeFileSync(join(root, name), `${name} initial\n`)
+  git(root, 'add', '-A')
+  git(root, 'commit', '-m', 'initial')
+  const paths = { dir: root, taskDir: root, returnsDir: root }
+  return { root, io: seatIo({ members: {} }, paths, root, null, null, {}, {}) }
+}
+
 // The seat-side inventory mirrors gate.mjs: event discriminators and payload
 // keys are separate projections, and the three forwarding sinks are excluded.
 const SEAT_SINK = /(?:io\?\.log\?\.\(|io\.log\(|(?<![.\w])log\?\.\(|logLine\(join\(paths\.dir, 'journal\.jsonl'\), )/g
@@ -1909,4 +1923,106 @@ test('a recovered transient followed by a stale transcript remains stale', () =>
     assert.doesNotMatch(verdict.text, /the seat is WORKING:/)
     assert.equal(events.some((event) => event.kind === 'cell-failure' && /the seat is STALE:/.test(event.detail)), true)
   })
+})
+
+test('seatIo commit stages an ALREADY-STAGED deletion beside a modification', () => {
+  const fixture = commitRepo('staged-del', ['gone.txt', 'mod.txt'])
+  try {
+    writeFileSync(join(fixture.root, 'mod.txt'), 'modified\n')
+    git(fixture.root, 'rm', '-q', 'gone.txt')
+    const sha = fixture.io.commit(['gone.txt', 'mod.txt'], 'retire gone.txt')
+    assert.match(sha, /^[0-9a-f]{7,}$/)
+    const recorded = git(fixture.root, 'show', '--name-status', '--format=', 'HEAD').trim().split('\n').filter(Boolean).map((line) => line.replace('\t', ' ')).sort()
+    assert.deepEqual(recorded, ['D gone.txt', 'M mod.txt'])
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo commit records an UNSTAGED worktree deletion', () => {
+  const fixture = commitRepo('unstaged-del', ['gone.txt'])
+  try {
+    rmSync(join(fixture.root, 'gone.txt'))
+    const sha = fixture.io.commit(['gone.txt'], 'retire gone.txt')
+    assert.match(sha, /^[0-9a-f]{7,}$/)
+    assert.equal(git(fixture.root, 'ls-tree', '--name-only', 'HEAD', '--', 'gone.txt').trim(), '')
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo commit carries an add, a modify and both deletion shapes at once', () => {
+  const fixture = commitRepo('mixed', ['mod.txt', 'staged-gone.txt', 'worktree-gone.txt'])
+  try {
+    writeFileSync(join(fixture.root, 'mod.txt'), 'modified\n')
+    writeFileSync(join(fixture.root, 'added.txt'), 'added\n')
+    git(fixture.root, 'rm', '-q', 'staged-gone.txt')
+    rmSync(join(fixture.root, 'worktree-gone.txt'))
+    const scope = ['added.txt', 'mod.txt', 'staged-gone.txt', 'worktree-gone.txt']
+    const sha = fixture.io.commit(scope, 'a mixed lane')
+    assert.match(sha, /^[0-9a-f]{7,}$/)
+    const recorded = git(fixture.root, 'show', '--name-status', '--format=', 'HEAD').trim().split('\n').filter(Boolean).map((line) => line.replace('\t', ' ')).sort()
+    assert.deepEqual(recorded, ['A added.txt', 'D staged-gone.txt', 'D worktree-gone.txt', 'M mod.txt'])
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo commit stages nothing outside the lane\'s scope', () => {
+  const fixture = commitRepo('fence', ['mod.txt', 'gone.txt', 'oos-dirty.txt', 'oos-gone.txt'])
+  try {
+    writeFileSync(join(fixture.root, 'mod.txt'), 'modified\n')
+    git(fixture.root, 'rm', '-q', 'gone.txt')
+    writeFileSync(join(fixture.root, 'oos-dirty.txt'), 'dirtied out of scope\n')
+    rmSync(join(fixture.root, 'oos-gone.txt'))
+    const sha = fixture.io.commit(['mod.txt', 'gone.txt'], 'the b264 shape')
+    assert.match(sha, /^[0-9a-f]{7,}$/)
+    const recorded = git(fixture.root, 'show', '--name-status', '--format=', 'HEAD').trim().split('\n').filter(Boolean).map((line) => line.replace('\t', ' ')).sort()
+    assert.deepEqual(recorded, ['D gone.txt', 'M mod.txt'])
+    const after = git(fixture.root, 'status', '--porcelain', '-uall').split('\n').filter(Boolean).sort()
+    assert.deepEqual(after, [' D oos-gone.txt', ' M oos-dirty.txt'])
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo commit still refuses an empty scope with its verbatim message', () => {
+  const fixture = commitRepo('empty', ['a.txt'])
+  try {
+    writeFileSync(join(fixture.root, 'untouched-by-scope.txt'), 'x\n')
+    const before = git(fixture.root, 'status', '--porcelain')
+    assert.throws(() => fixture.io.commit(['a.txt'], 'nothing here'), (error) => {
+      assert.match(error.message, /^commit: nothing in scope actually changed — refusing an empty commit$/)
+      return true
+    })
+    assert.equal(git(fixture.root, 'status', '--porcelain'), before)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo commit treats a scope of ONLY an already-staged deletion as a real change', () => {
+  const fixture = commitRepo('only-del', ['gone.txt', 'other.txt'])
+  try {
+    git(fixture.root, 'rm', '-q', 'gone.txt')
+    const sha = fixture.io.commit(['gone.txt'], 'only a deletion')
+    assert.match(sha, /^[0-9a-f]{7,}$/)
+    const recorded = git(fixture.root, 'show', '--name-status', '--format=', 'HEAD').trim().split('\n').filter(Boolean).map((line) => line.replace('\t', ' '))
+    assert.deepEqual(recorded, ['D gone.txt'])
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo commit skips a planned-but-never-created path', () => {
+  const fixture = commitRepo('never-created', ['mod.txt'])
+  try {
+    writeFileSync(join(fixture.root, 'mod.txt'), 'modified\n')
+    const sha = fixture.io.commit(['mod.txt', 'planned/never-created.mjs'], 'a plan that named a file nobody wrote')
+    assert.match(sha, /^[0-9a-f]{7,}$/)
+    const recorded = git(fixture.root, 'show', '--name-status', '--format=', 'HEAD').trim().split('\n').filter(Boolean).map((line) => line.replace('\t', ' '))
+    assert.deepEqual(recorded, ['M mod.txt'])
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
+})
+
+test('seatIo changedFiles keeps both sides of a rename', () => {
+  const fixture = commitRepo('rename', ['old.txt', 'kept.txt'])
+  try {
+    git(fixture.root, 'mv', 'old.txt', 'new.txt')
+    writeFileSync(join(fixture.root, 'kept.txt'), 'modified\n')
+    const changed = fixture.io.changedFiles()
+    assert.ok(changed.includes('new.txt'))
+    assert.ok(changed.includes('old.txt'))
+    assert.ok(changed.includes('kept.txt'))
+    assert.equal(changed.length, 3)
+    assert.equal(changed.indexOf('old.txt'), changed.indexOf('new.txt') + 1)
+  } finally { rmSync(fixture.root, { recursive: true, force: true }) }
 })

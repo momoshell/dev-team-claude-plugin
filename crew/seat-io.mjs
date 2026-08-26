@@ -2601,25 +2601,23 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       // files individually, never a collapsed '?? dir/'. Rename/copy entries
       // ('R'/'C' in X) carry the ORIGINAL path as the following NUL record —
       // both sides are real changes the scope gate must see.
-      const out = execSync('git status --porcelain -uall -z', { cwd: checkout, encoding: 'utf8' })
-      const parts = out.split('\0')
-      const files = []
-      for (let i = 0; i < parts.length; i += 1) {
-        const entry = parts[i]
-        if (!entry) continue
-        files.push(entry.slice(3))
-        if (entry[0] === 'R' || entry[0] === 'C') { i += 1; if (parts[i]) files.push(parts[i]) }
-      }
-      return files
+      return entryPaths(statusEntries(execSync('git status --porcelain -uall -z', { cwd: checkout, encoding: 'utf8' })))
     },
     commit(files, message) {
       // argv-form git (no shell string: planner-supplied paths are data, not
       // syntax), staging only what actually changed within scope — a planned-
       // but-never-created path must not crash the run after a green suite.
-      const changed = this.changedFiles()
+      // ONE status read: the scope membership and the staging decision are the
+      // same view of the tree.
+      const entries = statusEntries(execSync('git status --porcelain -uall -z', { cwd: checkout, encoding: 'utf8' }))
+      const changed = entryPaths(entries)
       const present = files.filter((f) => changed.includes(f))
       if (present.length === 0) throw new Error('commit: nothing in scope actually changed — refusing an empty commit')
-      execFileSync('git', ['add', '--', ...present], { cwd: checkout })
+      // An already-staged deletion is a real change with nothing left to add:
+      // it commits from the index and never reaches a pathspec that cannot
+      // match it (#688).
+      const toAdd = present.filter((f) => needsStaging(entries, f))
+      if (toAdd.length > 0) execFileSync('git', ['add', '--', ...toAdd], { cwd: checkout })
       execFileSync('git', ['commit', '-q', '-F', '-'], { cwd: checkout, input: message })
       return execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: checkout, encoding: 'utf8' }).trim()
     },
@@ -2662,6 +2660,41 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   }
   if (emitter) io.emit = emitAdapter(emitter, crew)
   return io
+}
+
+// One record per `git status --porcelain -uall -z` entry: x and y are the index
+// and worktree columns, path is the entry's own path, and origin is the
+// ORIGINAL path of a rename/copy — the following NUL record. Declared below
+// seatIo (hoisted) so the anchor-pinned lines above it never shift.
+function statusEntries(porcelain) {
+  const parts = porcelain.split('\0')
+  const entries = []
+  for (let i = 0; i < parts.length; i += 1) {
+    const entry = parts[i]
+    if (!entry) continue
+    const record = { x: entry[0], y: entry[1], path: entry.slice(3), origin: null }
+    if (record.x === 'R' || record.x === 'C') { i += 1; if (parts[i]) record.origin = parts[i] }
+    entries.push(record)
+  }
+  return entries
+}
+
+// Both sides of a rename are real changes the scope gate must see.
+function entryPaths(entries) {
+  const files = []
+  for (const record of entries) { files.push(record.path); if (record.origin) files.push(record.origin) }
+  return files
+}
+
+// A path needs `git add` only when its WORKTREE column is non-blank: a blank y
+// means the index already matches the worktree, so there is nothing left to
+// stage. This is not an optimisation. An ALREADY-STAGED deletion ('D ', what
+// `git rm` leaves) is in neither the worktree nor the index, so
+// `git add -- <path>` matches no pathspec and git exits fatal — crashing a lane
+// whose deletion was already staged correctly (#688). A rename's ORIGINAL path
+// has no entry of its own and is likewise already gone, so it is never staged.
+function needsStaging(entries, path) {
+  return entries.some((record) => record.path === path && record.y !== ' ')
 }
 
 export const SEAT_REFUSAL_STAGE = 'seat-refused'

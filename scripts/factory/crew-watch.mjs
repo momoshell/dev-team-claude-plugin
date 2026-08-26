@@ -4,7 +4,7 @@
 // spawns nothing.
 
 import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs'
-import { loadavg, cpus } from 'node:os'
+import { homedir, loadavg, cpus } from 'node:os'
 import { join } from 'node:path'
 import { archivedLanes, crewRoot, discoverLanes, journalAt, laneActive, readJournal, resolveTunables, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
 import { fileURLToPath } from 'node:url'
@@ -66,6 +66,73 @@ export function seatCondition(lines) {
   }
   return null
 }
+
+// TWO TRANSCRIPT HOMES, ONE READOUT (#670). A `claude` seat carries its lane in
+// argv, so `ps -ax | grep dt-<lane>` finds it; a `pi` seat is a bare `pi` with
+// no arguments, so that grep finds ZERO pi seats BY CONSTRUCTION — and the pi
+// seats are the builder and the reviewer. Both encodings are DERIVED from the
+// checkout, never hardcoded: a literal /Users/<name> is the #672 defect. This
+// derives a HOME DIRECTORY only and degrades an absent one to unknown; it never
+// resolves a session by deriving its name, which is what
+// scripts/factory/transcript.mjs refuses.
+export const TRANSCRIPT_HOMES = Object.freeze({
+  claude: (home, checkout) => join(home, '.claude', 'projects', checkout.replaceAll('/', '-')),
+  pi: (home, checkout) => join(home, '.pi', 'agent', 'sessions', `-${checkout.replaceAll('/', '-')}--`),
+})
+
+export function transcriptHome({ agent, checkout, home } = {}) {
+  const encoder = TRANSCRIPT_HOMES[String(agent)]
+  if (!encoder || typeof checkout !== 'string' || typeof home !== 'string' || checkout.length === 0 || home.length === 0) return null
+  return encoder(home, checkout)
+}
+
+export function newestTranscriptMs(dir, deps = {}) {
+  const d = normalDeps(deps)
+  let entries
+  try { entries = d.readdirSync(dir, { withFileTypes: true }) } catch { return null }
+  let newest = null
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const name = typeof entry === 'string' ? entry : entry?.name
+    if (!String(name).endsWith('.jsonl')) continue
+    if (typeof entry?.isDirectory === 'function') {
+      try { if (entry.isDirectory()) continue } catch { continue }
+    }
+    let stat
+    try { stat = d.statSync(join(dir, name)) } catch { continue }
+    if (typeof stat?.mtimeMs !== 'number' || !Number.isFinite(stat.mtimeMs)) continue
+    if (newest === null || stat.mtimeMs > newest) newest = stat.mtimeMs
+  }
+  return newest
+}
+
+export function laneCrew(lane, deps = {}) {
+  const d = normalDeps(deps)
+  try {
+    if (!lane || typeof lane.dir !== 'string') return null
+    return JSON.parse(d.readFileSync(join(lane.dir, 'crew.json'), 'utf8'))
+  } catch { return null }
+}
+
+export const LIVENESS_UNKNOWN = 'unknown'
+
+// Both homes are keyed on the checkout, not the role, so a lane's two pi seats
+// share one home and one age. A home with no readable frame is unknown — never
+// dead, never 0s: a NULL beats a value nobody measured (#297).
+export function seatLivenessLines({ lane, crew, now, home, deps = {} } = {}) {
+  const d = normalDeps(deps)
+  if (!crew || typeof crew !== 'object' || !crew.members || typeof crew.members !== 'object' || Array.isArray(crew.members)) return []
+  if (!Number.isFinite(now)) now = d.now()
+  const task = typeof lane?.task === 'string' ? lane.task : (typeof crew.task === 'string' ? crew.task : 'unknown')
+  const checkout = crew.checkout
+  return Object.keys(crew.members).sort().map((role) => {
+    const member = crew.members[role]
+    const agent = typeof member?.agent === 'string' ? member.agent : 'unknown'
+    const dir = agent === 'unknown' ? null : transcriptHome({ agent, checkout, home })
+    const newest = dir === null || !Number.isFinite(now) ? null : newestTranscriptMs(dir, d)
+    const age = newest === null ? LIVENESS_UNKNOWN : `${Math.max(0, Math.floor((now - newest) / 1000))}s`
+    return `[${task}] seat=${role} agent=${agent} home=${dir ?? LIVENESS_UNKNOWN} transcript=${age}`
+  })
+}
 export const KEYED_EVENTS = Object.freeze(['review_outcome', 'gate_check_discrimination'])
 export const READOUT_INTERVAL_S = 2
 export const WATCHDOG_INTERVAL_S = 30
@@ -103,6 +170,7 @@ export function normalDeps(deps = {}) {
     appendFileSync: deps.appendFileSync || appendFileSync,
     loadavg: deps.loadavg || loadavg,
     cpus: deps.cpus || cpus,
+    homedir: deps.homedir || homedir,
     platform: deps.platform || process.platform,
     now: deps.now || (() => Date.now()),
     openSync: deps.openSync || openSync,
@@ -281,6 +349,7 @@ export function boundedReport({ root, names = [], all = false, now, deps = {} } 
     // ITS OWN observation, or a four-minute-old retry reads as current.
     const seen = seat && seat.at !== null ? ` seen=${Math.max(0, Math.floor((at - seat.at) / 1000))}s` : ''
     lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}${seen}`)
+    lines.push(...seatLivenessLines({ lane, crew: laneCrew(lane, d), now: at, home: d.homedir(), deps: d }))
   }
   for (const lane of selected.archived) {
     const journal = readJournal(lane.journal, d)

@@ -26,8 +26,32 @@ escalation by hand, you are in the recovery closeout.
 
 ## Preserve first
 
-Both closeouts start here. Copy the live state directory before inspecting,
-repairing, or renaming it:
+Both closeouts start here. Complete the quiet-tree precondition below before
+inspecting, repairing, renaming, or making the preserve copy:
+
+### Precondition: prove the tree QUIET first
+
+Preserve-by-copy (#512) copies a **moving target** if a seat is still writing.
+This was measured on `b254`: it escalated at 10:58, its builder wrote a test
+file at 10:52 and its envelope at 11:03, and teardown reported
+`seats:5 proven:0 unproven:5` — five closes logged, none proven, while the
+orphaned builder kept mutating the checkout for about two hours. #574 records
+that seats outlive the driver; this is the sharper form.
+
+As a check, take **two reads** some seconds apart of BOTH the newest
+**transcript** mtime and the **worktree**'s newest file mtime:
+
+```sh
+newest() { find "$1" -type f -exec stat -f '%m %N' {} + | sort -rn | head -1; }
+newest <transcript-home>; newest <worktree>; sleep 10
+newest <transcript-home>; newest <worktree>
+```
+
+Equal on both reads means the tree is quiet, and the copy is evidence.
+Advancing on either read means a seat is still writing and the copy would be a
+smear: tear down first (the recovery closeout), then read the tree after.
+A missing transcript home is `unknown`, not quiet; cross-reference
+[`references/liveness.md`](liveness.md).
 
 ```sh
 cp -a <state-dir> <state-dir>.recovery-copy

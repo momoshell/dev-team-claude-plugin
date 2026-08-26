@@ -6,5 +6,6 @@
   "scripts/factory/make-brief.mjs:657": "function colourNeutralEnv(base = process.env)",
   "crew/crew.mjs:1884": "escalation -> NEVER teardown",
   "crew/crew.mjs:2134": "const seats = rows.length",
-  "crew/crew.mjs:2243": "seats.proven !== seats.seats || seats.recorded !== seats.seats"
+  "crew/crew.mjs:2243": "seats.proven !== seats.seats || seats.recorded !== seats.seats",
+  "scripts/factory/crew-watch.mjs:121": "export function seatLivenessLines("
 }

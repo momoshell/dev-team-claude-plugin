@@ -719,6 +719,12 @@ function frozenTempSites(sites) {
   }
 }
 
+// Retired 2026-08-26 by lane b264-ciretireb2 (#535 wave B2). Both files were
+// deleted with the unreached CI watcher and repairer modules they tested, so
+// neither exemption has anything left to freeze:
+//   test/factory-ci-*.test.mjs (2 sites and 1 site, 3 subtracted from the total
+//     below) — retired by this lane (#535); named by glob because no live citation
+//     of those modules may survive this commit
 const RAW_TEMP_EXEMPT = new Map([
   ['crew/arms.test.mjs', frozenTempSites(1)],
   ['crew/capabilities.test.mjs', frozenTempSites(1)],
@@ -735,8 +741,6 @@ const RAW_TEMP_EXEMPT = new Map([
   ['crew/roster-refresh.test.mjs', frozenTempSites(1)],
   ['crew/seat-io-runclean.test.mjs', frozenTempSites(4)],
   ['skills/qa-test-writing/anchor-pin.test.mjs', frozenTempSites(1)],
-  ['test/factory-ci-repair.test.mjs', frozenTempSites(2)],
-  ['test/factory-ci-watch.test.mjs', frozenTempSites(1)],
   ['test/factory-crew-watch.test.mjs', frozenTempSites(1)],
   ['test/factory-emit-floor.test.mjs', frozenTempSites(2)],
   ['test/factory-emit.test.mjs', frozenTempSites(3)],
@@ -784,7 +788,7 @@ test('temp sandbox tripwire — every exemption has a live, load-bearing warrant
     assert.ok(exemption.sites > 0, `exemption ${file} is redundant`)
     total += exemption.sites
   }
-  assert.equal(total, 207)
+  assert.equal(total, 204)
 })
 
 test('temp sandbox tripwire — the detector flags a hand-rolled call and clears a helper call', () => {

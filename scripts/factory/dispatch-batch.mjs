@@ -73,7 +73,7 @@ export const REFUSAL_REASONS = Object.freeze([
 ])
 
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
-export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: <state what this cannot see: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.>'
+export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
 // citations in .md files are not, and a heuristic over prose would refuse every doc that

@@ -59,11 +59,11 @@ The ledger declares **21 tables** plus SQLite's own `sqlite_sequence`. Seven are
 
 | transport | `context_tokens` | `context_window` | why |
 | --- | --- | --- | --- |
-| `pane` (default, tmux/cmux) | NULL | NULL | a claude pane seat DOES land an `agent_sessions` row: `emitPaneUsage` (`crew/seat-io.mjs:2075`) emits a `usage` frame from the shipped claude reader (`SHIPPED_PANE_USAGE`, `crew/seat-io.mjs:877`); measured **2 rows across the all-pane b213/b214 lanes on 2026-08-25**; pi/codex pane seats land none because no shipped usage reader, so a pane lane total is a floor; `context_tokens`/`context_window` remain NULL because the writer hardcodes both (`crew/seat-io.mjs:1236`); `foldUsage` (`crew/headless.mjs:135`) and `foldRpcUsage` (`crew/headless-rpc.mjs:133`) fold billed totals only |
+| `pane` (default, tmux/cmux) | NULL | NULL | a claude pane seat DOES land an `agent_sessions` row: `emitPaneUsage` (`crew/seat-io.mjs:2075`) emits a `usage` frame from the shipped claude reader (`SHIPPED_PANE_USAGE`, `crew/seat-io.mjs:877`); measured **2 rows across the all-pane b213/b214 lanes on 2026-08-25**; pi/codex pane seats land none because there is no shipped usage reader, but their cost is not unmeasured — the pi transcripts price every message themselves, see recipe K; `context_tokens`/`context_window` remain NULL because the writer hardcodes both (`crew/seat-io.mjs:1236`); `foldUsage` (`crew/headless.mjs:135`) and `foldRpcUsage` (`crew/headless-rpc.mjs:133`) fold billed totals only |
 | `headless-json` | NULL | NULL | the row is written, but the writer hardcodes both columns to null (`context_tokens: null, context_window: null`, `crew/seat-io.mjs:1236`), so the stored value is null whatever the fold produced; `foldUsage` (`crew/headless.mjs:135`) maps only `billed_*` and carries no context snapshot to store |
 | `headless-rpc` | NULL | NULL | the same writer and the same two hardcoded nulls (`crew/seat-io.mjs:1236`); `foldRpcUsage` (`crew/headless-rpc.mjs:133`) sums `message_end` deltas into `billed_*` only and keeps no last-message snapshot |
 
-The same retired pane explanation remains in `visualizer/server/shape.mjs:12` and `scripts/factory/ledger.mjs:319`, `:3128`; those files are outside this lane's fence and this is a follow-up. `scripts/factory/transcript.mjs:206-263` is the unwired reducer that could supply `context_tokens` — it has no production caller — and `context_window` is NULL by decision **U-4** because there is no verified source and a model→window table is drift-prone. No live transport populates either today — a meter reading of 0% occupancy would be a guess, so the `task` readout carries `absent.context_occupancy`. Populating either column is therefore two changes, not one: a fold that produces a context snapshot, and a writer that stops hardcoding null (`crew/seat-io.mjs:1236`). Whether it should be populated at all is not decided here (adjacent to #404).
+The same retired pane explanation remains in `visualizer/server/shape.mjs:12`, `scripts/factory/ledger.mjs:319`, `:3128`, and `visualizer/web/src/lib/trace.js:6`; those files are outside this lane's fence and this is a follow-up. `scripts/factory/transcript.mjs:206-263` is the unwired reducer that could supply `context_tokens` — it has no production caller — and `context_window` is NULL by decision **U-4** because there is no verified source and a model→window table is drift-prone. No live transport populates either today — a meter reading of 0% occupancy would be a guess, so the `task` readout carries `absent.context_occupancy`. Populating either column is therefore two changes, not one: a fold that produces a context snapshot, and a writer that stops hardcoding null (`crew/seat-io.mjs:1236`). Whether it should be populated at all is not decided here (adjacent to #404).
 
 **Scope plumbing landed:** the four boot entrypoints now declare `ctx.files_in_scope`: `crew/crew.mjs` from `--files-in-scope` or the failing run's envelope, `crew/child.mjs` and `crew/daemon.mjs` from the run spec, and `crew/factoryctl.mjs` from `--files-in-scope`. An entry the scope gate cannot honor is refused at the boot end with that entry named, and a shape that inherits scope is refused rather than run with an empty one. An `escalation` outcome now means a repair reached a seat and failed, or a boot-end refusal was recorded with its reason — it is no longer the missing plumbing. Rows recorded before this commit are not backfilled; their `where`/`why` remain in `ci_dispatches` and the park artifact.
 
@@ -82,9 +82,10 @@ The verbs above answer questions about **runs**. A question about **seat behavio
 | Which runs escalated, where, and why? | `duckdb` — recipe E below. `returns/task.json` carries `details.escalation` as `{where, why}` while the ledger carries only the escalation phase. The unit is one run attempt. |
 | Is an escalation a mechanism failure or a reasoned dead end? | `duckdb` — recipe F below, recipe E plus a stated `why`-prose classifier. The unit is one escalation; the mechanism share is a floor, never exact. |
 | Does lane size predict plan rounds or escalation? | `duckdb` — recipe G below, joining planner mutation/scope records to `returns/task.json`. The unit is one lane. |
-| What did each seat of a pane-run lane cost? | `duckdb` — recipe H below, over `pane-usage` records priced from `crew/roster.json`. The unit is one seat session; pi/codex pane seats emit no reader record, so a lane total is a floor. |
+| What did each seat of a pane-run lane cost? | `duckdb` — recipe H below, over `pane-usage` records priced from `crew/roster.json`. The unit is one seat session; pi/codex pane seats emit no pane-usage record, so this is the **claude** half of a pane lane rather than a lane total — the pi half prices itself, see recipe K. |
 | What did each headless seat cost, per lane? | `sqlite3` — recipe I below, `agent_sessions.billed_*` joined to the roster rates. The unit is one seat session; each row is a running total, not a delta. |
 | Which ledger tables does production actually write? | `sqlite3` — recipe J below. The unit is one table; fixture rows in `sessions` are excluded from its real-session count. |
+| What did a pane-seated pi seat cost, per lane and per seat session? | `duckdb` — recipe K below, over the per-message `usage.cost` the pi transcripts already carry. The unit is one lane, and one pi seat session. |
 
 ### The unified frame view
 
@@ -530,7 +531,7 @@ lead     | 19 | 12 |  17.79 | 0.94
                          493.10 total (unrounded)
 ```
 
-No `builder` row exists because only the claude agent ships a pane-usage reader (`SHIPPED_PANE_USAGE`, `crew/seat-io.mjs:877`). A pi/codex pane builder's cost is **UNMEASURED**, never zero, so this is a floor.
+No `builder` row exists because only the claude agent ships a pane-usage reader (`SHIPPED_PANE_USAGE`, `crew/seat-io.mjs:877`). A pi/codex pane builder is absent from *this* table, not unmeasured: its cost is recorded per message in its own transcript, see recipe K. Read this table as the **claude** half of a pane lane and recipe K as the pi half.
 
 ### Recipe I — headless per-seat token totals
 
@@ -598,6 +599,77 @@ sessions               454 real / 20890 total
 ```
 
 The seven empty tables are the two declared retired tables plus the five unreached writers named above; the `sessions` total carries fixtures, so its real count is the excluded 454.
+
+### Recipe K — what a pane-seated pi seat cost, from its own transcript
+
+pi prices itself, claude gives tokens only, and the ledger covers headless seats only. This retires `b219-ledgeranswers` finding 12, which measured `agent_sessions` and concluded a pane-seated pi/codex seat is invisible, so a per-lane cost total can only be a floor. That is true of the **ledger** and false of the **data** — every pi assistant frame carries `message.usage.cost`, already cache-split, so the pi half needs no rate table at all. It is per-lane because the transcript directory IS the lane (`~/.pi/agent/sessions/--<checkout-path-with-dashes>--/`). The window is pinned so the recorded output stays reproducible as the corpus grows; the lane filter (`%-dt-%`, `%-dev-team-wt%`) is the two crew checkout namings; and a `cell` of NULL is a costed frame whose `message` carries no `provider`/`model`, never a free one.
+
+The command below was copied out and run unedited; these are my numbers (the brief's slice was narrower; the corpus grows).
+
+```sh
+duckdb -box <<'SQL'
+create or replace view pi_cost as
+select regexp_extract(filename,'sessions/--([^/]*)--/',1)                     as lane,
+       regexp_extract(filename,'/([^/]*)\.jsonl$',1)                          as session,
+       json_extract_string(message,'$.provider')||'/'||json_extract_string(message,'$.model') as cell,
+       try_cast(json_extract_string(message,'$.usage.cost.total') as double)  as usd,
+       try_cast(json_extract_string(message,'$.usage.totalTokens') as bigint) as tok
+from read_json_auto('~/.pi/agent/sessions/*/*.jsonl', filename=true, union_by_name=true, ignore_errors=true)
+where json_extract_string(message,'$.usage.cost.total') is not null
+  and cast(timestamp as timestamptz) < '2026-08-26T00:00:00Z'
+  and (regexp_extract(filename,'sessions/--([^/]*)--/',1) like '%-dt-%'
+    or regexp_extract(filename,'sessions/--([^/]*)--/',1) like '%-dev-team-wt%');
+.print 'corpus (unit: the whole pinned window)'
+select count(distinct lane) lanes, count(distinct session) sessions, count(*) costed_msgs, round(sum(usd),2) usd from pi_cost;
+.print 'per-lane (unit: one lane)'
+select lane, count(distinct session) sessions, count(*) msgs, round(sum(usd),2) usd from pi_cost group by 1 order by usd desc limit 10;
+.print 'per-seat-session (unit: one pi seat session)'
+select lane, session, cell, count(*) msgs, sum(tok) tok, round(sum(usd),2) usd from pi_cost group by 1,2,3 order by usd desc limit 10;
+SQL
+```
+
+Recorded output, run 2026-08-26T10:03:04Z:
+
+```text
+corpus (unit: the whole pinned window)
+┌───────┬──────────┬─────────────┬────────┐
+│ lanes │ sessions │ costed_msgs │  usd   │
+├───────┼──────────┼─────────────┼────────┤
+│ 282   │ 605      │ 19457       │ 536.16 │
+└───────┴──────────┴─────────────┴────────┘
+per-lane (unit: one lane)
+┌────────────────────────────────────────────┬──────────┬──────┬───────┐
+│                    lane                    │ sessions │ msgs │  usd  │
+├────────────────────────────────────────────┼──────────┼──────┼───────┤
+│ Users-x-Development-dt-b65-advisor         │ 2        │ 120  │ 15.55 │
+│ Users-x-Development-dev-team-wt125         │ 7        │ 279  │ 13.33 │
+│ Users-x-Development-dt-b106-config         │ 1        │ 50   │ 11.93 │
+│ Users-x-Development-dev-team-wt85          │ 2        │ 94   │ 11.11 │
+│ Users-x-Development-dt-b126-driftcheck     │ 2        │ 204  │ 10.83 │
+│ Users-x-Development-dt-b31-reaper-headless │ 2        │ 74   │ 9.58  │
+│ Users-x-Development-dt-b153-lab            │ 4        │ 324  │ 9.52  │
+│ Users-x-Development-dt-b122-falseabsence   │ 2        │ 101  │ 9.2   │
+│ Users-x-Development-dt-b108-viz            │ 1        │ 42   │ 8.5   │
+│ Users-x-Development-dt-b131-vacuity        │ 1        │ 46   │ 8.07  │
+└────────────────────────────────────────────┴──────────┴──────┴───────┘
+per-seat-session (unit: one pi seat session)
+┌────────────────────────────────────────────┬───────────────────────────────────────────────────────────────┬──────────────────────────┬──────┬──────────┬───────┐
+│                    lane                    │                            session                            │           cell           │ msgs │   tok    │  usd  │
+├────────────────────────────────────────────┼───────────────────────────────────────────────────────────────┼──────────────────────────┼──────┼──────────┼───────┤
+│ Users-x-Development-dt-b65-advisor         │ 2026-08-20T10-22-05-617Z_01a01eb1-3731-7746-a328-e6820a7e7a30 │ openai-codex/gpt-5.6-sol │ 119  │ 19211892 │ 15.55 │
+│ Users-x-Development-dev-team-wt85          │ 2026-08-13T18-38-30-841Z_019ffc6b-2fb9-7bbb-97a0-e5503dcddafe │ openai-codex/gpt-5.6-sol │ 67   │ 10845793 │ 11.03 │
+│ Users-x-Development-dt-b126-driftcheck     │ 2026-08-21T22-11-54-277Z_01a02661-6d25-7c9a-a595-12604f023295 │ openai-codex/gpt-5.6-sol │ 64   │ 10824806 │ 10.13 │
+│ Users-x-Development-dt-b31-reaper-headless │ 2026-08-18T20-09-00-474Z_01a0167d-d53a-7cc2-8d62-449d9be0bd9c │ openai-codex/gpt-5.6-sol │ 73   │ 10743091 │ 9.58  │
+│ Users-x-Development-dt-b122-falseabsence   │ 2026-08-21T21-19-20-226Z_01a02631-4ca2-7ecf-ad2a-ad3b7270a0cb │ openai-codex/gpt-5.6-sol │ 85   │ 11542035 │ 9.15  │
+│ Users-x-Development-dt-b106-config         │ 2026-08-21T14-40-55-090Z_01a024c4-8932-7cc7-bc96-49fbbedefad3 │ NULL                     │ 8    │ 6091449  │ 8.35  │
+│ Users-x-Development-dev-team-wt125         │ 2026-08-13T22-13-25-450Z_019ffd2f-f14a-7f94-aeff-67e5446303a1 │ openai-codex/gpt-5.6-sol │ 44   │ 5886451  │ 8.19  │
+│ Users-x-Development-dt-b30-reaper          │ 2026-08-18T15-07-39-989Z_01a01569-f255-7d74-b1a2-be725cb966db │ openai-codex/gpt-5.6-sol │ 63   │ 8194003 │ 7.39  │
+│ Users-x-Development-dt-b153-lab            │ 2026-08-22T18-47-20-819Z_01a02acc-81f3-7b1e-9a67-ddb3c609dab7 │ openai-codex/gpt-5.6-sol │ 64   │ 8683545 │ 7.25  │
+│ Users-x-Development-dt-b191-knowledge      │ 2026-08-24T13-21-36-264Z_01a033ef-0008-7e9c-8c61-26ea94ab14d6 │ openai-codex/gpt-5.6-sol │ 47   │ 8108396 │ 7.07  │
+└────────────────────────────────────────────┴───────────────────────────────────────────────────────────────┴──────────────────────────┴──────┴──────────┴───────┘
+```
+
+**The claude half is deliberately `left unpriced` here.** A claude transcript frame carries token counts and no cost field, so pricing it needs a rate source and a decision about which rates are authoritative — and `ledger cells` already computes `cost_usd` from `crew/roster.json` rates under `CELL_PRICE_UNITS` (`scripts/factory/ledger.mjs:154`), the OPEN CONTRADICTION (#626) recorded above. Recipe H prices claude pane seats from that same roster. Until #626 is decided, this recipe prices only the half that prices itself rather than adding a second authority.
 
 ### Mechanics that bite
 

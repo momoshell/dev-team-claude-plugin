@@ -22,7 +22,38 @@ export function detailLine(row) {
 // The four operational rows PR #665 added. They are MARKERS on a bar, never spans:
 // a retry is work in progress, and drawing it as a gap reproduces exactly the
 // misreading #659 and #669 exist to prevent.
-export const MARKER_EVENTS = new Set(['seat-retrying', 'seat-retry-cleared', 'seat-stale', 'seat-stale-cleared'])
+export const SEAT_MARKER_EVENTS = new Set(['seat-retrying', 'seat-retry-cleared', 'seat-stale', 'seat-stale-cleared'])
+// #682's two rows, and a DIFFERENT KIND of marker rather than two more retries: a
+// retry is THIS seat waiting on its provider, while a substrate outage is the pane
+// manager under every seat in the batch — #682 measured four drivers dying within
+// 23 seconds of each other — so an operator who sees one lane has reason to suspect
+// all of them. Each row is named exactly ONCE, here.
+export const SUBSTRATE_DOWN = 'seat-substrate-down'
+export const SUBSTRATE_RECOVERED = 'seat-substrate-recovered'
+export const SUBSTRATE_MARKER_EVENTS = new Set([SUBSTRATE_DOWN, SUBSTRATE_RECOVERED])
+export const MARKER_EVENTS = new Set([...SEAT_MARKER_EVENTS, ...SUBSTRATE_MARKER_EVENTS])
+export const markerKind = (event) => (SUBSTRATE_MARKER_EVENTS.has(event) ? 'substrate' : 'seat')
+
+// A down and its recovery are ONE episode, tracked by ROLE so the pair survives an
+// assignment rolling over underneath it. An episode that never recovered gets NO
+// outage_ms at all — the open-span honesty rule, applied to an outage. Called only
+// on an OWNED marker: an anomaly is not an episode.
+function episodeLink(marker, role, open) {
+  if (marker.event === SUBSTRATE_DOWN && !open.has(role)) open.set(role, marker)
+  if (marker.event === SUBSTRATE_RECOVERED) {
+    const down = open.get(role) ?? null
+    if (down) {
+      open.delete(role)
+      const outage_ms = marker.at_ms - down.at_ms
+      down.outage_ms = outage_ms
+      down.recovered_index = marker.index
+      marker.outage_ms = outage_ms
+      marker.down_index = down.index
+      marker.down_at_ms = down.at_ms
+    }
+  }
+  return marker
+}
 
 const durationOf = (span) => (span.ended_at == null ? {} : { duration_ms: span.ended_at - span.started_at })
 const finish = (span) => ({ ...span, ...durationOf(span) })
@@ -49,6 +80,7 @@ export function buildTrajectory(rows = [], { operational_channel = null, reveal 
   const openStages = []
   const openAssignments = new Map()
   const openByRole = new Map()
+  const openOutages = new Map()
   for (const entry of ordered) {
     const row = entry.row
     if (MARKER_EVENTS.has(row.event)) {
@@ -56,10 +88,12 @@ export function buildTrajectory(rows = [], { operational_channel = null, reveal 
       // the cell id and `assign` is the dispatch id: joining them finds nothing at
       // all, silently. This walks `ordered`, so a marker is found whether or not
       // the ledger reveals its operational row.
-      const ownerStack = openByRole.get(row.role ?? null)
+      const role = row.role ?? null
+      const ownerStack = openByRole.get(role)
       const owner = ownerStack && ownerStack.length ? spans[ownerStack.at(-1)] : null
-      if (owner) owner.markers = [...(owner.markers ?? []), { event: row.event, at_ms: entry.at_ms, index: entry.index, detail: entry.detail }]
-      else anomalies.push({ kind: 'marker_unowned', label: row.event, role: row.role ?? null, expected: `an open assignment for role ${row.role ?? 'unknown'}`, index: entry.index, at_ms: entry.at_ms })
+      const marker = { event: row.event, kind: markerKind(row.event), at_ms: entry.at_ms, index: entry.index, detail: entry.detail }
+      if (owner) owner.markers = [...(owner.markers ?? []), episodeLink(marker, role, openOutages)]
+      else anomalies.push({ kind: 'marker_unowned', label: row.event, role, expected: `an open assignment for role ${row.role ?? 'unknown'}`, index: entry.index, at_ms: entry.at_ms })
       continue
     }
     if (typeof row.stage === 'string') {

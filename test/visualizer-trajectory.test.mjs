@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { startServer } from '../visualizer/server/server.mjs'
 import { createJournalSource } from '../visualizer/server/journal-source.mjs'
-import { buildTrajectory, focusTrajectory, MARKER_EVENTS, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
+import { buildTrajectory, focusTrajectory, MARKER_EVENTS, SUBSTRATE_DOWN, SUBSTRATE_RECOVERED, projectSpan, spansActiveIn, toMs } from '../visualizer/web/src/lib/spans.js'
 import { applyRead, createPulse, initialJournalState, select, setRange, setReveal, shouldRead, trajectoryView } from '../visualizer/web/src/lib/live.js'
 import { JOURNAL_CHANNELS } from '../crew/drive.mjs'
 import { scratchDir, treeDigest } from './helpers.mjs'
@@ -448,7 +448,7 @@ test('trajectory collects operational markers independently of reveal', () => {
   const hidden = buildTrajectory(rows, { operational_channel: JOURNAL_CHANNELS.operational, reveal: false })
   const revealed = buildTrajectory(rows, { operational_channel: JOURNAL_CHANNELS.operational, reveal: true })
   assert.deepEqual(assignment(hidden, 'd9:builder').markers, assignment(revealed, 'd9:builder').markers)
-  assert.equal(hidden.hidden_operational, 4)
+  assert.equal(hidden.hidden_operational, markerEvents.length)
   assert.equal(hidden.rows.some((row) => markerEvents.includes(row.event)), false)
 })
 
@@ -460,4 +460,113 @@ test('trajectory reports an unowned marker instead of dropping it', () => {
   const anomaly = result.anomalies.find((entry) => entry.kind === 'marker_unowned')
   assert.deepEqual({ kind: anomaly.kind, label: anomaly.label, index: anomaly.index, at_ms: anomaly.at_ms }, { kind: 'marker_unowned', label: 'seat-stale', index: 1, at_ms: 150 })
   assert.deepEqual(assignment(result, 'd8:planner').markers ?? [], [])
+})
+
+test('trajectory lands a substrate down and its recovery on the owning assignment', () => {
+  const result = buildTrajectory([
+    { at: 0, assign: 'd1', role: 'planner' },
+    { at: 10, event: SUBSTRATE_DOWN, role: 'planner', channel: JOURNAL_CHANNELS.operational },
+    { at: 60, event: SUBSTRATE_RECOVERED, role: 'planner', channel: JOURNAL_CHANNELS.operational },
+    { at: 100, envelope: 'd1', role: 'planner', status: 'done' },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  assert.deepEqual(assignment(result, 'd1:planner').markers.map((marker) => marker.event), [SUBSTRATE_DOWN, SUBSTRATE_RECOVERED])
+  assert.deepEqual(result.anomalies, [])
+})
+
+test('trajectory marks a substrate outage as a different kind from a retry', () => {
+  const result = buildTrajectory([
+    { at: 0, assign: 'd2', role: 'builder' },
+    { at: 10, event: 'seat-retrying', role: 'builder', channel: JOURNAL_CHANNELS.operational },
+    { at: 20, event: SUBSTRATE_DOWN, role: 'builder', channel: JOURNAL_CHANNELS.operational },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  const markers = assignment(result, 'd2:builder').markers
+  assert.equal(markers.find((marker) => marker.event === SUBSTRATE_DOWN).kind, 'substrate')
+  assert.notEqual(markers.find((marker) => marker.event === 'seat-retrying').kind, 'substrate')
+})
+
+test('a recovered outage reads as one episode and an open one names no length', () => {
+  const result = buildTrajectory([
+    { at: 0, assign: 'd3', role: 'builder' },
+    { at: 1000, event: SUBSTRATE_DOWN, role: 'builder', channel: JOURNAL_CHANNELS.operational },
+    { at: 4000, event: SUBSTRATE_RECOVERED, role: 'builder', channel: JOURNAL_CHANNELS.operational },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  const markers = assignment(result, 'd3:builder').markers
+  const down = markers.find((marker) => marker.event === SUBSTRATE_DOWN)
+  const recovered = markers.find((marker) => marker.event === SUBSTRATE_RECOVERED)
+  assert.equal(down.outage_ms, 3000)
+  assert.equal(recovered.outage_ms, 3000)
+  assert.equal(recovered.down_index, down.index)
+  assert.equal(recovered.down_at_ms, down.at_ms)
+  assert.equal(down.recovered_index, recovered.index)
+
+  const openResult = buildTrajectory([
+    { at: 0, assign: 'd4', role: 'builder' },
+    { at: 1000, event: SUBSTRATE_DOWN, role: 'builder', channel: JOURNAL_CHANNELS.operational },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  const openDown = assignment(openResult, 'd4:builder').markers.find((marker) => marker.event === SUBSTRATE_DOWN)
+  assert.equal('outage_ms' in openDown, false)
+  assert.deepEqual(Object.keys(openDown).filter((key) => key !== 'at_ms' && DURATION_KEY.test(key)), [])
+})
+
+test('substrate markers appear with reveal false and stay out of the ledger', () => {
+  const rows = [
+    { at: 0, assign: 'd5', role: 'builder' },
+    { at: 1000, event: SUBSTRATE_DOWN, role: 'builder', channel: JOURNAL_CHANNELS.operational },
+    { at: 4000, event: SUBSTRATE_RECOVERED, role: 'builder', channel: JOURNAL_CHANNELS.operational },
+  ]
+  const hidden = buildTrajectory(rows, { operational_channel: JOURNAL_CHANNELS.operational })
+  const revealed = buildTrajectory(rows, { operational_channel: JOURNAL_CHANNELS.operational, reveal: true })
+  assert.deepEqual(assignment(hidden, 'd5:builder').markers, assignment(revealed, 'd5:builder').markers)
+  assert.equal(hidden.hidden_operational, 2)
+  assert.equal(hidden.rows.some((row) => row.event === SUBSTRATE_DOWN || row.event === SUBSTRATE_RECOVERED), false)
+})
+
+test('trajectory joins a substrate marker by role across two concurrent assignments', () => {
+  const result = buildTrajectory([
+    { at: 100, assign: 'd6', role: 'planner' },
+    { at: 110, assign: 'd7', role: 'builder' },
+    { at: 150, event: SUBSTRATE_DOWN, role: 'builder', id: 'cell-42', channel: JOURNAL_CHANNELS.operational },
+    { at: 400, envelope: 'd7', role: 'builder', status: 'done' },
+    { at: 500, envelope: 'd6', role: 'planner', status: 'done' },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  assert.deepEqual(assignment(result, 'd7:builder').markers.map((marker) => marker.event), [SUBSTRATE_DOWN])
+  assert.deepEqual(assignment(result, 'd6:planner').markers ?? [], [])
+})
+
+test('trajectory reports an unowned substrate marker instead of dropping it', () => {
+  const result = buildTrajectory([
+    { at: 100, assign: 'd8', role: 'planner' },
+    { at: 150, event: SUBSTRATE_DOWN, role: 'builder', id: 'cell-7', channel: JOURNAL_CHANNELS.operational },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  const anomaly = result.anomalies.find((entry) => entry.kind === 'marker_unowned')
+  assert.deepEqual({ kind: anomaly.kind, label: anomaly.label, index: anomaly.index, at_ms: anomaly.at_ms }, { kind: 'marker_unowned', label: SUBSTRATE_DOWN, index: 1, at_ms: 150 })
+  assert.deepEqual(assignment(result, 'd8:planner').markers ?? [], [])
+})
+
+test('substrate markers give no span a duration it did not have', () => {
+  const base = [
+    { at: 0, stage: 'closed-stage' },
+    { at: 100, stage_done: 'closed-stage' },
+    { at: 200, stage: 'open-stage' },
+    { at: 300, assign: 'open-turn', role: 'builder' },
+  ]
+  const marked = [...base, { at: 1000, event: SUBSTRATE_DOWN, role: 'builder', channel: JOURNAL_CHANNELS.operational }]
+  const bare = buildTrajectory(base, { operational_channel: JOURNAL_CHANNELS.operational })
+  const withMarkers = buildTrajectory(marked, { operational_channel: JOURNAL_CHANNELS.operational })
+  assert.deepEqual(bare.spans.map(durationKeys), withMarkers.spans.map(durationKeys))
+  for (const span of withMarkers.spans.filter((entry) => entry.ended_at === null)) {
+    assert.equal('duration_ms' in span, false)
+  }
+  assert.equal(stage(withMarkers, 'closed-stage').duration_ms, 100)
+})
+
+test('the #673 marker events keep landing unchanged', () => {
+  const result = buildTrajectory([
+    { at: 0, assign: 'd9', role: 'builder' },
+    { at: 10, event: 'seat-retrying', role: 'builder', channel: JOURNAL_CHANNELS.operational },
+    { at: 20, event: 'seat-retry-cleared', role: 'builder', channel: JOURNAL_CHANNELS.operational },
+  ], { operational_channel: JOURNAL_CHANNELS.operational })
+  const markers = assignment(result, 'd9:builder').markers
+  assert.deepEqual(markers.map((marker) => marker.event), ['seat-retrying', 'seat-retry-cleared'])
+  assert.equal(markers.every((marker) => marker.kind !== 'substrate'), true)
 })

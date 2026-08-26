@@ -13,15 +13,16 @@ import { spawnSync } from 'node:child_process'
 import { git, ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
-  LADDER_BANDS, OPTIONAL_REQUEST_KEYS, REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
+  DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
+  REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
   MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
   readLadderBands, renderBrief, renderProposalBlock, resolveWriteSurface, validateAsk,
-  validateScopeEntries, verifyCreates, verifyWhere,
+  validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
 import { defaultProfilePath, probeRepo } from '../scripts/factory/probe-repo.mjs'
-import { CHECK_FAIL_PREFIX, MUTATIONS_MAX } from '../crew/drive.mjs'
+import { CHECK_FAIL_PREFIX, DIRECTED_BLOCK as DRIVE_DIRECTED_BLOCK, DIRECTED_KEYS as DRIVE_DIRECTED_KEYS, MUTATIONS_MAX, parseDirectedBrief } from '../crew/drive.mjs'
 import { PROTECTED_PATHS } from '../crew/protected-paths.mjs'
 
 const SCRIPT = join(ROOT, 'scripts', 'factory', 'make-brief.mjs')
@@ -278,7 +279,7 @@ test('an optional creates declaration compiles, renders after verified paths, an
   ])
   const writeLine = section(brief, '## Conventions').split('\n').find((line) => line.startsWith('files_in_scope'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/new-widget.mjs, lib/widget.mjs')
-  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates'])
+  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates', 'directed'])
 })
 
 test('creates verifies the opposite existence pair and reuses scope shape checks', () => {
@@ -348,6 +349,118 @@ test('creates keeps missing-path strict in both where/creates directions and acc
   const without = compile(root, {}, [], 'without-creates.md').brief
   const empty = compile(root, { creates: [] }, [], 'empty-creates.md').brief
   assert.equal(without, empty)
+})
+
+test('a directed request renders one block the real parser accepts', () => {
+  const root = fixture('directed-happy')
+  const { brief } = compile(root, {
+    ask: 'Carry the gate in a ` ```directed ` block for widget delivery',
+    directed: { gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'] },
+  })
+  assert.equal(brief.split('\n').filter((line) => line.trim() === '```directed').length, 1)
+  const parsed = parseDirectedBrief(brief)
+  assert.equal(parsed.defect, null)
+  assert.equal(parsed.gate_cmd, '/abs/path/gate.mjs')
+  assert.deepEqual(parsed.files_in_scope, ['lib/widget.mjs'])
+})
+
+test('omitting the plan renders the brief byte-identically', () => {
+  const gathered = {
+    request: { ask: 'Carry a declared gate plan for widget delivery', done_means: 'The gate accepts the delivered widget.', out_of_scope: 'The driver owns dispatch.' },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  }
+  const without = renderBrief(gathered)
+  const withPlan = renderBrief({
+    ...gathered,
+    request: {
+      ...gathered.request,
+      directed: { gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'] },
+    },
+  })
+  assert.equal(without.includes('## Directed plan'), false)
+  assert.equal(without.split('\n').filter((line) => line.trim() === '```directed').length, 0)
+  const lines = withPlan.split('\n')
+  const start = lines.findIndex((line) => line.trim() === '## Directed plan')
+  const rest = lines.slice(start + 1)
+  const end = rest.findIndex((line) => /^## /.test(line))
+  assert.notEqual(start, -1)
+  lines.splice(start, 1 + (end === -1 ? rest.length : end))
+  assert.equal(lines.join('\n'), without)
+})
+
+test('the compiler refuses a directed block the driver would refuse', () => {
+  const base = { ask: ASK, where: ['lib/widget.mjs'], done_means: DONE, out_of_scope: OUT }
+  const plan = { gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'] }
+  const unknown = { ...plan, gate_source: 'orchestrator' }
+  assert.throws(() => validateRequest({ ...base, directed: unknown }, { taskName: 'directed-refusals' }), (error) => {
+    assert.equal(error.reason, 'directed-unknown-key')
+    assert.match(error.message, /gate_source/)
+    return true
+  })
+  for (const directed of [
+    null,
+    'not-an-object',
+    [],
+    { ...plan, gate_cmd: '  ' },
+    { ...plan, files_in_scope: [] },
+    { ...plan, files_in_scope: [42] },
+  ]) {
+    assert.throws(() => validateRequest({ ...base, directed }, { taskName: 'directed-refusals' }), (error) => error.reason === 'directed-shape')
+  }
+  const root = fixture('directed-refusal')
+  const result = run(root, ['--request', request(root, { directed: unknown }), '--checkout', root])
+  assert.equal(result.status, 2)
+  assert.match(`${result.stderr}${result.stdout}`, /directed-unknown-key/)
+})
+
+test('a directed plan is accepted whatever variant will read it', () => {
+  const plan = { gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'] }
+  const requestBody = { ask: ASK, where: ['lib/widget.mjs'], done_means: DONE, out_of_scope: OUT, directed: plan }
+  const accepted = validateRequest(requestBody, { taskName: 'variant-sensitive' })
+  assert.deepEqual(accepted.directed, plan)
+  const brief = renderBrief({
+    request: accepted,
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  })
+  assert.equal(brief.split('\n').filter((line) => line.trim() === '```directed').length, 1)
+  const source = readFileSync(SCRIPT, 'utf8')
+  assert.match(source, /variant-blind/)
+  assert.match(source, /DISPATCH_ONLY_REQUEST_KEYS/)
+})
+
+test('the compiler and the driver declare one directed contract', () => {
+  assert.equal(DIRECTED_BLOCK, DRIVE_DIRECTED_BLOCK)
+  assert.deepEqual(DIRECTED_KEYS, DRIVE_DIRECTED_KEYS)
+})
+
+test('the directed section records where a directed gate lives', () => {
+  const body = section(renderBrief({
+    request: { ask: ASK, where: ['lib/widget.mjs'], done_means: DONE, out_of_scope: OUT, directed: {
+      gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'],
+    } },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  }), '## Directed plan')
+  assert.equal(body.includes(DIRECTED_GATE_NOTE), true)
+  for (const clause of ['outside the repo', 'absolute path', 'gate_cmd', 'write fence']) {
+    assert.equal(body.includes(clause), true, `missing ${clause}`)
+  }
+})
+
+test('a bare directed fence in the prose is refused, not shipped', () => {
+  assert.throws(() => renderBrief({
+    request: {
+      ask: ASK,
+      where: ['lib/widget.mjs'],
+      done_means: DONE,
+      out_of_scope: ['a quoted plan:', '```directed', '{}', '```'].join('\n'),
+      directed: { gate_cmd: '/abs/path/gate.mjs', files_in_scope: ['lib/widget.mjs'] },
+    },
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  }), (error) => error.reason === 'directed-fence-collision')
 })
 
 test('a fenced lane keeps a created path on the fence write-surface basis', () => {
@@ -1513,7 +1626,10 @@ test('compiler and emitter proposal declarations stay in agreement', () => {
 test('the parser returns a refusal code for an unknown CLI option', () => {
   assert.equal(main(['--bogus']), 2)
   assert.equal(new Set(REFUSAL_REASONS).size, REFUSAL_REASONS.length)
-  assert.equal(REFUSAL_REASONS.length, 21)
+  assert.equal(REFUSAL_REASONS.length, 24)
+  assert.ok(REFUSAL_REASONS.includes('directed-unknown-key'))
+  assert.ok(REFUSAL_REASONS.includes('directed-shape'))
+  assert.ok(REFUSAL_REASONS.includes('directed-fence-collision'))
   assert.ok(REFUSAL_REASONS.includes('scope-directory-unslashed'))
   assert.ok(REFUSAL_REASONS.includes('scope-entry-shape'))
   assert.ok(REFUSAL_REASONS.includes('scope-entry-case'))

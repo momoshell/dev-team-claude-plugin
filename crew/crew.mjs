@@ -2108,6 +2108,107 @@ function statusCmd(args) {
   process.stdout.write(`${JSON.stringify({ task: crew.task, workspace_id: crew.workspace_id, alive })}\n`)
 }
 
+// The drain's budgets. STATED DEFAULT, REVISE WHEN MEASURED: #649 asks for a
+// bound chosen from measurement and no such measurement exists yet, so these
+// numbers are declared defaults and are labelled as such rather than dressed up
+// as evidence. Teardown runs AFTER a lane is already terminal, so a seat still
+// writing its envelope needs seconds; anything longer is a hang, and the right
+// response to a hang is to RECORD it and proceed, never to wait longer.
+// Teardown's reliability outranks this feature, which is why both bounds are
+// small — stated default, revise when measured.
+export const TEARDOWN_DRAIN_MS = 60_000
+// The error path — a teardown whose run never reached a `done` envelope — takes
+// the shorter bound: nothing is expected to arrive, so waiting buys less, and
+// the abnormal path is exactly where a hang is likeliest. Same basis as its
+// sibling above: stated default, revise when measured.
+export const TEARDOWN_DRAIN_ERROR_MS = 10_000
+// One poll per half second, plus a hard poll cap so a clock that never advances
+// cannot spin. The bound that DECIDES is the wall clock, never this cap.
+const DRAIN_POLL_MS = 500
+const DRAIN_MAX_POLLS = Math.ceil(TEARDOWN_DRAIN_MS / DRAIN_POLL_MS)
+
+// The assignments this run made, read the way stagesFromJournal reads stages
+// (:1921): the journal is append-only ACROSS runs, so the scan restarts at every
+// run-start row and only THIS run's assignments come back. `null` means the
+// journal itself was unreadable — which is not the same claim as "nothing was
+// assigned".
+export function assignmentsFromJournal(path, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  let text
+  try { text = String(read(path, 'utf8')) } catch { return null }
+  const open = new Map()
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event === RUN_START_EVENT) { open.clear(); continue }
+    if (typeof row?.assign === 'string' && typeof row?.role === 'string') open.set(row.assign, { id: row.assign, role: row.role })
+  }
+  return [...open.values()]
+}
+
+// The ERROR PATH, decided from evidence rather than from a caller's word: a run
+// that reached `done` wrote its task envelope before teardown (:1877), so an
+// envelope that is missing, unreadable or not `done` IS the error path. Any
+// doubt takes the SHORTER bound — teardown reliability outranks the wait.
+function drainErrorPath(returnsDir, deps = {}) {
+  const exists = deps.existsSync || existsSync
+  const read = deps.readFileSync || readFileSync
+  const path = join(returnsDir, 'task.json')
+  if (!exists(path)) return true
+  try { return JSON.parse(String(read(path, 'utf8')))?.status !== 'done' } catch { return true }
+}
+
+// What teardown is about to throw away. An assignment with no envelope file is
+// IN FLIGHT — the driver assigns `d<n>` to a role and the seat writes
+// `returns/d<n>.<role>.json`, so this is a filesystem question answerable
+// synchronously, before anything is closed. Best-effort by contract: the whole
+// body is guarded and a fault comes back as a RECORD, never as a throw, because
+// a drain that can prevent a teardown is worse than no drain.
+function drainForTeardown(paths, deps = {}) {
+  try {
+    const now = deps.now || (() => Date.now())
+    const sleep = deps.sleep || ((ms) => {
+      const sab = new SharedArrayBuffer(4)
+      Atomics.wait(new Int32Array(sab), 0, 0, ms)
+    })
+    const exists = deps.existsSync || existsSync
+    const returnsDir = paths.returnsDir || join(paths.dir, 'returns')
+    const assignments = assignmentsFromJournal(join(paths.dir, 'journal.jsonl'), deps)
+    if (!assignments) return null
+    const pendingOf = (list) => list.filter((a) => !exists(join(returnsDir, `${a.id}.${a.role}.json`)))
+    const inflight = pendingOf(assignments)
+    // An empty in-flight set is an ABSENCE, not a measured zero: a teardown that
+    // threw nothing away gets no row at all, exactly as a crew with no pane seat
+    // gets no sweep line.
+    if (!inflight.length) return null
+    const errorPath = drainErrorPath(returnsDir, deps)
+    const budgetMs = errorPath ? TEARDOWN_DRAIN_ERROR_MS : TEARDOWN_DRAIN_MS
+    const startedAt = now()
+    const deadline = startedAt + budgetMs
+    let open = inflight
+    let polls = 0
+    while (open.length && now() < deadline && polls < DRAIN_MAX_POLLS) {
+      polls += 1
+      sleep(DRAIN_POLL_MS)
+      open = pendingOf(open)
+    }
+    return {
+      inflight: inflight.length,
+      drained: inflight.length - open.length,
+      // The archive-stable RELATIVE locator, never the pre-rename absolute path:
+      // this row is written before the archive rename.
+      abandoned: open.map((a) => ({ id: a.id, role: a.role, return: `returns/${a.id}.${a.role}.json` })),
+      waited_ms: now() - startedAt,
+      budget_ms: budgetMs,
+      error_path: errorPath,
+      polls,
+    }
+  } catch (err) {
+    return { inflight: null, drained: null, abandoned: [], waited_ms: null, budget_ms: null, error_path: null, polls: 0, error: err.message }
+  }
+}
+
 // Archive the crew dir (the durable record: envelopes, journal, artifacts)
 // and close the ephemeral view (panes, workspace). Everything evidentiary is
 // on disk by contract before this runs — deliverables live in files, never
@@ -2119,7 +2220,14 @@ export function teardownCore(paths, crew, deps = {}) {
   const paneRowsFn = deps.paneTeardownRows || paneTeardownRows
   const settleFn = deps.settle || settleSeatTeardown
   const io = deps.io || null
+  // MEASURE BEFORE THE FIRST CLOSE. What was in flight is a fact about the live
+  // crew dir, and the loop below destroys the seats that would still be writing
+  // it: a drain bolted on after the closes measures nothing. The ROW is written
+  // after the closes because what it records is a FINISHED measurement, and a
+  // journal write must never delay a close.
+  const drain = drainForTeardown(paths, deps)
   for (const m of Object.values(crew.members)) if (m.surface_id) closeSurfaceFn(m.surface_id)
+  if (drain) try { io?.log?.({ at: new Date().toISOString(), event: 'teardown-drain', ...drain }) } catch { /* the journal is never load-bearing */ }
   // The viewer is not in crew.members, so the loop above never sees it, and
   // close-workspace is documented to no-op while a live pane occupies the
   // workspace — close it by id rather than trusting the workspace close.
@@ -2211,7 +2319,7 @@ export function teardownCore(paths, crew, deps = {}) {
   // absolute path recordTreeFingerprint returned named the pre-rename dir and
   // does not exist any more.
   if (fingerprint?.recorded === true) fingerprint = { ...fingerprint, path: join(archived, FINGERPRINT_FILE), file: FINGERPRINT_FILE }
-  return { archived, seats, seats_absent: seatsAbsent, roots, descendants, fingerprint }
+  return { archived, seats, seats_absent: seatsAbsent, roots, descendants, fingerprint, drain }
 }
 export function teardownCmd(args, deps = {}) {
   const taskSlug = slug(args.task)

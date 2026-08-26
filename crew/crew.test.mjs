@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -2898,6 +2898,161 @@ test('teardownCore skips all cmux closes without a workspace and still closes a 
     assert.equal(existsSync(second), true)
     assert.equal(closeWorkspace.calls.length, 1)
     assert.deepEqual(closeWorkspace.calls[0], ['workspace-1'])
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+function runTeardownDrainFixture({ assignments = [], returned = [], taskStatus, members, closeSurface, sleep, now } = {}) {
+  const parent = scratchDir('crew-teardown-drain-')
+  const dir = join(parent, 'crew')
+  const returnsDir = join(dir, 'returns')
+  const taskDir = join(dir, 'task')
+  mkdirSync(returnsDir, { recursive: true })
+  mkdirSync(taskDir, { recursive: true })
+  const lines = [JSON.stringify({ at: 't0', event: RUN_START_EVENT })]
+  for (const assignment of assignments) {
+    lines.push(JSON.stringify({ at: 't1', assign: assignment.id, role: assignment.role, brief: 'brief.md' }))
+  }
+  writeFileSync(join(dir, 'journal.jsonl'), `${lines.join('\n')}\n`)
+  for (const assignment of returned) {
+    writeFileSync(join(returnsDir, `${assignment.id}.${assignment.role}.json`), '{"status":"done"}')
+  }
+  if (taskStatus !== undefined) writeFileSync(join(returnsDir, 'task.json'), JSON.stringify({ status: taskStatus }))
+  const journal = []
+  const order = []
+  let clock = 0
+  const nowFn = now || (() => { clock += 1000; return clock })
+  const sleepFn = sleep || (() => {})
+  const crewMembers = members || { builder: { surface_id: 'surface-builder', transport: 'pane' } }
+  let record
+  try {
+    record = teardownCore({ dir, returnsDir, taskDir }, { workspace_id: null, members: crewMembers }, {
+      closeSurface: (id) => {
+        order.push(`close:${id}`)
+        return closeSurface ? closeSurface(id, { returnsDir, order }) : true
+      },
+      closeWorkspace: () => {},
+      probe: () => false,
+      sleep: (ms) => {
+        order.push(`sleep:${ms}`)
+        sleepFn(ms, { returnsDir, order })
+      },
+      now: nowFn,
+      settleSeatRoots: () => null,
+      reclaimDescendants: () => null,
+      recordTreeFingerprint: () => ({ recorded: false, path: null }),
+      io: { log: (row) => journal.push(row), emit: () => true },
+    })
+  } finally { rmSync(parent, { recursive: true, force: true }) }
+  return { record, journal, order, rows: journal.filter((row) => row.event === 'teardown-drain') }
+}
+
+test('teardownCore captures the in-flight set before the first close', () => {
+  const result = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'builder' }],
+    closeSurface: (_id, { returnsDir }) => writeFileSync(join(returnsDir, 'd1.builder.json'), '{"status":"done"}'),
+  })
+  assert.equal(result.rows.length, 1)
+  assert.deepEqual(result.rows[0].abandoned, [{ id: 'd1', role: 'builder', return: 'returns/d1.builder.json' }])
+})
+
+test('the drain row names every assignment that never returned', () => {
+  const result = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'planner' }, { id: 'd2', role: 'builder' }],
+    returned: [{ id: 'd1', role: 'planner' }],
+  })
+  assert.equal(result.rows.length, 1)
+  assert.equal(result.rows[0].inflight, 1)
+  assert.equal(result.rows[0].drained, 0)
+  assert.deepEqual(result.rows[0].abandoned, [{ id: 'd2', role: 'builder', return: 'returns/d2.builder.json' }])
+})
+
+test('an empty in-flight set gets no drain row', () => {
+  const returned = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'planner' }, { id: 'd2', role: 'builder' }],
+    returned: [{ id: 'd1', role: 'planner' }, { id: 'd2', role: 'builder' }],
+  })
+  assert.equal(returned.rows.length, 0)
+  const empty = runTeardownDrainFixture()
+  assert.equal(empty.rows.length, 0)
+  const positive = runTeardownDrainFixture({ assignments: [{ id: 'd1', role: 'builder' }] })
+  assert.equal(positive.rows.length, 1)
+})
+
+test('work that settles inside the bound is distinguishable from work that was abandoned', () => {
+  const settled = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'builder' }],
+    sleep: (_ms, { returnsDir }) => writeFileSync(join(returnsDir, 'd1.builder.json'), '{"status":"done"}'),
+  })
+  const abandoned = runTeardownDrainFixture({ assignments: [{ id: 'd1', role: 'builder' }] })
+  assert.equal(settled.rows.length, 1)
+  assert.equal(settled.rows[0].drained, 1)
+  assert.deepEqual(settled.rows[0].abandoned, [])
+  assert.equal(abandoned.rows.length, 1)
+  assert.deepEqual(abandoned.rows[0].abandoned, [{ id: 'd1', role: 'builder', return: 'returns/d1.builder.json' }])
+})
+
+test('the normal path takes 60s and the error path 10s', () => {
+  assert.equal(TEARDOWN_DRAIN_MS, 60_000)
+  assert.equal(TEARDOWN_DRAIN_ERROR_MS, 10_000)
+  const normal = runTeardownDrainFixture({ assignments: [{ id: 'd1', role: 'builder' }], taskStatus: 'done' })
+  assert.equal(normal.rows.length, 1)
+  assert.equal(normal.rows[0].budget_ms, 60_000)
+  assert.equal(normal.rows[0].error_path, false)
+  const error = runTeardownDrainFixture({ assignments: [{ id: 'd1', role: 'builder' }] })
+  assert.equal(error.rows.length, 1)
+  assert.equal(error.rows[0].budget_ms, 10_000)
+  assert.equal(error.rows[0].error_path, true)
+})
+
+test('the drain is bounded in wall clock, not in polls', () => {
+  let clock = 0
+  const result = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'builder' }],
+    now: () => { clock += 600_000; return clock },
+  })
+  assert.equal(result.rows.length, 1)
+  assert.equal(result.rows[0].polls <= 2, true)
+  assert.deepEqual(result.rows[0].abandoned, [{ id: 'd1', role: 'builder', return: 'returns/d1.builder.json' }])
+})
+
+test('a drain fault never escapes teardownCore', () => {
+  const result = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'builder' }],
+    now: () => { throw new Error('injected clock fault') },
+  })
+  assert.equal(typeof result.record.archived, 'string')
+  assert.equal(result.record.seats.proven, 1)
+  assert.equal(result.rows.length, 1)
+  assert.equal(result.rows[0].error, 'injected clock fault')
+})
+
+test('teardown still archives, sweeps and reports absence with a drain row present', () => {
+  const result = runTeardownDrainFixture({
+    assignments: [{ id: 'd1', role: 'builder' }],
+    members: { builder: { surface_id: null, transport: 'headless-rpc' } },
+  })
+  assert.equal(typeof result.record.archived, 'string')
+  assert.equal(result.record.seats, null)
+  assert.equal(result.record.seats_absent, TEARDOWN_ABSENT_CAUSES.headless)
+  assert.equal(result.rows.length, 1)
+})
+
+test('assignmentsFromJournal restarts at run-start and answers null for an unreadable journal', () => {
+  const parent = scratchDir('crew-assignments-journal-')
+  const path = join(parent, 'journal.jsonl')
+  try {
+    writeFileSync(path, [
+      JSON.stringify({ event: RUN_START_EVENT }),
+      JSON.stringify({ assign: 'd-old', role: 'builder' }),
+      JSON.stringify({ event: RUN_START_EVENT }),
+      JSON.stringify({ assign: 'd2', role: 'builder' }),
+      JSON.stringify({ assign: 'd3', role: 'planner' }),
+    ].join('\n'))
+    assert.deepEqual(assignmentsFromJournal(path), [
+      { id: 'd2', role: 'builder' },
+      { id: 'd3', role: 'planner' },
+    ])
+    assert.equal(assignmentsFromJournal(join(parent, 'missing.jsonl')), null)
   } finally { rmSync(parent, { recursive: true, force: true }) }
 })
 

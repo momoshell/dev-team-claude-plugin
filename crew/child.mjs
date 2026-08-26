@@ -81,7 +81,7 @@ function declaredScope(value, variant) {
 // imports crew.mjs. crew/crew.test.mjs runs both against one shared table.
 // `validation_lane` is the spelling with no second meaning; `lane` is what the
 // daemon normalises to null when absent (crew/daemon.mjs:1091) and forwards
-// unconditionally (:948), and what ci-repair dispatches.
+// unconditionally (:948), and what a factoryctl `run --lane` supplies (crew/factoryctl.mjs:192).
 export const VALIDATION_LANE_REFUSAL = 'invalid-validation-lane'
 
 export function resolveValidationLane({ validationLane, lane, fences } = {}) {

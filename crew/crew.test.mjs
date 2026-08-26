@@ -35,7 +35,7 @@ import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, paneUsageRecords } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import {
-  cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_MISSES_TO_DIE,
+  cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -4135,6 +4135,95 @@ test('waitForEnvelope re-reads an envelope before throwing substrate-gone', () =
   })
   assert.deepEqual(env, { status: 'done' })
   assert.equal(probes, SUBSTRATE_MISSES_TO_DIE)
+})
+
+test('waitForEnvelope outlives the measured 13-minute substrate outage', () => {
+  let t = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1800, role: 'builder',
+    readEnvelope: () => t >= 780_000 ? { status: 'done' } : null,
+    probeSeat: () => t < 780_000 ? { alive: null, substrate: 'down' } : { alive: true, substrate: 'ok' },
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+  assert.ok(SUBSTRATE_GRACE_MS >= 780_000)
+  assert.equal(SUBSTRATE_MISSES_TO_DIE, Math.ceil(SUBSTRATE_GRACE_MS / LIVENESS_PROBE_MS))
+})
+
+test('waitForEnvelope never sums two separate substrate outages', () => {
+  const outage = SUBSTRATE_MISSES_TO_DIE
+  const envelopeAt = 2 * outage * LIVENESS_PROBE_MS
+  let t = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: envelopeAt / 1000 + 120, role: 'builder',
+    readEnvelope: () => t >= envelopeAt ? { status: 'done' } : null,
+    probeSeat: () => Math.round(t / LIVENESS_PROBE_MS) === outage
+      ? { alive: null, substrate: 'ok' } : { alive: null, substrate: 'down' },
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+})
+
+test('waitForEnvelope still terminates a genuinely dead substrate as substrate-gone', () => {
+  let t = 0
+  let probes = 0
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 7200, role: 'builder',
+    readEnvelope: () => null,
+    probeSeat: () => { probes += 1; return { alive: null, substrate: 'down' } },
+    now: () => t, sleep: (ms) => { t += ms },
+  }), (err) => {
+    assert.equal(err.stage, 'substrate-gone')
+    assert.equal(err.role, 'builder')
+    assert.equal(cellFailureKind(err), 'transport-error')
+    assert.notEqual(cellFailureKind(err), 'seat-died')
+    assert.equal(t, SUBSTRATE_MISSES_TO_DIE * LIVENESS_PROBE_MS)
+    return true
+  })
+  assert.equal(probes, SUBSTRATE_MISSES_TO_DIE)
+})
+
+test('waitForEnvelope reports substrate outage edges to its caller', () => {
+  let t = 0
+  const records = []
+  const env = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => t >= 6 * LIVENESS_PROBE_MS ? { status: 'done' } : null,
+    probeSeat: () => {
+      const index = Math.round(t / LIVENESS_PROBE_MS)
+      return index >= 1 && index <= 3 ? { alive: null, substrate: 'down' } : { alive: true, substrate: 'ok' }
+    },
+    onSubstrate: (record) => records.push(record),
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+  assert.equal(records.filter((record) => record.state === 'down').length, 1)
+  assert.equal(records.filter((record) => record.state === 'ok').length, 1)
+  assert.deepEqual(records[0], { at: LIVENESS_PROBE_MS, state: 'down', misses: 1, graceMs: SUBSTRATE_GRACE_MS })
+  assert.deepEqual(records[1], { at: 4 * LIVENESS_PROBE_MS, state: 'ok', misses: 3, graceMs: SUBSTRATE_GRACE_MS })
+
+  t = 0
+  const healthy = []
+  assert.equal(waitForEnvelope({
+    returnPath: '/tmp/healthy.json', timeoutS: 120, role: 'builder', readEnvelope: () => null,
+    probeSeat: () => ({ alive: true, substrate: 'ok' }), onSubstrate: (record) => healthy.push(record),
+    now: () => t, sleep: (ms) => { t += ms },
+  }), null)
+  assert.deepEqual(healthy, [])
+})
+
+test('waitForEnvelope keeps the liveness axis bound to two misses', () => {
+  let t = 0
+  assert.throws(() => waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 7200, role: 'builder', readEnvelope: () => null,
+    probeSeat: () => ({ alive: false, substrate: 'ok' }),
+    now: () => t, sleep: (ms) => { t += ms },
+  }), (err) => {
+    assert.equal(err.stage, 'seat-died')
+    assert.equal(t, 2 * LIVENESS_PROBE_MS)
+    return true
+  })
+  assert.equal(LIVENESS_MISSES_TO_DIE, 2)
 })
 
 test('waitForEnvelope keeps legacy tri-state probes unchanged', () => {

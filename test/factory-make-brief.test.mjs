@@ -13,7 +13,7 @@ import { spawnSync } from 'node:child_process'
 import { git, ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
-  DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
+  DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, main,
   MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
@@ -360,6 +360,7 @@ test('a directed request renders one block the real parser accepts', () => {
   assert.equal(brief.split('\n').filter((line) => line.trim() === '```directed').length, 1)
   const parsed = parseDirectedBrief(brief)
   assert.equal(parsed.defect, null)
+  assert.ok(brief.includes(HOSTILE_ENV_BLOCK))
   assert.equal(parsed.gate_cmd, '/abs/path/gate.mjs')
   assert.deepEqual(parsed.files_in_scope, ['lib/widget.mjs'])
 })
@@ -1063,6 +1064,32 @@ test('standing blocks and unfilled slots render verbatim', () => {
   const digest = (text) => createHash('sha256').update(text).digest('hex')
   assert.equal(digest(ACCEPTANCE_GATE_BLOCK), 'd8fc7641f8ad456c0bd60032571a3c09d5f2a81e2fe0a480190369e854db61a2')
   assert.equal(digest(CONVENTIONS_BLOCK), 'e3d510a9129041cc5d30e2a81e4b2eadf898f812219a82d16ea6fd2f4d8d47f5')
+})
+
+// #672: the gate and the defect shared a blind spot — every check ran on the
+// author's box, with the author's $HOME, $PATH and installed binaries. The rule
+// ships in the standing acceptance block because that is the one surface that
+// reaches every future lane without touching the protected driver.
+test('every compiled brief requires a hostile-environment pass of the lane\'s own tests', () => {
+  const root = fixture('hostile-env')
+  const { brief } = compile(root)
+  const gate = section(brief, '## Acceptance gate')
+  assert.ok(gate.includes(HOSTILE_ENV_BLOCK))
+  // the mechanism, not just the intent
+  assert.ok(gate.includes('env -u CREW_CLAUDE_BIN HOME='))
+  // and why: the three assumptions a same-environment gate cannot see
+  for (const reason of ['resolved binary', '$HOME', '$PATH']) assert.ok(gate.includes(reason), reason)
+  // stub-or-skip, both sanctioned forms, both precedents
+  for (const clause of ['STUB', 'SKIP with a named reason', 't.skip(', 'crew/crew.test.mjs', 'crew/adapter-pi.test.mjs']) {
+    assert.ok(gate.includes(clause), clause)
+  }
+  // additive: the block sits inside the acceptance section, once, and removing it
+  // leaves the rest of the brief untouched.
+  const inserted = `\n\n${HOSTILE_ENV_BLOCK}`
+  assert.equal(brief.split(inserted).length, 2)
+  assert.ok(brief.indexOf(ACCEPTANCE_GATE_BLOCK) < brief.indexOf(HOSTILE_ENV_BLOCK))
+  assert.ok(brief.indexOf(HOSTILE_ENV_BLOCK) < brief.indexOf('## Per-check mutations'))
+  assert.equal(brief.replace(inserted, '').includes('CREW_CLAUDE_BIN'), false)
 })
 
 // The per-check mutation contract must reach a planner mechanically: two lanes lost

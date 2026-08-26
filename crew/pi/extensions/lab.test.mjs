@@ -131,9 +131,60 @@ function scriptedHarness({ requests, result = 'done', concurrent = false, suite 
   return { holder, taskDir, tool, program, calls, syncCalls, removeCalls, suiteChildren }
 }
 
+// The scratch tree the fake clone materialises. Deliberately its OWN literal and
+// not SUITE_PATH: the acceptance gate rewrites SUITE_PATH to a path this manifest
+// does not carry, which is how it proves the test reports the refusal rather than
+// dying on an undefined spawn record (#681).
+const FAKE_SCRATCH_FILES = ['crew/pi/extensions/subagent.test.mjs']
+const SUITE_PATH = 'crew/pi/extensions/subagent.test.mjs'
+const FAKE_HEAD_SHA = '0'.repeat(40)
+
+// A spawnSync stand-in that answers the git argv sequence makeScratch issues and
+// materialises the scratch tree on disk. Anything that is not git is delegated to
+// the real spawnSync, so livenessProbe's `ps` keeps working. Any git argv this
+// stand-in does not recognise returns status 1 — drift surfaces as a refusal the
+// tests now assert on, never as a silent success.
+function fakeGitSpawnSync() {
+  return (command, args, options) => {
+    if (command !== 'git') return nodeSpawnSync(command, args, options)
+    if (args[0] === 'rev-parse' && args[1] === 'HEAD') {
+      return { status: 0, stdout: `${FAKE_HEAD_SHA}\n`, stderr: '' }
+    }
+    if (args.length === 5 && args[0] === 'clone' && args[1] === '-q' && args[2] === '--local') {
+      const dest = args[4]
+      mkdirSync(dest, { recursive: true })
+      for (const file of FAKE_SCRATCH_FILES) {
+        const target = join(dest, file)
+        mkdirSync(dirname(target), { recursive: true })
+        writeFileSync(target, '')
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'checkout' && args[1] === '--detach') return { status: 0, stdout: '', stderr: '' }
+    if (args[0] === 'config' && args[1] === '--unset-all') return { status: 0, stdout: '', stderr: '' }
+    if (args[0] === 'symbolic-ref' && args[1] === '--delete') return { status: 0, stdout: '', stderr: '' }
+    if (args[0] === 'config' && args[1] === '--get' && args[2] === 'remote.origin.url') {
+      return { status: 1, stdout: '', stderr: '' }
+    }
+    if (args[0] === 'symbolic-ref') return { status: 1, stdout: '', stderr: '' }
+    return { status: 1, stdout: '', stderr: `fakeGitSpawnSync: unhandled git ${args.join(' ')}\n` }
+  }
+}
+
 async function flush() {
   await new Promise((resolve) => setImmediate(resolve))
   await new Promise((resolve) => setImmediate(resolve))
+}
+
+// The recorded answers are the settled sequence. Reading run.calls positionally
+// without checking them is what let a refused scratchCheckout surface as
+// "Cannot read properties of undefined (reading 'args')" (#681).
+function assertOpsAnswered(run, count) {
+  const answers = run.program.responses
+  assert.equal(answers.length, count, `expected ${count} answered ops, got ${JSON.stringify(answers)}`)
+  answers.forEach((answer, index) => {
+    assert.equal(answer.ok, true, `op ${index + 1} refused: ${answer.refused || 'unknown'}`)
+  })
 }
 
 async function realTool(program, root = ROOT, deps = {}) {
@@ -547,28 +598,30 @@ test('the verdict tracks the real boundary', async () => {
 })
 
 test('runSuite argv inserts -- and rejects an over-long path array', async () => {
-  const path = 'crew/pi/extensions/subagent.test.mjs'
   const run = scriptedHarness({
     requests: [
       { id: 1, op: 'scratchCheckout', args: [] },
-      { id: 2, op: 'runSuite', args: [[path]] },
+      { id: 2, op: 'runSuite', args: [[SUITE_PATH]] },
     ],
     suite: { stdout: '# pass 1\n# fail 0\n' },
-    deps: { kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
+    deps: { spawnSync: fakeGitSpawnSync(), kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
   })
   const result = await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
   assert.equal(result.details.outcome, 'ok')
+  assertOpsAnswered(run, 2)
   const suiteArgs = run.calls[1].args
-  assert.equal(suiteArgs[suiteArgs.indexOf('--') + 1], path)
+  assert.equal(suiteArgs[suiteArgs.indexOf('--') + 1], SUITE_PATH)
 
-  const tooMany = Array.from({ length: mod.LAB_SUITE_PATHS_MAX + 1 }, () => path)
+  const tooMany = Array.from({ length: mod.LAB_SUITE_PATHS_MAX + 1 }, () => SUITE_PATH)
   const bad = scriptedHarness({
     requests: [
       { id: 1, op: 'scratchCheckout', args: [] },
       { id: 2, op: 'runSuite', args: [tooMany] },
     ],
+    deps: { spawnSync: fakeGitSpawnSync() },
   })
   await bad.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
+  assert.equal(bad.program.responses[0].ok, true, `scratchCheckout refused: ${bad.program.responses[0].refused}`)
   assert.equal(bad.program.responses[1].refused, 'op-args-invalid')
   assert.equal(bad.calls.length, 1)
 })
@@ -577,14 +630,15 @@ test('the suite child receives a scrubbed environment', async () => {
   const run = scriptedHarness({
     requests: [
       { id: 1, op: 'scratchCheckout', args: [] },
-      { id: 2, op: 'runSuite', args: [['crew/pi/extensions/subagent.test.mjs']] },
+      { id: 2, op: 'runSuite', args: [[SUITE_PATH]] },
     ],
     suite: { stdout: '# pass 1\n# fail 0\n' },
     envPatch: { NODE_OPTIONS: '--require=/nonexistent-preload.cjs', FORCE_COLOR: '1', CLICOLOR_FORCE: '1' },
-    deps: { kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
+    deps: { spawnSync: fakeGitSpawnSync(), kill: (pid, signal) => { if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) } },
   })
   const result = await run.tool.execute('x', { program: 'export default 1' }, null, null, { cwd: ROOT })
   assert.equal(result.details.outcome, 'ok')
+  assertOpsAnswered(run, 2)
   const suiteEnv = run.calls[1].options.env
   assert.equal(Object.hasOwn(suiteEnv, 'NODE_OPTIONS'), false)
   assert.equal(Object.hasOwn(suiteEnv, 'FORCE_COLOR'), false)
@@ -1051,10 +1105,11 @@ test('suite termination targets its detached process group at both rungs', async
   const run = scriptedHarness({
     requests: [
       { id: 1, op: 'scratchCheckout', args: [] },
-      { id: 2, op: 'runSuite', args: [['crew/pi/extensions/subagent.test.mjs']] },
+      { id: 2, op: 'runSuite', args: [[SUITE_PATH]] },
     ],
     suite: { close: false },
     deps: {
+      spawnSync: fakeGitSpawnSync(),
       suiteTimeoutMs: 10, killGraceMs: 20, stdioGraceMs: 1, childTimeoutMs: 100000,
       setTimeout: clock.setTimeout, clearTimeout: clock.clearTimeout,
       kill: (pid, signal) => { kills.push([pid, signal]); if (signal === 0) throw Object.assign(new Error('gone'), { code: 'ESRCH' }) },
@@ -1068,6 +1123,9 @@ test('suite termination targets its detached process group at both rungs', async
   await flush()
   clock.fire(clock.list.find((one) => one.ms === 1))
   const result = await pending
+  assert.equal(run.program.responses[0].ok, true, `scratchCheckout refused: ${run.program.responses[0].refused}`)
+  assert.equal(run.program.responses.length, 2, `expected 2 answered ops, got ${JSON.stringify(run.program.responses)}`)
+  assert.equal(run.program.responses[1].refused, 'suite-failed')
   assert.equal(run.calls[1].options.detached, true)
   assert.ok(kills.some(([pid, signal]) => pid === -2222 && signal === 'SIGTERM'))
   assert.ok(kills.some(([pid, signal]) => pid === -2222 && signal === 'SIGKILL'))

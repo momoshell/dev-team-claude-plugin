@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve, sep } from 'node:path'
 
@@ -32,17 +32,22 @@ export function createReturnsSource({ crewRoot = join(homedir(), '.crew') } = {}
     candidates = [...new Set(candidates)].sort()
     if (!candidates.length) return { ...empty, error: 'no task directory for this run' }
 
-    let chosen = null, chosenVerified = false, hasRun = false
+    // #718: a candidate whose ledger/run.json names a DIFFERENT run is still a
+    // task directory that exists on disk. It used to set a run marker, which disabled
+    // the unverified fallback below, so the route denied a directory it had just
+    // read — while a candidate with NO run.json was returned with verified:false.
+    // More information must never produce a worse answer than less. The absence
+    // reported at line 33 (no candidate directory at all) is now the only one
+    // this route can claim, and it is always true. An omitted adw_id — '' from
+    // server.mjs:339 — is a legitimate "any run" query and lands here too: the
+    // newest candidate, verified:false.
+    let chosen = null, chosenVerified = false
     for (let i = candidates.length - 1; i >= 0; i -= 1) {
       const candidate = candidates[i]
-      const runPath = join(candidate, 'ledger', 'run.json')
-      if (!existsSync(runPath)) continue
-      hasRun = true
-      const run = readJson(runPath)
+      const run = readJson(join(candidate, 'ledger', 'run.json'))
       if (run && run.adw_id === adw_id) { chosen = candidate; chosenVerified = true; break }
     }
-    if (!chosen && !hasRun) { chosen = candidates.at(-1); chosenVerified = false }
-    if (!chosen) return { ...empty, error: 'no task directory for this run' }
+    if (!chosen) { chosen = candidates.at(-1); chosenVerified = false }
 
     const result = { ...empty, dir: chosen, verified: chosenVerified, envelopes: [], degraded: false, error: undefined }
     const returnsDir = join(chosen, 'returns')

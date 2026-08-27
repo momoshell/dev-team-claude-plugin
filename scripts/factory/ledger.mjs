@@ -137,6 +137,18 @@ export const RETIRED_TABLES = Object.freeze({
   envelopes: 'Retired: never wired since the legacy runtime was retired (81dee7c, 0.2.0); its one writer was scripts/cmux/dispatch.mjs closeCmd. crew/seat-io.mjs mirrors envelope facts into events / review_outcomes instead, and the visualizer reads envelopes from returns/ archive files. The table and recordEnvelope stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
   processes: 'Retired: never held a row in any production ledger — startProcess has no caller outside scripts/factory/ledger.mjs itself and its own tests (#405), so `ledger procs <adw_id>` returns [] for every run. The table, startProcess and endProcess stay declared because the schema fence is additive-only and replayJsonl depends on the closed WRITERS set. A zero row count is retired, never nothing happened.',
 })
+
+// Unique indexes a prior schema declared and this one has WIDENED. migrationsFor
+// derives an index name from its columns, so a widened key mints a NEW index and
+// leaves the old, narrower one in place on every db already on disk — where it
+// goes on collapsing the very rows the widening exists to keep (#716/F2). Named
+// here and DROPped before the CREATEs run. Widening only: every retired index's
+// columns are a prefix of the key that replaced it, so nothing is unenforced
+// that was enforced before.
+export const RETIRED_INDEXES = Object.freeze([
+  'seat_teardowns_adw_id_role_uq',
+  'review_outcomes_adw_id_dispatch_id_uq',
+])
 export const PHASE_STATUSES = Object.freeze(['running', 'ok', 'fail', 'skipped'])
 export const PROCESS_STATES = Object.freeze(['running', 'exited', 'killed', 'unknown'])
 export const GATE_DISCRIMINATION_VERDICTS = Object.freeze(['proven', 'failed', 'unproven'])
@@ -493,7 +505,7 @@ export const TABLES = Object.freeze({
       { name: 'created_at', decl: 'TEXT' },
       ...REVIEW_CELL_COLUMNS,
     ],
-    unique: [['adw_id', 'dispatch_id']],
+    unique: [['adw_id', 'dispatch_id', 'created_at']],
     indexes: [],
   },
   accept_decisions: {
@@ -757,7 +769,7 @@ export const TABLES = Object.freeze({
       { name: 'evidence_kind', decl: 'TEXT' },
       { name: 'created_at', decl: 'TEXT' },
     ],
-    unique: [['adw_id', 'role']],
+    unique: [['adw_id', 'role', 'created_at']],
     indexes: [{ name: 'seat_teardowns_outcome_idx', cols: ['outcome', 'created_at'] }],
   },
   seat_reclaims: {
@@ -873,6 +885,9 @@ function primaryKeyColumn(table) {
 
 function migrationsFor() {
   const stmts = []
+  for (const name of RETIRED_INDEXES) {
+    stmts.push(`DROP INDEX IF EXISTS ${quoteSqlIdentifier(name)}`)
+  }
   for (const [table, def] of Object.entries(TABLES)) {
     const colSql = def.columns.map((c) => `${quoteSqlIdentifier(c.name)} ${c.decl}`).join(', ')
     stmts.push(`CREATE TABLE IF NOT EXISTS ${quoteSqlIdentifier(table)} (${colSql})`)
@@ -891,6 +906,22 @@ function migrationsFor() {
 // opening a db created by an earlier prefix under the full list).
 export const MIGRATIONS = migrationsFor()
 
+// A CREATE UNIQUE INDEX is the ONE migration statement that can fail on data
+// rather than on schema: rows already on disk may violate a key declared later.
+// applyMigrations runs inside ensureDb on EVERY open and the failing statement
+// runs before any writer does, so letting that throw degrades the handle
+// forever and puts the documented remedy (replayJsonl, which needs an open
+// mirror) permanently out of reach (#716/F6). Skip the index, keep the db
+// openable, and NAME what is not enforced -- never silently.
+function isUniqueIndexFailure(err, stmt) {
+  return /^CREATE UNIQUE INDEX/i.test(String(stmt))
+    && /UNIQUE constraint failed|constraint failed/i.test(String(err && err.message))
+}
+function uniqueIndexNameOf(stmt) {
+  const m = /CREATE UNIQUE INDEX IF NOT EXISTS "((?:[^"]|"")+)"/i.exec(String(stmt))
+  return m ? m[1].replaceAll('""', '"') : String(stmt)
+}
+
 // Applies (a prefix of) MIGRATIONS, then an additive ADD COLUMN probe over
 // the DECLARED table list from TABLES only (never sqlite_master — that also
 // lists sqlite's own internal sqlite_sequence table, which cannot be
@@ -898,8 +929,14 @@ export const MIGRATIONS = migrationsFor()
 // `applyMigrations` so tests can exercise AC-4 (idempotence, earlier-prefix
 // upgrade) directly against a raw DatabaseSync connection.
 export function applyMigrations(db, migrations = MIGRATIONS) {
+  const unenforced = []
   for (const stmt of migrations) {
-    db.exec(stmt)
+    try {
+      db.exec(stmt)
+    } catch (err) {
+      if (!isUniqueIndexFailure(err, stmt)) throw err
+      unenforced.push(uniqueIndexNameOf(stmt))
+    }
   }
   for (const table of Object.keys(TABLES)) {
     const existingCols = new Set(db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name))
@@ -918,6 +955,7 @@ export function applyMigrations(db, migrations = MIGRATIONS) {
       }
     }
   }
+  return { unenforced_unique_indexes: unenforced }
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +1003,13 @@ function normaliseRequestText(value, ctx) {
   return `${text.slice(0, REQUEST_MAX_CHARS - marker.length)}${marker}`
 }
 
+// The one shape a millisecond-ISO timestamp may have. BOTH paths of isoMs test
+// against this single regex: the number path used to check only /\.\d{3}Z$/, so
+// any epoch-ms outside years 1000-9999 was writable and un-replayable (#716/F4).
+const MS_ISO_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
+const ISO_MS_STRING_REFUSAL = 'isoMs: string input must already be a millisecond-ISO timestamp'
+const ISO_MS_RANGE_REFUSAL = 'isoMs: epoch input is outside the millisecond-ISO representable range (years 1000-9999)'
+
 // isoMs(t) -> millisecond-precision ISO string. Every *_at column and every
 // JSONL line's `at` field goes through this. Re-implemented locally (not
 // imported) per the one-way cmux -> factory subsystem direction.
@@ -981,17 +1026,23 @@ export function isoMs(t) {
   // straight from an input object) and could carry a redaction marker;
   // the typeof/shape alone is enough to diagnose the refusal.
   if (typeof t === 'string') {
-    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(t)) {
-      throw new Error('isoMs: string input must already be a millisecond-ISO timestamp')
+    if (!MS_ISO_RE.test(t)) {
+      refuse(ISO_MS_STRING_REFUSAL)
     }
     return t
   }
   if (typeof t !== 'number' && !(t instanceof Date)) {
-    throw new Error(`isoMs: expected an epoch-ms number, a Date, or an already-ms-ISO string, got ${typeof t}`)
+    refuse(`isoMs: expected an epoch-ms number, a Date, or an already-ms-ISO string, got ${typeof t}`)
   }
-  const iso = new Date(t).toISOString()
-  if (!/\.\d{3}Z$/.test(iso)) {
-    throw new Error(`isoMs: produced a timestamp without a millisecond group: ${iso}`)
+  let iso
+  try {
+    iso = new Date(t).toISOString()
+  } catch (err) {
+    if (err instanceof RangeError) refuse(ISO_MS_RANGE_REFUSAL)
+    throw err
+  }
+  if (!MS_ISO_RE.test(iso)) {
+    refuse(ISO_MS_RANGE_REFUSAL)
   }
   return iso
 }
@@ -1286,6 +1337,7 @@ export function openLedger({
     // degraded_message verbatim as the run-set's absent prose. Both null while
     // not degraded.
     degraded_reason: null, degraded_message: null,
+    unenforced_unique_indexes: [],
   }
   const seqAllocators = new Map() // `${adw_id}:${kind}` -> next seq
   const seqFloors = new Map() // `${adw_id}:${kind}` -> JSONL authority floor
@@ -1308,6 +1360,7 @@ export function openLedger({
   let dbOpenAttempted = false
   let degraded = !versionAtLeast(nodeVersion, NODE_FLOOR)
   let degradedNoticeWritten = false
+  let replaying = false
 
   function noteDegraded(reason, code) {
     degraded = true
@@ -1371,7 +1424,11 @@ export function openLedger({
       if (!readOnly) {
         conn.exec('PRAGMA journal_mode = WAL')
         conn.exec('PRAGMA synchronous = 1')
-        applyMigrations(conn)
+        const report = applyMigrations(conn)
+        stats.unenforced_unique_indexes = [...report.unenforced_unique_indexes]
+        if (report.unenforced_unique_indexes.length > 0) {
+          stderr.write(`ledger: unique index not enforced on this file (${report.unenforced_unique_indexes.join(', ')}) — rows on disk predate it; the mirror stays open and jsonlDrift keeps measuring, but this key is NOT unique here\n`)
+        }
         chmodIfExists(dbPath, 0o600)
         chmodIfExists(`${dbPath}-wal`, 0o600)
         chmodIfExists(`${dbPath}-shm`, 0o600)
@@ -1406,6 +1463,12 @@ export function openLedger({
 
   function appendJsonl(kind, args) {
     assertWritable()
+    // A replay reconstructs the MIRROR from the authority; it must never write
+    // the authority back into itself. Replaying a ledger's own jsonlPath used to
+    // double the file (7 -> 14 -> 28) and re-stamp every line with isoMs(now())
+    // (#716/F3). assertWritable stays ABOVE this line: a read-only handle must
+    // still refuse a replay rather than silently mirror it.
+    if (replaying) return
     ensureDirAndPerms()
     const line = { v: LEDGER_VERSION, kind, at: isoMs(now()), args }
     appendFileSync(jsonlPath, `${JSON.stringify(line)}\n`)
@@ -3192,7 +3255,15 @@ export function openLedger({
     try {
       text = readFileSync(jsonlPath, 'utf8')
     } catch (err) {
-      return unmeasuredDrift(jsonlPath, `the JSONL authority could not be read: ${(err && (err.code || err.name)) || 'ReadError'}`)
+      // An old file with an unenforced key is still an answerable mirror even
+      // before its first authority line is written; there are no authority
+      // keys to compare yet, so report a measured zero rather than masking the
+      // migration condition as a failed open (#716/F6).
+      if (stats.unenforced_unique_indexes.length > 0 && err?.code === 'ENOENT') {
+        text = ''
+      } else {
+        return unmeasuredDrift(jsonlPath, `the JSONL authority could not be read: ${(err && (err.code || err.name)) || 'ReadError'}`)
+      }
     }
     let lines = 0
     let unparsed = 0
@@ -3300,7 +3371,22 @@ export function openLedger({
   // ---- lifecycle / meta -----------------------------------------------------
 
   function statsFn() {
-    return { degraded, ...stats }
+    const snapshot = { degraded, ...stats }
+    // Keep the opener lazy for existing stats consumers, but make the new
+    // migration-health field authoritative when it is read: a caller asking
+    // for the field must observe a UNIQUE index skipped during open, even if
+    // no prior query forced ensureDb() yet (#716/F6).
+    Object.defineProperty(snapshot, 'unenforced_unique_indexes', {
+      enumerable: true,
+      get() {
+        ensureDb()
+        snapshot.degraded = degraded
+        snapshot.degraded_reason = stats.degraded_reason
+        snapshot.degraded_message = stats.degraded_message
+        return [...stats.unenforced_unique_indexes]
+      },
+    })
+    return snapshot
   }
 
   function readConnection() {
@@ -3349,6 +3435,7 @@ export function openLedger({
     // internal, used by the doctor CLI verb and tests only:
     _dbPath: dbPath,
     _jsonlPath: jsonlPath,
+    _setReplaying(value) { const was = replaying; replaying = !!value; return was },
     _probeFts5,
     _pragmas: pragmas,
     // internal, used ONLY by installFinalizerImpl (the in-process registry
@@ -3386,29 +3473,54 @@ function _probeFts5() {
 export function replayJsonl(jsonlPath, ledger) {
   let applied = 0
   let skipped = 0
+  let failed = 0
+  let firstFailure = null
   if (!existsSync(jsonlPath)) {
-    return { applied, skipped }
+    return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
   }
   const content = readFileSync(jsonlPath, 'utf8')
   const lines = content.split('\n').filter(Boolean)
-  for (const line of lines) {
-    let parsed
-    try {
-      parsed = JSON.parse(line)
-    } catch {
-      skipped += 1
-      continue
+  let lineNo = 0
+  function noteReplayFailure(lineNo, err) {
+    failed += 1
+    if (firstFailure === null) {
+      firstFailure = {
+        line: lineNo,
+        reason: err instanceof LedgerUsageError ? err.message : (err?.name || 'Error'),
+      }
     }
-    if (!parsed || !WRITERS.includes(parsed.kind)) {
-      // Never embed the raw `kind` value — a JSONL line is externally
-      // controlled data (this is a replay entry point) and could carry a
-      // redaction marker. Name the closed WRITERS set instead.
-      refuse(`replayJsonl: line has an unknown kind — must be one of ${WRITERS.join('|')}`)
-    }
-    ledger[parsed.kind](parsed.args)
-    applied += 1
   }
-  return { applied, skipped }
+  const restore = typeof ledger._setReplaying === 'function'
+    ? ledger._setReplaying(true)
+    : null
+  try {
+    for (const line of lines) {
+      lineNo += 1
+      let parsed
+      try {
+        parsed = JSON.parse(line)
+      } catch {
+        skipped += 1
+        continue
+      }
+      if (!parsed || !WRITERS.includes(parsed.kind)) {
+        // Never embed the raw `kind` value — a JSONL line is externally
+        // controlled data (this is a replay entry point) and could carry a
+        // redaction marker. Name the closed WRITERS set instead.
+        noteReplayFailure(lineNo, new LedgerUsageError(`ledger: replayJsonl: line has an unknown kind — must be one of ${WRITERS.join('|')}`))
+        continue
+      }
+      try {
+        ledger[parsed.kind](parsed.args)
+        applied += 1
+      } catch (err) {
+        noteReplayFailure(lineNo, err)
+      }
+    }
+  } finally {
+    if (restore !== null) ledger._setReplaying(restore)
+  }
+  return { applied, skipped, failed, complete: failed === 0 && skipped === 0, first_failure: firstFailure }
 }
 
 // ---------------------------------------------------------------------------

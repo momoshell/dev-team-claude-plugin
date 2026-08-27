@@ -452,6 +452,30 @@ test('AC-3: journal_mode/synchronous/busy_timeout read back from the live connec
   assert.equal(p.busy_timeout, 5000)
 })
 
+test('T1: isoMs is symmetric across the number-to-string replay boundary', () => {
+  for (const value of [0, 1, 1000, Date.now(), 253402300799999]) {
+    const once = isoMs(value)
+    assert.equal(isoMs(once), once, `isoMs round-trip changed ${value}`)
+  }
+})
+
+test('T2: an out-of-range epoch is refused by isoMs and a writer', { skip: SKIP }, () => {
+  assert.throws(() => isoMs(1790000000000000), LedgerUsageError)
+  const ledger = openTestLedger()
+  try {
+    assert.throws(
+      () => ledger.recordCellFailure({ adw_id: 'range', role: 'builder', kind: 'timeout', created_at: 1790000000000000 }),
+      LedgerUsageError,
+    )
+  } finally { ledger.close() }
+})
+
+test('T3: an out-of-range CLI window is a usage refusal', { skip: SKIP }, () => {
+  const result = run(['seat-teardowns', '--since', '+058692-11-03T14:13:20.000Z'])
+  assert.equal(result.status, 2)
+  assert.match(result.stderr, /\[reason: usage\]/)
+})
+
 // ---------------------------------------------------------------------------
 // AC-4: additive, idempotent migrations
 // ---------------------------------------------------------------------------
@@ -503,6 +527,61 @@ test('AC-4: an earlier cell_failures schema gains attribution without backfillin
   assert.ok(columns.includes('attribution'))
   assert.equal(db.prepare('SELECT attribution FROM cell_failures').get().attribution, null)
   db.close()
+})
+
+function makeUnenforcedSeatIndexDb() {
+  const { DatabaseSync } = require('node:sqlite')
+  const dir = nextDir()
+  const dbPath = join(dir, 'unenforced-seat.db')
+  const jsonlPath = join(dir, 'authority.jsonl')
+  const db = new DatabaseSync(dbPath)
+  const withheld = MIGRATIONS.filter((statement) => !(/CREATE UNIQUE INDEX/.test(statement) && /seat_teardowns/.test(statement)))
+  applyMigrations(db, withheld)
+  const insert = db.prepare('INSERT INTO seat_teardowns (adw_id, role, outcome, reason, forced, created_at) VALUES (?, ?, ?, ?, 0, ?)')
+  insert.run('t12', 'builder', 'proven', 'exited', '2024-01-01T00:00:00.000Z')
+  insert.run('t12', 'builder', 'failed', 'still-alive', '2024-01-01T00:00:00.000Z')
+  db.close()
+  const line = (outcome, reason) => JSON.stringify({
+    v: 1, kind: 'recordSeatTeardown', at: '2024-01-01T00:00:00.000Z',
+    args: { adw_id: 't12', role: 'builder', outcome, reason, forced: 0, created_at: '2024-01-01T00:00:00.000Z' },
+  })
+  writeFileSync(jsonlPath, `${line('proven', 'exited')}\n${line('failed', 'still-alive')}\n`)
+  return { dbPath, jsonlPath }
+}
+
+test('T12: rows predating a unique index remain readable and drift stays measurable', { skip: SKIP }, () => {
+  const { dbPath, jsonlPath } = makeUnenforcedSeatIndexDb()
+  const ledger = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+  try {
+    const drift = ledger.jsonlDrift()
+    assert.equal(ledger.degraded, false)
+    assert.equal(drift.measured, true)
+    assert.equal(ledger.dumpTable('seat_teardowns').length, 2)
+  } finally { ledger.close() }
+})
+
+test('T13: stats names a unique index skipped for pre-existing duplicate rows', { skip: SKIP }, () => {
+  const { dbPath, jsonlPath } = makeUnenforcedSeatIndexDb()
+  const ledger = openLedger({ dbPath, jsonlPath, stderr: { write: () => {} } })
+  try {
+    const names = ledger.stats().unenforced_unique_indexes
+    assert.ok(names.includes('seat_teardowns_adw_id_role_created_at_uq'))
+  } finally { ledger.close() }
+})
+
+test('T14: every migration prefix upgrades to the complete current column set', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  for (let k = 0; k <= MIGRATIONS.length; k += 1) {
+    const db = new DatabaseSync(join(nextDir(), `prefix-${k}.db`))
+    try {
+      assert.doesNotThrow(() => applyMigrations(db, MIGRATIONS.slice(0, k)))
+      assert.doesNotThrow(() => applyMigrations(db, MIGRATIONS))
+      for (const [table, def] of Object.entries(TABLES)) {
+        const columns = db.prepare(`PRAGMA table_info(${table})`).all().map((row) => row.name)
+        assert.deepEqual(columns, def.columns.map(({ name }) => name), `prefix ${k} table ${table} columns`)
+      }
+    } finally { db.close() }
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -634,6 +713,117 @@ test('AC-5: replaying the JSONL through the public write API into a fresh db rep
     replayedAgain[table] = ledger2.dumpTable(table)
   }
   assert.deepEqual(replayedAgain, replayed)
+})
+
+test('T6: replaying one authority twice leaves target row counts unchanged', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.recordSeatTeardown({ adw_id: 't6', role: 'builder', outcome: 'proven', reason: 'exited', created_at: '2024-01-01T00:00:00.000Z' })
+  const target = openTestLedger()
+  try {
+    const first = replayJsonl(source._jsonlPath, target)
+    const firstCount = target.dumpTable('seat_teardowns').length
+    const second = replayJsonl(source._jsonlPath, target)
+    assert.equal(first.complete, true)
+    assert.equal(second.complete, true)
+    assert.equal(target.dumpTable('seat_teardowns').length, firstCount)
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('T7: opening a db retires the old seat teardown index before widening it', { skip: SKIP }, () => {
+  const { DatabaseSync } = require('node:sqlite')
+  const dir = nextDir()
+  const dbPath = join(dir, 'retired-index.db')
+  const db = new DatabaseSync(dbPath)
+  applyMigrations(db)
+  db.exec('CREATE UNIQUE INDEX IF NOT EXISTS "seat_teardowns_adw_id_role_uq" ON "seat_teardowns" ("adw_id", "role")')
+  db.close()
+
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    ledger.recordSeatTeardown({ adw_id: 't7', role: 'builder', outcome: 'proven', created_at: '2024-01-01T00:00:00.000Z' })
+    ledger.recordSeatTeardown({ adw_id: 't7', role: 'builder', outcome: 'failed', created_at: '2024-01-01T00:00:01.000Z' })
+    assert.equal(ledger.dumpTable('seat_teardowns').length, 2)
+  } finally { ledger.close() }
+  const probe = new DatabaseSync(dbPath)
+  try {
+    const names = probe.prepare('PRAGMA index_list("seat_teardowns")').all().map((row) => row.name)
+    assert.equal(names.includes('seat_teardowns_adw_id_role_uq'), false)
+  } finally { probe.close() }
+})
+
+test('T8: replaying a ledger authority into itself preserves its bytes', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.startSession({ adw_id: 't8', repo_slug: 'r', task_slug: 't' })
+    ledger.recordEvent({ adw_id: 't8', type: 'log', payload: { level: 'info', message: 'one' } })
+    const before = readFileSync(ledger._jsonlPath, 'utf8')
+    const result = replayJsonl(ledger._jsonlPath, ledger)
+    assert.equal(result.complete, true)
+    assert.equal(readFileSync(ledger._jsonlPath, 'utf8'), before)
+    assert.equal(ledger.dumpTable('events').length, 1)
+  } finally { ledger.close() }
+})
+
+test('T9: replay counts malformed and failing lines, then applies later good lines', { skip: SKIP }, () => {
+  const jsonlPath = join(nextDir(), 'partial-authority.jsonl')
+  const line = (kind, args) => JSON.stringify({ v: 1, kind, at: '2024-01-01T00:00:00.000Z', args })
+  writeFileSync(jsonlPath, [
+    line('startSession', { adw_id: 't9', repo_slug: 'r', task_slug: 't' }),
+    line('recordEvent', { adw_id: 't9', type: 'log', payload: { level: 'info', message: 'before' } }),
+    line('notAWriter', {}),
+    line('recordEvent', { adw_id: 't9', type: 'log', payload: { level: 'info', message: 'between' } }),
+    line('recordCellFailure', { adw_id: 't9', role: 'builder', kind: 'not-a-kind' }),
+    line('recordEvent', { adw_id: 't9', type: 'log', payload: { level: 'info', message: 'after' } }),
+    '{not valid json truncated',
+  ].join('\n') + '\n')
+  const ledger = openTestLedger()
+  try {
+    const result = replayJsonl(jsonlPath, ledger)
+    assert.equal(result.applied, 4)
+    assert.equal(result.failed, 2)
+    assert.equal(result.skipped, 1)
+    assert.equal(result.complete, false)
+    assert.deepEqual(result.first_failure, {
+      line: 3,
+      reason: 'ledger: replayJsonl: line has an unknown kind — must be one of ' + WRITERS.join('|'),
+    })
+    const messages = ledger.dumpTable('events').map((row) => JSON.parse(row.payload_json).message).sort()
+    assert.deepEqual(messages, ['after', 'before', 'between'])
+  } finally { ledger.close() }
+})
+
+test('T10: a well-formed authority replays completely without throwing', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  source.startSession({ adw_id: 't10', repo_slug: 'r', task_slug: 't' })
+  source.recordEvent({ adw_id: 't10', type: 'log', payload: { level: 'info', message: 'ok' } })
+  const lineCount = readFileSync(source._jsonlPath, 'utf8').split('\n').filter(Boolean).length
+  const target = openTestLedger()
+  try {
+    let result = null
+    assert.doesNotThrow(() => { result = replayJsonl(source._jsonlPath, target) })
+    assert.equal(result.applied, lineCount)
+    assert.equal(result.complete, true)
+  } finally {
+    source.close()
+    target.close()
+  }
+})
+
+test('T11: replay failure reasons never echo a marker-bearing unknown kind', { skip: SKIP }, () => {
+  const marker = `${NONCE_PREFIX}replay-kind-marker`
+  const jsonlPath = join(nextDir(), 'marker-authority.jsonl')
+  const raw = JSON.stringify({ v: 1, kind: marker, at: '2024-01-01T00:00:00.000Z', args: {} })
+  writeFileSync(jsonlPath, `${raw}\n`)
+  const ledger = openTestLedger()
+  try {
+    const result = replayJsonl(jsonlPath, ledger)
+    assert.equal(result.failed, 1)
+    assert.ok(result.first_failure)
+    assert.doesNotMatch(result.first_failure.reason, new RegExp(marker))
+  } finally { ledger.close() }
 })
 
 test('cell failure attributions are a frozen axis separate from failure kinds', () => {
@@ -2131,7 +2321,7 @@ test('recordSessionRequest redaction is a replayable no-op with no request prove
   }, { request: 'read safely from brief', request_source: 'brief-file' })
 })
 
-test('recordSessionRequest redacted replay sanitizes a forged adw_id marker before JSONL append', { skip: SKIP }, () => {
+test('recordSessionRequest redacted replay does not rewrite the target authority', { skip: SKIP }, () => {
   const forgedJsonl = join(nextDir(), 'forged-request.jsonl')
   writeFileSync(forgedJsonl, `${JSON.stringify({
     v: 1,
@@ -2141,10 +2331,11 @@ test('recordSessionRequest redacted replay sanitizes a forged adw_id marker befo
   })}\n`)
 
   const replayed = openTestLedger()
-  assert.deepEqual(replayJsonl(forgedJsonl, replayed), { applied: 1, skipped: 0 })
-  const jsonlBytes = readFileSync(replayed._jsonlPath, 'utf8')
-  assert.ok(!jsonlBytes.includes(MARKER_NONCE_ONLY), 'forged redacted adw_id leaked into replay JSONL')
-  assert.match(jsonlBytes, /"adw_id":null/, 'replay must preserve the redacted no-op shape')
+  assert.deepEqual(replayJsonl(forgedJsonl, replayed), {
+    applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+  })
+  assert.equal(existsSync(replayed._jsonlPath), false, 'replay must not create or append the target authority')
+  assert.deepEqual(replayed.dumpTable('sessions'), [])
 })
 
 // --- S3: a marker-bearing INVALID value must never reach a refusal message
@@ -2175,10 +2366,11 @@ test('S3: a marker-bearing invalid value never reaches the refusal message at an
   const dir = nextDir()
   const jsonlPath = join(dir, 'bad.jsonl')
   writeFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: MARKER_NONCE_ONLY, at: new Date().toISOString(), args: {} })}\n`)
-  assert.throws(
-    () => replayJsonl(jsonlPath, ledger),
-    (err) => !String(err.message).includes(MARKER_NONCE_ONLY),
-  )
+  const replayed = replayJsonl(jsonlPath, ledger)
+  assert.equal(replayed.failed, 1)
+  assert.equal(replayed.complete, false)
+  assert.ok(replayed.first_failure)
+  assert.doesNotMatch(replayed.first_failure.reason, new RegExp(MARKER_NONCE_ONLY))
 })
 
 // ---------------------------------------------------------------------------
@@ -2663,7 +2855,7 @@ test('#541: the detector discriminates idempotent repeats from collapse', { skip
   sourceAgain.recordEvent({ adw_id: '541-replay', seq: 1, type: 'log', payload: { level: 'info', message: 'same' } })
   const sourcePath = sourceAgain._jsonlPath
   sourceAgain.close()
-  const target = openTestLedger()
+  const target = openTestLedger({ jsonlPath: sourcePath })
   try {
     replayJsonl(sourcePath, target)
     replayJsonl(sourcePath, target)
@@ -2709,12 +2901,17 @@ test('#541: the doctor CLI names a key collapse', { skip: SKIP }, () => {
 // S12: cheap missing negative tests
 // ---------------------------------------------------------------------------
 
-test('S12: replayJsonl throws LedgerUsageError on an unknown kind', { skip: SKIP }, () => {
+test('S12: replayJsonl counts an unknown kind as a failed line without throwing', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   const dir = nextDir()
   const jsonlPath = join(dir, 'bad-kind.jsonl')
   writeFileSync(jsonlPath, `${JSON.stringify({ v: 1, kind: 'notAWriter', at: new Date().toISOString(), args: {} })}\n`)
-  assert.throws(() => replayJsonl(jsonlPath, ledger), LedgerUsageError)
+  let result = null
+  assert.doesNotThrow(() => { result = replayJsonl(jsonlPath, ledger) })
+  assert.equal(result.failed, 1)
+  assert.equal(result.skipped, 0)
+  assert.equal(result.complete, false)
+  assert.ok(result.first_failure)
 })
 
 test('S12: replayJsonl counts a corrupted/truncated line as skipped without crashing', { skip: SKIP }, () => {
@@ -3337,7 +3534,9 @@ test('a dispatch row round-trips through JSONL, sqlite, and replayJsonl', { skip
   assert.equal(raw.at(-1).kind, 'recordIntakeDispatch')
   const target = openTestLedger()
   const replayed = replayJsonl(source._jsonlPath, target)
-  assert.deepEqual(replayed, { applied: 1, skipped: 0 })
+  assert.deepEqual(replayed, {
+    applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+  })
   assert.deepEqual({ ...target.dumpTable('intake_dispatches')[0] }, { id: 1, ...row })
 })
 
@@ -3445,6 +3644,27 @@ test('intake-sweeps CLI reports a measured zero for a swept window that picked n
   assert.equal(payload.absent, null)
 })
 
+test('T4: seat teardown retries with distinct timestamps remain separate rows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordSeatTeardown({ adw_id: 't4', role: 'builder', outcome: 'proven', reason: 'exited', created_at: '2024-01-01T00:00:00.000Z' })
+    ledger.recordSeatTeardown({ adw_id: 't4', role: 'builder', outcome: 'failed', reason: 'still-alive', created_at: '2024-01-01T00:00:01.000Z' })
+    assert.equal(ledger.dumpTable('seat_teardowns').length, 2)
+    assert.equal(ledger.seatTeardowns().find((row) => row.outcome === 'failed').count, 1)
+  } finally { ledger.close() }
+})
+
+test('T5: review retries with distinct timestamps retain both verdicts', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    ledger.recordReviewOutcome({ adw_id: 't5', dispatch_id: 'd5', role: 'reviewer', verdict: 'changes-needed', created_at: '2024-01-01T00:00:00.000Z' })
+    ledger.recordReviewOutcome({ adw_id: 't5', dispatch_id: 'd5', role: 'reviewer', verdict: 'pass', created_at: '2024-01-01T00:00:01.000Z' })
+    const rows = ledger.dumpTable('review_outcomes')
+    assert.equal(rows.length, 2)
+    assert.deepEqual(rows.map(({ verdict }) => verdict).sort(), ['changes-needed', 'pass'])
+  } finally { ledger.close() }
+})
+
 test('seat teardown outcomes mirror gate discrimination and duplicate emissions are idempotent', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   assert.deepEqual(SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS)
@@ -3454,10 +3674,11 @@ test('seat teardown outcomes mirror gate discrimination and duplicate emissions 
     evidence_kind: 'pgid', created_at: '2024-01-01T00:00:00.000Z',
   }
   ledger.recordSeatTeardown(row)
+  ledger.recordSeatTeardown(row)
   ledger.recordSeatTeardown({ ...row, outcome: 'failed', reason: 'probe-alive', created_at: '2024-01-01T00:00:01.000Z' })
   const rows = ledger.dumpTable('seat_teardowns')
-  assert.equal(rows.length, 1)
-  assert.equal(rows[0].outcome, 'proven')
+  assert.equal(rows.length, 2)
+  assert.deepEqual(rows.map(({ outcome }) => outcome).sort(), ['failed', 'proven'])
   const bad = openTestLedger()
   assert.throws(
     () => bad.recordSeatTeardown({ adw_id: 'seat-bad', role: 'builder', outcome: 'retired' }),
@@ -3504,7 +3725,7 @@ test('seat-teardowns CLI marks an empty window as not measured', { skip: SKIP },
 test('an older migration prefix upgrades additively with seat_teardowns', { skip: SKIP }, () => {
   const { DatabaseSync } = require('node:sqlite')
   const dbPath = join(nextDir(), 'seat-prefix.db')
-  const seatIndex = MIGRATIONS.findIndex((statement) => /seat_teardowns/i.test(statement))
+  const seatIndex = MIGRATIONS.findIndex((statement) => /CREATE TABLE IF NOT EXISTS "seat_teardowns"/i.test(statement))
   assert.ok(seatIndex > 0)
   const db = new DatabaseSync(dbPath)
   applyMigrations(db, MIGRATIONS.slice(0, seatIndex))
@@ -3618,7 +3839,9 @@ test('a recordSessionRequest JSONL line replays through the closed writer set', 
   source.startSession({ adw_id: 'request-replay', repo_slug: 'r', task_slug: 't' })
   source.recordSessionRequest({ adw_id: 'request-replay', request: 'replay this ask', source: 'dispatch' })
   const target = openTestLedger()
-  assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 2, skipped: 0 })
+  assert.deepEqual(replayJsonl(source._jsonlPath, target), {
+    applied: 2, skipped: 0, failed: 0, complete: true, first_failure: null,
+  })
   assert.deepEqual({ request: target.getSession('request-replay').request, request_source: target.getSession('request-replay').request_source }, {
     request: 'replay this ask', request_source: 'dispatch',
   })
@@ -3825,7 +4048,9 @@ test('proposal fields replay through JSONL into sessions', { skip: SKIP }, () =>
     proposed_shape: 'mechanical', proposed_strength: 'workhorse',
   })
   const target = openTestLedger()
-  assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 1, skipped: 0 })
+  assert.deepEqual(replayJsonl(source._jsonlPath, target), {
+    applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+  })
   const row = target.getSession('proposal-replay')
   assert.equal(row.proposed_shape, 'mechanical')
   assert.equal(row.proposed_strength, 'workhorse')
@@ -3885,7 +4110,9 @@ test('a session heartbeat JSONL line replays into the sessions last_heartbeat_at
   source.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: 't' })
   source.heartbeat({ adw_id: adwId, target: 'session', at })
   const target = openTestLedger()
-  assert.deepEqual(replayJsonl(source._jsonlPath, target), { applied: 2, skipped: 0 })
+  assert.deepEqual(replayJsonl(source._jsonlPath, target), {
+    applied: 2, skipped: 0, failed: 0, complete: true, first_failure: null,
+  })
   assert.equal(target.getSession(adwId).last_heartbeat_at, isoMs(at))
 })
 

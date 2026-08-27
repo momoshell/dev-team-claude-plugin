@@ -65,6 +65,39 @@ const CLI_FLAGS = Object.freeze({
   '--model-reference': 'referencePath',
 })
 
+// The query parameters each route reads, mapped from its pathname. One place
+// decides whether a route knows a parameter: a misspelling is a refusal that
+// NAMES it, not a silently ignored default — the contract CLI_FLAGS has given
+// the flag door since #443, on the door a human actually types into (h5 F6).
+const ROUTE_PARAMS = Object.freeze({
+  '/api/sessions': ['mode', 'status', 'since', 'until'],
+  '/api/events': ['adw_id', 'after', 'limit', 'type', 'role', 'phase_id'],
+  '/api/returns': ['repo_slug', 'task_slug', 'adw_id'],
+  '/api/journal': ['repo_slug', 'task_slug', 'adw_id'],
+  '/api/roster': [],
+  '/api/cell-health': ['since', 'until'],
+  '/api/run-set': ['since', 'until'],
+  '/api/intake': ['since', 'until'],
+  '/api/seat-teardowns': ['since', 'until'],
+  '/api/cell-attribution': ['since', 'until'],
+  '/api/intake/brake': [],
+  '/api/roster/propose': [],
+  '/api/roster/ladder': [],
+  '/api/roster/ladder/stage': [],
+  '/api/roster/ladder/compose': [],
+  '/api/health': [],
+  '/api/triage': [],
+})
+
+function refuseUnknownParams(url) {
+  const allowed = ROUTE_PARAMS[url.pathname]
+  if (!allowed) return null
+  for (const name of url.searchParams.keys()) {
+    if (!allowed.includes(name)) return `unknown query parameter ${name} — ${url.pathname} accepts ${allowed.length ? allowed.join(', ') : 'no query parameters'}`
+  }
+  return null
+}
+
 export function parseCliArgs(argv) {
   const out = defaults()
   const vocabulary = Object.keys(CLI_FLAGS).join(', ')
@@ -112,7 +145,47 @@ export function writeGuard(req) {
 function integer(value, fallback) {
   if (value == null || value === '') return fallback
   if (!/^\d+$/.test(value)) return null
-  return Number(value)
+  const number = Number(value)
+  // Number('999…') is a non-integral double: sqlite refuses to bind it to LIMIT
+  // (raw driver text reached the client as a 500) and accepts it for `id > ?`,
+  // so the route handed back a cursor it would refuse next request (h5 F10).
+  return Number.isSafeInteger(number) ? number : null
+}
+
+// The 400 has always said ISO-8601 is the contract; Date.parse never enforced
+// it — "2026" and "March 3 2026" both validated and then string-compared
+// against stored ISO timestamps, silently excluding everything (h5 F4). An
+// accepted bound is canonicalised with toISOString so the value the feed
+// compares is in the domain it claims to be.
+const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/
+const ISO_COMPONENTS = /^(?<year>\d{4})-(?<month>\d{2})-(?<day>\d{2})T(?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2})(?:\.(?<fraction>\d{1,3}))?(?:Z|[+-]\d{2}:\d{2})$/
+function windowBound(label, value) {
+  const text = value == null ? '' : String(value)
+  const parsed = new Date(text)
+  if (!ISO_INSTANT.test(text) || Number.isNaN(parsed.getTime())) return { value: null, error: `${label} must be an ISO-8601 timestamp such as 2026-01-01T00:00:00.000Z, found ${text}` }
+  // Date normalises impossible calendar dates (for example 2025-02-29) into a
+  // different instant. The strict shape above admits that spelling, so compare
+  // the date components before allowing the normalised value through.
+  const parts = text.match(ISO_COMPONENTS)
+  if (parts) {
+    const year = Number(parts.groups.year), month = Number(parts.groups.month), day = Number(parts.groups.day)
+    const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0)
+    const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    if (month < 1 || month > 12 || day < 1 || day > days[month - 1]) return { value: null, error: `${label} must be an ISO-8601 timestamp such as 2026-01-01T00:00:00.000Z, found ${text}` }
+  }
+  return { value: parsed.toISOString(), error: null }
+}
+
+function readWindow(url, fallback) {
+  let since = fallback.since, until = fallback.until
+  for (const label of ['since', 'until']) {
+    if (!url.searchParams.has(label)) continue
+    const bound = windowBound(label, url.searchParams.get(label))
+    if (bound.error) return { since: null, until: null, error: bound.error }
+    if (label === 'since') since = bound.value; else until = bound.value
+  }
+  if (until != null && Date.parse(until) <= Date.parse(since)) return { since: null, until: null, error: 'until must be later than since' }
+  return { since, until, error: null }
 }
 
 function readBrake(config) {
@@ -179,6 +252,12 @@ function staticResponse(req, res) {
   if (candidate !== DIST && !candidate.startsWith(`${DIST}/`)) { res.writeHead(404); res.end('Not found'); return }
   let target = candidate
   try { if (!statSync(target).isFile()) throw new Error('not file') } catch { target = resolve(DIST, 'index.html') }
+  // resolve() is lexical and never follows a symlink, so a link planted in the
+  // build output served content from outside the fence (h5 F12). realpath both
+  // sides — DIST itself may sit behind a symlinked path component.
+  const realDist = realpathOr(DIST)
+  const realTarget = realpathOr(target)
+  if (realTarget !== realDist && !realTarget.startsWith(`${realDist}/`)) { res.writeHead(404); res.end('Not found'); return }
   try {
     const types = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml' }
     const ext = target.slice(target.lastIndexOf('.'))
@@ -206,13 +285,32 @@ export function startServer(options = {}) {
       return json(res, 400, { schema, error: 'invalid request target or Host header' })
     }
     try {
+      // RFC 9110 requires HEAD wherever GET is implemented; the static route already
+      // does it and every API route answered 405, so a proxy or health-checker that
+      // probes with HEAD read a live board as broken (h5 F13). The Allow VALUES do
+      // not change: visualizer-trajectory.test.mjs:196 pins `allow: 'GET'` on
+      // /api/journal verbatim and sits outside this lane's fence.
+      const method = req.method === 'HEAD' ? 'GET' : req.method
+      const unknown = refuseUnknownParams(url)
+      if (unknown) return json(res, 400, { schema, error: unknown })
       if (url.pathname === '/api/sessions') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
-        const result = feed.listRuns({ mode: url.searchParams.get('mode') || '', status: url.searchParams.get('status') || '', since: url.searchParams.get('since') || '', until: url.searchParams.get('until') || '' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        const filters = { mode: url.searchParams.get('mode') || '', status: url.searchParams.get('status') || '', since: '', until: '' }
+        for (const label of ['since', 'until']) {
+          // An empty string is ABSENT, not malformed: api.js:7 sends all four names on
+          // every load and App.svelte:26 initialises them to ''.
+          const raw = url.searchParams.get(label)
+          if (raw == null || raw === '') continue
+          const bound = windowBound(label, raw)
+          if (bound.error) return json(res, 400, { schema, error: bound.error })
+          filters[label] = bound.value
+        }
+        if (filters.since && filters.until && Date.parse(filters.until) <= Date.parse(filters.since)) return json(res, 400, { schema, error: 'until must be later than since' })
+        const result = feed.listRuns(filters)
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/events') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const after = integer(url.searchParams.get('after'), 0), limit = integer(url.searchParams.get('limit'), 200)
         const phase_id = url.searchParams.has('phase_id') ? integer(url.searchParams.get('phase_id'), null) : undefined
         if (after === null || limit === null || limit < 1 || phase_id === null) return json(res, 400, { schema, error: 'after, limit and phase_id must be integers' })
@@ -220,47 +318,53 @@ export function startServer(options = {}) {
         for (const key of ['type', 'role']) if (url.searchParams.get(key)) filters[key] = url.searchParams.get(key)
         if (phase_id !== undefined) filters.phase_id = phase_id
         const result = feed.listEvents({ adw_id: url.searchParams.get('adw_id') || '', after, limit, ...filters })
-        return json(res, 200, { schema, ...result })
+        // Read AFTER the query it reports on, like /api/run-set: the feed's db open is
+        // lazy. listEvents answers { events: [], cursor } for an unopenable ledger,
+        // byte-identical to a genuinely empty page — the one reader on this surface
+        // that stated an absence as a measured zero (h5 F7; #678 / #687 / #699).
+        const eventsHealth = typeof feed.health === 'function' ? feed.health() : null
+        const eventsReason = typeof feed._reason === 'function' ? feed._reason() : null
+        // feed.health() also includes the triage sidecar, so its aggregate
+        // degraded flag cannot by itself turn a successful event read into a
+        // ledger absence (review RV1-2). A private reason or an explicit feed
+        // verdict ties the typed absence to this ledger query.
+        const eventsDegraded = result?.degraded === true || (eventsHealth?.degraded === true && typeof eventsReason === 'string' && eventsReason.length > 0)
+        const eventsAbsent = eventsDegraded ? ((typeof result?.absent === 'string' && result.absent.length > 0 ? result.absent : null) || eventsReason || 'the ledger could not be opened') : null
+        return json(res, 200, { schema, ...result, degraded: eventsDegraded, absent: eventsAbsent })
       }
       if (url.pathname === '/api/returns') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const repo_slug = url.searchParams.get('repo_slug'), task_slug = url.searchParams.get('task_slug')
         if (!repo_slug || !task_slug) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = returns.listEnvelopes({ repo_slug, task_slug, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/journal') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const journalRepo = url.searchParams.get('repo_slug'), journalTask = url.searchParams.get('task_slug')
         if (!journalRepo || !journalTask) return json(res, 400, { schema, error: 'repo_slug and task_slug are required' })
         const result = journal.readJournal({ repo_slug: journalRepo, task_slug: journalTask, adw_id: url.searchParams.get('adw_id') || '' })
         return json(res, 200, { schema, ...result })
       }
       if (url.pathname === '/api/roster') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...roster.readRoster() })
       }
       if (url.pathname === '/api/cell-health') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultCellWindow()
-        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
-        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
-        const sinceMs = Date.parse(since)
-        const untilMs = until == null ? null : Date.parse(until)
-        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
-        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const bounds = readWindow(url, defaults)
+        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
+        const { since, until } = bounds
         const result = feed.cellFailures({ since, until })
         return json(res, 200, { schema, ...shapeCellHealth({ ...result, roster: roster.readRoster(), since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/run-set') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultRunSetWindow()
-        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
-        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
-        const sinceMs = Date.parse(since)
-        const untilMs = until == null ? null : Date.parse(until)
-        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
-        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const bounds = readWindow(url, defaults)
+        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
+        const { since, until } = bounds
         const result = feed.runSet({ since, until })
         // Read AFTER the query it reports on: the feed's db open is lazy, so a
         // handle that has answered nothing yet reports degraded false even for
@@ -287,50 +391,41 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...shapeRunSet({ ...result, degraded: runSetHealth?.degraded === true, degraded_reason: runSetReason, since, until, label: defaults.label, ceiling: budgetCeiling(env), burn }) })
       }
       if (url.pathname === '/api/intake') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultIntakeWindow()
-        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
-        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
-        const sinceMs = Date.parse(since)
-        const untilMs = until == null ? null : Date.parse(until)
-        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
-        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const bounds = readWindow(url, defaults)
+        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
+        const { since, until } = bounds
         const result = typeof feed.intake === 'function'
           ? feed.intake({ since, until })
           : { sweeps: null, refusals: null, picks: null, ever: null, absent: 'intake is unavailable from this feed' }
         return json(res, 200, { schema, ...shapeIntake({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/seat-teardowns') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultTeardownWindow()
-        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
-        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
-        const sinceMs = Date.parse(since)
-        const untilMs = until == null ? null : Date.parse(until)
-        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
-        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const bounds = readWindow(url, defaults)
+        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
+        const { since, until } = bounds
         const result = typeof feed.seatTeardowns === 'function'
           ? feed.seatTeardowns({ since, until })
           : { runs: null, rows: null, absent: 'seat teardowns are unavailable from this feed' }
         return json(res, 200, { schema, ...shapeSeatTeardowns({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/cell-attribution') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const defaults = defaultCellWindow()
-        const since = url.searchParams.has('since') ? url.searchParams.get('since') : defaults.since
-        const until = url.searchParams.has('until') ? url.searchParams.get('until') : defaults.until
-        const sinceMs = Date.parse(since)
-        const untilMs = until == null ? null : Date.parse(until)
-        if (Number.isNaN(sinceMs) || (until != null && Number.isNaN(untilMs))) return json(res, 400, { schema, error: 'since and until must be ISO timestamps' })
-        if (untilMs != null && untilMs <= sinceMs) return json(res, 400, { schema, error: 'until must be later than since' })
+        const bounds = readWindow(url, defaults)
+        if (bounds.error) return json(res, 400, { schema, error: bounds.error })
+        const { since, until } = bounds
         const result = typeof feed.cellAttribution === 'function'
           ? feed.cellAttribution({ since, until })
           : { runs: null, rows: null, unattributable: null, absent: 'cell attribution is unavailable from this feed' }
         return json(res, 200, { schema, ...shapeCellAttribution({ ...result, since, until, label: defaults.label }) })
       }
       if (url.pathname === '/api/intake/brake') {
-        if (req.method === 'GET') return json(res, 200, readBrake(config))
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET, POST' })
+        if (method === 'GET') return json(res, 200, readBrake(config))
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET, POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
@@ -380,7 +475,7 @@ export function startServer(options = {}) {
         })
       }
       if (url.pathname === '/api/roster/propose') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
@@ -392,7 +487,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/roster/ladder') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         const window = defaultCellWindow()
         const ladder = readLadder({ ladderPath: config.ladderPath })
         const reference = readReference({ referencePath: config.referencePath })
@@ -401,7 +496,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, ...view })
       }
       if (url.pathname === '/api/roster/ladder/stage') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
@@ -418,7 +513,7 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, roster_path: raw.path, ...result })
       }
       if (url.pathname === '/api/roster/ladder/compose') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
@@ -435,25 +530,30 @@ export function startServer(options = {}) {
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
       if (url.pathname === '/api/health') {
-        if (req.method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...feed.health(), ...returns.health(), returns_readonly: true })
       }
       if (url.pathname === '/api/triage') {
-        if (req.method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req) // #543: /api/triage is a state writer too
         if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
         let input
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
-        if (typeof input.adw_id !== 'string' || typeof input.reviewed !== 'boolean') return json(res, 400, { schema, error: 'adw_id and reviewed are required' })
+        if (!input || typeof input !== 'object' || Array.isArray(input) || typeof input.adw_id !== 'string' || typeof input.reviewed !== 'boolean') return json(res, 400, { schema, error: 'adw_id and reviewed are required' })
         const result = feed.setTriage(input)
         return json(res, 200, { schema, ...result })
       }
-      if (url.pathname.startsWith('/api/')) return req.method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
-      if (req.method !== 'GET' && req.method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
+      if (url.pathname.startsWith('/api/')) return method === 'GET' ? json(res, 404, { schema, error: 'not found' }) : json(res, 405, { schema, error: 'not found' }, { allow: 'GET' })
+      if (method !== 'GET' && method !== 'HEAD') return res.writeHead(405, { allow: 'GET, HEAD' }).end()
       return staticResponse(req, res)
     } catch (err) { return json(res, 500, { schema, error: err.message || 'internal error' }) }
   })
-  const close = () => { server.close(() => feed.close()) }
+  // server.close() alone lets one in-flight request hold the process open with no
+  // timeout: the port frees while an orphan keeps ledger.db and the triage
+  // sidecar's WAL open, and only a second SIGTERM kills it — by process death,
+  // never through feed.close() (h5 F11). This closes THIS server's own sockets
+  // and signals no other process.
+  const close = () => { server.close(() => feed.close()); server.closeIdleConnections(); server.closeAllConnections() }
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()

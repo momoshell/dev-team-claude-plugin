@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto'
 import { mkdtempSync, rmSync, existsSync, readFileSync, mkdirSync, writeFileSync, readdirSync, statSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { createServer } from 'node:net'
+import { createServer, connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
@@ -1730,6 +1730,252 @@ test('viz-absent-cause-per-call — a second failure through one handle reports 
     assert.notEqual(second.absent, first.absent)
   } finally {
     feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('strict ISO windows are canonicalised on every window route', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-window-contract-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const routes = ['/api/cell-health', '/api/run-set', '/api/intake', '/api/seat-teardowns', '/api/cell-attribution']
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    for (const route of routes) {
+      for (const value of ['2026', 'March 3 2026', '2025-02-29T00:00:00Z']) {
+        const refused = await json(base, `${route}?since=${encodeURIComponent(value)}`)
+        assert.equal(refused.status, 400, `${route} should refuse ${value}`)
+      }
+      const secondPrecision = await json(base, `${route}?since=${encodeURIComponent('2026-01-01T00:00:00Z')}`)
+      assert.equal(secondPrecision.status, 200, route)
+      assert.equal(secondPrecision.json.window.since, '2026-01-01T00:00:00.000Z', route)
+      const precise = '2026-01-01T00:00:00.123Z'
+      const fullPrecision = await json(base, `${route}?since=${encodeURIComponent(precise)}`)
+      assert.equal(fullPrecision.status, 200, route)
+      assert.equal(fullPrecision.json.window.since, precise, route)
+    }
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('HTTP query doors refuse unknown names and admit their declared vocabulary', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-query-vocabulary-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const routes = ['/api/cell-health', '/api/run-set', '/api/events', '/api/sessions']
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    for (const route of routes) {
+      for (const name of ['untill', 'sinc', 'limitt']) {
+        const refused = await json(base, `${route}?${name}=`)
+        assert.equal(refused.status, 400, `${route} should refuse ${name}`)
+        assert.match(refused.json.error, new RegExp(name))
+      }
+    }
+    const iso = encodeURIComponent('2026-01-01T00:00:00.000Z')
+    const until = encodeURIComponent('2026-02-01T00:00:00.000Z')
+    assert.equal((await json(base, `/api/run-set?since=${iso}&until=${until}`)).status, 200)
+    assert.equal((await json(base, '/api/sessions?mode=&status=&since=&until=')).status, 200)
+    assert.equal((await json(base, '/api/events?adw_id=x&after=0&limit=10&type=log&role=builder&phase_id=1')).status, 200)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/sessions validates and canonicalises its optional window', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-sessions-window-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    for (const value of ['zzz', '1e309', '-1']) assert.equal((await json(base, `/api/sessions?since=${encodeURIComponent(value)}`)).status, 400, value)
+    const inverted = await json(base, `/api/sessions?since=${encodeURIComponent('2024-01-02T00:00:00.000Z')}&until=${encodeURIComponent('2024-01-01T00:00:00.000Z')}`)
+    assert.equal(inverted.status, 400)
+    const valid = await json(base, `/api/sessions?since=${encodeURIComponent('2024-01-01T00:00:00Z')}&until=${encodeURIComponent('2024-01-02T00:00:00Z')}`)
+    assert.equal(valid.status, 200)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/events names absence when its ledger cannot be opened', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-events-absence-')
+  const brokenDb = join(dir, 'broken', 'ledger.db'), brokenTriage = join(dir, 'broken-visualizer.db')
+  mkdirSync(brokenDb, { recursive: true })
+  let child, base
+  try {
+    ({ child, base } = await startServer(brokenDb, brokenTriage))
+    const control = await json(base, '/api/sessions')
+    assert.equal(control.status, 200)
+    assert.equal(control.json.degraded, true)
+    const events = await json(base, '/api/events?adw_id=x&after=0')
+    assert.equal(events.status, 200)
+    assert.equal(events.json.degraded, true)
+    assert.equal(typeof events.json.absent, 'string')
+    assert.notEqual(events.json.absent.length, 0)
+    await stopServer(child); child = null
+
+    const healthyDb = join(dir, 'healthy', 'ledger.db'), healthyTriage = join(dir, 'healthy-visualizer.db')
+    const { done } = fixture(healthyDb);
+    ({ child, base } = await startServer(healthyDb, healthyTriage))
+    const all = await json(base, `/api/events?adw_id=${done}&after=0&limit=1000`)
+    assert.equal(all.status, 200)
+    const empty = await json(base, `/api/events?adw_id=${done}&after=${all.json.cursor}&limit=10`)
+    assert.equal(empty.status, 200)
+    assert.equal(empty.json.degraded, false)
+    assert.equal(empty.json.absent, null)
+    assert.deepEqual(empty.json.events, [])
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/events does not confuse a degraded triage sidecar with a degraded ledger', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-events-triage-degraded-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'triage.db')
+  const { done } = fixture(ledgerDb)
+  mkdirSync(triageDb, { recursive: true })
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const sessions = await json(base, '/api/sessions')
+    assert.equal(sessions.status, 200)
+    assert.equal(sessions.json.degraded, true)
+    const events = await json(base, `/api/events?adw_id=${done}&after=0&limit=10`)
+    assert.equal(events.status, 200)
+    assert.equal(events.json.events.length > 0, true)
+    assert.equal(events.json.degraded, false)
+    assert.equal(events.json.absent, null)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/triage refuses null and primitive JSON bodies without leaking an exception', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-triage-body-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    for (const body of ['null', '[]', '5']) {
+      const response = await json(base, '/api/triage', { method: 'POST', headers: { 'content-type': 'application/json' }, body })
+      assert.equal(response.status, 400, body)
+      assert.doesNotMatch(response.body, /Cannot read properties/)
+    }
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('/api/events refuses integers outside the safe range and accepts returned cursors', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-event-integer-bounds-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb, { filler: 101 })
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const huge = '99999999999999999999999'
+    assert.equal((await json(base, `/api/events?adw_id=${done}&limit=${huge}`)).status, 400)
+    assert.equal((await json(base, `/api/events?adw_id=${done}&after=${huge}`)).status, 400)
+    assert.equal((await json(base, `/api/events?adw_id=${done}&limit=9007199254740992`)).status, 400)
+    const first = await json(base, `/api/events?adw_id=${done}&limit=100`)
+    assert.equal(first.status, 200)
+    assert.equal(Number.isSafeInteger(first.json.cursor), true)
+    const next = await json(base, `/api/events?adw_id=${done}&after=${first.json.cursor}&limit=100`)
+    assert.equal(next.status, 200)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('SIGTERM closes an in-flight visualizer request', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-shutdown-flight-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  let server, socket
+  try {
+    server = await startServer(ledgerDb, triageDb)
+    const port = Number(new URL(server.base).port)
+    socket = await new Promise((resolveP, rejectP) => {
+      const connection = connect(port, '127.0.0.1', () => resolveP(connection))
+      connection.once('error', rejectP)
+    })
+    socket.write('POST /api/triage HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: 100\r\n\r\nnull')
+    await new Promise((resolveP) => setTimeout(resolveP, 100))
+    const exited = await new Promise((resolveP) => {
+      if (server.child.exitCode !== null) { resolveP(true); return }
+      let timer
+      const finish = (value) => { clearTimeout(timer); resolveP(value) }
+      server.child.once('exit', () => finish(true))
+      timer = setTimeout(() => finish(false), 5000)
+      server.child.kill('SIGTERM')
+    })
+    assert.equal(exited, true)
+  } finally {
+    try { socket?.destroy() } catch {}
+    if (server?.child.exitCode === null) {
+      server.child.kill('SIGKILL')
+      await new Promise((resolveP) => server.child.once('exit', resolveP))
+    }
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('static responses refuse symlinks that leave web/dist', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-static-outside-')
+  const outside = join(dir, 'outside.txt')
+  const dist = join(process.cwd(), 'visualizer', 'web', 'dist')
+  const madeDist = !existsSync(dist)
+  const leakPath = join(dist, `b288-symlink-${process.pid}-${Date.now()}.txt`)
+  writeFileSync(outside, 'B288-SYMLINK-ESCAPED-CONTENT')
+  let child, base
+  if (madeDist) mkdirSync(dist, { recursive: true })
+  try {
+    symlinkSync(outside, leakPath);
+    ({ child, base } = await startServer(join(dir, 'ledger.db'), join(dir, 'visualizer.db')))
+    const response = await fetch(`${base}/${leakPath.slice(dist.length + 1)}`)
+    const text = await response.text()
+    assert.equal(response.status, 404)
+    assert.doesNotMatch(text, /B288-SYMLINK-ESCAPED-CONTENT/)
+  } finally {
+    if (child) await stopServer(child)
+    rmSync(leakPath, { force: true })
+    if (madeDist) rmSync(dist, { recursive: true, force: true })
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('HEAD is supported for GET routes while write routes retain their Allow value', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-head-routes-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  let child, base
+  try {
+    ({ child, base } = await startServer(ledgerDb, triageDb))
+    const head = async (path) => {
+      const response = await fetch(`${base}${path}`, { method: 'HEAD' })
+      return { status: response.status, allow: response.headers.get('allow'), body: await response.text() }
+    }
+    for (const path of ['/api/health', '/api/sessions', '/api/roster']) {
+      const response = await head(path)
+      assert.equal(response.status, 200, path)
+      assert.equal(response.body, '', path)
+    }
+    const triage = await head('/api/triage')
+    assert.equal(triage.status, 405)
+    assert.equal(triage.allow, 'POST')
+  } finally {
+    if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
 })

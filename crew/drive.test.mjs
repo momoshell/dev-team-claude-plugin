@@ -23,7 +23,7 @@ import {
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
-  validateAcceptDecision, validatePlanResiduals, acceptContractLines, planAcceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX,
+  validateAcceptDecision, validatePlanResiduals, acceptContractLines, planAcceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX, ACCEPT_REFUSALS, ACCEPT_REASKS, acceptBounceLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines, divergenceConsultLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
   MAX_QUESTIONS, parseQuestions, matchAnswers, questionConsultLines, answerBounceLines, applyPrescriptionLines,
@@ -244,16 +244,21 @@ const PLAN_CHECK_FINDINGS = [
 ]
 
 function planCheckAcceptIo(details = {}, options = {}) {
+  const { leadAnswers = [], ...rest } = options
+  const followUps = Object.fromEntries(leadAnswers.map((answer, index) => (
+    [`lead:${index + 2}`, leadEnv(answer.decision || 'accept', 'because', answer)]
+  )))
   return fakeIo({
     envelopes: {
       'planner:1': planEnv(), 'planner:2': planEnv(),
       'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('revise'),
       'lead:1': leadEnv('accept', 'because the latest plan is usable', details),
+      ...followUps,
       'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
-    ...options,
+    ...rest,
   })
 }
 
@@ -280,6 +285,17 @@ test('a plan-check accept naming no residual records an empty accept', () => {
   assert.deepEqual(result.details.accept_decision.residuals, [])
 })
 
+test('an accepted decision records refusal null and reasked 0', () => {
+  const io = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
+  const result = driveTask(CTX_TL, io)
+  const row = result.details.accept_decision
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(row.outcome, 'accepted')
+  assert.equal(row.refusal, null)
+  assert.equal(row.reasked, 0)
+})
+
 test('a correctness-unverified plan-check residual still escalates', () => {
   const io = planCheckAcceptIo({ residuals: [{ ...PLAN_RESIDUAL, type: 'correctness-unverified' }] })
   const result = driveTask(CTX_TL, io)
@@ -291,10 +307,11 @@ test('a correctness-unverified plan-check residual still escalates', () => {
 })
 
 test('a malformed plan-check residual refuses the accept with keyed errors', () => {
-  const io = planCheckAcceptIo({ residuals: [
+  const malformed = { residuals: [
     { id: 'bad-type', type: 'not-a-residual-type', summary: 'named gap' },
     { id: 'no-summary', type: 'cosmetic' },
-  ] })
+  ] }
+  const io = planCheckAcceptIo(malformed, { leadAnswers: [malformed] })
   const result = driveTask(CTX_TL, io)
   const row = io.calls.logs.find((entry) => entry.accept_decision)?.accept_decision
   assert.equal(result.status, 'escalation')
@@ -302,6 +319,8 @@ test('a malformed plan-check residual refuses the accept with keyed errors', () 
   assert.equal(io.calls.commits.length, 0)
   assert.ok(row.errors.some((error) => error.id === 'bad-type' && error.why === 'unknown residual type'))
   assert.ok(row.errors.some((error) => error.id === 'no-summary' && error.why === 'empty residual summary'))
+  assert.equal(Object.keys(io.calls.writes).filter((path) => /\/decision-\d+-reask\d+\.md$/.test(path)).length, 1)
+  assert.equal(io.calls.assign.filter((entry) => entry.role === 'lead').length, 2)
 })
 
 test('the plan-check consult names residuals, types, and its unchanged options', () => {
@@ -317,16 +336,98 @@ test('the plan-check consult names residuals, types, and its unchanged options',
   for (const type of RESIDUAL_TYPES) assert.match(planAcceptContractLines().join('\n'), new RegExp(type))
 })
 
-test('a plan-check refuted-only accept fails closed without a commit', () => {
-  const io = planCheckAcceptIo({ refuted: [{ id: 'RV1-1', evidence: 'not a plan residual' }] })
+test('the measured b287 refuted-only accept bounces once and a corrected answer accepts', () => {
+  const io = planCheckAcceptIo(
+    { refuted: [{ id: 'C1', evidence: 'verified the anchors myself; the compact comparison cannot produce a readable locator' }] },
+    { leadAnswers: [{ residuals: [PLAN_RESIDUAL] }] },
+  )
   const result = driveTask(CTX_TL, io)
-  assert.equal(result.status, 'escalation')
-  assert.equal(io.calls.commits.length, 0)
-  assert.equal(result.details.accept_decision.outcome, 'escalated')
-  assert.ok(result.details.accept_decision.errors.some((error) => error.why.includes('refuted is not supported')))
+  const rows = io.calls.logs.filter((entry) => entry.accept_decision).map((entry) => entry.accept_decision)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(
+    { outcome: rows[0].outcome, refusal: rows[0].refusal, reasked: rows[0].reasked, residuals: rows[0].residuals },
+    { outcome: 'accepted', refusal: null, reasked: 1, residuals: [PLAN_RESIDUAL] },
+  )
 })
 
-function planThenReviewIo(laterDetails) {
+test('the accept re-ask brief carries the validator refusal and the contract this stage offers', () => {
+  const io = planCheckAcceptIo(
+    { refuted: [{ id: 'C1', evidence: 'verified the anchors myself; the compact comparison cannot produce a readable locator' }] },
+    { leadAnswers: [{ residuals: [PLAN_RESIDUAL] }] },
+  )
+  driveTask(CTX_TL, io)
+  const brief = io.calls.writes[`${TD}/decision-1-reask1.md`]
+  assert.ok(brief)
+  assert.match(brief, /refuted is not supported at a plan-check accept/)
+  for (const line of planAcceptContractLines()) {
+    if (line !== '') assert.ok(brief.includes(line), `missing contract line: ${line}`)
+  }
+})
+
+test('a second malformed accept escalates once and carries the original refusal', () => {
+  const io = planCheckAcceptIo(
+    { refuted: [{ id: 'C1', evidence: 'verified the anchors myself; the compact comparison cannot produce a readable locator' }] },
+    { leadAnswers: [{ residuals: [{ id: 'no-summary', type: 'cosmetic' }] }] },
+  )
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-check')
+  assert.match(result.details.escalation.why, /empty residual summary/)
+  assert.match(result.details.escalation.why, /refuted is not supported/)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(Object.keys(io.calls.writes).filter((path) => /\/decision-\d+-reask\d+\.md$/.test(path)).length, 1)
+  assert.equal(io.calls.assign.filter((entry) => entry.role === 'lead').length, 2)
+})
+
+test('a lead that answers escalate at the accept re-ask escalates with both reasons', () => {
+  const io = planCheckAcceptIo(
+    { refuted: [{ id: 'C1', evidence: 'verified the anchors myself; the compact comparison cannot produce a readable locator' }] },
+    { leadAnswers: [{ decision: 'escalate', reason: 'a human should read this' }] },
+  )
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-check')
+  assert.match(result.details.escalation.why, /refuted is not supported/)
+  assert.match(result.details.escalation.why, /a human should read this/)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('a form refusal is typed malformed and a correctness-unverified one judgment', () => {
+  const formIo = planCheckAcceptIo(
+    { refuted: [{ id: 'C1', evidence: 'not a plan residual' }] },
+    { leadAnswers: [{ refuted: [{ id: 'C1', evidence: 'not a plan residual' }] }] },
+  )
+  const form = driveTask(CTX_TL, formIo)
+  const formRow = form.details.accept_decision
+
+  const judgmentIo = planCheckAcceptIo({ residuals: [{ ...PLAN_RESIDUAL, type: 'correctness-unverified' }] })
+  const judgment = driveTask(CTX_TL, judgmentIo)
+  const judgmentRow = judgment.details.accept_decision
+
+  assert.equal(form.status, 'escalation')
+  assert.equal(judgment.status, 'escalation')
+  assert.equal(formRow.outcome, 'escalated')
+  assert.equal(judgmentRow.outcome, 'escalated')
+  assert.equal(formRow.refusal, 'malformed')
+  assert.equal(judgmentRow.refusal, 'judgment')
+  assert.ok(ACCEPT_REFUSALS.includes(formRow.refusal))
+  assert.ok(ACCEPT_REFUSALS.includes(judgmentRow.refusal))
+})
+
+test('a judgement refusal is never re-asked', () => {
+  const io = planCheckAcceptIo(
+    { residuals: [{ ...PLAN_RESIDUAL, type: 'correctness-unverified' }] },
+    { leadAnswers: [{ residuals: [PLAN_RESIDUAL] }] },
+  )
+  const result = driveTask(CTX_TL, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(Object.keys(io.calls.writes).filter((path) => /\/decision-\d+-reask\d+\.md$/.test(path)).length, 0)
+  assert.equal(io.calls.assign.filter((entry) => entry.role === 'lead').length, 1)
+})
+
+function planThenReviewIo(laterDetails, correction = laterDetails) {
   return fakeIo({
     envelopes: {
       'planner:1': planEnv(), 'planner:2': planEnv(),
@@ -336,6 +437,7 @@ function planThenReviewIo(laterDetails) {
       'reviewer:1': reviewEnv('changes-needed', PLAN_CHECK_FINDINGS),
       'reviewer:2': reviewEnv('changes-needed', PLAN_CHECK_FINDINGS),
       'lead:2': leadEnv('accept', 'record the review decision', laterDetails),
+      'lead:3': leadEnv('accept', 'correct the review decision', correction),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -364,6 +466,22 @@ test('a later valid review accept supersedes the plan-check decision on done', (
   assert.notDeepEqual(result.details.accept_decision, rows[0])
 })
 
+test('a malformed review-exhaustion accept is re-asked with the keyed contract', () => {
+  const io = planThenReviewIo(
+    { residuals: [{ id: 'unknown-review', type: 'cosmetic' }] },
+    { residuals: [{ id: 'RV-plan-1', type: 'cosmetic' }], refuted: [] },
+  )
+  const result = driveTask(CTX_TL, io)
+  const brief = io.calls.writes[`${TD}/decision-2-reask1.md`]
+  assert.ok(brief)
+  for (const line of acceptContractLines(PLAN_CHECK_FINDINGS)) {
+    if (line !== '') assert.ok(brief.includes(line), `missing contract line: ${line}`)
+  }
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.accept_decision.where, 'review-exhausted')
+  assert.equal(result.details.accept_decision.outcome, 'accepted')
+})
+
 test('a later refused review accept supersedes the plan-check decision on converge', () => {
   const io = fakeIo({
     envelopes: {
@@ -372,6 +490,7 @@ test('a later refused review accept supersedes the plan-check decision on conver
       'builder:1': buildEnv(), 'builder:2': buildEnv(),
       'reviewer:1': reviewEnv('changes-needed', REVIEW_FINDINGS),
       'lead:2': leadEnv('accept', 'record the refused review claim', { residuals: [{ id: 'unknown-review', type: 'cosmetic' }] }),
+      'lead:3': leadEnv('accept', 'record the refused review claim', { residuals: [{ id: 'unknown-review', type: 'cosmetic' }] }),
     },
     runs: {
       'gate-cmd:1': { ok: false, output: CONVERGE_GATE },
@@ -767,6 +886,18 @@ test('acceptContractLines lists findings and the typed residual/refutation instr
   assert.ok(lines.some((line) => /refuted should-fix still accepts/i.test(line)))
   for (const finding of findings) assert.equal(text.split(finding.id).length - 1, 1)
   assert.deepEqual(acceptContractLines(null), [])
+})
+
+test('acceptBounceLines renders hostile entries without throwing and appends the contract', () => {
+  let rendered
+  assert.doesNotThrow(() => {
+    acceptBounceLines(null, null)
+    rendered = acceptBounceLines([{}, { id: 1 }, null], planAcceptContractLines()).join('\n')
+  })
+  for (const line of planAcceptContractLines()) {
+    if (line !== '') assert.ok(rendered.includes(line), `missing contract line: ${line}`)
+  }
+  assert.match(rendered, new RegExp(`ACCEPT_REASKS = ${ACCEPT_REASKS}`))
 })
 
 test('the shared charter and validator agree on the findings contract', () => {
@@ -1676,6 +1807,7 @@ test('a re-review that surfaces NEW must-fixes is charged like any other', () =>
       'reviewer:1': reviewEnv('changes-needed', firstFindings),
       'reviewer:2': reviewEnv('changes-needed', secondFindings),
       'lead:1': leadEnv('accept'),
+      'lead:2': leadEnv('accept'),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -2049,6 +2181,7 @@ function exhaustionAcceptIo(details = {}, options = {}, findings = ACCEPT_FINDIN
       'reviewer:1': reviewEnv('changes-needed', findings),
       'reviewer:2': reviewEnv('changes-needed', findings),
       'lead:1': leadEnv('accept', 'because these are bounded residuals', details),
+      'lead:2': leadEnv('accept', 'because these are bounded residuals', details),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -2067,6 +2200,7 @@ function twoRoundReviewIo(round2Findings, accept, options = {}) {
       'reviewer:1': reviewEnv('changes-needed', ACCEPT_FINDINGS),
       'reviewer:2': reviewEnv('changes-needed', round2Findings),
       'lead:1': leadEnv('accept', 'because', accept),
+      'lead:2': leadEnv('accept', 'because', accept),
     },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
     changed: ['a.mjs', 'a.test.mjs'],
@@ -2088,6 +2222,8 @@ test('a findings-less later round leaves the canonical accept contract intact', 
   const brief = io.calls.writes[`${TD}/decision-1.md`]
   assert.match(brief, /RV1-1 \(must-fix\)/)
   assert.match(brief, /For an accept, name every listed finding exactly once/)
+  assert.equal(Object.keys(io.calls.writes).filter((path) => /\/decision-\d+-reask\d+\.md$/.test(path)).length, 1)
+  assert.equal(io.calls.assign.filter((entry) => entry.role === 'lead').length, 2)
 })
 
 test('a findings-carrying later round replaces the canonical accept contract', () => {
@@ -2192,6 +2328,19 @@ test('the refused decision is recorded valid, not malformed', () => {
   assert.equal(record.refuted[0].evidence, REFUTATION_CLAIM)
 })
 
+test('a refuted must-fix is a judgement and is never re-asked', () => {
+  const io = exhaustionAcceptIo({
+    residuals: [],
+    refuted: [{ id: 'RV2-1', evidence: 'the must-fix is not a real defect' }],
+  }, {}, MUST_FIX_REFUTATION_FINDINGS)
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'refuted-must-fix')
+  assert.equal(result.details.accept_decision.refusal, 'judgment')
+  assert.equal(result.details.accept_decision.reasked, 0)
+  assert.equal(Object.keys(io.calls.writes).filter((path) => /\/decision-\d+-reask\d+\.md$/.test(path)).length, 0)
+})
+
 test('refutation evidence is bounded', () => {
   const findings = [{ id: 'RV2-1', severity: 'should-fix' }]
   const long = `${'x'.repeat(REFUTATION_EVIDENCE_MAX)}TAIL`
@@ -2241,6 +2390,23 @@ test('accepted_via states what the record contains', () => {
   }, {}, ACCEPT_FINDINGS_SOFT)
   const build = driveTask({ ...CTX, limits: { build_rounds: 1, review_rounds: 1 } }, buildIo)
   assert.match(build.details.accepted_via, /\(build rounds exhausted\)$/)
+})
+
+test('the accept re-ask does not spend a lead consult', () => {
+  const bouncingIo = planCheckAcceptIo(
+    { refuted: [{ id: 'C1', evidence: 'verified the anchors myself; the compact comparison cannot produce a readable locator' }] },
+    { leadAnswers: [{ residuals: [PLAN_RESIDUAL] }] },
+  )
+  const bouncing = driveTask(CTX_TL, bouncingIo)
+  const directIo = planCheckAcceptIo({ residuals: [PLAN_RESIDUAL] })
+  const direct = driveTask(CTX_TL, directIo)
+
+  assert.equal(bouncing.status, 'done')
+  assert.equal(direct.status, 'done')
+  assert.equal(bouncing.details.consults, 1)
+  assert.equal(direct.details.consults, 1)
+  assert.equal(bouncingIo.calls.assign.filter((entry) => entry.role === 'lead').length, 2)
+  assert.equal(directIo.calls.assign.filter((entry) => entry.role === 'lead').length, 1)
 })
 
 test('the converge seam does not swallow a refuted must-fix', () => {
@@ -2384,6 +2550,10 @@ test('fail-closed accept escalation composes with the regrant policy shape', () 
       'reviewer:2': reviewEnv('changes-needed', ACCEPT_FINDINGS),
       'lead:1': leadEnv('bounce'),
       'lead:2': leadEnv('accept', 'invalid typed decision', {
+        residuals: [{ id: 'RV1-1', type: 'cosmetic' }],
+        refuted: [{ id: 'RV1-2', evidence: 'not real' }],
+      }),
+      'lead:3': leadEnv('accept', 'invalid typed decision', {
         residuals: [{ id: 'RV1-1', type: 'cosmetic' }],
         refuted: [{ id: 'RV1-2', evidence: 'not real' }],
       }),
@@ -7065,6 +7235,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at dissent'],
   ['recordRow', '', 'at decision consult round reason'],
   ['recordRow', '', 'at extra_round_granted'],
+  ['recordRow', '', 'at accept_reask'],
   ['recordRow', '', 'at accept_decision'],
   ['recordRow', '', 'at envelope_accepted'],
   ['recordRow', '', 'at triage'],
@@ -7100,7 +7271,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 38)
+  assert.equal(sites.length, 39)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)

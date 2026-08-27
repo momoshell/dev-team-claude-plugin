@@ -1306,6 +1306,48 @@ export function planAcceptContractLines() {
   ]
 }
 
+// A refusal has two KINDS and they are not the same event. `malformed` is a FORM
+// error: the lead put its answer in a field this stage does not support, or left a
+// required key out. Nothing it decided has been rejected on the merits and code can
+// say exactly what to change, so it is a RETRY. `judgment` is well-formed and code
+// declines to honour it (a correctness-unverified residual, a refuted must-fix) —
+// that is a decision for a human and no re-ask can move it. #715: folding the two
+// into one terminal `escalated` cost lane b287-resume its whole run over a field
+// name, while an under-answering PLANNER has had another turn since
+// answerBounceLines (crew/drive.mjs:1040). The record carries the KIND as a field
+// because the only thing that used to separate them was one word of prose
+// (crew/drive.mjs:2176), and an operator should not have to parse prose to tell
+// a typo from a judgement. It is NOT the ledger's `outcome`: that column is a closed
+// binary (ACCEPT_DECISION_OUTCOMES, scripts/factory/ledger.mjs:181).
+export const ACCEPT_REFUSALS = Object.freeze(['malformed', 'judgment'])
+
+// ONE correction, never two: the bound is a constant so the loop that honours it
+// can be read at a glance.
+export const ACCEPT_REASKS = 1
+
+// Hand the lead back its own refused accept, exactly as answerBounceLines
+// (crew/drive.mjs:1040) hands a planner back its own inadequate answer: the
+// validator's refusal in its own words, plus the contract THIS STAGE offers.
+// b287's lead used a shape it had never been shown; showing it is the whole repair.
+// Total by construction: malformed error entries still render without throwing.
+export function acceptBounceLines(errors, contractLines) {
+  const entries = Array.isArray(errors) ? errors : []
+  const lines = ['', '## Your accept was refused on FORM, not on the merits']
+  for (const entry of entries) {
+    let id = null
+    let why = ''
+    try { id = entry?.id; why = textOf(entry?.why) } catch { /* malformed entries still render */ }
+    lines.push(`- ${typeof id === 'string' && id !== '' ? id : 'decision'}: ${why}`)
+  }
+  lines.push(
+    '',
+    'Nothing you decided has been rejected. Restate the SAME decision in the shape below, or answer escalate if you want a human to read it instead.',
+    `This is your ONE correction (ACCEPT_REASKS = ${ACCEPT_REASKS}): a second refused answer escalates the run.`,
+    ...(Array.isArray(contractLines) ? contractLines : []),
+  )
+  return lines
+}
+
 // accepted_via DESCRIBES THE RECORD. A label that contradicts the record is
 // worse than no label: the old hardcoded accepted-via sentence announced
 // residuals for a decision that carried none, and nearly got this defect filed
@@ -2068,8 +2110,8 @@ function runTask(ctx, io, crash) {
     return second
   }
 
-  function askLead(question, options, contextPaths, { round, targets }) {
-    const briefPath = art(`decision-${S.consults}${round === 2 ? 'b' : ''}.md`)
+  function askLead(question, options, contextPaths, { round, targets, label = '' }) {
+    const briefPath = art(`decision-${S.consults}${round === 2 ? 'b' : ''}${label ? `-${label}` : ''}.md`)
     const valve = round === 1 && targets.length > 0
       ? [`- ${SECOND_OPINION} (set details.from to one of: ${targets.join(', ')} — code will gather their independent view and re-ask you once)`]
       : []
@@ -2084,7 +2126,7 @@ function runTask(ctx, io, crash) {
       `Reply with a ReturnEnvelope whose details are {"decision": <option>, "reason": "...", "guidance": "..."${round === 1 ? ', "from": "<role>" when requesting a second opinion' : ''}}.`,
       `guidance is REQUIRED when decision is bounce — it becomes the bounce brief's steer.`,
     ].join('\n'))
-    const env = assignAndWait('lead', briefPath, round === 2 ? 'decision-final' : 'decision')
+    const env = assignAndWait('lead', briefPath, label ? `decision-${label}` : round === 2 ? 'decision-final' : 'decision')
     const d = env.details || {}
     // Round 2: a repeat second-opinion passes through raw so consultLead can
     // name the one-hop bound precisely in its escalation reason.
@@ -2154,10 +2196,12 @@ function runTask(ctx, io, crash) {
     })
   }
 
-  // Settle a lead accept at either exhaustion point. A missing findings array
-  // is the older reviewer contract and remains a legacy accept; an explicit
-  // array is always checked against the latest canonical set and recorded.
-  function settleAccept(c, where) {
+  // Adjudicate ONE lead accept. PURE: no journal row, no emit, no S.planAccept.
+  // settleAccept records exactly once, after the re-ask has had its turn, so a
+  // corrected answer never leaves a false `escalated` row behind it — the ledger's
+  // outcome column is a closed binary (scripts/factory/ledger.mjs:181) and the row
+  // is written for the decision that STOOD.
+  function adjudicateAccept(c, where) {
     const findings = S.acceptFindings
     const check = where === 'plan-check'
       ? validatePlanResiduals(c.residuals, c.refuted)
@@ -2167,6 +2211,9 @@ function runTask(ctx, io, crash) {
     const errors = check.errors || []
     const refusedMustFix = check.refuted_must_fix || []
     const outcome = check.ok && check.unverified.length === 0 && refusedMustFix.length === 0 ? 'accepted' : 'escalated'
+    // The typed distinction (#715): a form error is a RETRY; unverified and
+    // refuted_must_fix are well-formed and are a decision for a human.
+    const refusal = outcome === 'accepted' ? null : errors.length > 0 ? 'malformed' : 'judgment'
     const errorWhy = errors.map(({ id, why }) => `${id ?? 'decision'} ${why}`)
     const unverifiedWhy = check.unverified.map((id) => `${id} is correctness-unverified`)
     const evidenceOf = (id) => check.refuted.find((entry) => entry.id === id)?.evidence ?? ''
@@ -2177,6 +2224,7 @@ function runTask(ctx, io, crash) {
     const record = {
       where,
       outcome,
+      refusal,
       findings_total: Array.isArray(findings) ? findings.length : 0,
       residuals: check.residuals,
       refuted: check.refuted,
@@ -2184,6 +2232,48 @@ function runTask(ctx, io, crash) {
       refuted_must_fix: refusedMustFix,
       errors,
     }
+    return { ok: outcome === 'accepted', why, record, refusal, refusedMustFix: refusedMustFix.length > 0 }
+  }
+
+  const acceptContractFor = (where) => (where === 'plan-check' ? planAcceptContractLines() : acceptContractLines(S.acceptFindings))
+
+  // The lead's answerBounceLines. NOT charged as a consult: this corrects the FORM
+  // of an answer the lead has already given — it is not a second opinion — and
+  // charging it would let a run whose consult budget is exactly spent lose the lane
+  // to a field name all over again (consultLead returns escalate without asking
+  // anyone once the budget is out, crew/drive.mjs:2010), which is the very defect
+  // #715 exists to remove. The bound is structural instead: ACCEPT_REASKS per
+  // settle, and a run settles an accept at most once per exhaustion point.
+  function askAcceptCorrection(where, refused, contextPaths, reask) {
+    io.log(recordRow({ at: io.now(), accept_reask: { where, reask, errors: refused.record.errors } }))
+    emit({ kind: 'accept-reask', where, reask, errors: refused.record.errors })
+    return askLead(
+      [`Your accept at ${where} was refused because it is NOT WELL-FORMED. This is a form error, not a judgement on your decision.`,
+        ...acceptBounceLines(refused.record.errors, acceptContractFor(where))].join('\n'),
+      ['accept', 'escalate'], contextPaths, { round: 1, targets: [], label: `reask${reask}` },
+    )
+  }
+
+  // Settle a lead accept at either exhaustion point. A missing findings array
+  // is the older reviewer contract and remains a legacy accept; an explicit
+  // array is always checked against the latest canonical set and recorded.
+  // A MALFORMED answer is re-asked once before it can end the run (#715); a
+  // `judgment` refusal is for a human and is never re-asked.
+  function settleAccept(c, where, contextPaths = []) {
+    let settled = adjudicateAccept(c, where)
+    let reasked = 0
+    for (let reask = 1; settled.refusal === 'malformed' && reask <= ACCEPT_REASKS; reask += 1) {
+      const refused = settled
+      const again = askAcceptCorrection(where, refused, contextPaths, reask)
+      reasked = reask
+      if (again.decision !== 'accept') {
+        settled = { ...refused, why: `${refused.why} — re-asked once; the lead answered ${again.decision}: ${again.reason || 'no reason given'}` }
+        break
+      }
+      settled = adjudicateAccept(again, where)
+      if (!settled.ok) settled = { ...settled, why: `${settled.why} (re-asked once after: ${refused.why})` }
+    }
+    const record = { ...settled.record, reasked }
     // Conditional-LATEST state, not plan-only state: once a plan-check accept has
     // opened the slot, every later typed decision supersedes it, so the terminals
     // that pass no extraDetails (done at crew/drive.mjs:3388, converge at :1828)
@@ -2193,7 +2283,7 @@ function runTask(ctx, io, crash) {
     if (where === 'plan-check' || S.planAccept !== null) S.planAccept = record
     io.log(recordRow({ at: io.now(), accept_decision: record }))
     emit({ kind: 'accept-decision', ...record })
-    return { ok: outcome === 'accepted', why, record, refusedMustFix: refusedMustFix.length > 0 }
+    return { ok: settled.ok, why: settled.why, record, refusedMustFix: settled.refusedMustFix }
   }
 
   const acceptQuestion = (question) => {
@@ -2572,7 +2662,7 @@ function runTask(ctx, io, crash) {
       // Accept RECORDS. b209-journalchannel escalated at this exact break because
       // it "records nothing": the lead knew the residual gap exactly and had
       // nowhere to put it, so it spent the run's escalation to say so in prose.
-      const settledPlan = settleAccept(c, 'plan-check')
+      const settledPlan = settleAccept(c, 'plan-check', [planPath, check.details?.check_path || art('plan-check.md')])
       if (!settledPlan.ok) {
         stageComplete()
         stageComplete()
@@ -3392,7 +3482,7 @@ function runTask(ctx, io, crash) {
           stageComplete()
           continue build
         }
-        const settledAccept = settleAccept(c, 'review-exhausted')
+        const settledAccept = settleAccept(c, 'review-exhausted', [planPath, lastReviewPath])
         // A refuted must-fix is NOT a residual: convergeSettle would file it as one,
         // commit the build and open a PR — the viz-intake outcome under another name.
         // It fails closed to the human, and a distinct `where` keeps it out of the
@@ -3468,7 +3558,7 @@ function runTask(ctx, io, crash) {
             stageComplete()
             continue build
           }
-          const settledAccept = settleAccept(c, 'build-exhausted')
+          const settledAccept = settleAccept(c, 'build-exhausted', [planPath, lastReviewPath])
           // A refuted must-fix is NOT a residual: convergeSettle would file it as one,
           // commit the build and open a PR — the viz-intake outcome under another name.
           // It fails closed to the human, and a distinct `where` keeps it out of the

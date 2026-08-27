@@ -29,9 +29,18 @@ test('returns source resolves archives, attempts, malformed envelopes, and never
     const result = createReturnsSource({ crewRoot: root }).listEnvelopes({ repo_slug: 'repo', task_slug: 'task', adw_id: 'run-1' })
     assert.equal(result.verified, true)
     assert.equal(result.dir, dir)
+    // #718: a non-matching ledger/run.json is not an absence. The newest
+    // candidate is returned unverified, exactly as a candidate with no
+    // run.json is (below), and an omitted adw_id ('' from server.mjs:339) is
+    // answered the same way rather than with a false denial.
     const rejected = createReturnsSource({ crewRoot: root }).listEnvelopes({ repo_slug: 'repo', task_slug: 'task', adw_id: 'missing-run' })
-    assert.equal(rejected.error, 'no task directory for this run')
-    assert.deepEqual(rejected.envelopes, [])
+    assert.equal(rejected.dir, mismatched)
+    assert.equal(rejected.verified, false)
+    assert.equal(rejected.envelopes.length, 1)
+    assert.equal(rejected.error, undefined)
+    const anyRun = createReturnsSource({ crewRoot: root }).listEnvelopes({ repo_slug: 'repo', task_slug: 'task', adw_id: '' })
+    assert.equal(anyRun.dir, mismatched)
+    assert.equal(anyRun.verified, false)
     assert.deepEqual(result.envelopes.map((entry) => entry.assignment_id), ['d1', 'd2', 'd3', 'd4'])
     assert.equal(result.envelopes.some((entry) => entry.assignment_id === 'r1' || entry.assignment_id === 'r2'), false)
     assert.equal(result.envelopes.find((entry) => entry.assignment_id === 'd3').valid, false)

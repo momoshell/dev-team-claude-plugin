@@ -20,7 +20,7 @@ import { splitFrames } from './headless-rpc.mjs'
 import { openRun } from '../scripts/factory/emit.mjs'
 import { NODE_FLOOR, openLedger } from '../scripts/factory/ledger.mjs'
 import { repoKeyFor } from '../scripts/factory/probe-repo.mjs'
-import { sqliteAvailable, writeTornFile } from '../test/helpers.mjs'
+import { scratchDir, sqliteAvailable, writeTornFile } from '../test/helpers.mjs'
 
 // Quote characters inside a regex literal are ordinary here again: maskCode()
 // in test/factory-env.test.mjs classifies every slash from the token before it
@@ -1351,8 +1351,9 @@ test('an unmeasurable budget window refuses with its path and reason', () => {
   } finally { f.cleanup() }
 })
 
-test('an absent ledger is measured only at the ledger floor and child specs carry budget state', async () => {
-  const ledgerPath = join(tmpdir(), `missing-budget-${process.pid}-${Date.now()}.db`)
+test('an absent mirror beside a present ledger authority is unmeasured, an absent ledger dir is at the floor, and child specs carry budget state', async () => {
+  const ledgerDir = scratchDir('daemon-missing-budget-')
+  const ledgerPath = join(ledgerDir, 'ledger.db')
   const f = fixture({ budget: { max_tokens: 1, ledger_db: ledgerPath } })
   try {
     const usage = usageWindow({ dbPath: ledgerPath, since: '2026-01-01T00:00:00.000Z' })
@@ -1363,6 +1364,7 @@ test('an absent ledger is measured only at the ledger floor and child specs carr
       assert.equal(f.forks.length, 0, 'an unmeasurable configured budget must not fork a JSONL-only child')
       return
     }
+    // (a) an absent mirror with no authority beside it is a fresh ledger at the floor.
     assert.deepEqual(usage, { measured: true, total: 0, sessions: 0 })
     f.d.enqueue({ crew_dir: f.crewDir })
     assert.equal(f.forks.length, 1)
@@ -1370,10 +1372,21 @@ test('an absent ledger is measured only at the ledger floor and child specs carr
     assert.equal(typeof spec.ledger_db, 'string')
     assert.equal(spec.ledger_db, ledgerPath)
     assert.equal(spec.budget_enabled, true)
+
+    // (b) the same absent mirror, now with the JSONL authority beside it. The spend
+    // is on disk; a measured zero here is what one `rm` used to buy (#719).
+    writeFileSync(join(ledgerDir, 'ledger.jsonl'), '{"kind":"agent_session"}\n')
+    const deleted = usageWindow({ dbPath: ledgerPath, since: '2026-01-01T00:00:00.000Z' })
+    assert.equal(deleted.measured, false, 'a deleted mirror beside a present authority hides spend, it does not prove there was none')
+    assert.equal(deleted.total, null)
+    assert.equal(deleted.sessions, 0)
+    assert.match(deleted.why, /ledger\.jsonl/)
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, run_id: 'deleted-mirror' }), (err) => err.code === 'budget-unmeasurable')
+    assert.equal(f.forks.length, 1, 'a run whose spend cannot be measured must not be forked')
   } finally { await f.d.stop(); f.cleanup() }
 })
 
-test('usageWindow fails closed below the emitter floor and preserves its at-floor absent-db fast path', () => {
+test('usageWindow fails closed below the emitter floor and keeps its at-floor fast path only when no ledger authority sits beside the mirror', () => {
   const dir = mkdtempSync(join(tmpdir(), 'daemon-budget-floor-'))
   const dbPath = join(dir, 'ledger.db')
   const since = '2026-01-02T00:00:00.000Z'
@@ -1393,6 +1406,8 @@ test('usageWindow fails closed below the emitter floor and preserves its at-floo
     for (const nodeVersion of ['26.0.0', '26.5.1']) {
       const result = usageWindow({ dbPath, since, nodeVersion })
       if (sqliteAvailable()) {
+        // The fast path survives, but only for what it can honestly claim: this dir
+        // holds no ledger.jsonl, so there is no authority whose spend a zero hides.
         assert.deepEqual(result, { measured: true, total: 0, sessions: 0 })
       } else {
         assert.equal(result.measured, false, 'a simulated at-floor version cannot make this below-floor process require SQLite')
@@ -1400,6 +1415,26 @@ test('usageWindow fails closed below the emitter floor and preserves its at-floo
       }
     }
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a present but unreadable mirror is unmeasured and says so differently from a deleted mirror beside a ledger authority', () => {
+  if (!LEDGER_SQLITE_OK) return
+  const ledgerDir = scratchDir('daemon-mirror-cases-')
+  const dbPath = join(ledgerDir, 'ledger.db')
+  const since = '2026-01-01T00:00:00.000Z'
+  writeFileSync(dbPath, 'not a sqlite database')
+  const unreadable = usageWindow({ dbPath, since })
+  assert.equal(unreadable.measured, false)
+  assert.equal(unreadable.total, null)
+  assert.equal(typeof unreadable.why, 'string')
+  assert.notEqual(unreadable.why, '')
+  rmSync(dbPath)
+  writeFileSync(join(ledgerDir, 'ledger.jsonl'), '{"kind":"agent_session"}\n')
+  const deleted = usageWindow({ dbPath, since })
+  assert.equal(deleted.measured, false)
+  assert.equal(deleted.total, null)
+  assert.match(deleted.why, /ledger\.jsonl/)
+  assert.notEqual(deleted.why, unreadable.why)
 })
 
 test('the ledger floor gates a configured budget but not a no-budget daemon', () => {

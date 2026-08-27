@@ -255,6 +255,43 @@ function versionAtLeast(value, floor) {
   return true
 }
 
+// The SQLite mirror is a REBUILDABLE PROJECTION of the JSONL authority beside
+// it, which scripts/factory/ledger.mjs's header says "may be deleted at any
+// time and rebuilt in full via replayJsonl()". So an ABSENT mirror means one of
+// two things, and they are not the same answer: with no authority beside it
+// nothing was ever recorded and a floor zero is the truth; with an authority
+// beside it the spend IS on disk and this reader cannot see it, which is
+// unmeasured, not zero — the case one `rm` used to turn into an unlimited
+// ceiling (#719). The authority is never PARSED here: its existence is the
+// whole signal, and measuring a total from it is a bigger change than this
+// reader owns.
+function absentMirror(dbPath) {
+  const mirror = typeof dbPath === 'string' ? dbPath.trim() : ''
+  if (mirror === '') {
+    return { measured: false, total: null, sessions: 0, why: 'no ledger database path is configured, so this window cannot be measured' }
+  }
+  const authority = join(dirname(mirror), 'ledger.jsonl')
+  try {
+    // existsSync() collapses access errors to false; statSync() keeps an
+    // inaccessible authority from being mistaken for a genuinely fresh ledger.
+    fsStatSync(authority)
+  } catch (err) {
+    if (err?.code !== 'ENOENT') {
+      return {
+        measured: false, total: null, sessions: 0,
+        why: `cannot determine whether the JSONL authority at ${authority} is present — ${err?.message || String(err)}`,
+      }
+    }
+  }
+  if (fsExistsSync(authority)) {
+    return {
+      measured: false, total: null, sessions: 0,
+      why: `the SQLite mirror at ${mirror} is absent while the JSONL authority at ${authority} is present — the mirror is a rebuildable projection, so its absence hides recorded spend rather than proving there was none (rebuild it with replayJsonl, or clear the ceiling with daemon({budget:null}))`,
+    }
+  }
+  return { measured: true, total: 0, sessions: 0 } // no authority beside it: nothing was ever recorded here
+}
+
 // Each agent_sessions row is a running total for one session, not a delta;
 // SUM-over-rows is therefore correct (scripts/factory/ledger.mjs:1378), while
 // MAX or a last-row read silently under-reports a window.
@@ -271,7 +308,7 @@ export function usageWindow({ dbPath, since, nodeVersion = process.versions.node
     // rows. Without node:sqlite, child emitters are JSONL-only and a configured
     // ceiling must fail closed rather than remain zero forever.
     const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite')
-    if (!fsExistsSync(dbPath)) return { measured: true, total: 0, sessions: 0 }
+    if (!fsExistsSync(dbPath)) return absentMirror(dbPath)
     db = new DatabaseSync(dbPath, { readOnly: true })
     db.exec('PRAGMA busy_timeout = 5000')
     const row = db.prepare(`

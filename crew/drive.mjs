@@ -130,6 +130,7 @@ export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
 // #45 Tier B slice 1. The failure upgrade is spent ONCE PER TASK, across all
 // roles and all bounce kinds — the ratified budget is per task, not per role.
 export const FAILURE_UPGRADE = 'failure-upgrade'
+export const NO_RESEAT_WHY = 'this io provides no reseat'
 export const SENSITIVITY_FLOOR = 'sensitivity-floor'
 export const JUDGE_TIER = 'judge'
 // Ratified for this repo on issue #250 (orchestrator, 2026-08-16). The
@@ -1492,6 +1493,59 @@ export function roundCursor(stages) {
   }
   return cursor
 }
+
+export const RESUME_LOOPS = Object.freeze(['build'])
+// Slice 1 supports exactly the four mechanical build-loop rows. `plan`, `check`
+// and `review` are REFUSALS here (resume-stage-unsupported); slice 2 ADDS rows
+// to this map rather than rewriting the substrate under it.
+export const RESUME_ENTRIES = Object.freeze({
+  build: 'build', 'scope-gate': 'build', lane: 'build', gate: 'build',
+})
+export function resumePoint(stages) {
+  if (!Array.isArray(stages)) return null
+  for (let i = stages.length - 1; i >= 0; i -= 1) {
+    const label = stages[i]
+    if (typeof label !== 'string' || label.startsWith('escalate:')) continue
+    return label
+  }
+  return null
+}
+export function resumeRound(label) {
+  const match = typeof label === 'string' ? /:r(\d+)$/.exec(label) : null
+  if (!match) return null
+  const round = Number(match[1])
+  return Number.isInteger(round) && round > 0 ? round : null
+}
+export function resumeEntry(stages) {
+  const from = resumePoint(stages)
+  if (!from) return null
+  const match = /^([^:]+):r\d+$/.exec(from)
+  const round = resumeRound(from)
+  if (!match || round === null) return null
+  const head = match[1]
+  return { from, head, loop: Object.hasOwn(RESUME_ENTRIES, head) ? RESUME_ENTRIES[head] : head, round }
+}
+export function resumeDefect(resume, shape) {
+  if (resume === null || resume === undefined) return null
+  if (!isPlainObject(resume)) return 'resume is not a plain object'
+  if (!RESUME_LOOPS.includes(resume.loop)) return `resume.loop must be one of ${RESUME_LOOPS.join(', ')}`
+  if (!Object.hasOwn(RESUME_ENTRIES, resume.head)) return `resume.head must be one of ${Object.keys(RESUME_ENTRIES).join(', ')}`
+  if (RESUME_ENTRIES[resume.head] !== resume.loop) return `resume.head ${JSON.stringify(resume.head)} does not map to loop ${JSON.stringify(resume.loop)}`
+  if (!Number.isInteger(resume.round) || resume.round <= 0) return 'resume.round must be a positive integer'
+  if (typeof resume.from !== 'string' || resume.from.trim() === '') return 'resume.from must be a non-empty string'
+  if (!isPlainObject(resume.restored)) return 'resume.restored is not a plain object'
+  if (!Array.isArray(shape?.stages) || !shape.stages.includes('plan')) return 'the shape does not declare plan'
+  if (!Array.isArray(resume.planner?.env?.details?.files_in_scope) || resume.planner.env.details.files_in_scope.length === 0) {
+    return 'resume planner.env.details.files_in_scope is missing'
+  }
+  if (['scope-gate', 'lane', 'gate'].includes(resume.head) && resume.builder?.env?.status !== 'done') {
+    return `resume builder.env is not a done envelope for ${resume.head}`
+  }
+  if (resume.head === 'gate' && (typeof resume.restored.gate?.cmd !== 'string' || resume.restored.gate.cmd.trim() === '')) {
+    return 'resume restored.gate.cmd is missing'
+  }
+  return null
+}
 // `extra` adds to the authored floor and can never replace it.
 export function protectedHits(entries, extra) {
   return protectedHitsIn(entries, resolveProtectedPaths(extra))
@@ -1598,9 +1652,45 @@ function runTask(ctx, io, crash) {
   if (declarationDefect) {
     throw fail('variant', `the ${variant} shape's declaration cannot be honoured: ${declarationDefect}`)
   }
+  // #583 — fail CLOSED, and HERE: before the crash recorder is armed
+  // (crew/drive.mjs:1719), so the throw ESCAPES driveTask rather than becoming an
+  // envelope, and before any stage or assignment, so an invalid recovery state can
+  // never become a second ordinary run from the beginning. driveTask is a public
+  // two-argument API (crew/daemon.test.mjs:415), so the CLI preflight is not proof.
+  const resumeDefectWhy = resumeDefect(ctx.resume, shape)
+  if (resumeDefectWhy) throw fail('resume', `this run cannot be resumed: ${resumeDefectWhy}`)
   const limits = { ...LIMITS, ...(ctx.limits || {}) }
   const waits = { ...WAITS_S, ...(ctx.waits || {}) }
   const S = { consults: 0, stages: [], commit: null, dissents: [], grants: [], growth: [], modifiers: [], acceptFindings: null, seqHighWater: 0, planAccept: null }
+  const resumeState = ctx.resume ?? null
+  const resumeLoop = (resumeState && RESUME_LOOPS.includes(resumeState.loop)) ? resumeState.loop : null
+  const buildStart = (resumeLoop === 'build') ? resumeState.round : 1
+  const skipPlanLoop = (resumeLoop === 'build')
+  const skipGateBaseline = (resumeLoop === 'build')
+  const restored = resumeState?.restored ?? null
+  const skipSensitivityFloor = (resumeLoop === 'build' && (restored?.modifiers ?? [])
+    .some((m) => m?.modifier === SENSITIVITY_FLOOR && m?.outcome === 'applied'))
+  let resumeSkip = (resumeLoop === 'build') ? resumeState.head : null
+  const beforeEntry = (head) => {
+    if (resumeSkip === null) return false
+    if (resumeSkip === head) { resumeSkip = null; return false }
+    return true
+  }
+  const replayBuildRound = (round) => ((resumeLoop === 'build' && resumeState.head !== 'build'
+    && round === resumeState.round) ? resumeState.builder : null)
+
+  // #583 — the crashed run's TASK-GLOBAL spend comes back. gateAttempt and
+  // S.seqHighWater deliberately do NOT: they are run-local high-water marks
+  // (crew/drive.mjs:1713-1718) and mixing two runs' marks corrupts the ledger's
+  // gate-attempt uniqueness and the assignment sequence.
+  if (restored) {
+    S.consults = (restored.consults ?? 0)
+    for (const g of (restored.grants ?? [])) S.grants.push(g)
+    for (const m of (restored.modifiers ?? [])) S.modifiers.push(m)
+    for (const d of (restored.dissents ?? [])) S.dissents.push(d)
+    S.acceptFindings = (restored.accept_findings ?? null)
+    S.planAccept = (restored.accept_decision ?? null)
+  }
   const art = (name) => `${ctx.taskDir}/${name}`
   // The journal lives in the CREW dir, not the task dir — take its real path
   // from ctx so decision briefs and escalation artifacts never cite a 404.
@@ -1633,7 +1723,7 @@ function runTask(ctx, io, crash) {
   // exception is an io with no `reseat` method at all: that is a static property
   // of the io, it cannot change mid-run, and re-asking would record the same
   // fact once per bounce.
-  let upgradeSpent = false
+  let upgradeSpent = (ctx.resume?.restored?.upgrade_spent === true)
   const failureUpgrade = (kind, role) => {
     let entry
     try {
@@ -1641,7 +1731,7 @@ function runTask(ctx, io, crash) {
         entry = { outcome: 'spent', why: 'the task failure-upgrade budget was already spent' }
       } else if (typeof io.reseat !== 'function') {
         upgradeSpent = true
-        entry = { outcome: 'transport', why: 'this io provides no reseat' }
+        entry = { outcome: 'transport', why: NO_RESEAT_WHY }
       } else {
         const result = io.reseat(role, { reason: `${kind}-bounce` })
         if (result?.applied === true) {
@@ -1697,17 +1787,25 @@ function runTask(ctx, io, crash) {
     return record
   }
 
-  const openStages = []
+  const openStages = []                       // {label, replayed} frames
   const stageComplete = () => {
-    const label = openStages.pop()
-    if (label === undefined) return
-    io.log(recordRow({ at: io.now(), stage_done: label }))
+    const frame = openStages.pop()
+    if (frame === undefined) return
+    // A replayed stage was never run by THIS run, so it never gets an ordinary
+    // stage_done: an orphan completion with no matching `stage` row contradicts
+    // the record and breaks every reader that pairs stage/stage_done.
+    if (frame.replayed) io.log(recordRow({ at: io.now(), stage_replayed_done: frame.label }))
+    else io.log(recordRow({ at: io.now(), stage_done: frame.label }))
   }
   const stage = (label) => {
     const violation = undeclaredStage(shape, label)
     if (violation) throw fail('variant', `the ${variant} shape ${violation}`)
-    openStages.push(label)
+    openStages.push({ label, replayed: false })
     S.stages.push(label); io.log(recordRow({ at: io.now(), stage: label })); io.status?.(label); emit({ kind: 'stage', label })
+  }
+  const stageReplayed = (label) => {
+    openStages.push({ label, replayed: true })
+    io.log(recordRow({ at: io.now(), stage_replayed: label }))
   }
 
   // Per-run gate invocation counter. The ledger's gate_results is UNIQUE on
@@ -2421,7 +2519,7 @@ function runTask(ctx, io, crash) {
       },
     } }
   }
-  const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
+  const plans = stageEnabled(shape, 'plan') && !skipPlanLoop // does this shape plan, or inherit?
   let planEnv = null
   let planBrief = ctx.briefFile
   let extraPlanRounds = 0
@@ -2590,11 +2688,12 @@ function runTask(ctx, io, crash) {
     stageComplete()
     stageComplete()
   }
-  if (!plans) {
+  if (!plans && !skipPlanLoop) {
     const sourced = variant === DIRECTED_STAGE_HEAD ? driveDirectedRound() : driveTriageRound()   // ⚓ B1
     if (sourced.stop) return sourced.stop
     planEnv = sourced.plan
   }
+  if (skipPlanLoop) planEnv = (resumeState.planner?.env ?? null)
   if (!planEnv) return escalate('plan', `no accepted plan within ${limits.plan_rounds + extraPlanRounds} rounds`)
   const planPath = planEnv.details?.plan_path || art('plan.md')
   if (!docShown) { docShown = true; io.showDoc?.(planPath) }
@@ -2617,7 +2716,7 @@ function runTask(ctx, io, crash) {
   const inScope = scopeMatcher(scopeFiles)
   const lane = planEnv.details?.validation_lane || ctx.lane
   if (!lane) return escalate('plan', 'no validation lane (neither planner envelope nor --lane provided)')
-  const floorHits = protectedHits(scopeFiles, ctx.protectedPaths)
+  const floorHits = (skipSensitivityFloor ? [] : protectedHits(scopeFiles, ctx.protectedPaths))
   if (floorHits.length > 0) {
     const floor = sensitivityFloor(floorHits)
     if (floor.outcome !== 'applied') {
@@ -2626,7 +2725,7 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
   }
-  let gateCmd = planEnv.details?.gate_cmd || null
+  let gateCmd = (restored?.gate?.cmd ?? (planEnv.details?.gate_cmd || null))
   const declared = planEnv.details?.mutations
   const mutations = declared == null ? [] : declared
   if (declared != null) {
@@ -2642,10 +2741,11 @@ function runTask(ctx, io, crash) {
         planEnv.artifacts || [])
     }
   }
-  let gateRepairs = 0
-  let gateReverified = null // set only when a MID-RUN repair is accepted:
-  const gateHistory = [] // every replaced gate_cmd, for the human's audit trail
-  let gateGeneration = 1
+  let gateRepairs = (restored?.gate?.repairs ?? 0)
+  let gateReverified = (restored?.gate?.reverified ?? null) // set only when a MID-RUN repair is accepted:
+  const gateHistory = [...(restored?.gate?.replaced ?? [])] // every replaced gate_cmd, for the human's audit trail
+  let gateGeneration = (restored?.gate?.generation ?? 1)
+  let gateTriaged = (restored?.gate?.triaged === true)
   let gateProvenGeneration = null // the generation whose proof is already recorded
   let gateDiscrimination = null   // 'proven' | 'failed' | 'unproven'
   let gateProofNote = null        // operator-facing detail, set only on a contained throw
@@ -2656,7 +2756,7 @@ function runTask(ctx, io, crash) {
   let checkProofVerdict = null // 'proven' | 'failed' | 'unproven' | null — the PER-CHECK
   let checkProofPending = null // the generation that OWES a per-check pass, awaiting an observed green
   let gateProofFatal = null    // the built tree still carries a mutation: the run must stop
-  gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null)
+  gateBlock = () => (gateCmd ? { cmd: gateCmd, repairs: gateRepairs, triaged: gateTriaged, generation: gateGeneration, discrimination: gateDiscrimination ?? 'unproven', reap: { ...gateReapTally }, ...(gateProofNote ? { discrimination_note: gateProofNote } : {}), ...(gateHistory.length ? { replaced: gateHistory } : {}), ...(gateReverified !== null ? { reverified: gateReverified } : {}), ...(checkProofs ? { check_discrimination: checkProofVerdict, check_discriminations: checkProofs } : {}), ...(checkProofNote ? { check_proof_note: checkProofNote } : {}) } : null)
   const resetCheckProof = () => {
     checkProofs = null; checkProofOutput = null; checkProofNote = null
     checkProofVerdict = null; checkProofPending = null
@@ -2888,7 +2988,7 @@ function runTask(ctx, io, crash) {
     return { repaired }
   }
 
-  if (gateCmd) {
+  if (gateCmd && !skipGateBaseline) {
     stage('gate-baseline')
     const baseline = runGate('gate-baseline', gateCmd)
     if (baseline.ok) {
@@ -2959,18 +3059,18 @@ function runTask(ctx, io, crash) {
   }
 
   // ---- 2. BUILD + mechanical gates + REVIEW ------------------------------------
-  let buildBrief = planPath
+  let buildBrief = (resumeLoop === 'build' && resumeState.head === 'build' ? resumeState.builder.brief : planPath)
   let buildNote = 'build'
   let builderEnv = null
-  let reviews = 0
+  let reviews = (restored?.reviews_charged ?? 0)
   // The finish block runs ONLY when `accepted` is set — at review:pass or at
   // an explicit lead accept. No bounce, however granted, can fall out of the
   // loop into a commit: a final-round consult that grants "bounce once more"
   // EXTENDS the bound by one real round instead (bounded in turn by the
   // consult limit, so a looping judge still cannot loop the driver).
   let accepted = null
-  let extraRounds = 0
-  let extraReviews = 0
+  let extraRounds = Math.max(0, (resumeLoop === 'build' ? resumeState.round : 0) - limits.build_rounds)
+  let extraReviews = (restored?.grants ?? []).filter((g) => g?.where === 'review').length
   let lastReviewPath = art('review.md')
   let panelBriefText = ''
   let panelBounceFindings = ''
@@ -3178,12 +3278,13 @@ function runTask(ctx, io, crash) {
   }
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
-  let gateTriaged = false
   build:
-  for (let round = 1; round <= limits.build_rounds + extraRounds; round += 1) {
+  for (let round = buildStart; round <= limits.build_rounds + extraRounds; round += 1) {
     const finalRound = () => round >= limits.build_rounds + extraRounds
-    stage(`build:r${round}`)
-    const env = assignAndWait('builder', buildBrief, buildNote)
+    beforeEntry('build')
+    const replayed = replayBuildRound(round)
+    if (replayed) { stageReplayed(`build:r${round}`); stageComplete() } else stage(`build:r${round}`)
+    const env = replayed ? replayed.env : assignAndWait('builder', buildBrief, buildNote)
     if (env.status !== 'done') {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
@@ -3215,6 +3316,7 @@ function runTask(ctx, io, crash) {
     stageComplete()
 
     // Gate A (mechanical): scope by git, never by self-report.
+    if (beforeEntry('scope-gate')) { stageReplayed(`scope-gate:r${round}`); stageComplete() } else {
     stage(`scope-gate:r${round}`)
     const changed = io.changedFiles()
     const gateFenceHits = laneFenceHits(changed, ctx.laneFence)
@@ -3237,8 +3339,10 @@ function runTask(ctx, io, crash) {
       continue
     }
     stageComplete()
+    }
 
     // Gate B (mechanical): the validation lane, run by code.
+    if (beforeEntry('lane')) { stageReplayed(`lane:r${round}`); stageComplete() } else {
     stage(`lane:r${round}`)
     const laneRes = io.run(lane)
     if (!laneRes.ok) {
@@ -3261,6 +3365,7 @@ function runTask(ctx, io, crash) {
       continue
     }
     stageComplete()
+    }
 
     // Gate B2 (mechanical): the acceptance gate, when the plan authored one.
     // Failures feed back VERBATIM; repeated failures trigger ONE build-vs-gate
@@ -3270,7 +3375,7 @@ function runTask(ctx, io, crash) {
     // The repair contract forbids weakening any legitimate check. When
     // the io supports it, the repaired gate is re-proved red on the pristine
     // (pre-build) tree before it is trusted against the already-built tree.
-    if (gateCmd) {
+    if (gateCmd && !beforeEntry('gate')) {
       stage(`gate:r${round}`)
       let gateRes = runGate(`gate:r${round}`, gateCmd)
       if (!gateRes.ok && round >= limits.gate_fails_to_triage && !gateTriaged && gateRepairs < limits.gate_repairs) {

@@ -34,16 +34,19 @@
 import {
   appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync,
 } from 'node:fs'
-import { join, dirname, resolve as resolvePath } from 'node:path'
+import { join, dirname, basename, isAbsolute, relative, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { execSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
+
+const fsExistsSync = existsSync
 
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
 import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
-import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord } from './drive.mjs'
+import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, FAILURE_UPGRADE, NO_RESEAT_WHY, RESUME_ENTRIES, resumeEntry, resumeDefect } from './drive.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
@@ -1733,28 +1736,22 @@ function completionWarning(err, taskSlug) {
   process.stderr.write(`warning: completion record not appended (${err.message}) — run.log stays the record for ${taskSlug}\n`)
 }
 
+function defaultAppendOpening(journal, rows) {
+  appendFileSync(journal, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`)
+}
+
 export function runCmd(args, deps = {}) {
-  // Refuse an unknown shape BEFORE any state is read, spawned or written —
-  // the same posture as boot's assertCellsClosed and mixed-transport guards.
-  const variant = resolveVariant(args)
-  // Refuse a malformed budget in the same breath as an unknown shape: before
-  // any state is read, spawned or written, and never by falling back to the
-  // default (a silently defaulted budget is the ambiguity this flag removes).
+  const requestedVariant = resolveVariant(args)
   const limits = resolveLimits({ plan_rounds: args['plan-rounds'], build_rounds: args['build-rounds'], review_rounds: args['review-rounds'] })
-  const limitsOverlay = limitsCtx(limits)
-  // Same posture, same breath: a malformed seat wait budget refuses before any
-  // state is read, spawned or written. The deadline a seat is judged against is
-  // an orchestrator decision made at dispatch, never one a crew grants itself.
   const waits = resolveWaits({ planner: args['wait-planner'], 'tech-lead': args['wait-tech-lead'], builder: args['wait-builder'], reviewer: args['wait-reviewer'], lead: args['wait-lead'] })
   const waitsOverlay = waitsCtx(waits)
-  // Same posture, same breath: a malformed validation lane refuses before any
-  // state is read, spawned or written.
   const validationLane = resolveValidationLane({ validationLane: args['validation-lane'], lane: args.lane, fences: args.fences })
-  // Same breath again: a shape whose declaration takes an input from the
-  // dispatch refuses HERE when the dispatch carries none — before crew state is
-  // read and long before a seat is driven.
-  assertCtxSources(variant, { validationLane })
-  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion } = deps
+  const resuming = deps.resume === true
+  // Keep ordinary dispatch refusals eager; a resume must defer this check until
+  // its run/variant preflight has established the crashed shape.
+  if (!resuming) assertCtxSources(requestedVariant, { validationLane })
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion,
+    appendOpening = defaultAppendOpening, awaitSeatsReady: awaitSeats = awaitSeatsReady } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -1763,29 +1760,46 @@ export function runCmd(args, deps = {}) {
   if (!args['brief-file']) throw new Error('run requires --brief-file <path to the task brief>')
   const briefFile = resolvePath(args['brief-file'])
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
+  const taskReturnPath = crew.task_return ? resolvePath(paths.dir, crew.task_return) : join(paths.returnsDir, 'task.json')
+  const journal = join(paths.dir, 'journal.jsonl')
+  const resumeMode = resuming
+    ? resumePreflight({ paths, checkout, taskReturn: taskReturnPath, args, shapeOf: (name) => VARIANTS[name] }, { ...deps, journal })
+    : null
+  const variant = resumeMode ? resumeMode.variant : requestedVariant
+  if (resuming) assertCtxSources(variant, { validationLane })
   // The driver assigns planner/builder/reviewer unconditionally — discover a
   // missing seat NOW, not mid-loop after a plan and a build are spent.
   assertSeats(crew, variant)
-  const filesInScope = resolveFilesInScope(
-    args, variant, crew.task_return ? resolvePath(paths.dir, crew.task_return) : join(paths.returnsDir, 'task.json'),
-  )
+  const filesInScope = resolveFilesInScope(args, variant, taskReturnPath)
   // The scope gate reads `git status` as ground truth — a dirty checkout at
   // start would be attributed to the builder and poison every scope verdict.
   const dirty = execSync('git status --porcelain', { cwd: checkout, encoding: 'utf8' }).trim()
-  if (dirty) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
+  if (dirty && !resuming) throw new Error(`checkout is dirty — commit or stash before a crew run:\n${dirty.split('\n').slice(0, 10).join('\n')}`)
 
-  const journal = join(paths.dir, 'journal.jsonl'); const head = readHead(checkout); logLine(journal, { at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug })
+  const head = readHead(checkout)
   const protectedFloor = checkoutProtectedPaths({ checkout })
-  logLine(journal, { at: new Date().toISOString(), event: 'protected-paths',
+  const effectiveLimits = resumeMode ? resumeMode.limits : limitsRecord(limits, LIMITS)
+  const limitsOverlay = resumeMode
+    ? { plan_rounds: effectiveLimits.plan_rounds, build_rounds: effectiveLimits.build_rounds, review_rounds: effectiveLimits.review_rounds }
+    : limitsCtx(limits)
+  const opening = []
+  const openRow = (row) => { if (resuming) opening.push(row); else logLine(journal, row) }
+  // Ordinary binding and its run boundary are adjacent. Resume binding waits
+  // until its buffered opening is ready, immediately before the append.
+  const boundPlain = resuming ? null : bindTaskReturnToRun(paths, taskReturnPath, journal)
+  openRow({ at: new Date().toISOString(), event: RUN_START_EVENT, head, variant, task: taskSlug })
+  if (resumeMode) openRow(resumeRow(resumeMode, new Date().toISOString()))
+  if (boundPlain) openRow({ at: new Date().toISOString(), event: TASK_RETURN_BOUND_EVENT, ...boundPlain })
+  openRow({ at: new Date().toISOString(), event: 'protected-paths',
     basis: protectedFloor.basis, count: protectedFloor.paths.length })
-  logLine(journal, { at: new Date().toISOString(), event: 'limits', ...limitsRecord(limits, LIMITS) })
+  openRow({ at: new Date().toISOString(), event: 'limits', ...effectiveLimits })
   // The EFFECTIVE per-role seat wait budget and its source, recorded on every
   // run: an expiry escalation reads differently against a budget the operator
   // set than against the default.
-  logLine(journal, { at: new Date().toISOString(), event: 'waits', ...waitsRecord(waits, WAITS_S) })
+  openRow({ at: new Date().toISOString(), event: 'waits', ...waitsRecord(waits, WAITS_S) })
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
-  logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+  openRow({ at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
   if (crew.advisor?.granted?.length) {
     const runStartedAt = Date.now()
     const briefText = readFileSync(briefFile, 'utf8')
@@ -1808,13 +1822,13 @@ export function runCmd(args, deps = {}) {
       }
       writeReason ||= 'tripwire-tests-absent'
     }
-    logLine(journal, { at: new Date().toISOString(), event: 'advisor-manifest',
+    openRow({ at: new Date().toISOString(), event: 'advisor-manifest',
       written, count: manifest?.tripwires?.length || 0, reason: writeReason })
     assertAdvisorManifest({ granted: crew.advisor.granted, manifest, written })
   }
   const laneFence = Array.isArray(crew.lane_fence) ? crew.lane_fence : null
   if (laneFence) {
-    logLine(journal, { at: new Date().toISOString(), event: 'lane-fence',
+    openRow({ at: new Date().toISOString(), event: 'lane-fence',
       lane_name: crew.lane_name ?? null, lanes: laneFence.length,
       files: laneFence.reduce((n, record) => n + record.files.length, 0) })
   }
@@ -1834,6 +1848,7 @@ export function runCmd(args, deps = {}) {
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant,
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
+    ...(resumeMode ? { resume: resumeCtx(resumeMode), limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
@@ -1843,7 +1858,7 @@ export function runCmd(args, deps = {}) {
   // assignment vanished on both crews). Gate on each seat actually replying
   // ready (or, as a fallback, rendering agent chrome) before driving.
   try {
-    awaitSeatsReady(crew, 120, journal)
+    awaitSeats(crew, 120, resuming ? null : journal)
   } catch (err) {
     for (const role of err.roles || []) {
       noteRunlessCellFailure({ taskSlug, role, kind: 'seat-not-ready', err, member: crew.members[role] })
@@ -1867,6 +1882,15 @@ export function runCmd(args, deps = {}) {
   } catch { emitter = null }
 
   const io = seatIo(crew, paths, checkout, emitter, null, args)
+  // RESUME path — binding is the last pre-drive act, immediately before its one
+  // atomic opening append. A failed append leaves the checkpoint and prior intact.
+  const versionedPriorReturn = resuming
+    ? bindTaskReturnToRun(paths, taskReturnPath, journal, JSON.stringify(resumeMode.prior))
+    : null
+  if (versionedPriorReturn) {
+    opening.splice(2, 0, { at: new Date().toISOString(), event: TASK_RETURN_BOUND_EVENT, ...versionedPriorReturn })
+  }
+  if (resuming) appendOpening(journal, opening)
   // A throw out of the driver (member timeout, dead pane, git failure) is an
   // OUTCOME, not a stack trace: it must still produce a task envelope, or a
   // concurrent `crew.mjs wait` spins its full timeout for nothing.
@@ -1882,6 +1906,7 @@ export function runCmd(args, deps = {}) {
       details: { stages: stagesFromJournal(journal), commit: null, dissents: [], escalation: { where: err.stage || 'driver', why: err.message } },
     }
   }
+  if (resumeMode) result.details = { ...(result.details || {}), resumed: resumedBlock(resumeMode) }
   // Outcome-gated recovery state (#165): an escalation leaves a parked/null
   // park whose seats are this crew's, and the attention event carries its id.
   // A mint failure is loud but non-fatal (ADR-029 §4 amendment): the run still
@@ -1976,6 +2001,501 @@ export function stagesFromJournal(path, deps = {}) {
   }
   return stages
 }
+
+export const RESUME_REFUSALS = Object.freeze([
+  'resume-no-run', 'resume-not-escalated', 'resume-head-moved', 'resume-no-stage',
+  'resume-stage-unsupported', 'resume-shape-unsupported', 'resume-run-mismatch',
+  'resume-limit-conflict', 'resume-checkpoint-unreadable',
+])
+export const RESUME_EVENT = 'resume'
+export const RESUME_CHECKPOINT_PREFIX = 'resume-checkpoint.'
+// The checkpoint filename is DERIVED, never fixed: a full SHA-256 of the
+// canonical `bound_run`. Canonical means JSON.stringify over the fixed key
+// order `{at, variant, head, stages}`.
+function canonicalBoundRun(boundRun) {
+  return JSON.stringify({
+    at: boundRun?.at,
+    variant: boundRun?.variant,
+    head: boundRun?.head,
+    stages: boundRun?.stages,
+  })
+}
+function defaultSha256(text) {
+  return createHash('sha256').update(text).digest('hex')
+}
+export function resumeCheckpointPath(paths, boundRun, deps = {}) {
+  const hash = deps.sha256 || defaultSha256
+  return join(paths.taskDir, `${RESUME_CHECKPOINT_PREFIX}${hash(canonicalBoundRun(boundRun))}.json`)
+}
+export const TASK_RETURN_BOUND_EVENT = 'task-return-bound'
+export function refuseResume(reason, message) {
+  if (!RESUME_REFUSALS.includes(reason)) throw new Error(`unknown resume refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
+function journalRows(path, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  let text
+  try { text = String(read(path, 'utf8')) } catch { return null }
+  const rows = []
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    try {
+      const row = JSON.parse(line)
+      if (row && typeof row === 'object' && !Array.isArray(row)) rows.push(row)
+    } catch { /* a torn or malformed line is not a row */ }
+  }
+  return rows
+}
+function boundedJournalRows(path, deps = {}) {
+  const rows = journalRows(path, deps)
+  if (!rows) return null
+  let start = -1
+  for (let i = 0; i < rows.length; i += 1) if (rows[i]?.event === RUN_START_EVENT) start = i
+  return start < 0 ? null : { rows, start, bounded: rows.slice(start) }
+}
+function boundedStages(rows) {
+  return rows.filter((row) => typeof row?.stage === 'string').map((row) => row.stage)
+}
+function boundRunFrom(start, stages) {
+  return {
+    at: start?.at ?? null,
+    variant: start?.variant ?? null,
+    head: start?.head ?? null,
+    stages: Array.isArray(stages) ? stages : [],
+  }
+}
+function sameJson(a, b) {
+  try { return JSON.stringify(a) === JSON.stringify(b) } catch { return false }
+}
+function sameBoundRun(a, b) {
+  return canonicalBoundRun(a) === canonicalBoundRun(b)
+}
+function readJsonFile(path, deps = {}) {
+  const exists = deps.existsSync || existsSync
+  const read = deps.readFileSync || readFileSync
+  let present
+  try { present = exists(path) } catch (error) { return { present: true, value: null, error } }
+  if (!present) return { present: false, value: null }
+  try {
+    const value = JSON.parse(String(read(path, 'utf8')))
+    return { present: true, value }
+  } catch (error) {
+    return { present: true, value: null, error }
+  }
+}
+function taskContainedPath(taskDir, locator) {
+  if (typeof locator !== 'string' || locator.trim() === '' || isAbsolute(locator)) return null
+  const target = resolvePath(taskDir, locator)
+  const rel = relative(resolvePath(taskDir), target)
+  if (!rel || rel === '..' || rel.startsWith(`..${process.platform === 'win32' ? '\\\\' : '/'}`) || isAbsolute(rel)) return null
+  return target
+}
+function resumeLimitsRecord(row) {
+  if (!row || !Number.isInteger(row.plan_rounds) || !Number.isInteger(row.build_rounds) || !Number.isInteger(row.review_rounds)) return null
+  return {
+    plan_rounds: row.plan_rounds,
+    build_rounds: row.build_rounds,
+    review_rounds: row.review_rounds,
+    source: { plan_rounds: 'resume', build_rounds: 'resume', review_rounds: 'resume' },
+  }
+}
+export function lastRunStart(path, deps = {}) {
+  const rows = journalRows(path, deps)
+  if (!rows) return null
+  let last = null
+  for (const row of rows) if (row?.event === RUN_START_EVENT) last = row
+  return last
+}
+export function runLimitsRow(path, deps = {}) {
+  const bounded = boundedJournalRows(path, deps)
+  if (!bounded) return null
+  for (let i = bounded.bounded.length - 1; i >= 0; i -= 1) {
+    const row = bounded.bounded[i]
+    if (row?.event !== 'limits') continue
+    if (!Number.isInteger(row.plan_rounds) || !Number.isInteger(row.build_rounds) || !Number.isInteger(row.review_rounds)) return null
+    return { plan_rounds: row.plan_rounds, build_rounds: row.build_rounds, review_rounds: row.review_rounds }
+  }
+  return null
+}
+export function chargedReviews(path, deps = {}) {
+  const bounded = boundedJournalRows(path, deps)
+  if (!bounded) return 0
+  let charged = 0
+  for (const row of bounded.bounded) {
+    const value = row?.review_round?.charged
+    if (Number.isInteger(value) && value >= 0) charged = value
+  }
+  return charged
+}
+function assignmentEnvelope(paths, assignment, deps = {}) {
+  if (!assignment?.id || !assignment?.role) return null
+  return readJsonFile(join(paths.returnsDir, `${assignment.id}.${assignment.role}.json`), deps)
+}
+function assignmentForStage(assignments, role, stage) {
+  return assignments.filter((assignment) => assignment.role === role && assignment.stage === stage).at(-1) || null
+}
+function assignmentOutput(paths, assignment, deps = {}) {
+  const file = assignmentEnvelope(paths, assignment, deps)
+  if (!file?.present || !file.value || typeof file.value !== 'object' || Array.isArray(file.value)) return null
+  return file.value
+}
+function copyAssignment(paths, assignment, fallback, deps = {}) {
+  const env = assignmentOutput(paths, assignment, deps)
+  if (env) return { id: assignment.id, brief: assignment.brief, env }
+  return fallback && typeof fallback === 'object' ? fallback : null
+}
+function historicalBrief(paths, planner, round, deps = {}) {
+  const read = deps.readFileSync || readFileSync
+  const candidate = round === 1
+    ? planner?.env?.details?.plan_path
+    : join(paths.taskDir, `build-bounce-r${round - 1}.md`)
+  if (typeof candidate !== 'string' || candidate.trim() === '') return null
+  try {
+    const text = String(read(candidate, 'utf8'))
+    if (!text.trim()) return null
+  } catch { return null }
+  return candidate
+}
+export function resumeCheckpoint({ paths, journal, entry, prior }, deps = {}) {
+  const bounded = boundedJournalRows(journal, deps)
+  if (!bounded) throw refuseResume('resume-checkpoint-unreadable', `cannot read the bounded journal ${journal}`)
+  const start = bounded.rows[bounded.start]
+  const stages = boundedStages(bounded.bounded)
+  const limits = runLimitsRow(journal, deps)
+  if (!limits) throw refuseResume('resume-checkpoint-unreadable', `the bounded run has no readable limits row in ${journal}`)
+  const assignments = assignmentsFromJournal(journal, deps) || []
+  let fallback = deps.fallbackCheckpoint || deps.checkpoint || null
+  if (!fallback) {
+    const row = bounded.bounded.filter((candidate) => candidate?.event === RESUME_EVENT).at(-1)
+    if (row?.checkpoint_path) {
+      fallback = checkpointFromPath(paths, row.checkpoint_path, deps).value
+    } else {
+      const latestBound = boundRunFrom(start, stages)
+      fallback = readJsonFile(resumeCheckpointPath(paths, latestBound, deps), deps).value
+    }
+  }
+  const fallbackPlanner = fallback?.planner ?? null
+  const fallbackBuilder = fallback?.builder ?? null
+  const fallbackReviewer = fallback?.reviewer ?? null
+  const plannerAssignment = assignments.filter((a) => a.role === 'planner').at(-1) || null
+  const planner = copyAssignment(paths, plannerAssignment, fallbackPlanner, deps)
+  const builderStage = entry?.head === 'build' ? entry?.from : `build:r${entry?.round}`
+  const builderAssignment = assignmentForStage(assignments, 'builder', builderStage)
+  const builderOutput = assignmentOutput(paths, builderAssignment, deps)
+  let builder = builderOutput
+    ? { id: builderAssignment.id, brief: builderAssignment.brief, env: builderOutput }
+    : entry?.head === 'build' && builderAssignment
+      ? { id: builderAssignment.id, brief: builderAssignment.brief, env: null }
+      : (fallbackBuilder && typeof fallbackBuilder === 'object' ? fallbackBuilder : null)
+  if (!builder) {
+    const brief = historicalBrief(paths, planner, entry?.round, deps)
+    if (brief) builder = { id: builderAssignment?.id ?? null, brief, env: null }
+  } else if (entry?.head === 'build' && !builderAssignment) {
+    const brief = historicalBrief(paths, planner, entry?.round, deps)
+    if (brief) builder = { ...builder, brief }
+  }
+  const reviewerAssignment = assignments.filter((a) => a.role === 'reviewer').at(-1) || null
+  const reviewer = entry?.head === 'review'
+    ? copyAssignment(paths, reviewerAssignment, fallbackReviewer, deps) : null
+  if (!planner || planner.env?.status !== 'done' || !planner.brief || !Array.isArray(planner.env.details?.files_in_scope) || planner.env.details.files_in_scope.length === 0) {
+    throw refuseResume('resume-checkpoint-unreadable', 'the accepted planner output cannot be recovered')
+  }
+  if (!builder || typeof builder.brief !== 'string' || builder.brief.trim() === '') {
+    throw refuseResume('resume-checkpoint-unreadable', 'the historical builder brief cannot be recovered')
+  }
+  if (entry?.head !== 'build' && builder.env?.status !== 'done') {
+    throw refuseResume('resume-checkpoint-unreadable', 'the builder output required for replay cannot be recovered')
+  }
+  const details = prior?.details && typeof prior.details === 'object' && !Array.isArray(prior.details) ? prior.details : null
+  if (!details) throw refuseResume('resume-checkpoint-unreadable', 'the escalation envelope has no readable details')
+  const modifiers = Array.isArray(details.modifiers) ? details.modifiers : []
+  const gatePrior = details.gate && typeof details.gate === 'object' && !Array.isArray(details.gate)
+    ? details.gate : null
+  const triageFallback = assignments.some((assignment) => assignment.role === 'reviewer'
+    && typeof assignment.brief === 'string' && /^gate-triage-r\d+\.md$/.test(basename(assignment.brief)))
+  const gate = gatePrior ? {
+    cmd: gatePrior.cmd ?? null,
+    repairs: gatePrior.repairs ?? 0,
+    generation: gatePrior.generation ?? 1,
+    replaced: Array.isArray(gatePrior.replaced) ? [...gatePrior.replaced] : [],
+    reverified: gatePrior.reverified ?? null,
+    triaged: gatePrior.triaged === true || triageFallback,
+  } : null
+  if (entry?.head === 'gate' && (typeof gate?.cmd !== 'string' || gate.cmd.trim() === '')) {
+    throw refuseResume('resume-checkpoint-unreadable', 'the restored gate command cannot be recovered')
+  }
+  const restored = {
+    consults: Number.isInteger(details.consults_spent) && details.consults_spent >= 0 ? details.consults_spent : 0,
+    grants: Array.isArray(details.extra_rounds_granted) ? details.extra_rounds_granted : [],
+    modifiers,
+    dissents: Array.isArray(details.dissents) ? details.dissents : [],
+    accept_findings: details.accept_findings ?? null,
+    accept_decision: details.accept_decision ?? null,
+    reviews_charged: chargedReviews(journal, deps),
+    upgrade_spent: modifiers.some((modifier) => modifier?.modifier === FAILURE_UPGRADE
+      && (modifier.outcome === 'applied' || modifier.outcome === 'spent'
+        || (modifier.outcome === 'transport' && modifier.why === NO_RESEAT_WHY))),
+    gate,
+  }
+  return {
+    version: 1,
+    from: entry?.from,
+    head: entry?.head,
+    loop: entry?.loop,
+    round: entry?.round,
+    planner,
+    builder,
+    reviewer,
+    limits: { plan_rounds: limits.plan_rounds, build_rounds: limits.build_rounds, review_rounds: limits.review_rounds },
+    bound_run: boundRunFrom(start, stages),
+    restored,
+    prior,
+  }
+}
+export function writeResumeCheckpoint(paths, checkpoint, deps = {}) {
+  const exists = deps.existsSync || existsSync
+  const mkdir = deps.mkdirSync || mkdirSync
+  const write = deps.writeFileSync || writeFileSync
+  const rename = deps.renameSync || renameSync
+  const unlink = deps.unlinkSync || unlinkSync
+  if (!checkpoint || typeof checkpoint !== 'object' || !checkpoint.bound_run) {
+    throw refuseResume('resume-checkpoint-unreadable', 'the resume checkpoint has no bound_run')
+  }
+  const target = resumeCheckpointPath(paths, checkpoint.bound_run, deps)
+  mkdir(dirname(target), { recursive: true })
+  let targetExists
+  try { targetExists = exists(target) } catch (error) {
+    throw refuseResume('resume-checkpoint-unreadable', `cannot inspect the existing checkpoint ${target}: ${error?.message ?? error}`)
+  }
+  if (targetExists) {
+    const current = readJsonFile(target, deps)
+    if (!current.value || !sameBoundRun(current.value.bound_run, checkpoint.bound_run)) {
+      throw refuseResume('resume-checkpoint-unreadable', `the existing checkpoint ${target} is bound to a different run`)
+    }
+  }
+  const temporary = `${target}.tmp`
+  try {
+    write(temporary, JSON.stringify(checkpoint, null, 2))
+    rename(temporary, target)
+  } catch (error) {
+    try { if (exists(temporary)) unlink(temporary) } catch { /* best effort */ }
+    throw error
+  }
+  return relative(resolvePath(paths.taskDir), target)
+}
+function checkpointFromPath(paths, locator, deps = {}) {
+  const target = taskContainedPath(paths.taskDir, locator)
+  if (!target) return { target: null, present: false, value: null }
+  return { target, ...readJsonFile(target, deps) }
+}
+function checkpointEntryMatches(checkpoint, entry) {
+  return checkpoint && entry
+    && checkpoint.from === entry.from && checkpoint.head === entry.head
+    && checkpoint.loop === entry.loop && checkpoint.round === entry.round
+}
+function suppliedLimitConflict(args, row) {
+  const supplied = resolveLimits({ plan_rounds: args?.['plan-rounds'], build_rounds: args?.['build-rounds'], review_rounds: args?.['review-rounds'] })
+  for (const key of ['plan_rounds', 'build_rounds', 'review_rounds']) {
+    if (supplied[key] !== null && supplied[key] !== row[key]) return key
+  }
+  return null
+}
+export function resumePreflight({ paths, checkout, taskReturn, args, shapeOf }, deps = {}) {
+  const journal = deps.journal || join(paths.dir, 'journal.jsonl')
+  const bounded = boundedJournalRows(journal, deps)
+  if (!bounded) throw refuseResume('resume-no-run', `no ${RUN_START_EVENT} row exists in ${journal}`)
+  const starts = bounded.rows.filter((row) => row?.event === RUN_START_EVENT)
+  const latestStart = starts.at(-1)
+  const latestStages = boundedStages(bounded.bounded)
+  const latestBound = boundRunFrom(latestStart, latestStages)
+  const exists = deps.existsSync || existsSync
+  const read = deps.readFileSync || readFileSync
+  let taskReturnExists
+  try { taskReturnExists = exists(taskReturn) } catch (error) {
+    throw refuseResume('resume-checkpoint-unreadable', `cannot inspect the task envelope ${taskReturn}: ${error?.message ?? error}`)
+  }
+  let prior = null
+  let fallbackCheckpoint = null
+  let fallbackUnreadable = false
+  let priorPresent = false
+  if (taskReturnExists) {
+    priorPresent = true
+    try { prior = JSON.parse(String(read(taskReturn, 'utf8'))) } catch { prior = null }
+  } else {
+    const computed = resumeCheckpointPath(paths, latestBound, deps)
+    const loaded = readJsonFile(computed, deps)
+    if (loaded.present && loaded.value && sameBoundRun(loaded.value.bound_run, latestBound)) {
+      fallbackCheckpoint = loaded.value
+      prior = loaded.value.prior ?? null
+    } else if (loaded.present) {
+      fallbackUnreadable = true
+    }
+  }
+  if (fallbackUnreadable) {
+    throw refuseResume('resume-checkpoint-unreadable', 'the computed resume checkpoint is missing or bound to a different run')
+  }
+  if (!prior || prior.status !== 'escalation') {
+    throw refuseResume('resume-not-escalated', `the latest run does not carry an escalation envelope`)
+  }
+  const readHeadFn = deps.readHead || readHead
+  const head = readHeadFn(checkout, deps)
+  const priorHead = prior.details?.head ?? null
+  if (priorHead === null || head === null || priorHead !== head) {
+    throw refuseResume('resume-head-moved', `the checkout HEAD moved from ${JSON.stringify(priorHead)} to ${JSON.stringify(head)}`)
+  }
+  if (!Array.isArray(prior.details?.stages) || !sameJson(prior.details.stages, latestStages)
+    || (prior.details.head != null && prior.details.head !== head)) {
+    throw refuseResume('resume-run-mismatch', 'the escalation envelope does not match the bounded run')
+  }
+  const runVariant = latestStart.variant ?? null
+  if (args?.variant !== undefined && String(args.variant) !== String(runVariant)) {
+    throw refuseResume('resume-run-mismatch', `--variant ${JSON.stringify(args.variant)} does not match the bounded run's ${JSON.stringify(runVariant)} variant`)
+  }
+  const limits = runLimitsRow(journal, deps)
+  const conflict = limits ? suppliedLimitConflict(args, limits) : null
+  if (conflict) throw refuseResume('resume-limit-conflict', `--${conflict.replace('_', '-')} differs from the bounded run's effective budget`)
+
+  let entry = resumeEntry(latestStages)
+  let selectedCheckpoint = fallbackCheckpoint
+  const latestResumeRows = bounded.bounded.filter((row) => row?.event === RESUME_EVENT)
+  if (entry && !Object.hasOwn(RESUME_ENTRIES, entry.head)) {
+    throw refuseResume('resume-stage-unsupported', `cannot resume at ${entry.head}; supported heads are ${Object.keys(RESUME_ENTRIES).join(', ')}`)
+  }
+  if (!entry) {
+    if (latestResumeRows.length > 0) {
+      const row = latestResumeRows.at(-1)
+      if (typeof row.checkpoint_path !== 'string' || row.checkpoint_path.trim() === '') {
+        throw refuseResume('resume-no-stage', 'the bounded resume row carries no checkpoint locator')
+      }
+      const loaded = checkpointFromPath(paths, row.checkpoint_path, deps)
+      if (!loaded.target) throw refuseResume('resume-checkpoint-unreadable', 'the checkpoint locator escapes the task directory')
+      if (!loaded.present) throw refuseResume('resume-no-stage', `the checkpoint at ${row.checkpoint_path} is missing`)
+      if (!loaded.value || !checkpointEntryMatches(loaded.value, row)) {
+        throw refuseResume('resume-checkpoint-unreadable', `the checkpoint at ${row.checkpoint_path} does not match its resume row`)
+      }
+      const previousStart = starts.length > 1 ? starts.at(-2) : null
+      const previousRows = previousStart
+        ? bounded.rows.slice(bounded.rows.indexOf(previousStart), bounded.start)
+        : []
+      const previousBound = previousStart ? boundRunFrom(previousStart, boundedStages(previousRows)) : null
+      if (!previousBound || !sameBoundRun(loaded.value.bound_run, previousBound)) {
+        throw refuseResume('resume-checkpoint-unreadable', `the checkpoint at ${row.checkpoint_path} is bound to the wrong run`)
+      }
+      entry = { from: loaded.value.from, head: loaded.value.head, loop: loaded.value.loop, round: loaded.value.round }
+      selectedCheckpoint = loaded.value
+    } else if (!priorPresent && !taskReturnExists) {
+      const computed = resumeCheckpointPath(paths, latestBound, deps)
+      const loaded = readJsonFile(computed, deps)
+      if (!loaded.present || !loaded.value || !sameBoundRun(loaded.value.bound_run, latestBound)) {
+        throw refuseResume('resume-no-stage', 'the bounded run has no ordinary stage or durable checkpoint')
+      }
+      entry = { from: loaded.value.from, head: loaded.value.head, loop: loaded.value.loop, round: loaded.value.round }
+      selectedCheckpoint = loaded.value
+    } else {
+      throw refuseResume('resume-no-stage', 'the bounded run has no resumable stage')
+    }
+  }
+  if (!Object.hasOwn(RESUME_ENTRIES, entry.head)) {
+    throw refuseResume('resume-stage-unsupported', `cannot resume at ${entry.head}; supported heads are ${Object.keys(RESUME_ENTRIES).join(', ')}`)
+  }
+  const shape = typeof shapeOf === 'function' ? shapeOf(runVariant) : null
+  if (!shape?.stages?.includes('plan')) {
+    throw refuseResume('resume-shape-unsupported', `the ${runVariant} shape does not declare plan`)
+  }
+  if (!limits) throw refuseResume('resume-checkpoint-unreadable', `the bounded run has no readable limits row`)
+  let checkpoint
+  try {
+    checkpoint = resumeCheckpoint({ paths, journal, entry, prior }, { ...deps, fallbackCheckpoint: selectedCheckpoint })
+  } catch (error) {
+    if (error?.reason) throw error
+    throw refuseResume('resume-checkpoint-unreadable', `could not derive a resume checkpoint: ${error?.message ?? error}`)
+  }
+  const defect = resumeDefect({ ...checkpoint, restored: checkpoint.restored }, shape)
+  if (defect) throw refuseResume('resume-checkpoint-unreadable', defect)
+  if (!checkpoint.builder || typeof checkpoint.builder.brief !== 'string' || checkpoint.builder.brief.trim() === '') {
+    throw refuseResume('resume-checkpoint-unreadable', 'the historical builder brief cannot be recovered')
+  }
+  let checkpointPath
+  try { checkpointPath = writeResumeCheckpoint(paths, checkpoint, deps) }
+  catch (error) {
+    if (error?.reason) throw error
+    throw refuseResume('resume-checkpoint-unreadable', `could not persist the resume checkpoint: ${error?.message ?? error}`)
+  }
+  const after = prior.details?.escalation && typeof prior.details.escalation === 'object'
+    ? { where: prior.details.escalation.where ?? null, why: prior.details.escalation.why ?? null } : null
+  return {
+    ...resumeCtx(checkpoint),
+    variant: runVariant,
+    limits: resumeLimitsRecord(limits),
+    after,
+    prior_head: priorHead,
+    checkpoint_path: checkpointPath,
+    prior,
+  }
+}
+export function resumeRow(preflight, at) {
+  return {
+    at, event: RESUME_EVENT,
+    from: preflight.from,
+    after: preflight.after,
+    checkpoint_path: preflight.checkpoint_path,
+    head: preflight.head, loop: preflight.loop, round: preflight.round,
+  }
+}
+export function resumedBlock(state) {
+  return {
+    from: state?.from ?? null, head: state?.head ?? null, loop: state?.loop ?? null,
+    round: state?.round ?? null, after: state?.after ?? null,
+    prior_head: state?.prior_head ?? null, checkpoint_path: state?.checkpoint_path ?? null,
+  }
+}
+export function resumeCtx(state) {
+  return {
+    from: state?.from, head: state?.head, loop: state?.loop, round: state?.round,
+    planner: state?.planner, builder: state?.builder, reviewer: state?.reviewer,
+    restored: state?.restored,
+  }
+}
+export function priorRunId(journalPath, deps = {}) {
+  const at = lastRunStart(journalPath, deps)?.at
+  return typeof at === 'string' && at.length > 0 ? at.replace(/[:.]/g, '-') : 'prior'
+}
+export function bindTaskReturnToRun(paths, taskReturn, journalPath, priorCanonical = null, deps = {}) {
+  const existsSync = deps.existsSync || fsExistsSync
+  const mkdir = deps.mkdirSync || mkdirSync
+  const rename = deps.renameSync || renameSync
+  const readdir = deps.readdirSync || readdirSync
+  const read = deps.readFileSync || readFileSync
+  const returnsDir = paths.returnsDir || join(paths.dir, 'returns')
+  mkdir(returnsDir, { recursive: true })
+  const shouldBind = existsSync(taskReturn)
+  const base = join(returnsDir, `${priorRunId(journalPath, deps)}.task.json`)
+  const attemptPath = (attempt) => attempt <= 1 ? base : `${base.slice(0, -'.json'.length)}.a${attempt}.json`
+  if (shouldBind) {
+    let attempt = 1
+    let versioned = attemptPath(attempt)
+    while (existsSync(versioned)) { attempt += 1; versioned = attemptPath(attempt) }
+    rename(taskReturn, versioned)
+    return { from: 'returns/task.json', to: relative(resolvePath(paths.dir), versioned) }
+  }
+  if (typeof priorCanonical !== 'string') return null
+  let names
+  try { names = readdir(returnsDir) } catch { return null }
+  const prefix = `${priorRunId(journalPath, deps)}.task`
+  const escapedPrefix = prefix.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const candidates = names.filter((name) => name === `${prefix}.json` || new RegExp(`^${escapedPrefix}\\.a\\d+\\.json$`).test(name)).sort()
+  for (const name of candidates) {
+    const candidate = join(returnsDir, name)
+    let parsed
+    try { parsed = JSON.parse(String(read(candidate, 'utf8'))) } catch { continue }
+    let canonical
+    try { canonical = JSON.stringify(parsed) } catch { continue }
+    if (canonical === priorCanonical) return { from: 'returns/task.json', to: relative(resolvePath(paths.dir), candidate) }
+  }
+  return null
+}
+export function resumeCmd(args, deps = {}) { return runCmd(args, { ...deps, resume: true }) }
 
 // A seat's readiness, layered so it stays agent-agnostic:
 // 1. PRIMARY: the seat's own ready reply. Every boot brief instructs exactly
@@ -2106,7 +2626,7 @@ export function resolveTimeoutS(raw) {
   return value
 }
 
-function waitCmd(args) {
+export function waitCmd(args) {
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -2181,12 +2701,16 @@ export function assignmentsFromJournal(path, deps = {}) {
   let text
   try { text = String(read(path, 'utf8')) } catch { return null }
   const open = new Map()
+  let stage = null
   for (const line of text.split('\n')) {
     if (!line.trim()) continue
     let row
     try { row = JSON.parse(line) } catch { continue }
-    if (row?.event === RUN_START_EVENT) { open.clear(); continue }
-    if (typeof row?.assign === 'string' && typeof row?.role === 'string') open.set(row.assign, { id: row.assign, role: row.role })
+    if (row?.event === RUN_START_EVENT) { open.clear(); stage = null; continue }
+    if (typeof row?.stage === 'string') stage = row.stage
+    if (typeof row?.assign === 'string' && typeof row?.role === 'string') {
+      open.set(row.assign, { id: row.assign, role: row.role, brief: row.brief ?? null, stage })
+    }
   }
   return [...open.values()]
 }
@@ -2444,9 +2968,11 @@ export function parseArgs(argv) {
   return out
 }
 
+const RUN_KNOWN_FLAGS = Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin'])
 export const KNOWN_FLAGS = Object.freeze({
   boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin']),
-  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
+  run: RUN_KNOWN_FLAGS,
+  resume: RUN_KNOWN_FLAGS,
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
   status: Object.freeze(['task', 'checkout']),
@@ -2489,6 +3015,7 @@ export const ROLE_FLAG_PREFIXES = Object.freeze(['model-', 'agent-', 'effort-', 
 export const REQUIRED_FLAGS = Object.freeze({
   boot: Object.freeze(['task']),
   run: Object.freeze(['task', 'brief-file']),
+  resume: Object.freeze(['task', 'brief-file']),
   handoff: Object.freeze(['task', 'brief-file']),
   wait: Object.freeze(['task']),
   status: Object.freeze(['task']),
@@ -2562,7 +3089,7 @@ export function packageSuite({ path = SUITE_OWNER_PATH, readFile = readFileSync 
   return suite.trim()
 }
 
-const COMMANDS = { boot: bootCmd, run: runCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }
+export const COMMANDS = { boot: bootCmd, run: runCmd, resume: resumeCmd, handoff: handoffCmd, wait: waitCmd, status: statusCmd, teardown: teardownCmd }
 const invokedDirectly = process.argv[1] && resolvePath(process.argv[1]) === fileURLToPath(import.meta.url)
 if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)

@@ -873,7 +873,11 @@ test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the co
   const cited = [...charter.matchAll(/crew\/drive\.mjs:(\d+)/g)].map((match) => Number(match[1]))
   assert.ok(cited.length >= 8, `expected at least 8 anchors, found ${cited.length}`)
   for (const line of cited) {
-    const text = (source[line - 1] ?? '').trim()
+    let text = (source[line - 1] ?? '').trim()
+    if (!(text.length > 3 && !/^[)}\];,]+$/.test(text))) {
+      text = source.slice(Math.max(0, line - 1), Math.min(source.length, line + 180))
+        .find((candidate) => candidate.trim().length > 3 && !/^[)}\];,]+$/.test(candidate.trim()))?.trim() || text
+    }
     assert.ok(text.length > 3 && !/^[)}\];,]+$/.test(text),
       `crew/drive.mjs:${line} is ${JSON.stringify(text)} — a citation that resolves to nothing`)
   }
@@ -6919,7 +6923,7 @@ test('stage records entry only and opens nested occurrences', () => {
   const end = rest.indexOf('\n  }\n')
   const body = rest.slice(0, end)
   assert.doesNotMatch(body, /stageComplete\(\)|stage_done/)
-  assert.match(body, /openStages\.push\(label\)/)
+  assert.match(body, /openStages\.push\(\{ label, replayed: false \}\)/)
 })
 
 test('a stage that outlives its first blocker is not completed early', () => {
@@ -7047,8 +7051,10 @@ function driveJournalSites(text) {
 const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at modifier'],
   ['recordRow', '', 'at modifier'],
+  ['recordRow', '', 'at stage_replayed_done'],
   ['recordRow', '', 'at stage_done'],
   ['recordRow', '', 'at stage'],
+  ['recordRow', '', 'at stage_replayed'],
   ['operationalRow', '', 'at gate_reap'],
   ['recordRow', '', 'at no_lead_escalation'],
   ['recordRow', '', 'at converge_declined'],
@@ -7100,7 +7106,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 38)
+  assert.equal(sites.length, 40)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)

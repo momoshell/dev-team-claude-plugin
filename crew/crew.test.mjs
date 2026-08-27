@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, assignmentsFromJournal, RESUME_REFUSALS, RESUME_EVENT, RESUME_CHECKPOINT_PREFIX, TASK_RETURN_BOUND_EVENT, resumeCheckpointPath, refuseResume, lastRunStart, runLimitsRow, chargedReviews, resumeCheckpoint, writeResumeCheckpoint, resumePreflight, resumeRow, resumedBlock, resumeCtx, priorRunId, bindTaskReturnToRun, resumeCmd, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -2005,7 +2005,7 @@ test('argv value contracts cover every known flag and every hostile shape', () =
 
   const requiredPrefix = (verb) => {
     const prefix = ['--task', 't']
-    if (verb === 'run' || verb === 'handoff') prefix.push('--brief-file', 'brief.md')
+    if (verb === 'run' || verb === 'resume' || verb === 'handoff') prefix.push('--brief-file', 'brief.md')
     return prefix
   }
   const nextFlag = (flag) => flag === 'task' ? ['--checkout', 'checkout'] : ['--task', 't']
@@ -3190,11 +3190,26 @@ test('assignmentsFromJournal restarts at run-start and answers null for an unrea
       JSON.stringify({ assign: 'd3', role: 'planner' }),
     ].join('\n'))
     assert.deepEqual(assignmentsFromJournal(path), [
-      { id: 'd2', role: 'builder' },
-      { id: 'd3', role: 'planner' },
+      { id: 'd2', role: 'builder', brief: null, stage: null },
+      { id: 'd3', role: 'planner', brief: null, stage: null },
     ])
     assert.equal(assignmentsFromJournal(join(parent, 'missing.jsonl')), null)
   } finally { rmSync(parent, { recursive: true, force: true }) }
+})
+
+test('resume exports carry the closed refusal vocabulary and record helpers', () => {
+  assert.deepEqual(RESUME_REFUSALS, [
+    'resume-no-run', 'resume-not-escalated', 'resume-head-moved', 'resume-no-stage',
+    'resume-stage-unsupported', 'resume-shape-unsupported', 'resume-run-mismatch',
+    'resume-limit-conflict', 'resume-checkpoint-unreadable',
+  ])
+  assert.equal(RESUME_EVENT, 'resume')
+  assert.equal(RESUME_CHECKPOINT_PREFIX, 'resume-checkpoint.')
+  assert.equal(TASK_RETURN_BOUND_EVENT, 'task-return-bound')
+  assert.deepEqual(resumedBlock(null), {
+    from: null, head: null, loop: null, round: null, after: null, prior_head: null, checkpoint_path: null,
+  })
+  assert.throws(() => refuseResume('not-a-resume-refusal', 'bad'), /unknown resume refusal reason/)
 })
 
 test('paneTeardownRows maps only positive death evidence to proven', () => {

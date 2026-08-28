@@ -6,8 +6,8 @@ import { join } from 'node:path'
 
 import { daemon } from './daemon.mjs'
 import {
-  attachVerb, commitIssues, completionLogPath, connect, ESCALATION_BOUND_MS, formatRows, main,
-  parseArgs, pendingVerb, readCompletionLog, runVerb, terminalRunLine, waitingVerb,
+  assertUsage, attachVerb, commitIssues, completionLogPath, connect, ESCALATION_BOUND_MS, formatRows, KNOWN_FLAGS, main,
+  parseArgs, pendingVerb, readCompletionLog, runVerb, sendVerb, terminalRunLine, waitingVerb,
 } from './factoryctl.mjs'
 import { scratchDir } from '../test/helpers.mjs'
 
@@ -619,6 +619,85 @@ test('send requires a run id and a message before connecting', async () => {
     assert.match(result.stderr, /send requires <run-id> and <message>/)
     assert.equal(touched, false)
   } finally { await f.daemon.stop(); f.cleanup() }
+})
+
+test('every factoryctl verb refuses an unknown flag by name with exit 2', async () => {
+  const probes = [
+    ['run', ['run', '--zzz', 'q']],
+    ['ls', ['ls', '--zzz', 'q']],
+    ['attach', ['attach', 'run-1', '--zzz', 'q']],
+    ['send', ['send', 'run-1', 'hello', '--zzz', 'q']],
+    ['pending', ['pending', '--zzz', 'q']],
+    ['waiting', ['waiting', '--zzz', 'q']],
+  ]
+  for (const [verb, argv] of probes) {
+    let stderr = ''
+    const code = await main(argv, { stdout: () => {}, stderr: (text) => { stderr += text } })
+    assert.equal(code, 2, verb)
+    assert.match(stderr, new RegExp(`factoryctl ${verb} does not read --zzz`))
+  }
+})
+
+test('factoryctl rejects raw reserved flag spellings before dispatch', async () => {
+  for (const flag of ['__proto__', '_']) {
+    let stderr = ''
+    let touched = false
+    const code = await main(['ls', `--${flag}`, 'x', '--root', '/tmp/nope'], {
+      stdout: () => {}, stderr: (text) => { stderr += text },
+      net: { connect: () => { touched = true; throw new Error('socket should not be touched') } },
+    })
+    assert.equal(code, 2, flag)
+    assert.match(stderr, new RegExp(`factoryctl ls does not read --${flag}`))
+    assert.equal(touched, false, flag)
+  }
+})
+
+test('run refuses the measured typos and names what was meant', async () => {
+  for (const flag of ['files-in-scop', 'lan', 'varient', 'taks']) {
+    let stderr = ''
+    const code = await main(['run', `--${flag}`, 'q'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+    assert.equal(code, 2, flag)
+    assert.match(stderr, new RegExp(`factoryctl run does not read --${flag}`))
+  }
+  let stderr = ''
+  const code = await main(['run', '--validation-lane', 'npm test'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+  assert.equal(code, 2)
+  assert.ok(stderr.includes('--validation-lane (did you mean --lane?)'), stderr)
+})
+
+test('the factoryctl allow-list is per verb, not one global bag', async () => {
+  let stderr = ''
+  let code = await main(['ls', '--lane', 'demo'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+  assert.equal(code, 2)
+  assert.match(stderr, /factoryctl ls does not read --lane/)
+  stderr = ''
+  code = await main(['attach', 'run-1', '--repo', '/tmp/repo'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+  assert.equal(code, 2)
+  assert.match(stderr, /factoryctl attach does not read --repo/)
+  assert.doesNotThrow(() => assertUsage('run', { lane: 'x' }))
+  assert.equal(KNOWN_FLAGS.ls.includes('lane'), false)
+})
+
+test('send transmits every positional past the run id', async () => {
+  const many = []
+  await sendVerb(parseArgs(['send', 'run-1', 'hello', 'there', 'world']), {
+    call: async (_cmd, params) => { many.push(params); return { ok: true } }, stdout: () => {},
+  })
+  assert.equal(many[0].message, 'hello there world')
+  const quoted = []
+  await sendVerb(parseArgs(['send', 'run-1', 'one two']), {
+    call: async (_cmd, params) => { quoted.push(params); return { ok: true } }, stdout: () => {},
+  })
+  assert.equal(quoted[0].message, 'one two')
+  let stderr = ''
+  let code = await main(['send', 'run-1', '--wat', 'hello'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+  assert.equal(code, 2)
+  assert.match(stderr, /factoryctl send does not read --wat/)
+  stderr = ''
+  code = await main(['send', 'run-1'], { stdout: () => {}, stderr: (text) => { stderr += text } })
+  assert.equal(code, 1)
+  assert.match(stderr, /send requires <run-id> and <message>/)
+  assert.deepEqual(parseArgs(['send', 'run-1', 'hello', 'world']), { _: ['send', 'run-1', 'hello', 'world'] })
 })
 
 test('factoryctl usage lists every verb', async () => {

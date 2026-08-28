@@ -24,6 +24,97 @@ export function parseArgs(argv) {
   return out
 }
 
+// --- per-verb usage (#536 F12) -----------------------------------------------
+// The allow-list is PER VERB and is never merged with crew.mjs's KNOWN_FLAGS:
+// the two CLIs' vocabularies are deliberately separate, --lane means one thing
+// to `run` and nothing at all to `ls`, and one global bag would re-admit exactly
+// the confusion F12 measured.
+export const KNOWN_FLAGS = Object.freeze({
+  run: Object.freeze(['root', 'crew-dir', 'tier', 'brief', 'task', 'checkout', 'variant', 'files-in-scope', 'lane']),
+  ls: Object.freeze(['root', 'json']),
+  attach: Object.freeze(['root']),
+  send: Object.freeze(['root', 'role']),
+  pending: Object.freeze(['crew-root', 'repo', 'json']),
+  waiting: Object.freeze(['crew-root', 'json', 'resolve', 'expire', 'dry-run']),
+})
+
+// A flag that is CORRECT on crew.mjs and wrong here, so the refusal says what
+// was MEANT and not only what was wrong. Naming the mismatch is in scope;
+// renaming a flag is not, and nothing here admits the flag.
+export const FLAG_HINTS = Object.freeze({
+  run: Object.freeze({ 'validation-lane': 'lane', 'brief-file': 'brief' }),
+})
+
+function editDistance(a, b) {
+  const rows = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)])
+  for (let j = 0; j <= b.length; j += 1) rows[0][j] = j
+  for (let i = 1; i <= a.length; i += 1) {
+    for (let j = 1; j <= b.length; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1
+      rows[i][j] = Math.min(rows[i - 1][j] + 1, rows[i][j - 1] + 1, rows[i - 1][j - 1] + cost)
+    }
+  }
+  return rows[a.length][b.length]
+}
+
+// An explicit cross-CLI hint first, then a typo within two edits of a real flag.
+function nearestFlag(verb, flag) {
+  const hinted = FLAG_HINTS[verb]?.[flag]
+  if (hinted) return hinted
+  let best = null
+  let bestDistance = 3
+  for (const known of KNOWN_FLAGS[verb] || []) {
+    const distance = editDistance(flag, known)
+    if (distance < bestDistance) { best = known; bestDistance = distance }
+  }
+  return best
+}
+
+export class CtlUsageError extends Error {
+  constructor(message) { super(message); this.name = 'CtlUsageError'; this.usage = true }
+}
+
+// `__proto__` changes an ordinary object's prototype and `_` overwrites
+// parseArgs' positional sentinel, so neither reaches assertUsage as an unknown
+// key. Scan raw argv before parseArgs can hide either spelling; parseArgs itself
+// remains unchanged for its pinned export contract.
+function rawUsageVerb(argv) {
+  if (!Array.isArray(argv)) return null
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i]
+    if (typeof token !== 'string') continue
+    if (!token.startsWith('--')) return token
+    const next = argv[i + 1]
+    if (typeof next === 'string' && !next.startsWith('--')) i += 1
+  }
+  return null
+}
+
+function assertRawUsage(verb, argv) {
+  if (!Object.hasOwn(KNOWN_FLAGS, verb) || !Array.isArray(argv)) return
+  const unknown = [...new Set(argv.filter((token) => token === '--__proto__' || token === '--_').map((token) => token.slice(2)))]
+  if (unknown.length === 0) return
+  const named = unknown.map((flag) => `--${flag}`).join(', ')
+  const reads = KNOWN_FLAGS[verb].map((flag) => `--${flag}`).join(', ')
+  throw new CtlUsageError(`factoryctl ${verb} does not read ${named}; ${verb} reads: ${reads}`)
+}
+
+// Layered OVER parseArgs and never inside it: parseArgs' export name, signature
+// and return shape are pinned outside this file, so the refusal is a separate
+// assertion step rather than a change to what parseArgs returns.
+export function assertUsage(verb, args) {
+  const supplied = args && typeof args === 'object' ? args : {}
+  const known = KNOWN_FLAGS[verb] || []
+  const unknown = Object.keys(supplied).filter((key) => key !== '_' && !known.includes(key))
+  if (unknown.length === 0) return
+  const named = unknown.map((flag) => {
+    const meant = nearestFlag(verb, flag)
+    return meant ? `--${flag} (did you mean --${meant}?)` : `--${flag}`
+  }).join(', ')
+  const reads = known.map((flag) => `--${flag}`).join(', ')
+  throw new CtlUsageError(`factoryctl ${verb} does not read ${named}; ${verb} reads: ${reads}`)
+}
+
 export function socketPathFor(args = {}, env = process.env) {
   const root = args.root || env.CREW_DAEMON_ROOT || join(homedir(), '.crew', 'daemon')
   return join(root, 'daemon.sock')
@@ -229,8 +320,19 @@ export async function runVerb(args, deps = {}) {
   return result
 }
 
+// The WHOLE message, not its first word (#536 F13): every positional past the
+// run id, joined by one space. A word beginning with `--` is NOT message text —
+// parseArgs reads it as a flag and assertUsage then refuses it by name, so a
+// message whose first word starts with `--` has no spelling on this CLI and is
+// refused loudly rather than silently truncated.
+function sendMessage(args) {
+  if (!Array.isArray(args?._)) return null
+  const message = args._.slice(2).join(' ')
+  return message.trim() ? message : null
+}
+
 function requireSendArgs(args) {
-  if (typeof args?._?.[1] !== 'string' || !args._[1] || typeof args._?.[2] !== 'string' || !args._[2]) {
+  if (typeof args?._?.[1] !== 'string' || !args._[1] || sendMessage(args) === null) {
     throw new Error('send requires <run-id> and <message>')
   }
   if (args.role !== undefined && (typeof args.role !== 'string' || !args.role)) throw new Error('send requires --role <role> when --role is present')
@@ -241,7 +343,7 @@ export async function sendVerb(args, deps = {}) {
   const call = deps.call || deps.connection?.call
   if (typeof call !== 'function') throw new Error('send requires a daemon connection')
   const role = args.role
-  const result = await call('send', { run: args._[1], message: args._[2], ...(role ? { role } : {}) })
+  const result = await call('send', { run: args._[1], message: sendMessage(args), ...(role ? { role } : {}) })
   const stdout = outputSink(deps.stdout, process.stdout)
   stdout(`${JSON.stringify(result)}\n`)
   return result
@@ -883,13 +985,19 @@ export function waitingVerb(args, deps = {}) {
 // --- waiting on a human (#528): END ------------------------------------------
 
 export async function main(argv, deps = {}) {
-  const args = parseArgs(argv)
   const stderr = outputSink(deps.stderr, process.stderr)
+  try { assertRawUsage(rawUsageVerb(argv), argv) }
+  catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 2 }
+  const args = parseArgs(argv)
   const verb = args._[0]
   if (!['run', 'ls', 'attach', 'send', 'pending', 'waiting'].includes(verb)) {
     stderr('usage: factoryctl <run|ls|attach|send|pending|waiting> ...\n')
     return 2
   }
+  // Refuse what the operator typed and this CLI does not read, BEFORE anything is
+  // enqueued: a dropped flag used to enqueue an unscoped, unlaned run in silence.
+  try { assertUsage(verb, args) }
+  catch (err) { stderr(`error: ${err?.message || String(err)}\n`); return 2 }
   // `pending` and `waiting` read; they never connect to a daemon and never start one.
   if (verb === 'pending' || verb === 'waiting') {
     try {

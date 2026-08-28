@@ -470,24 +470,25 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     } catch { /* diagnostics only */ }
     return settled
   }
-  function assign({ role, briefFile, note }) {
+  function assign({ role, briefFile, note, reask = null }) {
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     let existing = seats.get(role)
     if (existing?.turn && !existing.turn.state.settled) throw staged('rpc-session-busy', `rpc seat ${role} already has an in-flight turn`, role)
     if (existing) awaitSettled(existing)
-    const id = nextAssignmentId()
-    const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
+    const runId = nextAssignmentId()
+    const id = reask?.id || runId
+    const returnPath = reask?.returnPath || join(paths.returnsDir, `${id}.${role}.json`)
     if (exists(returnPath)) unlink(returnPath)
-    const seat = ensureProcess(role, id)
+    const seat = ensureProcess(role, runId)
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
-    const turn = { id, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
     seat.turn = turn
-    const promptId = send(seat, { type: 'prompt', message: prompt, id }, 'prompt')
+    const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
     turn.promptId = promptId
-    saveSession(role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(role).startedAt || now(), lastAssignmentId: id })
+    saveSession(role, { sessionId: seat.sessionId, pid: seat.pid, startedAt: session(role).startedAt || now(), lastAssignmentId: runId })
     return { id, returnPath }
   }
   // The envelope is the record, but it is not the seat's readiness: pi may
@@ -632,7 +633,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
             turn.state.ended = false
             turn.promptId = send(seat, {
               type: 'prompt', message: turn.prompt,
-              id: `${turn.id}-p${turn.retries}`,
+              id: `${turn.runId}-p${turn.retries}`,
             }, 'prompt')
             log({ at: now(), rpc_prompt_retry: { role: turn.role, id: turn.id, attempt: turn.retries } })
             continue waitLoop

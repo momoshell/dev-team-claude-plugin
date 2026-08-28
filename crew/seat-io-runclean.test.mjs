@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, REASK_SETTLE_POLLS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
@@ -162,7 +162,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='seat-stale-cleared'", 'at role id'],
   ['operationalRow', "event='seat-stale'", 'at role id last_frame_at stale_ms threshold_ms'],
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
-  ['recordRow', "event='envelope-reask'", 'at role id returnPath outcome ...extra'],
+  ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
@@ -1165,6 +1165,59 @@ const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done",
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
+function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [] } = {}) {
+  const root = scratchDir(`seat-transport-reask-${transport}-`)
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  const workerBin = join(root, 'stub-claude')
+  writeFileSync(workerBin, '')
+  const logs = []; const events = []; const assigns = []
+  let clock = 0; let waitIndex = 0
+  const transportIo = {
+    assign(spec) {
+      assigns.push(spec)
+      const failure = assignFails[assigns.length - 1]
+      if (failure) throw failure
+      const id = spec?.reask?.id || `d${assigns.length}`
+      const returnPath = spec?.reask?.returnPath || join(paths.returnsDir, `${id}.builder.json`)
+      return { id, returnPath }
+    },
+    wait(path) {
+      const step = waits[waitIndex++]
+      if (typeof step !== 'function') throw new Error(`no scripted wait for ${path}`)
+      return step(path)
+    },
+    teardown() { return [] },
+  }
+  const crew = {
+    checkout: root,
+    claude_bin: workerBin,
+    members: { builder: { model: 'sonnet', transport } },
+  }
+  const deps = {
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    logLine: (_path, row) => logs.push(row),
+    ...(transport === HEADLESS_RPC_TRANSPORT ? { headlessRpcIo: () => transportIo } : { headlessIo: () => transportIo }),
+  }
+  const io = seatIo(crew, paths, root, null, null, {}, deps)
+  io.emit = (event) => events.push(event)
+  const first = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+  const reaskPath = join(paths.returnsDir, `${first.id}.reask.builder.json`)
+  return { root, paths, crew, io, first, reaskPath, assigns, logs, events, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+}
+
+function parseReaskFailure(stage, raw = MALFORMED_REASK) {
+  const error = new Error(`unusable envelope from ${stage}`)
+  error.stage = stage; error.role = 'builder'; error.raw = raw
+  return error
+}
+function stagedReaskFailure(stage, message = stage) {
+  const error = new Error(message)
+  error.stage = stage; error.role = 'builder'
+  return error
+}
+
 test('both pane waits journal the retry transition and the wait exit retires it', () => {
   const ordinary = makeRetryHarness({
     envelopeVisible: (box) => box.envelope,
@@ -1292,7 +1345,7 @@ test('reaskDecision refuses a settled, absent, indeterminate or non-pane seat an
     { kind: 'unusable-envelope', transport: 'pane', surfaceId: 'surface-builder', alive: true, asked: true },
     { kind: 'unusable-envelope', transport: 'pane', surfaceId: null, alive: true, asked: false },
     { kind: 'unusable-envelope', transport: 'pane', surfaceId: 'surface-builder', alive: null, asked: false },
-    { kind: 'unusable-envelope', transport: 'headless-json', surfaceId: 'surface-builder', alive: true, asked: false },
+    { kind: 'unusable-envelope', transport: HEADLESS_TRANSPORT, surfaceId: null, alive: null, asked: false }
   ]
   for (const args of refusals) {
     const result = reaskDecision(args)
@@ -1300,6 +1353,184 @@ test('reaskDecision refuses a settled, absent, indeterminate or non-pane seat an
     assert.match(result.why, /\S/)
   }
   assert.equal(reaskDecision({ kind: 'unusable-envelope', transport: 'pane', surfaceId: 'surface-builder', alive: true, asked: false }).ask, true)
+  for (const transport of [HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT]) {
+    assert.equal(reaskDecision({ kind: 'unusable-envelope', transport, surfaceId: null, alive: null, asked: false, reassignable: true }).ask, true)
+  }
+})
+
+test('a headless-json seat gets exactly one re-ask carrying the original assignment id, and a valid second envelope continues the run', () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_TRANSPORT,
+    waits: [
+      () => { throw parseReaskFailure('headless-parse-error') },
+      () => JSON.parse(VALID_REASK),
+    ],
+  })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 600), JSON.parse(VALID_REASK))
+    assert.equal(harness.assigns.length, 2)
+    assert.equal(harness.assigns[1].reask.id, harness.first.id)
+    assert.equal(harness.assigns[1].reask.returnPath, harness.reaskPath)
+    assert.equal(harness.events.filter((event) => event.kind === 'cell-failure').length, 1)
+  } finally { harness.cleanup() }
+})
+
+test("a headless-rpc seat's re-ask is delegated to its transport io", () => {
+  const harness = makeTransportReaskHarness({
+    transport: HEADLESS_RPC_TRANSPORT,
+    waits: [
+      () => { throw parseReaskFailure('rpc-parse-error') },
+      () => JSON.parse(VALID_REASK),
+    ],
+  })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 600), JSON.parse(VALID_REASK))
+    assert.equal(harness.assigns.length, 2)
+    assert.equal(harness.assigns[1].reask.id, harness.first.id)
+    assert.equal(harness.assigns[1].reask.returnPath, harness.reaskPath)
+  } finally { harness.cleanup() }
+})
+
+test('the re-ask bound holds on every transport', () => {
+  for (const transport of [HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT]) {
+    const stage = transport === HEADLESS_RPC_TRANSPORT ? 'rpc-parse-error' : 'headless-parse-error'
+    const harness = makeTransportReaskHarness({
+      transport,
+      waits: [
+        () => { throw parseReaskFailure(stage) },
+        () => { throw parseReaskFailure(stage, MALFORMED_REASK_2) },
+      ],
+    })
+    try {
+      let first
+      try { harness.io.wait(harness.first.returnPath, 600) } catch (error) { first = error }
+      assert.ok(first)
+      assert.match(first.message, /re-ask attempted/)
+      assert.match(first.message, /second envelope is still unparseable/)
+      assert.equal(harness.assigns.length, 2)
+      assert.throws(() => harness.io.wait(harness.first.returnPath, 600))
+      assert.equal(harness.assigns.length, 2)
+    } finally { harness.cleanup() }
+  }
+})
+
+test('every delivery attempt is journalled with its ordinal', () => {
+  const busy = stagedReaskFailure('headless-session-busy', 'seat is still busy')
+  const harness = makeTransportReaskHarness({
+    waits: [
+      () => { throw parseReaskFailure('headless-parse-error') },
+      () => JSON.parse(VALID_REASK),
+    ],
+    assignFails: [null, busy],
+  })
+  try {
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 600), JSON.parse(VALID_REASK))
+    const rows = harness.logs.filter((row) => row.event === 'envelope-reask')
+    assert.deepEqual(rows.map((row) => [row.outcome, row.attempt]), [['busy', 1], ['sent', 2], ['recovered', undefined]])
+    assert.ok(rows.every((row) => row.transport === HEADLESS_TRANSPORT))
+  } finally { harness.cleanup() }
+})
+
+test('a seat that never settles fails the run after the named bound', () => {
+  const busy = stagedReaskFailure('headless-session-busy', 'seat is still busy')
+  const harness = makeTransportReaskHarness({
+    waits: [() => { throw parseReaskFailure('headless-parse-error') }],
+    assignFails: [null, ...Array.from({ length: REASK_SETTLE_POLLS + 1 }, () => busy)],
+  })
+  try {
+    let error
+    try { harness.io.wait(harness.first.returnPath, 600) } catch (err) { error = err }
+    assert.ok(error)
+    assert.equal(harness.assigns.length, REASK_SETTLE_POLLS + 2)
+    const rows = harness.logs.filter((row) => row.event === 'envelope-reask')
+    assert.equal(rows.filter((row) => row.outcome === 'busy').length, REASK_SETTLE_POLLS)
+    const terminal = rows.at(-1)
+    assert.deepEqual([terminal.outcome, terminal.attempt], ['undelivered', REASK_SETTLE_POLLS + 1])
+    assert.equal(terminal.transport, HEADLESS_TRANSPORT)
+  } finally { harness.cleanup() }
+})
+
+test('every envelope-reask row names its transport', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const logs = []; let sends = 0; let returnPath = null
+    const io = seatIo({ members: { builder: { transport: 'pane', surface_id: 'surface-builder' } } }, fixture.paths, fixture.repoDir, null, null, {}, {
+      logLine: (_path, row) => logs.push(row),
+      sendLine: () => { sends += 1; if (sends === 2) writeFileSync(returnPath, VALID_REASK) },
+      tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
+      locate: (_tree, id) => id === 'surface-builder',
+    })
+    const assignment = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' }); returnPath = assignment.returnPath
+    writeFileSync(returnPath, MALFORMED_REASK)
+    assert.deepEqual(io.wait(returnPath, 600), JSON.parse(VALID_REASK))
+    assert.equal(logs.filter((row) => row.event === 'envelope-reask').every((row) => row.transport === 'pane'), true)
+  })
+
+  for (const transport of [HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT]) {
+    const stage = transport === HEADLESS_RPC_TRANSPORT ? 'rpc-parse-error' : 'headless-parse-error'
+    const harness = makeTransportReaskHarness({ transport, waits: [() => { throw parseReaskFailure(stage) }, () => JSON.parse(VALID_REASK)] })
+    try {
+      harness.io.wait(harness.first.returnPath, 600)
+      assert.equal(harness.logs.filter((row) => row.event === 'envelope-reask').every((row) => row.transport === transport), true)
+    } finally { harness.cleanup() }
+  }
+})
+
+test("a transport re-ask leaves the seat's own return file byte-identical", () => {
+  for (const transport of [HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT]) {
+    const stage = transport === HEADLESS_RPC_TRANSPORT ? 'rpc-parse-error' : 'headless-parse-error'
+    const harness = makeTransportReaskHarness({ transport, waits: [() => { throw parseReaskFailure(stage) }, () => JSON.parse(VALID_REASK)] })
+    try {
+      writeFileSync(harness.first.returnPath, MALFORMED_REASK)
+      const before = readFileSync(harness.first.returnPath, 'utf8')
+      assert.deepEqual(harness.io.wait(harness.first.returnPath, 600), JSON.parse(VALID_REASK))
+      assert.equal(readFileSync(harness.first.returnPath, 'utf8'), before)
+      assert.notEqual(harness.assigns[1].reask.returnPath, harness.first.returnPath)
+    } finally { harness.cleanup() }
+  }
+})
+
+test('a second failure that is not a parse failure is journalled as failed', () => {
+  const harness = makeTransportReaskHarness({ waits: [
+    () => { throw parseReaskFailure('headless-parse-error') },
+    () => { throw stagedReaskFailure('headless-timeout', 'headless timeout') },
+  ] })
+  try {
+    let error
+    try { harness.io.wait(harness.first.returnPath, 600) } catch (err) { error = err }
+    assert.ok(error)
+    const rows = harness.logs.filter((row) => row.event === 'envelope-reask')
+    assert.equal(rows.some((row) => row.outcome === 'unparseable-again'), false)
+    const failed = rows.find((row) => row.outcome === 'failed')
+    assert.deepEqual({ failure: failed.failure, second: failed.second }, { failure: 'timeout', second: 'headless-timeout' })
+    assert.match(error.message, /is not JSON this driver can read|unusable envelope/)
+  } finally { harness.cleanup() }
+})
+
+test('a seat refusal on the re-ask writes its terminal row before it is rethrown', () => {
+  const refusal = stagedReaskFailure(SEAT_REFUSAL_STAGE, 'provider refused')
+  const harness = makeTransportReaskHarness({ waits: [
+    () => { throw parseReaskFailure('headless-parse-error') },
+    () => { throw refusal },
+  ] })
+  try {
+    let error
+    try { harness.io.wait(harness.first.returnPath, 600) } catch (err) { error = err }
+    assert.equal(error, refusal)
+    const rows = harness.logs.filter((row) => row.event === 'envelope-reask')
+    assert.equal(rows.at(-1).outcome, 'failed')
+    assert.equal(rows.at(-1).second, SEAT_REFUSAL_STAGE)
+  } finally { harness.cleanup() }
+})
+
+test('a transport this build never enrolled is refused a re-ask', () => {
+  const harness = makeTransportReaskHarness({ waits: [() => { throw parseReaskFailure('headless-parse-error') }] })
+  try {
+    harness.crew.members.builder.transport = 'some-future-transport'
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 600))
+    assert.equal(harness.assigns.length, 1)
+    const declined = harness.logs.find((row) => row.event === 'envelope-reask' && row.outcome === 'declined')
+    assert.equal(declined.transport, 'some-future-transport')
+  } finally { harness.cleanup() }
 })
 
 test('seatIo.wait keeps polling an absent return file to its deadline', () => {

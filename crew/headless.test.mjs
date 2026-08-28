@@ -648,3 +648,92 @@ test('T7 headless transport journals a failed crew.json persist', () => {
     assert.ok(failures.every((event) => event.role === 'reviewer' && event.reason === 'write-failed'))
   } finally { rmSync(paths.dir, { recursive: true, force: true }) }
 })
+
+function headlessReaskFixture(overrides = {}) {
+  const logs = []
+  const f = makeFixture({ log: (row) => logs.push(row), ...overrides })
+  const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+  const reaskPath = join(f.returnsDir, `${first.id}.reask.builder.json`)
+  writeFileSync(join(f.taskDir, 'headless', first.id, 'exit'), '0')
+  return { ...f, first, reaskPath, logs }
+}
+
+test('a re-ask assignment keeps the caller logical id and collects on the caller path', () => {
+  const f = headlessReaskFixture()
+  try {
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: f.first.id, returnPath: f.reaskPath } })
+    assert.deepEqual(second, { id: 'd1', returnPath: f.reaskPath })
+    assert.match(f.calls[1].prompt, /^ASSIGNMENT d1:/)
+    assert.ok(f.calls[1].prompt.includes(f.reaskPath))
+  } finally { f.cleanup() }
+})
+
+test('a re-ask is a second physical run with its own directory and reservation', () => {
+  const f = headlessReaskFixture()
+  try {
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: f.first.id, returnPath: f.reaskPath } })
+    assert.equal(second.id, f.first.id)
+    assert.equal(existsSync(join(f.taskDir, 'headless', 'd2')), true)
+    const marker = JSON.parse(readFileSync(join(f.taskDir, 'headless', '.builder.active.json'), 'utf8'))
+    assert.equal(marker.id, 'd2')
+    assert.equal(marker.dir, join(f.taskDir, 'headless', 'd2'))
+    const spawn = f.logs.filter((row) => row.event === 'headless-spawn').at(-1)
+    assert.equal(spawn.id, 'd1')
+    assert.equal(spawn.run_id, 'd2')
+  } finally { f.cleanup() }
+})
+
+test("a re-ask resumes the seat's own session rather than starting a new one", () => {
+  const f = headlessReaskFixture()
+  try {
+    f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: f.first.id, returnPath: f.reaskPath } })
+    assert.equal(f.calls[1].resume, true)
+    assert.equal(f.calls[1].sessionId, f.calls[0].sessionId)
+  } finally { f.cleanup() }
+})
+
+test('a re-ask never touches the seat original return file', () => {
+  const f = headlessReaskFixture()
+  try {
+    const original = 'original malformed bytes'
+    writeFileSync(f.first.returnPath, original)
+    f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: f.first.id, returnPath: f.reaskPath } })
+    assert.equal(readFileSync(f.first.returnPath, 'utf8'), original)
+  } finally { f.cleanup() }
+})
+
+test('a re-ask while the prior invocation is still live is refused as busy', () => {
+  const f = makeFixture()
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const reaskPath = join(f.returnsDir, `${first.id}.reask.builder.json`)
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: first.id, returnPath: reaskPath } }), (err) => err.stage === 'headless-session-busy')
+    assert.equal(readdirSync(join(f.taskDir, 'headless')).filter((name) => /^d\d+$/.test(name)).length, 1)
+  } finally { f.cleanup() }
+})
+
+test('a timeout marker row names the physical run', () => {
+  let clock = 0
+  const f = headlessReaskFixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: () => { const err = new Error('permission denied'); err.code = 'EPERM'; throw err },
+  })
+  try {
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: f.first.id, returnPath: f.reaskPath } })
+    assert.throws(() => f.io.wait(second.returnPath, 1), (err) => err.stage === 'headless-timeout')
+    const marker = f.logs.find((row) => row.event === 'headless-timeout-marker-retained')
+    assert.equal(marker.id, f.first.id)
+    assert.equal(marker.run_id, 'd2')
+  } finally { f.cleanup() }
+})
+
+test('wait collects the re-ask envelope from the caller path', () => {
+  const f = headlessReaskFixture()
+  try {
+    const second = f.io.assign({ role: 'builder', briefFile: '/tmp/reask.md', reask: { id: f.first.id, returnPath: f.reaskPath } })
+    const envelope = { assignment_id: f.first.id, role: 'builder', status: 'done' }
+    writeFileSync(f.reaskPath, JSON.stringify(envelope))
+    assert.deepEqual(f.io.wait(second.returnPath, 1), envelope)
+  } finally { f.cleanup() }
+})

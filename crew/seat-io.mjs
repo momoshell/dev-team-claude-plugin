@@ -101,6 +101,29 @@ const REFUSAL_READING_MAX_MS = 300_000
 export const REASK_MAX = 1
 export const REASK_TIMEOUT_S = 600
 
+// A transport re-ask is a fresh ASSIGNMENT, and a headless-json seat's prior
+// invocation may not have written its `exit` file yet at the instant its
+// unparseable envelope is read — assign refuses that as busy
+// (crew/headless.mjs:422). Settling is part of DELIVERING the one re-ask, never a
+// second one: at most REASK_SETTLE_POLLS retries of the same undelivered ask,
+// REASK_SETTLE_MS apart, and then the run fails exactly as it fails today. This
+// loop runs BEFORE the re-ask's own `window` begins, so it is bounded by these two
+// constants and by nothing else — 5000ms is crew/headless.mjs:21's own
+// WAIT_POLL_MS and 12 polls is a 60s ceiling, an order of magnitude above the
+// write-then-exit gap it waits out.
+export const REASK_SETTLE_MS = 5000
+export const REASK_SETTLE_POLLS = 12
+// The two transports' own words for "this seat still has a live turn"
+// (crew/headless.mjs:408, crew/headless-rpc.mjs:477). PRIVATE: this is this
+// module's READING of the other two, not a contract to export.
+const REASK_BUSY_STAGES = new Set(['headless-session-busy', 'rpc-session-busy'])
+// Only a transport whose re-ask semantics have been deliberately ENROLLED may be
+// re-asked. A transport io can expose `assign` and `wait` and ignore the optional
+// `reask` override entirely, so method existence is not capability (#623): a newly
+// added transport is refused here until someone enrols it on purpose. PRIVATE for
+// the same reason REASK_BUSY_STAGES is.
+const REASK_TRANSPORTS = new Set([HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT])
+
 // The canonical transport value is NOT the store directory name. Keep the
 // production paths explicit: deriving a path from `headless-json` would find
 // nothing and make capture inert.
@@ -1423,14 +1446,19 @@ export function readEnvelopeFile(returnPath, deps = {}) {
 // the refusals are unit-testable without a seat: a re-ask to a seat that is
 // settled, absent, indeterminate, or on a transport whose send seam this module
 // does not own is a FABRICATED recovery, and the escalation must say which.
-export function reaskDecision({ kind, transport, surfaceId, alive, asked }) {
+export function reaskDecision({ kind, transport, surfaceId, alive, asked, reassignable = false }) {
   if (kind !== 'unusable-envelope') return { ask: false, why: `failure kind ${String(kind)} is not an unparseable envelope, so there is nothing a re-emit could fix` }
   if (asked) return { ask: false, why: `a re-ask was already sent for this envelope; the bound is ${REASK_MAX} per assignment` }
-  const paneSeat = transport === DEFAULT_TRANSPORT
-  if (!paneSeat) return { ask: false, why: `transport ${String(transport)} owns its own wait and send seam, so this driver has nobody here to ask` }
-  if (!surfaceId) return { ask: false, why: 'the seat has no recorded surface, so there is no live participant to ask' }
-  if (alive !== true) return { ask: false, why: `the pane probe returned ${alive === false ? 'probe-dead' : 'probe-unknown'}, and a re-ask to a seat that is not measurably alive is a fabricated recovery` }
-  return { ask: true, why: 'a live pane seat can re-emit its own envelope' }
+  if (transport === DEFAULT_TRANSPORT) {
+    if (!surfaceId) return { ask: false, why: 'the seat has no recorded surface, so there is no live participant to ask' }
+    if (alive !== true) return { ask: false, why: `the pane probe returned ${alive === false ? 'probe-dead' : 'probe-unknown'}, and a re-ask to a seat that is not measurably alive is a fabricated recovery` }
+    return { ask: true, why: 'a live pane seat can re-emit its own envelope' }
+  }
+  // A transport seat has no surface and no liveness to probe: its re-ask is a
+  // fresh assignment onto the seam the transport io itself owns, and the only
+  // measured question is whether this driver HOLDS that seam.
+  if (!reassignable) return { ask: false, why: `transport ${String(transport)} owns its own wait and send seam and this driver holds no re-assign seam for it, so there is nobody here to ask` }
+  return { ask: true, why: `transport ${String(transport)} re-asks by a fresh assignment carrying the original id` }
 }
 
 // What the driver owes a seat that emitted an UNCLASSIFIED refusal frame, from
@@ -2074,15 +2102,24 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     const role = info?.role || 'unknown'
     const surfaceId = transport ? null : (info?.surface_id || null)
     const alive = surfaceId ? paneAlive(surfaceId, { tree, locate }) : null
+    const transportName = transport ? (crew.members?.[role]?.transport || 'unknown') : DEFAULT_TRANSPORT
+    // What this driver HOLDS, measured rather than assumed: an ENROLLED transport
+    // io that exposes both halves of the seam is one this driver can ask again.
+    // The NAME is load-bearing — a member whose transport this build never
+    // enrolled, or cannot name at all, is refused rather than promised a re-ask
+    // nothing here knows how to deliver.
+    const reassignable = !!transport && REASK_TRANSPORTS.has(transportName) && typeof transport.assign === 'function' && typeof transport.wait === 'function'
+    let attempts = 1
     const decision = reaskDecision({
       kind: cellFailureKind(err),
-      transport: transport ? (crew.members?.[role]?.transport || 'unknown') : DEFAULT_TRANSPORT,
+      transport: transportName,
       surfaceId,
       alive,
       asked: reasked.has(returnPath),
+      reassignable,
     })
     const note = (outcome, extra = {}) => {
-      try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: info?.id ?? null, returnPath, outcome, ...extra })) }
+      try { io.log(recordRow({ at: now(), event: 'envelope-reask', role, id: info?.id ?? null, returnPath, transport: transportName, outcome, ...extra })) }
       catch { /* the journal is diagnostics, never load-bearing for a wait */ }
     }
     if (!decision.ask) {
@@ -2093,22 +2130,53 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     reasked.add(returnPath)
     const staleRaw = typeof err.raw === 'string' ? err.raw : null
-    const briefPath = join(paths.taskDir, `reask-${info?.id || 'seat'}.${role}.md`)
+    const reaskId = info?.id || 'reask'
+    const briefPath = join(paths.taskDir, `reask-${reaskId}.${role}.md`)
+    // A transport re-ask collects on its OWN path. The seat's original file is
+    // evidence: read, never rewritten and never removed — so the second envelope
+    // needs somewhere else to land, or the transport's own wait reads the stale
+    // unparseable bytes straight back as the answer.
+    const reaskPath = join(paths.returnsDir, `${reaskId}.reask.${role}.json`)
+    let collectPath = returnPath
     try {
       // The brief is written BEFORE the message is annotated, so what the seat
       // reads is the parse failure verbatim and nothing else.
-      writeFileSync(briefPath, reaskBrief({ role, id: info?.id || 'reask', returnPath, message: err.message }))
-      sendLine(surfaceId, assignmentLine({ id: info?.id || 'reask', role, briefFile: briefPath, returnPath, taskDir: paths.taskDir }))
+      writeFileSync(briefPath, reaskBrief({ role, id: reaskId, returnPath: reassignable ? reaskPath : returnPath, message: err.message }))
+      if (reassignable) {
+        // The id is the ORIGINAL one: an envelope carrying the re-ask's own id
+        // would be refused by the driver's anti-replay check (crew/drive.mjs:631)
+        // and the recovery would be spent for nothing. EVERY delivery attempt is
+        // journalled with its ordinal — a minute of refused deliveries that only
+        // reported its own last line would be a minute nobody can read back.
+        let polls = 0
+        for (;;) {
+          attempts = polls + 1
+          try {
+            const attempt = transport.assign({ role, briefFile: briefPath, reask: { id: reaskId, returnPath: reaskPath } })
+            collectPath = attempt?.returnPath || reaskPath
+            break
+          } catch (assignErr) {
+            if (!REASK_BUSY_STAGES.has(assignErr?.stage) || polls >= REASK_SETTLE_POLLS) throw assignErr
+            note('busy', { attempt: attempts, why: assignErr.message })
+            polls += 1
+            sleep(REASK_SETTLE_MS)
+          }
+        }
+      } else {
+        sendLine(surfaceId, assignmentLine({ id: reaskId, role, briefFile: briefPath, returnPath, taskDir: paths.taskDir }))
+      }
     } catch (sendErr) {
       err.message = `${err.message}\n[re-ask attempted and not delivered: ${sendErr.message}]`
       err.reask = { attempted: true, delivered: false, recovered: false, why: sendErr.message }
-      note('undelivered', { why: sendErr.message })
+      note('undelivered', { why: sendErr.message, attempt: attempts })
       return { envelope: null, error: err }
     }
-    note('sent', { brief: briefPath })
+    note('sent', { brief: briefPath, attempt: attempts })
     const window = Math.min(timeoutS, REASK_TIMEOUT_S)
     try {
-      const env = waitForEnvelope({
+      const env = reassignable
+        ? transport.wait(collectPath, window)
+        : waitForEnvelope({
         returnPath,
         timeoutS: window,
         role,
@@ -2137,10 +2205,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       err.reask = { attempted: true, delivered: true, recovered: false, second: null }
       note('no-new-bytes', { window_s: window })
     } catch (secondErr) {
-      if (secondErr && secondErr.stage === SEAT_REFUSAL_STAGE) throw secondErr
-      err.message = `${err.message}\n[re-ask attempted: one re-ask was sent to ${role} and the second envelope is still unparseable: ${secondErr.message}]`
-      err.reask = { attempted: true, delivered: true, recovered: false, second: secondErr.message }
-      note('unparseable-again', { second: secondErr.stage || null })
+      // What the SECOND attempt actually did, named from the same closed set the
+      // first failure was named from. `unparseable-again` is now reserved for the
+      // one case it describes; anything else is a re-ask that failed before it
+      // could produce a usable envelope, and it says so rather than borrowing a
+      // parse defect's name.
+      const secondKind = cellFailureKind(secondErr)
+      if (secondErr && secondErr.stage === SEAT_REFUSAL_STAGE) {
+        note('failed', { failure: secondKind, second: secondErr.stage || null, refused: true })
+        throw secondErr
+      }
+      if (secondKind === 'unusable-envelope') {
+        err.message = `${err.message}\n[re-ask attempted: one re-ask was sent to ${role} and the second envelope is still unparseable: ${secondErr.message}]`
+        err.reask = { attempted: true, delivered: true, recovered: false, second: secondErr.message }
+        note('unparseable-again', { second: secondErr.stage || null })
+      } else {
+        err.message = `${err.message}\n[re-ask failed before producing a usable envelope: ${secondErr.message}]`
+        err.reask = { attempted: true, delivered: true, recovered: false, failure: secondKind, second: secondErr.stage || null }
+        note('failed', { failure: secondKind, second: secondErr.stage || null })
+      }
     }
     return { envelope: null, error: err }
   }

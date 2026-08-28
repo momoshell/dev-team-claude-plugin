@@ -413,7 +413,14 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const err = new Error(`headless: seat ${role} has an unresolvable reservation for session ${sessionId} at ${activePath(role)} — use override to recover it`)
     err.stage = 'headless-unresolvable-reservation'; err.role = role; return err
   }
-  function assign({ role, briefFile, note }) {
+  // A RE-ASK is not a new assignment: it is the SAME one, asked again. The caller
+  // (crew/seat-io.mjs reaskUnusableEnvelope) owns the bound and supplies BOTH the
+  // original LOGICAL id — so the envelope that comes back still satisfies the
+  // driver's anti-replay check (crew/drive.mjs:631) — and a fresh path to collect
+  // it on, because the seat's own bytes are read, never rewritten. The PHYSICAL
+  // run keeps its own `runId`: it is a second invocation and every reservation,
+  // directory and journal row must still be able to say so.
+  function assign({ role, briefFile, note, reask = null }) {
     const member = crew.members?.[role]
     if (!member) throw new Error(`role ${role} not seated in this crew`)
     const prior = [...runs.values()].reverse().find((r) => r.role === role)
@@ -429,8 +436,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       notePersist(role, persistCrew(paths, role, { session_id: sessionId }, crewDeps))
     }
     const allocation = allocateRun()
-    const { id, dir } = allocation
-    const returnPath = join(paths.returnsDir, `${id}.${role}.json`)
+    const { id: runId, dir } = allocation
+    const id = reask?.id || runId
+    const returnPath = reask?.returnPath || join(paths.returnsDir, `${id}.${role}.json`)
     if (exists(returnPath)) unlink(returnPath)
     const stream = join(dir, 'stream.jsonl'), stderr = join(dir, 'stderr.log'), exit = join(dir, 'exit'), cmdPath = join(dir, 'cmd.json')
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
@@ -438,7 +446,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const args = command.args || []
     const pgid = join(dir, 'pgid')
     const shell = `printf '%s' $$ >${shq(`${pgid}.tmp`)}; mv ${shq(`${pgid}.tmp`)} ${shq(pgid)}; ${shq(command.bin)} ${args.map(shq).join(' ')} >${shq(stream)} 2>${shq(stderr)}; printf '%s' $? >${shq(`${exit}.tmp`)}; mv ${shq(`${exit}.tmp`)} ${shq(exit)}`
-    const reservation = store.reserve(role, { phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid }, role, id, dir, returnPath, exit, startedAt: now() })
+    const reservation = store.reserve(role, { phase: PHASES.RESERVED, sessionId, evidence: { kind: EVIDENCE_KINDS.PGID, file: pgid }, role, id: runId, dir, returnPath, exit, startedAt: now() })
     if (!reservation.ok) {
       if (reservation.reason === 'unresolvable') throw unresolvable(role, sessionId)
       throw busy(role, sessionId)
@@ -466,9 +474,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     member.started = true
     notePersist(role, persistCrew(paths, role, { started: true }, crewDeps))
-    const run = { role, id, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
+    const run = { role, id, runId, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
     runs.set(returnPath, run)
-    log({ at: now(), event: 'headless-spawn', role, id, pid: child.pid, dir, returnPath })
+    log({ at: now(), event: 'headless-spawn', role, id, run_id: runId, pid: child.pid, dir, returnPath })
     return { id, returnPath }
   }
   // An unreadable envelope is TERMINAL, and it leaves this transport the way
@@ -507,7 +515,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
         if (current.marker?.reservation_id === run.reservation_id) proven = store.probeEvidence(current.marker.evidence) === LIVENESS.DEAD
       }
       if (proven) store.clear({ key: run.role, reservation_id: run.reservation_id })
-      else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id })
+      else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id, run_id: run.runId })
     }
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }

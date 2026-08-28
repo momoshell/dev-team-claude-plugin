@@ -329,6 +329,41 @@ export function usageWindow({ dbPath, since, nodeVersion = process.versions.node
   }
 }
 
+// Process identity follows the descendant-record convention at crew/seat-io,
+// lines 612-616: root_pid/root_pgid/root_start and root-unidentified. This
+// reader is copied rather than imported because the daemon import firewall
+// forbids that module.
+function defaultPsSnapshot() {
+  const empty = () => ({ ok: false, rows: new Map() })
+  try {
+    const read = (format) => {
+      let result
+      try {
+        result = cpSpawnSync('ps', ['-eo', format], { encoding: 'utf8', timeout: 2000 })
+      } catch { return null }
+      const withStat = format.includes('stat=')
+      const pattern = withStat
+        ? /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/
+        : /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.*)$/
+      const rows = new Map()
+      const text = typeof result?.stdout === 'string' ? result.stdout : ''
+      for (const line of text.split(/\r?\n/)) {
+        const match = pattern.exec(line)
+        if (!match) continue
+        const pid = Number(match[1]), ppid = Number(match[2]), pgid = Number(match[3])
+        const stat = withStat ? match[4] : null
+        const start = (withStat ? match[5] : match[4]).trim()
+        if (![pid, ppid, pgid].every(Number.isSafeInteger) || !start) continue
+        rows.set(pid, { pid, ppid, pgid, start, stat })
+      }
+      return { ok: result?.status === 0 && rows.size > 0, rows }
+    }
+    const measured = read('pid=,ppid=,pgid=,stat=,lstart=')
+    if (measured?.ok === true) return measured
+    return read('pid=,ppid=,pgid=,lstart=') || measured || empty()
+  } catch { return empty() }
+}
+
 function hasPid(value) {
   const n = Number(value)
   return Number.isFinite(n) && n > 0
@@ -427,6 +462,7 @@ export function daemon(options = {}) {
   const fork = injected.fork || cpFork
   const spawnSync = injected.spawnSync || cpSpawnSync
   const kill = injected.kill || ((pid, signal) => process.kill(pid, signal))
+  const psSnapshot = injected.psSnapshot || defaultPsSnapshot
   const now = injected.now || (() => Date.now())
   const nodeVersion = injected.nodeVersion || process.versions.node
   const readUsageWindow = injected.usageWindow || usageWindow
@@ -456,8 +492,34 @@ export function daemon(options = {}) {
   let interval = null
   let intervalSet = false
   let started = false
+  // 'new' → 'running' → 'stopping' → 'stopped'; started says whether this
+  // process holds the socket, phase says whether it ever will again.
+  let phase = 'new'
   let ownsFiles = false
   let folded = false
+
+  function identifyProcess(value) {
+    const pid = Number(value)
+    if (!hasPid(pid)) return { pgid: null, start: null }
+    try {
+      const snapshot = psSnapshot()
+      if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return { pgid: null, start: null }
+      const row = snapshot.rows.get(pid)
+      return row ? { pgid: row.pgid ?? null, start: row.start ?? null } : { pgid: null, start: null }
+    } catch { return { pgid: null, start: null } }
+  }
+
+  function childIdentified(run) {
+    const pid = Number(run?.child_pid)
+    if (!hasPid(pid) || !Number.isSafeInteger(run?.child_pgid) || run.child_pgid <= 1
+      || typeof run.child_start !== 'string' || run.child_start.length === 0) return false
+    try {
+      const snapshot = psSnapshot()
+      if (snapshot?.ok !== true || !(snapshot.rows instanceof Map)) return false
+      const row = snapshot.rows.get(pid)
+      return !!row && row.pgid === run.child_pgid && row.start === run.child_start
+    } catch { return false }
+  }
 
   function appendRecord(record) {
     mkdir(root, { recursive: true })
@@ -530,6 +592,8 @@ export function daemon(options = {}) {
       task_return_base: record.task_return_base || record.task_return,
       attempt: record.attempt ?? 1,
       child_pid: null,
+      child_pgid: null,
+      child_start: null,
       child_generation: 0,
       lifecycle: 'queued',
       orphaned: false,
@@ -561,7 +625,13 @@ export function daemon(options = {}) {
       return
     }
     if (!run) return
-    if (record.kind === 'started') { run.child_pid = record.child_pid; run.lifecycle = 'started'; return }
+    if (record.kind === 'started') {
+      run.child_pid = record.child_pid
+      run.child_pgid = record.child_pgid ?? null
+      run.child_start = record.child_start ?? null
+      run.lifecycle = 'started'
+      return
+    }
     if (record.kind === 'adopted') { run.lifecycle = 'adopted'; return }
     if (record.kind === 'requeued') { run.lifecycle = 'queued'; return }
     if (record.kind === 'regrant') {
@@ -575,6 +645,8 @@ export function daemon(options = {}) {
       run.continuation = true
       run.lifecycle = 'queued'
       run.child_pid = null
+      run.child_pgid = null
+      run.child_start = null
       return
     }
     if (record.kind === 'orphaned') { run.lifecycle = 'orphaned'; run.orphaned = true; run.orphan_reason = record.reason || 'orphaned-on-restart'; run.child_dead = true; return }
@@ -808,17 +880,21 @@ export function daemon(options = {}) {
   function reapLaunchedContinuation(run) {
     const pid = run.child_pid
     if (!hasPid(pid)) return false
+    const identifiedGroup = childIdentified(run)
+    // The detached child is its own group leader (pgid === pid); this fallback
+    // is only ever signalled when the binding above identified it.
+    const pgid = Number.isSafeInteger(run.child_pgid) && run.child_pgid > 1 ? run.child_pgid : Number(pid)
     run.child_generation += 1
     run.child_pid = null
+    run.child_pgid = null
+    run.child_start = null
     run.child_dead = true
-    // GROUP-kill, never a bare pid: the child is forked detached (:941) and is
-    // its own group leader, so its own descendants go with it. The guard is
-    // crew/headless-rpc.mjs:456's — kill(-0, sig) signals THIS daemon's group
-    // and kill(-1, sig) every process this user owns; neither is ever a reap.
-    const pgid = Number(pid)
-    const signalable = Number.isSafeInteger(pgid) && pgid > 1
-    if (signalable) { try { kill(-pgid, 'SIGTERM') } catch { /* an already-exited child is the outcome we wanted */ } }
-    try { appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: signalable ? 'SIGTERM' : null })) } catch { /* the feed must never re-throw inside a recovery path */ }
+    if (identifiedGroup === true) {
+      try { kill(-pgid, 'SIGTERM') } catch { /* an already-exited child is the outcome we wanted */ }
+    } else {
+      try { appendRecord({ kind: 'reap-refused', run_id: run.run_id, at: now(), child_pid: pid, reason: 'child-unidentified' }) } catch { /* preserve daemon liveness if the registry disk is unavailable */ }
+    }
+    try { appendEvent(run, normalizeEvent('daemon', { event: 'died', scope: 'run', exit_code: null, signal: identifiedGroup === true ? 'SIGTERM' : null })) } catch { /* the feed must never re-throw inside a recovery path */ }
     return true
   }
 
@@ -854,6 +930,8 @@ export function daemon(options = {}) {
       run.continuation = true
       run.lifecycle = 'queued'
       run.child_pid = null
+      run.child_pgid = null
+      run.child_start = null
       run.child_dead = false
       run.unmeasured_polls = 0
       run.orphan_reason = null
@@ -1059,20 +1137,27 @@ export function daemon(options = {}) {
     try {
       child = fork(CHILD_PATH, ['--run-child', JSON.stringify(childSpecFor(run))], { detached: true, stdio: 'ignore' })
       run.child_pid = child?.pid ?? null
+      const identity = identifyProcess(run.child_pid)
+      run.child_pgid = identity.pgid
+      run.child_start = identity.start
       attachChild(run, child, generation)
       child?.unref?.()
     } catch (err) {
-      if (preserveOnFailure) { run.child_pid = null; run.lifecycle = 'queued' }
+      if (preserveOnFailure) {
+        run.child_pid = null; run.child_pgid = null; run.child_start = null; run.lifecycle = 'queued'
+      }
       else orphanRun(run, `child-spawn-error: ${err?.message || String(err)}`)
       return err
     }
     if (!hasPid(run.child_pid)) {
-      if (preserveOnFailure) { run.child_pid = null; run.lifecycle = 'queued' }
+      if (preserveOnFailure) {
+        run.child_pid = null; run.child_pgid = null; run.child_start = null; run.lifecycle = 'queued'
+      }
       else orphanRun(run, 'child-spawn-error: fork returned no pid')
       return runError('child-spawn-error', `fork returned no pid for run ${run.run_id}`)
     }
     run.lifecycle = 'started'
-    appendRecord({ kind: 'started', run_id: run.run_id, at: now(), child_pid: run.child_pid })
+    appendRecord({ kind: 'started', run_id: run.run_id, at: now(), child_pid: run.child_pid, child_pgid: run.child_pgid, child_start: run.child_start })
     appendEvent(run, normalizeEvent('daemon', { event: 'fork', run_id: run.run_id, pid: run.child_pid }))
     return null
   }
@@ -1134,6 +1219,9 @@ export function daemon(options = {}) {
   }
 
   function enqueue(spec = {}) {
+    if (phase === 'stopping' || phase === 'stopped') {
+      throw runError('daemon-stopped', `daemon on ${socketPath} is ${phase} — refusing to admit a run it cannot supervise; nothing was queued and nothing was forked`)
+    }
     ensureFolded()
     if (!isObject(spec)) throw runError('invalid-spec', 'enqueue requires a spec object')
     const hasDir = typeof spec.crew_dir === 'string' && !!spec.crew_dir
@@ -1278,8 +1366,8 @@ export function daemon(options = {}) {
         judgeEnvelope(run, 'orphaned-on-restart')
         continue
       }
-      const alive = processAlive(kill, run.child_pid)
-      if (alive === true || alive === null) {
+      const identified = childIdentified(run)
+      if (identified === true) {
         run.lifecycle = 'adopted'
         appendRecord({ kind: 'adopted', run_id: run.run_id, at: now() })
         continue
@@ -1474,6 +1562,7 @@ export function daemon(options = {}) {
       throw err
     }
     started = true
+    phase = 'running'
     ownsFiles = true
     adoptOrOrphan()
     pump()
@@ -1484,6 +1573,7 @@ export function daemon(options = {}) {
 
   async function stop(keepSocket = null) {
     if (!started && !ownsFiles && !server) return
+    phase = 'stopping'
     if (intervalSet) { clearEvery(interval); interval = null; intervalSet = false }
     for (const socket of [...connections]) {
       if (socket === keepSocket) { try { socket.end?.() } catch {} }
@@ -1499,6 +1589,7 @@ export function daemon(options = {}) {
       try { unlink(pidPath) } catch {}
       ownsFiles = false
     }
+    phase = 'stopped'
   }
 
   return { start, stop, poll, enqueue, send, state, result, list, feed, subscribers: () => [...subscribers].map(({ id, runId }) => ({ id, run_id: runId })), socketPath, root }

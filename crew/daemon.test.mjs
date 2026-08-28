@@ -91,6 +91,7 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
   writeFileSync(join(crewDir, 'journal.jsonl'), '')
   writeFileSync(brief, '# brief\n')
   const alive = new Set([700, 900])
+  const procStart = new Map()
   const forks = []
   const boots = []
   const reportedCrewDir = bootCrewDir || join(dir, 'reported-crew-state')
@@ -116,6 +117,7 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
       if (signal === 0 && !alive.has(pid)) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
       return true
     },
+    psSnapshot: () => ({ ok: true, rows: new Map([...alive].map((value) => [value, { pid: value, ppid: 1, pgid: value, start: procStart.get(value) ?? `start-${value}`, stat: 'S' }])) }),
     setInterval: () => null,
     clearInterval: () => {},
     feedRetention,
@@ -125,7 +127,7 @@ function fixture({ roles = ['planner', 'builder', 'reviewer'], transport = 'head
   }
   const d = daemon({ root, concurrency, ...(budget === undefined ? {} : { budget }), deps })
   return {
-    dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive,
+    dir, root, crewDir, taskDir, returnsDir, taskReturn, brief, reportedCrewDir, d, deps, forks, boots, alive, procStart,
     cleanup: () => rmSync(dir, { recursive: true, force: true }),
   }
 }
@@ -3336,4 +3338,83 @@ test('one settle path is shared by both run entrypoints', () => {
   assert.equal(sweeps(seatIoSrc), 1)
   assert.equal(sweeps(child), 0)
   assert.equal(sweeps(crew), 0)
+})
+
+test('restart refuses to adopt a live pid that is not this daemon\'s child', async () => {
+  const f = fixture()
+  let next = null
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    f.d.poll()
+    await f.d.stop()
+    f.procStart.set(900, 'Thu Jan  1 00:00:00 2099')
+    next = daemon({ root: f.root, deps: f.deps })
+    await next.start()
+    next.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'adopted'), false)
+    assert.equal(next.state({ run }).state, 'done')
+    assert.equal(next.result({ run }).envelope.details.escalation.why, 'orphaned-on-restart')
+  } finally {
+    await f.d.stop()
+    await next?.stop()
+    f.cleanup()
+  }
+})
+
+test('restart still adopts the child it can identify', async () => {
+  const f = fixture()
+  let next = null
+  try {
+    await f.d.start()
+    const { run_id: run } = await f.d.enqueue({ crew_dir: f.crewDir })
+    f.d.poll()
+    await f.d.stop()
+    const count = f.forks.length
+    next = daemon({ root: f.root, deps: f.deps })
+    await next.start()
+    next.poll()
+    const records = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.equal(f.forks.length, count)
+    assert.equal(next.state({ run }).state, 'working')
+    assert.equal(records.some((record) => record.run_id === run && record.kind === 'adopted'), true)
+  } finally {
+    await f.d.stop()
+    await next?.stop()
+    f.cleanup()
+  }
+})
+
+test('enqueue refuses while the daemon is stopping', async () => {
+  const f = fixture()
+  try {
+    await f.d.start()
+    const forkCount = f.forks.length
+    const stopping = f.d.stop()
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => err.code === 'daemon-stopped')
+    await stopping
+    assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir }), (err) => err.code === 'daemon-stopped')
+    assert.equal(f.forks.length, forkCount)
+    const registry = join(f.root, 'runs.jsonl')
+    if (existsSync(registry)) {
+      const records = readFileSync(registry, 'utf8').split('\n').filter(Boolean).map((line) => JSON.parse(line))
+      assert.equal(records.some((record) => record.kind === 'enqueued'), false)
+    }
+  } finally {
+    await f.d.stop()
+    f.cleanup()
+  }
+})
+
+test('a never-started daemon still admits an enqueue', async () => {
+  const f = fixture()
+  try {
+    const result = f.d.enqueue({ crew_dir: f.crewDir })
+    assert.equal(typeof result.run_id, 'string')
+    assert.equal(f.forks.length, 1)
+  } finally {
+    await f.d.stop()
+    f.cleanup()
+  }
 })

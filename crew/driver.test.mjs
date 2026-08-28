@@ -1,6 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { assignmentLine, assertSafeLine, pickNeedle, surfaceProcessTree } from './driver.mjs'
+import {
+  assignmentLine, assertSafeLine, pickNeedle, surfaceProcessTree, sendLine,
+  SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
+} from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
 
@@ -718,4 +721,98 @@ test('the pane capability declarations still declare abort none', () => {
   }
   assert.deepEqual(pane(claudeCapabilitiesFor), expected)
   assert.deepEqual(pane(piCapabilitiesFor), expected)
+})
+
+
+// --- sendLine: the send/verify/enter/PROVE sequence (b305) --------------------
+// A faked cmux, an in-memory input box and a virtual clock. The fake models the
+// one thing measured live on 2026-08-29: a consumed line leaves the box (the
+// needle leaves the frame), a swallowed one sits there unchanged.
+function fakeCmux({ consume = () => true } = {}) {
+  const state = { box: '', sends: 0, enters: 0, keys: [], calls: [] }
+  const screen = () => `\n\n> ${state.box}\n  bypass permissions on\n`
+  const fn = (verb, args) => {
+    state.calls.push({ verb, args })
+    const tail = args.indexOf('--') >= 0 ? args.slice(args.indexOf('--') + 1).join(' ') : ''
+    if (verb === 'read-screen') return { ok: true, stdout: screen(), stderr: '', error: null }
+    if (verb === 'send') { state.box += tail; state.sends += 1; return { ok: true, stdout: '', stderr: '', error: null } }
+    if (verb === 'send-key') {
+      state.keys.push(tail)
+      if (tail === 'enter') { state.enters += 1; if (consume(state)) state.box = '' }
+      else state.box = ''
+      return { ok: true, stdout: '', stderr: '', error: null }
+    }
+    return { ok: true, stdout: '', stderr: '', error: null }
+  }
+  return { fn, state }
+}
+
+function sendWith(consume) {
+  const { fn, state } = fakeCmux({ consume })
+  const journal = []
+  let clock = 1_700_000_000_000
+  const start = clock
+  let error = null
+  try {
+    sendLine('51e89c13-956c-42f5-9787-ba8437699948', SEND_LINE, {
+      cmux: fn, log: (row) => journal.push(row),
+      now: () => clock, settle: (ms) => { clock += ms },
+    })
+  } catch (err) { error = err }
+  return { state, journal, error, elapsed: clock - start }
+}
+
+const SEND_LINE = assignmentLine({
+  id: 'd1', role: 'builder', briefFile: '/tmp/b305/brief.md',
+  returnPath: '/tmp/b305/returns/d1.builder.json', taskDir: '/tmp/b305/task',
+})
+
+test('sendLine returns when the line is echoed AND consumed — one enter, no retype', () => {
+  const { state, journal, error } = sendWith(() => true)
+  assert.equal(error, null)
+  assert.equal(state.sends, 1)
+  assert.equal(state.enters, 1)
+  assert.deepEqual(state.keys, ['enter'])
+  assert.equal(journal.at(-1).event, 'send-submit')
+  assert.equal(journal.at(-1).outcome, 'submitted')
+})
+
+test('a line that echoes but is NEVER consumed fails by name, bounded and journalled', () => {
+  const { state, journal, error, elapsed } = sendWith(() => false)
+  assert.ok(error, 'expected a throw')
+  assert.equal(error.code, 'send-not-submitted')
+  assert.match(error.message, /never left the input box/)
+  assert.ok(state.enters >= 2 && state.enters <= 16, `bounded enters, got ${state.enters}`)
+  assert.equal(journal.filter((row) => row.event === 'send-submit-attempt').length, state.enters)
+  assert.equal(journal.at(-1).outcome, 'not-submitted')
+  assert.ok(elapsed >= 60_000, `budget must cover the measured ~60s race, waited ${elapsed}ms`)
+  assert.ok(elapsed <= SUBMIT_TOTAL_BUDGET_MS + SUBMIT_PROOF_WINDOW_MS, `bounded, waited ${elapsed}ms`)
+})
+
+test('a swallowed first enter is recovered by a re-press, with no second typed copy', () => {
+  const { state, journal, error } = sendWith((s) => s.enters >= 2)
+  assert.equal(error, null)
+  assert.equal(state.enters, 2)
+  assert.equal(state.sends, 1)
+  assert.deepEqual(journal.filter((row) => row.event === 'send-submit-attempt').map((row) => row.outcome), ['unproved', 'submitted'])
+})
+
+test('when the re-presses are spent the retype ladder runs, and the whole send stays bounded', () => {
+  const { state, error } = sendWith((s) => s.sends >= 2)
+  assert.equal(error, null)
+  assert.equal(state.sends, 2)
+  assert.ok(state.keys.includes('ctrl+u'), 'the existing clear ladder is reused before a retype')
+  assert.equal(state.enters, SUBMIT_ENTER_ATTEMPTS + 1)
+})
+
+test('every enter attempt is journalled with its own outcome', () => {
+  const { state, journal } = sendWith(() => false)
+  const rows = journal.filter((row) => row.event === 'send-submit-attempt')
+  assert.equal(rows.length, state.enters)
+  for (const row of rows) {
+    assert.equal(row.outcome, 'unproved')
+    assert.equal(row.surface_id, '51e89c13-956c-42f5-9787-ba8437699948')
+    assert.equal(typeof row.attempt, 'number')
+    assert.equal(typeof row.enter, 'number')
+  }
 })

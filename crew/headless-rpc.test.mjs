@@ -972,3 +972,77 @@ test('T7 rpc transport journals a failed crew.json persist', () => {
     assert.ok(failures.every((event) => event.role === 'builder' && event.reason === 'write-failed'))
   } finally { f.cleanup() }
 })
+
+function rpcReaskFixture() {
+  const f = fixture()
+  const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+  const stream = join(f.paths.taskDir, 'headless-rpc', 'builder', 'stream.jsonl')
+  writeFileSync(stream, `${JSON.stringify({ type: 'agent_settled' })}\n`)
+  const malformed = b200Bytes()
+  writeFileSync(first.returnPath, malformed)
+  let parseError = null
+  try { f.io.wait(first.returnPath, 1) } catch (err) { parseError = err }
+  const reaskPath = join(f.paths.returnsDir, `${first.id}.reask.builder.json`)
+  const second = f.io.assign({ role: 'builder', briefFile: '/reask.md', reask: { id: first.id, returnPath: reaskPath } })
+  return { f, first, second, reaskPath, stream, malformed, parseError }
+}
+
+test("a re-ask prompts the SAME live session with the caller's logical id and path", () => {
+  const r = rpcReaskFixture()
+  try {
+    assert.equal(r.second.id, r.first.id)
+    assert.equal(r.second.returnPath, r.reaskPath)
+    const prompts = r.f.writes.filter((frame) => frame.type === 'prompt')
+    assert.equal(prompts.length, 2)
+    assert.match(prompts[1].message, /^ASSIGNMENT d1:/)
+    assert.ok(prompts[1].message.includes(r.reaskPath))
+    assert.equal(r.f.commands.filter((entry) => entry.kind === 'spawn').length, 1)
+  } finally { r.f.cleanup() }
+})
+
+test("a re-ask's wire id is distinct and session metadata names the physical run", () => {
+  const r = rpcReaskFixture()
+  try {
+    const prompts = r.f.writes.filter((frame) => frame.type === 'prompt')
+    assert.notEqual(prompts[0].id, prompts[1].id)
+    assert.equal(prompts[0].id, 'd1')
+    assert.equal(prompts[1].id, 'd2')
+    const saved = JSON.parse(readFileSync(join(r.f.paths.taskDir, 'headless-rpc', 'builder', 'session.json'), 'utf8'))
+    assert.equal(saved.lastAssignmentId, 'd2')
+  } finally { r.f.cleanup() }
+})
+
+test("a delayed failed response for the FIRST prompt id is ignored by the re-ask turn", () => {
+  const r = rpcReaskFixture()
+  try {
+    const firstWireId = r.f.writes.filter((frame) => frame.type === 'prompt')[0].id
+    writeFileSync(r.stream, `${JSON.stringify({ type: 'response', id: firstWireId, success: false, error: 'first prompt failed late' })}\n${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
+    const envelope = { assignment_id: r.first.id, role: 'builder', status: 'done' }
+    writeFileSync(r.reaskPath, JSON.stringify(envelope))
+    assert.deepEqual(r.f.io.wait(r.reaskPath, 1), envelope)
+  } finally { r.f.cleanup() }
+})
+
+test("a busy retry mints its id off the PHYSICAL run", () => {
+  const r = rpcReaskFixture()
+  try {
+    const secondPrompt = r.f.writes.filter((frame) => frame.type === 'prompt')[1]
+    writeFileSync(r.stream, `${JSON.stringify({
+      type: 'response', id: secondPrompt.id, command: 'prompt', success: false,
+      error: "Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
+    })}\n${JSON.stringify({ type: 'agent_settled' })}\n`, { flag: 'a' })
+    const envelope = { assignment_id: r.first.id, role: 'builder', status: 'done' }
+    writeFileSync(r.reaskPath, JSON.stringify(envelope))
+    assert.deepEqual(r.f.io.wait(r.reaskPath, 1), envelope)
+    const prompts = r.f.writes.filter((frame) => frame.type === 'prompt')
+    assert.equal(prompts.at(-1).id, 'd2-p1')
+    assert.notEqual(prompts.at(-1).id, 'd1-p1')
+  } finally { r.f.cleanup() }
+})
+
+test("a re-ask never unlinks the seat's original return file", () => {
+  const r = rpcReaskFixture()
+  try {
+    assert.equal(readFileSync(r.first.returnPath, 'utf8'), r.malformed)
+  } finally { r.f.cleanup() }
+})

@@ -416,6 +416,94 @@ test('read-only ledger handles do not create a missing path, lie about writes, o
   rmSync(dir, { recursive: true, force: true })
 })
 
+test('a feed started before the ledger exists answers from it once it appears', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-reopen-before-ledger-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const feed = createLedgerFeed({ ledgerDb, triageDb, reopenCooldownMs: 0 })
+  try {
+    const before = feed.listRuns()
+    assert.deepEqual(before.runs, [])
+    assert.equal(before.degraded, true)
+    const writer = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+    try {
+      writer.startSession({ adw_id: 'feed-reopen-run', repo_slug: 'repo', task_slug: 'reopen' })
+    } finally { writer.close() }
+    const after = feed.listRuns()
+    assert.equal(after.runs.length, 1)
+    assert.equal(after.runs[0].adw_id, 'feed-reopen-run')
+    assert.equal(feed._reason(), null)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a failed feed open is re-attempted at most once per cooldown', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-open-cooldown-')
+  let clock = 1_000_000
+  const feed = createLedgerFeed({
+    ledgerDb: join(dir, 'ledger.db'),
+    triageDb: join(dir, 'visualizer.db'),
+    reopenCooldownMs: 60_000,
+    now: () => clock,
+  })
+  try {
+    feed.listRuns(); feed.listRuns(); feed.listRuns()
+    assert.equal(feed.health().probe.open_attempts, 1)
+    clock += 60_001
+    feed.listRuns()
+    assert.equal(feed.health().probe.open_attempts, 2)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a re-opened feed re-probes the optional tables', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-reprobe-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const feed = createLedgerFeed({ ledgerDb, triageDb, reopenCooldownMs: 0 })
+  try {
+    feed.listRuns()
+    const writer = openLedger({ dbPath: ledgerDb, stderr: { write() {} } })
+    try {
+      writer.startSession({ adw_id: 'feed-reprobe-run', repo_slug: 'repo', task_slug: 'reprobe' })
+    } finally { writer.close() }
+    feed.listRuns()
+    const probe = feed.health().probe
+    assert.deepEqual(probe.missing_tables, [])
+    assert.equal(probe.reopens, 1)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a repeated degraded feed notice is written once', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-notice-dedupe-')
+  let clock = 1_000_000
+  const notices = []
+  const feed = createLedgerFeed({
+    ledgerDb: join(dir, 'ledger.db'),
+    triageDb: join(dir, 'visualizer.db'),
+    stderr: { write: (chunk) => { notices.push(String(chunk)); return true } },
+    reopenCooldownMs: 60_000,
+    now: () => clock,
+  })
+  try {
+    feed.listRuns()
+    for (let i = 0; i < 3; i += 1) {
+      clock += 60_001
+      feed.listRuns()
+    }
+    assert.equal(notices.length, 1)
+    assert.equal(new Set(notices).size, 1)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('feed delegated readouts equal the ledger methods on one fixture', { skip: SKIP }, () => {
   const dir = scratchDir('visualizer-feed-delegations-')
   const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')

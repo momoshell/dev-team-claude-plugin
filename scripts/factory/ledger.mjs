@@ -970,6 +970,7 @@ export function applyMigrations(db, migrations = MIGRATIONS) {
 export class LedgerUsageError extends Error {
   constructor(message, reason = 'usage') {
     super(message)
+    this.name = 'LedgerUsageError'
     this.reason = reason
   }
 }
@@ -993,14 +994,32 @@ function normaliseShortName(value, ctx, field) {
   return value.trim()
 }
 
+// The one truncation shape for durable free text: keep the head, mark the
+// cut. normaliseRequestText's bound is this shape at REQUEST_MAX_CHARS; the
+// 500/120 field bounds are the same idea inline (#536/F10).
+const TRUNCATION_MARKER = '…[truncated]'
+function boundText(text, max) {
+  if (text.length <= max) return text
+  return `${text.slice(0, max - TRUNCATION_MARKER.length)}${TRUNCATION_MARKER}`
+}
+// Bounds every STRING LEAF under a verbatim structure, leaving keys, array
+// length, order and non-string values untouched — ADR-024 forbids
+// re-shaping checks/violations, and a bound on free text is not a re-shape.
+// Mirrors redact()'s walk deliberately rather than inventing a second one.
+function boundFreeText(value, max) {
+  if (typeof value === 'string') return boundText(value, max)
+  if (Array.isArray(value)) return value.map((item) => boundFreeText(item, max))
+  if (value !== null && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([key, val]) => [key, boundFreeText(val, max)]))
+  }
+  return value
+}
+
 function normaliseRequestText(value, ctx) {
   if (typeof value !== 'string' || value.trim() === '') {
     refuse(`${ctx}: request must be a non-blank string`)
   }
-  const text = value.trim()
-  const marker = '…[truncated]'
-  if (text.length <= REQUEST_MAX_CHARS) return text
-  return `${text.slice(0, REQUEST_MAX_CHARS - marker.length)}${marker}`
+  return boundText(value.trim(), REQUEST_MAX_CHARS)
 }
 
 // The one shape a millisecond-ISO timestamp may have. BOTH paths of isoMs test
@@ -1362,6 +1381,12 @@ export function openLedger({
   let degradedNoticeWritten = false
   let replaying = false
 
+  // A typed absence, not a prose one: the code lands in stats().degraded_reason
+  // and the unmeasured drift readout names the same condition, so a reader can
+  // tell "the mirror file is gone" from every other unmeasured cause (#536/F9).
+  const MIRROR_MISSING_CODE = 'mirror_missing'
+  const MIRROR_MISSING_MESSAGE = 'the mirror file is no longer on disk'
+
   function noteDegraded(reason, code) {
     degraded = true
     if (!stats.degraded_reason) {
@@ -1669,6 +1694,15 @@ export function openLedger({
       if (obj[f] === undefined) {
         refuse(`${ctx}: missing required field '${f}'`)
       }
+      // #536/F11: `null` stays legitimate for required keys that carry an explicit
+      // absence (endProcess's exit_code/exit_signal), but never for `adw_id` — SQLite
+      // permits NULL in a TEXT PRIMARY KEY and treats NULLs as distinct under UNIQUE,
+      // so such a row can never be addressed, joined or cleaned up. This is per-writer,
+      // not global: the writers for which adw_id is genuinely optional
+      // (recordCellFailure's boot refusal, recordModifierAttempt) never list it here.
+      if (f === 'adw_id' && (typeof obj[f] !== 'string' || obj[f].trim() === '')) {
+        refuse(`${ctx}: field 'adw_id' must be a non-blank string`)
+      }
     }
   }
 
@@ -1894,6 +1928,14 @@ export function openLedger({
     // so replayJsonl's `ledger.recordEvent(args)` dispatch round-trips
     // exactly; payload_json is derived from it only at mirror-insert time.
     const payload = redact(applyPayloadAllowlist(input.type, input.payload, stats), stats)
+    // #536/F10: `message` is the one free-text payload key with no bound; a 5 MB
+    // log line otherwise lands verbatim in BOTH the JSONL authority and the
+    // events mirror. Bounded before either is written.
+    if (input.type === 'log' && payload.message != null) {
+      payload.message = typeof payload.message === 'string'
+        ? boundText(payload.message, REQUEST_MAX_CHARS)
+        : boundFreeText(payload.message, REQUEST_MAX_CHARS)
+    }
     const startedAt = input.started_at != null ? isoMs(input.started_at) : (input.type === 'tool_call' ? isoMs(now()) : null)
     const endedAt = input.ended_at != null ? isoMs(input.ended_at) : (input.type === 'tool_call' ? isoMs(now()) : null)
     const inserted = insertSequenced({
@@ -1961,11 +2003,13 @@ export function openLedger({
       ok: !!input.ok,
       // checks/violations are #28's gates-CLI vocabulary and are stored
       // VERBATIM (structure never re-shaped) — redaction still runs first,
-      // same as every other writer's field-hygiene pass. Kept as arrays in
-      // args (this method's own public parameter shape); stringified only
-      // at mirror-insert time so replay round-trips exactly.
-      checks: redact(input.checks ?? [], stats),
-      violations: redact(input.violations ?? [], stats),
+      // same as every other writer's field-hygiene pass. Only string leaves
+      // are bounded; keys, array length, order and non-string values remain
+      // verbatim. Kept as arrays in args (this method's own public parameter
+      // shape); stringified only at mirror-insert time so replay round-trips
+      // exactly.
+      checks: boundFreeText(redact(input.checks ?? [], stats), REQUEST_MAX_CHARS),
+      violations: boundFreeText(redact(input.violations ?? [], stats), REQUEST_MAX_CHARS),
       created_at: isoMs(input.created_at ?? now()),
       gate_generation: input.gate_generation ?? null,
       pristine: input.pristine == null ? null : !!input.pristine,
@@ -2571,7 +2615,10 @@ export function openLedger({
         // The run row is the pane seat's only identity home: a pane seat has
         // no pid and no claude_session_id, and inventing one would fabricate
         // the very thing this column is supposed to measure.
-        conn.prepare('UPDATE sessions SET last_heartbeat_at = ? WHERE adw_id = ?')
+        // ...and a finished run has no liveness left to observe: a beat racing
+        // endSession would otherwise date a run's last heartbeat after its own
+        // ended_at, which `ledger task <id>` prints as the run's liveness (#536/F12).
+        conn.prepare('UPDATE sessions SET last_heartbeat_at = ? WHERE adw_id = ? AND ended_at IS NULL')
           .run(toBindable(args.at), toBindable(args.adw_id))
       }
     })
@@ -3250,6 +3297,13 @@ export function openLedger({
     const conn = ensureDb()
     if (!conn) {
       return unmeasuredDrift(jsonlPath, `the mirror could not be opened: ${stats.degraded_reason ?? 'degraded'}`)
+    }
+    // POSIX lets a handle keep reading an unlinked inode. This handle can no
+    // longer measure the mirror an operator would rebuild, and a reader that
+    // cannot know must not report clean (#536/F9).
+    if (!existsSync(dbPath)) {
+      noteDegraded(MIRROR_MISSING_MESSAGE, MIRROR_MISSING_CODE)
+      return unmeasuredDrift(jsonlPath, MIRROR_MISSING_MESSAGE)
     }
     let text
     try {

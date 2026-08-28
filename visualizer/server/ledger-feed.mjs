@@ -5,6 +5,12 @@
 import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { createTriage } from './triage.mjs'
 import { shapeRun, matchesFilters } from './shape.mjs'
+// A failed open is a MOMENT, not a verdict. A read-only database handle cannot
+// create a missing file, so a visualizer started before the first crew run
+// used to answer empty for the rest of its life (#536/F8). The latch now
+// holds only for `closed`; a degraded open is re-attempted, at most once per
+// cooldown so a hot read loop cannot construct a handle per read.
+export const FEED_REOPEN_COOLDOWN_MS = 2000
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
 const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns']
 // Which shape fields a missing table makes unknowable. Feeding these into the
@@ -18,29 +24,60 @@ const TABLE_FIELDS = {
   accept_decisions: ['accept_decisions'],
 }
 
-export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} } } = {}) {
+export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, reopenCooldownMs = FEED_REOPEN_COOLDOWN_MS, now = () => Date.now() } = {}) {
   let ledger = null
   let db = null
   let degraded = false
   let degradedReason = null
   let closed = false
-  const probe = { missing: [...OPTIONAL_COLUMNS.sessions], missing_tables: [...OPTIONAL_TABLES], latched: false, probes: 0 }
+  let nextOpenAt = 0
+  const probe = { missing: [...OPTIONAL_COLUMNS.sessions], missing_tables: [...OPTIONAL_TABLES], latched: false, probes: 0, open_attempts: 0, reopens: 0 }
   let json1 = null
   const triage = createTriage({ ledgerDb, triageDb })
+  const seenNotices = new Set()
+  const ledgerStderr = { write(chunk) {
+    const text = String(chunk)
+    if (seenNotices.has(text)) return true
+    if (seenNotices.size < 32) seenNotices.add(text)
+    return stderr.write(text)
+  } }
 
   function open() {
-    if (ledger || degraded || closed) return db
+    if (closed) return db
+    if (ledger && db) return db
+    if (degraded && now() < nextOpenAt) return null
+    const reopening = degraded
+    nextOpenAt = now() + reopenCooldownMs
+    probe.open_attempts += 1
+    if (ledger) { try { ledger.close() } catch { /* a handle we are replacing */ } }
+    ledger = null
+    db = null
     try {
-      ledger = openLedger({ dbPath: ledgerDb, readOnly: true, stderr })
+      ledger = openLedger({ dbPath: ledgerDb, readOnly: true, stderr: ledgerStderr })
       db = ledger.readConnection()
       if (!db) {
         degraded = true
         degradedReason = ledger.stats().degraded_message || 'the ledger could not be opened'
+        ledger = null
+        return null
       }
+      if (reopening) {
+        // The database that just opened is not the one the old probe
+        // described: re-probe it rather than carrying a stale absence.
+        probe.reopens += 1
+        probe.latched = false
+        probe.missing = [...OPTIONAL_COLUMNS.sessions]
+        probe.missing_tables = [...OPTIONAL_TABLES]
+        json1 = null
+      }
+      degraded = false
+      degradedReason = null
       return db
     } catch (err) {
       degraded = true
       degradedReason = ledger?.stats().degraded_message || err?.message || String(err)
+      ledger = null
+      db = null
       return null
     }
   }

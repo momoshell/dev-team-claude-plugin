@@ -9,7 +9,7 @@
 import { test, after } from 'node:test'
 import assert from 'node:assert/strict'
 import {
-  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync,
+  mkdtempSync, rmSync, readFileSync, mkdirSync, writeFileSync, appendFileSync, existsSync, unlinkSync,
   readdirSync, statSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -2079,6 +2079,125 @@ test('taskReadout prints a schema-1 payload stating its question and definition'
 // AC-6: polling query + index
 // ---------------------------------------------------------------------------
 
+test('durable log messages are bounded in the mirror and authority', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const marker = '…[truncated]'
+  try {
+    const messages = {
+      huge: 'x'.repeat(5 * 1024 * 1024),
+      short: 'short message',
+      exact: 'e'.repeat(REQUEST_MAX_CHARS),
+      over: 'o'.repeat(REQUEST_MAX_CHARS + 1),
+    }
+    ledger.startSession({ adw_id: 'f10-log', repo_slug: 'r', task_slug: 't' })
+    for (const [level, message] of Object.entries(messages)) {
+      ledger.recordEvent({ adw_id: 'f10-log', type: 'log', payload: { level, message } })
+    }
+    const mirror = Object.fromEntries(ledger.dumpTable('events').map((row) => {
+      const payload = JSON.parse(row.payload_json)
+      return [payload.level, payload.message]
+    }))
+    const authority = Object.fromEntries(readFileSync(ledger._jsonlPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .filter((line) => line.kind === 'recordEvent')
+      .map((line) => [line.args.payload.level, line.args.payload.message]))
+    for (const record of [mirror, authority]) {
+      assert.equal(record.huge.length, REQUEST_MAX_CHARS)
+      assert.equal(record.huge.slice(0, 32), messages.huge.slice(0, 32))
+      assert.equal(record.huge.slice(-marker.length), marker)
+      assert.equal(record.short, messages.short)
+      assert.equal(record.exact, messages.exact)
+      assert.equal(record.over.length, REQUEST_MAX_CHARS)
+      assert.equal(record.over.slice(0, 32), messages.over.slice(0, 32))
+      assert.equal(record.over.slice(-marker.length), marker)
+    }
+  } finally { ledger.close() }
+})
+
+test('recordGateResult bounds string leaves without changing its verbatim structure', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const marker = '…[truncated]'
+  try {
+    const huge = 'g'.repeat(5 * 1024 * 1024)
+    const checks = [
+      { item: 'first', ok: true, note: huge },
+      { item: 'second', ok: false, note: 'short note' },
+    ]
+    const violations = [huge, { code: 'short-code', allowed: false }]
+    ledger.startSession({ adw_id: 'f10-gate', repo_slug: 'r', task_slug: 't' })
+    ledger.recordGateResult({
+      adw_id: 'f10-gate', phase_id: null, gate_name: 'gate', attempt: 1, ok: false,
+      checks, violations, gate_generation: 1, pristine: false,
+    })
+    const mirrored = ledger.dumpTable('gate_results')[0]
+    const mirroredChecks = JSON.parse(mirrored.checks_json)
+    const mirroredViolations = JSON.parse(mirrored.violations_json)
+    assert.equal(mirroredChecks.length, checks.length)
+    assert.deepEqual(Object.keys(mirroredChecks[0]), Object.keys(checks[0]))
+    assert.deepEqual(Object.keys(mirroredChecks[1]), Object.keys(checks[1]))
+    assert.equal(mirroredChecks[0].ok, true)
+    assert.equal(mirroredChecks[1].ok, false)
+    assert.equal(mirroredChecks[1].note, checks[1].note)
+    assert.equal(mirroredViolations.length, violations.length)
+    assert.deepEqual(Object.keys(mirroredViolations[1]), Object.keys(violations[1]))
+    assert.equal(mirroredViolations[1].allowed, false)
+    for (const bounded of [mirroredChecks[0].note, mirroredViolations[0]]) {
+      assert.equal(bounded.length, REQUEST_MAX_CHARS)
+      assert.equal(bounded.slice(0, 32), huge.slice(0, 32))
+      assert.equal(bounded.slice(-marker.length), marker)
+    }
+    const authority = readFileSync(ledger._jsonlPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      .find((line) => line.kind === 'recordGateResult').args
+    assert.deepEqual(authority.checks, mirroredChecks)
+    assert.deepEqual(authority.violations, mirroredViolations)
+  } finally { ledger.close() }
+})
+
+test('jsonlDrift refuses to measure a deleted mirror and names the absence', { skip: SKIP }, () => {
+  const dir = nextDir()
+  const dbPath = join(dir, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    ledger.startSession({ adw_id: 'f9-gone', repo_slug: 'r', task_slug: 't' })
+    assert.equal(ledger.jsonlDrift().measured, true)
+    unlinkSync(dbPath)
+    const gone = ledger.jsonlDrift()
+    assert.equal(gone.measured, false)
+    assert.equal(gone.drift_total, null)
+    assert.equal(gone.unmeasured_reason, 'the mirror file is no longer on disk')
+    assert.equal(ledger.stats().degraded, true)
+    assert.equal(ledger.stats().degraded_reason, 'mirror_missing')
+  } finally { ledger.close() }
+
+  const intact = openTestLedger()
+  try {
+    intact.startSession({ adw_id: 'f9-intact', repo_slug: 'r', task_slug: 't' })
+    assert.equal(intact.jsonlDrift().measured, true)
+  } finally { intact.close() }
+})
+
+test('session, phase and event writers reject null or blank adw_id while boot refusals remain attributable', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    for (const adw_id of [null, '']) {
+      assert.throws(() => ledger.startSession({ adw_id, repo_slug: 'r', task_slug: 't' }), LedgerUsageError)
+      assert.throws(() => ledger.startPhase({ adw_id, name: 'phase' }), LedgerUsageError)
+      assert.throws(() => ledger.recordEvent({ adw_id, type: 'log', payload: { level: 'info', message: 'event' } }), LedgerUsageError)
+    }
+    assert.deepEqual(ledger.dumpTable('sessions'), [])
+    assert.deepEqual(ledger.dumpTable('phases'), [])
+    assert.deepEqual(ledger.dumpTable('events'), [])
+    assert.equal(existsSync(ledger._jsonlPath), false)
+
+    ledger.recordCellFailure({ adw_id: null, role: 'planner', kind: 'boot-refusal' })
+    const rows = ledger.dumpTable('cell_failures')
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].adw_id, null)
+    const lines = readFileSync(ledger._jsonlPath, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    assert.equal(lines.length, 1)
+    assert.equal(lines[0].args.adw_id, null)
+  } finally { ledger.close() }
+})
+
 test('AC-6: listEvents serves ordered, limited, afterRowid-exclusive pages, and its query plan names the events index', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   for (let i = 0; i < 5; i++) {
@@ -4095,6 +4214,13 @@ test('session heartbeat updates only last_heartbeat_at in place and overwrites i
   for (const column of TABLES.sessions.columns.map(({ name }) => name).filter((name) => name !== 'last_heartbeat_at')) {
     assert.deepEqual(afterSecond[column], before[column], `session column changed: ${column}`)
   }
+  const endedAt = Date.parse('2026-01-02T03:04:10.010Z')
+  ledger.endSession({ adw_id: adwId, status: 'ok', ended_at: endedAt })
+  ledger.heartbeat({ adw_id: adwId, target: 'session', at: Date.parse('2026-01-02T03:04:20.020Z') })
+  const afterEnd = ledger.getSession(adwId)
+  assert.equal(afterEnd.last_heartbeat_at, isoMs(secondAt))
+  assert.equal(afterEnd.ended_at, isoMs(endedAt))
+  assert.ok(Date.parse(afterEnd.last_heartbeat_at) <= Date.parse(afterEnd.ended_at))
 })
 
 test('session heartbeat requires adw_id and rejects an unknown target', { skip: SKIP }, () => {

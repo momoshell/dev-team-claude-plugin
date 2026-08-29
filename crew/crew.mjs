@@ -837,15 +837,32 @@ export function assertBandFloors(seats, tier, ladder, { adapters = null, localPr
 // JSON is read HERE because grantsFor returns only {name, def}
 // (crew/capabilities.mjs:197) and capabilities.mjs is imported BY this file, so
 // widening it would put a band question inside the register loader.
-export function grantedDefModels(adapters, { readFile = readFileSync } = {}) {
+export function grantedDefModels(adapters, { readFile = readFileSync, localProviders = null } = {}) {
   const out = []
   for (const [role, seat] of Object.entries(adapters || {})) {
     for (const grant of seat?.grants?.agents || []) {
       let definition
       try { definition = JSON.parse(String(readFile(grant.def, 'utf8'))) } catch { continue }
-      const model = definition?.model
-      if (typeof model !== 'string' || !model.trim()) continue
-      out.push({ role, agent: grant.name, path: grant.def, model: model.trim() })
+      const cell = definition?.model
+      if (cell === undefined || cell === null) continue
+      if (typeof cell === 'string') {
+        throw refuse('agent-def-invalid', `seat ${role} agent definition ${grant.name} expected a model cell {provider, id}, found a bare string ${JSON.stringify(cell)} — declare a cell, at ${grant.def}`)
+      }
+      if (!cell || typeof cell !== 'object' || Array.isArray(cell)
+        || typeof cell.provider !== 'string' || !cell.provider.trim()
+        || typeof cell.id !== 'string' || !cell.id.trim()) {
+        throw refuse('agent-def-invalid', `seat ${role} agent definition ${grant.name} expected a model cell {provider, id}, found ${JSON.stringify(cell)} — declare a cell, at ${grant.def}`)
+      }
+      const adapter = seat?.adapter
+      if (typeof adapter?.modelString !== 'function') {
+        throw refuse('grant-unsupported', `seat ${role} agent definition ${grant.name} cannot resolve its model cell because adapter ${seat?.name ?? '<unknown>'} has no modelString — refusing to boot an unresolved model cell`)
+      }
+      // MUTATION A11: resolving at any id but the cell's own makes grantedDefModels
+      // report a model the definition never declared.
+      const resolved = adapter.modelString({ provider: cell.provider, id: cell.id, localProviders })
+      // MUTATION A12: dropping the push leaves assertDefBandFloors nothing to floor,
+      // so a below-floor cell reaches a child unchecked.
+      out.push({ role, agent: grant.name, path: grant.def, model: resolved })
     }
   }
   return out
@@ -1205,6 +1222,7 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
   const registry = deps.register ? loadCapabilities({ register: deps.register }) : loadCapabilities()
   const root = deps.root ?? REGISTER_ROOT
   const exists = deps.exists || existsSync
+  const readFile = deps.readFile || readFileSync
   const probeEndpoint = deps.probeEndpoint || probeLocalEndpoint
   for (const role of roles) {
     try {
@@ -1238,6 +1256,32 @@ export async function resolveAdapters(roles, args, seats = null, deps = {}) {
           throw refuse('grant-unsupported', `seat ${role} local provider ${provider} is not supported by adapter ${name} — refusing to boot a silently weaker seat`)
         }
         configDir = dirname(settingsPath)
+      }
+
+      for (const grant of grants.agents || []) {
+        let definition
+        try { definition = JSON.parse(String(readFile(grant.def, 'utf8'))) } catch { continue }
+        const cell = definition?.model
+        const defProvider = cell?.provider
+        if (!cell || typeof cell !== 'object' || Array.isArray(cell)
+          || typeof defProvider !== 'string' || !Object.hasOwn(registry.local_providers, defProvider)) continue
+        const defLocal = registry.local_providers[defProvider]
+        const defSettingsPath = resolvedGrantPath(root, defLocal.settings)
+        // MUTATION A9: neutralising this test boots a definition whose local
+        // provider has no settings file.
+        if (!pathExists(exists, defSettingsPath)) {
+          throw pathMessage('local-settings-missing', role, `agent definition ${grant.name} local provider ${defProvider} settings`, 'an existing checkout-relative path', 'missing', defSettingsPath)
+        }
+        let defLive = false
+        try { defLive = await probeEndpoint(defLocal.base_url) } catch { defLive = false }
+        // MUTATION A10: neutralising this test boots a definition pointing at a dead
+        // local endpoint.
+        if (!defLive) {
+          throw refuse('local-endpoint-dead', `seat ${role} agent definition ${grant.name} local provider ${defProvider} endpoint ${defLocal.base_url} is unavailable — refusing to boot a dead local-provider cell`)
+        }
+        if (adapter.capabilitiesFor({ transport }).local_provider !== true) {
+          throw refuse('grant-unsupported', `seat ${role} agent definition ${grant.name} local provider ${defProvider} is not supported by adapter ${name} — refusing to boot a silently weaker seat`)
+        }
       }
 
       const requires = [...new Set([...(SEAT_DEFAULTS[role].requires || []), ...grants.requires])]
@@ -1467,7 +1511,7 @@ export async function bootCmd(args, deps = {}) {
     ladder = loadLadder()
     assertBandFloors(seats, tierName, ladder, { adapters, localProviders: registry.local_providers })
     // #377: the same floor over the models granted agent DEFINITIONS pin.
-    assertDefBandFloors(grantedDefModels(adapters), tierName, ladder, { adapters, localProviders: registry.local_providers })
+    assertDefBandFloors(grantedDefModels(adapters, { localProviders: registry.local_providers }), tierName, ladder, { adapters, localProviders: registry.local_providers })
   }
   // #45 Tier B: opt-in cell breaker. With no policy configured this is a
   // null and the ledger is never opened (acceptance #1). An open cell

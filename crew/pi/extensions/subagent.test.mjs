@@ -170,9 +170,12 @@ async function driven(extension, options) {
 
 test('the module is zero-dep, erasable, and carries the vendored MIT notice', () => {
   const source = readFileSync(EXTENSION, 'utf8')
-  const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
+  const imports = [...source.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1]); const allNodeImports = imports.every((specifier) => specifier.startsWith('node:'))
   assert.ok(imports.length > 0)
-  assert.ok(imports.every((specifier) => specifier.startsWith('node:')), imports.join(', '))
+  assert.ok(allNodeImports || imports.every((specifier) => specifier.startsWith('node:') || specifier === '../../adapters/adapter-pi.mjs'), imports.join(', '))
+  const adapterSource = readFileSync(join(dirname(EXTENSION), '../../adapters/adapter-pi.mjs'), 'utf8')
+  const adapterImports = [...adapterSource.matchAll(/^import[\s\S]*?from\s+["']([^"']+)["']/gm)].map((match) => match[1])
+  assert.deepEqual(adapterImports.filter((specifier) => !specifier.startsWith('node:')), [])
   assert.doesNotMatch(source, /^\s*enum\s/m)
   assert.doesNotMatch(source, /^\s*namespace\s/m)
   for (const phrase of [
@@ -321,14 +324,27 @@ test('loadAgentDefinition mirrors the register four refusal classes', () => {
   assert.match(wrongName.error, /expected name/)
   const badPrompt = mod.loadAgentDefinition({ name: 'scout', def: '/prompt' }, { readFile: () => JSON.stringify({ name: 'scout', prompt: '' }) })
   assert.match(badPrompt.error, /non-empty prompt/)
+  const bare = mod.loadAgentDefinition({ name: 'scout', def: '/bare' }, {
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'anthropic/claude-opus-5' }),
+  })
+  assert.match(bare.error, /found a bare string/)
+  assert.match(bare.error, /declare a cell/)
   const accepted = mod.loadAgentDefinition({ name: 'scout', def: '/ok' }, {
-    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'm', thinking: 'high' }),
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'anthropic', id: 'claude-opus-5' }, thinking: 'high' }),
   })
-  assert.deepEqual(accepted.definition, { name: 'scout', prompt: 'p', tools: ['read'], model: 'm', thinking: 'high' })
+  assert.deepEqual(accepted.definition, { name: 'scout', prompt: 'p', tools: ['read'], model: 'anthropic/claude-opus-5', thinking: 'high' })
+  const unknown = mod.loadAgentDefinition({ name: 'scout', def: '/unknown' }, {
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'unknown', id: 'x' } }),
+  })
+  assert.match(unknown.error, /refusing a guessed passthrough/)
   const noThinking = mod.loadAgentDefinition({ name: 'scout', def: '/no-thinking' }, {
-    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'm' }),
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'anthropic', id: 'claude-opus-5', effort: 'low' } }),
   })
-  assert.equal(noThinking.definition.thinking, undefined)
+  assert.equal(noThinking.definition.thinking, 'low')
+  const ownThinkingWins = mod.loadAgentDefinition({ name: 'scout', def: '/own-thinking' }, {
+    readFile: () => JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'anthropic', id: 'claude-opus-5', effort: 'low' }, thinking: 'high' }),
+  })
+  assert.equal(ownThinkingWins.definition.thinking, 'high')
   const defaults = mod.loadAgentDefinition({ name: 'scout', def: '/defaults' }, { readFile: () => JSON.stringify({ name: 'scout', prompt: 'p' }) })
   assert.deepEqual(defaults.definition.tools, ['read', 'grep', 'find', 'ls'])
 })
@@ -709,15 +725,20 @@ test('ctx supplies the child model, thinking level and cwd', async () => {
   assert.equal(args[args.indexOf('--thinking') + 1], 'medium')
   assert.equal(run.calls[0].options.cwd, run.context.cwd)
   const pinned = await driven(mod, {
-    defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'anthropic/custom' }),
+    defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'anthropic', id: 'custom' } }),
   })
   assert.equal(pinned.calls[0].args[pinned.calls[0].args.indexOf('--model') + 1], 'anthropic/custom')
   assert.equal(pinned.calls[0].args.includes('--thinking'), false)
   const pinnedThinking = await driven(mod, {
-    defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: 'anthropic/custom', thinking: 'high' }),
+    defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'anthropic', id: 'custom' }, thinking: 'high' }),
   })
   assert.equal(pinnedThinking.calls[0].args[pinnedThinking.calls[0].args.indexOf('--model') + 1], 'anthropic/custom')
   assert.equal(pinnedThinking.calls[0].args[pinnedThinking.calls[0].args.indexOf('--thinking') + 1], 'high')
+  const unresolved = await driven(mod, {
+    defBody: JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'no-such-provider', id: 'x' } }),
+  })
+  assert.equal(unresolved.calls.length, 0)
+  assert.match(`${textOf(unresolved.result)} ${refusedOf(unresolved.result)}`, /refusing a guessed passthrough/)
 })
 
 test('the granted pi seat activates the agent tool and transports the allowlist', () => {

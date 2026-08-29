@@ -53,6 +53,11 @@ import { StringDecoder } from 'node:string_decoder'
 import { appendFileSync, existsSync as nodeExists, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+// adapter-pi is this checkout's own module and itself imports only `node:url`,
+// so the file stays free of third-party dependencies; the granting seat of this
+// extension is a pi seat by construction, so adapter-pi IS the granting seat's adapter.
+import { modelString } from '../../adapters/adapter-pi.mjs'
 
 export const AGENT_TOOL_NAME = 'agent'
 export const AGENTS_ENV = 'CREW_PI_AGENTS'
@@ -280,6 +285,35 @@ export function parseAgentAllowlist(raw: any): any[] {
   return parsed.filter((one) => one && typeof one.name === 'string' && typeof one.def === 'string')
 }
 
+const REGISTER_PATH = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'capabilities.json')
+function localProvidersFromRegister(deps: any = {}): any {
+  const read = deps.readRegister || readFileSync
+  try { return JSON.parse(String(read(REGISTER_PATH, 'utf8'))).local_providers || {} } catch { return {} }
+}
+
+export function resolveDefCell(cell: any, { resolveModel, localProviders, path }: any): any {
+  // MUTATION A6: recognising a bare string as something other than a string
+  // collapses the named refusal into the generic shape error.
+  if (typeof cell === 'string') {
+    return { error: `expected a model cell {provider, id}, found a bare string ${JSON.stringify(cell)} — declare a cell, at ${path}` }
+  }
+  if (!cell || typeof cell !== 'object' || Array.isArray(cell)
+    || typeof cell.provider !== 'string' || !cell.provider.trim()
+    || typeof cell.id !== 'string' || !cell.id.trim()) {
+    return { error: `expected a model cell {provider, id}, found ${JSON.stringify(cell)} — declare a cell, at ${path}` }
+  }
+  // MUTATION A1: resolving the cell at any id but its own runs the child at
+  // model the definition never declared.
+  // MUTATION A7: rewriting this text drops adapter-pi's own refusal.
+  // MUTATION A8: returning no `error` here silently falls back to the parent
+  // cell and SPAWNS — exactly the cost surprise #694 forbids.
+  let resolved
+  try { resolved = resolveModel({ provider: cell.provider, id: cell.id, localProviders }) }
+  catch (err: any) { return { error: `${err.message}, at ${path}` } }
+  const effort = typeof cell.effort === 'string' && cell.effort.trim() ? cell.effort : undefined
+  return { model: resolved, effort }
+}
+
 // The four refusal classes and the wording of grantsFor (crew/crew.mjs:284-303),
 // so the two validators cannot drift apart silently.
 export function loadAgentDefinition(grant: any, deps: any = {}): any {
@@ -300,7 +334,21 @@ export function loadAgentDefinition(grant: any, deps: any = {}): any {
     return { error: `expected a non-empty prompt, found ${JSON.stringify(definition.prompt)}, at ${path}` }
   }
   const tools = Array.isArray(definition.tools) && definition.tools.length ? definition.tools.map(String) : ['read', 'grep', 'find', 'ls']
-  return { definition: { name: definition.name, prompt: definition.prompt, tools, model: typeof definition.model === 'string' ? definition.model : undefined, thinking: typeof definition.thinking === 'string' && definition.thinking.trim() ? definition.thinking : undefined } }
+  let model
+  let effort
+  if (definition.model !== undefined && definition.model !== null) {
+    const cell = resolveDefCell(definition.model, {
+      resolveModel: deps.modelString || modelString,
+      localProviders: deps.localProviders ?? localProvidersFromRegister(deps),
+      path,
+    })
+    if (cell.error) return { error: cell.error }
+    model = cell.model
+    effort = cell.effort
+  }
+  const thinking = typeof definition.thinking === 'string' && definition.thinking.trim()
+    ? definition.thinking : effort
+  return { definition: { name: definition.name, prompt: definition.prompt, tools, model, thinking } }
 }
 
 // -p/--no-session are correct HERE (a one-shot child) and forbidden on a seat
@@ -644,7 +692,9 @@ export function createAgentTool(deps: any = {}) {
         // 52KB name reached the parent's context in b33.
         return refuseEarly(`refused: that agent is not granted to this seat; allowed: ${allowedNames}`)
       }
-      const loaded = loadAgentDefinition(grant, { readFile })
+      const loaded = loadAgentDefinition(grant, {
+        readFile, modelString: deps.modelString, localProviders: deps.localProviders, readRegister: deps.readRegister,
+      })
       if (loaded.error) return refuseEarly(`refused: ${loaded.error}`)
       const def = loaded.definition
 

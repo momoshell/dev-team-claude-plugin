@@ -3767,17 +3767,39 @@ test('grantedDefModels reads only pinned defs', () => {
   const dir = mkdtempSync(join(tmpdir(), 'crew-def-models-'))
   const pinned = join(dir, 'pinned.json')
   const bare = join(dir, 'bare.json')
+  const bareString = join(dir, 'bare-string.json')
   try {
-    writeFileSync(pinned, JSON.stringify({ name: 'pinner', prompt: 'p', model: 'anthropic/claude-opus-5' }))
+    writeFileSync(pinned, JSON.stringify({ name: 'pinner', prompt: 'p', model: { provider: 'anthropic', id: 'claude-opus-5' } }))
     writeFileSync(bare, JSON.stringify({ name: 'bare', prompt: 'p' }))
+    writeFileSync(bareString, JSON.stringify({ name: 'bare-string', prompt: 'p', model: 'anthropic/claude-opus-5' }))
     const adapters = {
-      planner: { grants: { agents: [{ name: 'pinner', def: pinned }, { name: 'bare', def: bare }] } },
+      planner: { adapter: { modelString: piModelString }, grants: { agents: [{ name: 'pinner', def: pinned }, { name: 'bare', def: bare }] } },
       builder: { grants: { agents: [] } },
     }
-    assert.deepEqual(grantedDefModels(adapters), [{
+    assert.deepEqual(grantedDefModels(adapters, { localProviders: {} }), [{
       role: 'planner', agent: 'pinner', path: pinned, model: 'anthropic/claude-opus-5',
     }])
+    const bareAdapters = {
+      planner: { adapter: { modelString: piModelString }, grants: { agents: [{ name: 'bare-string', def: bareString }] } },
+    }
+    assert.throws(
+      () => grantedDefModels(bareAdapters, { localProviders: {} }),
+      (err) => err.reason === 'agent-def-invalid' && /found a bare string/.test(err.message) && /declare a cell/.test(err.message),
+    )
   } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('a below-floor model cell from grantedDefModels is refused by assertDefBandFloors', () => {
+  const root = scratchDir('crew-def-floor-')
+  const path = join(root, 'scout.json')
+  writeFileSync(path, JSON.stringify({ name: 'scout', prompt: 'p', model: { provider: 'anthropic', id: 'claude-haiku-4-5' } }))
+  const adapters = { planner: { name: 'pi', adapter: { modelString: piModelString }, grants: { agents: [{ name: 'scout', def: path }] } } }
+  const defs = grantedDefModels(adapters, { localProviders: {} })
+  const ladder = loadLadder()
+  assert.throws(
+    () => assertDefBandFloors(defs, 'build', ladder, { adapters, localProviders: {} }),
+    (err) => err.reason === 'band-below-floor',
+  )
 })
 
 test('assertDefBandFloors refuses below-floor and unknown pinned models', () => {
@@ -4846,6 +4868,35 @@ test('checkout-pinned local providers require live endpoints and expose their se
       (err) => err.reason === 'local-settings-missing' && /no-settings/.test(err.message),
     )
   } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('resolveAdapters refuses a granted definition local-provider cell without parent fallback', async () => {
+  const root = scratchDir('crew-def-local-')
+  const definition = join(root, 'crew/pi/agents/scout.json')
+  const extension = join(root, 'crew/pi/extensions/subagent.ts')
+  mkdirSync(dirname(definition), { recursive: true })
+  mkdirSync(dirname(extension), { recursive: true })
+  writeFileSync(definition, JSON.stringify({ name: 'scout', prompt: 'p', tools: ['read'], model: { provider: 'local-pi', id: 'qwen3-coder' } }))
+  writeFileSync(extension, '// extension\n')
+  const base = capabilityRegister()
+  const register = capabilityRegister({
+    local_providers: {
+      'local-pi': { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url: 'http://127.0.0.1:11434/v1' },
+    },
+    roles: {
+      planner: { ...base.roles.planner, extensions: ['crew/pi/extensions/subagent.ts'], agents: [{ name: 'scout', def: 'crew/pi/agents/scout.json' }] },
+    },
+  })
+  const seats = { planner: { agent: 'pi', effort: 'medium', provider: 'anthropic', id: 'claude-opus-5', model: null } }
+  await assert.rejects(
+    () => resolveAdapters(['planner'], {}, seats, { register, root, probeEndpoint: async () => true }),
+    (err) => err.reason === 'local-settings-missing' && /agent definition scout local provider local-pi settings/.test(err.message),
+  )
+  writeFileSync(join(root, 'crew/pi/settings.json'), '{}')
+  await assert.rejects(
+    () => resolveAdapters(['planner'], {}, seats, { register, root, probeEndpoint: async () => false }),
+    (err) => err.reason === 'local-endpoint-dead' && /agent definition scout local provider local-pi endpoint/.test(err.message),
+  )
 })
 
 test('resolveAdapters refuses a claude-seated local-provider cell before any seat spawns', async () => {

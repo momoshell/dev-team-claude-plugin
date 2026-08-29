@@ -134,6 +134,29 @@ test('modelString refuses an unmapped provider rather than guessing', () => {
   assert.throws(() => modelString({ provider: 'google', id: 'x' }), /google/)
 })
 
+test('modelString refuses providers inherited from Object.prototype', () => {
+  const names = ['toString', 'constructor', 'hasOwnProperty', 'valueOf']
+  for (const name of names) {
+    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
+    assert.throws(
+      () => modelString({ provider: name, id: 'x' }),
+      (error) => error.message === expected,
+    )
+  }
+})
+
+test('modelString refuses undeclared Object.prototype providers with a local register', () => {
+  const localProviders = { 'local-pi': { pi_provider: 'local-pi' } }
+  const names = ['toString', 'constructor', 'hasOwnProperty', 'valueOf']
+  for (const name of names) {
+    const expected = `adapter-pi: no pi provider for roster provider "${name}" (known: openai, anthropic, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`
+    assert.throws(
+      () => modelString({ provider: name, id: 'x', localProviders }),
+      (error) => error.message === expected,
+    )
+  }
+})
+
 test('the seat\'s claude-named `tools` allowlist cannot influence a composed pi seat command', () => {
   let count = 0
   const variants = ['', 'Read', 'Bash,Write,Edit,Glob,Grep', 'NoSuchTool,Read', undefined]
@@ -228,6 +251,23 @@ test('a granted pi tool cannot widen the deny boundary', () => {
 test('modelString maps a local provider only when the register supplies its pi namespace', () => {
   assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders: { 'local-pi': { pi_provider: 'local-pi' } } }), 'local-pi/qwen3-coder')
   assert.throws(() => modelString({ provider: 'local-pi', id: 'qwen3-coder' }), /local-pi/)
+})
+
+test('modelString honours an own local provider named after Object.prototype', () => {
+  assert.equal(
+    modelString({ provider: 'hasOwnProperty', id: 'qwen3-coder', localProviders: { hasOwnProperty: { pi_provider: 'local-pi' } } }),
+    'local-pi/qwen3-coder',
+  )
+})
+
+test('modelString handles null-prototype local provider registers', () => {
+  const localProviders = Object.create(null)
+  localProviders['local-pi'] = { pi_provider: 'local-pi' }
+  assert.equal(modelString({ provider: 'local-pi', id: 'qwen3-coder', localProviders }), 'local-pi/qwen3-coder')
+  assert.throws(
+    () => modelString({ provider: 'toString', id: 'x', localProviders }),
+    (error) => error.message === 'adapter-pi: no pi provider for roster provider "toString" (known: openai, anthropic, local-pi) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups',
+  )
 })
 
 test('advisor grant appends only its extension and safely transports its cell', () => {

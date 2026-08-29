@@ -88,8 +88,19 @@ export function capabilitiesFor({ transport, grants } = {}) {
 // (verified `pi auth check --provider openai-codex`).
 export const PI_PROVIDERS = Object.freeze({ openai: 'openai-codex', anthropic: 'anthropic' })
 
+// An OWN-property lookup on BOTH halves (#739): a bare bracket read reaches
+// Object.prototype, so a roster provider named `toString` or `constructor`
+// resolved to a function — truthy — and modelString synthesized
+// `function toString() { [native code] }/<id>` instead of taking the refusal
+// below. adapter-claude.mjs's modelString already guards its local half the
+// same way. An OWN property is still honoured even when its name collides
+// with a prototype member, and a null-prototype register behaves identically.
+const own = (obj, key) => Boolean(obj) && typeof obj === 'object' && Object.hasOwn(obj, key)
+
 export function modelString({ provider, id, localProviders }) {
-  const p = PI_PROVIDERS[provider] ?? localProviders?.[provider]?.pi_provider
+  const p = own(PI_PROVIDERS, provider)
+    ? PI_PROVIDERS[provider]
+    : own(localProviders, provider) ? localProviders[provider]?.pi_provider : undefined
   if (!p) {
     const known = Object.keys({ ...PI_PROVIDERS, ...(localProviders || {}) })
     throw new Error(`adapter-pi: no pi provider for roster provider "${provider}" (known: ${known.join(', ')}) — refusing a guessed passthrough: pi synthesizes phantom models on narrowed lookups`)

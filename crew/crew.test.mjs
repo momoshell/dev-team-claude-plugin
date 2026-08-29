@@ -4195,6 +4195,75 @@ test('waitForEnvelope rethrows only a staged seat refusal and restarts only on i
   assert.equal(run({ restartBudget: 'yes' }), plain)
 })
 
+test('waitForEnvelope extends a working seat once and accepts an envelope inside the extension', () => {
+  let t = 0
+  let classifications = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/extended.json', timeoutS: 100, role: 'planner',
+    readEnvelope: () => (t >= 150_000 ? { status: 'done' } : null),
+    probeSeat: () => true,
+    classifyExpiry: (at) => {
+      classifications += 1
+      assert.equal(at, 100_000)
+      return { state: 'working' }
+    },
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.deepEqual(env, { status: 'done' })
+  assert.equal(classifications, 1)
+  assert.ok(t >= 150_000)
+})
+
+test('waitForEnvelope grants a working extension at most once', () => {
+  let t = 0
+  let classifications = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/extended-once.json', timeoutS: 100, role: 'planner',
+    readEnvelope: () => null,
+    probeSeat: () => true,
+    classifyExpiry: () => { classifications += 1; return { state: 'working' } },
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.equal(env, null)
+  assert.equal(t, 2 * 100_000)
+  assert.equal(classifications, 1)
+})
+
+test('waitForEnvelope does not extend stale, retrying or unmeasured seats', () => {
+  for (const classification of [{ state: 'stale' }, { state: 'retrying' }, null]) {
+    let t = 0
+    let classifications = 0
+    const env = waitForEnvelope({
+      returnPath: '/tmp/not-extended.json', timeoutS: 100, role: 'planner',
+      readEnvelope: () => (t >= 150_000 ? { status: 'late' } : null),
+      probeSeat: () => true,
+      classifyExpiry: () => { classifications += 1; return classification },
+      now: () => t, sleep: (ms) => { t += ms },
+    })
+    assert.equal(env, null)
+    assert.equal(t, 100_000)
+    assert.equal(classifications, 1)
+  }
+})
+
+test('waitForEnvelope composes a restart budget with one working extension', () => {
+  let t = 0
+  let samples = 0
+  let classifications = 0
+  const env = waitForEnvelope({
+    returnPath: '/tmp/restart-extended.json', timeoutS: 100, role: 'planner',
+    readEnvelope: () => null,
+    probeSeat: () => true,
+    sampleSeat: () => (++samples === 1 ? { restartBudget: true } : null),
+    classifyExpiry: () => { classifications += 1; return { state: 'working' } },
+    now: () => t, sleep: (ms) => { t += ms },
+  })
+  assert.equal(env, null)
+  assert.equal(t, 230_000)
+  assert.equal(classifications, 1)
+  assert.ok(samples >= 1)
+})
+
 test('a staged refusal escapes driveTask with provider text intact for child escalation mapping', () => {
   const text = 'the provider says: prompt_cache_retention is not supported on this model'
   const refusal = Object.assign(new Error(text), { stage: SEAT_REFUSAL_STAGE, role: 'builder' })

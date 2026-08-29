@@ -166,6 +166,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='seat-substrate-down'", 'at role id misses grace_ms'],
   ['operationalRow', "event='seat-substrate-recovered'", 'at role id misses grace_ms'],
   ['operationalRow', "event='seat-stale-cleared'", 'at role id'],
+  ['operationalRow', "event='wait-extended'", 'at role id idle_s extension_s'],
   ['operationalRow', "event='seat-stale'", 'at role id last_frame_at stale_ms threshold_ms'],
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
@@ -182,10 +183,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 28)
+  assert.equal(sites.length, 29)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 22)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 23)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
 })
 
@@ -2364,6 +2365,50 @@ test('seatIo names a producing seat working and leaves an unmeasurable seat unna
     assert.equal(env, null)
     assert.equal(io.waitDiagnosis(assignment.returnPath), null)
     assert.equal(events.find((event) => event.kind === 'cell-failure').detail, `no envelope at ${assignment.returnPath} within 2000s`)
+  })
+})
+
+test('seatIo journals exactly one wait extension for a producing seat and none for a stale seat', () => {
+  withTranscriptSeat({
+    timeoutS: 100, transcriptPaths: () => ['/x/builder.jsonl'],
+    statSync: (_path, at) => ({ mtimeMs: at <= 250_000 ? at - 30_000 : -1_000_000 }),
+  }, ({ logs, env }) => {
+    assert.equal(env, null)
+    const rows = logs.filter((row) => row.event === 'wait-extended')
+    assert.equal(rows.length, 1)
+    assert.deepEqual({ role: rows[0].role, id: rows[0].id, idle_s: rows[0].idle_s, extension_s: rows[0].extension_s, channel: rows[0].channel }, {
+      role: 'builder', id: 'd1', idle_s: 40, extension_s: 100, channel: 'operational',
+    })
+  })
+
+  withTranscriptSeat({
+    timeoutS: 100, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: -1_000_000 }),
+  }, ({ logs, env }) => {
+    assert.equal(env, null)
+    assert.equal(logs.filter((row) => row.event === 'wait-extended').length, 0)
+  })
+})
+
+test('seatIo appends the spent extension clause and preserves bare expiry text otherwise', () => {
+  const clause = ' (budget extended once by 100s because the seat was working at the first expiry)'
+  withTranscriptSeat({
+    timeoutS: 100, transcriptPaths: () => ['/x/builder.jsonl'],
+    statSync: (_path, at) => ({ mtimeMs: at <= 250_000 ? at - 30_000 : -1_000_000 }),
+  }, ({ io, env, assignment }) => {
+    assert.equal(env, null)
+    const verdict = io.waitDiagnosis(assignment.returnPath)
+    const bare = waitState({ role: 'builder', latest: 150_000, refusal: null, at: 200_000, timeoutS: 100, retry: null })
+    assert.equal(verdict.text, `${bare.text}${clause}`)
+    assert.ok(verdict.text.endsWith(clause))
+  })
+
+  withTranscriptSeat({
+    timeoutS: 100, transcriptPaths: () => ['/x/builder.jsonl'], statSync: () => ({ mtimeMs: -1_000_000 }),
+  }, ({ io, env, assignment }) => {
+    assert.equal(env, null)
+    const verdict = io.waitDiagnosis(assignment.returnPath)
+    const bare = waitState({ role: 'builder', latest: -1_000_000, refusal: null, at: 100_000, timeoutS: 100, retry: null })
+    assert.equal(verdict.text, bare.text)
   })
 })
 

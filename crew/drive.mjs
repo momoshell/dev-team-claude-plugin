@@ -125,7 +125,7 @@ export function waitsRecord(resolved, defaults) {
 // The decision enum the lead may return. The driver offers a SUBSET as
 // options in each consult; any answer outside the offered set is treated as
 // escalate (fail toward the human, never toward silent progress).
-export const DECISIONS = Object.freeze(['bounce', 'accept', 'escalate'])
+export const DECISIONS = Object.freeze(['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])
 
 // #45 Tier B slice 1. The failure upgrade is spent ONCE PER TASK, across all
 // roles and all bounce kinds — the ratified budget is per task, not per role.
@@ -2094,8 +2094,8 @@ function runTask(ctx, io, crash) {
       `Reply with a ReturnEnvelope whose details are {"perspective": "<3-8 sentences>", "recommendation": "<one outcome>", "confidence": "high|medium|low"}.`,
     ].join('\n'))
     const pEnv = assignAndWait(from, pBrief, 'perspective')
-    const recommendation = pEnv.status === 'done' && options.includes(pEnv.details?.recommendation)
-      ? pEnv.details.recommendation : null
+    const advised = bounceTargetOf(pEnv.details?.recommendation, options)      // #751
+    const recommendation = pEnv.status === 'done' && options.includes(advised) ? advised : null
     const perspective = pEnv.status === 'done'
       ? `${pEnv.details?.perspective || pEnv.summary || '(empty perspective)'} [recommends: ${recommendation || 'unstated'}; confidence: ${pEnv.details?.confidence || 'unstated'}]`
       : `(${from} returned ${pEnv.status}: ${pEnv.summary || 'no detail'})`
@@ -2146,17 +2146,17 @@ function runTask(ctx, io, crash) {
     const d = env.details || {}
     // Round 2: a repeat second-opinion passes through raw so consultLead can
     // name the one-hop bound precisely in its escalation reason.
-    if (round === 2 && env.status === 'done' && d.decision === SECOND_OPINION) {
-      return { decision: SECOND_OPINION }
-    }
+    if (round === 2 && env.status === 'done' && d.decision === SECOND_OPINION) return { decision: SECOND_OPINION }
+    const decided = bounceTargetOf(d.decision, options)      // #751
     const allowed = round === 1 && targets.length > 0 ? [...options, SECOND_OPINION] : options
-    if (env.status !== 'done' || !allowed.includes(d.decision)) {
+    if (env.status !== 'done' || !allowed.includes(decided)) {
       return { decision: 'escalate', reason: `lead returned ${env.status}/${d.decision ?? 'no decision'} — treating as escalate` }
     }
-    io.log(recordRow({ at: io.now(), decision: d.decision, consult: S.consults, round, reason: d.reason }))
-    emit({ kind: 'decision', decided: d.decision, why: d.reason || '', consult: S.consults, round })
+    if (decided !== d.decision) io.log(recordRow({ at: io.now(), bounce_target_mapped: { answered: d.decision, treated_as: decided, consult: S.consults, round } }))
+    io.log(recordRow({ at: io.now(), decision: decided, consult: S.consults, round, reason: d.reason }))
+    emit({ kind: 'decision', decided, why: d.reason || '', consult: S.consults, round })
     return {
-      decision: d.decision, reason: d.reason || '', guidance: d.guidance || '', from: d.from,
+      decision: decided, reason: d.reason || '', guidance: d.guidance || '', from: d.from,
       residuals: d.residuals, refuted: d.refuted, answers: d.answers,
     }
   }
@@ -3090,6 +3090,7 @@ function runTask(ctx, io, crash) {
   let extraRounds = 0
   let extraReviews = 0
   let lastReviewPath = art('review.md')
+  let staleVerdict = null
   let panelBriefText = ''
   let panelBounceFindings = ''
   const panelStandingQuestion = 'state the invariant the prior rounds\' instances share; does this diff close it?'
@@ -3294,6 +3295,17 @@ function runTask(ctx, io, crash) {
       ...applyPrescriptionLines('the review'),
     ].join('\n')
   }
+  // #751 A REVIEWER bounce. The lead ruled the standing verdict STALE against a
+  // tree the scope gate, the lane and every configured acceptance gate have already
+  // proved, so the reviewer is re-assigned against THAT tree and nothing is rebuilt.
+  // It consumes the SAME one review grant a builder bounce consumes — the target
+  // chooses the recipient, never a second budget.
+  const reviewerBounce = (round, where) => {
+    grant('review', round); extraReviews += 1
+    failureUpgrade('review', 'reviewer')
+    staleVerdict = { path: lastReviewPath, where }
+    stageComplete()
+  }
   const panel = ctx.continuation === true ? panelSeats(seatList) : null
   if (ctx.continuation === true && !panel) panelLog({ panel_skipped: 'seats' })
   let gateTriaged = false
@@ -3485,7 +3497,7 @@ function runTask(ctx, io, crash) {
     // for a reviewer's malformed envelope.
     while (true) {
       if (reviews >= limits.review_rounds + extraReviews) {
-        const options = canGrant('review') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
+        const options = canGrant('review') ? ['bounce-builder', 'bounce-reviewer', 'accept', 'escalate'] : ['accept', 'escalate']
         const c = consultLead(
           acceptQuestion(`Review rounds are exhausted (${reviews}) and the last verdict was revise. Grant one more review/build round, accept with residuals, or escalate?`),
           options, [planPath, lastReviewPath],
@@ -3499,7 +3511,11 @@ function runTask(ctx, io, crash) {
           stageComplete()
           return escalate('review', c.reason)
         }
-        if (c.decision === 'bounce') {
+        if (c.decision === 'bounce-reviewer') {
+          reviewerBounce(round, 'review-exhausted')
+          continue
+        }
+        if (c.decision === 'bounce-builder') {
           grant('review', round)
           extraReviews += 1
           if (finalRound()) extraRounds += 1
@@ -3540,11 +3556,13 @@ function runTask(ctx, io, crash) {
         `Plan of record: ${planPath}. Changes are uncommitted in ${ctx.checkout} — read the diff with git.`,
         `Re-run the validation lane yourself: ${lane}`,
         `Write review.md in the task dir. details.verdict must be pass or changes-needed.`,
+        ...staleVerdictLines(staleVerdict),
       ].join('\n')
       io.writeFile(revBrief, panelBriefText)
       const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
       lastReviewPath = review.details?.review_path || art('review.md')
       const v = verdictOf(review)
+      if (v) staleVerdict = null
       // A VERIFICATION COSTS NOTHING. Only a round that DEMANDS change spends a
       // review_rounds slot. Measured over 164 archived lanes: of 86 re-reviews,
       // 52 (60%) found nothing — they existed only to confirm the must-fixes
@@ -3561,7 +3579,7 @@ function runTask(ctx, io, crash) {
       if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
       if (v === 'revise') {
         if (finalRound()) {
-          const options = canGrant('review') ? ['bounce', 'accept', 'escalate'] : ['accept', 'escalate']
+          const options = canGrant('review') ? ['bounce-builder', 'bounce-reviewer', 'accept', 'escalate'] : ['accept', 'escalate']
           const c = consultLead(
             acceptQuestion(`Build rounds are exhausted but the review says changes-needed. Grant one more review/build round, accept with residuals, or escalate?`),
             options, [planPath, lastReviewPath],
@@ -3575,7 +3593,11 @@ function runTask(ctx, io, crash) {
             stageComplete()
             return escalate('review', c.reason)
           }
-          if (c.decision === 'bounce') {
+          if (c.decision === 'bounce-reviewer') {
+            reviewerBounce(round, 'build-exhausted')
+            continue
+          }
+          if (c.decision === 'bounce-builder') {
             grant('review', round)
             extraRounds += 1
             extraReviews += 1
@@ -3836,6 +3858,40 @@ const bindingWhy = (mode, file) => (mode === 'ambiguous'
 //               liveness OBSERVATIONS that only watch it: descendant capture and
 //               reclaim, seat-root settle, teardown sweeps, process group reaping,
 //               transcript staleness, pane-usage accounting, viewer surfaces.
+// #751 The bare `bounce` a lead running an older charter still answers. Where a
+// site offers the two recipients IN PLACE of that bare name, the bare answer means
+// the one it always meant — the builder — so vocabulary drift costs a journal note,
+// not an escalation; the same rule reads an ADVISOR's bare recommendation, so a
+// perspective is never silently dropped for saying the old word. Declared down here,
+// below every crew/roles citation this file carries, so the call sites inside
+// consultLead and askLead add no line above them (#743, #748).
+export function bounceTargetOf(decision, options) {
+  const offered = Array.isArray(options) ? options : []
+  if (decision !== 'bounce' || offered.includes('bounce') || !offered.includes('bounce-builder')) return decision
+  return 'bounce-builder'
+}
+
+// The re-review brief's stale-verdict note. `null` when the review round was not
+// reached through a reviewer bounce, so an ordinary review brief is unchanged.
+// ONE helper serves BOTH exhaustion sites, so it may state only what holds at both.
+// At site A the ordinary review-fix path executes `continue build` before the
+// top-of-review exhaustion is reached again; at site B the consult follows the
+// verdict directly with no tree-changing stage between them. "the tree moved after
+// the review" is therefore the LEAD's decision rule, documented in crew/roles/lead.md,
+// not a chronology this helper can assert after either call site. What is true at
+// both is the lead's ruling and the state of the CURRENT tree. "every configured
+// acceptance gate" is deliberate too: gateCmd is nullable and the acceptance-gate
+// stage is conditional on it.
+export function staleVerdictLines(stale) {
+  if (!stale || typeof stale.path !== 'string') return []
+  return ['',
+    `The lead ruled the verdict in ${stale.path} STALE (${stale.where}) against the CURRENT tree`,
+    `and ruled its finding already closed. This reviewer bounce itself built nothing;`,
+    `the CURRENT tree has already passed the scope gate, the validation lane, and every`,
+    `configured acceptance gate. You are REPLACING that verdict against this tree,`,
+    `not answering it — read the diff again.`]
+}
+
 export const JOURNAL_CHANNELS = Object.freeze({ record: 'record', operational: 'operational' })
 export const JOURNAL_CHANNEL_NAMES = Object.freeze(Object.keys(JOURNAL_CHANNELS))
 

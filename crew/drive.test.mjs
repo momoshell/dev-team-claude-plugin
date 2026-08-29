@@ -33,7 +33,7 @@ import {
   UNIVERSAL_STAGE_HEADS, SHAPE_SOURCES, REVIEWED_CORE_STAGES, TRIAGE_STAGE_HEAD, TRIAGE_SOURCES, TRIAGE_STAGES,
   DIRECTED_STAGE_HEAD, DIRECTED_SOURCES, DIRECTED_SEATS, DIRECTED_STAGES, PARTIAL_REVIEWED, parseDirectedBrief,
   stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect, envelopeFieldsPresent,
-  ENVELOPE_REFUSAL_REASONS,
+  ENVELOPE_REFUSAL_REASONS, bounceTargetOf, staleVerdictLines,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -2818,7 +2818,7 @@ test('compounding policy: a now-on-menu advisor recommendation records dissent w
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.dissents[0], { from: 'reviewer', recommendation: 'bounce', lead_decision: 'accept', consult: 1 })
+  assert.deepEqual(res.details.dissents[0], { from: 'reviewer', recommendation: 'bounce-builder', lead_decision: 'accept', consult: 1 })
   assert.equal(io.calls.commits.length, 1)
 })
 
@@ -4838,7 +4838,7 @@ test('lead-less happy path: plan -> build -> gates -> review pass -> suite -> co
 
 test('DECISIONS and LIMITS are the frozen public contract', () => {
   assert.ok(Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS))
-  assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])
+  assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])
   assert.equal(SECOND_OPINION, 'second-opinion')
   assert.ok(Object.isFrozen(PERSPECTIVE_TARGETS))
 })
@@ -5025,7 +5025,7 @@ test('review grant cap refuses a second bounce and escalates without commit', ()
   assert.equal(res.status, 'escalation')
   assert.equal(io.calls.commits.length, 0)
   const decisions = Object.entries(io.calls.writes).filter(([path]) => /decision-\d+b?\.md$/.test(path)).map(([, body]) => body)
-  assert.equal(decisions.filter((body) => /^- bounce$/m.test(body)).length, 1)
+  assert.equal(decisions.filter((body) => /^- bounce-builder$/m.test(body)).length, 1)
   assert.deepEqual(res.details.extra_rounds_granted, [{ where: 'review', round: 3 }])
 })
 
@@ -7506,6 +7506,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at no_lead_escalation'],
   ['recordRow', '', 'at perspective_from recommendation consult'],
   ['recordRow', '', 'at dissent'],
+  ['recordRow', '', 'at bounce_target_mapped'],
   ['recordRow', '', 'at decision consult round reason'],
   ['recordRow', '', 'at extra_round_granted'],
   ['recordRow', '', 'at accept_reask'],
@@ -7545,7 +7546,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 40)
+  assert.equal(sites.length, 41)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
@@ -7564,4 +7565,197 @@ test('a full drive writes no journal row without a channel', () => {
   for (const row of io.calls.logs) {
     assert.ok(JOURNAL_CHANNEL_NAMES.includes(row.channel), `${JSON.stringify(row)} carries no channel`)
   }
+})
+
+
+// ---------------------------------------------------------------------------
+// #751 — a lead's bounce at a review exhaustion has TWO recipients.
+// Both site fixtures configure a real gate_cmd (RED at baseline, green after)
+// so "the acceptance gate is skipped for a reviewer bounce and re-run for a
+// builder bounce" is a claim the recorded stages can actually carry.
+const B318_GATED_RUNS = {
+  'gate-cmd:1': { ok: false, output: `baseline red\n${GATE_SUMMARY_PREFIX} {"total":2,"failed":2,"errored":0}` },
+  'gate-cmd': { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":2,"failed":0,"errored":0}` },
+  'lane-cmd': { ok: true, output: '' },
+  'suite-cmd': { ok: true, output: '' },
+}
+const b318GatedPlan = () => planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } })
+
+// Site A: the exhaustion consult at the TOP of the review loop (review budget
+// spent). Round 2 runs its own gate:r2 before the consult is reached.
+function b318SiteA(decision, { secondReview = 'pass', secondLead = null, reseat = null } = {}) {
+  const envelopes = {
+    'planner:1': b318GatedPlan(),
+    'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(), 'builder:4': buildEnv(),
+    'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv(secondReview), 'reviewer:3': reviewEnv('pass'),
+    'lead:1': leadEnv(decision),
+  }
+  if (secondLead) envelopes['lead:2'] = leadEnv(secondLead)
+  const io = fakeIo({ envelopes, runs: B318_GATED_RUNS, changed: ['a.mjs', 'a.test.mjs'], ...(reseat ? { reseat } : {}) })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 1 } }, io)
+  return { io, result }
+}
+
+// Site B: the consult reached when the BUILD budget is spent and the standing
+// verdict is changes-needed.
+function b318SiteB(decision, { secondReview = 'pass' } = {}) {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': b318GatedPlan(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'), 'reviewer:2': reviewEnv(secondReview), 'reviewer:3': reviewEnv('pass'),
+      'lead:1': leadEnv(decision),
+    },
+    runs: B318_GATED_RUNS,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1, review_rounds: 2 } }, io)
+  return { io, result }
+}
+
+const b318Options = (brief) => [...(String(brief).match(/## Your options[^\n]*\n([\s\S]*?)\n\n/)?.[1] ?? '')
+  .matchAll(/^- ([^\n]+)$/gm)].map(([, option]) => option.replace(/\s+\(.*$/, ''))
+const b318ReviewGrants = (res) => (res.details.extra_rounds_granted ?? []).filter(({ where }) => where === 'review')
+const b318Builders = (io) => io.calls.assign.filter(({ role }) => role === 'builder')
+
+test('bounce-reviewer at review exhaustion re-reviews the same tree', () => {
+  const { io, result } = b318SiteA('bounce-reviewer', {
+    reseat: (role) => role === 'reviewer' ? { applied: true } : { applied: false, reason: 'transport' },
+  })
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, [
+    'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1',
+    'build:r2', 'scope-gate:r2', 'lane:r2', 'gate:r2', 'review:r2', 'review:pass',
+    'suite', 'commit', 'suite:cold', 'done',
+  ])
+  assert.equal(b318Builders(io).length, 2)
+  const roles = io.calls.assign.map(({ role }) => role)
+  assert.equal(roles[roles.indexOf('lead') + 1], 'reviewer')
+  assert.deepEqual(io.calls.reseat, [
+    { role: 'builder', options: { reason: 'review-bounce' } },
+    { role: 'reviewer', options: { reason: 'review-bounce' } },
+  ])
+})
+
+test("bounce-builder at review exhaustion is today's bounce", () => {
+  const { io, result } = b318SiteA('bounce-builder')
+  assert.equal(result.status, 'done')
+  for (const label of ['build:r3', 'scope-gate:r3', 'lane:r3', 'gate:r3']) {
+    assert.ok(result.details.stages.includes(label), `expected stage ${label}`)
+  }
+  const builders = b318Builders(io)
+  assert.equal(builders.length, 3)
+  assert.equal(builders[2].note, 'review-fix')
+  assert.match(io.calls.writes[`${TD}/build-bounce-r2.md`], /Close every must-fix/)
+  assert.equal(b318ReviewGrants(result).length, 1)
+})
+
+test('bounce-builder at build exhaustion also spends exactly one review grant', () => {
+  const { result } = b318SiteB('bounce-builder')
+  assert.equal(b318ReviewGrants(result).length, 1)
+})
+
+test('the two review-exhaustion consults offer both recipients', () => {
+  const want = ['bounce-builder', 'bounce-reviewer', 'accept', 'escalate', 'second-opinion']
+  for (const { io } of [b318SiteA('bounce-reviewer'), b318SiteB('bounce-reviewer')]) {
+    assert.deepEqual(b318Options(io.calls.writes[`${TD}/decision-1.md`]), want)
+  }
+})
+
+test('either target spends the one review grant', () => {
+  const { io, result } = b318SiteA('bounce-reviewer', { secondReview: 'changes-needed', secondLead: 'escalate' })
+  assert.equal(result.status, 'escalation')
+  // The valve is offered on the FIRST round of every consult, so it rides along.
+  assert.deepEqual(b318Options(io.calls.writes[`${TD}/decision-2.md`]), ['accept', 'escalate', 'second-opinion'])
+  assert.equal(b318ReviewGrants(result).length, 1)
+})
+
+test('a bare bounce at a review exhaustion is read as bounce-builder and journalled', () => {
+  const { io, result } = b318SiteA('bounce')
+  assert.equal(result.status, 'done')
+  assert.ok(result.details.stages.includes('build:r3'))
+  assert.equal(io.calls.logs.find((row) => typeof row.decision === 'string').decision, 'bounce-builder')
+  assert.deepEqual(
+    io.calls.logs.find((row) => row.bounce_target_mapped).bounce_target_mapped,
+    { answered: 'bounce', treated_as: 'bounce-builder', consult: 1, round: 1 },
+  )
+})
+
+test('bounce-reviewer at build exhaustion re-reviews without a build', () => {
+  const { io, result } = b318SiteB('bounce-reviewer')
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, [
+    'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1',
+    'review:r2', 'review:pass', 'suite', 'commit', 'suite:cold', 'done',
+  ])
+  assert.equal(b318Builders(io).length, 1)
+})
+
+test('the re-review brief states only what holds at both exhaustion sites', () => {
+  for (const [label, { io }] of [['site A', b318SiteA('bounce-reviewer')], ['site B', b318SiteB('bounce-reviewer')]]) {
+    const brief = io.calls.writes[`${TD}/review-brief-2.md`]
+    const flat = brief.replace(/\s+/g, ' ')
+    assert.ok(flat.includes('STALE'), `${label}: no STALE`)
+    const where = label === 'site A' ? 'review-exhausted' : 'build-exhausted'
+    assert.ok(flat.includes(`STALE (${where})`), `${label}: wrong exhaustion label`)
+    assert.ok(flat.includes(`${TD}/review.md`), `${label}: no review path`)
+    assert.ok(flat.includes('against the CURRENT tree'), `${label}: no CURRENT tree`)
+    assert.ok(flat.includes('reviewer bounce itself built nothing'), `${label}: no built-nothing clause`)
+    assert.ok(flat.includes('every configured acceptance gate'), `${label}: no configured-gate clause`)
+    // One helper serves both sites, so neither chronology may be asserted: the
+    // site-A path builds after the standing verdict, while the site-B consult
+    // follows its verdict directly.
+    assert.equal(flat.includes('nothing has been built since it was written'), false, `${label}: false chronology`)
+    assert.equal(flat.includes('the tree moved after'), false, `${label}: unconditional chronology`)
+    assert.equal(io.calls.writes[`${TD}/review-brief-1.md`].includes('STALE'), false, `${label}: first brief contaminated`)
+  }
+})
+
+test('bounceTargetOf maps only where the bare name is off the menu', () => {
+  const targets = ['bounce-builder', 'bounce-reviewer', 'accept', 'escalate']
+  assert.equal(bounceTargetOf('bounce', ['bounce', 'accept', 'escalate']), 'bounce')
+  assert.equal(bounceTargetOf('bounce', targets), 'bounce-builder')
+  assert.equal(bounceTargetOf('accept', targets), 'accept')
+  assert.equal(bounceTargetOf('bounce', ['accept', 'escalate']), 'bounce')
+  assert.equal(bounceTargetOf('bounce', null), 'bounce')
+  assert.equal(bounceTargetOf(undefined, targets), undefined)
+})
+
+test('staleVerdictLines is empty for an ordinary review round', () => {
+  for (const input of [null, undefined, {}, { path: 7 }, { where: 'review-exhausted' }]) {
+    assert.deepEqual(staleVerdictLines(input), [])
+  }
+})
+
+test('staleVerdictLines states only what holds at both sites', () => {
+  const flat = staleVerdictLines({ path: '/t/review.md', where: 'build-exhausted' }).join('\n').replace(/\s+/g, ' ')
+  for (const token of ['/t/review.md', 'STALE', 'build-exhausted', 'against the CURRENT tree',
+    'reviewer bounce itself built nothing', 'every configured acceptance gate']) {
+    assert.ok(flat.includes(token), `stale note must say ${token}`)
+  }
+  assert.equal(flat.includes('nothing has been built since it was written'), false)
+  assert.equal(flat.includes('the tree moved after'), false)
+})
+
+test('a stale re-review brief survives an unreadable in-place re-ask', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': b318GatedPlan(),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(),
+      'reviewer:1': reviewEnv('changes-needed'),
+      'reviewer:2': { status: 'done', role: 'reviewer', details: { verdict: 'unknown-shape' } },
+      'reviewer:3': reviewEnv('changes-needed'),
+      'lead:1': leadEnv('bounce-reviewer'), 'lead:2': leadEnv('bounce'), 'lead:3': leadEnv('escalate'),
+    },
+    runs: B318_GATED_RUNS,
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 3)
+  const briefs = io.calls.writeLog
+    .filter(({ path }) => path === `${TD}/review-brief-2.md`)
+    .map(({ content }) => content)
+  assert.equal(briefs.length, 2)
+  assert.match(briefs[1], /STALE/)
 })

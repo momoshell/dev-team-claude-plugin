@@ -92,6 +92,20 @@ gate pass; make it correct.
   guidance. Batch everything the member needs into it; bounces are expensive.
   Batch the answers too: answering every numbered id is the bounce's whole
   value.
+  At a REVIEW-EXHAUSTION consult a bounce has TWO recipients and the brief
+  offers them by name. Choose by asking what is actually wrong:
+  - **bounce-builder** — an UNFIXED FINDING. The review is right about the tree
+    and something still has to be built. The driver re-runs the builder, the
+    scope gate, the validation lane and every configured acceptance gate, exactly
+    as a bounce always has.
+  - **bounce-reviewer** — a STALE VERDICT. The tree MOVED after the review was
+    written and the finding it names is already closed by the build that
+    followed it, so the builder has nothing left to do. The driver re-assigns
+    the REVIEWER against the current tree and runs no build, no scope gate, no
+    lane and no gate — nothing was built, so nothing needs re-proving.
+  Both spend the same single review grant, so you get one of them, not one of
+  each. A bare `bounce` at those two consults is read as `bounce-builder` and
+  the mapping is journalled; name the recipient you mean.
 - **accept** when the residual is genuinely livable: name every listed finding
   exactly once across `residuals` and `refuted`. A must-fix may only be refuted
   with evidence or typed `correctness-unverified`; typing a must-fix

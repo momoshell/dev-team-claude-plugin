@@ -578,22 +578,24 @@ exemption entry carries no find/replace and is recorded `exempt` without a
 write. A non-exempt declaration whose file is missing from the built tree is recorded
 `unapplied`, also without a write, and that is now the only meaning `unapplied`
 carries.
-A declaration whose file exists but whose anchor does not resolve is recorded
+A declaration whose file exists but whose anchor cannot be safely applied is recorded
 `anchor-absent` when the find text is nowhere in the file under either attempt,
 or `anchor-ambiguous` when the whitespace-normalized find matches more than one
-span; neither writes.
+span, or `anchor-unsafe` when the resolved span crosses a line carrying a `//`
+comment inside the span, so a verbatim replacement would land in that comment;
+none of the three writes (#742).
 Only an applicable non-exempt declaration is written into the BUILT CHECKOUT
 itself, re-run against the gate, and restored to its exact original bytes in a
 `finally`, its outcome then `killed` or `survived` (`MUTATION_OUTCOMES`).
 `survived` is the only outcome that indicts the gate; `unapplied`,
-`anchor-absent`, and `anchor-ambiguous` instead say the plan predicted source the
-builder did not write. A `survived`, `unapplied`, `anchor-absent`, or
-`anchor-ambiguous` proof failure is routed by `settleFailedProof` to the one gate
-repair a task is allowed, and stops the run with an escalation when the restore
-was unsafe, when that repair is spent or has no custodian, or when the repair
-itself does not resolve it. Per-check discrimination is therefore commissioned
-and shipped, not deferred — §8's "not commissioned now" and §3's rejection of
-"a harness that does not exist" are both retired by it.
+`anchor-absent`, `anchor-ambiguous`, and `anchor-unsafe` instead say the plan
+predicted source the builder did not write. A `survived`, `unapplied`,
+`anchor-absent`, `anchor-ambiguous`, or `anchor-unsafe` proof failure is routed by
+`settleFailedProof` to the one gate repair a task is allowed, and stops the run with
+an escalation when the restore was unsafe, when that repair is spent or has no
+custodian, or when the repair itself does not resolve it. Per-check discrimination
+is therefore commissioned and shipped, not deferred — §8's "not commissioned now"
+and §3's rejection of "a harness that does not exist" are both retired by it.
 
 What is NOT amended: the decisions themselves, the 20-task denominator, the
 `must_fix > 0` trigger, and every other citation in §§0–11.

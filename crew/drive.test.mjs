@@ -3819,6 +3819,18 @@ test('mutation anchors bind exact or whitespace-normalized token spans', () => {
   assert.equal(applied.mode, 'normalized')
   assert.equal(applied.text, `const value = ${replacement}\n`)
 
+  const commentCrossing = '// load-bearing\nexport const GUARD = true\n'
+  const commentFind = '// load-bearing export const GUARD = true'
+  assert.equal(bindMutationAnchor(commentCrossing, commentFind).mode, 'unsafe')
+  assert.deepEqual(applyMutationAnchor(commentCrossing, commentFind, 'export const GUARD = false'), { mode: 'unsafe', text: null })
+  assert.equal(bindMutationAnchor('export const GUARD =\ntrue // trailing\n', 'export const GUARD = true // trailing').mode, 'normalized')
+  assert.equal(bindMutationAnchor('// before\nexport const GUARD = true\n', 'export const GUARD =\ntrue').mode, 'normalized')
+  assert.equal(bindMutationAnchor('if (ready) {\n  try {', 'if (ready) { try {').mode, 'normalized')
+
+  const standaloneCr = '// load-bearing\rexport const GUARD = true\n'
+  assert.equal(bindMutationAnchor(standaloneCr, commentFind).mode, 'unsafe')
+  assert.deepEqual(applyMutationAnchor(standaloneCr, commentFind, 'export const GUARD = false'), { mode: 'unsafe', text: null })
+
   assert.deepEqual(bindMutationAnchor('export const guard = true\n', 'export const guards = true'), { mode: 'absent', spans: [] })
   const twice = 'const a = pick(one,\n  two)\nconst b = pick(one, two)\n'
   const ambiguous = bindMutationAnchor(twice, 'pick(one, \n two)')
@@ -3881,6 +3893,27 @@ test('a two-span anchor is ambiguous and writes nothing', () => {
   assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
 })
 
+test('a comment-crossing span is anchor-unsafe and writes nothing', () => {
+  const built = '// load-bearing\nexport const GUARD = true\n'
+  const mutation = {
+    check: 'anchor-unsafe', file: 'a.mjs',
+    find: '// load-bearing export const GUARD = true', replace: 'export const GUARD = false',
+  }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: built }, writeThrough: true,
+    cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
+  assert.deepEqual({ outcome: row.outcome, file: row.file, summary: row.summary }, { outcome: 'anchor-unsafe', file: 'a.mjs', summary: null })
+  assert.equal(row.why, "the declared find's normalized match crosses a line that carries a // comment inside the span, so a verbatim replacement would land in the comment; declare a find that starts after the comment")
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+  assert.match(res.details.escalation.why, /did not BIND/)
+  assert.doesNotMatch(res.details.escalation.why, /did not kill/)
+})
+
 test('a missing file and an unbindable find keep unapplied on the missing file only', () => {
   const mutations = [
     { check: 'missing-file', file: 'missing.mjs', find: 'anything', replace: 'other' },
@@ -3925,9 +3958,11 @@ test('binding-failure escalation says BIND while survived keeps did-not-kill wor
 
 test('mutation binding failures are frozen and exclude gate outcomes', () => {
   assert.equal(Object.isFrozen(MUTATION_BINDING_FAILURES), true)
+  assert.deepEqual([...MUTATION_BINDING_FAILURES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'unapplied'])
   assert.ok(MUTATION_BINDING_FAILURES.length < MUTATION_OUTCOMES.length)
   for (const outcome of MUTATION_BINDING_FAILURES) assert.ok(MUTATION_OUTCOMES.includes(outcome))
   for (const outcome of ['killed', 'exempt', 'survived']) assert.equal(MUTATION_BINDING_FAILURES.includes(outcome), false)
+  assert.deepEqual(MUTATION_OUTCOMES.filter((outcome) => !['killed', 'exempt'].includes(outcome) && !MUTATION_BINDING_FAILURES.includes(outcome)), ['survived'])
 })
 
 // --- b37: per-check gate discrimination -------------------------------------
@@ -3950,6 +3985,26 @@ test('validateMutations accepts a mutation and exemption and rejects malformed d
     const errors = validateMutations(entries, inScope)
     assert.ok(errors.length > 0, JSON.stringify(entries))
     assert.ok(errors.every((error) => error.why), JSON.stringify(entries))
+  }
+
+  const whitespaceReason = 'find and replace differ only in whitespace — that mutates no token'
+  const whitespaceOnly = { ...CHECK_MUTATION, find: 'fn(a,  b)', replace: 'fn(a,\tb)' }
+  assert.deepEqual(validateMutations([whitespaceOnly], inScope), [{ entry: whitespaceOnly, why: whitespaceReason }])
+  const identical = { ...CHECK_MUTATION, find: 'fn(a,  b)', replace: 'fn(a,  b)' }
+  assert.deepEqual(validateMutations([identical], inScope), [{ entry: identical, why: 'find and replace are identical — that mutates nothing' }])
+  assert.deepEqual(validateMutations([{ ...CHECK_MUTATION, find: 'fn(a,  b)', replace: 'fn(a,  c)' }], inScope), [])
+
+  const normalizedPairs = [
+    { find: 'fn(a,  b)', replace: 'fn(a,\tb)', built: 'prefix fn(a,\t b) suffix' },
+    { find: 'fn(a,\r\n b)', replace: 'fn(a, b)', built: 'prefix fn(a,\n  b) suffix' },
+    { find: 'fn(a, \r\n\tb)', replace: 'fn(a,\tb)', built: 'prefix fn(a,\r\n b) suffix' },
+  ]
+  for (const pair of normalizedPairs) {
+    assert.equal(bindMutationAnchor(pair.built, pair.find).mode, 'normalized')
+    assert.equal(validateMutations([{ ...CHECK_MUTATION, find: pair.find, replace: pair.replace }], inScope).length, 1)
+  }
+  for (const [find, replace] of [['fn(a,\fb)', 'fn(a, b)'], ['fn(a, b)', 'fn(a, b)']]) {
+    assert.deepEqual(validateMutations([{ ...CHECK_MUTATION, find, replace }], inScope), [])
   }
 })
 
@@ -4335,7 +4390,7 @@ test('a longer sibling failure is not the intended check failure', () => {
 
 test('mutation outcomes are frozen and every observed row uses the closed vocabulary', () => {
   assert.equal(Object.isFrozen(MUTATION_OUTCOMES), true)
-  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['anchor-absent', 'anchor-ambiguous', 'exempt', 'killed', 'survived', 'unapplied'])
+  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'exempt', 'killed', 'survived', 'unapplied'])
 })
 
 test('the per-check proof stage is declared by the full variant', () => {

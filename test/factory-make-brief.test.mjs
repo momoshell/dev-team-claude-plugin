@@ -1105,7 +1105,7 @@ test('every compiled brief carries the per-check mutation contract', () => {
   for (const clause of [
     'stable token', 'unique', `${CHECK_FAIL_PREFIX} <check>`, 'exempt', 'files_in_scope',
     'non-empty LITERAL', 'must DIFFER', 'at most', String(MUTATIONS_MAX), 'TOKEN SEQUENCE',
-    'anchor-absent', 'anchor-ambiguous', 'unapplied',
+    'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe', 'unapplied',
     '/^[A-Za-z0-9][A-Za-z0-9._-]*$/', '"find"', '"replace"', '"check"',
   ]) assert.ok(MUTATION_CONTRACT_BLOCK.includes(clause), clause)
   // Additive: the section sits between the acceptance block and the validation lane,
@@ -1135,10 +1135,15 @@ test('the mutation contract states the FAIL-line separator rule', () => {
     '`unapplied` (the declared file does not exist in the built tree)',
     '`anchor-absent` (the find text is nowhere in the file under either attempt)',
     '`anchor-ambiguous` (the normalized find matches more than one span)',
+    '`anchor-unsafe` (the normalized match crosses a line carrying a `//` comment inside the span, so a verbatim replacement would land in that comment — declare a find that starts after the comment)',
     '`survived` remains the only gate defect',
     '#733',
   ]) assert.ok(flat.includes(clause), clause)
   assert.ok(flat.includes('non-empty LITERAL text naming the token sequence to bind'))
+  assert.ok(/find and replace differ only in whitespace — that mutates no token(?![A-Za-z])/.test(flat))
+  const unsafeClause = flat.slice(flat.indexOf('`anchor-unsafe`'), flat.indexOf('None of the four'))
+  assert.ok(unsafeClause.includes('so a verbatim replacement would land in that comment'))
+  assert.equal(unsafeClause.includes('single-line'), false)
   assert.equal(flat.includes('non-empty LITERAL text that actually occurs in that file'), false)
   for (const form of [
     'FAIL <check>',
@@ -1149,6 +1154,14 @@ test('the mutation contract states the FAIL-line separator rule', () => {
   for (const token of ['accepted', 'REJECTED', 'checkFailureLine', 'EXTENDED', 'FAIL cache-v2', '#330', '#387']) {
     assert.ok(contract.includes(token), token)
   }
+})
+
+test('the contract and ADR-030 name anchor-unsafe', () => {
+  const adr = readFileSync(join(ROOT, 'docs', 'adr', 'adr-030-acceptance-authorship.md'), 'utf8')
+  const paragraphs = adr.split(/\n\s*\n/).filter((paragraph) => paragraph.includes('anchor-absent'))
+  assert.ok(paragraphs.length > 0)
+  for (const paragraph of paragraphs) assert.ok(paragraph.includes('anchor-unsafe'))
+  assert.ok(MUTATION_CONTRACT_BLOCK.includes('anchor-unsafe'))
 })
 
 // node --test picks its reporter by context, so the summary line's leading character is

@@ -267,7 +267,10 @@ A mutation entry carries exactly:
   that file; not a regex, not a description. The exact-then-normalized rule below
   decides whether it binds; byte-identical whitespace is not required.
 - \`replace\` — required string, and must DIFFER from \`find\`; an identical pair
-  mutates nothing.
+  mutates nothing. A pair whose whitespace-NORMALIZED forms are equal is refused for
+  the same reason: it binds the same token sequence and rewrites the same tokens. The
+  driver says so in those words — \`find and replace differ only in whitespace — that
+  mutates no token\`.
 
 A declared \`find\` **binds by TOKEN SEQUENCE**, not by the bytes you typed. The driver
 tries an exact match first and, only on a miss, a whitespace-normalized one, so
@@ -275,12 +278,14 @@ tries an exact match first and, only on a miss, a whitespace-normalized one, so
 Normalization is **whitespace-only**. It is not a regex, not a symbol lookup, not
 fuzzy: a find whose TOKENS differ from the built source does not bind.
 The anchor must be **unique** after normalization.
-The three ways an anchor fails to reach the built tree, by name: **\`unapplied\`** (the
+The four ways an anchor fails to reach the built tree, by name: **\`unapplied\`** (the
 declared file does not exist in the built tree), **\`anchor-absent\`** (the find text
 is nowhere in the file under either attempt), **\`anchor-ambiguous\`** (the normalized
-find matches more than one span). None of the three is a gate defect — each says the
-plan predicted source the builder did not write, and **\`survived\` remains the only gate defect**.
-Cite **#733**.
+find matches more than one span), or **\`anchor-unsafe\`** (the normalized match
+crosses a line carrying a \`//\` comment inside the span, so a verbatim replacement
+would land in that comment — declare a find that starts after the comment). None of
+the four is a gate defect — each says the plan predicted source the builder did not
+write, and **\`survived\` remains the only gate defect**. Cite **#733**, **#742**.
 
 An exemption entry carries exactly \`{ "check": "<token>", "exempt": "<non-empty reason>" }\`
 and no \`file\`, \`find\` or \`replace\`.

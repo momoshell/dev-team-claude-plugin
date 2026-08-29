@@ -1422,12 +1422,12 @@ export function parseDirectedBrief(text) {
 // that the check must catch. 32 is a bound, not a target: each entry costs one
 // gate run on the built tree (b31b's voluntary proof declared 19).
 export const MUTATIONS_MAX = 32
-export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt', 'anchor-absent', 'anchor-ambiguous'])
+export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe'])
 // The outcomes that are NOT a gate defect: the declaration never reached the built
-// tree, so the plan predicted source the builder did not write. `survived` stays the
-// ONLY member of MUTATION_OUTCOMES that indicts the gate itself (#733).
-export const MUTATION_BINDING_FAILURES = Object.freeze(['unapplied', 'anchor-absent', 'anchor-ambiguous'])
-const BINDING_OUTCOME = Object.freeze({ absent: 'anchor-absent', ambiguous: 'anchor-ambiguous' })
+// tree or its anchor could not be safely applied, so the plan predicted source the
+// builder did not write. `survived` stays the ONLY member of MUTATION_OUTCOMES that indicts the gate itself (#733); `anchor-unsafe` is a binding failure, never a gate defect (#742).
+export const MUTATION_BINDING_FAILURES = Object.freeze(['unapplied', 'anchor-absent', 'anchor-ambiguous', 'anchor-unsafe'])
+const BINDING_OUTCOME = Object.freeze({ absent: 'anchor-absent', ambiguous: 'anchor-ambiguous', unsafe: 'anchor-unsafe' })
 // The driver dictates ONE output convention for a gate that declares per-check
 // mutations, exactly as it already dictates GATE_SUMMARY_PREFIX (:204): a failing
 // check prints a line beginning `FAIL <check>`. A label SUBSTRING is not proof —
@@ -1502,6 +1502,13 @@ export function validateMutations(entries, inScope = () => true) {
         why = 'a mutation must carry a non-empty literal find and a replace string'
       } else if (!exempt && entry.find === entry.replace) {
         why = 'find and replace are identical — that mutates nothing'
+      // The anchor binds by TOKEN SEQUENCE, so a pair differing only in whitespace
+      // binds and rewrites the same tokens: the gate stays green and the row indicts
+      // it with `survived` for a declaration that changed nothing (#742). ONE
+      // normalization — normalizeAnchor, the binder's own — never a second collapse
+      // rule, or validation and binding drift on the characters they disagree about.
+      } else if (!exempt && normalizeAnchor(entry.find).text === normalizeAnchor(entry.replace).text) {
+        why = 'find and replace differ only in whitespace — that mutates no token'
       }
     }
     if (why) errors.push({ entry, why })
@@ -3745,6 +3752,26 @@ function normalizeAnchor(text) {
   return { text: out, starts, ends }
 }
 
+// A `//` comment runs to the end of its line, so a `replace` spliced VERBATIM into a
+// span that crosses a line ending inside one lands INSIDE the comment: the gate then
+// reddens for a reason the declaration never named and the row can record `killed`
+// (#742). The rule: for every line terminator INSIDE the resolved span, the span's own
+// text on the line ending there may not carry `//`. EVERY terminator normalizeAnchor
+// collapses counts — `ANCHOR_WHITESPACE` is `/[ \t\r\n]/`, so a normalized match can
+// cross a standalone CR as readily as LF or CRLF. A span with no interior line
+// terminator is never affected, so b301-daemonid's `if … {` / `try {` case still binds.
+const UNSAFE_COMMENT = '//'
+function spanCommentUnsafe(original, start, end) {
+  const span = original.slice(start, end)
+  const lines = span.split(/\r\n|\r|\n/)
+  // Every line but the LAST ends at a terminator inside the span; the last one does
+  // not, so a `//` there cannot swallow what replaces the span.
+  for (const spanLine of lines.slice(0, -1)) {
+    if (spanLine.includes(UNSAFE_COMMENT)) return true
+  }
+  return false
+}
+
 // Two ORDERED attempts. EXACT first, written with `indexOf` because the settled
 // contract makes the primitive load-bearing (gate check A16 reads this line) —
 // byte-for-byte the behaviour that exists today.
@@ -3761,6 +3788,8 @@ export function bindMutationAnchor(original, find) {
   }
   if (spans.length === 0) return { mode: 'absent', spans: [] }
   if (spans.length > 1) return { mode: 'ambiguous', spans }
+  const [only] = spans
+  if (spanCommentUnsafe(original, only.start, only.end)) return { mode: 'unsafe', spans }
   return { mode: 'normalized', spans }
 }
 
@@ -3779,7 +3808,9 @@ export function applyMutationAnchor(original, find, replace) {
 // Why an anchor did not bind, per mode — the reader-facing half of the split.
 const bindingWhy = (mode, file) => (mode === 'ambiguous'
   ? `the declared find text matches more than one whitespace-normalized span of the built ${file}, so the anchor cannot say which to mutate`
-  : `the declared find text is nowhere in the built ${file}, exactly or whitespace-normalized`)
+  : mode === 'unsafe'
+    ? `the declared find's normalized match crosses a line that carries a // comment inside the span, so a verbatim replacement would land in the comment; declare a find that starts after the comment`
+    : `the declared find text is nowhere in the built ${file}, exactly or whitespace-normalized`)
 
 // --- the journal channel split (#608's producer half) --------------------------
 // The journal is two interleaved streams and said so nowhere. Measured on

@@ -10,7 +10,7 @@
   "crew/drive.mjs:244": "ENVELOPE_FIELD_KINDS.includes(field?.kind)",
   "crew/drive.test.mjs:4158": "DECISIONS and LIMITS are the frozen public contract",
   "crew/drive.test.mjs:4159": "Object.isFrozen(DECISIONS) && Object.isFrozen(LIMITS)",
-  "crew/drive.test.mjs:4160": "assert.deepEqual([...DECISIONS], ['bounce', 'accept', 'escalate'])",
+  "crew/drive.test.mjs:4160": "assert.deepEqual([...DECISIONS], ['bounce', 'bounce-builder', 'bounce-reviewer', 'accept', 'escalate'])",
   "crew/pi/extensions/subagent.test.mjs:169": "module is zero-dep, erasable, and carries",
   "crew/pi/extensions/subagent.test.mjs:173": "imports.every((specifier) => specifier.startsWith('node:'))",
   "crew/pi/extensions/subagent.test.mjs:174": "assert.doesNotMatch(source, /^\\s*enum",

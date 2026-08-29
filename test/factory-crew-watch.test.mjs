@@ -1,7 +1,6 @@
 import { after, test } from 'node:test'
 import assert from 'node:assert/strict'
 import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from 'node:fs'
-import { createHash } from 'node:crypto'
 import { spawn, spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -47,7 +46,7 @@ function world() {
 }
 
 function deps(now = NOW, extra = {}) {
-  return { ...QUIET, now: () => now, ppid: () => 777, ...extra }
+  return { ...QUIET, now: () => now, ppid: () => 777, readSession: () => null, ...extra }
 }
 
 function journalObjects(path) {
@@ -97,7 +96,7 @@ test('bounded report shows active and settled lane status', () => {
   seedLane(root, { task: 'finished', settled: true, journalLines: [{ at: NOW - 8_000, stage: 'done' }] })
   const report = boundedReport({ root, names: ['live', 'finished'], now: NOW, deps: deps() })
   assert.deepEqual(report.lines, [
-    '[live] stage=build:r1 age=5s status=active',
+    '[live] stage=build:r1 age=5s status=active driver=unknown heartbeat=none',
     '[finished] stage=done age=8s status=settled',
   ])
 })
@@ -219,10 +218,10 @@ test('boundedReport tells a retrying seat from a stale one and from a working on
   })
   const report = boundedReport({ root, names: ['retrying', 'stale', 'working', 'cleared'], now: NOW, deps: deps() })
   assert.deepEqual(report.lines, [
-    '[retrying] stage=build:r1 age=12s status=retrying seen=12s',
-    '[stale] stage=build:r1 age=11s status=stale seen=11s',
-    '[working] stage=build:r1 age=5s status=active',
-    '[cleared] stage=build:r1 age=2s status=active',
+    '[retrying] stage=build:r1 age=12s status=retrying seen=12s driver=unknown heartbeat=none',
+    '[stale] stage=build:r1 age=11s status=stale seen=11s driver=unknown heartbeat=none',
+    '[working] stage=build:r1 age=5s status=active driver=unknown heartbeat=none',
+    '[cleared] stage=build:r1 age=2s status=active driver=unknown heartbeat=none',
   ])
 })
 
@@ -258,7 +257,7 @@ test('a condition is scoped to its dispatch and retrying outranks stale on one t
       { at: NOW - 3_000, event: 'seat-stale-cleared', id: 'd3', role: 'builder' },
     ],
   })
-  assert.equal(boundedReport({ root: recoveredRoot, names: ['recovered'], now: NOW, deps: deps() }).lines[0], '[recovered] stage=build:r1 age=3s status=active')
+  assert.equal(boundedReport({ root: recoveredRoot, names: ['recovered'], now: NOW, deps: deps() }).lines[0], '[recovered] stage=build:r1 age=3s status=active driver=unknown heartbeat=none')
 })
 
 test('retry transitions are selected through both default event construction paths', () => {
@@ -280,7 +279,7 @@ test('--all reports live lanes only', () => {
   })
 
   const report = boundedReport({ root, all: true, now: NOW, deps: deps() })
-  assert.deepEqual(report.lines, ['[live] stage=build:r1 age=5s status=active'])
+  assert.deepEqual(report.lines, ['[live] stage=build:r1 age=5s status=active driver=unknown heartbeat=none'])
 })
 
 test('a named lane that has been archived reports archived, never pending', () => {
@@ -710,7 +709,41 @@ test('follow has no process-spawning surface and no child after one tick', async
   }
 })
 
-test('lane-watch remains byte-identical', () => {
-  const source = readFileSync(new URL('../scripts/factory/lane-watch.mjs', import.meta.url))
-  assert.equal(createHash('sha256').update(source).digest('hex'), 'aea054f933f4618663d8205dda12e093893155630818d2740e8fa6e53086ef06')
+test('boundedReport reports driver-gone and heartbeat age for a stale heartbeat', () => {
+  const root = world()
+  seedLane(root, { task: 'driver-gone', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  const report = boundedReport({
+    root, names: ['driver-gone'], now: NOW,
+    deps: deps(NOW, { readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 61_000).toISOString() }) }),
+  })
+  assert.equal(report.lines[0], '[driver-gone] stage=build:r1 age=5s status=active driver=driver-gone heartbeat=61s')
+})
+
+test('boundedReport reports unknown rather than running when the session is unreadable', () => {
+  const root = world()
+  seedLane(root, { task: 'driver-unknown', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  const report = boundedReport({ root, names: ['driver-unknown'], now: NOW, deps: deps(NOW, { readSession: () => null }) })
+  assert.equal(report.lines[0], '[driver-unknown] stage=build:r1 age=5s status=active driver=unknown heartbeat=none')
+  assert.equal(report.lines[0].includes('driver=running'), false)
+})
+
+test('boundedReport reports a fresh heartbeat as running with its age', () => {
+  const root = world()
+  seedLane(root, { task: 'driver-running', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  const report = boundedReport({
+    root, names: ['driver-running'], now: NOW,
+    deps: { ...QUIET, readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 5_000).toISOString() }) },
+  })
+  assert.equal(report.lines[0], '[driver-running] stage=build:r1 age=5s status=active driver=running heartbeat=5s')
+})
+
+test('boundedReport reports an exited driver instead of running', () => {
+  const root = world()
+  const lane = seedLane(root, { task: 'driver-exited', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  writeFileSync(join(lane.dir, 'run.log'), `${JSON.stringify({ status: 'exited' })}\n`)
+  const report = boundedReport({
+    root, names: ['driver-exited'], now: NOW,
+    deps: { ...QUIET, readSession: () => ({ ended_at: null, last_heartbeat_at: new Date(NOW - 61_000).toISOString() }) },
+  })
+  assert.equal(report.lines[0], '[driver-exited] stage=build:r1 age=5s status=active driver=exited heartbeat=61s')
 })

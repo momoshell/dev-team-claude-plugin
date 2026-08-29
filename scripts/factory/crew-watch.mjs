@@ -6,7 +6,7 @@
 import { existsSync, openSync, readSync, closeSync, readFileSync, readdirSync, statSync, appendFileSync, realpathSync } from 'node:fs'
 import { homedir, loadavg, cpus } from 'node:os'
 import { join } from 'node:path'
-import { archivedLanes, crewRoot, discoverLanes, journalAt, laneActive, readJournal, resolveTunables, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
+import { archivedLanes, crewRoot, discoverLanes, driverState, journalAt, laneActive, laneLedgerView, readJournal, resolveTunables, watchPass, TERMINAL_STAGES } from './lane-watch.mjs'
 import { fileURLToPath } from 'node:url'
 
 export const DEFAULT_EVENTS = Object.freeze(['stage', 'attention', 'escalat', 'refus', 'review_outcome', 'gate_check_discrimination', 'commit', 'seat-teardown', 'seat-retrying', 'seat-retry-cleared'])
@@ -176,6 +176,7 @@ export function normalDeps(deps = {}) {
     openSync: deps.openSync || openSync,
     readSync: deps.readSync || readSync,
     closeSync: deps.closeSync || closeSync,
+    readSession: deps.readSession || undefined,
     ppid: deps.ppid || (() => process.ppid),
     stdout: deps.stdout || ((text) => process.stdout.write(text)),
     stderr: deps.stderr || ((text) => process.stderr.write(text)),
@@ -334,7 +335,7 @@ export function selectLanes({ root, names = [], all = false, deps = {} } = {}) {
 }
 
 export function boundedReport({ root, names = [], all = false, now, deps = {} } = {}) {
-  const d = normalDeps(deps)
+  const d = normalDeps(typeof now === 'number' ? { ...deps, now: () => now } : deps)
   const at = now === undefined ? d.now() : now
   const selected = selectLanes({ root, names, all, deps: d })
   const lines = []
@@ -348,7 +349,12 @@ export function boundedReport({ root, names = [], all = false, now, deps = {} } 
     // The lane's `age` measures journal activity; a condition needs the age of
     // ITS OWN observation, or a four-minute-old retry reads as current.
     const seen = seat && seat.at !== null ? ` seen=${Math.max(0, Math.floor((at - seat.at) / 1000))}s` : ''
-    lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}${seen}`)
+    // The driver's own state, distinct from the seat's. #297: a lane whose
+    // ledger session cannot be read is `unknown`, never `running`.
+    const driver = driverState(lane, journal, laneLedgerView(lane, d))
+    const driverPart = driver.state === null ? ''
+      : ` driver=${driver.state} heartbeat=${driver.heartbeat_age_ms === null ? 'none' : `${Math.max(0, Math.floor(driver.heartbeat_age_ms / 1000))}s`}`
+    lines.push(`[${lane.task}] stage=${stage} age=${ageS}s status=${status}${seen}${driverPart}`)
     lines.push(...seatLivenessLines({ lane, crew: laneCrew(lane, d), now: at, home: d.homedir(), deps: d }))
   }
   for (const lane of selected.archived) {

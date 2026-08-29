@@ -32,7 +32,7 @@
 // Each verb refuses a flag it does not read with exit 2; --fences is boot-only,
 // and a bare --lane on run is the round validation lane.
 import {
-  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync,
+  appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, unlinkSync, readdirSync, writeSync,
 } from 'node:fs'
 import { join, dirname, resolve as resolvePath } from 'node:path'
 import { homedir } from 'node:os'
@@ -1759,6 +1759,54 @@ export function runExitCode(result) {
     : RUN_EXIT_UNEXPECTED
 }
 
+// The exit marker (#749, driver half). `run` writes exactly ONE terminal
+// line on every exit path this process can reach, so an EMPTY run.log means
+// exactly "killed with an uncatchable signal, or hung" and never "unknown".
+// The shape is the one factoryctl.mjs:498 already reads back.
+export const EXITED_STATUS = 'exited'
+// 128 + signal number, the shell's own convention for a signalled death.
+export const SIGNAL_EXIT_CODES = Object.freeze({ SIGTERM: 143, SIGINT: 130 })
+export const UNCAUGHT_EXIT_CODE = 1
+
+let terminalLineWritten = false
+export function terminalLineSeen() { return terminalLineWritten }
+
+// The ONE writer of a terminal line. writeSync(1, …) and not
+// process.stdout.write: an 'exit' listener may not defer, and a pipe's async
+// write would be dropped on the floor exactly when the marker matters most.
+export function writeTerminalLine(payload, write = (text) => writeSync(1, text)) {
+  terminalLineWritten = true
+  write(`${JSON.stringify(payload)}\n`)
+}
+
+// Measured on Node v26.7.0, 2026-08-29: a bare process.on('exit') marker prints
+// BEFORE Node's own fatal-exception report even into one merged fd. So the
+// stack is printed HERE, first, and the marker follows it — the ordering #749
+// asks for, with the stack preserved verbatim.
+export function installExitMarker({
+  on = (event, handler) => process.on(event, handler),
+  write,
+  exit = (code) => process.exit(code),
+  stderr = (text) => writeSync(2, text),
+} = {}) {
+  terminalLineWritten = false
+  on('uncaughtException', (err) => {
+    stderr(`${err && err.stack ? err.stack : String(err)}\n`)
+    if (!terminalLineWritten) writeTerminalLine({ status: EXITED_STATUS, code: UNCAUGHT_EXIT_CODE }, write)
+    exit(UNCAUGHT_EXIT_CODE)
+  })
+  on('exit', (code) => {
+    if (terminalLineWritten) return
+    writeTerminalLine({ status: EXITED_STATUS, code }, write)
+  })
+  for (const signal of Object.keys(SIGNAL_EXIT_CODES)) {
+    on(signal, () => {
+      if (!terminalLineWritten) writeTerminalLine({ status: EXITED_STATUS, signal }, write)
+      exit(SIGNAL_EXIT_CODES[signal])
+    })
+  }
+}
+
 // The completion event (#687). run.log and the journal stay authoritative for
 // their own purposes; this is ADDITIVE. One line per finishing run, in a log that
 // OUTLIVES the crew dir the run used — because a crew dir is mutable, reusable
@@ -1804,7 +1852,7 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(variant, { validationLane })
-  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady } = deps
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -1988,7 +2036,7 @@ export function runCmd(args, deps = {}) {
     archived, taskReturn, at: new Date().toISOString(),
   })
   try { appendCompletionDep(completion) } catch (err) { completionWarning(err, taskSlug) }
-  process.stdout.write(`${JSON.stringify({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived })}\n`)
+  writeTerminalLine({ status: result.status, commit: result.details?.commit ?? null, task_return: taskReturn, archived }, writeTerminalLineDep)
   process.exitCode = runExitCode(result)
 }
 
@@ -2650,6 +2698,7 @@ if (invokedDirectly) {
   const [verb, ...rest] = process.argv.slice(2)
   const fn = COMMANDS[verb]
   if (!fn) { process.stderr.write(`usage: crew.mjs <${Object.keys(COMMANDS).join('|')}> --task <slug> ...\n`); process.exit(2) }
+  if (verb === 'run') installExitMarker()
   // fn may be async (boot resolves adapters via dynamic import) — a sync
   // try/catch cannot see an async rejection, so a promise result is also
   // routed to `fail` explicitly.

@@ -19,11 +19,17 @@
 // earlier. The driver journals STAGES, not a seat's in-progress writes. So the
 // wedged predicate is silence AND artifact mtimes not advancing.
 
-import { existsSync as fsExistsSync, appendFileSync as fsAppendFileSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, statSync as fsStatSync } from 'node:fs'
+import {
+  existsSync as fsExistsSync, appendFileSync as fsAppendFileSync, readFileSync as fsReadFileSync,
+  readdirSync as fsReaddirSync, statSync as fsStatSync, openSync as fsOpenSync,
+  readSync as fsReadSync, closeSync as fsCloseSync,
+} from 'node:fs'
 import { homedir, loadavg as osLoadavg, cpus as osCpus } from 'node:os'
 import { join } from 'node:path'
+import { LIVENESS_PROBE_MS } from '../../crew/seat-io.mjs'
+import { defaultDbPath, openLedger } from './ledger.mjs'
 
-export const NOTE_KINDS = Object.freeze(['silent-lane', 'host-load', 'final-round'])
+export const NOTE_KINDS = Object.freeze(['silent-lane', 'host-load', 'final-round', 'driver-gone'])
 export const WATCH_EVENT = 'lane-watch'
 
 // Defaults, each with a measured basis rather than a guess:
@@ -60,7 +66,11 @@ export function normalDeps(deps = {}) {
     readFileSync: deps.readFileSync || fsReadFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
     statSync: deps.statSync || fsStatSync,
+    openSync: deps.openSync || fsOpenSync,
+    readSync: deps.readSync || fsReadSync,
+    closeSync: deps.closeSync || fsCloseSync,
     appendFileSync: deps.appendFileSync || fsAppendFileSync,
+    readSession: deps.readSession || readLaneSession,
     loadavg: deps.loadavg || osLoadavg,
     cpus: deps.cpus || osCpus,
     platform: deps.platform || process.platform,
@@ -192,6 +202,120 @@ export function laneActive(lane, journal) {
   return !stage.startsWith('escalate:')
 }
 
+// The heartbeat period has ONE owner (crew/seat-io.mjs:38) and this is a
+// re-export, never a second copy: a watcher that hardcoded 30_000 would drift
+// silently the day the probe cadence changes.
+// scripts/factory/reap-stale.mjs:11 is the precedent for this import direction.
+export const HEARTBEAT_PERIOD_MS = LIVENESS_PROBE_MS
+// TWO periods: one missed beat is a scheduling hiccup, two is silence.
+export const DRIVER_GONE_PERIODS = 2
+export const DRIVER_RUNNING = 'running'
+export const DRIVER_GONE = 'driver-gone'
+export const DRIVER_EXITED = 'exited'
+export const DRIVER_UNKNOWN = 'unknown'
+// The terminal line is the LAST line of run.log; a bounded tail is enough and a
+// whole-file read is not — a long run's log is megabytes of seat noise.
+export const RUN_LOG_TAIL_BYTES = 65_536
+
+// The sibling `terminalRunLine` lives in crew/factoryctl.mjs:498. This copy
+// keeps scripts/factory/* from depending on that non-leaf CLI module, so the
+// observability path stays leaf-only.
+export function runLogTerminal(lane, deps = {}) {
+  const d = normalDeps(deps)
+  let path
+  try { path = join(lane?.dir, 'run.log') } catch { return null }
+  let size
+  try { size = d.statSync(path).size } catch { return null }
+  if (typeof size !== 'number' || !Number.isFinite(size) || size <= 0) return null
+  const start = Math.max(0, size - RUN_LOG_TAIL_BYTES)
+  const amount = size - start
+  let fd
+  let buffer
+  let failed = false
+  try {
+    fd = d.openSync(path, 'r')
+    buffer = Buffer.alloc(amount)
+    const bytesRead = d.readSync(fd, buffer, 0, amount, start)
+    if (bytesRead !== amount) failed = true
+  } catch { failed = true }
+  finally {
+    if (fd !== undefined) {
+      try { d.closeSync(fd) } catch { failed = true }
+    }
+  }
+  if (failed || buffer === undefined) return null
+  let status = null
+  for (const raw of buffer.toString('utf8').split('\n')) {
+    try {
+      const frame = JSON.parse(raw)
+      if (frame && typeof frame.status === 'string') status = frame.status
+    } catch { /* seat noise, torn lines and non-JSON frames are not terminal */ }
+  }
+  return status
+}
+
+export function readLaneSession(lane, deps = {}) {
+  const dbPath = deps.defaultDbPath || defaultDbPath
+  const open = deps.openLedger || openLedger
+  let handle
+  let failed = false
+  let row = null
+  try {
+    handle = open({ dbPath: dbPath(), readOnly: true })
+    const connection = handle?.readConnection?.()
+    if (!connection) return null
+    row = connection.prepare(
+      'SELECT ended_at, last_heartbeat_at FROM sessions WHERE repo_slug = ? AND task_slug = ? ORDER BY started_at DESC LIMIT 1',
+    ).get(lane.repo, lane.task) || null
+  } catch { failed = true }
+  finally {
+    if (handle) {
+      try { handle.close?.() } catch { failed = true }
+    }
+  }
+  return failed ? null : row
+}
+
+export function laneLedgerView(lane, deps = {}) {
+  const d = normalDeps(deps)
+  let session = null
+  try { session = d.readSession(lane) } catch { /* an injected read failure is unmeasured */ }
+  return { session, terminal: runLogTerminal(lane, d), now: d.now() }
+}
+
+export function driverGone(lane, journal, ledger) {
+  if (!laneActive(lane, journal)) return false
+  const session = ledger?.session
+  if (session == null) return false                  // unmeasured is never gone
+  if (session.ended_at != null) return false         // the run closed its own session
+  if (ledger.terminal != null) return false          // run.log already answered for this run
+  const beat = journalAt(session.last_heartbeat_at)
+  if (beat === null) return false                    // never measured (#297)
+  if (!Number.isFinite(ledger.now)) return false
+  return ledger.now - beat >= DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+}
+
+export function driverState(lane, journal, ledger) {
+  if (!laneActive(lane, journal)) return { state: null, heartbeat_age_ms: null }
+  const terminal = ledger?.terminal
+  const session = ledger?.session
+  // A terminal frame is positive evidence that this run's driver exited even
+  // when the read-only ledger is missing or degraded.
+  if (session == null) {
+    return terminal != null
+      ? { state: DRIVER_EXITED, heartbeat_age_ms: null }
+      : { state: DRIVER_UNKNOWN, heartbeat_age_ms: null }
+  }
+  const beat = journalAt(session.last_heartbeat_at)
+  const age = beat === null || !Number.isFinite(ledger.now) ? null : ledger.now - beat
+  // It is not a fresh liveness observation, so never fold terminal evidence
+  // back into `running`.
+  if (terminal != null) return { state: DRIVER_EXITED, heartbeat_age_ms: age }
+  if (age === null) return { state: DRIVER_UNKNOWN, heartbeat_age_ms: null }
+  if (driverGone(lane, journal, ledger)) return { state: DRIVER_GONE, heartbeat_age_ms: age }
+  return { state: DRIVER_RUNNING, heartbeat_age_ms: age }
+}
+
 export function hostLoad({ threshold, deps = {} } = {}) {
   const d = normalDeps(deps)
   if (d.platform === 'win32') return null
@@ -261,7 +385,7 @@ function appendNote(lane, note, deps) {
 
 // A bounded pass. The caller repeats it; nothing here loops, sleeps, or lives on.
 export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}) {
-  const d = normalDeps(deps)
+  const d = normalDeps(typeof now === 'number' ? { ...deps, now: () => now } : deps)
   const at = typeof now === 'number' ? now : d.now()
   const tunables = resolveTunables({ silenceS, loadThreshold })
   const silence = tunables.silence_s.value
@@ -276,10 +400,20 @@ export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}
     const journal = readJournal(lane.journal, d)
     if (!laneActive(lane, journal)) continue
     watched.push(lane.id)
+    const driver = driverState(lane, journal, laneLedgerView(lane, d))
     const artifactMs = latestArtifactMs(lane.taskDir, d)
     const laneNotes = []
-    const silent = silenceNote({ journal, artifactMs, now: at, silenceS: silence })
-    if (silent) laneNotes.push(silent)
+    if (driver.state === DRIVER_GONE) {
+      laneNotes.push({
+        note: 'driver-gone',
+        heartbeat_age_s: Math.max(0, Math.floor(driver.heartbeat_age_ms / 1000)),
+        threshold_s: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS / 1000,
+        last_stage: journal.lastStage,
+      })
+    } else if (driver.state !== DRIVER_EXITED) {
+      const silent = silenceNote({ journal, artifactMs, now: at, silenceS: silence })
+      if (silent) laneNotes.push(silent)
+    }
     if (load) laneNotes.push({ ...load })
     const round = roundNote(journal)
     if (round) laneNotes.push(round)

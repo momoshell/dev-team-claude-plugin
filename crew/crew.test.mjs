@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -610,7 +610,11 @@ async function runCompletionFixture({ task, result, keep = true, append = null }
       try {
         runCmd(
           { task, checkout, 'brief-file': brief, keep },
-          { drive: () => result, ...(append ? { appendCompletion: append } : {}) },
+          {
+            drive: () => result,
+            ...(append ? { appendCompletion: append } : {}),
+            writeTerminalLine: (text) => { output += String(text) },
+          },
         )
       } finally {
         process.stdout.write = previousStdoutWrite
@@ -2084,6 +2088,87 @@ test('run exits 3 on an escalation, 0 on done, and 1 on anything else', () => {
     [{ status: 'done' }, 0], [{ status: 'escalation' }, 3], [{ status: 'blocked' }, 1],
     [{ status: 'converge' }, 1], [{}, 1], [null, 1],
   ]) assert.equal(runExitCode(result), expected)
+})
+
+test('installExitMarker writes one terminal line for normal, signal and uncaught exits', () => {
+  const handlers = {}
+  const events = []
+  const exits = []
+  const install = () => installExitMarker({
+    on: (event, handler) => { handlers[event] = handler },
+    write: (text) => events.push(['write', text]),
+    stderr: (text) => events.push(['stderr', text]),
+    exit: (code) => exits.push(code),
+  })
+
+  install()
+  handlers.exit(0)
+  assert.deepEqual(events, [['write', '{"status":"exited","code":0}\n']])
+  assert.equal(terminalLineSeen(), true)
+
+  events.length = 0
+  install()
+  writeTerminalLine({ status: 'done' }, (text) => events.push(['write', text]))
+  handlers.exit(0)
+  assert.deepEqual(events, [['write', '{"status":"done"}\n']])
+
+  events.length = 0
+  install()
+  handlers.SIGTERM()
+  assert.deepEqual(events, [['write', '{"status":"exited","signal":"SIGTERM"}\n']])
+  assert.equal(exits.at(-1), 143)
+
+  events.length = 0
+  install()
+  handlers.SIGINT()
+  assert.deepEqual(events, [['write', '{"status":"exited","signal":"SIGINT"}\n']])
+  assert.equal(exits.at(-1), 130)
+
+  events.length = 0
+  install()
+  handlers.uncaughtException(new Error('marker boom'))
+  assert.equal(events[0][0], 'stderr')
+  assert.match(events[0][1], /Error: marker boom/)
+  assert.deepEqual(events[1], ['write', '{"status":"exited","code":1}\n'])
+  assert.equal(exits.at(-1), 1)
+})
+
+test('a real SIGTERM leaves exactly one exit marker on a child stdout', async () => {
+  const root = scratchDir('crew-exit-marker-')
+  const script = join(root, 'marker-child.mjs')
+  writeFileSync(script, `import { installExitMarker } from ${JSON.stringify(new URL('./crew.mjs', import.meta.url).href)}\ninstallExitMarker()\nprocess.stderr.write('ready\\n')\nsetInterval(() => {}, 1000)\n`)
+  let child
+  let output = ''
+  try {
+    const result = await new Promise((resolve, reject) => {
+      child = spawn(process.execPath, [script], { stdio: ['ignore', 'pipe', 'pipe'] })
+      const timeout = setTimeout(() => {
+        try { child.kill('SIGKILL') } catch {}
+        reject(new Error('exit marker child timed out'))
+      }, 5000)
+      child.stdout.on('data', (chunk) => { output += String(chunk) })
+      let stderr = ''
+      let signalled = false
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk)
+        if (!signalled && stderr.includes('ready\n')) {
+          signalled = true
+          try { child.kill('SIGTERM') } catch {}
+        }
+      })
+      child.once('error', reject)
+      child.once('close', (code, signal) => { clearTimeout(timeout); resolve({ code, signal }) })
+    })
+    const lines = output.split('\n').filter(Boolean).map((line) => JSON.parse(line))
+    assert.deepEqual(lines, [{ status: 'exited', signal: 'SIGTERM' }])
+    assert.equal(result.code, 143)
+    assert.equal(result.signal, null)
+  } finally {
+    if (child && child.exitCode == null && child.signalCode == null) {
+      try { child.kill('SIGKILL') } catch {}
+    }
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('run derives its process exit code from the envelope status', async () => {

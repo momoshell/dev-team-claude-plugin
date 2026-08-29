@@ -3,7 +3,7 @@
   import { drainEvents } from './drain.js'
   let { run, phaseFilter = null } = $props()
   let events = $state([]), cursor = $state(0), loading = $state(false), truncated = $state(false), initialized = $state(false), expandedWhy = $state({})
-  let type = $state(''), role = $state(''), selectedPhase = $state(phaseFilter ?? '')
+  let type = $state(''), role = $state(''), selectedPhase = $state('')
   let phaseAvailable = $derived(events.some((event) => event.phase_id != null))
   let roles = $derived([...new Set(events.map((event) => { try { return JSON.parse(event.payload_json || '{}').role } catch { return null } }).filter(Boolean))].sort())
   let phases = $derived(run.phases || [])

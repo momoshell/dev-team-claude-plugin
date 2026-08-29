@@ -19,6 +19,8 @@ import { teardownCore } from './crew.mjs'
 const CONTENT = Object.freeze({
   committed: 'committed tracked content\n',
   dirty: 'dirty tracked content\n',
+  target: 'target v1\n',
+  victim: 'victim v1\n',
   untracked: 'untracked content\n',
   ignored: 'ignored secret content\n',
   node: 'node package content\n',
@@ -35,7 +37,9 @@ function makeRepo({ dirty = true, linked = false } = {}) {
   git(repoDir, 'init')
   writeFileSync(join(repoDir, '.gitignore'), 'ignored/\nnode_modules/\n')
   writeFileSync(join(repoDir, 'tracked.txt'), CONTENT.committed)
-  git(repoDir, 'add', '.gitignore', 'tracked.txt')
+  writeFileSync(join(repoDir, 'witness-target.txt'), CONTENT.target)
+  writeFileSync(join(repoDir, 'witness-victim.txt'), CONTENT.victim)
+  git(repoDir, 'add', '-A')
   git(repoDir, 'commit', '-m', 'initial')
 
   if (dirty) {
@@ -166,6 +170,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
+  ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
   ['recordRow', '', 'at seat_died returnPath'],
   ['recordRow', '', 'at substrate_gone returnPath'],
   ['operationalRow', "event='teardown-transports'", 'at declared transports init_failed seats'],
@@ -177,10 +182,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 27)
+  assert.equal(sites.length, 28)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 21)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 22)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
 })
 
@@ -396,6 +401,96 @@ test('runClean on a clean tree runs without creating a stash entry', () => {
     const result = io.runClean('printf clean-tree')
     assert.deepEqual(result, { ok: true, output: 'clean-tree' })
     assert.equal(git(fixture.repoDir, 'stash', 'list').trim(), '')
+  })
+})
+
+test('runClean refuses a tracked file modified during the window and names it', () => {
+  withRepo({}, (fixture) => {
+    let error
+    assert.throws(() => makeIo(fixture).runClean("printf 'target v2\\n' > witness-target.txt; printf ok"), (err) => { error = err; return true })
+    assert.equal(error.reason, 'tree-witness')
+    assert.match(error.message, /tree-witness/)
+    assert.match(error.message, /witness-target\.txt/)
+  })
+})
+
+test('runClean refuses a tracked file removed during the window and names it', () => {
+  withRepo({}, (fixture) => {
+    let error
+    assert.throws(() => makeIo(fixture).runClean('rm witness-victim.txt; printf ok'), (err) => { error = err; return true })
+    assert.equal(error.reason, 'tree-witness')
+    assert.match(error.message, /tree-witness/)
+    assert.match(error.message, /witness-victim\.txt/)
+  })
+})
+
+test('runClean reports an added path without refusing the window', () => {
+  withRepo({}, (fixture) => {
+    const journal = []
+    const result = makeIo(fixture, { logLine: (_path, row) => journal.push(row) })
+      .runClean("printf 'new\\n' > witness-added.txt; printf ok")
+    assert.deepEqual(result, { ok: true, output: 'ok' })
+    const row = journal.find((entry) => entry.event === 'tree-witness')
+    assert.ok(row)
+    assert.equal(row.outcome, 'changed')
+    assert.equal(row.refused, false)
+    assert.deepEqual(row.added, ['witness-added.txt'])
+  })
+})
+
+test('runClean refuses an unmeasurable witness on either side without reporting unchanged', () => {
+  for (const [side, unmeasurableCall] of [['open', 1], ['close', 2]]) {
+    withRepo({}, (fixture) => {
+      let calls = 0
+      const cause = `injected-${side}-unmeasurable`
+      const journal = []
+      const deps = {
+        fingerprintTree: (checkout) => {
+          calls += 1
+          if (calls === unmeasurableCall) return { measured: false, checkout, at: 'injected', cause, detail: 'test injection' }
+          return { measured: true, checkout, at: 'injected', head: 'HEADSHA', entries: {} }
+        },
+        logLine: (_path, row) => journal.push(row),
+      }
+      let error
+      assert.throws(() => makeIo(fixture, deps).runClean('printf clean'), (err) => { error = err; return true })
+      assert.match(error.message, new RegExp(cause))
+      assert.equal(journal.length, 1)
+      assert.notEqual(journal[0].outcome, 'unchanged')
+    })
+  }
+})
+
+test('runClean restores stashed work before refusing a witness violation', () => {
+  withRepo({}, (fixture) => {
+    let error
+    assert.throws(() => makeIo(fixture).runClean("printf 'target v2\\n' > witness-target.txt; printf ok"), (err) => { error = err; return true })
+    assert.equal(error.reason, 'tree-witness')
+    restored(fixture)
+    assert.equal(git(fixture.repoDir, 'stash', 'list').trim(), '')
+  })
+})
+
+test('runClean carries the witness through the clean-tree arm', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const journal = []
+    let error
+    assert.throws(() => makeIo(fixture, { logLine: (_path, row) => journal.push(row) })
+      .runClean("printf 'target v2\\n' > witness-target.txt; printf ok"), (err) => { error = err; return true })
+    assert.equal(error.reason, 'tree-witness')
+    assert.equal(readFileSync(join(fixture.repoDir, 'witness-target.txt'), 'utf8'), 'target v2\n')
+    assert.equal(git(fixture.repoDir, 'stash', 'list').trim(), '')
+    assert.equal(journal.find((entry) => entry.event === 'tree-witness')?.refused, true)
+  })
+})
+
+test('runClean keeps a quiet window unchanged and unjournalled', () => {
+  withRepo({}, (fixture) => {
+    const journal = []
+    const result = makeIo(fixture, { logLine: (_path, row) => journal.push(row) }).runClean('printf clean')
+    assert.deepEqual(result, { ok: true, output: 'clean' })
+    restored(fixture)
+    assert.equal(journal.some((entry) => entry.event === 'tree-witness'), false)
   })
 })
 

@@ -3941,8 +3941,10 @@ test('intakeDispatches groups outcome and reason within the requested window', {
 
 test('the intake-sweeps CLI prints dispatches beside sweeps and refusals', { skip: SKIP }, () => {
   const ledger = openTestLedger()
-  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 7, outcome: 'none', considered: 0, pages: 1, created_at: '2024-01-01T00:00:00.000Z' })
-  ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 4, outcome: 'claimed', created_at: '2024-01-01T00:00:01.000Z' })
+  const sweepAt = '2024-01-01T00:00:00.000Z'
+  const dispatchAt = '2024-01-01T00:00:01.000Z'
+  ledger.recordIntakeSweep({ board_owner: 'owner', board_project: 7, outcome: 'none', considered: 0, pages: 1, created_at: sweepAt })
+  ledger.recordIntakeDispatch({ board_owner: 'owner', board_project: 7, issue: 4, outcome: 'claimed', created_at: dispatchAt })
   const refusalAt = '2024-01-01T00:00:02.000Z'
   ledger.recordIntakeRefusal({ board_owner: 'owner', board_project: 7, issue: 5, reason: 'stop-switch', created_at: refusalAt })
   const dbPath = ledger._dbPath
@@ -3950,9 +3952,11 @@ test('the intake-sweeps CLI prints dispatches beside sweeps and refusals', { ski
   const res = run(['intake-sweeps'], { DEVTEAM_LEDGER_DB: dbPath })
   assert.equal(res.status, 0, res.stderr)
   const payload = JSON.parse(res.stdout)
-  assert.ok(Array.isArray(payload.dispatches))
   assert.deepEqual(payload.dispatch_outcomes, [...INTAKE_DISPATCH_OUTCOMES])
-  assert.equal(payload.dispatches[0].outcome, 'claimed')
+  const expectedSweepRows = [{ outcome: 'none', reason: null, count: 1, first_at: sweepAt, last_at: sweepAt }]
+  assert.deepEqual(payload.rows, expectedSweepRows, 'the sweeps the title names must appear in the payload')
+  const expectedDispatchRows = [{ outcome: 'claimed', reason: null, count: 1, first_at: dispatchAt, last_at: dispatchAt }]
+  assert.deepEqual(payload.dispatches, expectedDispatchRows, 'the dispatches the title names must appear in the payload')
   const refusalRows = payload.refusal_rows
   assert.deepEqual(refusalRows, [{ reason: 'stop-switch', count: 1, first_at: refusalAt, last_at: refusalAt }])
 })

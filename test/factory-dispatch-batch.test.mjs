@@ -157,8 +157,15 @@ function entry(lane, files, reads = []) { return { lane, files, reads } }
 function refusal(fn, reason) {
   assert.throws(fn, (err) => err instanceof BatchRefusal && err.reason === reason)
 }
+async function refusalAsync(fn, reason) {
+  await assert.rejects(fn, (err) => err instanceof BatchRefusal && err.reason === reason)
+}
 function thrown(fn) {
   try { fn() } catch (error) { return error }
+  assert.fail('expected a refusal')
+}
+async function thrownAsync(fn) {
+  try { return await fn() } catch (error) { return error }
   assert.fail('expected a refusal')
 }
 
@@ -637,7 +644,7 @@ test('sibling-leak and test-reach warnings remain unchanged with a live crew roo
   assert.equal(report.warning.text.startsWith(TEST_REACH_WARNING_PREFIX), true)
 })
 
-test('dispatchBatch logs cross-batch unknown during dry-run and returns normally', () => {
+test('dispatchBatch logs cross-batch unknown during dry-run and returns normally', async () => {
   const checkout = gitFixture()
   const home = join(root, 'cross-batch-dry-run-unknown')
   crewFixture({
@@ -651,7 +658,7 @@ test('dispatchBatch logs cross-batch unknown during dry-run and returns normally
   const batch = join(checkout, 'cross-batch-dry-run')
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure dry-run unknown', ['scripts/keep.mjs'])))
   const logs = []
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['scripts/keep.mjs'])],
     checkout,
@@ -660,6 +667,7 @@ test('dispatchBatch logs cross-batch unknown during dry-run and returns normally
     runFlags: { 'dry-run': true },
     deps: {
       home,
+      env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
       spawn: (options) => options.args?.includes('ls-files')
         ? spawnSync(options.file, options.args, { cwd: options.cwd, encoding: 'utf8' })
         : { status: 1, stdout: '', stderr: '' },
@@ -671,13 +679,13 @@ test('dispatchBatch logs cross-batch unknown during dry-run and returns normally
   assert.equal(report.fences.crossBatch.cleared, false)
 })
 
-test('dispatchBatch logs test reach during dry-run without changing the outcome', () => {
+test('dispatchBatch logs test reach during dry-run without changing the outcome', async () => {
   const checkout = reachFixture('dry-run')
   const batch = join(checkout, 'reach-batch')
   mkdirSync(batch)
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure reach warning', ['lib/widget.mjs'])))
   const logs = []
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['lib/widget.mjs'])],
     checkout,
@@ -685,6 +693,8 @@ test('dispatchBatch logs test reach during dry-run without changing the outcome'
     outDir: join(checkout, 'reach-out'),
     runFlags: { 'dry-run': true },
     deps: {
+      home: root,
+      env: { DEVTEAM_LEDGER_DIR: root },
       spawn: (options) => options.args?.includes('ls-files')
         ? spawnSync(options.file, options.args, { cwd: options.cwd, encoding: 'utf8' })
         : { status: 1, stdout: '', stderr: '' },
@@ -888,10 +898,10 @@ test('checkFences still refuses a batch lane absent from the register', () => {
   }), 'lane-unfenced')
 })
 
-test('dispatchBatch refuses a register superset before any worktree exists', () => {
+test('dispatchBatch refuses a register superset before any worktree exists', async () => {
   const spawned = []
   const batch = makeBatch(['lane-a'])
-  assert.throws(() => dispatchBatch({
+  await assert.rejects(() => dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/owned.mjs']), entry('lane-b', ['crew/owned-lane-b.mjs'])],
     checkout: root,
@@ -901,6 +911,8 @@ test('dispatchBatch refuses a register superset before any worktree exists', () 
     variant: 'full',
     runFlags: { 'dry-run': true },
     deps: {
+      home: root,
+      env: { DEVTEAM_LEDGER_DIR: root },
       existsSync: () => false,
       spawn: (call) => { spawned.push(call); return { status: 1, stdout: '', stderr: '' } },
       log: () => {},
@@ -1022,14 +1034,14 @@ test('an anchor warning carries the blind-spot sentence', () => {
   assert.equal(report.warnings[0].text.includes(ANCHOR_BLIND_SPOT), true)
 })
 
-test('dry-run warns with the anchor prefix and every line key', () => {
+test('dry-run warns with the anchor prefix and every line key', async () => {
   const checkout = join(root, 'anchor-warning-dry-run-checkout')
   const fixture = warningFixture(checkout)
   const batch = join(root, 'anchor-warning-dry-run-batch')
   mkdirSync(batch)
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure the anchor warning', fixture.files)))
   const logs = []
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', fixture.files)],
     checkout,
@@ -1037,6 +1049,8 @@ test('dry-run warns with the anchor prefix and every line key', () => {
     outDir: join(root, 'anchor-warning-dry-run-out'),
     runFlags: { 'dry-run': true },
     deps: {
+      home: root,
+      env: { DEVTEAM_LEDGER_DIR: root },
       existsSync: (path) => String(path).endsWith('anchors.json') ? fsExistsSync(path) : false,
       spawn: () => ({ status: 1 }),
       log: (line) => logs.push(String(line)),
@@ -1254,10 +1268,12 @@ test('readsFromRefusal parses both compiler refusal shapes from real compiler ou
   assert.deepEqual(second.files, ['src/stale.mjs'])
 })
 
-test('dispatchBatch refuses a leaking register before spawning any subprocess', () => {
+test('dispatchBatch refuses a leaking register before spawning any subprocess', async () => {
   const batch = makeBatch(['lane-a', 'lane-b'])
   const spawned = []
   const deps = {
+    home: root,
+    env: { DEVTEAM_LEDGER_DIR: root },
     readdirSync: () => ['lane-a.request.json', 'lane-b.request.json'],
     readFileSync: (path) => {
       const lane = String(path).split('/').pop().replace(REQUEST_SUFFIX, '')
@@ -1266,7 +1282,7 @@ test('dispatchBatch refuses a leaking register before spawning any subprocess', 
     existsSync: () => false,
     spawn: (call) => { spawned.push(call); return { status: 0 } },
   }
-  refusal(() => dispatchBatch({
+  await refusalAsync(() => dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/shared.mjs']), entry('lane-b', ['crew/shared.mjs'])],
     checkout: root, parentDir: root, outDir: join(root, 'out'), deps,
@@ -1274,13 +1290,20 @@ test('dispatchBatch refuses a leaking register before spawning any subprocess', 
   assert.equal(spawned.length, 0)
 })
 
-test('dispatchBatch compiles lanes sequentially and then boots and runs them', () => {
+test('dispatchBatch compiles lanes concurrently and then boots and runs them', async () => {
   const batch = makeBatch(['lane-a', 'lane-b'])
-  const out = join(root, 'sequential-out')
+  const out = join(root, 'concurrent-out')
+  const baseline = join(root, 'concurrent-baseline.json')
+  put(baseline, JSON.stringify({ sha: 'a'.repeat(40), command: 'npm test', pass: 1, fail: 0, status: 'green' }))
   const fences = [entry('lane-a', ['crew/owned-a.mjs']), entry('lane-b', ['crew/owned-b.mjs'])]
   const spawned = []
-  let compileActive = false
+  const events = []
+  let started = 0
+  let release
+  const allStarted = new Promise((resolve) => { release = resolve })
   const deps = {
+    home: root,
+    env: { DEVTEAM_LEDGER_DIR: root },
     existsSync: () => false,
     readdirSync: () => ['lane-a.request.json', 'lane-b.request.json'],
     readFileSync: (path) => {
@@ -1290,32 +1313,40 @@ test('dispatchBatch compiles lanes sequentially and then boots and runs them', (
         return JSON.stringify(request(`measure ${lane} source behavior`, [`crew/owned-${lane.slice(-1)}.mjs`]))
       }
       if (text.endsWith('.brief.md')) return '```proposal\n{"shape":"build","strength":null}\n```\n'
+      if (text.endsWith('/package.json')) return JSON.stringify({ private: true, scripts: { test: 'npm test' } })
       if (text.endsWith('/crew.json')) {
         const parts = text.split('/')
         const lane = parts[parts.length - 2]
         const sibling = lane === 'lane-a' ? 'lane-b' : 'lane-a'
         return JSON.stringify({ lane_name: lane, lane_fence: [{ lane: sibling, files: [] }] })
       }
-      throw new Error(`unexpected read ${path}`)
+      return readFileSync(text, 'utf8')
     },
     spawn: (call) => {
       spawned.push(call)
+      if (call.args.includes('rev-parse') && call.args.includes('HEAD')) return { status: 0, stdout: `${'a'.repeat(40)}\n`, stderr: '' }
       if (call.args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
-      if (call.args.some((arg) => String(arg).endsWith('make-brief.mjs'))) {
-        assert.equal(compileActive, false)
-        compileActive = true
-        compileActive = false
-        return { status: 0, stdout: '', stderr: '' }
-      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    spawnAsync: async (call) => {
+      spawned.push(call)
+      const lane = call.args[call.args.indexOf('--lane') + 1]
+      events.push(`start:${lane}`)
+      started += 1
+      if (started === 2) release()
+      await allStarted
+      events.push(`end:${lane}`)
       return { status: 0, stdout: '', stderr: '' }
     },
     log: () => {},
   }
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch, fences, checkout: root, parentDir: root, outDir: out,
-    tier: 'mechanical', variant: 'full', deps,
+    tier: 'mechanical', variant: 'full', runFlags: { baseline }, deps,
   })
   assert.deepEqual(report.lanes.map(({ lane }) => lane), ['lane-a', 'lane-b'])
+  const firstEnd = events.findIndex((event) => event.startsWith('end:'))
+  assert.equal(events.slice(0, firstEnd).filter((event) => event.startsWith('start:')).length, 2)
   const compileCalls = spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
   assert.equal(compileCalls.length, 2)
   assert.equal(spawned.filter(({ args }) => args.includes('worktree')).length, 2)
@@ -1324,7 +1355,7 @@ test('dispatchBatch compiles lanes sequentially and then boots and runs them', (
   assert.equal(runCalls.every((call) => call.background === true && String(call.logPath).endsWith('/run.log')), true)
 })
 
-function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
+async function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
   const batch = makeBatch(names)
   for (const lane of names) {
     put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(request(
@@ -1335,6 +1366,8 @@ function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
   const parent = join(root, `baseline-${label}-parent`)
   const spawned = []
   const deps = {
+    home: root,
+    env: { DEVTEAM_LEDGER_DIR: root },
     existsSync: () => false,
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
     readFileSync: (path, encoding) => {
@@ -1367,7 +1400,7 @@ function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
     },
     log: () => {},
   }
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`])),
     checkout: root,
@@ -1385,7 +1418,7 @@ function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
   return { report, spawned, measures, compiles }
 }
 
-function dispatchFixture({
+async function dispatchFixture({
   label,
   names = ['lane-a', 'lane-b'],
   requests = {},
@@ -1398,6 +1431,9 @@ function dispatchFixture({
   outcomes = {},
   ancestor = () => 0,
   spawnResult = () => ({ status: 0, stdout: '', stderr: '' }),
+  spawnAsync = null,
+  assertQuiet = null,
+  headFor = null,
   readObserver = () => {},
   home = root,
 } = {}) {
@@ -1412,6 +1448,7 @@ function dispatchFixture({
   const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
   const deps = {
     home,
+    env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
     existsSync: (path) => String(path).endsWith('returns/task.json')
       && Object.hasOwn(outcomes, laneFromOutcomePath(String(path))),
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
@@ -1428,6 +1465,7 @@ function dispatchFixture({
         return briefs[lane] ?? brief
       }
       if (text.endsWith('returns/task.json')) return JSON.stringify(outcomes[laneFromOutcomePath(text)])
+      if (text.endsWith('/package.json')) return JSON.stringify({ private: true, scripts: { test: 'npm test' } })
       if (text.endsWith('/crew.json')) {
         const lane = text.split('/').at(-2)
         return JSON.stringify({
@@ -1442,12 +1480,19 @@ function dispatchFixture({
       spawned.push(call)
       const args = (call.args || []).map(String)
       if (args.includes('merge-base')) return { status: ancestor(args), stdout: '', stderr: '' }
+      if (args.includes('rev-parse') && args.includes('HEAD')) {
+        const index = args.indexOf('-C')
+        const target = index === -1 ? String(call.cwd || '') : args[index + 1]
+        return headFor ? { status: 0, stdout: `${headFor(target)}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' }
+      }
       if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
       return spawnResult(args, call)
     },
+    ...(spawnAsync ? { spawnAsync: (call) => { spawned.push(call); return spawnAsync(call) } } : {}),
+    ...(assertQuiet ? { assertQuiet } : {}),
     log: (line) => logs.push(String(line)),
   }
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: laneFences,
     checkout: root,
@@ -1469,9 +1514,13 @@ function laneFromOutcomePath(path) {
   return String(path).split('/').at(-3)
 }
 
-test('a four-lane batch measures the baseline once', () => {
+function cachePath(home, sha) {
+  return join(home, 'factory-state', 'baselines', `${sha}.json`)
+}
+
+test('a four-lane batch measures the baseline once', async () => {
   const names = ['lane-a', 'lane-b', 'lane-c', 'lane-d']
-  const result = fakedDispatch({ label: 'four', names, shaFor: () => 'a'.repeat(40) })
+  const result = await fakedDispatch({ label: 'four', names, shaFor: () => 'a'.repeat(40) })
   // Measured mechanism: four lanes cost four suite runs before this lane and one after.
   assert.equal(result.measures.length, 1)
   assert.equal(result.compiles.length, 4)
@@ -1479,9 +1528,9 @@ test('a four-lane batch measures the baseline once', () => {
   assert.equal(result.report.lanes.length, 4)
 })
 
-test('lanes on different commits fall back to measuring per lane', () => {
+test('lanes on different commits fall back to measuring per lane', async () => {
   const names = ['lane-a', 'lane-b', 'lane-c']
-  const result = fakedDispatch({
+  const result = await fakedDispatch({
     label: 'divergent', names,
     shaFor: (target) => String(target).endsWith('lane-a') ? 'a'.repeat(40) : 'b'.repeat(40),
   })
@@ -1491,9 +1540,9 @@ test('lanes on different commits fall back to measuring per lane', () => {
   assert.equal(result.report.lanes.length, 3)
 })
 
-test('a failed batch measurement never refuses the batch', () => {
+test('a failed batch measurement never refuses the batch', async () => {
   const names = ['lane-a', 'lane-b', 'lane-c']
-  const result = fakedDispatch({
+  const result = await fakedDispatch({
     label: 'failed-measurement', names, shaFor: () => 'a'.repeat(40), measurementStatus: 1,
   })
   assert.equal(result.measures.length, 1)
@@ -1502,12 +1551,255 @@ test('a failed batch measurement never refuses the batch', () => {
   assert.equal(result.report.lanes.length, 3)
 })
 
-test('a single-lane batch takes no separate batch measurement', () => {
-  const result = fakedDispatch({ label: 'single', names: ['lane-a'], shaFor: () => 'a'.repeat(40) })
+test('a single-lane batch takes no separate batch measurement', async () => {
+  const result = await fakedDispatch({ label: 'single', names: ['lane-a'], shaFor: () => 'a'.repeat(40) })
   assert.equal(result.measures.length, 0)
   assert.equal(result.compiles.length, 1)
   assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
   assert.equal(result.report.lanes.length, 1)
+})
+
+test('three lanes start compiling before any compile returns', async () => {
+  const sha = 'a'.repeat(40)
+  const home = join(root, 'concurrency-three-home')
+  const baseline = join(root, 'concurrency-three-baseline.json')
+  put(baseline, JSON.stringify({ sha, command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const events = []
+  let started = 0
+  let release
+  let timer
+  const allStarted = new Promise((resolve) => {
+    release = () => {
+      if (timer) clearTimeout(timer)
+      resolve()
+    }
+    timer = setTimeout(release, 250)
+  })
+  const result = await dispatchFixture({
+    label: 'concurrency-three',
+    names: ['lane-a', 'lane-b', 'lane-c'],
+    home,
+    headFor: () => sha,
+    runFlags: { baseline },
+    spawnAsync: async (call) => {
+      const lane = call.args[call.args.indexOf('--lane') + 1]
+      events.push(`start:${lane}`)
+      started += 1
+      if (started === 3) release()
+      await allStarted
+      events.push(`end:${lane}`)
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  const firstEnd = events.findIndex((event) => event.startsWith('end:'))
+  assert.equal(events.slice(0, firstEnd).filter((event) => event.startsWith('start:')).length, 3)
+  assert.equal(result.report.lanes.length, 3)
+})
+
+test('a refused compile names its lane and cannot be masked by a sibling success', async () => {
+  const sha = 'a'.repeat(40)
+  const baseline = join(root, 'refused-lane-baseline.json')
+  put(baseline, JSON.stringify({ sha, command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const started = []
+  let boots = 0
+  await assert.rejects(() => dispatchFixture({
+    label: 'refused-lane',
+    home: join(root, 'refused-lane-home'),
+    headFor: () => sha,
+    runFlags: { baseline },
+    spawnAsync: async (call) => {
+      const lane = call.args[call.args.indexOf('--lane') + 1]
+      started.push(lane)
+      return lane === 'lane-a'
+        ? { status: 1, stdout: '', stderr: 'compiler refused the lane without a named retry' }
+        : { status: 0, stdout: '', stderr: '' }
+    },
+    spawnResult: (args) => {
+      if (args.includes('boot')) boots += 1
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'reads-unresolved'
+    && error.message.includes('lane-a'))
+  assert.deepEqual(started.sort(), ['lane-a', 'lane-b'])
+  assert.equal(boots, 0)
+})
+
+test('at-risk compiles are serialised with a host quiet consult between them', async () => {
+  const baseline = join(root, 'at-risk-baseline.json')
+  put(baseline, JSON.stringify({ sha: 'b'.repeat(40) }))
+  const events = []
+  const result = await dispatchFixture({
+    label: 'at-risk-serial',
+    home: join(root, 'at-risk-serial-home'),
+    headFor: () => 'a'.repeat(40),
+    runFlags: { baseline },
+    assertQuiet: () => { events.push('quiet') },
+    spawnAsync: async (call) => {
+      const lane = call.args[call.args.indexOf('--lane') + 1]
+      events.push(`start:${lane}`)
+      events.push(`end:${lane}`)
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.deepEqual(events, [
+    'quiet', 'start:lane-a', 'end:lane-a',
+    'quiet', 'start:lane-b', 'end:lane-b',
+  ])
+  assert.equal(result.report.lanes.length, 2)
+})
+
+test('a matching-sha baseline with a different command is serialised as a fallback', async () => {
+  const sha = 'a'.repeat(40)
+  const baseline = join(root, 'at-risk-command-baseline.json')
+  put(baseline, JSON.stringify({ sha, command: 'npm run other-suite', pass: 1, fail: 0, status: 'green' }))
+  const events = []
+  const result = await dispatchFixture({
+    label: 'at-risk-command',
+    home: join(root, 'at-risk-command-home'),
+    headFor: () => sha,
+    runFlags: { baseline },
+    assertQuiet: () => { events.push('quiet') },
+    spawnAsync: async (call) => {
+      const lane = call.args[call.args.indexOf('--lane') + 1]
+      events.push(`start:${lane}`)
+      events.push(`end:${lane}`)
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.deepEqual(events, [
+    'quiet', 'start:lane-a', 'end:lane-a',
+    'quiet', 'start:lane-b', 'end:lane-b',
+  ])
+  assert.equal(result.report.lanes.length, 2)
+})
+
+test('a matching sha and command cache hit skips measurement and reaches every compiler', async () => {
+  const sha = 'a'.repeat(40)
+  const home = join(root, 'cache-hit-home')
+  const entryPath = cachePath(home, sha)
+  put(entryPath, JSON.stringify({ sha, command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const result = await dispatchFixture({
+    label: 'cache-hit',
+    home,
+    headFor: () => sha,
+  })
+  const measures = result.spawned.filter(({ args }) => args.includes('--measure-baseline'))
+  const compiles = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  assert.equal(measures.length, 0)
+  assert.equal(compiles.length, 2)
+  assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] === entryPath), true)
+})
+
+test('a cache record for another sha is replaced by a fresh measurement', async () => {
+  const sha = 'a'.repeat(40)
+  const home = join(root, 'cache-sha-miss-home')
+  const entryPath = cachePath(home, sha)
+  put(entryPath, JSON.stringify({ sha: 'b'.repeat(40), command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const result = await dispatchFixture({
+    label: 'cache-sha-miss',
+    home,
+    headFor: () => sha,
+    spawnResult: (args) => {
+      if (args.includes('--measure-baseline')) {
+        put(args[args.indexOf('--measure-baseline') + 1], JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.equal(result.spawned.filter(({ args }) => args.includes('--measure-baseline')).length, 1)
+  assert.equal(JSON.parse(readFileSync(entryPath, 'utf8')).sha, sha)
+})
+
+test('a cache record for another command is replaced by a fresh measurement', async () => {
+  const sha = 'a'.repeat(40)
+  const home = join(root, 'cache-command-miss-home')
+  const entryPath = cachePath(home, sha)
+  put(entryPath, JSON.stringify({ sha, command: 'npm run other-suite', pass: 1, fail: 0, status: 'green' }))
+  const result = await dispatchFixture({
+    label: 'cache-command-miss',
+    home,
+    headFor: () => sha,
+    spawnResult: (args) => {
+      if (args.includes('--measure-baseline')) {
+        put(args[args.indexOf('--measure-baseline') + 1], JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.equal(result.spawned.filter(({ args }) => args.includes('--measure-baseline')).length, 1)
+  assert.equal(JSON.parse(readFileSync(entryPath, 'utf8')).command, 'npm test')
+})
+
+test('an operator baseline wins over a valid cache hit', async () => {
+  const sha = 'a'.repeat(40)
+  const home = join(root, 'operator-baseline-home')
+  const cached = cachePath(home, sha)
+  put(cached, JSON.stringify({ sha, command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const supplied = join(root, 'operator-baseline.json')
+  put(supplied, JSON.stringify({ sha }))
+  const result = await dispatchFixture({
+    label: 'operator-baseline',
+    home,
+    headFor: () => sha,
+    runFlags: { baseline: supplied },
+  })
+  const compiles = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  assert.equal(result.spawned.filter(({ args }) => args.includes('--measure-baseline')).length, 0)
+  assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] === supplied), true)
+  assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] !== cached), true)
+})
+
+test('relocated baseline cache writes under DEVTEAM_LEDGER_DIR, not home', async () => {
+  const sha = 'a'.repeat(40)
+  const home = join(root, 'relocated-cache-home')
+  const result = await dispatchFixture({
+    label: 'relocated-cache',
+    home,
+    headFor: () => sha,
+    spawnResult: (args) => {
+      if (args.includes('--measure-baseline')) {
+        put(args[args.indexOf('--measure-baseline') + 1], JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
+      }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+  })
+  assert.equal(fsExistsSync(cachePath(home, sha)), true)
+  assert.equal(fsExistsSync(join(home, '.dev-team')), false)
+  assert.equal(result.report.lanes.length, 2)
+})
+
+test('memory boot flags are forwarded verbatim and omitted when unset', async () => {
+  const result = await dispatchFixture({
+    label: 'memory-flags',
+    names: ['lane-a', 'lane-b'],
+    runFlags: { 'memory-dir': '/tmp/mem', 'memory-backend': 'sqlite', 'memory-budget-bytes': '4096' },
+  })
+  const boots = result.spawned.filter(({ args }) => args.includes('boot'))
+  assert.equal(boots.length, 2)
+  for (const { args } of boots) {
+    for (const [flag, value] of [['--memory-dir', '/tmp/mem'], ['--memory-backend', 'sqlite'], ['--memory-budget-bytes', '4096']]) {
+      assert.equal(args[args.indexOf(flag) + 1], value)
+    }
+  }
+  const bare = await dispatchFixture({ label: 'memory-flags-absent', names: ['lane-a'] })
+  for (const { args } of bare.spawned.filter(({ args }) => args.includes('boot'))) {
+    assert.equal(args.some((arg) => String(arg).startsWith('--memory-')), false)
+  }
+})
+
+test('parseCliArgs accepts baseline and memory values while preserving refusals', () => {
+  assert.deepEqual(parseCliArgs([
+    '--baseline', '/tmp/base.json', '--memory-dir', '/tmp/mem', '--memory-backend', 'sqlite', '--memory-budget-bytes', '4096',
+  ]), {
+    baseline: '/tmp/base.json',
+    'memory-dir': '/tmp/mem',
+    'memory-backend': 'sqlite',
+    'memory-budget-bytes': '4096',
+  })
+  refusal(() => parseCliArgs(['--memory-bogus', 'x']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--baseline', 'a', '--baseline', 'b']), 'batch-unreadable')
+  refusal(() => parseCliArgs(['--baseline']), 'batch-unreadable')
 })
 
 test('parseCliArgs refuses missing values and unknown flags', () => {
@@ -1515,41 +1807,41 @@ test('parseCliArgs refuses missing values and unknown flags', () => {
   refusal(() => parseCliArgs(['--not-a-flag', 'x']), 'batch-unreadable')
 })
 
-test('main loads the fence register, forwards dry-run, and returns a usage code', () => {
+test('main loads the fence register, forwards dry-run, and returns a usage code', async () => {
   const checkout = gitFixture()
   const batch = join(checkout, 'main-batch')
   mkdirSync(batch)
   put(join(batch, 'lane-a.request.json'), JSON.stringify(request('measure main path behavior', ['src/owned.mjs'])))
   const register = join(checkout, 'main-fences.json')
   put(register, JSON.stringify({ lanes: [entry('lane-a', ['src/owned.mjs'])] }))
-  const code = main([
+  const code = await main([
     '--batch', batch,
     '--fences', register,
     '--checkout', checkout,
     '--parent', root,
     '--out', join(root, 'main-out'),
     '--dry-run',
-  ], { existsSync: () => false, spawn: () => ({ status: 1 }), log: () => {} })
+  ], { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: () => ({ status: 1 }), log: () => {} })
   assert.equal(code, 0)
-  assert.equal(main(['--unknown'], { log: () => {} }), 2)
+  assert.equal(await main(['--unknown'], { log: () => {} }), 2)
 })
 
-test('an unsupported run variant refuses before any run launch', () => {
+test('an unsupported run variant refuses before any run launch', async () => {
   const batch = makeBatch(['lane-a'])
   const spawned = []
-  refusal(() => dispatchBatch({
+  await refusalAsync(() => dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/owned.mjs'])],
     checkout: root,
     parentDir: root,
     outDir: join(root, 'bad-variant-out'),
     variant: 'not-a-variant',
-    deps: { existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 1 } } },
+    deps: { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 1 } } },
   }), 'run-failed')
   assert.equal(spawned.some(({ args }) => args.includes('run')), false)
 })
 
-test('an unsupported run variant refuses BEFORE the branch probe, not after it', () => {
+test('an unsupported run variant refuses BEFORE the branch probe, not after it', async () => {
   const batch = makeBatch(['lane-a'])
   const spawned = []
   // Both faults are present at once: the variant is invalid AND the lane branch
@@ -1557,60 +1849,60 @@ test('an unsupported run variant refuses BEFORE the branch probe, not after it',
   // above planWorktrees, the git probe ran first and the batch refused
   // `branch-taken` — naming a cause it tripped over instead of the one it
   // measured, and spawning a subprocess to do it (RV3-1).
-  refusal(() => dispatchBatch({
+  await refusalAsync(() => dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/owned.mjs'])],
     checkout: root,
     parentDir: root,
     outDir: join(root, 'variant-before-probe-out'),
     variant: 'not-a-variant',
-    deps: { existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 0 } } },
+    deps: { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 0 } } },
   }), 'run-failed')
   assert.deepEqual(spawned, [], 'no subprocess may run before the run options are preflighted')
 })
 
-test('moving the preflight earlier does not disarm branch-taken for valid run options', () => {
+test('moving the preflight earlier does not disarm branch-taken for valid run options', async () => {
   // The reverse direction: with the variant valid, the same taken branch must
   // still refuse `branch-taken`. A reorder that silenced this would trade one
   // wrong refusal for a missing one.
   const batch = makeBatch(['lane-a'])
   const spawned = []
-  refusal(() => dispatchBatch({
+  await refusalAsync(() => dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/owned.mjs'])],
     checkout: root,
     parentDir: root,
     outDir: join(root, 'valid-variant-taken-branch-out'),
     variant: 'full',
-    deps: { existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 0 } } },
+    deps: { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 0 } } },
   }), 'branch-taken')
   assert.equal(spawned.some(({ args }) => args.includes('rev-parse')), true)
 })
 
-test('--dry-run plans branch probes but creates no worktree', () => {
+test('--dry-run plans branch probes but creates no worktree', async () => {
   const batch = makeBatch(['lane-a'])
   const spawned = []
-  const report = dispatchBatch({
+  const report = await dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/owned.mjs'])],
     checkout: root,
     parentDir: root,
     outDir: join(root, 'dry-run-out'),
     runFlags: { 'dry-run': true },
-    deps: { existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 1 } }, log: () => {} },
+    deps: { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: (call) => { spawned.push(call); return { status: 1 } }, log: () => {} },
   })
   assert.equal(report.dryRun, true)
   assert.equal(spawned.some(({ args }) => args.includes('worktree')), false)
 })
 
-test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', () => {
+test('a dispatch over a checkout with pinned files unrelated to the batch still dispatches', async () => {
   const checkout = gitFixture()
   const batch = join(checkout, 'pinned-dry-run-batch')
   mkdirSync(batch)
   put(join(batch, `lane-a${REQUEST_SUFFIX}`), JSON.stringify(request('measure pinned dry-run behavior', ['src/owned.mjs'])))
   const fences = [entry('lane-a', ['src/owned.mjs'])]
-  const deps = { existsSync: () => false, spawn: () => ({ status: 1 }), log: () => {} }
-  const withoutManifest = dispatchBatch({
+  const deps = { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: () => ({ status: 1 }), log: () => {} }
+  const withoutManifest = await dispatchBatch({
     batchDir: batch,
     fences,
     checkout,
@@ -1620,7 +1912,7 @@ test('a dispatch over a checkout with pinned files unrelated to the batch still 
     deps,
   })
   anchorFixtures(checkout, { devops: { 'crew/other.mjs:12': 'export const OTHER = 1' } })
-  const withManifest = dispatchBatch({
+  const withManifest = await dispatchBatch({
     batchDir: batch,
     fences,
     checkout,
@@ -1634,17 +1926,17 @@ test('a dispatch over a checkout with pinned files unrelated to the batch still 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['existsSync', 'home', 'log', 'readFileSync', 'readdirSync', 'spawn'])
+  assert.deepEqual(Object.keys(deps).sort(), ['assertQuiet', 'env', 'existsSync', 'home', 'log', 'readFileSync', 'readdirSync', 'spawn', 'spawnAsync'])
 })
 
-test('compileLane performs at most two passes and carries compiler reads into a retry register', () => {
+test('compileLane performs at most two passes and carries compiler reads into a retry register', async () => {
   const batch = makeBatch(['lane-a'])
   const out = join(root, 'compile-out')
   const register = join(root, 'register.json')
   put(register, JSON.stringify({ lanes: [entry('lane-a', ['crew/owned.mjs'], [])] }))
   const calls = []
   let pass = 0
-  const result = compileLane({
+  const result = await compileLane({
     lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
     fences: [entry('lane-a', ['crew/owned.mjs'], [])],
     deps: {
@@ -1664,7 +1956,7 @@ test('compileLane performs at most two passes and carries compiler reads into a 
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads.map(({ file }) => file), ['crew/x.mjs'])
 })
 
-test('staffing pair comes from a real compiled brief proposal block', () => {
+test('staffing pair comes from a real compiled brief proposal block', async () => {
   const checkout = gitFixture()
   const batch = join(checkout, 'staffing-real-batch')
   const out = join(checkout, 'staffing-real-out')
@@ -1688,7 +1980,7 @@ test('staffing pair comes from a real compiled brief proposal block', () => {
   const expected = JSON.parse(lines.slice(start + 1, end).join('\n'))
   assert.ok(expected.shape)
   assert.ok(expected.strength)
-  const result = compileLane({
+  const result = await compileLane({
     lane: 'lane-a', batchDir: batch, laneDir: checkout, registerPath,
     outDir: join(root, 'staffing-real-compile-out'), fences: [entry('lane-a', ['src/owned.mjs', 'src/coupled.mjs'], [])],
     deps: {
@@ -1702,8 +1994,8 @@ test('staffing pair comes from a real compiled brief proposal block', () => {
   assert.notEqual(result.staffing.strength, null)
 })
 
-test('dispatch records shape and strength for each lane', () => {
-  const result = dispatchFixture({
+test('dispatch records shape and strength for each lane', async () => {
+  const result = await dispatchFixture({
     label: 'staffing-pairs',
     names: ['lane-a', 'lane-b'],
     briefs: {
@@ -1731,9 +2023,9 @@ test('dispatch records shape and strength for each lane', () => {
   assert.ok(lines.some((line) => line.includes('lane=lane-b') && line.includes('shape=judge') && line.includes('strength=frontier')))
 })
 
-test('dispatch records a compiler misclassification verbatim', () => {
+test('dispatch records a compiler misclassification verbatim', async () => {
   const note = `${MISCLASSIFIED_PREFIX}: complexity build prices frontier — repropose the shape`
-  const result = dispatchFixture({
+  const result = await dispatchFixture({
     label: 'staffing-note',
     names: ['lane-a'],
     briefs: { 'lane-a': staffingBrief({ shape: 'mechanical', strength: 'frontier', misclassification: note }) },
@@ -1743,14 +2035,14 @@ test('dispatch records a compiler misclassification verbatim', () => {
   assert.ok(result.logs.some((line) => line.startsWith('dispatch-batch: lane=lane-a ') && line.includes('misclassified=true')))
 })
 
-test('recording a misclassification changes no dispatch decisions', () => {
+test('recording a misclassification changes no dispatch decisions', async () => {
   const note = `${MISCLASSIFIED_PREFIX}: complexity build prices frontier — repropose the shape`
-  const withNote = dispatchFixture({
+  const withNote = await dispatchFixture({
     label: 'staffing-note-present',
     names: ['lane-a'],
     briefs: { 'lane-a': staffingBrief({ shape: 'mechanical', strength: 'frontier', misclassification: note }) },
   })
-  const withoutNote = dispatchFixture({
+  const withoutNote = await dispatchFixture({
     label: 'staffing-note-absent',
     names: ['lane-a'],
     briefs: { 'lane-a': staffingBrief({ shape: 'mechanical', strength: 'frontier' }) },
@@ -1763,7 +2055,7 @@ test('recording a misclassification changes no dispatch decisions', () => {
   assert.deepEqual(differing, ['misclassification'])
 })
 
-test('staffing absence records null axes and never invents a shape', () => {
+test('staffing absence records null axes and never invents a shape', async () => {
   const malformed = [
     {
       label: 'staffing-absent',
@@ -1787,7 +2079,7 @@ test('staffing absence records null axes and never invents a shape', () => {
     },
   ]
   for (const { label, brief } of malformed) {
-    const result = dispatchFixture({ label, names: ['lane-a'], brief })
+    const result = await dispatchFixture({ label, names: ['lane-a'], brief })
     const record = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
     assert.equal(record.shape, null, `${label} shape`)
     assert.equal(record.strength, null, `${label} strength`)
@@ -1801,8 +2093,8 @@ test('dispatcher misclassification literal stays pinned to the compiler', () => 
   assert.equal(source.includes(MISCLASSIFIED_PREFIX), true)
 })
 
-test('staffing fields append to the existing settled dispatch log line', () => {
-  const result = dispatchFixture({ label: 'staffing-log-order', names: ['lane-a'] })
+test('staffing fields append to the existing settled dispatch log line', async () => {
+  const result = await dispatchFixture({ label: 'staffing-log-order', names: ['lane-a'] })
   const line = result.logs.find((entry) => entry.startsWith('dispatch-batch: lane=lane-a '))
   assert.ok(line)
   assert.equal(line.startsWith(
@@ -1811,27 +2103,28 @@ test('staffing fields append to the existing settled dispatch log line', () => {
   assert.match(line, / shape=judge strength=workhorse misclassified=false$/)
 })
 
-function compileBriefProposal(brief, label) {
+async function compileBriefProposal(brief, label) {
   const batch = makeBatch(['lane-a'])
   const out = join(root, `proposal-${label}-out`)
   const register = join(root, `proposal-${label}-register.json`)
   put(register, JSON.stringify({ lanes: [entry('lane-a', ['crew/owned.mjs'], [])] }))
-  return compileLane({
+  const result = await compileLane({
     lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
     fences: [entry('lane-a', ['crew/owned.mjs'], [])],
     deps: {
       spawn: () => ({ status: 0, stdout: '', stderr: '' }),
       readFileSync: (path) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, 'utf8'),
     },
-  }).proposed
+  })
+  return result.proposed
 }
 
-test('a proposal block without a tier line never supplies the seating tier', () => {
-  assert.equal(compileBriefProposal(briefWithBlockOnly, 'block-only'), null)
+test('a proposal block without a tier line never supplies the seating tier', async () => {
+  assert.equal(await compileBriefProposal(briefWithBlockOnly, 'block-only'), null)
 })
 
-test('a mid-sentence proposed tier quote does not outrank the compiler line', () => {
-  assert.equal(compileBriefProposal(briefWithQuotedTier, 'quoted-tier'), 'build')
+test('a mid-sentence proposed tier quote does not outrank the compiler line', async () => {
+  assert.equal(await compileBriefProposal(briefWithQuotedTier, 'quoted-tier'), 'build')
 })
 
 test('readBatch splits a lane tier and leaves the compiler request schema clean', () => {
@@ -1843,8 +2136,8 @@ test('readBatch splits a lane tier and leaves the compiler request schema clean'
   assert.equal(Object.hasOwn(lanes.find(({ lane }) => lane === 'lane-a').request, 'tier'), false)
 })
 
-test('a lane tier seats that lane while a sibling takes the batch default', () => {
-  const result = dispatchFixture({
+test('a lane tier seats that lane while a sibling takes the batch default', async () => {
+  const result = await dispatchFixture({
     label: 'lane-tier',
     requests: { 'lane-a': requestFor('lane-a', { tier: 'judge' }) },
     batchTier: 'mechanical',
@@ -1860,8 +2153,8 @@ test('a lane tier seats that lane while a sibling takes the batch default', () =
   assert.ok(requested.some((line) => line.includes('lane=lane-b') && line.includes('requested=mechanical requested_from=batch')))
 })
 
-test('the compiler receives exactly the four schema request keys', () => {
-  const result = dispatchFixture({
+test('the compiler receives exactly the four schema request keys', async () => {
+  const result = await dispatchFixture({
     label: 'clean-request',
     requests: { 'lane-a': requestFor('lane-a', { tier: 'judge', variant: 'scout' }) },
   })
@@ -1874,8 +2167,8 @@ test('the compiler receives exactly the four schema request keys', () => {
   }
 })
 
-test('a dispatched depends_on lane still compiles with exactly the schema keys', () => {
-  const result = dispatchFixture({
+test('a dispatched depends_on lane still compiles with exactly the schema keys', async () => {
+  const result = await dispatchFixture({
     label: 'depends-on-request',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
@@ -1887,8 +2180,8 @@ test('a dispatched depends_on lane still compiles with exactly the schema keys',
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort(), ['ask', 'done_means', 'out_of_scope', 'where'])
 })
 
-test('creates reaches the compiler as an optional fifth key while tier remains dispatch-only', () => {
-  const result = dispatchFixture({
+test('creates reaches the compiler as an optional fifth key while tier remains dispatch-only', async () => {
+  const result = await dispatchFixture({
     label: 'creates-request',
     requests: { 'lane-a': requestFor('lane-a', { tier: 'judge', creates: ['./crew/new-a.mjs'] }) },
     fences: [
@@ -1913,8 +2206,8 @@ test('readBatch splits a lane variant and leaves the compiler request clean', ()
   assert.equal(Object.hasOwn(lanes.find(({ lane }) => lane === 'lane-a').request, 'variant'), false)
 })
 
-test('a batch mixes lane variants while preserving the batch default', () => {
-  const result = dispatchFixture({
+test('a batch mixes lane variants while preserving the batch default', async () => {
+  const result = await dispatchFixture({
     label: 'lane-variants',
     names: ['lane-a', 'lane-b', 'lane-c'],
     requests: { 'lane-b': requestFor('lane-b', { variant: 'scout' }) },
@@ -1931,22 +2224,22 @@ test('a batch mixes lane variants while preserving the batch default', () => {
   assert.ok(settled.some((line) => line.includes('lane=lane-c') && line.includes('variant=full variant_from=batch')))
 })
 
-test('lane variants are preflighted by name and ctx lanes require validation', () => {
-  assert.throws(() => dispatchFixture({
+test('lane variants are preflighted by name and ctx lanes require validation', async () => {
+  await assert.rejects(() => dispatchFixture({
     label: 'lane-unknown-variant',
     requests: { 'lane-b': requestFor('lane-b', { variant: 'not-a-variant' }) },
   }), (error) => error instanceof BatchRefusal
     && error.reason === 'run-failed'
     && error.message.includes('lane-b')
     && error.message.includes('not-a-variant'))
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'lane-repair-without-validation',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { variant: 'repair' }) },
   }), (error) => error instanceof BatchRefusal && error.reason === 'run-failed'
     && error.message.includes('lane-a')
     && error.message.includes('--validation-lane'))
-  const repaired = dispatchFixture({
+  const repaired = await dispatchFixture({
     label: 'lane-repair-with-validation',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { variant: 'repair' }) },
@@ -1956,12 +2249,12 @@ test('lane variants are preflighted by name and ctx lanes require validation', (
   assert.equal(run.args[run.args.indexOf('--variant') + 1], 'repair')
 })
 
-test('a directed lane whose brief fails the parser refuses before boot', () => {
+test('a directed lane whose brief fails the parser refuses before boot', async () => {
   const brief = briefWithBlockOnly
   const defect = parseDirectedBrief(brief).defect
   const spawned = []
   const batch = makeBatch(['lane-a'])
-  assert.throws(() => dispatchBatch({
+  await assert.rejects(() => dispatchBatch({
     batchDir: batch,
     fences: [entry('lane-a', ['crew/owned.mjs'])],
     checkout: root,
@@ -1971,6 +2264,8 @@ test('a directed lane whose brief fails the parser refuses before boot', () => {
     variant: 'directed',
     runFlags: { 'validation-lane': 'npm test' },
     deps: {
+      home: root,
+      env: { DEVTEAM_LEDGER_DIR: root },
       existsSync: () => false,
       readFileSync: (path, encoding) => String(path).endsWith('.brief.md')
         ? brief
@@ -1989,8 +2284,8 @@ test('a directed lane whose brief fails the parser refuses before boot', () => {
   assert.equal(spawned.some(({ args }) => (args || []).includes('boot')), false)
 })
 
-test('a valid directed brief still dispatches the lane', () => {
-  const result = dispatchFixture({
+test('a valid directed brief still dispatches the lane', async () => {
+  const result = await dispatchFixture({
     label: 'directed-valid',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { variant: 'directed' }) },
@@ -2019,8 +2314,8 @@ test('invalid lane variant shapes refuse batch-unreadable at the request path', 
   }
 })
 
-test('a batch without lane variants keeps the full variant on every run', () => {
-  const result = dispatchFixture({ label: 'no-lane-variants' })
+test('a batch without lane variants keeps the full variant on every run', async () => {
+  const result = await dispatchFixture({ label: 'no-lane-variants' })
   const runs = result.spawned.filter(({ args }) => args.includes('run'))
   assert.equal(runs.length, 2)
   for (const { args } of runs) {
@@ -2065,9 +2360,9 @@ test('planWaves refuses an unresolvable lane name with the offending object', ()
     && error.message.includes('{"id":"lane-a"}'))
 })
 
-test('a lane tier below its protected floor refuses tier-floor-conflict', () => {
+test('a lane tier below its protected floor refuses tier-floor-conflict', async () => {
   const requestBody = requestFor('lane-a', { tier: 'mechanical', where: ['crew/drive.mjs'] })
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'floor-conflict',
     names: ['lane-a'],
     requests: { 'lane-a': requestBody },
@@ -2075,22 +2370,22 @@ test('a lane tier below its protected floor refuses tier-floor-conflict', () => 
   }), (err) => err instanceof BatchRefusal && err.reason === 'tier-floor-conflict')
 })
 
-test('an unrecognised lane tier refuses batch-unreadable', () => {
-  assert.throws(() => dispatchFixture({
+test('an unrecognised lane tier refuses batch-unreadable', async () => {
+  await assert.rejects(() => dispatchFixture({
     label: 'unknown-tier',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { tier: 'operator' }) },
   }), (err) => err instanceof BatchRefusal && err.reason === 'batch-unreadable')
 })
 
-test('keep defaults on, --no-keep removes it, and the report states the choice', () => {
-  const kept = dispatchFixture({ label: 'keep-default' })
+test('keep defaults on, --no-keep removes it, and the report states the choice', async () => {
+  const kept = await dispatchFixture({ label: 'keep-default' })
   const keptRuns = kept.spawned.filter(({ args }) => args.includes('run'))
   assert.equal(kept.report.keep, true)
   assert.equal(keptRuns.length, 2)
   assert.equal(keptRuns.every(({ args }) => args.includes('--keep')), true)
 
-  const released = dispatchFixture({ label: 'keep-off', runFlags: { 'no-keep': true } })
+  const released = await dispatchFixture({ label: 'keep-off', runFlags: { 'no-keep': true } })
   const releasedRuns = released.spawned.filter(({ args }) => args.includes('run'))
   assert.equal(released.report.keep, false)
   assert.equal(releasedRuns.length, 2)
@@ -2115,15 +2410,15 @@ test('resolveTransport defaults headless, selects panes, and refuses conflicting
   refusal(() => resolveTransport({ runFlags: { panes: true, 'headless-all': true } }), 'transport-conflict')
 })
 
-test('default dispatch reports headless transport and every boot carries its flag', () => {
-  const result = dispatchFixture({ label: 'default-transport' })
+test('default dispatch reports headless transport and every boot carries its flag', async () => {
+  const result = await dispatchFixture({ label: 'default-transport' })
   const boots = result.spawned.filter(({ args }) => args.includes('boot'))
   assert.equal(result.report.transport, BOOT_TRANSPORT)
   assert.equal(boots.every(({ args }) => args.includes('--headless-all')), true)
 })
 
-test('--panes dispatch omits transport flags and reports returned workspaces', () => {
-  const result = dispatchFixture({ label: 'panes-argv-and-report', runFlags: { panes: true } })
+test('--panes dispatch omits transport flags and reports returned workspaces', async () => {
+  const result = await dispatchFixture({ label: 'panes-argv-and-report', runFlags: { panes: true } })
   const boots = result.spawned.filter(({ args }) => args.includes('boot'))
   assert.equal(boots.every(({ args }) => !args.includes('--headless-all') && !args.includes('--panes')), true)
   assert.deepEqual(result.report.lanes.map(({ lane, workspaceId }) => ({ lane, workspaceId })), [
@@ -2132,8 +2427,8 @@ test('--panes dispatch omits transport flags and reports returned workspaces', (
   ])
 })
 
-test('--panes dispatch refuses when boot returns a null workspace_id', () => {
-  assert.throws(() => dispatchFixture({
+test('--panes dispatch refuses when boot returns a null workspace_id', async () => {
+  await assert.rejects(() => dispatchFixture({
     label: 'panes-null-workspace',
     runFlags: { panes: true },
     workspaceFor: () => null,
@@ -2142,8 +2437,8 @@ test('--panes dispatch refuses when boot returns a null workspace_id', () => {
     && err.message.includes('crew.json workspace_id is null'))
 })
 
-test('pane closing output names each returned workspace', () => {
-  const result = dispatchFixture({ label: 'panes-closing-output', runFlags: { panes: true } })
+test('pane closing output names each returned workspace', async () => {
+  const result = await dispatchFixture({ label: 'panes-closing-output', runFlags: { panes: true } })
   const transport = result.logs.filter((line) => line.startsWith('dispatch-batch: transport='))
   assert.equal(transport.length, 1)
   assert.equal(transport[0].startsWith(`dispatch-batch: transport=${PANE_TRANSPORT}`), true)
@@ -2152,8 +2447,8 @@ test('pane closing output names each returned workspace', () => {
   assert.doesNotMatch(transport[0], /workspace_id is null/)
 })
 
-test('closing output states the transport, keep policy, and names one teardown command per lane', () => {
-  const result = dispatchFixture({ label: 'closing-output' })
+test('closing output states the transport, keep policy, and names one teardown command per lane', async () => {
+  const result = await dispatchFixture({ label: 'closing-output' })
   const transport = result.logs.filter((line) => line.startsWith('dispatch-batch: transport='))
   assert.equal(transport.length, 1)
   assert.equal(transport[0].startsWith(`dispatch-batch: transport=${BOOT_TRANSPORT}`), true)
@@ -2169,21 +2464,36 @@ test('closing output states the transport, keep policy, and names one teardown c
   }
 })
 
-test('wave one dispatches only its level and reports later lanes as deferred', () => {
-  const result = dispatchFixture({
+test('wave one dispatches only its level and re-emits baseline and memory flags for deferred lanes', async () => {
+  const baseline = join(root, 'wave-one-baseline.json')
+  put(baseline, JSON.stringify({ sha: 'a'.repeat(40), command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const result = await dispatchFixture({
     label: 'wave-one',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: {
+      baseline,
+      'memory-dir': '/tmp/mem',
+      'memory-backend': 'sqlite',
+      'memory-budget-bytes': '4096',
+    },
   })
   assert.deepEqual(result.report.waves, [['lane-a'], ['lane-b']])
   assert.deepEqual(result.report.lanes.map(({ lane }) => lane), ['lane-a'])
   assert.deepEqual(result.report.deferred, [{ lane: 'lane-b', wave: 2, predecessors: ['lane-a'] }])
   assert.deepEqual(result.report.unstarted, [])
   assert.equal(result.spawned.filter(({ args }) => args.includes('boot')).length, 1)
-  assert.ok(result.logs.some((line) => line.includes('deferred lane=lane-b') && line.includes('after=lane-a') && line.includes('--wave 2')))
+  const deferred = result.logs.find((line) => line.includes('deferred lane=lane-b'))
+  assert.ok(deferred)
+  assert.match(deferred, /after=lane-a/)
+  assert.match(deferred, /--wave 2/)
+  assert.match(deferred, new RegExp(`--baseline ${baseline}`))
+  for (const [flag, value] of [['--memory-dir', '/tmp/mem'], ['--memory-backend', 'sqlite'], ['--memory-budget-bytes', '4096']]) {
+    assert.match(deferred, new RegExp(`${flag} ${value}`))
+  }
 })
 
-test('wave two stops behind escalation or an unsettled predecessor', () => {
-  const escalated = dispatchFixture({
+test('wave two stops behind escalation or an unsettled predecessor', async () => {
+  const escalated = await dispatchFixture({
     label: 'wave-escalated',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
@@ -2192,7 +2502,7 @@ test('wave two stops behind escalation or an unsettled predecessor', () => {
   assert.equal(escalated.spawned.filter(({ args }) => args.includes('boot')).length, 0)
   assert.deepEqual(escalated.report.unstarted, [{ lane: 'lane-b', reason: 'predecessor-escalated', predecessor: 'lane-a' }])
 
-  const unsettled = dispatchFixture({
+  const unsettled = await dispatchFixture({
     label: 'wave-unsettled',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
@@ -2201,9 +2511,9 @@ test('wave two stops behind escalation or an unsettled predecessor', () => {
   assert.equal(unsettled.spawned.length, 0)
 })
 
-test('wave two refuses a stale predecessor base and dispatches when containment is proven', () => {
+test('wave two refuses a stale predecessor base and dispatches when containment is proven', async () => {
   const commit = 'c'.repeat(40)
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'wave-stale-base',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
@@ -2213,7 +2523,7 @@ test('wave two refuses a stale predecessor base and dispatches when containment 
     && error.reason === 'dependent-base-stale'
     && error.message.includes('lane-a') && error.message.includes(commit))
 
-  const contained = dispatchFixture({
+  const contained = await dispatchFixture({
     label: 'wave-contained-base',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2' },
@@ -2224,8 +2534,8 @@ test('wave two refuses a stale predecessor base and dispatches when containment 
   assert.deepEqual(contained.report.lanes.map(({ lane }) => lane), ['lane-b'])
 })
 
-test('wave selection rejects a number outside the planned range', () => {
-  assert.throws(() => dispatchFixture({
+test('wave selection rejects a number outside the planned range', async () => {
+  await assert.rejects(() => dispatchFixture({
     label: 'wave-out-of-range',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '3' },
@@ -2233,14 +2543,14 @@ test('wave selection rejects a number outside the planned range', () => {
     && error.message.includes('2 wave(s)'))
 })
 
-test('an unflagged no-edges dispatch adds no wave output and reports empty deferrals', () => {
-  const result = dispatchFixture({ label: 'no-edges' })
+test('an unflagged no-edges dispatch adds no wave output and reports empty deferrals', async () => {
+  const result = await dispatchFixture({ label: 'no-edges' })
   assert.equal(result.logs.filter((line) => /wave|deferred|unstarted/i.test(line)).length, 0)
   assert.equal(result.report.waves.length, 1)
   assert.deepEqual(result.report.deferred, [])
   assert.deepEqual(result.report.unstarted, [])
 
-  const dry = dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
+  const dry = await dispatchFixture({ label: 'no-edges-dry-run', runFlags: { 'dry-run': true } })
   assert.deepEqual(dry.logs, [
     JSON.stringify({ dispatch: 'dry-run', plans: dry.report.plans }),
     'dispatch-batch: dry-run lane=lane-a tier=mechanical seats=none seats_from=none',
@@ -2253,8 +2563,8 @@ test('an unflagged no-edges dispatch adds no wave output and reports empty defer
   assert.deepEqual(dry.report.unstarted, [])
 })
 
-test('dry-run wave selection still gates unsettled and stale predecessors', () => {
-  const blocked = dispatchFixture({
+test('dry-run wave selection still gates unsettled and stale predecessors', async () => {
+  const blocked = await dispatchFixture({
     label: 'dry-wave-unsettled',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2', 'dry-run': true },
@@ -2264,7 +2574,7 @@ test('dry-run wave selection still gates unsettled and stale predecessors', () =
   assert.equal(blocked.logs.some((line) => line.startsWith('{"dispatch":"dry-run"')), false)
 
   const commit = 'd'.repeat(40)
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'dry-wave-stale',
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
     runFlags: { wave: '2', 'dry-run': true },
@@ -2314,10 +2624,10 @@ test('baseContains treats only a measured zero probe as containment', () => {
   } }), false)
 })
 
-test('a request seats compile without carrying seats into the compiler request', () => {
+test('a request seats compile without carrying seats into the compiler request', async () => {
   const seats = { planner: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', effort: 'high' } }
   assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes('seats'), true)
-  const result = dispatchFixture({
+  const result = await dispatchFixture({
     label: 'seats-request',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { seats }) },
@@ -2391,8 +2701,8 @@ test('seat merge and forwarding helpers are deterministic and preserve field pro
   assert.equal(seatFromSpec(batch, lane), 'builder.agent=batch,planner.agent=lane,planner.model=batch,planner.effort=lane,planner.allow_shortfall=batch')
 })
 
-test('boot argv carries regular seat flags before a declared shortfall waiver', () => {
-  const result = dispatchFixture({
+test('boot argv carries regular seat flags before a declared shortfall waiver', async () => {
+  const result = await dispatchFixture({
     label: 'seats-argv',
     names: ['lane-a'],
     requests: {
@@ -2411,8 +2721,8 @@ test('boot argv carries regular seat flags before a declared shortfall waiver', 
   ])
 })
 
-test('lane seat fields override batch defaults while batch fields fill gaps', () => {
-  const laneWins = dispatchFixture({
+test('lane seat fields override batch defaults while batch fields fill gaps', async () => {
+  const laneWins = await dispatchFixture({
     label: 'lane-seat-precedence',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { agent: 'pi' } } }) },
@@ -2423,7 +2733,7 @@ test('lane seat fields override batch defaults while batch fields fill gaps', ()
   assert.equal(laneBoot.args[laneBoot.args.indexOf('--model-planner') + 1], 'batch-model')
   assert.ok(laneWins.logs.some((line) => line.includes('seats_from=planner.agent=lane,planner.model=batch')))
 
-  const batchWins = dispatchFixture({
+  const batchWins = await dispatchFixture({
     label: 'batch-seat-default',
     names: ['lane-a'],
     runFlags: { 'agent-planner': 'claude' },
@@ -2433,8 +2743,8 @@ test('lane seat fields override batch defaults while batch fields fill gaps', ()
   assert.ok(batchWins.logs.some((line) => line.includes('seats_from=planner.agent=batch')))
 })
 
-test('dispatch records a per-field seat chain and an empty chain for untouched lanes', () => {
-  const result = dispatchFixture({
+test('dispatch records a per-field seat chain and an empty chain for untouched lanes', async () => {
+  const result = await dispatchFixture({
     label: 'seat-record',
     names: ['lane-a', 'lane-b'],
     requests: {
@@ -2453,9 +2763,9 @@ test('dispatch records a per-field seat chain and an empty chain for untouched l
   assert.deepEqual(untouched.seats, {})
 })
 
-test('an unseated seat override refuses before any lane boots', () => {
+test('an unseated seat override refuses before any lane boots', async () => {
   let boots = 0
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'unseated-seat',
     names: ['lane-a', 'lane-b'],
     requests: { 'lane-b': requestFor('lane-b', { seats: { 'tech-lead': { agent: 'pi' } } }) },
@@ -2469,7 +2779,7 @@ test('an unseated seat override refuses before any lane boots', () => {
   assert.equal(boots, 0)
 })
 
-test('an unreadable roster refuses seat overrides and no-seat dispatches never read it', () => {
+test('an unreadable roster refuses seat overrides and no-seat dispatches never read it', async () => {
   assert.throws(() => seatRolesUnseated({
     seats: { planner: { agent: 'pi' } },
     tier: 'build',
@@ -2478,7 +2788,7 @@ test('an unreadable roster refuses seat overrides and no-seat dispatches never r
     && error.reason === 'seat-floor-conflict'
     && error.message.includes(ROSTER_PATH))
   let rosterReads = 0
-  dispatchFixture({
+  await dispatchFixture({
     label: 'no-roster-read',
     names: ['lane-a'],
     readObserver: (path) => { if (path === ROSTER_PATH) rosterReads += 1 },
@@ -2486,9 +2796,9 @@ test('an unreadable roster refuses seat overrides and no-seat dispatches never r
   assert.equal(rosterReads, 0)
 })
 
-test('boot band-floor refusals are distinct from capability shortfalls', () => {
+test('boot band-floor refusals are distinct from capability shortfalls', async () => {
   const floorStderr = 'crew boot refused at crew/model-ladder.json [band-below-floor]'
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'boot-band-floor',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { model: 'raw-model' } } }) },
@@ -2500,7 +2810,7 @@ test('boot band-floor refusals are distinct from capability shortfalls', () => {
     && error.message.includes('[band-below-floor]'))
 
   const capabilityStderr = 'seat planner requires capability "subagents" — refusing to boot a weaker seat'
-  assert.throws(() => dispatchFixture({
+  await assert.rejects(() => dispatchFixture({
     label: 'boot-capability-shortfall',
     names: ['lane-a'],
     requests: { 'lane-a': requestFor('lane-a', { seats: { planner: { agent: 'pi' } } }) },
@@ -2513,8 +2823,8 @@ test('boot band-floor refusals are distinct from capability shortfalls', () => {
   assert.equal(seatFloorRefusal(capabilityStderr), null)
 })
 
-test('protected-path seat overrides retain a forced judge tier', () => {
-  const result = dispatchFixture({
+test('protected-path seat overrides retain a forced judge tier', async () => {
+  const result = await dispatchFixture({
     label: 'seat-protected-floor',
     names: ['lane-a'],
     batchTier: 'mechanical',
@@ -2533,8 +2843,8 @@ test('protected-path seat overrides retain a forced judge tier', () => {
   assert.equal(record.tier.settled, 'judge')
 })
 
-test('dry-run logs each lane seat settlement and keeps the blind spot unchanged', () => {
-  const result = dispatchFixture({
+test('dry-run logs each lane seat settlement and keeps the blind spot unchanged', async () => {
+  const result = await dispatchFixture({
     label: 'seat-dry-run',
     names: ['lane-a'],
     runFlags: { 'dry-run': true, 'agent-planner': 'claude' },
@@ -2544,8 +2854,8 @@ test('dry-run logs each lane seat settlement and keeps the blind spot unchanged'
   assert.ok(result.logs.includes(DRY_RUN_BLIND_SPOT))
 })
 
-test('resume commands re-emit every batch seat flag', () => {
-  const result = dispatchFixture({
+test('resume commands re-emit every batch seat flag', async () => {
+  const result = await dispatchFixture({
     label: 'seat-resume',
     names: ['lane-a', 'lane-b'],
     requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },

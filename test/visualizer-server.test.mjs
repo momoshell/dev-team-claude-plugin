@@ -9,6 +9,7 @@ import { createServer, connect } from 'node:net'
 import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
+import { gitGrepHits } from '../scripts/factory/absence.mjs'
 import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
@@ -303,6 +304,12 @@ test('all 405 responses advertise an allowed method', { skip: SKIP }, async () =
   }
 })
 
+test('server direct invocation realpaths both sides of its guard', () => {
+  const source = readFileSync(SERVER_SCRIPT, 'utf8')
+  assert.match(source, /realpathOr\(process\.argv\[1\]\)\s*===\s*realpathOr\(fileURLToPath\(import\.meta\.url\)\)/)
+  assert.match(source, /function realpathOr\(path\)[\s\S]*realpathSync\(path\)/)
+})
+
 test('the visualizer CLI announces a port through a symlinked repository path', { skip: SKIP }, async () => {
   const dir = mkdtempSync(join(tmpdir(), 'visualizer-symlink-'))
   const link = join(dir, 'repo-link')
@@ -432,6 +439,86 @@ test('a feed started before the ledger exists answers from it once it appears', 
     assert.equal(after.runs.length, 1)
     assert.equal(after.runs[0].adw_id, 'feed-reopen-run')
     assert.equal(feed._reason(), null)
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a readable mirror without sessions is unanswerable, not a measured empty list', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-sessions-absent-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE sessions')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.listRuns({})
+    assert.deepEqual(result.runs, [])
+    assert.equal(result.degraded, true)
+    assert.equal(result.absent, 'no such table: sessions')
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a readable mirror without events is unanswerable, not an empty page', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-events-absent-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const { done } = fixture(ledgerDb)
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec('DROP TABLE events')
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.listEvents({ adw_id: done, after: 7 })
+    assert.deepEqual(result.events, [])
+    assert.equal(result.cursor, 7)
+    assert.equal(result.degraded, true)
+    assert.equal(result.absent, 'no such table: events')
+  } finally {
+    feed.close()
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('a readable mirror without phases or agent events is unanswerable, not a partial run', { skip: SKIP }, () => {
+  for (const table of ['phases', 'events']) {
+    const dir = scratchDir(`visualizer-feed-${table}-for-sessions-`)
+    const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+    fixture(ledgerDb)
+    const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+    writable.exec(`DROP TABLE ${table}`)
+    writable.close()
+    const feed = createLedgerFeed({ ledgerDb, triageDb })
+    try {
+      const result = feed.listRuns({})
+      assert.deepEqual(result.runs, [])
+      assert.equal(result.degraded, true)
+      assert.equal(result.absent, `no such table: ${table}`)
+    } finally {
+      feed.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+})
+
+test('a legacy agent_sessions schema preserves its actionable missing-column reason', { skip: SKIP }, () => {
+  const dir = scratchDir('visualizer-feed-legacy-agent-sessions-')
+  const ledgerDb = join(dir, 'ledger.db'), triageDb = join(dir, 'visualizer.db')
+  const writable = new (require('node:sqlite').DatabaseSync)(ledgerDb)
+  writable.exec(`CREATE TABLE agent_sessions (
+    adw_id TEXT, started_at TEXT, billed_input_tokens INTEGER,
+    billed_output_tokens INTEGER, billed_cache_write_tokens INTEGER
+  )`)
+  writable.close()
+  const feed = createLedgerFeed({ ledgerDb, triageDb })
+  try {
+    const result = feed.budgetWindow({ since: new Date(0).toISOString(), until: null })
+    assert.equal(result.measured, false)
+    assert.equal(result.absent, 'no such column: billed_cache_read_tokens')
   } finally {
     feed.close()
     rmSync(dir, { recursive: true, force: true })
@@ -857,6 +944,14 @@ test('/api/run-set uses the ledger pane wording and never resurrects the deleted
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
   }
+})
+
+test('the deleted usage absence cause is absent from visualizer and present in scripts', () => {
+  const needle = 'predates per-agent token measurement'
+  const visualizer = gitGrepHits({ needle, paths: ['visualizer/'] })
+  const scripts = gitGrepHits({ needle, paths: ['scripts/'] })
+  assert.equal(visualizer.count, 0)
+  assert.ok(scripts.count > 0)
 })
 
 test('a readable mirror missing a transport source is absent, not transport-unrecorded', { skip: SKIP }, async () => {

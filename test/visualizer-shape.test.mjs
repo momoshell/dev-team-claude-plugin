@@ -782,6 +782,8 @@ test('visualizer architecture keeps sqlite and legacy Svelte syntax behind the b
   const feed = readFileSync(join(process.cwd(), 'visualizer/server/ledger-feed.mjs'), 'utf8')
   assert.doesNotMatch(feed, /node:sqlite/)
   assert.doesNotMatch(feed, /DatabaseSync/)
+  assert.doesNotMatch(feed, /\bSELECT\b/)
+  assert.doesNotMatch(feed, /\.prepare\(/)
   assert.match(feed, /import \{ openLedger \} from ['"]\.\.\/\.\.\/scripts\/factory\/ledger\.mjs['"]/)
 })
 

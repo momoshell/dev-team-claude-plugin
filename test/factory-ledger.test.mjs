@@ -3221,6 +3221,261 @@ function seedRun(ledger, adwId, startedAt, status = 'running') {
   if (status !== 'running') ledger.endSession({ adw_id: adwId, status })
 }
 
+function readerFixture() {
+  const ledger = openTestLedger()
+  const run = 'reader-run'
+  seedRun(ledger, run, '2024-01-02T00:00:00.000Z', 'ok')
+  seedRun(ledger, 'reader-old', '2024-01-01T00:00:00.000Z', 'fail')
+  seedRun(ledger, 'reader-until', '2024-01-03T00:00:00.000Z', 'ok')
+  const phaseId = ledger.startPhase({ adw_id: run, name: 'plan', started_at: '2024-01-02T00:00:01.000Z' })
+  ledger.recordEvent({
+    adw_id: run, type: 'agent_start', phase_id: phaseId,
+    payload: { role: 'builder', model: 'reader-model', dispatch_id: 'reader-dispatch' },
+    started_at: '2024-01-02T00:00:02.000Z',
+  })
+  ledger.recordEvent({
+    adw_id: run, type: 'agent_end', phase_id: phaseId,
+    payload: { role: 'builder', outcome: 'done', dispatch_id: 'reader-dispatch' },
+    ended_at: '2024-01-02T00:00:03.000Z',
+  })
+  ledger.startAgentSession({
+    adw_id: run, dispatch_id: 'reader-dispatch', role: 'builder', model: 'reader-model',
+    claude_session_id: 'reader-session', transcript_path: null,
+    started_at: '2024-01-02T00:00:04.000Z',
+  })
+  ledger.endAgentSession({
+    adw_id: run, claude_session_id: 'reader-session', ended_at: '2024-01-02T00:00:05.000Z',
+    context_tokens: 10, context_window: 100, raw_read_tokens: 8, raw_written_tokens: 9,
+    billed_input_tokens: 11, billed_output_tokens: 12, billed_cache_write_tokens: 13, billed_cache_read_tokens: 14,
+  })
+  ledger.recordGateDiscrimination({
+    adw_id: run, phase_id: phaseId, gate_generation: 2, verdict: 'proven',
+    checks_total: 4, checks_failed: 0, checks_errored: 0, note: 'reader-proof',
+    created_at: '2024-01-02T00:00:06.000Z',
+  })
+  ledger.recordGateResult({
+    adw_id: run, phase_id: phaseId, gate_name: 'reader-gate', attempt: 1, ok: true,
+    checks: [{ item: 'reader', ok: true }], violations: [], gate_generation: 2, pristine: false,
+    created_at: '2024-01-02T00:00:07.000Z',
+  })
+  ledger.recordReviewOutcome({
+    adw_id: run, phase_id: phaseId, dispatch_id: 'reader-review', role: 'reviewer', verdict: 'pass',
+    must_fix: 0, should_fix: 1, consider: 2, created_at: '2024-01-02T00:00:08.000Z',
+  })
+  ledger.recordAcceptDecision({
+    adw_id: run, phase_id: phaseId, where: 'reader-review', outcome: 'accepted',
+    findings_total: 1, residual_count: 0, refuted_count: 1, cosmetic_count: 0, unverified_count: 0,
+    created_at: '2024-01-02T00:00:09.000Z',
+  })
+  ledger.recordCellFailure({
+    adw_id: run, phase_id: phaseId, dispatch_id: 'reader-failure', role: 'builder',
+    agent: 'pi', provider: 'openai', model_id: 'reader-model', effort: 'high', transport: 'pane',
+    kind: 'seat-died', stage: 'reader-stage', detail: 'reader-detail', created_at: '2024-01-02T00:00:10.000Z',
+  })
+  ledger.recordCellFailure({
+    adw_id: null, role: 'builder', kind: 'boot-refusal', created_at: '2024-01-02T00:00:11.000Z',
+  })
+  ledger.recordCellFailure({
+    adw_id: 'reader-missing-run', role: 'builder', kind: 'timeout', created_at: '2024-01-02T00:00:12.000Z',
+  })
+  ledger.recordSeatTeardown({
+    adw_id: run, phase_id: phaseId, role: 'builder', transport: 'pane', outcome: 'proven',
+    reason: 'reader-exit', created_at: '2024-01-02T00:00:13.000Z',
+  })
+  ledger.recordIntakeSweep({
+    board_owner: 'reader-owner', board_project: 1, outcome: 'picked', considered: 2, pages: 1,
+    picked_issue: 12, created_at: '2024-01-01T00:00:00.000Z',
+  })
+  ledger.recordIntakeSweep({
+    board_owner: 'reader-owner', board_project: 1, outcome: 'picked', considered: 1, pages: 1,
+    picked_issue: 11, created_at: '2024-01-02T00:00:14.000Z',
+  })
+  ledger.recordIntakeSweep({
+    board_owner: 'reader-owner', board_project: 1, outcome: 'none', considered: 0, pages: 1,
+    created_at: '2024-01-03T00:00:00.000Z',
+  })
+  ledger.recordIntakeRefusal({
+    board_owner: 'reader-owner', board_project: 1, issue: 13, reason: 'stop-switch',
+    detail: 'reader-refusal', priority: 'P1', issue_created_at: '2023-12-31T00:00:00.000Z',
+    created_at: '2024-01-02T00:00:15.000Z',
+  })
+  return { ledger, run, phaseId }
+}
+
+test('tableNames reads live schema names', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try { assert.ok(ledger.tableNames().includes('sessions')) } finally { ledger.close() }
+})
+
+test('columnNames reads live columns and validates its table', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    assert.deepEqual(ledger.columnNames('sessions'), TABLES.sessions.columns.map(({ name }) => name))
+    assert.throws(() => ledger.columnNames('not-a-table'), LedgerUsageError)
+  } finally { ledger.close() }
+})
+
+test('sessionsFiltered returns filtered sessions in descending start order', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.sessionsFiltered({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' }).map((row) => row.adw_id), [run, 'reader-old'])
+    assert.deepEqual(ledger.sessionsFiltered({ status: 'fail' }).map((row) => row.adw_id), ['reader-old'])
+  } finally { ledger.close() }
+})
+
+test('runsStartedWithin honors its half-open start window and ordering', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    const rows = ledger.runsStartedWithin({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' })
+    assert.deepEqual(rows.map((row) => row.adw_id), [run])
+    assert.equal(rows.some((row) => row.adw_id === 'reader-until'), false)
+    assert.deepEqual(ledger.runsStartedWithin({ since: '2024-01-02T00:00:00.000Z' }).map((row) => row.adw_id), ['reader-until', run])
+  } finally { ledger.close() }
+})
+
+test('phasesFor returns only requested run phases in sequence order', { skip: SKIP }, () => {
+  const { ledger, run, phaseId } = readerFixture()
+  try {
+    const rows = ledger.phasesFor([run, 'missing-run'])
+    assert.deepEqual(rows.map(({ adw_id, id, name }) => ({ adw_id, id, name })), [{ adw_id: run, id: phaseId, name: 'plan' }])
+    assert.deepEqual(ledger.phasesFor([]), [])
+  } finally { ledger.close() }
+})
+
+test('agentEventsFor returns the agent event projection in id order', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    const rows = ledger.agentEventsFor([run])
+    assert.deepEqual(rows.map(({ type, adw_id }) => ({ type, adw_id })), [
+      { type: 'agent_start', adw_id: run }, { type: 'agent_end', adw_id: run },
+    ])
+  } finally { ledger.close() }
+})
+
+test('agentSessionsFor returns requested usage sessions and billed totals', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.agentSessionsFor([run]).map(({ adw_id, dispatch_id, billed_input_tokens, billed_output_tokens }) => ({ adw_id, dispatch_id, billed_input_tokens, billed_output_tokens })), [
+      { adw_id: run, dispatch_id: 'reader-dispatch', billed_input_tokens: 11, billed_output_tokens: 12 },
+    ])
+  } finally { ledger.close() }
+})
+
+test('gateDiscriminationsFor returns requested generations in order', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.gateDiscriminationsFor([run]).map(({ adw_id, gate_generation, verdict }) => ({ adw_id, gate_generation, verdict })), [{ adw_id: run, gate_generation: 2, verdict: 'proven' }])
+  } finally { ledger.close() }
+})
+
+test('gateResultsFor returns requested attempts in generation order', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.gateResultsFor([run]).map(({ adw_id, gate_name, attempt }) => ({ adw_id, gate_name, attempt })), [{ adw_id: run, gate_name: 'reader-gate', attempt: 1 }])
+  } finally { ledger.close() }
+})
+
+test('reviewOutcomesFor returns requested review rows in created order', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.reviewOutcomesFor([run]).map(({ adw_id, dispatch_id, verdict }) => ({ adw_id, dispatch_id, verdict })), [{ adw_id: run, dispatch_id: 'reader-review', verdict: 'pass' }])
+  } finally { ledger.close() }
+})
+
+test('acceptDecisionsFor returns requested decisions in created order', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.acceptDecisionsFor([run]).map(({ adw_id, where_at, outcome }) => ({ adw_id, where_at, outcome })), [{ adw_id: run, where_at: 'reader-review', outcome: 'accepted' }])
+  } finally { ledger.close() }
+})
+
+test('supportsJson1 measures the JSON extraction capability', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try { assert.equal(ledger.supportsJson1(), true) } finally { ledger.close() }
+})
+
+test('eventsPage applies type, role, after and limit filters', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    const rows = ledger.eventsPage({ adw_id: run, after: 0, limit: 1, type: 'agent_start', role: 'builder' })
+    assert.equal(rows.length, 1)
+    assert.equal(rows[0].type, 'agent_start')
+    assert.equal(JSON.parse(rows[0].payload_json).role, 'builder')
+    assert.deepEqual(ledger.eventsPage({ adw_id: run, after: rows[0].id, limit: 1, type: 'agent_start' }), [])
+  } finally { ledger.close() }
+})
+
+test('maxEventId returns the final event id and null for an unknown run', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    const rows = ledger.eventsPage({ adw_id: run })
+    assert.equal(ledger.maxEventId(run), rows.at(-1).id)
+    assert.equal(ledger.maxEventId('missing-run'), null)
+  } finally { ledger.close() }
+})
+
+test('cellFailureRowsFor returns raw failures for requested runs', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.cellFailureRowsFor([run]).map(({ adw_id, kind, detail }) => ({ adw_id, kind, detail })), [{ adw_id: run, kind: 'seat-died', detail: 'reader-detail' }])
+  } finally { ledger.close() }
+})
+
+test('unattributableCellFailures returns run-less and unknown-run facts in order', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    assert.deepEqual(ledger.unattributableCellFailures({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' }).map(({ adw_id, kind }) => ({ adw_id, kind })), [
+      { adw_id: null, kind: 'boot-refusal' }, { adw_id: 'reader-missing-run', kind: 'timeout' },
+    ])
+  } finally { ledger.close() }
+})
+
+test('seatTeardownRowsFor returns raw teardown rows for requested runs', { skip: SKIP }, () => {
+  const { ledger, run } = readerFixture()
+  try {
+    assert.deepEqual(ledger.seatTeardownRowsFor([run]).map(({ adw_id, role, outcome }) => ({ adw_id, role, outcome })), [{ adw_id: run, role: 'builder', outcome: 'proven' }])
+  } finally { ledger.close() }
+})
+
+test('intakePicks returns only picked rows in descending creation order', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    assert.deepEqual(ledger.intakePicks({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' }).map(({ picked_issue }) => picked_issue), [11, 12])
+  } finally { ledger.close() }
+})
+
+test('intakeSweepTotals returns the unwindowed aggregate row', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    const row = ledger.intakeSweepTotals()
+    assert.deepEqual({ sweeps: row.sweeps, first_at: row.first_at, last_at: row.last_at }, { sweeps: 3, first_at: '2024-01-01T00:00:00.000Z', last_at: '2024-01-03T00:00:00.000Z' })
+  } finally { ledger.close() }
+})
+
+test('intakeCandidateRefusals returns the latest refusal facts by issue', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    assert.deepEqual(ledger.intakeCandidateRefusals({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' }).map(({ issue, reason, detail, refusals }) => ({ issue, reason, detail, refusals })), [{ issue: 13, reason: 'stop-switch', detail: 'reader-refusal', refusals: 1 }])
+  } finally { ledger.close() }
+})
+
+test('intakeCandidatePicks returns grouped picked issues in issue order', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    assert.deepEqual(ledger.intakeCandidatePicks({ since: '2024-01-01T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' }).map(({ issue, picks }) => ({ issue, picks })), [{ issue: 11, picks: 1 }, { issue: 12, picks: 1 }])
+  } finally { ledger.close() }
+})
+
+test('agentSessionTokenTotals returns all four running token totals in its window', { skip: SKIP }, () => {
+  const { ledger } = readerFixture()
+  try {
+    const row = ledger.agentSessionTokenTotals({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-03T00:00:00.000Z' })
+    assert.deepEqual({ sessions: row.sessions, input: row.input, output: row.output, cache_write: row.cache_write, cache_read: row.cache_read }, {
+      sessions: 1, input: 11, output: 12, cache_write: 13, cache_read: 14,
+    })
+  } finally { ledger.close() }
+})
+
 test('read-only writers refuse ordinary and sequence paths without changing authority or mirror', { skip: SKIP }, () => {
   const source = openTestLedger()
   source.startSession({ adw_id: 'read-only-seed', repo_slug: 'repo', task_slug: 'seed' })

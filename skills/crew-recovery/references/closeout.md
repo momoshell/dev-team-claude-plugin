@@ -201,4 +201,15 @@ Two rules the reviewer added, both earned:
 **Every edit to a cited file rots anchors, and only the exhibits tests notice** —
 the acceptance gate and the edited file's own tests both stay green. `b187`
 paid this four times in one lane: the build, a new pin, a comment, a file-level
-rule. There is no repair tool; `anchor-pin.mjs` detects and cannot fix (#582).
+rule. `anchor-pin.mjs` both detects and repairs. The repair covers every pinned directory,
+`crew/roles` among them - the tech-lead charter cites `crew/drive.mjs` by line and
+`crew/roles/anchors.json` pins what each of those lines must contain:
+
+    node skills/qa-test-writing/anchor-pin.mjs --repair crew/roles
+
+It relocates a pin whose content moved, and refuses rot (content nowhere) and
+ambiguity (content on two lines) rather than guessing (#582, #747).
+
+Until planner.md's and reviewer.md's own citations are pinned too, that command also
+prints three `manifest has no entry` refusals and exits 1. Those name the deferred
+pins, not rot; read the `repaired` lines, and treat any OTHER refusal as real.

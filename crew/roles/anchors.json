@@ -1,0 +1,14 @@
+{
+  "crew/drive.mjs:696": "function verdictOf(env) {",
+  "crew/drive.mjs:1103": "export function applyPrescriptionLines(source) {",
+  "crew/drive.mjs:1299": "export function planAcceptContractLines() {",
+  "crew/drive.mjs:2109": "lead requested a second second-opinion",
+  "crew/drive.mjs:2278": "function settleAccept(c, where, contextPaths = []) {",
+  "crew/drive.mjs:2536": "const checkPath = check.details?.check_path",
+  "crew/drive.mjs:2539": "Revise plan.md per the check at ${checkPath}",
+  "crew/drive.mjs:2616": "if (!ctx.roles.includes('tech-lead')) {",
+  "crew/drive.mjs:2632": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
+  "crew/drive.mjs:2633": "const v = verdictOf(check)",
+  "crew/drive.mjs:2735": "let gateCmd = planEnv.details?.gate_cmd || null",
+  "crew/drive.mjs:2736": "const declared = planEnv.details?.mutations"
+}

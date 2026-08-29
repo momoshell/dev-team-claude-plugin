@@ -10,5 +10,7 @@
   "crew/drive.mjs:2632": "const check = assignAndWait('tech-lead', checkBrief, 'plan-check')",
   "crew/drive.mjs:2633": "const v = verdictOf(check)",
   "crew/drive.mjs:2735": "let gateCmd = planEnv.details?.gate_cmd || null",
-  "crew/drive.mjs:2736": "const declared = planEnv.details?.mutations"
+  "crew/drive.mjs:2736": "const declared = planEnv.details?.mutations",
+  "crew/adapters/adapter-pi.mjs:262": "['--no-skills']",
+  "crew/adapters/adapter-claude.mjs:72": "grants?.skills?.length"
 }

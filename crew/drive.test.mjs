@@ -4,7 +4,7 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
 
 import { join } from 'node:path'
@@ -1025,7 +1025,12 @@ test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the co
   const charterPath = join(REPO_ROOT, 'crew', 'roles', 'tech-lead.md')
   const charter = readFileSync(charterPath, 'utf8')
   const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'crew', 'roles', 'anchors.json'), 'utf8'))
-  const result = checkAnchors({ root: REPO_ROOT, docs: [charterPath], manifest })
+  // Every charter in crew/roles, not only the tech-lead's: the manifest is directory-wide
+  // and anchor-pin.mjs --repair crew/roles scans the same set, so a pin cited only by
+  // planner.md or reviewer.md is a citation here, never an orphan.
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).sort().map((name) => join(rolesDir, name))
+  const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
   assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
   assert.deepEqual(result.failures, [])
   const drifted = result.shifted.map((shift) => `${shift.key}: pinned ${JSON.stringify(manifest[shift.key])} is now at line ${shift.to}`)

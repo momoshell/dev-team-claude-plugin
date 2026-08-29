@@ -9,6 +9,7 @@ import { homedir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
+import { assertHostQuiet, hostLoad, loadPolicy } from '../../crew/host-load.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
@@ -120,6 +121,20 @@ export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
 export const SEAT_FIELDS = Object.freeze({
   agent: 'agent-', model: 'model-', effort: 'effort-', allow_shortfall: 'allow-shortfall-',
 })
+// crew.mjs boot reads all three (KNOWN_FLAGS.boot, crew/crew.mjs:2448) and each carries a value
+// (FLAG_VALUE_CONTRACT, crew/crew.mjs:2471). The dispatcher forwards what it was given, verbatim,
+// and never invents a default.
+export const BOOT_MEMORY_FLAGS = Object.freeze(['memory-dir', 'memory-backend', 'memory-budget-bytes'])
+
+function memoryFlagArgs(runFlags = {}) {
+  const args = []
+  for (const flag of BOOT_MEMORY_FLAGS) {
+    const value = runFlags[flag]
+    if (value === undefined || value === null || value === '') continue
+    args.push(`--${flag}`, String(value))
+  }
+  return args
+}
 // The ratified staffing artifact. A lane may not staff a role its settled tier
 // does not seat, and crew/roster.json is where that is ratified.
 export const ROSTER_PATH = fileURLToPath(new URL('../../crew/roster.json', import.meta.url))
@@ -338,6 +353,18 @@ export class BatchRefusal extends Error {
 
 function refuse(message, reason) { throw new BatchRefusal(message, reason) }
 
+function spawnAsyncDefault({ file, args, cwd, env }) {
+  return new Promise((resolve) => {
+    const child = childSpawn(file, args, { cwd, env })
+    let stdout = ''
+    let stderr = ''
+    child.stdout?.on('data', (chunk) => { stdout += String(chunk) })
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk) })
+    child.on('error', (error) => resolve({ status: null, error, stdout, stderr }))
+    child.on('close', (status) => resolve({ status, stdout, stderr }))
+  })
+}
+
 function spawnBackground({ file, args, cwd, env, logPath }) {
   let fd
   try {
@@ -372,6 +399,9 @@ export function normalDeps(deps = {}) {
     spawn: deps.spawn || ((options) => options?.background
       ? spawnBackground(options)
       : spawnSync(options.file, options.args, { cwd: options.cwd, env: options.env, encoding: 'utf8' })),
+    env: deps.env || process.env,
+    spawnAsync: deps.spawnAsync || deps.spawn || spawnAsyncDefault,
+    assertQuiet: deps.assertQuiet || ((env) => assertHostQuiet(hostLoad({ policy: loadPolicy(env) }))),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
   }
 }
@@ -1181,11 +1211,57 @@ export function staffingFromBrief(text) {
   return { shape, strength, misclassification }
 }
 
-export function measureBatchBaseline({ plans, outDir, checkout, deps } = {}) {
+export const BASELINE_CACHE_DIRNAME = 'baselines'
+
+// The factory state root, relocatable exactly as the ledger's is
+// (scripts/factory/ledger.mjs:3658). One file per commit; a {sha, command} key needs no
+// eviction because both halves are immutable facts about that commit.
+export function baselineCacheRoot(deps) {
   const d = normalDeps(deps)
-  if (!Array.isArray(plans) || plans.length < 2) return null
-  const shas = new Set()
-  for (const plan of plans) {
+  return join(d.env.DEVTEAM_LEDGER_DIR || join(d.home, '.dev-team', 'factory'), BASELINE_CACHE_DIRNAME)
+}
+
+export function baselineCachePath({ sha, deps } = {}) {
+  return join(baselineCacheRoot(deps), `${sha}.json`)
+}
+
+// Returns the PATH of a usable record, or null. It never decides reuse: whatever it returns is
+// handed to make-brief as --baseline and passes make-brief's own acceptance
+// (reuseBaseline, scripts/factory/make-brief.mjs) unchanged.
+export function readBaselineCache({ sha, command, deps } = {}) {
+  if (typeof sha !== 'string' || !sha.trim()) return null
+  const d = normalDeps(deps)
+  const path = baselineCachePath({ sha, deps: d })
+  let record
+  try { record = JSON.parse(textOf(d.readFileSync(path, 'utf8'))) } catch { return null }
+  if (!record || typeof record !== 'object') return null
+  if (record.sha !== sha) return null
+  if (record.command !== command) return null
+  return path
+}
+
+export function recordBaselineCache({ measured, sha, deps } = {}) {
+  const d = normalDeps(deps)
+  let record
+  try { record = JSON.parse(textOf(d.readFileSync(measured, 'utf8'))) } catch { return null }
+  if (!record || record.sha !== sha || typeof record.command !== 'string' || !record.command.trim()) return null
+  const path = baselineCachePath({ sha, deps: d })
+  try {
+    mkdirSync(dirname(path), { recursive: true })
+    writeFileSync(path, JSON.stringify(record, null, 2) + '\n')
+  } catch (err) {
+    d.log(`dispatch-batch: cannot record baseline cache ${path}: ${err?.message || String(err)}`)
+    return null
+  }
+  return path
+}
+
+// One `git rev-parse HEAD` per lane, computed ONCE and shared by the baseline measurement and
+// the compile scheduler. Returns a Map lane -> sha, or null when any lane's head is unknown.
+export function laneHeads({ plans, deps } = {}) {
+  const d = normalDeps(deps)
+  const heads = new Map()
+  for (const plan of Array.isArray(plans) ? plans : []) {
     let result
     try {
       result = d.spawn({
@@ -1202,13 +1278,50 @@ export function measureBatchBaseline({ plans, outDir, checkout, deps } = {}) {
       d.log(`dispatch-batch: cannot measure shared commit for ${plan.lane}; measuring per lane`)
       return null
     }
-    shas.add(sha)
+    heads.set(plan.lane, sha)
   }
+  return heads
+}
+
+function laneTestCommand({ dir, deps }) {
+  const d = normalDeps(deps)
+  try {
+    const data = JSON.parse(textOf(d.readFileSync(join(dir, 'package.json'), 'utf8')))
+    return typeof data?.scripts?.test === 'string' && data.scripts.test.trim() ? data.scripts.test : null
+  } catch { return null }
+}
+
+// A real worktree is created before this probe. The fallback is only for injected
+// seams that report a successful worktree spawn without materialising its path;
+// an existing lane worktree with no command remains unknown and cannot claim reuse.
+function laneCommandForPlan({ plan, fallbackDir, deps }) {
+  const d = normalDeps(deps)
+  const command = laneTestCommand({ dir: plan?.dir, deps: d })
+  if (command || typeof fallbackDir !== 'string' || !fallbackDir.trim()) return command
+  let exists
+  try { exists = d.existsSync(plan?.dir) } catch { return null }
+  if (exists || d.existsSync === fsExistsSync) return null
+  return laneTestCommand({ dir: fallbackDir, deps: d })
+}
+
+export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = {}) {
+  const d = normalDeps(deps)
+  if (!Array.isArray(plans) || plans.length < 2) return null
+  const measuredHeads = heads || laneHeads({ plans, deps: d })
+  if (!measuredHeads) return null
+  const shas = new Set(measuredHeads.values())
   if (shas.size !== 1) {
     d.log('dispatch-batch: lanes do not share a commit; measuring per lane')
     return null
   }
   if (typeof outDir !== 'string' || !outDir.trim()) return null
+  const sha = [...shas][0]
+  const command = laneCommandForPlan({ plan: plans[0], fallbackDir: checkout, deps: d })
+  const cached = readBaselineCache({ sha, command, deps: d })
+  if (cached) {
+    d.log(`dispatch-batch: reusing cached baseline sha=${sha} path=${cached}`)
+    return cached
+  }
   const path = join(outDir, 'batch-baseline.json')
   let result
   try {
@@ -1225,7 +1338,8 @@ export function measureBatchBaseline({ plans, outDir, checkout, deps } = {}) {
     d.log(`dispatch-batch: batch baseline measurement failed; measuring per lane`)
     return null
   }
-  d.log(`dispatch-batch: measured shared baseline sha=${[...shas][0]} path=${path}`)
+  recordBaselineCache({ measured: path, sha, deps: d })
+  d.log(`dispatch-batch: measured shared baseline sha=${sha} path=${path}`)
   return path
 }
 
@@ -1243,7 +1357,7 @@ function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, base
   return { file: 'node', args, cwd: laneDir }
 }
 
-export function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
+export async function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
   const d = normalDeps(deps)
   const name = laneNameOf(lane)
   const requestDir = resolve(batchDir)
@@ -1265,7 +1379,7 @@ export function compileLane({ lane, batchDir, requestPath, laneDir, registerPath
 
   let currentRegister = authoredRegister
   let result
-  try { result = d.spawn(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
+  try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (result?.status === 0) {
@@ -1289,7 +1403,7 @@ export function compileLane({ lane, batchDir, requestPath, laneDir, registerPath
   currentRegister = writeUpdatedRegister({ data, lane: name, reason: parsed.reason, files: parsed.files, outDir: outputDir, d })
 
   let second
-  try { second = d.spawn(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
+  try { second = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler retry could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   if (!second || second.status !== 0) {
@@ -1528,7 +1642,7 @@ export function seatFromSpec(batch, lane) {
   return entries.length > 0 ? entries.join(',') : 'none'
 }
 
-function bootCommand({ lane, laneDir, tier, registerPath, transport, seats }) {
+function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
   return {
     file: 'node',
     args: [
@@ -1540,6 +1654,7 @@ function bootCommand({ lane, laneDir, tier, registerPath, transport, seats }) {
       '--lane', lane,
       ...seatFlagArgs(seats),
       ...shortfallFlagArgs(seats),
+      ...memoryFlagArgs(runFlags),
       // crew.mjs boot knows no --panes flag (KNOWN_FLAGS.boot, crew/crew.mjs:2232):
       // a pane seat is what boot produces WITHOUT --headless-all, so the pane
       // transport is the ABSENCE of this flag, never a flag of its own.
@@ -1620,10 +1735,12 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   add('out', outDir)
   add('tier', runFlags.tier ?? tier)
   add('variant', runFlags.variant ?? variant)
+  add('baseline', runFlags.baseline)
   for (const flag of [
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
   ]) add(flag, runFlags[flag])
+  for (const flag of BOOT_MEMORY_FLAGS) add(flag, runFlags[flag])
   for (const flag of Object.keys(runFlags).filter((flag) => Object.values(SEAT_FIELDS)
     .some((prefix) => flag.startsWith(prefix) && flag.length > prefix.length)).sort()) {
     add(flag, runFlags[flag])
@@ -1635,7 +1752,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   return args.join(' ')
 }
 
-export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, deps } = {}) {
+export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, deps } = {}) {
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
   const lanes = readBatch({ batchDir, deps: d })
@@ -1738,7 +1855,10 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   }
 
   createWorktrees({ plans, checkout: root, deps: d })
-  const baselinePath = measureBatchBaseline({ plans, outDir: outputDir, checkout: root, deps: d })
+  const heads = laneHeads({ plans, deps: d })
+  const supplied = typeof runFlags.baseline === 'string' && runFlags.baseline.trim() ? resolve(runFlags.baseline) : null
+  if (supplied) d.log(`dispatch-batch: operator supplied baseline path=${supplied}`)
+  const baselinePath = supplied || measureBatchBaseline({ plans, outDir: outputDir, checkout: root, heads, deps: d })
   // The compiler's request schema is closed, so every lane is compiled from a
   // copy of its request with the dispatch-only keys removed. The copy is named
   // so it can never be mistaken for an authored request, even when --out points
@@ -1752,9 +1872,39 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
     compileRequests.set(lane.lane, requestPath)
   }
 
-  const compiled = []
-  for (const plan of plans) {
-    compiled.push(compileLane({
+  // SCHEDULING ONLY. make-brief owns baseline acceptance (reuseBaseline,
+  // scripts/factory/make-brief.mjs) and still decides reuse for every lane; this predicate never
+  // changes what a lane is handed. It answers the one question the scheduler must answer BEFORE it
+  // spawns: can this compile run a full suite? A lane handed no baseline, or one recorded for a
+  // different commit than its own worktree carries, is at risk, and N of those at once is N suites.
+  const atRisk = (plan) => {
+    if (!baselinePath) return true
+    const head = heads?.get(plan.lane) || null
+    if (!head) return true
+    let record
+    try { record = JSON.parse(textOf(d.readFileSync(baselinePath, 'utf8'))) } catch { return true }
+    const command = laneCommandForPlan({ plan, fallbackDir: root, deps: d })
+    return !record || typeof record !== 'object' || Array.isArray(record)
+      || record.sha !== head
+      || !command || record.command !== command
+      || !Number.isInteger(record.pass) || record.pass < 0
+      || !Number.isInteger(record.fail) || record.fail < 0
+  }
+
+  let serial = Promise.resolve()
+  const runSerialised = (fn) => {
+    const next = serial.then(async () => {
+      try { await d.assertQuiet(d.env) } catch (err) {
+        refuse(`refusing to measure a lane baseline on a saturated host: ${err?.message || String(err)}`, COMPILE_REFUSED)
+      }
+      return fn()
+    })
+    serial = next.then(() => {}, () => {})
+    return next
+  }
+
+  const startCompile = (plan) => {
+    const compile = () => compileLane({
       lane: plan.lane,
       batchDir: resolve(batchDir),
       requestPath: compileRequests.get(plan.lane),
@@ -1764,7 +1914,15 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
       fences,
       baselinePath,
       deps: d,
-    }))
+    })
+    return atRisk(plan) ? runSerialised(compile) : compile()
+  }
+
+  const compiled = []
+  const results = await Promise.allSettled(plans.map((plan) => startCompile(plan)))
+  for (const settled of results) {
+    if (settled.status === 'rejected') throw settled.reason
+    compiled.push(settled.value)
   }
 
   const laneByName = new Map(lanes.map((lane) => [lane.lane, lane]))
@@ -1820,7 +1978,7 @@ export function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, t
   const arrivals = []
   for (const item of settled) {
     let boot
-    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport, seats: item.seats })) } catch (err) {
+    try { boot = d.spawn(bootCommand({ lane: item.lane, laneDir: item.plan.dir, tier: item.tier, registerPath, transport, seats: item.seats, runFlags })) } catch (err) {
       refuse(`crew boot failed for ${item.lane}: ${err?.message || String(err)}`, BOOT_FAILED)
     }
     if (!boot || boot.status !== 0) {
@@ -1900,7 +2058,8 @@ export function parseCliArgs(argv) {
   const valueFlags = new Set([
     'batch', 'fences', 'checkout', 'parent', 'out', 'tier', 'variant', 'wave',
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
-    'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
+    'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite', 'baseline',
+    ...BOOT_MEMORY_FLAGS,
   ])
   const booleanFlags = new Set(['dry-run', 'force', 'no-keep', PANE_TRANSPORT, BOOT_TRANSPORT])
   for (let index = 0; index < argv.length; index += 1) {
@@ -1929,7 +2088,7 @@ export function parseCliArgs(argv) {
   return flags
 }
 
-export function main(argv, deps = {}) {
+export async function main(argv, deps = {}) {
   try {
     const flags = parseCliArgs(argv)
     if (typeof flags.batch !== 'string' || flags.batch.trim() === '') {
@@ -1947,7 +2106,7 @@ export function main(argv, deps = {}) {
     }
     const parentDir = typeof flags.parent === 'string' ? resolve(flags.parent) : dirname(checkout)
     const outDir = typeof flags.out === 'string' ? resolve(flags.out) : join(resolve(flags.batch), 'out')
-    dispatchBatch({
+    await dispatchBatch({
       batchDir: resolve(flags.batch),
       fences,
       checkout,
@@ -1971,4 +2130,4 @@ export function main(argv, deps = {}) {
 
 const invokedDirectly = process.argv[1]
   && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))
-if (invokedDirectly) process.exitCode = main(process.argv.slice(2))
+if (invokedDirectly) main(process.argv.slice(2)).then((code) => { process.exitCode = code })

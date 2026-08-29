@@ -20,9 +20,11 @@ Dispatch a batch in this order, and record what refuses at each boundary:
    journal carries the `lane-fence` event. **`fence=NONE`** in a write lane means
    a boot-only flag went to the wrong verb.
 
-Parallelise on file-set disjointness, never on workspace count. The compiler
-runs the full suite on every compile, so sequence compiles and never nest a
-waiter inside another background call. Arm the watcher on the run log: `run`
+Parallelise on file-set disjointness, never on workspace count. The batch's
+compiles run in parallel; only a baseline fallback is serialised behind the
+host-load guard, and the baseline is cached by commit and command, so a
+compile no longer implies a suite run. Never nest a waiter inside another
+background call. Arm the watcher on the run log: `run`
 emits exactly one terminal `{"status":…}` line, while a pid is only a proxy.
 Merge the batch branches in a scratch worktree and run the suite before handing
 them over. Size a scout brief to the **write-up**, not the reading: forbid
@@ -42,7 +44,7 @@ one.
 `scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
 over a batch directory of request JSONs and a fence register, refusing the
 batch at the first failed check rather than proceeding
-(`scripts/factory/dispatch-batch.mjs:30`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+(`scripts/factory/dispatch-batch.mjs:32`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
@@ -87,9 +89,9 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:99`,
-`scripts/factory/dispatch-batch.mjs:100`,
-`scripts/factory/dispatch-batch.mjs:18`).
+(`scripts/factory/dispatch-batch.mjs:112`,
+`scripts/factory/dispatch-batch.mjs:113`,
+`scripts/factory/dispatch-batch.mjs:20`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
 pane mode by the ABSENCE of `--headless-all`, because `crew.mjs boot` knows no
@@ -123,8 +125,8 @@ one exemption that exists.
 A **wave** is a topological level of the declared graph. The operator authors
 an edge in the request; it is never inferred, because an inferred ordering is
 one nobody can audit. Unknown names and cycles refuse by name: **dependency-unknown**
-and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:34`
-and `scripts/factory/dispatch-batch.mjs:33`.
+and **dependency-cycle** are the reasons pinned by `scripts/factory/dispatch-batch.mjs:36`
+and `scripts/factory/dispatch-batch.mjs:35`.
 
 A wave runs only after every predecessor reached `done`, **never on an `escalation`**.
 A dependent lane briefed against work that did not land is
@@ -139,7 +141,7 @@ nothing from someone else's edge.
 A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
 its ground truth, baseline, and tripwires are the moved tree's. Containment is
 probed; a base that does not carry the predecessor's commit refuses
-**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:35`) rather than
+**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:37`) rather than
 compiling against a stale tree.
 
 Each wave is one invocation (`--wave`), because `run` is backgrounded and this

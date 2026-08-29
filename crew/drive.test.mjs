@@ -4,11 +4,12 @@
 // bounce exhaustion->accept/escalate, out-of-set lead answers, commit gating.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
 
 import { join } from 'node:path'
 import { regrantVerdict } from './escalation-policy.mjs'
+import { checkAnchors } from '../skills/qa-test-writing/anchor-pin.mjs'
 
 import { assertSeats, runCmd } from './crew.mjs'
 import { runChild } from './child.mjs'
@@ -1015,19 +1016,25 @@ test('the tech-lead charter documents envelope custody and the residual it canno
   assert.match(collapsed, /cannot type a residual/)
 })
 
-// Prose file:line citations are invisible to skills/*/anchors.json, so this
-// resolver is the only thing that can see them rot. It reads the cited LINE of
-// crew/drive.mjs, which is why a shifted anchor fails here instead of in a lane.
+// Prose file:line citations are invisible to skills/*/anchors.json, so crew/roles/anchors.json
+// pins the CONTENT each cited line of crew/drive.mjs must carry. A shape-only check could not
+// tell a right line from a wrong one, and twice a build kept it green by deleting a blank line
+// elsewhere to compensate for one it inserted (#743, #748, #747). The manifest and the prose are
+// held to a bijection in both directions, so a citation added to one side alone fails here.
 test('every crew/drive.mjs anchor the tech-lead charter cites resolves to the code it names', () => {
-  const charter = readFileSync(new URL('./roles/tech-lead.md', import.meta.url), 'utf8')
-  const source = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8').split('\n')
-  const cited = [...charter.matchAll(/crew\/drive\.mjs:(\d+)/g)].map((match) => Number(match[1]))
-  assert.ok(cited.length >= 8, `expected at least 8 anchors, found ${cited.length}`)
-  for (const line of cited) {
-    const text = (source[line - 1] ?? '').trim()
-    assert.ok(text.length > 3 && !/^[)}\];,]+$/.test(text),
-      `crew/drive.mjs:${line} is ${JSON.stringify(text)} — a citation that resolves to nothing`)
-  }
+  const charterPath = join(REPO_ROOT, 'crew', 'roles', 'tech-lead.md')
+  const charter = readFileSync(charterPath, 'utf8')
+  const manifest = JSON.parse(readFileSync(join(REPO_ROOT, 'crew', 'roles', 'anchors.json'), 'utf8'))
+  // Every charter in crew/roles, not only the tech-lead's: the manifest is directory-wide
+  // and anchor-pin.mjs --repair crew/roles scans the same set, so a pin cited only by
+  // planner.md or reviewer.md is a citation here, never an orphan.
+  const rolesDir = join(REPO_ROOT, 'crew', 'roles')
+  const docs = readdirSync(rolesDir).filter((name) => name.endsWith('.md')).sort().map((name) => join(rolesDir, name))
+  const result = checkAnchors({ root: REPO_ROOT, docs, manifest })
+  assert.ok(result.anchors >= 12, `expected at least 12 anchors, found ${result.anchors}`)
+  assert.deepEqual(result.failures, [])
+  const drifted = result.shifted.map((shift) => `${shift.key}: pinned ${JSON.stringify(manifest[shift.key])} is now at line ${shift.to}`)
+  assert.deepEqual(drifted, [])
   // Both citation forms of the four anchors #698 found stale: the qualified
   // `crew/drive.mjs:2299` and the bare `:2226` continuation the file also used.
   for (const retired of [':2299', ':2226', ':2319', ':2217']) {

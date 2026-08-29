@@ -35,19 +35,27 @@ export function collectAnchors({ docs }) {
   return anchors
 }
 
+function markdownIn(dir) {
+  const docs = []
+  for (const name of readdirSync(dir).sort()) {
+    const path = join(dir, name)
+    if (name.endsWith('.md') && !statSync(path).isDirectory()) docs.push(path)
+  }
+  return docs
+}
+
+// A directory carrying an anchors.json is enough (#747). A skill keeps its layout -
+// SKILL.md plus references/*.md - and any OTHER pinned directory, crew/roles among
+// them, is read as the markdown files it holds. Without the fallback crew/roles
+// resolves to no docs at all and a repair silently finds nothing to relocate.
 export function skillDocs(skillDir) {
   const docs = []
   const skill = join(skillDir, 'SKILL.md')
   if (existsSync(skill) && !statSync(skill).isDirectory()) docs.push(skill)
   const refs = join(skillDir, 'references')
-  if (existsSync(refs) && !statSync(refs).isDirectory()) return docs
-  if (existsSync(refs)) {
-    for (const name of readdirSync(refs).sort()) {
-      const path = join(refs, name)
-      if (name.endsWith('.md') && !statSync(path).isDirectory()) docs.push(path)
-    }
-  }
-  return docs
+  if (existsSync(refs) && statSync(refs).isDirectory()) docs.push(...markdownIn(refs))
+  if (docs.length > 0) return docs
+  return existsSync(skillDir) && statSync(skillDir).isDirectory() ? markdownIn(skillDir) : docs
 }
 
 function display(value) {
@@ -239,7 +247,7 @@ export function repairCli(argv, log = console.log) {
     return 2
   }
   if (!skillDir || !root) {
-    log('usage: node skills/qa-test-writing/anchor-pin.mjs --repair <skillDir> [--root <root>]')
+    log('usage: node skills/qa-test-writing/anchor-pin.mjs --repair <dir> [--root <root>]')
     return 2
   }
   const result = repairAnchorsInPlace({ root, skillDir, manifestPath: join(skillDir, 'anchors.json') })

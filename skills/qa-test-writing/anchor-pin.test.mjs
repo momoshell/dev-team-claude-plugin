@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, MIN_EXPECTED_LENGTH, repairAnchorsInPlace, repairCli } from './anchor-pin.mjs'
+import { assertAnchorsPinned, checkAnchors, checkSkillAnchors, MIN_EXPECTED_LENGTH, repairAnchorsInPlace, repairCli, skillDocs } from './anchor-pin.mjs'
 
 const EXPECTED = "KEY = 'anchored-sentinel-value'"
 
@@ -20,6 +20,19 @@ function fixture({ source = ['// header', `const ${EXPECTED}`, 'const other = 1'
   return { root, skillDir, doc, manifestPath, manifest }
 }
 
+function plainFixture(options = {}) {
+  const fx = fixture(options)
+  const { root } = fx
+  const { line = 2, cite = `crew/sample.mjs:${line}`, manifest = { 'crew/sample.mjs:2': EXPECTED } } = options
+  const plainDir = join(root, 'plain')
+  mkdirSync(plainDir, { recursive: true })
+  const doc = join(plainDir, 'notes.md')
+  writeFileSync(doc, `# sample\n\nExhibit: \`${cite}\`.\n`)
+  const manifestPath = join(plainDir, 'anchors.json')
+  writeFileSync(manifestPath, JSON.stringify(manifest, null, 2))
+  return { root, plainDir, doc, manifestPath, manifest }
+}
+
 function dispose(fx) {
   rmSync(fx.root, { recursive: true, force: true })
 }
@@ -27,6 +40,67 @@ function dispose(fx) {
 function bytes(fx) {
   return `${readFileSync(fx.manifestPath, 'utf8')}\0${readFileSync(fx.doc, 'utf8')}`
 }
+
+test('skillDocs finds the markdown of a directory that is not a skill', () => {
+  // Mutation killed: removing the plain-directory fallback would silently return no docs.
+  const plain = plainFixture()
+  const skill = fixture()
+  try {
+    assert.deepEqual(skillDocs(plain.plainDir), [plain.doc])
+    assert.deepEqual(skillDocs(skill.skillDir), [skill.doc])
+  } finally {
+    dispose(plain)
+    dispose(skill)
+  }
+})
+
+test('the CLI repairs a plain directory whose pin moved by one line', () => {
+  // Mutation killed: keeping skill-only discovery leaves a moved plain-directory pin unrepaired.
+  const source = ['// header', '// inserted before the declaration', `const ${EXPECTED}`, 'const other = 1', 'export default KEY', '']
+  const fx = plainFixture({ source })
+  const output = []
+  try {
+    assert.equal(repairCli(['--repair', fx.plainDir, '--root', fx.root], output.push.bind(output)), 0)
+    assert.ok(output.includes('repaired crew/sample.mjs:2 -> crew/sample.mjs:3'))
+    const manifest = JSON.parse(readFileSync(fx.manifestPath, 'utf8'))
+    const doc = readFileSync(fx.doc, 'utf8')
+    assert.equal(manifest['crew/sample.mjs:3'], EXPECTED)
+    assert.equal(Object.hasOwn(manifest, 'crew/sample.mjs:2'), false)
+    assert.equal(doc.includes('crew/sample.mjs:3'), true)
+    assert.equal(doc.includes('crew/sample.mjs:2'), false)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a plain directory refuses rot exactly as a skill does', () => {
+  // Mutation killed: dropping the rot refusal would make a plain directory look repaired.
+  const fx = plainFixture({ manifest: { 'crew/sample.mjs:2': 'a-sentinel-that-is-absent-entirely' } })
+  const output = []
+  const before = bytes(fx)
+  try {
+    assert.equal(repairCli(['--repair', fx.plainDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.match(output.join('\n'), /rot, not a shift/)
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
+})
+
+test('a plain directory refuses ambiguity exactly as a skill does', () => {
+  // Mutation killed: dropping the ambiguity refusal would let repair guess between two lines.
+  const source = ['const duplicated-sentinel = 1', 'const duplicated-sentinel = 1', '// tail', '']
+  const fx = plainFixture({ source, line: 3, manifest: { 'crew/sample.mjs:3': 'const duplicated-sentinel = 1' } })
+  const output = []
+  const before = bytes(fx)
+  try {
+    assert.equal(repairCli(['--repair', fx.plainDir, '--root', fx.root], output.push.bind(output)), 1)
+    assert.match(output.join('\n'), /refuses to guess/)
+    assert.equal(bytes(fx), before)
+  } finally {
+    dispose(fx)
+  }
+})
 
 test('a correct fixture anchor passes and counts one citation', () => {
   // Mutation killed: changing the fixture line or its declared substring must redden this content pin.

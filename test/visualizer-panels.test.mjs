@@ -7,6 +7,7 @@ import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
+import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -783,6 +784,31 @@ test('event stories name workflow markers and summarize the visible sequence', (
   assert.equal(eventStory({ type:'log', payload_json:JSON.stringify({ message:'suite:cold' }) }).title, 'Cold validation reached')
   assert.equal(eventStory({ type:'log', payload_json:JSON.stringify({ message:'gate-proof:2:checks' }) }).title, 'Gate proof 2 checks recorded')
   assert.deepEqual(eventStreamSummary(events), { total:4, starts:1, ends:1, decisions:1, logs:1 })
+})
+
+test('agent return stories group attempts and surface role-specific evidence', () => {
+  const envelopes = [
+    { role:'builder', dispatch_seq:4, status:'done', valid:true, artifacts:['a.js'], details:{ files_changed:['a.js'], validation:'suite green', commit_message:'fix it' } },
+    { role:'planner', dispatch_seq:1, status:'done', valid:true, artifacts:['plan.md'], details:{ files_in_scope:['a.js','b.js'], baseline_gate_summary:'GATE-SUMMARY {"total":5,"failed":1}' } },
+    { role:'builder', dispatch_seq:2, status:'done', valid:true, artifacts:[], details:{} },
+  ]
+  assert.deepEqual(envelopeGroups(envelopes).map((group) => [group.role, group.entries.map((entry) => entry.dispatch_seq)]), [['planner',[1]],['builder',[2,4]]])
+  assert.deepEqual(envelopeOverview(envelopes, { status:'done' }), { returns:3, roles:2, completed:3, invalid:0, retries:1, taskStatus:'done' })
+  assert.ok(envelopeFacts(envelopes[0]).some((fact) => fact.label === 'Changed' && fact.value === '1 file'))
+  assert.ok(envelopeFacts(envelopes[1]).some((fact) => fact.label === 'Gate checks' && fact.value === '5'))
+  assert.deepEqual(envelopeSections(envelopes[0]).map((section) => section.heading), ['Validation performed','Commit intent','Files changed'])
+})
+
+test('trajectory stories separate handoffs from factory stages and explain journal rows', () => {
+  const view = { spans:[
+    { family:'stage', actor:'driver', label:'gate:r1', started_at:0, ended_at:100, duration_ms:100 },
+    { family:'assignment', id:'d1', role:'planner', status:'done', started_at:10, ended_at:70, duration_ms:60, markers:[] },
+    { family:'assignment', id:'d2', role:'builder', status:null, started_at:80, ended_at:null, markers:[{ event:'seat-retrying' }] },
+  ] }
+  assert.deepEqual(trajectorySummary(view), { handoffs:2, completed:1, inFlight:1, seatIncidents:1, substrateOutages:0, driverStages:1 })
+  assert.deepEqual(assignmentPath(view).map((item) => [item.dispatch,item.role,item.outcome]), [['d1','planner','done'],['d2','builder','in flight']])
+  assert.equal(trajectoryRowStory({ event:'row', row:{ assign:'d2', role:'builder', brief:'/tmp/plan.md' } }).title, 'Builder received d2')
+  assert.equal(trajectoryRowStory({ event:'row', row:{ review_outcome:{ verdict:'pass', findings:[], must_fix:0 } } }).title, 'Review pass')
 })
 
 test('acceptEvidence joins lead evidence and reports missing evidence separately', () => {

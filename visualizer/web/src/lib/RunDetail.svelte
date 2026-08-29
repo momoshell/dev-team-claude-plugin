@@ -1,7 +1,8 @@
 <script>
-  import { getEvents, getReturns } from './api.js'
+  import { getEvents, getJournal, getReturns } from './api.js'
   import { drainEvents } from './drain.js'
   import { deriveStatus, durationCell, gateCell, reviewCell, tokenCell } from './fleet.js'
+  import { applyRead, initialJournalState, journalPulse, shouldRead } from './live.js'
   import PhaseGantt from './PhaseGantt.svelte'
   import EnvelopeInspector from './EnvelopeInspector.svelte'
   import ReviewPanel from './ReviewPanel.svelte'
@@ -14,8 +15,13 @@
   let returns = $state({ envelopes: [], task: null })
   let events = $state([])
   let selectedPhase = $state(null)
+  let journalState = $state(initialJournalState())
   let error = $state('')
   let copied = $state(false)
+  let detailGeneration = 0
+  let journalGeneration = 0
+  let detailKey = ''
+  let journalKey = ''
 
   let status = $derived(deriveStatus(run, returns?.task))
   let duration = $derived(durationCell(run))
@@ -25,18 +31,49 @@
   let started = $derived(dateParts(run.started_at))
   let finished = $derived(dateParts(run.ended_at))
 
-  async function load() {
+  async function load(target = { repo_slug:run.repo_slug, task_slug:run.goal, adw_id:run.adw_id }) {
+    const generation = ++detailGeneration
     error = ''
     try {
       const [returnResult, eventResult] = await Promise.all([
-        run.repo_slug && run.goal ? getReturns(run.repo_slug, run.goal, run.adw_id) : Promise.resolve({ envelopes:[], task:null }),
-        drainEvents((after, limit) => getEvents(run.adw_id, after, limit), {}),
+        target.repo_slug && target.task_slug ? getReturns(target.repo_slug, target.task_slug, target.adw_id) : Promise.resolve({ envelopes:[], task:null }),
+        drainEvents((after, limit) => getEvents(target.adw_id, after, limit), {}),
       ])
-      returns = returnResult
-      events = eventResult.events
-    } catch (err) { error = err.message || 'Task details could not be loaded.' }
+      if (generation === detailGeneration) {
+        returns = returnResult
+        events = eventResult.events
+      }
+    } catch (err) { if (generation === detailGeneration) error = err.message || 'Task details could not be loaded.' }
   }
-  $effect(() => { const id = run.adw_id; if (id) void load() })
+  async function loadJournal(target) {
+    const generation = ++journalGeneration
+    try {
+      const payload = await getJournal(target.repo_slug, target.task_slug, target.adw_id)
+      if (generation === journalGeneration) journalState = applyRead(journalState, { ok:true, payload }, Date.now())
+    } catch (err) {
+      if (generation === journalGeneration) journalState = applyRead(journalState, { ok:false, error:err.message }, Date.now())
+    }
+  }
+  $effect(() => {
+    const target = { repo_slug:run.repo_slug || '', task_slug:run.goal || '', adw_id:run.adw_id || '' }
+    if (!target.adw_id || target.adw_id === detailKey) return
+    detailKey = target.adw_id
+    void load(target)
+  })
+  $effect(() => {
+    const target = { repo_slug:run.repo_slug || '', task_slug:run.goal || '', adw_id:run.adw_id || '' }
+    const key = `${target.repo_slug}\u0000${target.task_slug}\u0000${target.adw_id}`
+    if (!target.adw_id || key === journalKey) return
+    journalKey = key
+    journalState = initialJournalState()
+    void loadJournal(target)
+  })
+  $effect(() => journalPulse.subscribe(() => {
+    if (!shouldRead({ running:run.running })) return
+    const target = { repo_slug:run.repo_slug || '', task_slug:run.goal || '', adw_id:run.adw_id || '' }
+    void load(target)
+    void loadJournal(target)
+  }))
   $effect(() => {
     const requested = phase
     const phases = run.phases || []
@@ -80,7 +117,7 @@
   {#if error}<p class="error-banner">{error}</p>{/if}
 
   <div class="execution-layout">
-    <PhaseGantt {run} {events} selected={selectedPhase} onselectphase={selectPhase} />
+    <PhaseGantt {run} {events} {journalState} selected={selectedPhase} onselectphase={selectPhase} />
     <aside class="crew-panel">
       <header><p class="micro">Assigned crew</p><h2>{run.agents?.length || 0} seat{run.agents?.length === 1 ? '' : 's'}</h2></header>
       <div class="crew-list">
@@ -100,7 +137,7 @@
   <section class="diagnostics">
     <div class="diagnostics-heading"><p class="micro">Deep inspection</p><h2>Evidence & diagnostics</h2><p>The primary execution story is above. Open these only when you need the underlying envelopes, agent trace, or raw events.</p></div>
     <details><summary><span><strong>Agent returns & outcome</strong><small>What each seat handed back, the review evidence, and final acceptance</small></span><b>Open</b></summary><div class="detail-stack"><EnvelopeInspector {run} {returns} /><ReviewPanel {run} {returns} /><AcceptPanel {run} {returns} /></div></details>
-    <details><summary><span><strong>Agent trajectory</strong><small>How work moved between seats, how long each handoff took, and where retries occurred</small></span><b>Open</b></summary><div class="detail-stack"><Trajectory {run} /></div></details>
+    <details><summary><span><strong>Agent trajectory</strong><small>How work moved between seats, how long each handoff took, and where retries occurred</small></span><b>Open</b></summary><div class="detail-stack"><Trajectory {run} {journalState} /></div></details>
     <details><summary><span><strong>Event stream</strong><small>An ordered, filterable account of turns, decisions, and workflow signals</small></span><b>Open</b></summary><div class="detail-stack"><EventStream {run} {events} phaseFilter={selectedPhase} onrefresh={load} /></div></details>
   </section>
 </main>

@@ -1,6 +1,6 @@
 <script>
   import { getReturns, getSessions } from './lib/api.js'
-  import { createSemaphore, deriveStatus } from './lib/fleet.js'
+  import { createSemaphore, deriveDisplayStatus, fleetActivity } from './lib/fleet.js'
   import { journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
@@ -31,21 +31,26 @@
   let envelopeWorkers = 0
 
   let anyRunning = $derived(runs.some((run) => run.running))
+  let activity = $derived(fleetActivity(runs, now))
   let runIndex = $derived(new Map(runs.map((run) => [run.adw_id, run])))
   let selectedRun = $derived(route.view === 'run' || route.view === 'phase' ? runIndex.get(route.adw_id) : null)
   let attentionRows = $derived(runs.map((run) => {
-    const status = deriveStatus(run, envelopes.get(run.adw_id))
+    const status = deriveDisplayStatus(run, envelopes.get(run.adw_id), now)
     const why = status.why || (status.key === 'fail'
       ? 'The run recorded a failure. Inspect its terminal phase and proof.'
       : status.key === 'aborted'
         ? 'The run stopped without an acceptance verdict. Inspect its preserved execution context.'
-        : 'Code declined to fake a result and handed the preserved context to a human.')
+        : status.key === 'silent' || status.key === 'unverified'
+          ? status.why
+          : 'Code declined to fake a result and handed the preserved context to a human.')
     return { run, status, why }
-  }).filter((row) => ['escalated', 'fail', 'aborted'].includes(row.status.key) && !row.run.triage?.reviewed_at))
+  }).filter((row) => ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(row.status.key) && !row.run.triage?.reviewed_at))
   let attentionBreakdown = $derived({
     escalated: attentionRows.filter((row) => row.status.key === 'escalated').length,
     failed: attentionRows.filter((row) => row.status.key === 'fail').length,
     aborted: attentionRows.filter((row) => row.status.key === 'aborted').length,
+    silent: attentionRows.filter((row) => row.status.key === 'silent').length,
+    unverified: attentionRows.filter((row) => row.status.key === 'unverified').length,
   })
   let pageTitle = $derived(selectedRun ? `${selectedRun.goal || 'Task'} · Factory` : route.view === 'roster' ? 'Roster · Factory' : route.view === 'ops' ? 'Operations · Factory' : 'Tasks · Factory')
 
@@ -139,7 +144,7 @@
     <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
   </nav>
   <div class="tools">
-    <span class:degraded={feedDegraded} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : anyRunning ? `${runs.filter((run) => run.running).length} live` : 'Ledger ready'}</span>
+    <span class:degraded={feedDegraded} class:silent={!feedDegraded && !activity.live && (activity.silent || activity.unverified)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.live ? `${activity.live} live` : activity.silent ? `${activity.silent} silent session${activity.silent === 1 ? '' : 's'}` : activity.unverified ? `0 live · ${activity.unverified} heartbeat unavailable` : 'Ledger ready'}</span>
     <label class="theme"><span>Theme</span><select bind:value={theme} aria-label="Theme"><option value="ink">Dark</option><option value="paper">Light</option><option value="os">System</option></select></label>
   </div>
 </header>
@@ -154,7 +159,7 @@
   <main class="page">
     <div class="page-heading"><div><p class="eyebrow">Factory control room</p><h1>Operations</h1><p>See whether work is flowing, where reliability is slipping, and which evidence needs a closer look.</p></div><span class="updated">Live operating windows · refreshed automatically</span></div>
     <OperationsOverview {runs} degraded={feedDegraded} {now} onopen={openRun} />
-    <details class="ops-baseline"><summary>All-time task baseline</summary><MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} /></details>
+    <details class="ops-baseline"><summary>All-time task baseline</summary><MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} /></details>
     <div class="ops-section-heading"><div><p class="eyebrow">Subsystem evidence</p><h2>Go deeper</h2></div><p>Each readout keeps its own measurement window and clearly separates zero from unavailable.</p></div>
     <div class="ops-grid"><CellHealthPanel /><RunSetPanel /><TeardownPanel /><IntakePanel /></div>
   </main>
@@ -166,11 +171,11 @@
 {:else}
   <main class="page">
     <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Factory tasks</h1><p>Follow work in progress, inspect completed runs, and open the full execution waterfall.</p></div><span class="updated">Live ledger · refreshed automatically</span></div>
-    <MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} />
+    <MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} />
     {#if error}<p class="error-banner">{error}</p>{/if}
     {#if attentionRows.length}
       <details class="attention">
-        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionBreakdown.escalated} escalated{attentionBreakdown.failed ? ` · ${attentionBreakdown.failed} failed` : ''}{attentionBreakdown.aborted ? ` · ${attentionBreakdown.aborted} aborted` : ''}</small></span><span class="attention-total">{attentionRows.length}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
+        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionBreakdown.escalated} escalated{attentionBreakdown.failed ? ` · ${attentionBreakdown.failed} failed` : ''}{attentionBreakdown.aborted ? ` · ${attentionBreakdown.aborted} aborted` : ''}{attentionBreakdown.silent ? ` · ${attentionBreakdown.silent} silent` : ''}{attentionBreakdown.unverified ? ` · ${attentionBreakdown.unverified} unverified` : ''}</small></span><span class="attention-total">{attentionRows.length}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
         <div class="attention-list" aria-label="Tasks needing attention">{#each attentionRows as row (row.run.adw_id)}<button onclick={() => openRun(row.run)}><span><strong>{row.run.goal || row.run.adw_id}</strong><small>{row.status.where || row.run.repo_slug || (row.status.key === 'fail' ? 'Failed run' : row.status.key === 'aborted' ? 'Aborted run' : 'Escalated')}</small></span><span class="rail-why">{row.why}</span><span class={`rail-status ${row.status.tone}`}>{row.status.word}</span><b>Open →</b></button>{/each}</div>
       </details>
     {/if}
@@ -185,7 +190,7 @@
 .brand-mark { display:grid; gap:3px; width:1.45rem; transform:skewX(-10deg); }.brand-mark i { display:block; height:4px; border-radius:1rem; }.brand-mark i:nth-child(1) { width:65%; background:var(--tech-lead-color); }.brand-mark i:nth-child(2) { width:100%; background:var(--planner-color); }.brand-mark i:nth-child(3) { width:48%; margin-left:25%; background:var(--builder-color); }
 nav { justify-self:center; display:flex; gap:.3rem; padding:.25rem; border:1px solid var(--line); border-radius:.65rem; background:color-mix(in srgb,var(--panel) 85%,transparent); }
 nav button { position:relative; border:0; border-radius:.45rem; background:transparent; color:var(--muted); padding:.45rem .8rem; font-size:.78rem; cursor:pointer; } nav button.active { color:inherit; background:var(--panel-raised); box-shadow:0 1px 6px rgba(0,0,0,.15); }
-.tools { justify-self:end; display:flex; align-items:center; gap:.8rem; }.connection { display:inline-flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.7rem; white-space:nowrap; }.connection i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px var(--status-ok); }.connection.degraded { color:var(--status-escalated); }.connection.degraded i { background:var(--status-escalated); box-shadow:none; }
+.tools { justify-self:end; display:flex; align-items:center; gap:.8rem; }.connection { display:inline-flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.7rem; white-space:nowrap; }.connection i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px var(--status-ok); }.connection.degraded,.connection.silent { color:var(--status-escalated); }.connection.degraded i,.connection.silent i { background:var(--status-escalated); box-shadow:none; }
 .theme { display:flex; align-items:center; gap:.35rem; }.theme span { position:absolute; width:1px; height:1px; overflow:hidden; }.theme select { min-height:2rem; border:1px solid var(--line); border-radius:.45rem; background:var(--panel); color:var(--muted); padding:0 .45rem; font-size:.7rem; }
 .page { position:relative; width:min(1440px,100%); margin:auto; padding:2rem 1.25rem 4rem; }.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }.page-heading .eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.updated { color:var(--muted); font-size:.7rem; padding-bottom:.35rem; white-space:nowrap; }
 .ops-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); }

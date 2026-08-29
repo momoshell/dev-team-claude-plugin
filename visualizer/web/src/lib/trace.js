@@ -282,6 +282,30 @@ function artifactBlocks(envelopes) {
   return blocks
 }
 
+function artifactDocuments(envelopes) {
+  return [...envelopes].reverse().map((envelope) => {
+    const blocks = artifactBlocks([envelope])
+    return {
+      id: `${envelope?.role || 'agent'}-${envelope?.dispatch_seq ?? 'unknown'}`,
+      role: envelope?.role || 'agent',
+      dispatch_seq: envelope?.dispatch_seq ?? null,
+      status: envelope?.status ?? null,
+      blocks,
+    }
+  }).filter((document) => document.blocks.length)
+}
+
+function artifactPaths(envelopes) {
+  const paths = new Map()
+  for (const envelope of envelopes) {
+    for (const path of Array.isArray(envelope?.artifacts) ? envelope.artifacts : []) {
+      if (!paths.has(path)) paths.set(path, { path, reason: ARTIFACT_WHY, sources: [] })
+      paths.get(path).sources.push(`${envelope?.role || 'agent'} d${envelope?.dispatch_seq ?? '—'}`)
+    }
+  }
+  return [...paths.values()]
+}
+
 export function phasePanel(run = {}, { phase = null, events = [], returns = {} } = {}) {
   const phases = Array.isArray(run.phases) ? run.phases : []
   const found = phases.find((entry) => entry?.name === phase)
@@ -339,7 +363,8 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
     events: scopedEvents,
     artifacts: {
       blocks: artifactBlocks(envelopeList),
-      paths: envelopeList.flatMap((envelope) => (Array.isArray(envelope?.artifacts) ? envelope.artifacts : []).map((path) => ({ path, reason: ARTIFACT_WHY }))),
+      documents: artifactDocuments(envelopeList),
+      paths: artifactPaths(envelopeList),
     },
     pending: returns?.error ?? null,
   }
@@ -414,7 +439,7 @@ export function renderMarkdown(text) {
   }
   const flushList = () => {
     if (!list.length) return
-    blocks.push({ kind: 'list', items: list.map((item) => ({ runs: inlineRuns(item.text), ordered: item.ordered })) })
+    blocks.push({ kind: 'list', ordered: list[0].ordered, items: list.map((item) => ({ runs: inlineRuns(item.text) })) })
     list = []
   }
   const flushText = () => { flushParagraph(); flushList() }
@@ -442,6 +467,20 @@ export function renderMarkdown(text) {
       blocks.push({ kind: 'heading', level: heading[1].length, runs: inlineRuns(heading[2]) })
       continue
     }
+    const callout = line.match(/^\s*((?:BLOCKER|CLOSED|ALREADY HANDLED(?:\s+by\s+the\s+reference)?|RE-?PROVED|PREFERRED|ALTERNATIVE|WARNING|NOTE|VERDICT|ESCALATE)(?:\s*\([^)]*\))?)(?::|\.|\s+—)\s*(.*)$/i)
+    if (callout) {
+      flushText()
+      const key = callout[1].toUpperCase()
+      const tone = /BLOCKER|ESCALATE/.test(key) ? 'serious' : /CLOSED|HANDLED|PROVED/.test(key) ? 'ok' : /WARNING|VERDICT/.test(key) ? 'warn' : 'neutral'
+      blocks.push({ kind: 'callout', label: callout[1], tone, runs: inlineRuns(callout[2]) })
+      continue
+    }
+    const quote = line.match(/^\s*>\s?(.*)$/)
+    if (quote) {
+      flushText()
+      blocks.push({ kind: 'blockquote', runs: inlineRuns(quote[1]) })
+      continue
+    }
     if (/^\s*(?:---+|\*\*\*|___)\s*$/.test(line)) {
       flushText()
       blocks.push({ kind: 'rule' })
@@ -450,11 +489,14 @@ export function renderMarkdown(text) {
     const item = line.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)$/)
     if (item) {
       flushParagraph()
-      list.push({ text: item[1], ordered: /^\s*\d/.test(line) })
+      const ordered = /^\s*\d/.test(line)
+      if (list.length && list[0].ordered !== ordered) flushList()
+      list.push({ text: item[1], ordered })
       continue
     }
     if (list.length) flushList()
     paragraph.push(line)
+    flushParagraph()
   }
   if (code != null) {
     const block = { kind: 'code', text: code.lines.join('\n') }

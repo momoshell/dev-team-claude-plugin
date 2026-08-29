@@ -61,6 +61,58 @@ export function deriveStatus(run = {}, taskEnvelope = null) {
   return { key: 'unknown', word: 'status not recorded', tone: 'quiet', where: null, why: null }
 }
 
+function conciseAge(milliseconds) {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`
+  const hours = Math.floor(minutes / 60)
+  return `${hours}h ${minutes % 60}m`
+}
+
+export function runActivity(run = {}, now = Date.now()) {
+  if (!run?.running) return { key: 'settled', live: false, attention: false, heartbeat: heartbeatCell(run, now) }
+  const heartbeat = heartbeatCell(run, now)
+  if (heartbeat.dashed) {
+    return {
+      key: 'unverified', live: false, attention: true, heartbeat,
+      word: 'running · heartbeat unavailable', tone: 'serious',
+      why: 'The ledger says this session is running, but this feed does not provide a heartbeat, so live activity cannot be verified.',
+    }
+  }
+  if (heartbeat.stale) {
+    const quietFor = conciseAge(heartbeat.age_ms)
+    return {
+      key: 'silent', live: false, attention: true, heartbeat,
+      word: `silent ${quietFor}`, tone: 'serious',
+      why: `The session still says running, but its last heartbeat was ${quietFor} ago.`,
+    }
+  }
+  return { key: 'live', live: true, attention: false, heartbeat, word: 'live', tone: 'busy', why: null }
+}
+
+export function fleetActivity(runs = [], now = Date.now()) {
+  const summary = { live: 0, silent: 0, unverified: 0, open: 0 }
+  for (const run of Array.isArray(runs) ? runs : []) {
+    const activity = runActivity(run, now)
+    if (activity.key === 'live') summary.live += 1
+    if (activity.key === 'silent') summary.silent += 1
+    if (activity.key === 'unverified') summary.unverified += 1
+    if (run?.running) summary.open += 1
+  }
+  return summary
+}
+
+export function deriveDisplayStatus(run = {}, taskEnvelope = null, now = Date.now()) {
+  const recorded = deriveStatus(run, taskEnvelope)
+  if (!['running', 'queued'].includes(recorded.key)) return recorded
+  const activity = runActivity(run, now)
+  if (activity.key === 'silent' || activity.key === 'unverified') {
+    return { key: activity.key, word: activity.word, tone: activity.tone, where: 'heartbeat', why: activity.why }
+  }
+  return recorded
+}
+
 export function heartbeatCell(run = {}, now = Date.now()) {
   let age = finiteNumber(run?.heartbeat_age_ms)
   if (age == null && run?.last_heartbeat_at != null) {
@@ -69,8 +121,8 @@ export function heartbeatCell(run = {}, now = Date.now()) {
   }
   if (age == null) return absenceMark(run?.pending?.last_heartbeat_at)
   const seconds = Math.round(age / 1000)
-  if (age <= SILENT_AFTER_MS) return { text: `${seconds}s ago`, stale: false, dashed: false }
-  return { text: `silent ${seconds}s`, stale: true, dashed: false }
+  if (age <= SILENT_AFTER_MS) return { text: `${seconds}s ago`, stale: false, dashed: false, age_ms: age }
+  return { text: `silent ${seconds}s`, stale: true, dashed: false, age_ms: age }
 }
 
 export function tokenCell(run = {}) {

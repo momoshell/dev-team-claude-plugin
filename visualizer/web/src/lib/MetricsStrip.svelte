@@ -1,12 +1,20 @@
 <script>
   import { fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens } from './panels.js'
-  let { runs = [], envelopes = null, degraded = false } = $props()
+  import { fleetActivity } from './fleet.js'
+  let { runs = [], envelopes = null, degraded = false, now = Date.now() } = $props()
   let passRate = $derived(fleetPassRate(runs, { degraded, envelopes }))
   let duration = $derived(fleetMedianDuration(runs, { degraded, envelopes }))
   let phases = $derived(fleetPhasesPerRun(runs, { degraded, envelopes }))
   let escalation = $derived(fleetEscalationRate(runs, { degraded, envelopes }))
   let tokens = $derived(fleetTokens(runs))
-  let active = $derived.by(() => { let count = 0; for (const run of runs) if (run.running) count += 1; return count })
+  let activity = $derived(fleetActivity(runs, now))
+  let activityNote = $derived(activity.live
+    ? 'fresh heartbeat · refreshing every 3s'
+    : activity.silent
+      ? `${activity.silent} stale running record${activity.silent === 1 ? '' : 's'}`
+      : activity.unverified
+        ? `${activity.unverified} running record${activity.unverified === 1 ? '' : 's'} · heartbeat unavailable`
+        : 'factory is idle')
   function compact(value) { return Intl.NumberFormat(undefined, { notation:'compact', maximumFractionDigits:1 }).format(value) }
   function percent(value) { return value == null ? '—' : `${value.toFixed(1)}%` }
   function time(value) {
@@ -20,7 +28,7 @@
 
 <section class="metrics" aria-label="Factory summary">
   <article><span class="label">Tasks recorded</span><strong>{runs.length}</strong><small>ledger history</small></article>
-  <article class:live={active > 0}><span class="label">In progress</span><strong>{active}</strong><small>{active ? 'refreshing every 3s' : 'factory is idle'}</small></article>
+  <article class:live={activity.live > 0} class:stale={activity.live === 0 && (activity.silent > 0 || activity.unverified > 0)}><span class="label">Live now</span><strong>{activity.live}</strong><small>{activityNote}</small></article>
   <article class:pending={passRate.percent == null}><span class="label">Completion quality</span><strong>{passRate.percent == null ? '—' : `${passRate.percent}%`}</strong><small>{passRate.percent == null ? passRate.pending : 'successful finishes'}</small></article>
   <article class:pending={duration.ms == null}><span class="label">Typical duration</span><strong>{time(duration.ms)}</strong><small>median completed task</small></article>
   <article class:pending={phases.average == null}><span class="label">Workflow depth</span><strong>{phases.average == null ? '—' : phases.average.toFixed(1)}</strong><small>phases per task</small></article>
@@ -36,6 +44,7 @@ article::before { content:''; position:absolute; top:0; left:.8rem; right:.8rem;
 strong { font:600 1.45rem/1 var(--mono); letter-spacing:-.04em; }
 small { color:var(--muted); font-size:.65rem; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .live strong { color:var(--status-running); }.live::after { content:''; position:absolute; right:.75rem; top:.75rem; width:.4rem; height:.4rem; border-radius:50%; background:var(--status-running); box-shadow:0 0 8px var(--status-running); }
+.stale strong,.stale small { color:var(--status-escalated); }
 .pending strong { color:var(--muted); }
 @media (max-width: 1100px) { .metrics { grid-template-columns:repeat(3,minmax(9rem,1fr)); } }
 @media (max-width: 600px) { .metrics { display:flex; } article { flex:0 0 10.5rem; } }

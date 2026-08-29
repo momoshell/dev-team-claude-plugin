@@ -4,10 +4,11 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
-import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
+import { absenceMark, costCell, createSemaphore, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, reviewCell, runActivity, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
+import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -137,7 +138,7 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
   for (const name of ['fleetPassRate', 'fleetMedianDuration', 'fleetPhasesPerRun', 'fleetEscalationRate']) {
     assert.match(importLine, new RegExp(`\\b${name}\\b`))
   }
-  assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false \} = \$props\(\)/)
+  assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false, now = Date\.now\(\) \} = \$props\(\)/)
   for (const pattern of [/runs\.filter\(/, /runs\.reduce\(/, /runs\.map\(/, /\.sort\(/]) {
     assert.doesNotMatch(strip, pattern)
   }
@@ -147,6 +148,7 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
   for (const mount of mounts) {
     assert.match(mount, /envelopes=/)
     assert.match(mount, /degraded=/)
+    assert.match(mount, /\{now\}/)
   }
 })
 
@@ -582,6 +584,19 @@ test('fleet cells preserve honest absence and discriminate status evidence', () 
   assert.equal(reviewCell({ reviews: [{ verdict: 'changes-needed' }, { verdict: 'pass' }] }).bounces, 1)
 })
 
+test('running records require a fresh heartbeat before the UI calls them live', () => {
+  const now = Date.parse('2024-01-01T12:00:00.000Z')
+  const fresh = { status: 'running', running: true, phases: [{}], last_heartbeat_at: new Date(now - 4000).toISOString() }
+  const stale = { status: 'running', running: true, phases: [{}], last_heartbeat_at: new Date(now - 3_720_000).toISOString() }
+  const unverified = { status: 'running', running: true, phases: [{}], pending: { last_heartbeat_at: 'not measured' } }
+  assert.equal(runActivity(fresh, now).key, 'live')
+  assert.equal(runActivity(stale, now).key, 'silent')
+  assert.equal(runActivity(stale, now).word, 'silent 1h 2m')
+  assert.equal(runActivity(unverified, now).key, 'unverified')
+  assert.equal(deriveDisplayStatus(stale, null, now).key, 'silent')
+  assert.deepEqual(fleetActivity([fresh, stale, unverified], now), { live: 1, silent: 1, unverified: 1, open: 3 })
+})
+
 test('fleet view pins escalations and silent runs and probes only non-green slugged runs', () => {
   const now = Date.parse('2024-01-01T00:05:00.000Z')
   const base = { repo_slug: 'repo', status: 'ok', running: false, phases: [{ seq: 1 }], started_at: '2024-01-01T00:00:00.000Z', duration_ms: 1000, metrics: {}, pending: {}, reviews: null, gate_generations: null, triage: { reviewed_at: null } }
@@ -822,12 +837,39 @@ test('acceptEvidence joins lead evidence and reports missing evidence separately
 })
 
 test('renderMarkdown returns typed safe blocks and keeps markup literal', () => {
-  const blocks = renderMarkdown('# Title\n\n<script>alert(1)</script>\n\n- <img onerror=...>')
+  const blocks = renderMarkdown('# Title\n\n<script>alert(1)</script>\nnext paragraph\n\n1. first\n2. second\n\nBLOCKER (scope): operator action required\n\n- <img onerror=...>')
   assert.ok(blocks.some((block) => block.kind === 'heading'))
   assert.ok(blocks.some((block) => block.kind === 'list'))
+  assert.ok(blocks.some((block) => block.kind === 'list' && block.ordered === true))
+  assert.ok(blocks.some((block) => block.kind === 'callout' && block.tone === 'serious'))
+  assert.equal(blocks.filter((block) => block.kind === 'paragraph').length, 2)
   assert.match(JSON.stringify(blocks), /alert\(1\)/)
   assert.match(JSON.stringify(blocks), /onerror/)
   assert.equal(typeof blocks, 'object')
+})
+
+test('phase artifacts keep return narratives separate and deduplicate file evidence', () => {
+  const panel = phasePanel({ phases:[{ id:1, name:'planning' }] }, { phase:'planning', returns:{ envelopes:[
+    { role:'planner', dispatch_seq:1, status:'done', summary:'BLOCKER: first return', artifacts:['task/plan.md'] },
+    { role:'lead', dispatch_seq:3, status:'done', summary:'Escalate with context.', artifacts:['task/plan.md','returns/d3.json'] },
+  ] } })
+  assert.deepEqual(panel.artifacts.documents.map((document) => document.role), ['lead','planner'])
+  assert.equal(panel.artifacts.paths.length, 2)
+  assert.deepEqual(panel.artifacts.paths.find((artifact) => artifact.path === 'task/plan.md').sources, ['planner d1','lead d3'])
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  assert.match(source, /let documentOpen = \$state\(\{\}\)/)
+  assert.match(source, /ontoggle=\{\(event\) => rememberDocument\(event, document\)\}/)
+  assert.doesNotMatch(source, /open=\{index === 0\}/)
+})
+
+test('phase inspection explains factory checkpoints and suppresses empty gate counters', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhasePanel.svelte'), 'utf8')
+  assert.match(source, /Task completion recorded/)
+  assert.match(source, /No agent lane owned this checkpoint/)
+  assert.match(source, /No gate ran on this checkpoint/)
+  assert.match(source, /Validation evidence is attached to/)
+  assert.doesNotMatch(source, /gate verdict unavailable/)
+  assert.doesNotMatch(source, /unlinked.*lane/)
 })
 
 test('trace source tripwires keep route, role order, and server read-only', () => {
@@ -839,7 +881,7 @@ test('trace source tripwires keep route, role order, and server read-only', () =
   assert.ok(runDetail.includes("import PhasePanel from './PhasePanel.svelte'"))
   assert.ok(eventStream.includes('phaseFilterId(run, requested)'))
   assert.ok(eventStream.includes('untrack(() =>'))
-  for (const file of ['AcceptPanel.svelte', 'EnvelopeInspector.svelte', 'PhaseGantt.svelte', 'PhasePanel.svelte', 'ReviewPanel.svelte', 'RunDetail.svelte']) {
+  for (const file of ['AcceptPanel.svelte', 'EnvelopeInspector.svelte', 'MarkdownView.svelte', 'PhaseGantt.svelte', 'PhasePanel.svelte', 'ReviewPanel.svelte', 'RunDetail.svelte']) {
     assert.equal(readFileSync(join(root, 'web/src/lib', file), 'utf8').includes('{@html'), false)
   }
   assert.deepEqual([...ROLE_ORDER], ['planner', 'builder', 'reviewer', 'tech-lead', 'lead', 'driver'])
@@ -936,6 +978,73 @@ test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
   assert.ok(source.includes('--lane-gap:.6rem'))
   assert.ok(source.includes('left:calc(var(--identity-column) + var(--lane-gap))'))
   assert.ok(source.includes('right:0'))
+})
+
+test('factory step trace projects measured journal spans into their owning phase', () => {
+  const journalState = { payload:{ rows:[
+    { at:1100, stage:'build:r1' },
+    { at:1150, assign:'d1', role:'builder' },
+    { at:1200, stage:'gate:r1' },
+    { at:1400, stage_done:'gate:r1' },
+    { at:1700, envelope:'d1', role:'builder', status:'done' },
+    { at:1800, stage_done:'build:r1' },
+  ], channels:{ operational:null } }, error:'' }
+  const timeline = { blocks:[{ phase_id:7, name:'building', started_at:1000, ended_at:2000, x:.1, width:.8, status:'ok' }] }
+  const trace = factoryStepTrace(journalState, timeline, { now:2000 })
+  assert.equal(trace.unavailable, null)
+  assert.equal(trace.steps.length, 2)
+  assert.deepEqual(trace.steps.map((step) => [step.name, step.category.label, step.phase]), [
+    ['build · round 1', 'Agent work', 'building'],
+    ['gate · round 1', 'Validation', 'building'],
+  ])
+  assert.deepEqual(trace.steps.map((step) => [Number(step.x.toFixed(2)), Number(step.width.toFixed(2))]), [[.18,.56],[.26,.16]])
+  assert.equal(trace.steps[1].depth, 1)
+  assert.deepEqual(trace.steps.map((step) => step.handoffs.map((handoff) => [handoff.role, handoff.id])), [[['builder','d1']],[['builder','d1']]])
+  assert.deepEqual(
+    trace.steps[1].handoffs.map((handoff) => [Number(handoff.x.toFixed(2)), Number(handoff.width.toFixed(2))]),
+    [[.22,.44]],
+  )
+})
+
+test('factory step trace distinguishes unavailable telemetry from a measured empty journal', () => {
+  assert.match(factoryStepTrace({ payload:{ rows:[], degraded:true }, error:'journal missing' }, {}).unavailable, /journal missing/)
+  const empty = factoryStepTrace({ payload:{ rows:[], degraded:false }, error:'' }, {})
+  assert.equal(empty.unavailable, null)
+  assert.equal(empty.measured, false)
+  assert.deepEqual(factoryStepCategory('suite:cold'), { key:'validation', label:'Validation' })
+  assert.equal(factoryStepName('envelope-accept'), 'envelope accept')
+})
+
+test('task detail shares one journal read between waterfall and trajectory', () => {
+  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const trajectory = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
+  const waterfall = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.match(detail, /<PhaseGantt[^>]*\{journalState\}/)
+  assert.match(detail, /<Trajectory[^>]*\{journalState\}/)
+  assert.equal(trajectory.includes("fetch(`/api/journal"), false)
+  assert.match(waterfall, /Factory steps/)
+  assert.match(waterfall, /not inferred agent tool calls/)
+})
+
+test('factory checkpoint inspection stays local and highlights the related waterfall phase', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const inspect = source.match(/function inspectStep\(step\) \{([^}]*)\}/)?.[1] || ''
+  assert.equal(inspect.includes('onselectphase'), false)
+  assert.match(source, /class:step-linked=\{sameId\(block\.phase_id, linkedPhase\)\}/)
+  assert.match(source, /step\.handoffs/)
+  assert.match(source, /upper rail shows overlapping agent handoffs/)
+  assert.match(source, /open=\{factoryOpen\}/)
+  assert.match(source, /max-height:min\(38rem,65vh\)/)
+})
+
+test('task detail refreshes do not reset finished-run disclosures for an unchanged task id', () => {
+  const detail = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RunDetail.svelte'), 'utf8')
+  const trajectory = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/Trajectory.svelte'), 'utf8')
+  assert.match(detail, /target\.adw_id === detailKey/)
+  assert.match(detail, /key === journalKey/)
+  assert.ok(detail.indexOf('key === journalKey') < detail.indexOf('journalState = initialJournalState()'))
+  assert.match(detail, /if \(!shouldRead\(\{ running:run\.running \}\)\) return/)
+  assert.match(trajectory, /id === trajectoryRunKey/)
 })
 
 test('PhasePanel shows pending gate retries alongside valid checks', () => {

@@ -1,8 +1,8 @@
 <script>
-  import { deriveStatus, durationCell, gateCell, reviewCell, tokenCell } from './fleet.js'
+  import { deriveDisplayStatus, durationCell, gateCell, reviewCell, runActivity, tokenCell } from './fleet.js'
   import Pagination from './Pagination.svelte'
 
-  let { runs = [], envelopes = new Map(), onopen = () => {} } = $props()
+  let { runs = [], envelopes = new Map(), now = Date.now(), onopen = () => {} } = $props()
   let query = $state('')
   let state = $state('all')
   let tier = $state('all')
@@ -11,12 +11,13 @@
   let pageSize = $state(12)
 
   function envelopeFor(id) { return envelopes instanceof Map ? envelopes.get(id) : envelopes?.[id] }
-  function statusFor(run) { return deriveStatus(run, envelopeFor(run.adw_id)) }
+  function statusFor(run) { return deriveDisplayStatus(run, envelopeFor(run.adw_id), now) }
+  function activityFor(run) { return runActivity(run, now) }
   function matchesState(run) {
     const status = statusFor(run)
-    if (state === 'active') return run.running
+    if (state === 'active') return activityFor(run).live
     if (state === 'completed') return !run.running
-    if (state === 'attention') return ['escalated', 'fail', 'aborted'].includes(status.key)
+    if (state === 'attention') return ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(status.key)
     return true
   }
   function matchesQuery(run) {
@@ -40,9 +41,9 @@
   let tiers = $derived([...new Set(runs.map((run) => run.tier).filter(Boolean))].sort())
   let counts = $derived({
     all: runs.filter((run) => !run.triage?.reviewed_at).length,
-    active: runs.filter((run) => run.running && !run.triage?.reviewed_at).length,
+    active: runs.filter((run) => activityFor(run).live && !run.triage?.reviewed_at).length,
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
-    attention: runs.filter((run) => ['escalated', 'fail', 'aborted'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
+    attention: runs.filter((run) => ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
   })
   let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (tier === 'all' || run.tier === tier) && matchesQuery(run)))
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))
@@ -52,7 +53,7 @@
 
 <section class="tasks-panel">
   <div class="status-tabs" role="tablist" aria-label="Task status">
-    {#each [['all','All tasks'], ['active','Active'], ['completed','Completed'], ['attention','Needs attention']] as tab (tab[0])}
+    {#each [['all','All tasks'], ['active','Live now'], ['completed','Completed'], ['attention','Needs attention']] as tab (tab[0])}
       <button type="button" class:active={state === tab[0]} onclick={() => state = tab[0]} role="tab" aria-selected={state === tab[0]}>
         {tab[1]} <span>{counts[tab[0]]}</span>
       </button>
@@ -70,16 +71,17 @@
       <tbody>
         {#each paged as run (run.adw_id)}
           {@const status = statusFor(run)}
+          {@const activity = activityFor(run)}
           {@const duration = durationCell(run)}
           {@const gate = gateCell(run)}
           {@const review = reviewCell(run)}
           {@const tokens = tokenCell(run)}
-          <tr class:running={run.running} onclick={() => onopen(run)}>
+          <tr class:running={activity.live} class:silent={activity.attention && run.running} onclick={() => onopen(run)}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'} · <code>{String(run.adw_id || '').slice(0, 8)}</code></span></button></td>
             <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span><small>{run.tier || 'tier unavailable'}</small></td>
             <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small>{run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
             <td class="proof"><span class:muted={gate.dashed}>{gate.dashed ? 'No gate proof' : gate.text}</span><small class:muted={review.dashed}>{review.dashed ? 'No review yet' : review.text}</small></td>
-            <td class="time"><strong>{duration.dashed ? (run.running ? 'In progress' : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
+            <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
             <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads'}>{tokens.dashed ? 'Not measured' : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small></td>
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>
           </tr>
@@ -110,6 +112,7 @@
 th { padding:.65rem .85rem; color:var(--muted); font-size:.67rem; letter-spacing:.11em; text-transform:uppercase; text-align:left; font-weight:700; }
 td { padding:.8rem .85rem; border-top:1px solid color-mix(in srgb,var(--line) 78%,transparent); vertical-align:middle; }
 tbody tr { cursor:pointer; transition:background .15s ease; } tbody tr:hover { background:var(--accent-soft); } tbody tr.running { box-shadow:inset 2px 0 var(--status-running); }
+tbody tr.silent { box-shadow:inset 2px 0 var(--status-escalated); }
 .task-link { display:grid; gap:.2rem; border:0; background:transparent; text-align:left; cursor:pointer; padding:0; }.task-link strong { max-width:20rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.88rem; }
 .task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; } code { font-family:var(--mono); color:var(--muted); }
 .status { display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; white-space:nowrap; }.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent); }

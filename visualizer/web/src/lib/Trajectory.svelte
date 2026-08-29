@@ -1,28 +1,16 @@
 <script>
-  import { applyRead, clearFocus, initialJournalState, journalPulse, select, setRange, setReveal, shouldRead, trajectoryView } from './live.js'
+  import { clearFocus, initialJournalState, select, setRange, setReveal, trajectoryView } from './live.js'
   import { projectMarker } from './spans.js'
   import { assignmentPath, trajectoryRowStory, trajectorySummary } from './diagnostic-story.js'
   import { PANEL_REFRESH_MS } from './panels.js'
 
-  let { run } = $props()
-  let state = $state(initialJournalState())
+  let { run, journalState = initialJournalState() } = $props()
+  let state = $state({ selected:null, range:null, reveal:false })
   let now = $state(Date.now())
   let dragFrom = null
-
-  async function load() {
-    try {
-      const params = new URLSearchParams({ repo_slug: run.repo_slug || '', task_slug: run.goal || '', adw_id: run.adw_id || '' })
-      const response = await fetch(`/api/journal?${params}`)
-      const data = await response.json()
-      if (!response.ok) throw new Error(data.error || `request failed (${response.status})`)
-      state = applyRead(state, { ok: true, payload: data }, Date.now())
-    } catch (err) { state = applyRead(state, { ok: false, error: err.message }, Date.now()) }
-    now = Date.now()
-  }
-  $effect(() => { const id = run.adw_id; if (id) void load() })
-  $effect(() => journalPulse.subscribe(() => { if (shouldRead({ running: run.running })) void load() }))
-
-  let view = $derived(trajectoryView(state, { now, refresh_ms: run.running ? PANEL_REFRESH_MS : null }))
+  let trajectoryRunKey = ''
+  let sourceState = $derived({ ...journalState, selected:state.selected, range:state.range, reveal:state.reveal })
+  let view = $derived(trajectoryView(sourceState, { now, refresh_ms: run.running ? PANEL_REFRESH_MS : null }))
   let summary = $derived(trajectorySummary(view))
   let handoffs = $derived(assignmentPath(view))
   let driverStages = $derived(view.spans.filter((span) => span.family === 'stage' && span.actor === 'driver'))
@@ -36,6 +24,14 @@
     const episode = marker.outage_ms == null ? 'still open' : `${Math.round(marker.outage_ms / 1000)}s`
     return `${marker.event} — pane-manager substrate outage (${episode}); correlated across every lane in this batch ${marker.detail}`
   }
+  $effect(() => { const readAt = journalState.read_at; now = readAt ?? Date.now() })
+  $effect(() => {
+    const id = run.adw_id || ''
+    if (!id || id === trajectoryRunKey) return
+    trajectoryRunKey = id
+    state = { selected:null, range:null, reveal:false }
+  })
+
   function down(event) { dragFrom = view.origin + fraction(event) * view.total; state = setRange(state, null) }
   function up(event) {
     if (dragFrom == null) return

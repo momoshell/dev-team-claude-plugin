@@ -5,9 +5,7 @@ Dispatch a batch in this order, and record what refuses at each boundary:
 1. Create one worktree per lane.
 2. Boot with **one shared fence register for the whole batch**. Boot writes the
    other lanes' files, so every write lane must be known before any seat boots.
-3. Run the two-pass compile. Generate the `reads` list from the compiler's own
-   refusal text: **`coupled-source-unfenced`** and the reverse spare-ack refusal
-   **`stale-read-ack`**. A `where` path that does not exist refuses
+3. Ask the compiler with `--discover-reads <lane>` for the reads a lane must acknowledge, write those records into the register, and perform a **single compile**. If that compile still refuses, the batch refuses `reads-unresolved` rather than retrying. A hand-authored register with spare acknowledgements remains guarded by **`stale-read-ack`**, while the coupled-source-unfenced refusal names the records discovery returns. A `where` path that does not exist refuses
    **`missing-path`** (`scripts/factory/make-brief.mjs:112`, `COUPLED_SOURCE_UNFENCED = 'coupled-source-unfenced'`; `scripts/factory/make-brief.mjs:113`, `STALE_READ_ACK = 'stale-read-ack'`).
 4. Verify through **`validateScopeEntries`** and **`scopeMatcher`** for own-file
    coverage and zero sibling leaks.

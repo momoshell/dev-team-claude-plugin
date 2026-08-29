@@ -14,7 +14,7 @@ import { git, ROOT } from './helpers.mjs'
 import {
   ACCEPTANCE_GATE_BLOCK, BROAD_KEY_HIT_LIMIT, CONVENTIONS_BLOCK, DEFAULT_PROTECTED_PATHS,
   DIRECTED_BLOCK, DIRECTED_GATE_NOTE, DIRECTED_KEYS, HOSTILE_ENV_BLOCK, LADDER_BANDS, OPTIONAL_REQUEST_KEYS,
-  REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling,
+  REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
   MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
   readLadderBands, renderBrief, renderProposalBlock, resolveWriteSurface, validateAsk,
@@ -594,6 +594,113 @@ test('citation-only coupling is enforced by fences and can be acknowledged as re
     '--fences', acknowledgedPath, '--lane', 'own',
   ], 'acknowledged.md')
   assert.match(brief, /lib\/cites\.js · .*acknowledged read-only/)
+})
+
+test('--discover-reads names exactly the records the coupled refusal names', () => {
+  const root = fixture('discover-reads-names', { citingComment: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
+  }, null, 2)}\n`)
+  const requestPath = request(root, { where: ['lib/widget.mjs'] })
+  const refused = run(root, [
+    '--request', requestPath, '--checkout', root,
+    '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'refused.md'),
+  ])
+  assert.equal(refused.status, 2)
+  assert.match(refused.stderr, /coupled-source-unfenced/)
+  const discovered = run(root, [
+    '--discover-reads', 'own', '--request', requestPath, '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(discovered.status, 0, `${discovered.stderr}\n${discovered.stdout}`)
+  const records = JSON.parse(discovered.stdout)
+  assert.deepEqual(records, [{
+    file: 'lib/cites.js',
+    why: 'compiler reported a coupled source while compiling lane own',
+  }])
+  const prefix = 'coupled source(s) outside lane fence: '
+  const details = refused.stderr.slice(refused.stderr.indexOf(prefix) + prefix.length).split(' [reason:')[0]
+  const refusalFiles = details.split(';').map((part) => part.split('·')[0].trim()).filter(Boolean)
+  assert.deepEqual(records.map(({ file }) => file), refusalFiles)
+  assert.equal(records[0].why, 'compiler reported a coupled source while compiling lane own')
+})
+
+test('--discover-reads uses the lane brief task name for generated requests', () => {
+  const root = fixture('discover-reads-task-name')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'lane-a', files: ['lib/widget.mjs'] }],
+  }, null, 2)}\n`)
+  const requestPath = request(root, {
+    ask: 'lane a compile request',
+    where: ['lib/widget.mjs'],
+  }, 'lane-a.compile-request.json')
+  const discovered = run(root, [
+    '--discover-reads', 'lane-a', '--request', requestPath, '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(discovered.status, 0, `${discovered.stderr}\n${discovered.stdout}`)
+  assert.equal(discovered.stdout.trim(), '[]')
+  const compiled = run(root, [
+    '--request', requestPath, '--checkout', root, '--fences', fencesPath,
+    '--lane', 'lane-a', '--out', join(root, 'lane-a.brief.md'), '--force',
+  ])
+  assert.equal(compiled.status, 0, `${compiled.stderr}\n${compiled.stdout}`)
+})
+
+test('--discover-reads prints an empty register when every coupled source is fenced', () => {
+  const root = fixture('discover-reads-empty', { citingComment: true })
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/cites.js'] }],
+  }, null, 2)}\n`)
+  const result = run(root, [
+    '--discover-reads', 'own', '--request', request(root, { where: ['lib/widget.mjs'] }),
+    '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(result.status, 0, `${result.stderr}\n${result.stdout}`)
+  assert.equal(result.stdout.trim(), '[]')
+})
+
+test('--discover-reads refuses what the compile path refuses', () => {
+  const root = fixture('discover-reads-refusals')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'] }],
+  }, null, 2)}\n`)
+  const reason = (result) => result.stderr.match(/\[reason: ([a-z-]+)\]/)?.[1]
+  const missingRequest = request(root, { where: ['lib/nope.mjs'] }, 'missing.request.json')
+  const missingCompile = run(root, [
+    '--request', missingRequest, '--checkout', root, '--fences', fencesPath, '--lane', 'own', '--out', join(root, 'missing.md'),
+  ])
+  const missingDiscover = run(root, [
+    '--discover-reads', 'own', '--request', missingRequest, '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(missingCompile.status, 2)
+  assert.equal(missingDiscover.status, 2)
+  assert.equal(reason(missingCompile), 'missing-path')
+  assert.equal(reason(missingDiscover), reason(missingCompile))
+
+  const validRequest = request(root, { where: ['lib/widget.mjs'] })
+  const unknownCompile = run(root, [
+    '--request', validRequest, '--checkout', root, '--fences', fencesPath, '--lane', 'nope', '--out', join(root, 'unknown.md'),
+  ])
+  const unknownDiscover = run(root, [
+    '--discover-reads', 'nope', '--request', validRequest, '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(unknownCompile.status, 2)
+  assert.equal(unknownDiscover.status, 2)
+  assert.equal(reason(unknownCompile), 'unknown-lane')
+  assert.equal(reason(unknownDiscover), reason(unknownCompile))
+})
+
+test('the refusal and the discover mode share one derivation', () => {
+  const root = fixture('discover-reads-partition', { coupledCaller: true, citingComment: true })
+  const where = verifyWhere({ checkout: root, where: ['lib/widget.mjs'] })
+  const discovery = discoverTripwires({ checkout: root, files: where })
+  const writeSurface = resolveWriteSurface({
+    fences: [{ lane: 'own', files: ['lib/widget.mjs', 'lib/caller.mjs'], reads: [] }],
+    lane: 'own', where,
+  })
+  const acknowledged = readsToAcknowledge({ discovery, writeSurface })
+  const refusal = crossCheckCoupling({ discovery, writeSurface, enforce: false })
+  assert.ok(refusal.in_fence.includes('lib/caller.mjs'))
+  assert.deepEqual(acknowledged.map(({ file }) => file), refusal.unfenced)
 })
 
 test('baseline is measured, colour-neutral, and absent test scripts are unknown', () => {

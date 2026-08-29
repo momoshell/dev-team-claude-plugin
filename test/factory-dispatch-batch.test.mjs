@@ -157,6 +157,11 @@ function entry(lane, files, reads = []) { return { lane, files, reads } }
 function refusal(fn, reason) {
   assert.throws(fn, (err) => err instanceof BatchRefusal && err.reason === reason)
 }
+function compilerLane(args) {
+  const values = (args || []).map(String)
+  const flag = values.includes('--lane') ? '--lane' : '--discover-reads'
+  return values[values.indexOf(flag) + 1]
+}
 async function refusalAsync(fn, reason) {
   await assert.rejects(fn, (err) => err instanceof BatchRefusal && err.reason === reason)
 }
@@ -1330,7 +1335,8 @@ test('dispatchBatch compiles lanes concurrently and then boots and runs them', a
     },
     spawnAsync: async (call) => {
       spawned.push(call)
-      const lane = call.args[call.args.indexOf('--lane') + 1]
+      if (call.args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+      const lane = compilerLane(call.args)
       events.push(`start:${lane}`)
       started += 1
       if (started === 2) release()
@@ -1348,7 +1354,9 @@ test('dispatchBatch compiles lanes concurrently and then boots and runs them', a
   const firstEnd = events.findIndex((event) => event.startsWith('end:'))
   assert.equal(events.slice(0, firstEnd).filter((event) => event.startsWith('start:')).length, 2)
   const compileCalls = spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
-  assert.equal(compileCalls.length, 2)
+  assert.equal(compileCalls.length, 4)
+  assert.equal(compileCalls.filter(({ args }) => args.includes('--discover-reads')).length, 2)
+  assert.equal(compileCalls.filter(({ args }) => args.includes('--out')).length, 2)
   assert.equal(spawned.filter(({ args }) => args.includes('worktree')).length, 2)
   const runCalls = spawned.filter(({ args }) => args.includes('run'))
   assert.equal(runCalls.length, 2)
@@ -1393,6 +1401,7 @@ async function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
         return { status: 0, stdout: `${shaFor(target)}\n`, stderr: '' }
       }
       if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
+      if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
       if (args.includes('--measure-baseline')) {
         return { status: measurementStatus, stdout: '', stderr: measurementStatus === 0 ? '' : 'measurement failed' }
       }
@@ -1411,11 +1420,13 @@ async function fakedDispatch({ label, names, shaFor, measurementStatus = 0 }) {
     deps,
   })
   const measures = spawned.filter(({ args }) => (args || []).map(String).includes('--measure-baseline'))
-  const compiles = spawned.filter(({ args }) => {
+  const compilerCalls = spawned.filter(({ args }) => {
     const list = (args || []).map(String)
     return list.some((arg) => arg.endsWith('make-brief.mjs')) && list.includes('--request')
   })
-  return { report, spawned, measures, compiles }
+  const discovers = compilerCalls.filter(({ args }) => args.includes('--discover-reads'))
+  const compiles = compilerCalls.filter(({ args }) => args.includes('--out'))
+  return { report, spawned, measures, compiles, discovers }
 }
 
 async function dispatchFixture({
@@ -1431,6 +1442,7 @@ async function dispatchFixture({
   outcomes = {},
   ancestor = () => 0,
   spawnResult = () => ({ status: 0, stdout: '', stderr: '' }),
+  discover = () => ({ status: 0, stdout: '[]', stderr: '' }),
   spawnAsync = null,
   assertQuiet = null,
   headFor = null,
@@ -1486,9 +1498,18 @@ async function dispatchFixture({
         return headFor ? { status: 0, stdout: `${headFor(target)}\n`, stderr: '' } : { status: 1, stdout: '', stderr: '' }
       }
       if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
-      return spawnResult(args, call)
+      const result = args.includes('--discover-reads')
+        ? (typeof discover === 'function' ? discover(args, call) : discover)
+        : spawnResult(args, call)
+      if (call.background === true) return { ...(result || {}), pid: result?.pid ?? 43117 }
+      return result
     },
-    ...(spawnAsync ? { spawnAsync: (call) => { spawned.push(call); return spawnAsync(call) } } : {}),
+    ...(spawnAsync ? { spawnAsync: (call) => {
+      spawned.push(call)
+      const args = (call.args || []).map(String)
+      if (args.includes('--discover-reads')) return typeof discover === 'function' ? discover(args, call) : discover
+      return spawnAsync(call)
+    } } : {}),
     ...(assertQuiet ? { assertQuiet } : {}),
     log: (line) => logs.push(String(line)),
   }
@@ -1524,6 +1545,7 @@ test('a four-lane batch measures the baseline once', async () => {
   // Measured mechanism: four lanes cost four suite runs before this lane and one after.
   assert.equal(result.measures.length, 1)
   assert.equal(result.compiles.length, 4)
+  assert.equal(result.discovers.length, 4)
   assert.equal(result.compiles.every(({ args }) => (args || []).map(String).includes('--baseline')), true)
   assert.equal(result.report.lanes.length, 4)
 })
@@ -1536,6 +1558,7 @@ test('lanes on different commits fall back to measuring per lane', async () => {
   })
   assert.equal(result.measures.length, 0)
   assert.equal(result.compiles.length, 3)
+  assert.equal(result.discovers.length, 3)
   assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
   assert.equal(result.report.lanes.length, 3)
 })
@@ -1547,6 +1570,7 @@ test('a failed batch measurement never refuses the batch', async () => {
   })
   assert.equal(result.measures.length, 1)
   assert.equal(result.compiles.length, 3)
+  assert.equal(result.discovers.length, 3)
   assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
   assert.equal(result.report.lanes.length, 3)
 })
@@ -1555,6 +1579,7 @@ test('a single-lane batch takes no separate batch measurement', async () => {
   const result = await fakedDispatch({ label: 'single', names: ['lane-a'], shaFor: () => 'a'.repeat(40) })
   assert.equal(result.measures.length, 0)
   assert.equal(result.compiles.length, 1)
+  assert.equal(result.discovers.length, 1)
   assert.equal(result.compiles.every(({ args }) => !(args || []).map(String).includes('--baseline')), true)
   assert.equal(result.report.lanes.length, 1)
 })
@@ -1582,7 +1607,7 @@ test('three lanes start compiling before any compile returns', async () => {
     headFor: () => sha,
     runFlags: { baseline },
     spawnAsync: async (call) => {
-      const lane = call.args[call.args.indexOf('--lane') + 1]
+      const lane = compilerLane(call.args)
       events.push(`start:${lane}`)
       started += 1
       if (started === 3) release()
@@ -1608,7 +1633,7 @@ test('a refused compile names its lane and cannot be masked by a sibling success
     headFor: () => sha,
     runFlags: { baseline },
     spawnAsync: async (call) => {
-      const lane = call.args[call.args.indexOf('--lane') + 1]
+      const lane = compilerLane(call.args)
       started.push(lane)
       return lane === 'lane-a'
         ? { status: 1, stdout: '', stderr: 'compiler refused the lane without a named retry' }
@@ -1636,7 +1661,7 @@ test('at-risk compiles are serialised with a host quiet consult between them', a
     runFlags: { baseline },
     assertQuiet: () => { events.push('quiet') },
     spawnAsync: async (call) => {
-      const lane = call.args[call.args.indexOf('--lane') + 1]
+      const lane = compilerLane(call.args)
       events.push(`start:${lane}`)
       events.push(`end:${lane}`)
       return { status: 0, stdout: '', stderr: '' }
@@ -1661,7 +1686,7 @@ test('a matching-sha baseline with a different command is serialised as a fallba
     runFlags: { baseline },
     assertQuiet: () => { events.push('quiet') },
     spawnAsync: async (call) => {
-      const lane = call.args[call.args.indexOf('--lane') + 1]
+      const lane = compilerLane(call.args)
       events.push(`start:${lane}`)
       events.push(`end:${lane}`)
       return { status: 0, stdout: '', stderr: '' }
@@ -1685,8 +1710,11 @@ test('a matching sha and command cache hit skips measurement and reaches every c
     headFor: () => sha,
   })
   const measures = result.spawned.filter(({ args }) => args.includes('--measure-baseline'))
-  const compiles = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  const compilerCalls = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  const discovers = compilerCalls.filter(({ args }) => args.includes('--discover-reads'))
+  const compiles = compilerCalls.filter(({ args }) => args.includes('--out'))
   assert.equal(measures.length, 0)
+  assert.equal(discovers.length, 2)
   assert.equal(compiles.length, 2)
   assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] === entryPath), true)
 })
@@ -1744,8 +1772,12 @@ test('an operator baseline wins over a valid cache hit', async () => {
     headFor: () => sha,
     runFlags: { baseline: supplied },
   })
-  const compiles = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  const compilerCalls = result.spawned.filter(({ args }) => args.includes('--request') && args.some((arg) => String(arg).endsWith('make-brief.mjs')))
+  const discovers = compilerCalls.filter(({ args }) => args.includes('--discover-reads'))
+  const compiles = compilerCalls.filter(({ args }) => args.includes('--out'))
   assert.equal(result.spawned.filter(({ args }) => args.includes('--measure-baseline')).length, 0)
+  assert.equal(discovers.length, 2)
+  assert.equal(compiles.length, 2)
   assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] === supplied), true)
   assert.equal(compiles.every(({ args }) => args[args.indexOf('--baseline') + 1] !== cached), true)
 })
@@ -1929,31 +1961,134 @@ test('normalDeps supplies the house-style dependency surface', () => {
   assert.deepEqual(Object.keys(deps).sort(), ['assertQuiet', 'env', 'existsSync', 'home', 'log', 'readFileSync', 'readdirSync', 'spawn', 'spawnAsync'])
 })
 
-test('compileLane performs at most two passes and carries compiler reads into a retry register', async () => {
+test('compileLane discovers reads once and compiles once', async () => {
   const batch = makeBatch(['lane-a'])
   const out = join(root, 'compile-out')
   const register = join(root, 'register.json')
   put(register, JSON.stringify({ lanes: [entry('lane-a', ['crew/owned.mjs'], [])] }))
   const calls = []
-  let pass = 0
+  const why = 'compiler reported a coupled source while compiling lane lane-a'
+  const discovered = JSON.stringify([{ file: 'crew/x.mjs', why }])
   const result = await compileLane({
     lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
     fences: [entry('lane-a', ['crew/owned.mjs'], [])],
     deps: {
       spawn: (call) => {
         calls.push(call)
-        pass += 1
-        if (pass === 1) return { status: 2, stderr: 'brief: coupled source(s) outside lane fence: crew/x.mjs · X [reason: coupled-source-unfenced]' }
-        return { status: 0, stdout: '', stderr: '' }
+        return call.args.includes('--discover-reads')
+          ? { status: 0, stdout: discovered, stderr: '' }
+          : { status: 0, stdout: '', stderr: '' }
       },
       readFileSync: (path) => path.endsWith('.brief.md') ? briefWithTierAndShape : readFileSync(path, 'utf8'),
     },
   })
   assert.equal(calls.length, 2)
+  assert.equal(calls[0].args.includes('--discover-reads'), true)
+  assert.equal(calls[0].args.includes('--out'), false)
+  assert.equal(calls[1].args.includes('--out'), true)
   assert.equal(result.proposed, 'build')
   const retry = calls[1].args[calls[1].args.indexOf('--fences') + 1]
   assert.notEqual(retry, register)
-  assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads.map(({ file }) => file), ['crew/x.mjs'])
+  assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads, [{ file: 'crew/x.mjs', why }])
+})
+
+test('a compile that still refuses coupled sources after discovery refuses reads-unresolved', async () => {
+  const batch = makeBatch(['lane-a'])
+  const out = join(root, 'compile-still-refused-out')
+  const register = join(root, 'compile-still-refused-register.json')
+  put(register, JSON.stringify({ lanes: [entry('lane-a', ['crew/owned.mjs'], [])] }))
+  const calls = []
+  await assert.rejects(() => compileLane({
+    lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
+    fences: [entry('lane-a', ['crew/owned.mjs'], [])],
+    deps: {
+      spawn: (call) => {
+        calls.push(call)
+        return call.args.includes('--discover-reads')
+          ? { status: 0, stdout: '[]', stderr: '' }
+          : { status: 2, stdout: '', stderr: 'coupled source(s) outside lane fence: crew/x.mjs · X [reason: coupled-source-unfenced]' }
+      },
+    },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'reads-unresolved'
+    && error.message.includes('lane-a')
+    && error.message.includes('coupled-source-unfenced'))
+  assert.equal(calls.length, 2)
+  assert.equal(calls.some(({ args }) => args.includes('--out') && args.includes('--discover-reads')), false)
+})
+
+test('read discovery that prints no usable JSON refuses reads-unresolved', async () => {
+  for (const [index, stdout] of ['', '{"file":"x"}'].entries()) {
+    const batch = makeBatch([`lane-json-${index}`])
+    const lane = `lane-json-${index}`
+    const out = join(root, `compile-discovery-invalid-${index}-out`)
+    const register = join(root, `compile-discovery-invalid-${index}-register.json`)
+    put(register, JSON.stringify({ lanes: [entry(lane, ['crew/owned.mjs'], [])] }))
+    const calls = []
+    await assert.rejects(() => compileLane({
+      lane, batchDir: batch, laneDir: root, registerPath: register, outDir: out,
+      fences: [entry(lane, ['crew/owned.mjs'], [])],
+      deps: {
+        spawn: (call) => {
+          calls.push(call)
+          return call.args.includes('--discover-reads')
+            ? { status: 0, stdout, stderr: '' }
+            : { status: 0, stdout: '', stderr: '' }
+        },
+      },
+    }), (error) => error instanceof BatchRefusal && error.reason === 'reads-unresolved')
+    assert.equal(calls.length, 1)
+    assert.equal(calls[0].args.includes('--discover-reads'), true)
+  }
+})
+
+test('a hand-authored register that over-acknowledges still refuses stale-read-ack', async () => {
+  const batch = makeBatch(['lane-stale'])
+  const out = join(root, 'compile-stale-read-out')
+  const register = join(root, 'compile-stale-read-register.json')
+  put(register, JSON.stringify({ lanes: [entry('lane-stale', ['crew/owned.mjs'], [{ file: 'crew/stale.mjs', why: 'hand-authored' }])] }))
+  const calls = []
+  await assert.rejects(() => compileLane({
+    lane: 'lane-stale', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
+    fences: [entry('lane-stale', ['crew/owned.mjs'], [{ file: 'crew/stale.mjs', why: 'hand-authored' }])],
+    deps: {
+      spawn: (call) => {
+        calls.push(call)
+        return call.args.includes('--discover-reads')
+          ? { status: 0, stdout: '[]', stderr: '' }
+          : { status: 2, stdout: '', stderr: 'stale read acknowledgement(s): crew/stale.mjs [reason: stale-read-ack]' }
+      },
+    },
+  }), (error) => error instanceof BatchRefusal
+    && error.reason === 'reads-unresolved'
+    && error.message.includes('stale-read-ack'))
+  assert.equal(calls.length, 2)
+})
+
+test('the dispatch line and run.pid carry the spawned pid', async () => {
+  const previousHome = process.env.HOME
+  const home = join(root, 'dispatch-pid-home')
+  const lane = 'pid-lane'
+  const knownPid = 49231
+  process.env.HOME = home
+  try {
+    const result = await dispatchFixture({
+      label: 'pid', names: [lane], home,
+      spawnResult: (args, call) => {
+        if (args.includes('boot')) {
+          const checkout = args[args.indexOf('--checkout') + 1]
+          mkdirSync(dirname(crewJsonPath({ checkout, lane })), { recursive: true })
+        }
+        if (call.background === true) return { status: 0, stdout: '', stderr: '', pid: knownPid }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+    const line = result.logs.find((entry) => entry.includes(`lane=${lane}`) && entry.includes('crew_dir='))
+    assert.match(line, new RegExp(`run pid=${knownPid}\\b`))
+    assert.equal(readFileSync(join(result.report.lanes[0].crewDir, 'run.pid'), 'utf8'), `${knownPid}\n`)
+  } finally {
+    process.env.HOME = previousHome
+  }
 })
 
 test('staffing pair comes from a real compiled brief proposal block', async () => {
@@ -1984,7 +2119,9 @@ test('staffing pair comes from a real compiled brief proposal block', async () =
     lane: 'lane-a', batchDir: batch, laneDir: checkout, registerPath,
     outDir: join(root, 'staffing-real-compile-out'), fences: [entry('lane-a', ['src/owned.mjs', 'src/coupled.mjs'], [])],
     deps: {
-      spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+      spawn: (call) => call.args.includes('--discover-reads')
+        ? { status: 0, stdout: '[]', stderr: '' }
+        : { status: 0, stdout: '', stderr: '' },
       readFileSync: (path, encoding) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, encoding || 'utf8'),
     },
   })
@@ -2112,7 +2249,9 @@ async function compileBriefProposal(brief, label) {
     lane: 'lane-a', batchDir: batch, laneDir: root, registerPath: register, outDir: out,
     fences: [entry('lane-a', ['crew/owned.mjs'], [])],
     deps: {
-      spawn: () => ({ status: 0, stdout: '', stderr: '' }),
+      spawn: (call) => call.args.includes('--discover-reads')
+        ? { status: 0, stdout: '[]', stderr: '' }
+        : { status: 0, stdout: '', stderr: '' },
       readFileSync: (path) => String(path).endsWith('.brief.md') ? brief : readFileSync(path, 'utf8'),
     },
   })
@@ -2159,7 +2298,9 @@ test('the compiler receives exactly the four schema request keys', async () => {
     requests: { 'lane-a': requestFor('lane-a', { tier: 'judge', variant: 'scout' }) },
   })
   const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
-  assert.equal(compiles.length, 2)
+  assert.equal(compiles.length, 4)
+  assert.equal(compiles.filter(({ args }) => args.includes('--discover-reads')).length, 2)
+  assert.equal(compiles.filter(({ args }) => args.includes('--out')).length, 2)
   const expected = ['ask', 'done_means', 'out_of_scope', 'where']
   for (const call of compiles) {
     const path = call.args[call.args.indexOf('--request') + 1]
@@ -2175,7 +2316,9 @@ test('a dispatched depends_on lane still compiles with exactly the schema keys',
     outcomes: { 'lane-a': { status: 'done', details: { commit: 'a'.repeat(40) } } },
   })
   const compiles = result.spawned.filter(({ args }) => args.some((arg) => String(arg).endsWith('make-brief.mjs')))
-  assert.equal(compiles.length, 1)
+  assert.equal(compiles.length, 2)
+  assert.equal(compiles.filter(({ args }) => args.includes('--discover-reads')).length, 1)
+  assert.equal(compiles.filter(({ args }) => args.includes('--out')).length, 1)
   const path = compiles[0].args[compiles[0].args.indexOf('--request') + 1]
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort(), ['ask', 'done_means', 'out_of_scope', 'where'])
 })
@@ -2272,6 +2415,7 @@ test('a directed lane whose brief fails the parser refuses before boot', async (
         : readFileSync(path, encoding || 'utf8'),
       spawn: (call) => {
         spawned.push(call)
+        if ((call.args || []).includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
         return (call.args || []).includes('rev-parse')
           ? { status: 1, stdout: '', stderr: '' }
           : { status: 0, stdout: '', stderr: '' }

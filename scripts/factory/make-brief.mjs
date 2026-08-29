@@ -1085,24 +1085,14 @@ function normaliseCoupledEntries(discovery) {
   return [...entries.values()].sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
 }
 
-export function crossCheckCoupling({ discovery, writeSurface, enforce = true } = {}) {
+// One derivation, two callers (#737): the refusal below and --discover-reads both read the fence partition from here, so the dispatcher never re-implements what a coupled source is.
+function partitionCoupling({ discovery, writeSurface } = {}) {
   const coupled = normaliseCoupledEntries(discovery)
   const records = coupled == null
     ? null
     : coupled.map((entry) => ({ ...entry, status: 'no-fence' }))
   if (writeSurface?.basis !== 'fences') {
-    // compileIntakeBrief supplies `fences: null, lane: null`: its write
-    // surface is authored `where`, so no fence exists for coupling to
-    // contradict. Rendering is informative; refusing would break #52's
-    // shipped intake loop.
-    return {
-      enforced: false,
-      coupled: records,
-      in_fence: [],
-      acknowledged: [],
-      unfenced: [],
-      stale: [],
-    }
+    return { records, inFence: [], acknowledged: [], unfenced: [], stale: [] }
   }
 
   const fenceFiles = new Set(Array.isArray(writeSurface.files)
@@ -1138,6 +1128,26 @@ export function crossCheckCoupling({ discovery, writeSurface, enforce = true } =
     .filter((read) => !coupledOutsideFence.has(read.file))
     .sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
 
+  return { records, inFence, acknowledged, unfenced, stale }
+}
+
+export function crossCheckCoupling({ discovery, writeSurface, enforce = true } = {}) {
+  const { records, inFence, acknowledged, unfenced, stale } = partitionCoupling({ discovery, writeSurface })
+  if (writeSurface?.basis !== 'fences') {
+    // compileIntakeBrief supplies `fences: null, lane: null`: its write
+    // surface is authored `where`, so no fence exists for coupling to
+    // contradict. Rendering is informative; refusing would break #52's
+    // shipped intake loop.
+    return {
+      enforced: false,
+      coupled: records,
+      in_fence: [],
+      acknowledged: [],
+      unfenced: [],
+      stale: [],
+    }
+  }
+
   const result = {
     enforced: enforce !== false,
     coupled: records == null ? null : [
@@ -1160,6 +1170,17 @@ export function crossCheckCoupling({ discovery, writeSurface, enforce = true } =
     refuseUsage(`coupled source(s) outside lane fence: ${details}`, COUPLED_SOURCE_UNFENCED)
   }
   return result
+}
+
+export function coupledReadWhy(lane) {
+  return `compiler reported a coupled source while compiling lane ${lane}`
+}
+
+// The reads a lane must acknowledge: exactly the records the
+// coupled-source-unfenced refusal names, as {file, why} register entries.
+export function readsToAcknowledge({ discovery, writeSurface } = {}) {
+  const { unfenced } = partitionCoupling({ discovery, writeSurface })
+  return unfenced.map(({ file }) => ({ file, why: coupledReadWhy(writeSurface?.lane ?? null) }))
 }
 
 function normaliseProtectedPaths(protectedPaths) {
@@ -1819,7 +1840,7 @@ export function renderBrief(gathered) {
 function parseCliArgs(argv) {
   const flags = {}
   const positional = []
-  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline'])
+  const valueFlags = new Set(['request', 'checkout', 'out', 'fences', 'protected', 'lane', 'profile', 'baseline', 'measure-baseline', 'discover-reads'])
   const booleanFlags = new Set(['force', 'require-profile'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
@@ -1970,10 +1991,32 @@ function compile(flags) {
   return 0
 }
 
+// --discover-reads <lane>: the same derivation the coupled-source-unfenced
+// refusal uses, printed instead of refused, so the dispatcher can acknowledge
+// the reads and compile ONCE (#737). It refuses what the compile path refuses.
+function discoverReadsOnly(flags) {
+  const lane = flags['discover-reads']
+  if (flags.lane != null || flags.out != null || flags.force === true || flags['measure-baseline'] != null) {
+    refuseUsage('--discover-reads cannot be combined with --lane, --out, --force or --measure-baseline', MISSING_LINE)
+  }
+  if (typeof flags.request !== 'string' || !flags.request) refuseUsage('--request <file> is required', MISSING_LINE)
+  const request = readRequestFile(flags.request)
+  validateRequest(request, { taskName: parseTaskStem(`${lane}.brief.md`) })
+  const checkout = gitRoot(flags.checkout || process.cwd())
+  const discoverWhere = verifyWhere({ checkout, where: request.where })
+  const discoverCreates = verifyCreates({ checkout, creates: request.creates ?? [] })
+  const discovery = discoverTripwires({ checkout, files: discoverWhere })
+  const fences = gatherFences({ fencesPath: flags.fences, checkout })
+  const writeSurface = resolveWriteSurface({ fences, lane, where: discoverWhere, creates: discoverCreates })
+  const records = readsToAcknowledge({ discovery, writeSurface })
+  process.stdout.write(`${JSON.stringify(records)}\n`)
+  return 0
+}
+
 export function main(argv) {
   try {
     const flags = parseCliArgs(argv)
-    return compile(flags)
+    return flags['discover-reads'] != null ? discoverReadsOnly(flags) : compile(flags)
   } catch (err) {
     if (err instanceof BriefUsageError) {
       process.stderr.write(`${err.message} [reason: ${err.reason}]\n`)

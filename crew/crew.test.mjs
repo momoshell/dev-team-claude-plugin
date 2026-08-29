@@ -3472,21 +3472,168 @@ test('teardownCmd exits non-zero without proof of death or without a positive re
 
 test('awaitSeatsReady returns immediately without probing an all-headless crew', () => {
   const cmux = callCounter()
-  awaitSeatsReady({ members: { lead: { surface_id: null }, builder: { surface_id: null } } }, 1, null, { cmux })
+  awaitSeatsReady({ members: { lead: { surface_id: null }, builder: { surface_id: null } } }, 'warm', null, { cmux })
   assert.equal(cmux.calls.length, 0)
 })
 
 test('awaitSeatsReady tags every seat still pending when readiness times out', () => {
   let clock = 0
   assert.throws(
-    () => awaitSeatsReady({ members: { builder: { surface_id: 'surface-builder' }, reviewer: { surface_id: 'surface-reviewer' } } }, 0, null, {
-      cmux: () => ({ ok: false, stdout: '' }), now: () => ++clock, sleep: () => {},
+    () => awaitSeatsReady({ members: { builder: { surface_id: 'surface-builder' }, reviewer: { surface_id: 'surface-reviewer' } } }, 'fresh', null, {
+      cmux: () => ({ ok: false, stdout: '' }), now: () => { clock += 181_000; return clock }, sleep: () => {},
     }),
     (err) => {
       assert.deepEqual(err.roles, ['builder', 'reviewer'])
+      assert.equal(err.mode, 'fresh')
+      assert.deepEqual(err.signals, { builder: null, reviewer: null })
+      assert.match(err.message, /mode: fresh/)
+      assert.match(err.message, /builder \(last signal: none\)/)
+      assert.match(err.message, /reviewer \(last signal: none\)/)
       return true
     },
   )
+})
+
+test('awaitSeatsReady fresh mode journals chrome once but refuses it', () => {
+  const rows = []
+  const times = [0, 1, 181_000]
+  const crew = { members: { planner: { surface_id: 'surface-planner' } } }
+  assert.throws(
+    () => awaitSeatsReady(crew, 'fresh', '/journal.jsonl', {
+      cmux: () => ({ ok: true, stdout: 'sub-agent ready\\n❯ ' }),
+      logLine: (_path, row) => rows.push(row),
+      now: () => times.shift() ?? 181_000,
+      sleep: () => {},
+    }),
+    (err) => err.mode === 'fresh' && err.roles.join(',') === 'planner',
+  )
+  assert.equal(rows.length, 1)
+  assert.deepEqual({ role: rows[0].role, signal: rows[0].signal, mode: rows[0].mode, accepted: rows[0].accepted }, {
+    role: 'planner', signal: 'chrome', mode: 'fresh', accepted: false,
+  })
+})
+
+test('awaitSeatsReady fresh mode clears on a role-anchored ready reply', () => {
+  const rows = []
+  awaitSeatsReady({ members: { planner: { surface_id: 'surface-planner' } } }, 'fresh', '/journal.jsonl', {
+    cmux: () => ({ ok: true, stdout: 'ready: planner\\n' }),
+    logLine: (_path, row) => rows.push(row),
+  })
+  assert.deepEqual({ role: rows[0].role, signal: rows[0].signal, mode: rows[0].mode, accepted: rows[0].accepted }, {
+    role: 'planner', signal: 'ready-reply', mode: 'fresh', accepted: true,
+  })
+})
+
+test('awaitSeatsReady fresh mode does not accept an echoed boot brief', () => {
+  const rows = []
+  assert.throws(
+    () => awaitSeatsReady({ members: { planner: { surface_id: 'surface-planner' } } }, 'fresh', '/journal.jsonl', {
+      cmux: () => ({ ok: true, stdout: 'Crew for task t. Task dir /x/task. Read your role in the system prompt, reply exactly ready: your-role, then wait.' }),
+      logLine: (_path, row) => rows.push(row),
+      now: (() => { const times = [0, 180_001]; return () => times.shift() ?? 180_001 })(),
+      sleep: () => {},
+    }),
+    /planner \(last signal: none\)/,
+  )
+  assert.equal(rows.length, 0)
+})
+
+test('awaitSeatsReady recognizes a pi status line under a fresh ready reply', () => {
+  const rows = []
+  awaitSeatsReady({ members: { reviewer: { surface_id: 'surface-reviewer' } } }, 'fresh', '/journal.jsonl', {
+    cmux: () => ({ ok: true, stdout: '$0.000 (sub) · openai-codex/gpt-5.6 • high\\nready: reviewer\\n' }),
+    logLine: (_path, row) => rows.push(row),
+  })
+  assert.deepEqual({ role: rows[0].role, signal: rows[0].signal, mode: rows[0].mode, accepted: rows[0].accepted }, {
+    role: 'reviewer', signal: 'ready-reply', mode: 'fresh', accepted: true,
+  })
+})
+
+test('awaitSeatsReady warm mode accepts chrome when the ready reply has scrolled away', () => {
+  const rows = []
+  awaitSeatsReady({ members: { planner: { surface_id: 'surface-planner' } } }, 'warm', '/journal.jsonl', {
+    cmux: () => ({ ok: true, stdout: 'sub-agent ready\\n❯ ' }),
+    logLine: (_path, row) => rows.push(row),
+  })
+  assert.deepEqual({ role: rows[0].role, signal: rows[0].signal, mode: rows[0].mode, accepted: rows[0].accepted }, {
+    role: 'planner', signal: 'chrome', mode: 'warm', accepted: true,
+  })
+})
+
+test('awaitSeatsReady uses the named fresh and warm timeout budgets', () => {
+  for (const [mode, timeout] of [['fresh', 180_000], ['warm', 120_000]]) {
+    const times = [0, timeout + 1]
+    assert.throws(
+      () => awaitSeatsReady({ members: { planner: { surface_id: 'surface-planner' } } }, mode, null, {
+        cmux: () => ({ ok: false, stdout: '' }), now: () => times.shift() ?? timeout + 1, sleep: () => {},
+      }),
+      (err) => err.mode === mode && err.message.includes(`within ${timeout / 1000}s`),
+    )
+  }
+})
+
+test('awaitSeatsReady refusal names each pending seat signal', () => {
+  const times = [0, 60_000, 180_001]
+  let polls = 0
+  assert.throws(
+    () => awaitSeatsReady({ members: {
+      planner: { surface_id: 'surface-planner' }, reviewer: { surface_id: 'surface-reviewer' },
+    } }, 'fresh', null, {
+      cmux: (_cmd, args) => args.includes('surface-planner')
+        ? { ok: true, stdout: 'sub-agent ready\\n❯ ' } : { ok: false, stdout: '' },
+      now: () => times.shift() ?? 180_001,
+      sleep: () => { polls += 1 },
+    }),
+    (err) => {
+      assert.equal(err.mode, 'fresh')
+      assert.deepEqual(err.roles, ['planner', 'reviewer'])
+      assert.deepEqual(err.signals, { planner: 'chrome', reviewer: null })
+      assert.match(err.message, /planner \(last signal: chrome\)/)
+      assert.match(err.message, /reviewer \(last signal: none\)/)
+      return polls === 1
+    },
+  )
+})
+
+test('awaitSeatsReady rejects unknown and absent modes explicitly', () => {
+  const crew = { members: { planner: { surface_id: 'surface-planner' } } }
+  for (const mode of ['bogus', undefined]) {
+    assert.throws(() => awaitSeatsReady(crew, mode, null, { cmux: callCounter() }), /readiness mode/)
+  }
+})
+
+test('bootCmd and runCmd pass explicit fresh and warm readiness modes', async () => {
+  const home = scratchDir('crew-ready-mode-home-')
+  const { root: checkoutRoot, checkout } = testCheckout('crew-ready-mode-checkout-')
+  const brief = join(home, 'brief.md')
+  const completionLog = join(home, 'completions.jsonl')
+  writeFileSync(brief, '# brief\\n')
+  execSync('git init -q', { cwd: checkout })
+  const bootModes = []; const runModes = []
+  const previousStdoutWrite = process.stdout.write
+  const previousExitCode = process.exitCode
+  try {
+    await withCompletionEnv(home, completionLog, async () => {
+      process.stdout.write = () => true
+      await bootCmd(
+        { task: 'ready-modes', checkout, tier: 'build', 'headless-all': true, 'claude-bin': process.execPath },
+        { cmux: callCounter(), tree: callCounter(), renameTab: callCounter(), awaitSeatsReady: (_crew, mode) => bootModes.push(mode) },
+      )
+      runCmd(
+        { task: 'ready-modes', checkout, 'brief-file': brief, keep: true },
+        {
+          drive: () => ({ status: 'done', summary: '', artifacts: [], details: { commit: null } }),
+          awaitSeatsReady: (_crew, mode) => runModes.push(mode),
+        },
+      )
+    })
+    assert.deepEqual(bootModes, ['fresh'])
+    assert.deepEqual(runModes, ['warm'])
+  } finally {
+    process.stdout.write = previousStdoutWrite
+    process.exitCode = previousExitCode
+    rmSync(home, { recursive: true, force: true }); rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('seatLiveness reports headless and preserves pane probe values', () => {

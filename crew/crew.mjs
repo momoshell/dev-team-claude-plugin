@@ -1441,6 +1441,7 @@ export async function bootCmd(args, deps = {}) {
     openLedger: openLedgerDep = null, existsSync: existsSyncDep = null,
     loadavg: loadavgDep = null, cpus: cpusDep = null,
     probeEndpoint: probeEndpointDep = null, register: registerDep = null,
+    awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady,
   } = deps
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
@@ -1711,6 +1712,11 @@ export async function bootCmd(args, deps = {}) {
     ...(memory.record ? { memory: memory.record } : {}),
     ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
   })
+  // The seats this boot just launched carry the brief in their argv, so their own
+  // ready reply is both due and the only evidence that counts (#741). Gate HERE,
+  // after crew.json is on disk: a boot killed at this line leaves a workspace a
+  // `crew teardown --task` can still find and close.
+  awaitSeatsReadyDep(crew, 'fresh', join(paths.dir, 'journal.jsonl'))
   process.stdout.write(`${JSON.stringify({ workspace_id: workspace ? workspace.id : null, members, task_dir: paths.taskDir, crew_json: join(paths.dir, 'crew.json') })}\n`)
 }
 
@@ -1798,7 +1804,7 @@ export function runCmd(args, deps = {}) {
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
   assertCtxSources(variant, { validationLane })
-  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion } = deps
+  const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
@@ -1881,13 +1887,14 @@ export function runCmd(args, deps = {}) {
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
   }
-  // Seats are TUI processes and the first assignment must not race their
-  // boot: characters typed into a pty before the TUI grabs it are silently
-  // swallowed (live-hit 2026-08-13 — the leading chunk of the first
-  // assignment vanished on both crews). Gate on each seat actually replying
-  // ready (or, as a fallback, rendering agent chrome) before driving.
+  // Run never launches a seat, so chrome is the right evidence HERE; the fresh
+  // gate now lives in boot. Seats are TUI processes and the first assignment
+  // must not race their boot: characters typed into a pty before the TUI grabs
+  // it are silently swallowed (live-hit 2026-08-13 — the leading chunk of the
+  // first assignment vanished on both crews). Gate on each seat actually
+  // replying ready (or, as a fallback, rendering agent chrome) before driving.
   try {
-    awaitSeatsReady(crew, 120, journal)
+    awaitSeatsReadyDep(crew, 'warm', journal)
   } catch (err) {
     for (const role of err.roles || []) {
       noteRunlessCellFailure({ taskSlug, role, kind: 'seat-not-ready', err, member: crew.members[role] })
@@ -2040,7 +2047,27 @@ export function seatReadySignal(screen, role) {
   return READY_CHROME.some((re) => re.test(s)) ? 'chrome' : null
 }
 
-export function awaitSeatsReady(crew, timeoutS = 120, journal = null, deps = {}) {
+// A seat launched with the boot brief in its argv is judged in `fresh` mode and
+// ONLY its own ready reply clears it: READY_CHROME's claude pattern includes the
+// bare `❯`, which the SHELL paints before the agent process exists, so chrome on a
+// fresh pane is evidence of a prompt, not of a seat (#741 — 81 of 85 seat-ready
+// rows on 2026-08-29 were chrome, inside 50ms of boot, and two lanes had their
+// first assignment typed into a pane no agent was reading yet). A re-run against
+// a long-lived workspace is judged in `warm` mode, where the reply has scrolled away
+// and chrome is the only evidence left. The mode is the CALLER's to state - boot
+// launched the seats, run did not - and is never inferred from the screen.
+export const SEAT_READY_MODES = Object.freeze(['fresh', 'warm'])
+// A fresh reply arrives tens of seconds after launch on a loaded host, and a false
+// negative now kills a boot instead of swallowing an assignment; warm keeps the
+// 120s it has always had.
+export const SEAT_READY_FRESH_TIMEOUT_S = 180
+export const SEAT_READY_WARM_TIMEOUT_S = 120
+
+export function awaitSeatsReady(crew, mode, journal = null, deps = {}) {
+  if (mode !== 'fresh' && mode !== 'warm') {
+    throw new Error(`awaitSeatsReady needs an explicit readiness mode (${SEAT_READY_MODES.join(' or ')}), got ${JSON.stringify(mode ?? null)}`)
+  }
+  const timeoutS = mode === 'fresh' ? SEAT_READY_FRESH_TIMEOUT_S : SEAT_READY_WARM_TIMEOUT_S
   const cmuxFn = deps.cmux || cmux
   const logLineFn = deps.logLine || logLine
   const now = deps.now || (() => Date.now())
@@ -2050,19 +2077,30 @@ export function awaitSeatsReady(crew, timeoutS = 120, journal = null, deps = {})
   })
   const deadline = now() + timeoutS * 1000
   const pending = new Set(Object.keys(crew.members).filter((role) => crew.members[role].surface_id))
+  const lastSignal = new Map()
+  const recorded = new Set()
   while (pending.size > 0) {
     for (const role of [...pending]) {
       const res = cmuxFn('read-screen', ['--surface', crew.members[role].surface_id, '--lines', '40'])
-      const sig = res.ok && seatReadySignal(res.stdout, role)
-      if (sig) {
-        pending.delete(role)
-        if (journal) logLineFn(journal, { at: new Date().toISOString(), event: 'seat-ready', role, signal: sig })
+      const sig = (res.ok && seatReadySignal(res.stdout, role)) || null
+      if (!sig) continue
+      lastSignal.set(role, sig)
+      const accepted = sig === 'ready-reply' || (mode === 'warm' && sig === 'chrome')
+      // One row per seat per distinct signal: a rejected chrome match repeats on
+      // every poll and the journal is evidence, not a tape of the screen.
+      if (journal && !recorded.has(`${role}:${sig}`)) {
+        recorded.add(`${role}:${sig}`)
+        logLineFn(journal, { at: new Date().toISOString(), event: 'seat-ready', role, signal: sig, mode, accepted })
       }
+      if (accepted) pending.delete(role)
     }
     if (pending.size === 0) break
     if (now() > deadline) {
-      const err = new Error(`seats never became ready within ${timeoutS}s: ${[...pending].join(', ')}`)
+      const detail = [...pending].map((role) => `${role} (last signal: ${lastSignal.get(role) || 'none'})`).join(', ')
+      const err = new Error(`seats never became ready within ${timeoutS}s (mode: ${mode}): ${detail}`)
       err.roles = [...pending]
+      err.mode = mode
+      err.signals = Object.fromEntries([...pending].map((role) => [role, lastSignal.get(role) || null]))
       throw err
     }
     sleep(2000)

@@ -1830,6 +1830,27 @@ export function coldPathCollision(path, names = []) {
   return ''
 }
 
+// PURE. The WHOLE guarded name occurring in `path`, case-insensitively, or '' when
+// none does. This is the ROOT rule, and it is deliberately weaker than
+// coldPathCollision's sliding window: measured 2026-08-29 on b317-drivergone, the
+// window rule applied to the ROOT rejected every macOS temp root, because `riv`
+// is a window of d-riv-ergone and every macOS temp root canonicalises under
+// /private — /private/tmp and /private/var/folders alike — so a green suite
+// escalated at its last step on an ordinary developer Mac. A root is dangerous
+// only when a test regex built from a guarded name could match it, and that needs
+// the WHOLE name; a three-character coincidence with a system directory cannot.
+// The window rule stays where it was tuned: the random LEAF. Names shorter than
+// COLD_PATH_MIN_SHARED are ignored here for the reason coldGuardNames drops them.
+export function coldRootCollision(path, names = []) {
+  const haystack = String(path).toLowerCase()
+  for (const raw of Array.isArray(names) ? names : []) {
+    const name = String(raw || '').trim().toLowerCase()
+    if (name.length < COLD_PATH_MIN_SHARED) continue
+    if (haystack.includes(name)) return name
+  }
+  return ''
+}
+
 // The names a cold checkout must share nothing with: the directory the lane built
 // in (always dt-<lane> for a dispatched lane) and the repository that worktree
 // belongs to. In a LINKED worktree those two differ, and the repository half is the
@@ -1852,15 +1873,17 @@ export function coldPathRoots(deps = {}) {
   return [tmpdir(), ...COLD_PATH_FALLBACK_ROOTS]
 }
 
-// Cut a path no test regex can match by accident. Randomness alone is not enough:
-// hex digits collide with lane names like b304-coldverify, so a candidate sharing
-// a substring with a guarded name is DISCARDED and redrawn. Each root is CANONICALIZED
-// first and the candidate is built under the canonical form, because the canonical
-// path is the one the process actually enters — a neutral-looking symlink pointing
-// into a colliding directory would otherwise pass. A root whose own canonical path
-// already collides can never yield a neutral candidate, so it is rejected BEFORE any
-// redraw rather than after burning all of them. Exhaustion of every root is never
-// silent and never falls open: it THROWS.
+// Cut a path no test regex can match by accident: coldPathCollision measures the random
+// LEAF the generator mints with its 3-character-window rule, while coldRootCollision
+// measures the canonical ROOT by WHOLE guarded names (see its comment for why).
+// Randomness alone is not enough: hex digits collide with lane names like b304-coldverify,
+// so a candidate sharing a substring with a guarded name is DISCARDED and redrawn. Each
+// root is CANONICALIZED first and the candidate is built under the canonical form, because
+// the canonical path is the one the process actually enters — a neutral-looking symlink
+// pointing into a colliding directory would otherwise pass. A root whose own canonical
+// path already collides can never yield a neutral candidate, so it is rejected BEFORE any
+// redraw rather than after burning all of them. Exhaustion of every root is never silent
+// and never falls open: it THROWS.
 export function neutralColdPath(names = [], deps = {}) {
   const rand = deps.rand || (() => randomUUID().replaceAll('-', ''))
   const attempts = deps.attempts || COLD_PATH_ATTEMPTS
@@ -1869,13 +1892,13 @@ export function neutralColdPath(names = [], deps = {}) {
   for (const raw of coldPathRoots(deps)) {
     let root
     try { root = String(realpath(String(raw))) } catch (err) { rejected.push(`${raw}: unresolvable (${err.message})`); continue }
-    const rootHit = coldPathCollision(root, names)
-    if (rootHit) { rejected.push(`${root}: the root itself shares ${JSON.stringify(rootHit)}`); continue }
+    const rootHit = coldRootCollision(root, names)
+    if (rootHit) { rejected.push(`${root}: the root itself contains the guarded name ${JSON.stringify(rootHit)}`); continue }
     let last = ''
     for (let i = 0; i < attempts; i += 1) {
-      const candidate = join(root, String(rand(i)))
-      last = coldPathCollision(candidate, names)
-      if (!last) return candidate
+      const leaf = String(rand(i))
+      last = coldPathCollision(leaf, names)
+      if (!last) return join(root, leaf)
     }
     rejected.push(`${root}: ${attempts} candidates all shared ${JSON.stringify(last)}`)
   }

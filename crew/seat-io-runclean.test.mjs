@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
-  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
@@ -670,6 +670,21 @@ test('coldPathCollision reports shared case-insensitive windows only', () => {
   assert.equal(coldPathCollision('/zz/9f9f9f', ['b281-spawnbudget']), '')
 })
 
+test('neutralColdPath accepts a temp root sharing only a window with a guarded name', () => {
+  const names = ['b317-drivergone', 'dt-b317-drivergone', 'dev-team-claude-plugin']
+  const path = neutralColdPath(names, { tmpRoots: ['/private/tmp'], realpath: (p) => p, rand: () => 'a1b2c3', attempts: 4 })
+  assert.equal(path, '/private/tmp/a1b2c3')
+  assert.equal(coldRootCollision('/private/tmp', names), '')
+  assert.equal(coldPathCollision('/private/tmp', names), 'riv')
+})
+
+test('coldRootCollision reports only a WHOLE guarded name and ignores short names', () => {
+  assert.equal(coldRootCollision('/zz/dt-b317-drivergone/T', ['b317-drivergone']), 'b317-drivergone')
+  assert.equal(coldRootCollision('/zz/DT-B317-DriverGone/T', ['b317-drivergone']), 'b317-drivergone')
+  assert.equal(coldRootCollision('/private/var/folders/zz/T', ['b304-coldverify']), '')
+  assert.equal(coldRootCollision('/private/tmp', ['tm']), '')
+})
+
 test('neutralColdPath redraws a collision and throws on exhausted roots', () => {
   const path = neutralColdPath(['b304-coldverify'], {
     tmpRoots: ['/zz'], rand: (i) => ['b304ab', 'f9f9f9'][i], attempts: 4, realpath: (p) => p,
@@ -696,10 +711,10 @@ test('runCold leaves runClean and the stash stack alone on a dirty linked tree',
   })
 })
 
-test('neutralColdPath rejects a colliding root before drawing and uses the next root', () => {
+test('neutralColdPath rejects a root carrying a WHOLE guarded name and uses the next root', () => {
   let draws = 0
   const path = neutralColdPath(['b304-coldverify'], {
-    tmpRoots: ['/zz/folders/T', '/zz/neutral9'], rand: () => { draws += 1; return `n${draws}n` },
+    tmpRoots: ['/zz/b304-coldverify/T', '/zz/neutral9'], rand: () => { draws += 1; return `n${draws}n` },
     attempts: 8, realpath: (p) => p,
   })
   assert.match(path, /^\/zz\/neutral9\//)
@@ -737,7 +752,8 @@ test('the shipped default roots yield a neutral path for this lane and repositor
     assert.ok(repo)
     assert.notEqual(repo, basename(fixture.checkout))
     const path = neutralColdPath(names)
-    assert.equal(coldPathCollision(path, names), '')
+    assert.equal(coldPathCollision(basename(path), names), '')
+    assert.equal(coldRootCollision(dirname(path), names), '')
   })
 })
 

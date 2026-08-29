@@ -8,13 +8,22 @@ import {
   archivedLaneName,
   archivedLanes,
   discoverLanes,
+  driverGone,
+  driverState,
+  DRIVER_EXITED,
+  HEARTBEAT_PERIOD_MS,
   hostLoad,
   journalAt,
+  laneActive,
   readJournal,
+  readLaneSession,
   resolveTunables,
+  runLogTerminal,
   watchPass,
   WATCH_DEFAULTS,
 } from '../scripts/factory/lane-watch.mjs'
+import { LIVENESS_PROBE_MS } from '../crew/seat-io.mjs'
+import { openLedger } from '../scripts/factory/ledger.mjs'
 import { makeSeedLane } from './helpers.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-lane-watch-'))
@@ -26,6 +35,7 @@ const QUIET = {
   loadavg: () => [1, 1, 1],
   cpus: () => new Array(10).fill({ model: 'test' }),
   platform: 'darwin',
+  readSession: () => null,
 }
 
 function iso(msAgo) {
@@ -386,6 +396,124 @@ test('watchPass notes the live lane and leaves the archived journal byte-identic
   assert.equal(liveNotes.length, 1)
   assert.equal(liveNotes[0].silent_s, 700)
   assert.equal(readFileSync(archived.journal, 'utf8'), before)
+})
+
+test('laneActive keeps terminal and settled lanes out of driver liveness', () => {
+  const cases = [
+    ['done', { settled: false }, { lastStage: 'done' }, false],
+    ['converge', { settled: false }, { lastStage: 'converge' }, false],
+    ['escalate:scope', { settled: false }, { lastStage: 'escalate:scope' }, false],
+    ['build:r1', { settled: false }, { lastStage: 'build:r1' }, true],
+    ['no stage', { settled: false }, { lastStage: null }, true],
+    ['settled', { settled: true }, { lastStage: 'build:r1' }, false],
+  ]
+  for (const [name, lane, journal, expected] of cases) assert.equal(laneActive(lane, journal), expected, name)
+})
+
+test('driverGone requires an active unended session, no terminal line and a stale beat', () => {
+  const root = world()
+  const seeded = seedLane(root, { task: 'driver-gone', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  const lane = { ...seeded, id: 'dt-demo/driver-gone', repo: 'dt-demo', task: 'driver-gone', settled: false }
+  const journal = readJournal(lane.journal)
+  const stale = { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }
+  assert.equal(driverGone(lane, journal, stale), true)
+  for (const [name, ledger] of [
+    ['ended', { ...stale, session: { ...stale.session, ended_at: iso(1_000) } }],
+    ['fresh', { ...stale, session: { ended_at: null, last_heartbeat_at: iso(5_000) } }],
+    ['terminal', { ...stale, terminal: 'exited' }],
+  ]) assert.equal(driverGone(lane, journal, ledger), false, name)
+
+  const settled = { ...lane, settled: true }
+  assert.equal(driverGone(settled, journal, stale), false)
+  assert.equal(driverGone(lane, { ...journal, lastStage: 'done' }, stale), false)
+})
+
+test('driverState distinguishes unknown, running and driver-gone with measured age', () => {
+  const root = world()
+  const seeded = seedLane(root, { task: 'driver-state', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
+  const lane = { ...seeded, id: 'dt-demo/driver-state', repo: 'dt-demo', task: 'driver-state', settled: false }
+  const journal = readJournal(lane.journal)
+  assert.deepEqual(driverState(lane, journal, { session: null, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null })
+  assert.deepEqual(driverState(lane, journal, { session: null, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(5_000) }, terminal: null, now: NOW }), { state: 'running', heartbeat_age_ms: 5_000 })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }), { state: 'driver-gone', heartbeat_age_ms: 61_000 })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: 61_000 })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null })
+})
+
+test('runLogTerminal reads a bounded tail and treats absent, empty and unparseable logs as unknown', () => {
+  const root = world()
+  const seeded = seedLane(root, { task: 'terminal-tail' })
+  const lane = { ...seeded, id: 'dt-demo/terminal-tail', repo: 'dt-demo', task: 'terminal-tail' }
+  const path = join(lane.dir, 'run.log')
+  writeFileSync(path, `${'seat noise line\n'.repeat(20_000)}${JSON.stringify({ status: 'exited', signal: 'SIGTERM' })}\n`)
+  assert.equal(runLogTerminal(lane), 'exited')
+  writeFileSync(path, '')
+  assert.equal(runLogTerminal(lane), null)
+  rmSync(path, { force: true })
+  assert.equal(runLogTerminal(lane), null)
+  writeFileSync(path, 'seat noise\nnot json\n')
+  assert.equal(runLogTerminal(lane), null)
+})
+
+test('watchPass records and deduplicates a driver-gone note instead of silent-lane', () => {
+  const root = world()
+  const lane = seedLane(root, {
+    task: 'driver-gone-note',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  const readSession = () => ({ ended_at: null, last_heartbeat_at: iso(61_000) })
+  const first = pass(root, { deps: { readSession } })
+  assert.equal(first.notes.filter((note) => note.note === 'driver-gone').length, 1)
+  assert.equal(first.notes.filter((note) => note.note === 'silent-lane').length, 0)
+  assert.equal(first.notes.find((note) => note.note === 'driver-gone').heartbeat_age_s, 61)
+  const second = pass(root, { deps: { readSession } })
+  assert.deepEqual(second.notes, [])
+
+  const terminalRoot = world()
+  const terminalLane = seedLane(terminalRoot, {
+    task: 'driver-exited',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  writeFileSync(join(terminalLane.dir, 'run.log'), `${JSON.stringify({ status: 'exited' })}\n`)
+  const terminalPass = pass(terminalRoot, { deps: { readSession } })
+  assert.deepEqual(terminalPass.notes, [])
+
+  const unreadableRoot = world()
+  const unreadableLane = seedLane(unreadableRoot, {
+    task: 'driver-exited-no-ledger',
+    journalLines: [{ at: NOW - 700_000, stage: 'build:r1' }],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  writeFileSync(join(unreadableLane.dir, 'run.log'), `${JSON.stringify({ status: 'exited', signal: 'SIGTERM' })}\n`)
+  const unreadablePass = pass(unreadableRoot, { deps: { readSession: () => null } })
+  assert.deepEqual(unreadablePass.notes, [])
+})
+
+test('heartbeat period is re-exported from seat-io and pinned in the ledger query doc', () => {
+  assert.equal(HEARTBEAT_PERIOD_MS, LIVENESS_PROBE_MS)
+  const doc = readFileSync(new URL('../docs/ledger-queries.md', import.meta.url), 'utf8')
+  assert.match(doc, /last_heartbeat_at/)
+  assert.match(doc, /LIVENESS_PROBE_MS/)
+  assert.ok(doc.includes(`${LIVENESS_PROBE_MS.toLocaleString('en-US').replace(/,/g, '_')} ms (${LIVENESS_PROBE_MS / 1000} s)`))
+})
+
+test('readLaneSession reads the newest real session row and returns null for a missing database', () => {
+  const root = world()
+  const dbPath = join(root, 'ledger.db')
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    ledger.startSession({ adw_id: 'driver-session', repo_slug: 'repo-real', task_slug: 'task-real' })
+    ledger.heartbeat({ adw_id: 'driver-session', target: 'session' })
+  } finally { ledger.close() }
+  const lane = { repo: 'repo-real', task: 'task-real' }
+  const row = readLaneSession(lane, { defaultDbPath: () => dbPath })
+  assert.equal(row.ended_at, null)
+  assert.equal(typeof row.last_heartbeat_at, 'string')
+  assert.equal(readLaneSession({ repo: 'missing', task: 'missing' }, { defaultDbPath: () => join(root, 'missing.db') }), null)
 })
 
 test('the archive marker tracks the suffix crew.mjs mints', () => {

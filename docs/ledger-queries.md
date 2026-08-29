@@ -681,3 +681,23 @@ per-seat-session (unit: one pi seat session)
 - **Journals must be read as raw text before unioning.** `read_json_auto` cannot union journals because the boot record has a different nesting shape; use `read_csv` with `delim=E'\x07'`, `quote=E'\x01'`, and `escape=E'\x01'`, then `try_cast(line as json)`.
 - **`ignore_errors=true` is mandatory on a live corpus** — see recipe C — and it is the reason the skipped-line counter is mandatory too.
 
+## Heartbeat cadence
+
+`sessions.last_heartbeat_at` and `agent_sessions.last_heartbeat_at` are written
+in place by `heartbeat()` (`scripts/factory/ledger.mjs:2615-2627`), and the
+ledger owns no timer for them (ADR-024: "the ledger owns no timer — #41 drives
+the rate"). The rate has ONE owner: `LIVENESS_PROBE_MS` in `crew/seat-io.mjs`,
+today **30_000 ms (30 s)** — the wait loop's probe cadence
+(`crew/seat-io.mjs:1682`), stamped only from a probe that came back alive
+(`crew/seat-io.mjs:1715`). So an operator can bound a death from the ledger
+alone: a run whose `ended_at` is NULL and whose `last_heartbeat_at` is older
+than **two periods (60 s)** has not been observed alive since that stamp.
+
+Three caveats, so the bound is read honestly. A beat is emitted only while the
+driver is INSIDE a seat wait; a driver busy in git, the gate or the suite writes
+none, so a stale stamp is evidence about the DRIVER's wait loop and not about
+the process's whole life. A NULL `last_heartbeat_at` is **not measured**, never
+a dead run — a headless lane that never entered a pane wait carries NULL by
+construction. And `processes.last_heartbeat_at` is unreachable: that table is
+retired and has never held a row (see **Retired tables** above).
+

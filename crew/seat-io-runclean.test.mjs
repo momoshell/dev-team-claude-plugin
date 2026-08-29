@@ -190,6 +190,15 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
 })
 
+test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
+  const source = readFileSync(join(ROOT, 'crew/seat-io.mjs'), 'utf8')
+  const gitSpawns = source.split('\n').filter((line) => line.includes("spawnSync('git'"))
+  const shellSpawns = source.split('\n').filter((line) => line.includes("spawnSync('/bin/sh'"))
+  assert.equal(gitSpawns.filter((line) => line.includes('maxBuffer')).length, 0)
+  assert.equal(shellSpawns.length, 2)
+  assert.equal(shellSpawns.filter((line) => line.includes('maxBuffer: RUN_MAX_BUFFER_BYTES')).length, 2)
+})
+
 test('the teardown family stamps the operational channel at the sink', () => {
   const root = scratchDir('journal-channel-capture-')
   const taskDir = join(root, 'task')

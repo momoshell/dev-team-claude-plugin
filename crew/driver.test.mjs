@@ -1,8 +1,9 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import {
-  assignmentLine, assertSafeLine, pickNeedle, surfaceProcessTree, sendLine,
-  SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
+  assignmentLine, assertSafeLine, pickNeedles, surfaceProcessTree, sendLine,
+  SEND_RETRIES, SUBMIT_ENTER_ATTEMPTS, SUBMIT_PROOF_WINDOW_MS, SUBMIT_TOTAL_BUDGET_MS,
 } from './driver.mjs'
 import { capabilitiesFor as claudeCapabilitiesFor } from './adapters/adapter-claude.mjs'
 import { capabilitiesFor as piCapabilitiesFor } from './adapters/adapter-pi.mjs'
@@ -87,17 +88,120 @@ test('legitimate tokens still compose', () => {
   assert.doesNotThrow(() => assignmentLine({ ...GOOD, id: 'tech-lead', role: 'tech-lead' }))
 })
 
-test('pickNeedle chooses from the line TAIL — the input-box viewport scrolls to the end, hiding the head', () => {
-  const line = assignmentLine({
-    id: 'd1', role: 'planner',
-    briefFile: '/private/tmp/some-very-long-scratchpad-path-that-wraps-many-columns/brief-95-adapter-seam.md',
-    returnPath: '/Users/x/.crew/repo/task/returns/d1.planner.json',
-    taskDir: '/Users/x/.crew/repo/task/task',
+// --- #759: many short needles -----------------------------------------------
+const B322_LINE = assignmentLine({
+  id: 'd1', role: 'planner',
+  briefFile: '/private/tmp/claude-501/scratchpad/batch-b322/out/b322-closeout.brief.md',
+  returnPath: '/Users/x/.crew/dt-b322-closeout/b322-closeout/returns/d1.planner.json',
+  taskDir: '/Users/x/.crew/dt-b322-closeout/b322-closeout/task',
+})
+const B322_RETURN_PATH = '/Users/x/.crew/dt-b322-closeout/b322-closeout/returns/d1.planner.json'
+const B322_BASENAME = 'd1.planner.json'
+const B322_MID_START = B322_LINE.indexOf(`${B322_RETURN_PATH}`) + 30
+const B322_MID_END = B322_LINE.indexOf(B322_BASENAME) + B322_BASENAME.length + 22
+const b322MiddleWindow = (box) => box.slice(B322_MID_START, B322_MID_END)
+const b322HeadWindow = (box) => box.slice(0, 30)
+const b322TailWindow = (box) => box.slice(-34)
+
+const SCREEN_MARKER_15_UP = 'SCREEN-MARKER-15-UP'
+const SCREEN_MARKER_LAST = 'SCREEN-MARKER-LAST'
+
+function windowCmux({ window = () => '', consume = () => true, clears = true } = {}) {
+  const state = { box: '', sends: 0, enters: 0, keys: [], calls: [] }
+  const frame = () => [
+    'screen-line-01',
+    SCREEN_MARKER_15_UP,
+    ...Array.from({ length: 12 }, (_, index) => `screen-line-${String(index + 2).padStart(2, '0')}`),
+    `> ${window(state.box)}`,
+    '  bypass permissions on',
+    SCREEN_MARKER_LAST,
+  ].join('\n')
+  const ok = (stdout = '') => ({ ok: true, stdout, stderr: '', error: null })
+  const fn = (verb, args = []) => {
+    state.calls.push({ verb, args })
+    const separator = args.indexOf('--')
+    const tail = separator >= 0 ? args.slice(separator + 1).join(' ') : ''
+    if (verb === 'read-screen') return ok(frame())
+    if (verb === 'send') { state.box += tail; state.sends += 1; return ok() }
+    if (verb === 'send-key') {
+      state.keys.push(tail)
+      if (tail === 'enter') { state.enters += 1; if (consume(state)) state.box = '' }
+      else if (clears) state.box = ''
+      return ok()
+    }
+    return ok()
+  }
+  return { fn, state }
+}
+
+function sendInWindow(line, window, options = {}) {
+  const { fn, state } = windowCmux({ window, ...options })
+  const journal = []
+  let clock = 1_700_000_000_000
+  let error = null
+  try {
+    sendLine('51e89c13-956c-42f5-9787-ba8437699948', line, {
+      cmux: fn, log: (row) => journal.push(row),
+      now: () => clock, settle: (ms) => { clock += ms },
+    })
+  } catch (err) { error = err }
+  return { state, journal, error }
+}
+
+test('pickNeedles returns unique short head, middle and tail candidates', () => {
+  const needles = pickNeedles(B322_LINE)
+  const flat = B322_LINE.replace(/\s+/g, '')
+  assert.deepEqual(needles, ['ASSIGNMENTd1:', B322_BASENAME, 'CREW-DONEplannerd1'])
+  for (const needle of needles) {
+    assert.ok(needle.length <= 24)
+    assert.equal(flat.split(needle).length - 1, 1)
+  }
+  assert.ok(!needles.includes(B322_RETURN_PATH.replace(/\s+/g, '')))
+})
+
+test('a middle-window frame lands and submits with one typed copy and one enter', () => {
+  const { state, error } = sendInWindow(B322_LINE, b322MiddleWindow)
+  assert.equal(error, null)
+  assert.equal(state.sends, 1)
+  assert.equal(state.enters, 1)
+})
+
+test('head-only and tail-only frames each land with one typed copy', () => {
+  for (const window of [b322HeadWindow, b322TailWindow]) {
+    const { state, error } = sendInWindow(B322_LINE, window)
+    assert.equal(error, null)
+    assert.equal(state.sends, 1)
+    assert.equal(state.enters, 1)
+  }
+})
+
+test('a frame showing nothing retries, clears between attempts and carries its last 12 lines', () => {
+  const { state, error } = sendInWindow(B322_LINE, () => '')
+  assert.ok(error, 'expected a throw when no candidate is visible')
+  assert.equal(state.sends, SEND_RETRIES + 1)
+  assert.equal(state.keys.filter((key) => key === 'ctrl+u').length, SEND_RETRIES)
+  assert.ok(error.message.includes(SCREEN_MARKER_LAST))
+  assert.ok(!error.message.includes(SCREEN_MARKER_15_UP))
+})
+
+test('SEND_RETRIES is exported as the bounded retype budget', () => {
+  assert.equal(SEND_RETRIES, 2)
+})
+
+test('a visible candidate refuses a retype when the input cannot clear', () => {
+  const { state, error } = sendInWindow(B322_LINE, b322HeadWindow, {
+    consume: () => false,
+    clears: false,
   })
-  const needle = pickNeedle(line)
-  assert.equal(needle, '/Users/x/.crew/repo/task/returns/d1.planner.json')
-  // the head-positioned brief path must NEVER be the needle, however long
-  assert.notEqual(needle, line.split(/\s+/).reduce((a, b) => (b.length > a.length ? b : a), ''))
+  assert.ok(error, 'expected a clear-to-baseline refusal')
+  assert.match(error.message, /could not clear the pane input back to baseline/)
+  assert.equal(state.sends, 1)
+})
+
+test('assignmentLine keeps its verbatim template and #759 path-length decision', () => {
+  const source = readFileSync(new URL('./driver.mjs', import.meta.url), 'utf8')
+  assert.ok(source.includes('ASSIGNMENT ${id}: read your brief at ${briefFile}. Task dir: ${taskDir}. Write your ReturnEnvelope to ${returnPath} then print exactly: CREW-DONE ${role} ${id}'))
+  assert.ok(source.includes('contract risk is not worth the characters. Both paths stay verbatim (#759).'))
 })
 
 

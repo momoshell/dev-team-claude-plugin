@@ -72,7 +72,12 @@ const SEND_SETTLE_MS = 250
 const SEND_VERIFY_WINDOW_MS = 3000
 const SEND_READY_TIMEOUT_MS = 60_000
 const SEND_READY_POLL_MS = 250
-const SEND_VERIFY_ATTEMPTS = 3
+// One typed copy, then up to SEND_RETRIES more (#759): a send whose echo never
+// lands is cleared back to baseline and RETYPED rather than escalating the lane
+// on its first attempt.
+export const SEND_RETRIES = 2
+// The escalation must show what the pane showed.
+const SCREEN_TAIL_LINES = 12
 
 function settle(ms) {
   const sab = new SharedArrayBuffer(4)
@@ -116,6 +121,11 @@ function assertPathValue(name, value) {
   }
 }
 
+// The line is long, and its length is what made #759 visible — but it is NOT
+// shortened. Restating the return path as `<taskDir>/returns/<basename>` would
+// make a seat DERIVE a path it must be given, and dropping any field breaks the
+// seat contract; measured against the multi-candidate proof below, that
+// contract risk is not worth the characters. Both paths stay verbatim (#759).
 export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
   assertToken('id', id)
   assertToken('role', role)
@@ -127,21 +137,64 @@ export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
   return line
 }
 
-function frameNeedleCount(surfaceId, needle, cmuxFn = cmux) {
+function readScreen(surfaceId, cmuxFn = cmux) {
   const res = cmuxFn('read-screen', ['--surface', surfaceId, '--lines', '40'])
   if (!res.ok) return null
-  return res.stdout.replace(/\s+/g, '').split(needle).length - 1
+  return res.stdout
 }
 
-// The verification needle must come from the line's TAIL: a long line wraps
-// in the seat's input box, and the box viewport scrolls to keep the cursor
-// (at the END) visible — the head is genuinely absent from read-screen even
-// though the buffer content is intact (live-hit 2026-08-13: two clean boots
-// showed the identical "truncation", which was viewport scroll, not loss).
-// Longest of the last 8 tokens = the return path on assignment lines.
-export function pickNeedle(line) {
+// Every candidate is counted off ONE frame: N candidates must never cost N
+// reads. Whitespace is stripped from the frame, so candidates are stripped too.
+function frameNeedleCounts(surfaceId, needles, cmuxFn = cmux) {
+  const stdout = readScreen(surfaceId, cmuxFn)
+  if (stdout === null) return null
+  const flat = stdout.replace(/\s+/g, '')
+  return needles.map((needle) => flat.split(needle).length - 1)
+}
+
+function screenTail(surfaceId, cmuxFn = cmux) {
+  const stdout = readScreen(surfaceId, cmuxFn)
+  if (stdout === null) return '<unreadable>'
+  return stdout.split('\n').slice(-SCREEN_TAIL_LINES).join(' | ')
+}
+
+const sameCounts = (a, b) => Array.isArray(a) && a.length === b.length && a.every((v, i) => v === b[i])
+
+// Verification needles must be SHORT and there must be SEVERAL (#759). The
+// claude input widget renders a fixed two-line window of a long line, so the
+// ~80-character return path — the longest of the last 8 tokens, and therefore
+// the old single needle — is cut mid-way and never counts as present: b322
+// escalated on its first send with the assignment plainly sitting in the box,
+// while a sibling lane with a LONGER crew-dir path passed. Whether a needle
+// survives is a function of how the line happens to wrap, so take one candidate
+// from the HEAD, one from the MIDDLE (the return file's basename) and one from
+// the TAIL, each <= NEEDLE_MAX_LEN characters and unique within the line, and
+// let ANY of them prove the landing.
+export const NEEDLE_MAX_LEN = 24
+
+export function pickNeedles(line) {
+  const squash = (s) => s.replace(/\s+/g, '')
+  const flat = squash(line)
+  const raw = []
+  const head = line.match(/^ASSIGNMENT\s+(\S+):/)
+  if (head) raw.push(`ASSIGNMENT ${head[1]}:`)
+  const mid = line.match(/ReturnEnvelope to (\S+)/)
+  if (mid) raw.push(mid[1].split('/').pop())
+  const tail = line.match(/CREW-DONE\s+(\S+)\s+(\S+)\s*$/)
+  if (tail) raw.push(`CREW-DONE ${tail[1]} ${tail[2]}`)
+  const out = []
+  for (const candidate of raw) {
+    const needle = squash(candidate)
+    if (!needle || needle.length > NEEDLE_MAX_LEN) continue
+    if (flat.split(needle).length - 1 !== 1) continue
+    if (!out.includes(needle)) out.push(needle)
+  }
+  if (out.length) return out
+  // Last resort for a line that is not an assignment (the legacy handoff line):
+  // the pre-#759 rule, the longest of the last 8 tokens.
   const tokens = line.split(/\s+/).filter(Boolean)
-  return tokens.slice(-8).reduce((a, b) => (b.length > a.length ? b : a), '')
+  const longest = tokens.slice(-8).reduce((a, b) => (b.length > a.length ? b : a), '')
+  return longest ? [squash(longest)] : []
 }
 
 // --- submission proof (b305) --------------------------------------------------
@@ -184,28 +237,29 @@ export function sendLine(surfaceId, line, deps = {}) {
   const now = deps.now || Date.now
   const journal = sendJournal(deps)
   assertSafeLine(line)
-  const needle = pickNeedle(line)
-  if (!needle) throw new Error('sendLine: no verifiable token in line')
+  const needles = pickNeedles(line)
+  if (!needles.length) throw new Error('sendLine: no verifiable token in line')
 
-  // Verify against a BASELINE, not an absolute count of 1: the needle may
+  // Verify against a BASELINE, not an absolute count of 1: a needle may
   // already be on screen (the same brief path assigned twice, the seat's own
   // transcript quoting a path it read) and a correct send must still verify.
+  // Each candidate carries its OWN baseline.
   const startedAt = now()
   const deadline = startedAt + SEND_READY_TIMEOUT_MS
-  let before = frameNeedleCount(surfaceId, needle, cmuxFn)
+  let before = frameNeedleCounts(surfaceId, needles, cmuxFn)
   while (before === null) {
     if (now() >= deadline) throw new Error(`sendLine: surface ${surfaceId} never became readable`)
     settleFn(SEND_READY_POLL_MS)
-    before = frameNeedleCount(surfaceId, needle, cmuxFn)
+    before = frameNeedleCounts(surfaceId, needles, cmuxFn)
   }
 
-  const afterSend = before + 1
+  const afterSend = before.map((count) => count + 1)
   const budgetEnd = startedAt + SUBMIT_TOTAL_BUDGET_MS
   let everLanded = false
   let submitted = false
   let enters = 0
   let last = null
-  for (let attempt = 1; attempt <= SEND_VERIFY_ATTEMPTS; attempt += 1) {
+  for (let attempt = 1; attempt <= SEND_RETRIES + 1; attempt += 1) {
     if (attempt > 1) {
       // Clearing a TUI input box is NOT one ctrl+u (live-hit 2026-08-13):
       // in the claude TUI ctrl+u deletes to the start of the VISUAL line and
@@ -213,16 +267,17 @@ export function sendLine(surfaceId, line, deps = {}) {
       // first (harmless everywhere), then ONE ctrl+c (claude's full input
       // clear; on an already-empty box it only arms an exit warning, which
       // the retype immediately disarms — never send it twice in a row).
-      // Refuse to retype into a box that still shows the needle.
+      // Refuse to retype into a box that still shows ANY candidate.
       cmuxFn('send-key', ['--surface', surfaceId, '--', 'ctrl+u'])
       settleFn(SEND_READY_POLL_MS)
-      if (frameNeedleCount(surfaceId, needle, cmuxFn) !== before) {
+      if (!sameCounts(frameNeedleCounts(surfaceId, needles, cmuxFn), before)) {
         cmuxFn('send-key', ['--surface', surfaceId, '--', 'ctrl+c'])
         settleFn(SEND_READY_POLL_MS)
       }
-      if (frameNeedleCount(surfaceId, needle, cmuxFn) !== before) {
+      if (!sameCounts(frameNeedleCounts(surfaceId, needles, cmuxFn), before)) {
         throw new Error('sendLine: could not clear the pane input back to baseline before retype')
       }
+      settleFn(SEND_READY_POLL_MS)
     }
     const send = cmuxFn('send', ['--surface', surfaceId, '--', line])
     if (!send.ok) throw new Error(`sendLine: send failed: ${send.error.message}`)
@@ -231,17 +286,31 @@ export function sendLine(surfaceId, line, deps = {}) {
     // read here mistakes slow rendering for a lost send (live-hit 2026-08-13:
     // both crews' first assignment landed but verified 0, killing the run).
     const verifyDeadline = now() + SEND_VERIFY_WINDOW_MS
-    let landed = false
+    let landed = -1
     do {
       settleFn(SEND_SETTLE_MS)
-      last = frameNeedleCount(surfaceId, needle, cmuxFn)
-      if (last === afterSend) { landed = true; break }
+      last = frameNeedleCounts(surfaceId, needles, cmuxFn)
+      if (last !== null) {
+        const hit = last.findIndex((count, index) => count === afterSend[index])
+        if (hit >= 0) { landed = hit; break }
+      }
     } while (now() < verifyDeadline)
-    if (!landed) continue
+    journal({
+      at: new Date(now()).toISOString(),
+      event: 'send-echo-attempt',
+      surface_id: surfaceId,
+      attempt,
+      candidates: needles,
+      counts: last,
+      needle: landed >= 0 ? needles[landed] : null,
+      outcome: landed >= 0 ? 'landed' : 'not-landed',
+    }, landed < 0)
+    if (landed < 0) continue
     everLanded = true
 
     // The line is on the screen and intact. Press enter, then PROVE the box
-    // let it go. A re-press is the cheapest recovery and the safest one: on an
+    // let it go, counting the SAME candidate that proved the landing. A
+    // re-press is the cheapest recovery and the safest one: on an
     // already-submitted box it submits nothing, so it cannot double an
     // assignment. Only when the re-presses are spent does the outer attempt
     // fall back to the clear-and-retype ladder above.
@@ -253,8 +322,8 @@ export function sendLine(surfaceId, line, deps = {}) {
       let seen = null
       do {
         settleFn(SUBMIT_PROOF_POLL_MS)
-        seen = frameNeedleCount(surfaceId, needle, cmuxFn)
-        if (seen !== null && seen !== afterSend) { submitted = true; break }
+        seen = frameNeedleCounts(surfaceId, needles, cmuxFn)
+        if (seen !== null && seen[landed] !== afterSend[landed]) { submitted = true; break }
       } while (now() < proofEnd)
       journal({
         at: new Date(now()).toISOString(),
@@ -262,15 +331,18 @@ export function sendLine(surfaceId, line, deps = {}) {
         surface_id: surfaceId,
         attempt,
         enter,
-        needle_count: seen,
-        expected_in_box: afterSend,
+        needle: needles[landed],
+        needle_count: seen === null ? null : seen[landed],
+        expected_in_box: afterSend[landed],
         outcome: submitted ? 'submitted' : (seen === null ? 'unreadable' : 'unproved'),
       }, !submitted)
       if (!submitted && now() >= budgetEnd) break
     }
     if (submitted || now() >= budgetEnd) break
   }
-  if (!everLanded) throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before}, last ${last})`)
+  if (!everLanded) {
+    throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before.join(',')}, last ${last === null ? 'unreadable' : last.join(',')}) — candidates ${needles.join(' | ')} — last ${SCREEN_TAIL_LINES} screen lines: ${screenTail(surfaceId, cmuxFn)}`)
+  }
 
   journal({
     at: new Date(now()).toISOString(),

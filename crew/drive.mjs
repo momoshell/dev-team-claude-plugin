@@ -1422,7 +1422,12 @@ export function parseDirectedBrief(text) {
 // that the check must catch. 32 is a bound, not a target: each entry costs one
 // gate run on the built tree (b31b's voluntary proof declared 19).
 export const MUTATIONS_MAX = 32
-export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt'])
+export const MUTATION_OUTCOMES = Object.freeze(['killed', 'survived', 'unapplied', 'exempt', 'anchor-absent', 'anchor-ambiguous'])
+// The outcomes that are NOT a gate defect: the declaration never reached the built
+// tree, so the plan predicted source the builder did not write. `survived` stays the
+// ONLY member of MUTATION_OUTCOMES that indicts the gate itself (#733).
+export const MUTATION_BINDING_FAILURES = Object.freeze(['unapplied', 'anchor-absent', 'anchor-ambiguous'])
+const BINDING_OUTCOME = Object.freeze({ absent: 'anchor-absent', ambiguous: 'anchor-ambiguous' })
 // The driver dictates ONE output convention for a gate that declares per-check
 // mutations, exactly as it already dictates GATE_SUMMARY_PREFIX (:204): a failing
 // check prints a line beginning `FAIL <check>`. A label SUBSTRING is not proof —
@@ -2790,9 +2795,15 @@ function runTask(ctx, io, crash) {
     stageComplete()
     return pristine
   }
-  const percheckNote = (row) => `the per-check proof did not kill ${JSON.stringify(row?.check)}: ${row?.why}`
+  // Two CLASSES, two sentences, distinguishable by machine and not only by a reader
+  // (#733). A binding failure is a PLAN/BUILD disagreement — the plan predicted source
+  // the builder did not write; `survived` keeps today's wording, because it is the one
+  // outcome that indicts the gate.
+  const percheckNote = (row) => (MUTATION_BINDING_FAILURES.includes(row?.outcome)
+    ? `the per-check mutation for ${JSON.stringify(row?.check)} did not BIND to the built tree: ${row?.why} — the plan predicted source the builder did not write`
+    : `the per-check proof did not kill ${JSON.stringify(row?.check)}: ${row?.why}`)
   const proofNote = () => (checkProofVerdict === 'failed'
-    ? percheckNote((checkProofs || []).find((row) => row.outcome === 'survived' || row.outcome === 'unapplied'))
+    ? percheckNote((checkProofs || []).find((row) => row.outcome !== 'killed' && row.outcome !== 'exempt'))
     : gateProofNote)
   const completeCheckProof = (label) => {
     checkProofPending = null
@@ -2810,11 +2821,17 @@ function runTask(ctx, io, crash) {
         active = { abs, original: null, writeAttempted: false }
         const original = io.readFile(abs)          // may throw: nothing written yet
         active.original = original
-        if (original === null || !original.includes(mutation.find)) {
+        if (original === null) {
           rows.push({ check: mutation.check, outcome: 'unapplied', file: mutation.file, summary: null,
-            why: original === null
-              ? `${mutation.file} does not exist in the built tree`
-              : `the declared find text is not in the built ${mutation.file}` })
+            why: `${mutation.file} does not exist in the built tree` })
+          survivor ??= rows[rows.length - 1]
+          active = null
+          continue
+        }
+        const bound = applyMutationAnchor(original, mutation.find, mutation.replace)
+        if (bound.text === null) {
+          rows.push({ check: mutation.check, outcome: BINDING_OUTCOME[bound.mode], file: mutation.file, summary: null,
+            why: bindingWhy(bound.mode, mutation.file) })
           survivor ??= rows[rows.length - 1]
           active = null
           continue
@@ -2822,7 +2839,7 @@ function runTask(ctx, io, crash) {
         let res = null
         try {
           active.writeAttempted = true
-          io.writeFile(abs, original.replaceAll(mutation.find, mutation.replace))
+          io.writeFile(abs, bound.text)
           res = runGate(mutationLabel(label, index), gateCmd)
         } finally { io.writeFile(abs, original) }
         active = null                              // restored: nothing in flight
@@ -3702,6 +3719,67 @@ function runTask(ctx, io, crash) {
   stageComplete()
   return result
 }
+
+// A declared anchor binds by TOKEN SEQUENCE, not by the bytes a planner typed before
+// the builder wrote the code: b301-daemonid stranded a complete, green lane on one
+// line break (#733). Normalization is WHITESPACE-ONLY — runs of [ \t\r\n] collapse to
+// one space and NOTHING else changes — so it can never widen what a mutation matches
+// beyond the same tokens, and a gate still cannot weaken itself to pass.
+const ANCHOR_WHITESPACE = /[ \t\r\n]/
+// Collapse whitespace runs, keeping per normalized character the ORIGINAL byte span
+// that produced it, so a normalized hit resolves back to exact original bytes.
+function normalizeAnchor(text) {
+  let out = ''
+  const starts = []
+  const ends = []
+  let i = 0
+  while (i < text.length) {
+    if (ANCHOR_WHITESPACE.test(text[i])) {
+      let j = i
+      while (j < text.length && ANCHOR_WHITESPACE.test(text[j])) j += 1
+      out += ' '; starts.push(i); ends.push(j); i = j
+    } else {
+      out += text[i]; starts.push(i); ends.push(i + 1); i += 1
+    }
+  }
+  return { text: out, starts, ends }
+}
+
+// Two ORDERED attempts. EXACT first, written with `indexOf` because the settled
+// contract makes the primitive load-bearing (gate check A16 reads this line) —
+// byte-for-byte the behaviour that exists today.
+// Only on an exact miss, whitespace-normalized, and only when the normalized hit is
+// UNIQUE: an anchor that cannot say WHICH span to mutate is not an anchor.
+export function bindMutationAnchor(original, find) {
+  if (typeof original !== 'string' || typeof find !== 'string' || find.length === 0) return { mode: 'absent', spans: [] }
+  if (original.indexOf(find) !== -1) return { mode: 'exact', spans: [] }
+  const src = normalizeAnchor(original)
+  const needle = normalizeAnchor(find).text
+  const spans = []
+  for (let at = src.text.indexOf(needle); at !== -1; at = src.text.indexOf(needle, at + 1)) {
+    spans.push({ start: src.starts[at], end: src.ends[at + needle.length - 1] })
+  }
+  if (spans.length === 0) return { mode: 'absent', spans: [] }
+  if (spans.length > 1) return { mode: 'ambiguous', spans }
+  return { mode: 'normalized', spans }
+}
+
+// `text: null` is the ONE signal that the anchor did not bind. `replace` is inserted
+// VERBATIM into the resolved span — never normalized, never reformatted.
+export function applyMutationAnchor(original, find, replace) {
+  const bound = bindMutationAnchor(original, find)
+  if (bound.mode === 'exact') return { mode: 'exact', text: original.replaceAll(find, replace) }
+  if (bound.mode === 'normalized') {
+    const { start, end } = bound.spans[0]
+    return { mode: 'normalized', text: `${original.slice(0, start)}${replace}${original.slice(end)}` }
+  }
+  return { mode: bound.mode, text: null }
+}
+
+// Why an anchor did not bind, per mode — the reader-facing half of the split.
+const bindingWhy = (mode, file) => (mode === 'ambiguous'
+  ? `the declared find text matches more than one whitespace-normalized span of the built ${file}, so the anchor cannot say which to mutate`
+  : `the declared find text is nowhere in the built ${file}, exactly or whitespace-normalized`)
 
 // --- the journal channel split (#608's producer half) --------------------------
 // The journal is two interleaved streams and said so nowhere. Measured on

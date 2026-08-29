@@ -263,10 +263,24 @@ A mutation entry carries exactly:
   and escalating one lane whose code was correct (#387).
 - \`file\` — required, repo-relative, a file and not a directory, and inside
   \`files_in_scope\`.
-- \`find\` — required, non-empty LITERAL text that actually occurs in that file; not
-  a regex, not a description.
+- \`find\` — required, non-empty LITERAL text naming the token sequence to bind in
+  that file; not a regex, not a description. The exact-then-normalized rule below
+  decides whether it binds; byte-identical whitespace is not required.
 - \`replace\` — required string, and must DIFFER from \`find\`; an identical pair
   mutates nothing.
+
+A declared \`find\` **binds by TOKEN SEQUENCE**, not by the bytes you typed. The driver
+tries an exact match first and, only on a miss, a whitespace-normalized one, so
+**whitespace and line wrapping are not load-bearing** and a re-wrapped line still binds.
+Normalization is **whitespace-only**. It is not a regex, not a symbol lookup, not
+fuzzy: a find whose TOKENS differ from the built source does not bind.
+The anchor must be **unique** after normalization.
+The three ways an anchor fails to reach the built tree, by name: **\`unapplied\`** (the
+declared file does not exist in the built tree), **\`anchor-absent\`** (the find text
+is nowhere in the file under either attempt), **\`anchor-ambiguous\`** (the normalized
+find matches more than one span). None of the three is a gate defect — each says the
+plan predicted source the builder did not write, and **\`survived\` remains the only gate defect**.
+Cite **#733**.
 
 An exemption entry carries exactly \`{ "check": "<token>", "exempt": "<non-empty reason>" }\`
 and no \`file\`, \`find\` or \`replace\`.

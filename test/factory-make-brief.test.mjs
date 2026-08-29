@@ -1104,7 +1104,8 @@ test('every compiled brief carries the per-check mutation contract', () => {
   assert.ok(contract.includes(MUTATION_CONTRACT_BLOCK))
   for (const clause of [
     'stable token', 'unique', `${CHECK_FAIL_PREFIX} <check>`, 'exempt', 'files_in_scope',
-    'non-empty LITERAL', 'must DIFFER', 'at most', String(MUTATIONS_MAX),
+    'non-empty LITERAL', 'must DIFFER', 'at most', String(MUTATIONS_MAX), 'TOKEN SEQUENCE',
+    'anchor-absent', 'anchor-ambiguous', 'unapplied',
     '/^[A-Za-z0-9][A-Za-z0-9._-]*$/', '"find"', '"replace"', '"check"',
   ]) assert.ok(MUTATION_CONTRACT_BLOCK.includes(clause), clause)
   // Additive: the section sits between the acceptance block and the validation lane,
@@ -1124,6 +1125,21 @@ test('the mutation contract states the FAIL-line separator rule', () => {
   const { brief } = compile(root)
   const contract = section(brief, '## Per-check mutations')
   assert.equal(contract, MUTATION_CONTRACT_BLOCK)
+  const normalized = (text) => text.replace(/\s+/g, ' ').trim().replaceAll('**', '')
+  const flat = normalized(contract)
+  for (const clause of [
+    'binds by TOKEN SEQUENCE',
+    'whitespace and line wrapping are not load-bearing',
+    'whitespace-only',
+    'anchor must be unique after normalization',
+    '`unapplied` (the declared file does not exist in the built tree)',
+    '`anchor-absent` (the find text is nowhere in the file under either attempt)',
+    '`anchor-ambiguous` (the normalized find matches more than one span)',
+    '`survived` remains the only gate defect',
+    '#733',
+  ]) assert.ok(flat.includes(clause), clause)
+  assert.ok(flat.includes('non-empty LITERAL text naming the token sequence to bind'))
+  assert.equal(flat.includes('non-empty LITERAL text that actually occurs in that file'), false)
   for (const form of [
     'FAIL <check>',
     'FAIL <check>: <why>',

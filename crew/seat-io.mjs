@@ -25,7 +25,13 @@ import { modelString as claudeModelString, paneUsageRecords as claudePaneUsageRe
 import { readSessionUsage } from '../scripts/factory/transcript.mjs'
 import { modelString as piModelString } from './adapters/adapter-pi.mjs'
 import { hostLoad, loadPolicy } from './host-load.mjs'
+import { compareFingerprints, FINGERPRINT_OUTCOMES, fingerprintTree } from './tree-fingerprint.mjs'
 export const DEFAULT_TRANSPORT = 'pane'
+// The distinct, named reason a runClean window refuses: a concurrent writer was
+// DETECTED in the working tree the driver had set aside. Never folded into a
+// stash refusal — the stash stack and the working tree fail for different
+// reasons and an operator must be able to tell them apart.
+export const TREE_WITNESS_REFUSAL = 'tree-witness'
 export const HEADLESS_TRANSPORT = 'headless-json'
 export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
@@ -2386,6 +2392,59 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     return matches[0]
   }
+  // THE WINDOW BELONGS TO THE DRIVER (#725). runClean sets the ENTIRE working
+  // tree aside and runs an arbitrary gate command against it for seconds to
+  // minutes; nothing stops a still-alive seat from writing into that tree while
+  // it does. Recorded live on b175-paneusage 2026-08-23, where what merged was
+  // correct by ordering luck alone. The posture is settled and stated here: the
+  // working tree belongs to the driver for as long as a runClean window is open,
+  // and a violation is DETECTED AND NAMED — never prevented, never silently
+  // tolerated. No quiescence, pause or seat lock is built here; #725 ask 3 chose
+  // detection as the first increment and this is that increment.
+  //
+  // BLIND SPOT: a seat that CREATES a new file mid-window is not caught. A gate
+  // command legitimately writes untracked artifacts and this witness cannot tell
+  // those from a seat's new file, so `added` paths are REPORTED — in the refusal
+  // detail and in the journal row — and never refused.
+  const treeWitness = (path) => (deps.fingerprintTree || fingerprintTree)(path)
+  // What the window is refused FOR, or null when nothing it can adjudicate
+  // happened. An unmeasurable side comes first and is never widened: a tree that
+  // could not be measured is never reported as a quiet one.
+  const witnessViolation = (diff) => {
+    if (diff.outcome === FINGERPRINT_OUTCOMES.unmeasurable) return `the tree could not be measured on the ${diff.side} side of the window: ${diff.cause}${diff.detail ? ` (${diff.detail})` : ''}`
+    const named = []
+    if ((diff.modified || []).length > 0) named.push(`modified: ${diff.modified.join(', ')}`)
+    if ((diff.removed || []).length > 0) named.push(`removed: ${diff.removed.join(', ')}`)
+    if (named.length > 0) return named.join('; ')
+    return null
+  }
+  const openTreeWitness = () => {
+    const opened = treeWitness(checkout)
+    return {
+      // Taken BEFORE any restore: this is the tree the gate command left behind.
+      close: () => treeWitness(checkout),
+      // RESTORE FIRST, THEN REFUSE — every caller adjudicates only after the
+      // builder's work is back, because stranding it inside a stash entry is a
+      // worse outcome than the defect this witness exists to name.
+      adjudicate: (closed) => {
+        const diff = compareFingerprints(opened, closed)
+        const violation = witnessViolation(diff)
+        if (diff.outcome !== FINGERPRINT_OUTCOMES.unchanged) {
+          try {
+            io.log(operationalRow({
+              at: now(), event: 'tree-witness', checkout, outcome: diff.outcome,
+              refused: violation !== null, modified: diff.modified, removed: diff.removed,
+              added: diff.added, head_changed: diff.head_changed, cause: diff.cause, detail: diff.detail,
+            }))
+          } catch { /* the journal is diagnostics; the refusal below is the run */ }
+        }
+        if (violation === null) return
+        const err = new Error(`runClean: ${TREE_WITNESS_REFUSAL} — the working tree at ${checkout} CHANGED while the gate command ran. The stashed work has been restored first; the working tree belongs to the driver for the duration of a runClean window, so this is a concurrent writer, detected and named rather than prevented. ${violation}. Also seen, never a refusal on its own: added: ${(diff.added || []).join(', ') || 'none'}`)
+        err.reason = TREE_WITNESS_REFUSAL
+        throw err
+      },
+    }
+  }
   const io = {
     assign(spec) {
       // Destructure EVERY field the pane path uses: `briefFile` is not in
@@ -2529,16 +2588,25 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // wrong tree (runCmd turns the throw into an escalation envelope).
     runClean(cmd) {
       const dirty = execSync('git status --porcelain -uall', { cwd: checkout, encoding: 'utf8' }).trim()
-      if (!dirty) return this.run(cmd) // nothing to set aside — the tree IS pristine
+      if (!dirty) {
+        // A clean tree is exactly as writable by a live seat as a stashed one,
+        // so the non-stashing arm carries the same witness around the same command.
+        const quiet = openTreeWitness()
+        const result = this.run(cmd) // nothing to set aside — the tree IS pristine
+        quiet.adjudicate(quiet.close())
+        return result
+      }
       const tag = `crew:runClean:${typeof deps.uuid === 'function' ? deps.uuid() : randomUUID()}`
       const push = spawnSync('git', ['stash', 'push', '--include-untracked', '-m', tag], { cwd: checkout, encoding: 'utf8' })
       if (push.status !== 0) throw new Error(`runClean: git stash push failed, refusing to judge a gate against the wrong tree:\n${push.stderr || push.stdout || ''}`)
       // Bind the identity NOW, while our push is still the newest thing on the
       // stack: a sibling lane's push shifts every index but never this commit id.
       const sha = ownStashEntry(tag, null).sha
+      const witness = openTreeWitness()
       try {
         return this.run(cmd)
       } finally {
+        const closed = witness.close()
         const own = ownStashEntry(tag, sha)
         const apply = spawnSync('git', ['stash', 'apply', sha], { cwd: checkout, encoding: 'utf8' })
         if (apply.status !== 0) throw new Error(`runClean: git stash apply FAILED — the checkout is half-restored and the builder's work is in stash entry ${sha} (${tag}), never popped:\n${apply.stderr || apply.stdout || ''}`)
@@ -2547,6 +2615,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         if (drop.status !== 0 || !dropped || !(sha.startsWith(dropped) || dropped.startsWith(sha))) {
           throw new Error(`runClean: the tree is restored but the entry dropped was ${dropped || 'none'}, not ours (${sha}, ${tag}) — read git stash list before trusting the stack:\n${drop.stderr || drop.stdout || ''}`)
         }
+        witness.adjudicate(closed)
       }
     },
     // A COLD verification run: the same command, in a checkout this lane has never

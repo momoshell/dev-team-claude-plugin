@@ -35,6 +35,10 @@ function makeSeatIo() {
   const added = []
   const commands = []
   const deps = {
+    // The scratch dir is not a git checkout, so the REAL witness would measure
+    // it as unmeasurable and refuse every runClean window here. The fake supplies
+    // the dependency instead: a measured, empty, unchanging tree.
+    fingerprintTree: (path) => ({ measured: true, checkout: path, at: 0, head: null, entries: {} }),
     now: () => clock,
     sleep: (ms) => { clock += ms },
     tree: () => ({ windows: [{ workspaces: [{ panes: [{ surfaces: [{ id: 'surface-builder' }] }] }] }] }),
@@ -467,6 +471,7 @@ test('outer seatIo keeps runClean available for headless-json and headless-rpc s
       { members: { builder: { transport } } }, f.paths, f.paths.dir, null, null, {},
       {
         [factory]: () => ({ assign() {}, wait() {} }),
+        fingerprintTree: (path) => ({ measured: true, checkout: path, at: 0, head: null, entries: {} }),
         execSync: () => '',
         spawnSync: (_bin, argv) => { executed.push(argv); return { status: 0, stdout: '', stderr: '' } },
       },

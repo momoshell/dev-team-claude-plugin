@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, chmodSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, chmodSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawn } from 'node:child_process'
@@ -38,6 +38,7 @@ function fixture(options = {}) {
     spawn: () => { commands.push({ kind: 'spawn' }); return { pid: Object.hasOwn(options, 'spawnPid') ? options.spawnPid : 701, unref() {} } }, openSync: options.openSync || (() => 10),
     writeSync: (_fd, line) => writes.push(JSON.parse(line)), closeSync: () => {}, kill,
     existsSync: options.existsSync || ((path) => existsSync(path) || String(path).endsWith('/cmd.fifo')),
+    readdirSync: options.readdirSync || readdirSync,
     writeFileSync: options.writeFileSync || writeFileSync, readFileSync: options.readFileSync || readFileSync, mkdirSync, log: options.log || (() => {}), sleep: options.sleep || (() => {}),
     ...(options.now ? { now: options.now } : {}),
     ...(options.emit ? { emit: options.emit } : {}),
@@ -278,6 +279,63 @@ test('retire: retiring a seat this supervisor never started is a no-op', () => {
     assert.equal(f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd1')
     assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 1)
   } finally { f.cleanup() }
+})
+
+test('nextAssignmentId ignores unsafe return filenames', () => {
+  const f = fixture()
+  try {
+    for (const name of ['d3.builder.json', 'd9007199254740993.builder.json', 'd99999999999999999999.builder.json']) {
+      writeFileSync(join(f.paths.returnsDir, name), '')
+    }
+    assert.equal(f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd4')
+  } finally { f.cleanup() }
+})
+
+test('nextAssignmentId ignores an unsafe saved session id', () => {
+  const f = fixture()
+  try {
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    mkdirSync(seatDir, { recursive: true })
+    writeFileSync(join(seatDir, 'session.json'), JSON.stringify({ lastAssignmentId: 'd9007199254740993' }))
+    assert.equal(f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd1')
+  } finally { f.cleanup() }
+})
+
+test('nextAssignmentId ignores an unsafe live session id', () => {
+  const f = fixture({ readdirSync: (path) => String(path).endsWith('/headless-rpc') ? [] : readdirSync(path) })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.equal(first.id, 'd1')
+    settle(f, first)
+    assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'session.json'), JSON.stringify({ lastAssignmentId: 'd9007199254740993' }))
+    assert.equal(f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd2')
+  } finally { f.cleanup() }
+})
+
+test('nextAssignmentId refuses an unsafe next id before spawning or unlinking', () => {
+  const f = fixture()
+  try {
+    const seed = join(f.paths.returnsDir, 'd9007199254740991.builder.json')
+    writeFileSync(seed, '')
+    const before = readdirSync(f.paths.returnsDir).sort()
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/brief.md' }), (err) => err.stage === 'rpc-assignment-id-exhausted')
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 0)
+    assert.deepEqual(readdirSync(f.paths.returnsDir).sort(), before)
+  } finally { f.cleanup() }
+})
+
+test('nextAssignmentId advances ordinary ids and starts at d1 when empty', () => {
+  const seeded = fixture()
+  const empty = fixture()
+  try {
+    writeFileSync(join(seeded.paths.returnsDir, 'd9.builder.json'), '')
+    assert.equal(seeded.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd10')
+    assert.equal(empty.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd1')
+  } finally {
+    seeded.cleanup()
+    empty.cleanup()
+  }
 })
 
 test('durable_cursor entry_id: entries persist, resume with since, and reject unknown cursors', () => {

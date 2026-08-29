@@ -37,6 +37,13 @@ export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
 export const LIVENESS_MISSES_TO_DIE = 2
+// Every gate, baseline, repair, validation lane and full suite reaches the
+// shell through io.run below. Node's spawnSync default maxBuffer is 1 MiB, and
+// past it the child is SIGTERM'd, `res.error.code` is ENOBUFS and a PASSING
+// command is reported red with the END of its output — GATE-SUMMARY, the TAP
+// `# fail N` line, the `not ok` assertion — discarded. A green full suite on
+// this checkout is already 34% of that default.
+export const RUN_MAX_BUFFER_BYTES = 64 * 1024 * 1024
 // #682, measured 2026-08-26: cmux stopped answering and FOUR lanes died within
 // 23 seconds of each other. Every driver probes the SAME pane manager, so a
 // substrate verdict is correlated BY CONSTRUCTION and its blast radius is every
@@ -2653,13 +2660,20 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     writeFile(path, content) { writeFileSync(path, content) },
     readFile(path) { return existsSync(path) ? readFileSync(path, 'utf8') : null },
     run(cmd) {
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000, env: colorNeutralEnv(deps.env || process.env) })
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: checkout, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
       // A timeout kill or a spawn failure must be legible in the output a
       // bounce brief pastes verbatim — never an empty "Failures:" block.
       let output = `${res.stdout || ''}${res.stderr || ''}`
       if (res.error) output += `\n[spawn error: ${res.error.message}]`
       if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
-      return { ok: res.status === 0, output }
+      // An overflow is UNMEASURED, never red: the command may well have passed
+      // and the bytes that would say so are the bytes that were dropped. The
+      // marker is appended LAST so it is what a reader and a test see at the end.
+      const overflowed = res.error?.code === 'ENOBUFS'
+      if (overflowed) output += `\n[output exceeded ${RUN_MAX_BUFFER_BYTES} bytes — this run is UNMEASURED, not red]`
+      const result = { ok: res.status === 0, output }
+      if (overflowed) result.truncated = true
+      return result
     },
     // Prove a command red on the PRE-BUILD tree while the stash stack is shared: set
     // the working changes aside, run, restore. The restore lives in a finally so
@@ -2725,7 +2739,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       const path = neutralColdPath(guard, deps.cold || {})
       const add = spawnSync('git', ['-C', checkout, 'worktree', 'add', '--detach', path, 'HEAD'], { encoding: 'utf8' })
       if (add.status !== 0) throw new Error(`runCold: git worktree add failed at ${path}, refusing to report a cold verdict from the checkout this lane built in:\n${add.stderr || add.stdout || ''}`)
-      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, env: colorNeutralEnv(deps.env || process.env) })
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, maxBuffer: RUN_MAX_BUFFER_BYTES, env: colorNeutralEnv(deps.env || process.env) })
       let output = `${res.stdout || ''}${res.stderr || ''}`
       if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
       if (res.error) throw new Error(`runCold: the cold suite could not be spawned in ${path} (kept for inspection): ${res.error.message}`)

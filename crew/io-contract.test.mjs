@@ -4,12 +4,13 @@ import assert from 'node:assert/strict'
 import { mkdirSync, readdirSync, existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, renameSync as fsRenameSync } from 'node:fs'; import { scratchDir } from '../test/helpers.mjs'
 
 import { join } from 'node:path'
-import { cellFailureKind, emitAdapter, seatIo, nextRung, nextModelRung } from './seat-io.mjs'
+import { cellFailureKind, emitAdapter, RUN_MAX_BUFFER_BYTES, seatIo, nextRung, nextModelRung } from './seat-io.mjs'
 import { resolveSeatModels } from './crew.mjs'
 import * as piAdapter from './adapters/adapter-pi.mjs'
 import { headlessIo } from './headless.mjs'
 import { headlessRpcIo } from './headless-rpc.mjs'
 import { WAIT_POLL_MS } from './seat-io.mjs'
+import { parseGateSummary } from './drive.mjs'
 import { assignmentLine } from './driver.mjs'
 
 const REQUIRED = ['assign', 'wait', 'writeFile', 'readFile', 'run', 'changedFiles', 'commit', 'log', 'now']
@@ -291,6 +292,48 @@ test('seatIo run reports status, spawn errors, and signals', () => {
   assert.deepEqual(f.io.run('ok'), { ok: true, output: '' })
   assert.equal(f.io.run('fail').ok, false)
   assert.match(f.io.run('signal').output, /spawn error|killed by SIGTERM/)
+})
+
+test('seatIo run retains a passing command larger than the node default buffer', () => {
+  const paths = dirs()
+  const emitter = join(paths.dir, 'emit.mjs')
+  fsWriteFileSync(emitter, "process.stdout.write('x'.repeat(1200000))\n")
+  const io = seatIo({ members: {} }, paths, paths.dir, null, null, {}, {})
+  const result = io.run(`${JSON.stringify(process.execPath)} ${JSON.stringify(emitter)}`)
+  assert.equal(result.ok, true)
+  assert.equal(result.output.length, 1_200_000)
+  assert.ok(!result.truncated)
+})
+
+test('seatIo run retains a trailing gate summary after a large command output', () => {
+  const paths = dirs()
+  const emitter = join(paths.dir, 'emit.mjs')
+  const summary = 'GATE-SUMMARY {"total":3,"failed":1,"errored":0}'
+  fsWriteFileSync(emitter, `process.stdout.write('x'.repeat(1200000) + '\\n${summary}\\n')\n`)
+  const io = seatIo({ members: {} }, paths, paths.dir, null, null, {}, {})
+  const result = io.run(`${JSON.stringify(process.execPath)} ${JSON.stringify(emitter)}`)
+  assert.deepEqual(parseGateSummary(result.output), { total: 3, failed: 1, errored: 0 })
+})
+
+test('seatIo run marks ENOBUFS output as truncated and unmeasured', () => {
+  const paths = dirs()
+  const error = Object.assign(new Error('spawnSync /bin/sh ENOBUFS'), { code: 'ENOBUFS' })
+  const io = seatIo({ members: {} }, paths, paths.dir, null, null, {}, {
+    spawnSync: () => ({ status: null, signal: 'SIGTERM', stdout: 'partial output\n', stderr: '', error }),
+  })
+  const result = io.run('anything')
+  assert.equal(result.truncated, true)
+  assert.equal(result.output.endsWith(`[output exceeded ${RUN_MAX_BUFFER_BYTES} bytes — this run is UNMEASURED, not red]`), true)
+})
+
+test('seatIo run keeps a non-ENOBUFS red byte-compatible', () => {
+  const paths = dirs()
+  const io = seatIo({ members: {} }, paths, paths.dir, null, null, {}, {
+    spawnSync: () => ({ status: 1, stdout: 'bad\n', stderr: 'err\n' }),
+  })
+  const result = io.run('anything')
+  assert.deepEqual(Object.keys(result).sort(), ['ok', 'output'])
+  assert.deepEqual(result, { ok: false, output: 'bad\nerr\n' })
 })
 
 test('seatIo run neutralises colour while preserving the inherited environment', () => {

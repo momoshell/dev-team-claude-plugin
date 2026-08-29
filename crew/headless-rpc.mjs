@@ -295,19 +295,31 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (!exists(path)) return 0
     try { return byteLength(read(path)) } catch { return 0 }
   }
+  // A parsed index that is not a SAFE integer NEVER contributes to `max`: past
+  // 2^53 `max + 1 === max`, so two consecutive turns mint one id, share one
+  // return path, and assign's anti-replay unlink deletes the earlier turn's
+  // envelope — self-perpetuating, from one malformed filename on disk.
+  // markerPgid and evidencePgid guard the same way in this file.
+  function safeAssignmentIndex(value) {
+    return Number.isSafeInteger(value) && value >= 0 ? value : 0
+  }
   function nextAssignmentId() {
     let max = 0
-    const inspect = (name) => { const m = /^d(\d+)(?:\.|$)/.exec(name); if (m) max = Math.max(max, Number(m[1])) }
+    const inspect = (name) => { const m = /^d(\d+)(?:\.|$)/.exec(name); if (m) max = Math.max(max, safeAssignmentIndex(Number(m[1]))) }
     try { for (const name of readdir(root)) inspect(name) } catch {}
     try { for (const name of readdir(paths.returnsDir)) inspect(name) } catch {}
     try {
       for (const name of readdir(root)) {
         const saved = readJson(join(root, name, 'session.json'))
-        max = Math.max(max, Number(String(saved?.lastAssignmentId || '').slice(1)) || 0)
+        max = Math.max(max, safeAssignmentIndex(Number(String(saved?.lastAssignmentId || '').slice(1))))
       }
     } catch {}
-    for (const seat of seats.values()) max = Math.max(max, Number(String(session(seat.role).lastAssignmentId || '').slice(1)) || 0)
-    return `d${max + 1}`
+    for (const seat of seats.values()) max = Math.max(max, safeAssignmentIndex(Number(String(session(seat.role).lastAssignmentId || '').slice(1))))
+    const next = max + 1
+    if (!Number.isSafeInteger(next)) {
+      throw staged('rpc-assignment-id-exhausted', `rpc assignment ids are exhausted at d${max}: d${next} is not a safe integer, so minting it would collide with the turn before it`)
+    }
+    return `d${next}`
   }
   function readFrames(seat) {
     const path = seat.stream

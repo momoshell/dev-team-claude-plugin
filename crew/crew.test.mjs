@@ -4601,6 +4601,8 @@ test('a real ledger round trip mirrors drive gate verdicts into distinct gate_re
         }
         return { ok: true, output: '' }
       },
+      // The driver cold-verifies before done and FAILS CLOSED (crew/drive.mjs).
+      runCold() { return { ok: true, output: '', path: '/zz/aa11bb', kept: null } },
       changedFiles() { return ['a.mjs'] },
       commit() { return 'abc1234' },
       log() {}, status() {}, now() { return 0 },

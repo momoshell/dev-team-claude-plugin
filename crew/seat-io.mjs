@@ -1,12 +1,12 @@
 import {
   existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync,
   unlinkSync as fsUnlinkSync, renameSync as fsRenameSync, mkdirSync as fsMkdirSync,
-  readdirSync as fsReaddirSync, statSync as fsStatSync,
+  readdirSync as fsReaddirSync, statSync as fsStatSync, realpathSync as fsRealpathSync,
 } from 'node:fs'
 import { basename, dirname, join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { execSync as cpExecSync, execFileSync as cpExecFileSync, spawnSync as cpSpawnSync } from 'node:child_process'
 
 import {
@@ -1747,6 +1747,104 @@ export function colorNeutralEnv(base = process.env) {
   return env
 }
 
+// --- the COLD verification checkout --------------------------------------------
+// Why a NEUTRAL path, and not /tmp/coldcheck-<lane>: measured on b281-spawnbudget
+// / PR #706, byte-identical files at an identical HEAD were GREEN in the lane's
+// worktree and RED in CI. The discriminator was neither warmth nor cached state —
+// it was the checkout PATH. The failing assertion was
+// `assert.match(refusedOf(run.result), /budget/i)`, and the refusal embeds an
+// absolute path, so /budget/i was matching the DIRECTORY NAME: the lane's worktree
+// was dt-b281-spawnbudget and CI's checkout was not. The budget refusal never
+// fired on either side. A cold checkout cut at /tmp/coldcheck-b281-spawnbudget
+// would have carried the lane name straight back into the path and PRESERVED that
+// bug, so the only path that discriminates is one sharing no meaningful substring
+// with the lane name or the repository name. COLD_PATH_MIN_SHARED is where
+// "meaningful" is set: three characters is short enough to catch `budget` inside a
+// longer name, and long enough that a two-character hex coincidence does not churn
+// the generator.
+export const COLD_PATH_MIN_SHARED = 3
+export const COLD_PATH_ATTEMPTS = 32
+
+// The ordered production FALLBACK roots, tried after node:os.tmpdir(). /tmp is here
+// because the default macOS temp root CANNOT serve this repository: tmpdir() is
+// /var/folders/<...>/T, whose canonical form is /private/var/folders/<...>/T, and
+// `folders` carries the window `old` — which is also a window of every *-coldverify
+// lane name. Every candidate below that root therefore collides no matter how its
+// final segment is drawn, so a single-root generator would refuse to cold-verify
+// this very lane on an ordinary developer machine. Canonical /private/tmp shares
+// nothing with this lane, this worktree or this repository.
+export const COLD_PATH_FALLBACK_ROOTS = Object.freeze(['/tmp'])
+
+// PURE. A shared substring of exactly COLD_PATH_MIN_SHARED characters occurring in
+// BOTH `path` and one of `names`, or '' when the path is neutral. A shared substring
+// of AT LEAST that length exists iff a shared window of exactly that length does, so
+// scanning fixed windows is equivalent to (and simpler than) a longest-first search.
+// Callers need only collision/non-collision, so WHICH window is reported is not part
+// of the contract. Case-insensitive, because a test regex is routinely /budget/i.
+export function coldPathCollision(path, names = []) {
+  const haystack = String(path).toLowerCase()
+  for (const raw of Array.isArray(names) ? names : []) {
+    const name = String(raw || '').toLowerCase()
+    for (let i = 0; i + COLD_PATH_MIN_SHARED <= name.length; i += 1) {
+      const piece = name.slice(i, i + COLD_PATH_MIN_SHARED)
+      if (haystack.includes(piece)) return piece
+    }
+  }
+  return ''
+}
+
+// The names a cold checkout must share nothing with: the directory the lane built
+// in (always dt-<lane> for a dispatched lane) and the repository that worktree
+// belongs to. In a LINKED worktree those two differ, and the repository half is the
+// one the checkout basename cannot supply. The caller adds the lane name and the
+// task name, which it is the only one to know. Short and dot names are dropped:
+// they would collide with everything.
+export function coldGuardNames(checkout = '', gitCommonDir = '') {
+  const repo = gitCommonDir ? basename(dirname(String(gitCommonDir))) : ''
+  return [basename(String(checkout || '')), repo]
+    .map((name) => String(name || '').trim())
+    .filter((name) => name.length >= COLD_PATH_MIN_SHARED && name !== '.' && name !== '..')
+}
+
+// The ORDERED roots to try. An explicit tmpRoots (or a single tmpRoot) is used
+// verbatim — a caller that names its roots gets exactly those and no silent
+// fallback; the production default is tmpdir() first, then COLD_PATH_FALLBACK_ROOTS.
+export function coldPathRoots(deps = {}) {
+  if (Array.isArray(deps.tmpRoots) && deps.tmpRoots.length) return [...deps.tmpRoots]
+  if (deps.tmpRoot) return [String(deps.tmpRoot)]
+  return [tmpdir(), ...COLD_PATH_FALLBACK_ROOTS]
+}
+
+// Cut a path no test regex can match by accident. Randomness alone is not enough:
+// hex digits collide with lane names like b304-coldverify, so a candidate sharing
+// a substring with a guarded name is DISCARDED and redrawn. Each root is CANONICALIZED
+// first and the candidate is built under the canonical form, because the canonical
+// path is the one the process actually enters — a neutral-looking symlink pointing
+// into a colliding directory would otherwise pass. A root whose own canonical path
+// already collides can never yield a neutral candidate, so it is rejected BEFORE any
+// redraw rather than after burning all of them. Exhaustion of every root is never
+// silent and never falls open: it THROWS.
+export function neutralColdPath(names = [], deps = {}) {
+  const rand = deps.rand || (() => randomUUID().replaceAll('-', ''))
+  const attempts = deps.attempts || COLD_PATH_ATTEMPTS
+  const realpath = deps.realpath || fsRealpathSync
+  const rejected = []
+  for (const raw of coldPathRoots(deps)) {
+    let root
+    try { root = String(realpath(String(raw))) } catch (err) { rejected.push(`${raw}: unresolvable (${err.message})`); continue }
+    const rootHit = coldPathCollision(root, names)
+    if (rootHit) { rejected.push(`${root}: the root itself shares ${JSON.stringify(rootHit)}`); continue }
+    let last = ''
+    for (let i = 0; i < attempts; i += 1) {
+      const candidate = join(root, String(rand(i)))
+      last = coldPathCollision(candidate, names)
+      if (!last) return candidate
+    }
+    rejected.push(`${root}: ${attempts} candidates all shared ${JSON.stringify(last)}`)
+  }
+  throw new Error(`neutralColdPath: no neutral cold checkout path for ${JSON.stringify(names)} — every candidate root was rejected [${rejected.join('; ')}]; point TMPDIR (or the cold tmpRoots dep) at a directory whose CANONICAL path shares no substring with this lane or repository`)
+}
+
 export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps = {}) {
   const env = deps.env || process.env
   const hostLoadDeps = {}
@@ -2450,6 +2548,44 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           throw new Error(`runClean: the tree is restored but the entry dropped was ${dropped || 'none'}, not ours (${sha}, ${tag}) — read git stash list before trusting the stack:\n${drop.stderr || drop.stdout || ''}`)
         }
       }
+    },
+    // A COLD verification run: the same command, in a checkout this lane has never
+    // written into, cut at a NEUTRAL path (neutralColdPath above states why the
+    // PATH, and not the warmth, is what discriminates). A worktree can only be cut
+    // at a commit, so this is meaningful only AFTER the lane has committed.
+    // Returns {ok, output, path, kept} for a suite that RAN: on green the checkout
+    // is REMOVED, on red it is KEPT and named so an operator reproduces the failure
+    // by cd-ing into it rather than by cutting a worktree by hand. Everything else
+    // — an unresolvable repository name, no neutral path anywhere, a checkout that
+    // could not be cut, a suite that could not be spawned, a green whose checkout
+    // could not be removed — THROWS, because a cold verdict this method could not
+    // actually take must never be reported as one, exactly as runClean refuses to
+    // judge the wrong tree.
+    runCold(cmd, names = []) {
+      let commonDir = ''
+      try {
+        const out = execSync('git rev-parse --git-common-dir', { cwd: checkout, encoding: 'utf8' }).trim()
+        commonDir = out.startsWith('/') ? out : join(checkout, out)
+      } catch (err) {
+        // FAIL CLOSED. In a linked dispatch worktree the checkout basename is the
+        // LANE name, not the repository name, so losing the common dir silently
+        // would drop exactly the repository-name half of the guard.
+        throw new Error(`runCold: git rev-parse --git-common-dir failed in ${checkout}, refusing to cut a cold checkout without the repository-name guard: ${err.message}`)
+      }
+      const guard = [...(Array.isArray(names) ? names : []), ...coldGuardNames(checkout, commonDir)]
+      const path = neutralColdPath(guard, deps.cold || {})
+      const add = spawnSync('git', ['-C', checkout, 'worktree', 'add', '--detach', path, 'HEAD'], { encoding: 'utf8' })
+      if (add.status !== 0) throw new Error(`runCold: git worktree add failed at ${path}, refusing to report a cold verdict from the checkout this lane built in:\n${add.stderr || add.stdout || ''}`)
+      const res = spawnSync('/bin/sh', ['-c', cmd], { cwd: path, encoding: 'utf8', timeout: 900_000, env: colorNeutralEnv(deps.env || process.env) })
+      let output = `${res.stdout || ''}${res.stderr || ''}`
+      if (res.signal) output += `\n[killed by ${res.signal}${res.signal === 'SIGTERM' ? ' — likely the 900s run timeout' : ''}]`
+      if (res.error) throw new Error(`runCold: the cold suite could not be spawned in ${path} (kept for inspection): ${res.error.message}`)
+      const ok = res.status === 0
+      if (ok) {
+        const removed = spawnSync('git', ['-C', checkout, 'worktree', 'remove', '--force', path], { encoding: 'utf8' })
+        if (removed.status !== 0) throw new Error(`runCold: the cold suite was GREEN but its checkout could not be removed and is still registered at ${path}:\n${removed.stderr || removed.stdout || ''}`)
+      }
+      return { ok, output, path, kept: ok ? null : path }
     },
     // Only headless-rpc is swept here. headless-json is deliberately not covered:
     // it spawns one process per assignment which exits on its own and ships no

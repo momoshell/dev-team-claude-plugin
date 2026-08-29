@@ -1588,6 +1588,10 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
 //        runClean(cmd) -> {ok, output},      // OPTIONAL: run cmd against the
 //                                            // checkout with the uncommitted
 //                                            // changes temporarily set aside
+//        runCold(cmd, names) -> {ok, output, path, kept},
+//                                            // OPTIONAL: run cmd in a FRESH checkout
+//                                            // cut at a NEUTRAL path; THROWS rather
+//                                            // than report a verdict it could not take
 //        reseat(role, {reason}) -> closed result // OPTIONAL, never load-bearing
 //        changedFiles() -> [repo-relative..], // git status --porcelain paths
 //        commit(files, message) -> hash,
@@ -3620,16 +3624,76 @@ function runTask(ctx, io, crash) {
   const committing = io.changedFiles().filter(inScope)
   S.commit = io.commit(committing, message)
   stageComplete()
+
+  // ---- 3b. COLD VERIFICATION ---------------------------------------------------
+  // The same suite, in a checkout this lane never wrote into. Until now a lane ran
+  // its suite in the worktree it had been writing into for the whole run, so every
+  // lane self-certified in the one environment guaranteed to be warm, and CI — which
+  // reports AFTER the operator has been told the lane is green — was the only
+  // cold-start check there was.
+  //
+  // POLICY: EVERY LANE, EVERY RUN, unconditionally. The cost is one extra full suite
+  // run per lane, measured at 126s on this repo on 2026-08-28, and it is paid
+  // because neither cheaper policy buys the thing. Running only lanes touching test
+  // files is the tempting one and it is wrong: the leak is a path-sensitive
+  // ASSERTION meeting a path-sensitive VALUE, and a lane can introduce either half
+  // in a source file while touching no test at all. Running once per batch at
+  // closeout reports after the operator has already been told each lane is green,
+  // which is precisely the defect CI already has and this exists to remove. Two
+  // minutes against a lane costing tens of minutes of model time is the honest price
+  // of not handing an operator a green that only holds in one directory.
+  //
+  // It runs AFTER the commit because a worktree can only be cut at a commit: before
+  // io.commit, HEAD does not carry the build and a cold run would certify the
+  // previous commit. It FAILS CLOSED, with NO exception: `done` is reachable only
+  // from a cold run that actually happened and was green. A red run, a runner that
+  // threw, and an io carrying no cold runner at all are the same answer to the only
+  // question that matters — this lane has not been verified anywhere but in the
+  // directory it built in — so all three escalate rather than report a verdict
+  // nobody took.
+  //
+  // The guarded names are the LANE name first and the task name second. They are
+  // separate fields and separate contracts — crew/crew.mjs sets `task` at :1831 and
+  // `laneName` at :1834, crew/child.mjs at :152 and :320 — and it is the LANE name
+  // that b281-spawnbudget's worktree carried into /budget/i. `laneName` is present
+  // only on a fenced dispatch, so the task name stays in the list as the always-present
+  // second guard; the list is de-duplicated because in a single-slice batch the two
+  // are routinely equal, and a duplicate guard would only slow the generator.
+  stage('suite:cold')
+  let coldSuite
+  if (typeof io.runCold !== 'function') {
+    coldSuite = { verdict: 'unavailable', why: 'this io provides no runCold, so no cold checkout could be cut' }
+  } else {
+    try {
+      const coldGuards = [...new Set([ctx.laneName, ctx.task].filter((name) => typeof name === 'string' && name.trim()))]
+      const cold = io.runCold(ctx.suite, coldGuards)
+      coldSuite = cold.ok
+        ? { verdict: 'green', path: cold.path }
+        : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
+    } catch (err) {
+      coldSuite = { verdict: 'unproven', why: err.message }
+    }
+  }
+  io.log(recordRow({ at: io.now(), cold_suite: coldSuite }))
+  stageComplete()
+  if (coldSuite.verdict !== 'green') {
+    const why = coldSuite.verdict === 'red'
+      ? `the full suite is GREEN in this lane's checkout (${ctx.checkout}) and RED from ${coldSuite.path} — byte-identical files at the identical commit ${S.commit}, the only variable being which directory the suite ran in. This is NOT an ordinary suite failure: something under test is reading its own absolute path, its cwd, or the NAME of the directory it is running in. The cold checkout was kept at ${coldSuite.kept} so the failure can be reproduced there directly; remove it with \`git worktree remove --force ${coldSuite.kept}\` once you are done.\n${coldSuite.output}`
+      : `the cold verification produced no verdict (${coldSuite.verdict}): ${coldSuite.why}. The suite is green only in the checkout this lane built in (${ctx.checkout}), which is the one piece of evidence a lane may not report done on. The commit ${S.commit} is local and unpushed.`
+    return escalate('cold-suite', why, [], { commit: S.commit, cold_suite: coldSuite })
+  }
+
   stage('done')
 
   const result = {
     status: 'done',
-    summary: `Task ${ctx.task} complete: committed ${S.commit} (${committing.length} files), suite green, ${accepted}. Stages: ${S.stages.join(' | ')}`,
+    summary: `Task ${ctx.task} complete: committed ${S.commit} (${committing.length} files), suite green, cold-verified from ${coldSuite.path}, ${accepted}. Stages: ${S.stages.join(' | ')}`,
     artifacts: [planPath, art('review.md'), journal],
     details: {
       ...(variant === DIRECTED_STAGE_HEAD ? { variant } : {}),
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
+      cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
       gate: gateBlock(),
       ...acceptDecisionBlock(),

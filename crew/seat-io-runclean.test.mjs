@@ -1,13 +1,13 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync as realSpawnSync } from 'node:child_process'
 import {
-  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, utimesSync, writeFileSync,
+  existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import {
-  cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, REASK_SETTLE_POLLS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
@@ -24,7 +24,7 @@ const CONTENT = Object.freeze({
   node: 'node package content\n',
 })
 
-function makeRepo({ dirty = true } = {}) {
+function makeRepo({ dirty = true, linked = false } = {}) {
   const root = mkdtempSync(join(tmpdir(), 'crew-run-clean-'))
   const repoDir = join(root, 'repo')
   mkdirSync(repoDir)
@@ -47,7 +47,9 @@ function makeRepo({ dirty = true } = {}) {
     writeFileSync(join(repoDir, 'node_modules', 'pkg', 'index.js'), CONTENT.node)
   }
 
-  return { root, repoDir, paths }
+  const fixture = { root, repoDir, paths, checkout: repoDir }
+  if (linked) fixture.checkout = addLane(fixture, 'linkedLane', CONTENT.dirty)
+  return fixture
 }
 
 function addLane(fixture, name, tracked) {
@@ -58,8 +60,8 @@ function addLane(fixture, name, tracked) {
   return dir
 }
 
-function makeIo({ repoDir, paths }) {
-  return seatIo({ members: {} }, paths, repoDir, null, null, {}, {})
+function makeIo({ repoDir, checkout, paths }, deps = {}) {
+  return seatIo({ members: {} }, paths, checkout || repoDir, null, null, {}, deps)
 }
 
 function commitRepo(tag, files) {
@@ -449,6 +451,197 @@ test('runClean refuses loudly when its own entry is gone', () => {
     assert.match(error.message, /refus/i)
     assert.notEqual(readFileSync(join(fixture.repoDir, 'tracked.txt'), 'utf8'), decoy)
     assert.ok(git(fixture.repoDir, 'stash', 'list', '--format=%gs').includes('decoy-entry'))
+  })
+})
+
+test('runCold runs the command outside the lane checkout and returns its path', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const result = makeIo(fixture).runCold('pwd')
+    const cwd = String(result.output || '').trim().split('\n').pop() || ''
+    assert.equal(result.ok, true)
+    assert.ok(cwd)
+    assert.notEqual(cwd, fixture.checkout)
+    assert.equal(result.kept, null)
+  })
+})
+
+test('runCold cuts the checkout at the current HEAD', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    writeFileSync(join(fixture.checkout, 'cold-marker.txt'), 'marker-ok\n')
+    git(fixture.checkout, 'add', '-A')
+    git(fixture.checkout, 'commit', '-q', '-m', 'the build')
+    const result = makeIo(fixture).runCold('cat cold-marker.txt')
+    assert.equal(result.ok, true)
+    assert.match(result.output, /marker-ok/)
+  })
+})
+
+test('runCold removes a green checkout and keeps a red checkout for inspection', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const green = makeIo(fixture).runCold('true')
+    assert.equal(green.ok, true)
+    assert.equal(existsSync(green.path), false)
+
+    const red = makeIo(fixture).runCold("printf 'cold output'; exit 3")
+    try {
+      assert.equal(red.ok, false)
+      assert.equal(red.kept, red.path)
+      assert.equal(existsSync(red.kept), true)
+      assert.match(red.output, /cold output/)
+    } finally {
+      if (red.kept) git(fixture.checkout, 'worktree', 'remove', '--force', red.kept)
+    }
+  })
+})
+
+test('runCold throws when git worktree add fails', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const deps = {
+      spawnSync: (bin, argv, opts) => (Array.isArray(argv) && argv.includes('worktree') && argv.includes('add')
+        ? { status: 1, stdout: '', stderr: 'injected add failure\n' }
+        : realSpawnSync(bin, argv, opts)),
+    }
+    assert.throws(() => makeIo(fixture, deps).runCold('true'), /worktree add failed/)
+  })
+})
+
+test('runCold throws when green cleanup fails and names the registered path', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let path = null
+    const deps = {
+      spawnSync: (bin, argv, opts) => {
+        if (Array.isArray(argv) && argv.includes('remove')) {
+          path = argv.at(-1)
+          return { status: 1, stdout: '', stderr: 'injected remove failure\n' }
+        }
+        return realSpawnSync(bin, argv, opts)
+      },
+    }
+    try {
+      assert.throws(() => makeIo(fixture, deps).runCold('true'), (error) => /still registered/.test(error.message) && error.message.includes(path))
+    } finally {
+      if (path) git(fixture.checkout, 'worktree', 'remove', '--force', path)
+    }
+  })
+})
+
+test('runCold throws when the suite cannot be spawned', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    let path = null
+    const deps = {
+      spawnSync: (bin, argv, opts) => {
+        if (String(bin) === '/bin/sh') {
+          path = opts.cwd
+          return { status: null, stdout: '', stderr: '', error: new Error('injected spawn failure') }
+        }
+        return realSpawnSync(bin, argv, opts)
+      },
+    }
+    try {
+      assert.throws(() => makeIo(fixture, deps).runCold('true'), /could not be spawned/)
+    } finally {
+      if (path) git(fixture.checkout, 'worktree', 'remove', '--force', path)
+    }
+  })
+})
+
+test('runCold refuses to cut an unguarded checkout when repository lookup fails', () => {
+  withRepo({ dirty: false }, (fixture) => {
+    const deps = { execSync: () => { throw new Error('injected rev-parse failure') } }
+    assert.throws(() => makeIo(fixture, deps).runCold('true'), /repository-name guard/)
+  })
+})
+
+test('runCold redraws paths carrying lane, repository, and checkout names', () => {
+  withRepo({ dirty: false, linked: true }, (fixture) => {
+    const root = scratchDir('zqneutral-')
+    const draw = (first, names) => {
+      const result = makeIo(fixture, { cold: { tmpRoot: root, rand: (i) => i === 0 ? first : 'f9f9f9', attempts: 8 } }).runCold('true', names)
+      assert.equal(basename(result.path), 'f9f9f9')
+    }
+    draw('zqlane5x', ['zqlane5'])
+    draw('repo9x', [])
+    draw('linkedLanex', [])
+  })
+})
+
+test('coldPathCollision reports shared case-insensitive windows only', () => {
+  const hit = coldPathCollision('/zz/coldcheck-9budget9', ['b281-spawnBUDGET'])
+  assert.equal(typeof hit, 'string')
+  assert.equal(hit.length, COLD_PATH_MIN_SHARED)
+  assert.ok('/zz/coldcheck-9budget9'.toLowerCase().includes(hit.toLowerCase()))
+  assert.ok('b281-spawnBUDGET'.toLowerCase().includes(hit.toLowerCase()))
+  assert.equal(coldPathCollision('/zz/9f9f9f', ['b281-spawnbudget']), '')
+})
+
+test('neutralColdPath redraws a collision and throws on exhausted roots', () => {
+  const path = neutralColdPath(['b304-coldverify'], {
+    tmpRoots: ['/zz'], rand: (i) => ['b304ab', 'f9f9f9'][i], attempts: 4, realpath: (p) => p,
+  })
+  assert.equal(basename(path), 'f9f9f9')
+  assert.throws(() => neutralColdPath(['spawnbudget'], {
+    tmpRoots: ['/zz'], rand: () => 'budgetx', attempts: 3, realpath: (p) => p,
+  }), /TMPDIR/)
+})
+
+test('coldGuardNames derives repository and drops short or dot names', () => {
+  assert.deepEqual(coldGuardNames('/tmp/zqcheckout', '/tmp/zqrepo/.git'), ['zqcheckout', 'zqrepo'])
+  assert.deepEqual(coldGuardNames('.', '/tmp/zqrepo/.git'), ['zqrepo'])
+  assert.deepEqual(coldGuardNames('/tmp/ab', '/tmp/xy/.git'), [])
+})
+
+test('runCold leaves runClean and the stash stack alone on a dirty linked tree', () => {
+  withRepo({ dirty: false, linked: true }, (fixture) => {
+    const result = makeIo(fixture).runCold('git show -s --format=%s')
+    assert.equal(result.ok, true)
+    assert.match(result.output, /initial/)
+    assert.equal(git(fixture.checkout, 'stash', 'list').trim(), '')
+    assert.equal(readFileSync(join(fixture.checkout, 'tracked.txt'), 'utf8'), CONTENT.dirty)
+  })
+})
+
+test('neutralColdPath rejects a colliding root before drawing and uses the next root', () => {
+  let draws = 0
+  const path = neutralColdPath(['b304-coldverify'], {
+    tmpRoots: ['/zz/folders/T', '/zz/neutral9'], rand: () => { draws += 1; return `n${draws}n` },
+    attempts: 8, realpath: (p) => p,
+  })
+  assert.match(path, /^\/zz\/neutral9\//)
+  assert.equal(draws, 1)
+})
+
+test('coldPathRoots preserves explicit order and does not silently fall back', () => {
+  assert.deepEqual(coldPathRoots({}), [tmpdir(), ...COLD_PATH_FALLBACK_ROOTS])
+  assert.deepEqual(coldPathRoots({ tmpRoot: '/zz/one' }), ['/zz/one'])
+  assert.deepEqual(coldPathRoots({ tmpRoots: ['/zz/one', '/zz/two'] }), ['/zz/one', '/zz/two'])
+})
+
+test('neutralColdPath canonicalizes symlink roots before judging and building', () => {
+  const root = scratchDir('zqsymlink-')
+  const target = join(root, 'zqcoldverify9')
+  const link = join(root, 'zqlink')
+  mkdirSync(target)
+  symlinkSync(target, link)
+  assert.throws(() => neutralColdPath(['zqcoldverify9'], { tmpRoots: [link], rand: () => 'f9f9f9', attempts: 2 }), /every candidate root was rejected/)
+
+  const neutral = join(root, 'zqneutral')
+  const link2 = join(root, 'zqlink2')
+  mkdirSync(neutral)
+  symlinkSync(neutral, link2)
+  const path = neutralColdPath(['nothingatall'], { tmpRoots: [link2], rand: () => 'f9f9f9', attempts: 2 })
+  assert.match(path, new RegExp(`^${realpathSync(neutral)}/`))
+})
+
+test('the shipped default roots yield a neutral path for this lane and repository', () => {
+  withRepo({ dirty: false, linked: true }, (fixture) => {
+    const common = git(fixture.checkout, 'rev-parse', '--git-common-dir').trim()
+    const resolved = common.startsWith('/') ? common : join(fixture.checkout, common)
+    const repo = basename(dirname(resolved))
+    const names = ['b304-coldverify', basename(fixture.checkout), repo]
+    assert.ok(repo)
+    assert.notEqual(repo, basename(fixture.checkout))
+    const path = neutralColdPath(names)
+    assert.equal(coldPathCollision(path, names), '')
   })
 })
 

@@ -1515,7 +1515,9 @@ export function openLedger({
     for (const sink of mirrorErrorSinks) {
       sink.count += 1
       if (!sink.first_code) sink.first_code = code
+      if (!sink.first_message) sink.first_message = err?.message || String(err)
       sink.last_code = code
+      sink.last_message = err?.message || String(err)
     }
     return code
   }
@@ -1526,6 +1528,10 @@ export function openLedger({
   // condition from a swallowed mirror failure and must not be reported as one.
   function captureMirrorErrors(fn) {
     const sink = { count: 0, first_code: null, last_code: null }
+    Object.defineProperties(sink, {
+      first_message: { value: null, writable: true },
+      last_message: { value: null, writable: true },
+    })
     mirrorErrorSinks.push(sink)
     try {
       return { value: fn(), errors: sink }
@@ -2885,6 +2891,203 @@ export function openLedger({
     }
   }
 
+  function tableNames() {
+    return queryRows("SELECT name FROM sqlite_master WHERE type = 'table'").map((row) => row.name)
+  }
+
+  function columnNames(table) {
+    if (!Object.prototype.hasOwnProperty.call(TABLES, table)) {
+      // Never embed the raw (caller-controlled) table name in the message —
+      // list the closed set of valid names instead.
+      refuse(`columnNames: unknown table — must be one of ${Object.keys(TABLES).join('|')}`)
+    }
+    return queryRows(`PRAGMA table_info(${table})`).map((row) => row.name)
+  }
+
+  function sessionsFiltered({ status, since, until } = {}) {
+    const where = [], args = []
+    if (status) { where.push('status = ?'); args.push(status) }
+    if (since) { where.push('started_at >= ?'); args.push(since) }
+    if (until) { where.push('started_at < ?'); args.push(until) }
+    return queryRows(`SELECT * FROM sessions${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY started_at DESC`, args)
+  }
+
+  function runsStartedWithin({ since, until = null } = {}) {
+    return queryRows(`
+      SELECT adw_id, task_slug, repo_slug, status, started_at, ended_at
+      FROM sessions
+      WHERE started_at >= ? AND (? IS NULL OR started_at < ?)
+      ORDER BY started_at DESC, adw_id
+    `, [since, until, until])
+  }
+
+  function phasesFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT * FROM phases WHERE adw_id IN (${marks}) ORDER BY adw_id, seq`, ids)
+  }
+
+  function agentEventsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT id, adw_id, type, phase_id, payload_json, started_at, ended_at FROM events WHERE adw_id IN (${marks}) AND type IN ('agent_start','agent_end') ORDER BY id`, ids)
+  }
+
+  function agentSessionsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT adw_id, dispatch_id, role, model, billed_input_tokens, billed_output_tokens, billed_cache_write_tokens, billed_cache_read_tokens FROM agent_sessions WHERE adw_id IN (${marks})`, ids)
+  }
+
+  function gateDiscriminationsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT adw_id, gate_generation, verdict, checks_total, checks_failed, checks_errored, note, created_at FROM gate_discriminations WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation`, ids)
+  }
+
+  function gateResultsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT adw_id, phase_id, gate_name, attempt, ok, checks_json, gate_generation, pristine, created_at FROM gate_results WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation, attempt`, ids)
+  }
+
+  function reviewOutcomesFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT adw_id, dispatch_id, role, verdict, must_fix, should_fix, consider, created_at FROM review_outcomes WHERE adw_id IN (${marks}) ORDER BY adw_id, created_at, id`, ids)
+  }
+
+  function acceptDecisionsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT adw_id, phase_id, where_at, outcome, findings_total, residual_count, refuted_count, cosmetic_count, unverified_count, invalid_reasons, created_at FROM accept_decisions WHERE adw_id IN (${marks}) ORDER BY adw_id, created_at, id`, ids)
+  }
+
+  function supportsJson1() {
+    return queryRows(`SELECT json_extract('{"a":1}','$.a') AS value`).length > 0
+  }
+
+  function eventsPage({ adw_id, after = 0, limit = 200, type, phase_id, role } = {}) {
+    const where = ['adw_id = ?', 'id > ?'], args = [adw_id, after]
+    if (type != null) { where.push('type = ?'); args.push(type) }
+    if (phase_id != null) { where.push('phase_id = ?'); args.push(phase_id) }
+    if (role != null) { where.push("json_extract(payload_json,'$.role') = ?"); args.push(role) }
+    return queryRows(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY id LIMIT ?`, [...args, limit])
+  }
+
+  function maxEventId(adwId) {
+    const row = queryRows('SELECT max(id) AS max_id FROM events WHERE adw_id = ?', [adwId])[0] ?? null
+    return row?.max_id == null ? null : Number(row.max_id)
+  }
+
+  // Rows are keyed by run, not by created_at: a seat's failure belongs to the
+  // run that dispatched it however late the row landed. Same reasoning as
+  // seatTeardownRowsFor.
+  function cellFailureRowsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`
+      SELECT adw_id, phase_id, dispatch_id, role, agent, provider, model_id, effort, transport, kind, stage, detail, created_at
+      FROM cell_failures
+      WHERE adw_id IN (${marks})
+      ORDER BY adw_id, created_at, id
+    `, ids)
+  }
+
+  // A row with no run, and a row naming a run this ledger does not register,
+  // are both unattributable FACTS — never dropped, never reassigned.
+  function unattributableCellFailures({ since, until = null } = {}) {
+    return queryRows(`
+      SELECT adw_id, phase_id, dispatch_id, role, agent, provider, model_id, effort, transport, kind, stage, detail, created_at
+      FROM cell_failures
+      WHERE created_at >= ? AND (? IS NULL OR created_at < ?)
+        AND (adw_id IS NULL OR adw_id NOT IN (SELECT adw_id FROM sessions))
+      ORDER BY created_at, id
+    `, [since, until, until])
+  }
+
+  // Seat rows are deliberately not filtered by created_at: a teardown for
+  // a run started in the window can land after until, and dropping it would
+  // fabricate a not-measured run. The window note carries this semantics.
+  function seatTeardownRowsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`
+      SELECT adw_id, phase_id, role, transport, outcome, reason, forced, evidence_kind, created_at
+      FROM seat_teardowns
+      WHERE adw_id IN (${marks})
+      ORDER BY adw_id, role
+    `, ids)
+  }
+
+  function intakePicks({ since, until = null } = {}) {
+    return queryRows(`
+      SELECT picked_issue, board_owner, board_project, created_at
+      FROM intake_sweeps
+      WHERE outcome = 'picked'
+        AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      ORDER BY created_at DESC
+      LIMIT 20
+    `, [since, since, until, until])
+  }
+
+  function intakeSweepTotals() {
+    return queryRows(`
+      SELECT COUNT(*) AS sweeps, MIN(created_at) AS first_at, MAX(created_at) AS last_at
+      FROM intake_sweeps
+    `)[0] ?? null
+  }
+
+  // Latest recorded refusal per issue. SQLite's bare-column-with-MAX()
+  // rule keeps the non-aggregated columns on the MAX(created_at) row.
+  function intakeCandidateRefusals({ since, until = null } = {}) {
+    return queryRows(`
+      SELECT board_owner, board_project, issue, reason, detail, priority,
+             issue_created_at, MAX(created_at) AS created_at, COUNT(*) AS refusals
+      FROM intake_refusals
+      WHERE issue IS NOT NULL
+        AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY board_owner, board_project, issue
+      ORDER BY issue
+    `, [since, since, until, until])
+  }
+
+  function intakeCandidatePicks({ since, until = null } = {}) {
+    return queryRows(`
+      SELECT picked_issue AS issue, board_owner, board_project,
+             MAX(created_at) AS created_at, COUNT(*) AS picks
+      FROM intake_sweeps
+      WHERE outcome = 'picked' AND picked_issue IS NOT NULL
+        AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
+      GROUP BY picked_issue, board_owner, board_project
+      ORDER BY picked_issue
+    `, [since, since, until, until])
+  }
+
+  // Keep this in lockstep with crew/daemon.mjs:311-321: the daemon's
+  // rolling burn query sums all four running token totals per session.
+  function agentSessionTokenTotals({ since, until = null } = {}) {
+    const untilClause = until == null ? '' : ' AND started_at < ?'
+    const params = until == null ? [since] : [since, until]
+    return queryRows(`
+      SELECT COUNT(*) AS sessions,
+             COALESCE(SUM(billed_input_tokens),0)       AS input,
+             COALESCE(SUM(billed_output_tokens),0)      AS output,
+             COALESCE(SUM(billed_cache_write_tokens),0) AS cache_write,
+             COALESCE(SUM(billed_cache_read_tokens),0)  AS cache_read
+      FROM agent_sessions WHERE started_at >= ?${untilClause}
+    `, params)[0] ?? null
+  }
+
   function gateReviewGap() {
     return queryRows(`
       SELECT s.adw_id, s.task_slug,
@@ -3480,7 +3683,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

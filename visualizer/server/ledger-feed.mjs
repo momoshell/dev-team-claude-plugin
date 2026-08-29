@@ -42,6 +42,10 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     return stderr.write(text)
   } }
 
+  function mirrorErrorReason(errors) {
+    return errors.first_message || errors.first_code || 'mirror read failed'
+  }
+
   function open() {
     if (closed) return db
     if (ledger && db) return db
@@ -85,41 +89,54 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     const handle = open()
     if (!handle || probe.latched) return
     probe.probes += 1
-    try {
-      const names = new Set(handle.prepare('PRAGMA table_info(sessions)').all().map((row) => row.name))
-      const tables = new Set(handle.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name))
-      probe.missing = OPTIONAL_COLUMNS.sessions.filter((name) => !names.has(name))
-      probe.missing_tables = OPTIONAL_TABLES.filter((name) => !tables.has(name))
-      if (!probe.missing.length && !probe.missing_tables.length) probe.latched = true
-    } catch (err) { degradedReason = err?.message || String(err) }
+    const { value, errors } = ledger.captureMirrorErrors(() => ({
+      names: ledger.columnNames('sessions'),
+      tables: ledger.tableNames(),
+    }))
+    if (errors.count > 0) {
+      degradedReason = mirrorErrorReason(errors)
+      return
+    }
+    const names = new Set(value.names), tables = new Set(value.tables)
+    probe.missing = OPTIONAL_COLUMNS.sessions.filter((name) => !names.has(name))
+    probe.missing_tables = OPTIONAL_TABLES.filter((name) => !tables.has(name))
+    if (!probe.missing.length && !probe.missing_tables.length) probe.latched = true
   }
   function listRuns(filters = {}) {
     probeColumns()
     const handle = open()
     if (!handle) return { runs: [], degraded: true, probe: { ...probe } }
-    const where = [], args = []
-    if (filters.status) { where.push('status = ?'); args.push(filters.status) }
-    if (filters.since) { where.push('started_at >= ?'); args.push(filters.since) }
-    if (filters.until) { where.push('started_at < ?'); args.push(filters.until) }
-    const sql = `SELECT * FROM sessions${where.length ? ` WHERE ${where.join(' AND ')}` : ''} ORDER BY started_at DESC`
-    const sessions = handle.prepare(sql).all(...args)
+    const sessionsRead = ledger.captureMirrorErrors(() => ledger.sessionsFiltered(filters))
+    if (sessionsRead.errors.count > 0) {
+      return { runs: [], degraded: true, absent: mirrorErrorReason(sessionsRead.errors), probe: { ...probe } }
+    }
+    const sessions = sessionsRead.value
     const ids = sessions.map((row) => row.adw_id)
     if (!ids.length) return { runs: [], degraded, probe: { ...probe } }
-    const marks = ids.map(() => '?').join(',')
-    const phases = handle.prepare(`SELECT * FROM phases WHERE adw_id IN (${marks}) ORDER BY adw_id, seq`).all(...ids)
-    const agents = handle.prepare(`SELECT id, adw_id, type, phase_id, payload_json, started_at, ended_at FROM events WHERE adw_id IN (${marks}) AND type IN ('agent_start','agent_end') ORDER BY id`).all(...ids)
-    function optional(table, sql) {
+    const phasesRead = ledger.captureMirrorErrors(() => ledger.phasesFor(ids))
+    if (phasesRead.errors.count > 0) {
+      return { runs: [], degraded: true, absent: mirrorErrorReason(phasesRead.errors), probe: { ...probe } }
+    }
+    const agentsRead = ledger.captureMirrorErrors(() => ledger.agentEventsFor(ids))
+    if (agentsRead.errors.count > 0) {
+      return { runs: [], degraded: true, absent: mirrorErrorReason(agentsRead.errors), probe: { ...probe } }
+    }
+    const phases = phasesRead.value
+    const agents = agentsRead.value
+    function optional(table, fn) {
       if (probe.missing_tables.includes(table)) return []
-      try { return handle.prepare(sql).all(...ids) } catch {
+      const { value, errors } = ledger.captureMirrorErrors(fn)
+      if (errors.count > 0) {
         if (!probe.missing_tables.includes(table)) probe.missing_tables.push(table)
         return []
       }
+      return value
     }
-    const agentSessions = optional('agent_sessions', `SELECT adw_id, dispatch_id, role, model, billed_input_tokens, billed_output_tokens, billed_cache_write_tokens, billed_cache_read_tokens FROM agent_sessions WHERE adw_id IN (${marks})`)
-    const gateRows = optional('gate_discriminations', `SELECT adw_id, gate_generation, verdict, checks_total, checks_failed, checks_errored, note, created_at FROM gate_discriminations WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation`)
-    const gateResults = optional('gate_results', `SELECT adw_id, phase_id, gate_name, attempt, ok, checks_json, gate_generation, pristine, created_at FROM gate_results WHERE adw_id IN (${marks}) ORDER BY adw_id, gate_generation, attempt`)
-    const reviewRows = optional('review_outcomes', `SELECT adw_id, dispatch_id, role, verdict, must_fix, should_fix, consider, created_at FROM review_outcomes WHERE adw_id IN (${marks}) ORDER BY adw_id, created_at, id`)
-    const acceptRows = optional('accept_decisions', `SELECT adw_id, phase_id, where_at, outcome, findings_total, residual_count, refuted_count, cosmetic_count, unverified_count, invalid_reasons, created_at FROM accept_decisions WHERE adw_id IN (${marks}) ORDER BY adw_id, created_at, id`)
+    const agentSessions = optional('agent_sessions', () => ledger.agentSessionsFor(ids))
+    const gateRows = optional('gate_discriminations', () => ledger.gateDiscriminationsFor(ids))
+    const gateResults = optional('gate_results', () => ledger.gateResultsFor(ids))
+    const reviewRows = optional('review_outcomes', () => ledger.reviewOutcomesFor(ids))
+    const acceptRows = optional('accept_decisions', () => ledger.acceptDecisionsFor(ids))
     const phaseMap = new Map(), eventMap = new Map(), agentSessionMap = new Map(), gateMap = new Map(), gateResultsMap = new Map(), reviewMap = new Map(), acceptMap = new Map()
     for (const id of ids) {
       phaseMap.set(id, []); eventMap.set(id, []); agentSessionMap.set(id, []); gateMap.set(id, []); gateResultsMap.set(id, []); reviewMap.set(id, []); acceptMap.set(id, [])
@@ -142,18 +159,23 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     const handle = open()
     if (!handle) return { events: [], cursor: after }
     const filters = type != null || role != null || phase_id != null
-    const where = ['adw_id = ?', 'id > ?'], args = [adw_id, after], unsupported_filters = []
-    if (type != null) { where.push('type = ?'); args.push(type) }
-    if (phase_id != null) { where.push('phase_id = ?'); args.push(phase_id) }
+    const unsupported_filters = []
+    let eventRole = role
     if (role != null) {
-      if (json1 === null) {
-        try { handle.prepare(`SELECT json_extract('{"a":1}','$.a') AS value`).get(); json1 = true } catch { json1 = false }
-      }
-      if (json1) { where.push("json_extract(payload_json,'$.role') = ?"); args.push(role) } else unsupported_filters.push('role')
+      if (json1 === null) json1 = ledger.captureMirrorErrors(() => ledger.supportsJson1()).value
+      if (json1) { eventRole = role } else { eventRole = null; unsupported_filters.push('role') }
     }
-    const events = handle.prepare(`SELECT * FROM events WHERE ${where.join(' AND ')} ORDER BY id LIMIT ?`).all(...args, limit)
+    const eventsRead = ledger.captureMirrorErrors(() => ledger.eventsPage({ adw_id, after, limit, type, phase_id, role: eventRole }))
+    if (eventsRead.errors.count > 0) {
+      return { events: [], cursor: after, degraded: true, absent: mirrorErrorReason(eventsRead.errors) }
+    }
+    const events = eventsRead.value
     if (!filters) return { events, cursor: events.length ? events[events.length - 1].id : after }
-    const max = handle.prepare('SELECT max(id) AS max_id FROM events WHERE adw_id = ?').get(adw_id)?.max_id
+    const maxRead = ledger.captureMirrorErrors(() => ledger.maxEventId(adw_id))
+    if (maxRead.errors.count > 0) {
+      return { events, cursor: after, degraded: true, absent: mirrorErrorReason(maxRead.errors), ...(unsupported_filters.length ? { unsupported_filters } : {}) }
+    }
+    const max = maxRead.value
     return { events, cursor: events.length === limit ? events.at(-1).id : (max ?? after), ...(unsupported_filters.length ? { unsupported_filters } : {}) }
   }
   function cellFailures({ since = null, until = null } = {}) {
@@ -170,69 +192,35 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     const handle = open()
     if (!handle) return { runs: null, rows: null, unattributable: null, absent: degradedReason || 'the ledger could not be opened' }
     if (probe.missing_tables.includes('cell_failures')) return { runs: null, rows: null, unattributable: null, absent: 'cell_failures predates this ledger mirror' }
-    try {
-      const runs = handle.prepare(`
-        SELECT adw_id, task_slug, repo_slug, status, started_at, ended_at
-        FROM sessions
-        WHERE started_at >= ? AND (? IS NULL OR started_at < ?)
-        ORDER BY started_at DESC, adw_id
-      `).all(since, until, until)
+    const { value, errors } = ledger.captureMirrorErrors(() => {
+      const runs = ledger.runsStartedWithin({ since, until })
       const ids = runs.map((row) => row.adw_id)
-      // Rows are keyed by run, not by created_at: a seat's failure belongs to the
-      // run that dispatched it however late the row landed. Same reasoning as
-      // seatTeardowns (:151-153).
-      const rows = ids.length
-        ? handle.prepare(`
-          SELECT adw_id, phase_id, dispatch_id, role, agent, provider, model_id, effort, transport, kind, stage, detail, created_at
-          FROM cell_failures
-          WHERE adw_id IN (${ids.map(() => '?').join(',')})
-          ORDER BY adw_id, created_at, id
-        `).all(...ids)
-        : []
-      // A row with no run, and a row naming a run this ledger does not register,
-      // are both unattributable FACTS — never dropped, never reassigned.
-      const unattributable = handle.prepare(`
-        SELECT adw_id, phase_id, dispatch_id, role, agent, provider, model_id, effort, transport, kind, stage, detail, created_at
-        FROM cell_failures
-        WHERE created_at >= ? AND (? IS NULL OR created_at < ?)
-          AND (adw_id IS NULL OR adw_id NOT IN (SELECT adw_id FROM sessions))
-        ORDER BY created_at, id
-      `).all(since, until, until)
-      return { runs, rows, unattributable, absent: null }
-    } catch (err) {
+      const rows = ledger.cellFailureRowsFor(ids)
+      const unattributable = ledger.unattributableCellFailures({ since, until })
+      return { runs, rows, unattributable }
+    })
+    if (errors.count > 0) {
       if (!probe.missing_tables.includes('cell_failures')) probe.missing_tables.push('cell_failures')
-      return { runs: null, rows: null, unattributable: null, absent: err?.message || String(err) }
+      return { runs: null, rows: null, unattributable: null, absent: mirrorErrorReason(errors) }
     }
+    return { ...value, absent: null }
   }
   function seatTeardowns({ since = null, until = null } = {}) {
     probeColumns()
     const handle = open()
     if (!handle) return { runs: null, rows: null, absent: degradedReason || 'the ledger could not be opened' }
     if (probe.missing_tables.includes('seat_teardowns')) return { runs: null, rows: null, absent: 'seat_teardowns predates this ledger mirror' }
-    try {
-      const runs = handle.prepare(`
-        SELECT adw_id, task_slug, repo_slug, status, started_at, ended_at
-        FROM sessions
-        WHERE started_at >= ? AND (? IS NULL OR started_at < ?)
-        ORDER BY started_at DESC, adw_id
-      `).all(since, until, until)
+    const { value, errors } = ledger.captureMirrorErrors(() => {
+      const runs = ledger.runsStartedWithin({ since, until })
       const ids = runs.map((row) => row.adw_id)
-      // Seat rows are deliberately not filtered by created_at: a teardown for
-      // a run started in the window can land after until, and dropping it would
-      // fabricate a not-measured run. The window note carries this semantics.
-      const rows = ids.length
-        ? handle.prepare(`
-          SELECT adw_id, phase_id, role, transport, outcome, reason, forced, evidence_kind, created_at
-          FROM seat_teardowns
-          WHERE adw_id IN (${ids.map(() => '?').join(',')})
-          ORDER BY adw_id, role
-        `).all(...ids)
-        : []
-      return { runs, rows, absent: null }
-    } catch (err) {
+      const rows = ledger.seatTeardownRowsFor(ids)
+      return { runs, rows }
+    })
+    if (errors.count > 0) {
       if (!probe.missing_tables.includes('seat_teardowns')) probe.missing_tables.push('seat_teardowns')
-      return { runs: null, rows: null, absent: err?.message || String(err) }
+      return { runs: null, rows: null, absent: mirrorErrorReason(errors) }
     }
+    return { ...value, absent: null }
   }
   function intake({ since = null, until = null } = {}) {
     probeColumns()
@@ -256,27 +244,20 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
       candidate_refusals: null, candidate_picks: null, candidates_absent: null,
       absent: sweepsRead.errors.first_code || 'mirror read failed',
     }
-    try {
-      picks = handle.prepare(`
-        SELECT picked_issue, board_owner, board_project, created_at
-        FROM intake_sweeps
-        WHERE outcome = 'picked'
-          AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-        ORDER BY created_at DESC
-        LIMIT 20
-      `).all(since, since, until, until)
-      ever = handle.prepare(`
-        SELECT COUNT(*) AS sweeps, MIN(created_at) AS first_at, MAX(created_at) AS last_at
-        FROM intake_sweeps
-      `).get()
-    } catch (err) {
+    const sweepDetailsRead = ledger.captureMirrorErrors(() => ({
+      picks: ledger.intakePicks({ since, until }),
+      ever: ledger.intakeSweepTotals(),
+    }))
+    if (sweepDetailsRead.errors.count > 0) {
       if (!probe.missing_tables.includes('intake_sweeps')) probe.missing_tables.push('intake_sweeps')
       return {
         sweeps: null, refusals: null, picks: null, ever: null,
         candidate_refusals: null, candidate_picks: null, candidates_absent: null,
-        absent: err?.message || String(err),
+        absent: mirrorErrorReason(sweepDetailsRead.errors),
       }
     }
+    picks = sweepDetailsRead.value.picks
+    ever = sweepDetailsRead.value.ever
 
     let refusals = null, refusals_absent = null
     let candidate_refusals = null, candidate_picks = null, candidates_absent = null
@@ -291,31 +272,17 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
         candidate_refusals: null, candidate_picks: null, candidates_absent: null,
         absent: refusalsRead.errors.first_code || 'mirror read failed',
       }
-      try {
-        // Latest recorded refusal per issue. SQLite's bare-column-with-MAX()
-        // rule keeps the non-aggregated columns on the MAX(created_at) row.
-        candidate_refusals = handle.prepare(`
-          SELECT board_owner, board_project, issue, reason, detail, priority,
-                 issue_created_at, MAX(created_at) AS created_at, COUNT(*) AS refusals
-          FROM intake_refusals
-          WHERE issue IS NOT NULL
-            AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-          GROUP BY board_owner, board_project, issue
-          ORDER BY issue
-        `).all(since, since, until, until)
-        candidate_picks = handle.prepare(`
-          SELECT picked_issue AS issue, board_owner, board_project,
-                 MAX(created_at) AS created_at, COUNT(*) AS picks
-          FROM intake_sweeps
-          WHERE outcome = 'picked' AND picked_issue IS NOT NULL
-            AND (? IS NULL OR created_at >= ?) AND (? IS NULL OR created_at < ?)
-          GROUP BY picked_issue, board_owner, board_project
-          ORDER BY picked_issue
-        `).all(since, since, until, until)
-      } catch (err) {
+      const candidatesRead = ledger.captureMirrorErrors(() => ({
+        candidate_refusals: ledger.intakeCandidateRefusals({ since, until }),
+        candidate_picks: ledger.intakeCandidatePicks({ since, until }),
+      }))
+      if (candidatesRead.errors.count > 0) {
         if (!probe.missing_tables.includes('intake_refusals')) probe.missing_tables.push('intake_refusals')
-        refusals_absent = err?.message || String(err)
+        refusals_absent = mirrorErrorReason(candidatesRead.errors)
         candidates_absent = refusals_absent
+      } else {
+        candidate_refusals = candidatesRead.value.candidate_refusals
+        candidate_picks = candidatesRead.value.candidate_picks
       }
     }
     return {
@@ -342,26 +309,14 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     if (probe.missing_tables.includes('agent_sessions')) {
       return { measured: false, total: null, sessions: null, absent: 'agent_sessions predates this ledger mirror' }
     }
-    const untilClause = until == null ? '' : ' AND started_at < ?'
-    const params = until == null ? [since] : [since, until]
-    try {
-      // Keep this in lockstep with crew/daemon.mjs:234-243: the daemon's
-      // rolling burn query sums all four running token totals per session.
-      const row = handle.prepare(`
-        SELECT COUNT(*) AS sessions,
-               COALESCE(SUM(billed_input_tokens),0)       AS input,
-               COALESCE(SUM(billed_output_tokens),0)      AS output,
-               COALESCE(SUM(billed_cache_write_tokens),0) AS cache_write,
-               COALESCE(SUM(billed_cache_read_tokens),0)  AS cache_read
-        FROM agent_sessions WHERE started_at >= ?${untilClause}
-      `).get(...params)
-      const total = ['input', 'output', 'cache_write', 'cache_read']
-        .reduce((sum, key) => sum + Number(row?.[key] ?? 0), 0)
-      return { measured: true, total, sessions: Number(row?.sessions ?? 0), absent: null }
-    } catch (err) {
+    const { value: row, errors } = ledger.captureMirrorErrors(() => ledger.agentSessionTokenTotals({ since, until }))
+    if (errors.count > 0) {
       if (!probe.missing_tables.includes('agent_sessions')) probe.missing_tables.push('agent_sessions')
-      return { measured: false, total: null, sessions: null, absent: err?.message || String(err) }
+      return { measured: false, total: null, sessions: null, absent: mirrorErrorReason(errors) }
     }
+    const total = ['input', 'output', 'cache_write', 'cache_read']
+      .reduce((sum, key) => sum + Number(row?.[key] ?? 0), 0)
+    return { measured: true, total, sessions: Number(row?.sessions ?? 0), absent: null }
   }
   function health() {
     probeColumns()

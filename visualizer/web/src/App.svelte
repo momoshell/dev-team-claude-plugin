@@ -4,6 +4,7 @@
   import { journalPulse } from './lib/live.js'
   import { formatHash, parseHash, subscribeHash } from './lib/route.js'
   import TaskList from './lib/TaskList.svelte'
+  import OperationsOverview from './lib/OperationsOverview.svelte'
   import MetricsStrip from './lib/MetricsStrip.svelte'
   import CellHealthPanel from './lib/CellHealthPanel.svelte'
   import TeardownPanel from './lib/TeardownPanel.svelte'
@@ -141,9 +142,11 @@
   {/if}
 {:else if route.view === 'ops'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">System health</p><h1>Operations</h1><p>Factory throughput, intake controls, and failure signals.</p></div></div>
-    <MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} />
-    <div class="ops-grid"><CellHealthPanel /><TeardownPanel /><IntakePanel /><RunSetPanel /></div>
+    <div class="page-heading"><div><p class="eyebrow">Factory control room</p><h1>Operations</h1><p>See whether work is flowing, where reliability is slipping, and which evidence needs a closer look.</p></div><span class="updated">Live operating windows · refreshed automatically</span></div>
+    <OperationsOverview {runs} degraded={feedDegraded} {now} onopen={openRun} />
+    <details class="ops-baseline"><summary>All-time task baseline</summary><MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} /></details>
+    <div class="ops-section-heading"><div><p class="eyebrow">Subsystem evidence</p><h2>Go deeper</h2></div><p>Each readout keeps its own measurement window and clearly separates zero from unavailable.</p></div>
+    <div class="ops-grid"><CellHealthPanel /><RunSetPanel /><TeardownPanel /><IntakePanel /></div>
   </main>
 {:else if route.view === 'roster'}
   <main class="page">
@@ -173,9 +176,11 @@ nav button { position:relative; border:0; border-radius:.45rem; background:trans
 .theme { display:flex; align-items:center; gap:.35rem; }.theme span { position:absolute; width:1px; height:1px; overflow:hidden; }.theme select { min-height:2rem; border:1px solid var(--line); border-radius:.45rem; background:var(--panel); color:var(--muted); padding:0 .45rem; font-size:.7rem; }
 .page { position:relative; width:min(1440px,100%); margin:auto; padding:2rem 1.25rem 4rem; }.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }.page-heading .eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.updated { color:var(--muted); font-size:.7rem; padding-bottom:.35rem; white-space:nowrap; }
 .ops-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); }
+.ops-section-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin:2rem 0 .8rem; }.ops-section-heading h2 { margin:.12rem 0 0; font-size:1.15rem; }.ops-section-heading p { max-width:34rem; margin:0; color:var(--muted); font-size:.7rem; text-align:right; }
+.ops-baseline { border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--panel) 85%,transparent); padding:.7rem .8rem .15rem; }.ops-baseline summary { width:max-content; color:var(--muted); cursor:pointer; font-size:.65rem; }
 .error-banner { border:1px solid color-mix(in srgb,var(--status-fail) 45%,var(--line)); background:color-mix(in srgb,var(--status-fail) 8%,var(--panel)); color:var(--status-fail); border-radius:var(--radius); padding:.8rem 1rem; }
 .attention { overflow:hidden; margin:0 0 1rem; border:1px solid color-mix(in srgb,var(--status-escalated) 45%,var(--line)); border-radius:var(--radius); background:color-mix(in srgb,var(--status-escalated) 6%,var(--panel)); }.attention header { display:flex; gap:.45rem; padding:.65rem .8rem; color:var(--status-escalated); font-size:.68rem; text-transform:uppercase; letter-spacing:.08em; }.attention header strong { font-family:var(--mono); }.attention button { width:100%; display:grid; grid-template-columns:minmax(12rem,1fr) minmax(16rem,2fr) auto; align-items:center; gap:1rem; border:0; border-top:1px solid color-mix(in srgb,var(--status-escalated) 25%,var(--line)); background:transparent; padding:.7rem .8rem; text-align:left; cursor:pointer; }.attention button > span:first-child { display:grid; gap:.15rem; }.attention button strong { font-size:.75rem; }.attention button small,.rail-why { color:var(--muted); font-size:.66rem; }.attention button b { color:var(--status-escalated); font-size:.67rem; }
 .empty-state { max-width:34rem; margin:8vh auto; text-align:center; }.empty-state > span { font:4rem/1 var(--mono); color:var(--line); }.empty-state h1 { margin:.8rem 0 .4rem; }.empty-state p { color:var(--muted); }.empty-state button { border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); padding:.55rem .8rem; cursor:pointer; }
 @media (max-width: 900px) { .topbar { grid-template-columns:1fr auto; }.topbar nav { grid-row:2; grid-column:1/-1; justify-self:stretch; justify-content:center; }.tools .connection { display:none; }.ops-grid { grid-template-columns:1fr; } }
-@media (max-width: 620px) { .page { padding:1.4rem .75rem 3rem; }.brand small,.theme { display:none; }.topbar { padding:.55rem .75rem; }.page-heading { align-items:start; }.updated { display:none; } nav button { flex:1; } }
+@media (max-width: 620px) { .page { padding:1.4rem .75rem 3rem; }.brand small,.theme { display:none; }.topbar { padding:.55rem .75rem; }.page-heading,.ops-section-heading { align-items:start; }.ops-section-heading > p { display:none; }.updated { display:none; } nav button { flex:1; } }
 </style>

@@ -16,7 +16,7 @@
     const status = statusFor(run)
     if (state === 'active') return run.running
     if (state === 'completed') return !run.running
-    if (state === 'attention') return status.key === 'escalated' || status.key === 'fail'
+    if (state === 'attention') return ['escalated', 'fail', 'aborted'].includes(status.key)
     return true
   }
   function matchesQuery(run) {
@@ -35,13 +35,14 @@
     if (value == null) return '—'
     return Intl.NumberFormat(undefined, { notation:'compact', maximumFractionDigits:1 }).format(value)
   }
+  function cacheRate(value) { return value == null ? null : `${value.toFixed(1)}% cache hit` }
 
   let tiers = $derived([...new Set(runs.map((run) => run.tier).filter(Boolean))].sort())
   let counts = $derived({
     all: runs.filter((run) => !run.triage?.reviewed_at).length,
     active: runs.filter((run) => run.running && !run.triage?.reviewed_at).length,
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
-    attention: runs.filter((run) => ['escalated', 'fail'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
+    attention: runs.filter((run) => ['escalated', 'fail', 'aborted'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
   })
   let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (tier === 'all' || run.tier === tier) && matchesQuery(run)))
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))
@@ -79,7 +80,7 @@
             <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small>{run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
             <td class="proof"><span class:muted={gate.dashed}>{gate.dashed ? 'No gate proof' : gate.text}</span><small class:muted={review.dashed}>{review.dashed ? 'No review yet' : review.text}</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? 'In progress' : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
-            <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small>{tokens.dashed ? 'Not measured' : 'billed tokens'}</small></td>
+            <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads'}>{tokens.dashed ? 'Not measured' : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small></td>
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>
           </tr>
         {:else}
@@ -93,7 +94,8 @@
 
 <style>
 .tasks-panel { position:relative; overflow:hidden; background:color-mix(in srgb,var(--panel) 94%,transparent); border:1px solid var(--line); border-radius:var(--radius-lg); box-shadow:var(--shadow); }
-.status-tabs { display:flex; gap:.3rem; padding:.65rem .75rem 0; overflow:auto; border-bottom:1px solid var(--line); }
+.status-tabs { display:flex; gap:.3rem; padding:.65rem .75rem 0; overflow-x:auto; overflow-y:hidden; border-bottom:1px solid var(--line); scrollbar-width:none; -ms-overflow-style:none; }
+.status-tabs::-webkit-scrollbar { display:none; width:0; height:0; }
 .status-tabs button { position:relative; border:0; border-radius:var(--radius-sm) var(--radius-sm) 0 0; background:transparent; color:var(--muted); padding:.65rem .75rem .75rem; white-space:nowrap; cursor:pointer; }
 .status-tabs button::after { content:''; position:absolute; height:2px; left:.6rem; right:.6rem; bottom:-1px; background:transparent; }
 .status-tabs button.active { color:inherit; }.status-tabs button.active::after { background:var(--accent); }
@@ -111,7 +113,7 @@ tbody tr { cursor:pointer; transition:background .15s ease; } tbody tr:hover { b
 .task-link { display:grid; gap:.2rem; border:0; background:transparent; text-align:left; cursor:pointer; padding:0; }.task-link strong { max-width:20rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.88rem; }
 .task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; } code { font-family:var(--mono); color:var(--muted); }
 .status { display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; white-space:nowrap; }.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent); }
-.status.ok { color:var(--status-ok); }.status.fail { color:var(--status-fail); }.status.busy { color:var(--status-running); }.status.serious { color:var(--status-escalated); }.status.quiet { color:var(--muted); }
+.status.ok { color:var(--status-ok); }.status.fail { color:var(--status-fail); }.status.aborted { color:var(--status-running); }.status.busy { color:var(--status-running); }.status.serious { color:var(--status-escalated); }.status.quiet { color:var(--muted); }
 .phase-line { display:flex; align-items:center; gap:3px; width:9rem; }.phase-line span { height:5px; min-width:8px; flex:1; border-radius:1rem; background:color-mix(in srgb,var(--phase-color) 68%,var(--line)); }
 .phase-line span.active { height:7px; background:var(--phase-color); box-shadow:0 0 8px color-mix(in srgb,var(--phase-color) 60%,transparent); }.phase-line span.failed { background:var(--status-fail); }
 .proof > span { display:block; text-transform:capitalize; font-size:.8rem; }.proof .muted { color:var(--muted); }

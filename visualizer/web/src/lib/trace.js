@@ -262,6 +262,13 @@ function samePhase(left, right) {
   return left != null && right != null && String(left) === String(right)
 }
 
+export function phaseFilterId(run = {}, value = null) {
+  if (value == null || value === '') return ''
+  const phases = Array.isArray(run?.phases) ? run.phases : []
+  const match = phases.find((phase) => samePhase(phase?.id, value) || phase?.name === value)
+  return match?.id ?? value
+}
+
 function artifactBlocks(envelopes) {
   const blocks = []
   for (const envelope of envelopes) {

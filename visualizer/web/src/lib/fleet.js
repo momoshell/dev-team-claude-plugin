@@ -54,7 +54,8 @@ export function deriveStatus(run = {}, taskEnvelope = null) {
     return { key: 'escalated', word: 'escalated', tone: 'serious', where: escalation?.where, why: escalation?.why }
   }
   if (run?.status === 'ok') return { key: 'success', word: 'success', tone: 'ok', where: null, why: null }
-  if (run?.status === 'fail' || run?.status === 'aborted') return { key: 'fail', word: 'fail', tone: 'fail', where: null, why: null }
+  if (run?.status === 'fail') return { key: 'fail', word: 'failed', tone: 'fail', where: null, why: null }
+  if (run?.status === 'aborted') return { key: 'aborted', word: 'aborted', tone: 'aborted', where: null, why: null }
   if (run?.running && !run?.phases?.length) return { key: 'queued', word: 'queued', tone: 'quiet', where: null, why: null }
   if (run?.running) return { key: 'running', word: 'running', tone: 'busy', where: null, why: null }
   return { key: 'unknown', word: 'status not recorded', tone: 'quiet', where: null, why: null }
@@ -80,7 +81,23 @@ export function tokenCell(run = {}) {
     if (typeof value === 'number' && Number.isFinite(value)) total = (total ?? 0) + value
   }
   if (total == null) return absenceMark(run?.pending?.billed_input_tokens)
-  return measuredCell(total, textNumber(total))
+  const input = finiteNumber(metrics?.billed_input_tokens)
+  const output = finiteNumber(metrics?.billed_output_tokens)
+  const cacheWrite = finiteNumber(metrics?.billed_cache_write_tokens)
+  const cacheRead = finiteNumber(metrics?.billed_cache_read_tokens)
+  const promptMeasured = [input, cacheWrite, cacheRead].every((value) => value != null)
+  const promptTotal = promptMeasured ? input + cacheWrite + cacheRead : null
+  const cacheRate = promptTotal > 0 ? cacheRead / promptTotal * 100 : null
+  return {
+    ...measuredCell(total, textNumber(total)),
+    input,
+    output,
+    cacheWrite,
+    cacheRead,
+    promptTotal,
+    cacheRate,
+    cachePending: cacheRate == null ? (run?.pending?.billed_cache_read_tokens || 'prompt cache usage was not measured') : null,
+  }
 }
 
 export function costCell(run = {}) {
@@ -118,7 +135,11 @@ export function tierCell(run = {}) {
 export function durationCell(run = {}) {
   const duration = finiteNumber(run?.duration_ms)
   if (duration == null) return absenceMark(run?.pending?.duration_ms)
-  return measuredCell(duration, `${Math.round(duration / 1000)}s`)
+  const seconds = Math.max(0, Math.round(duration / 1000))
+  if (seconds < 60) return measuredCell(duration, `${seconds}s`)
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return measuredCell(duration, `${minutes}m ${seconds % 60}s`)
+  return measuredCell(duration, `${Math.floor(minutes / 60)}h ${minutes % 60}m`)
 }
 
 function visibleRows(runs, envelopes, now, filters) {

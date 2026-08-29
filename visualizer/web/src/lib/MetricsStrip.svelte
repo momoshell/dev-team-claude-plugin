@@ -8,6 +8,7 @@
   let tokens = $derived(fleetTokens(runs))
   let active = $derived.by(() => { let count = 0; for (const run of runs) if (run.running) count += 1; return count })
   function compact(value) { return Intl.NumberFormat(undefined, { notation:'compact', maximumFractionDigits:1 }).format(value) }
+  function percent(value) { return value == null ? '—' : `${value.toFixed(1)}%` }
   function time(value) {
     if (value == null) return '—'
     const seconds = Math.round(value / 1000)
@@ -23,8 +24,8 @@
   <article class:pending={passRate.percent == null}><span class="label">Completion quality</span><strong>{passRate.percent == null ? '—' : `${passRate.percent}%`}</strong><small>{passRate.percent == null ? passRate.pending : 'successful finishes'}</small></article>
   <article class:pending={duration.ms == null}><span class="label">Typical duration</span><strong>{time(duration.ms)}</strong><small>median completed task</small></article>
   <article class:pending={phases.average == null}><span class="label">Workflow depth</span><strong>{phases.average == null ? '—' : phases.average.toFixed(1)}</strong><small>phases per task</small></article>
-  <article class:pending={escalation.percent == null}><span class="label">Escalation rate</span><strong>{escalation.percent == null ? '—' : `${escalation.percent}%`}</strong><small>{escalation.percent == null ? escalation.pending : 'tasks needing intervention'}</small></article>
-  <article class:pending={tokens.total == null}><span class="label">Measured usage</span><strong>{tokens.total == null ? '—' : compact(tokens.total)}</strong><small>{tokens.total == null ? tokens.pending : `${tokens.measured} tasks measured`}</small></article>
+  <article class:pending={escalation.percent == null}><span class="label">Escalation rate</span><strong>{escalation.percent == null ? '—' : `${escalation.percent}%`}</strong><small>{escalation.percent == null ? escalation.pending : 'terminal tasks handed to a human'}</small></article>
+  <article class:pending={tokens.total == null}><span class="label">Billed token volume</span><strong>{tokens.total == null ? '—' : compact(tokens.total)}</strong><small title="Cache reads ÷ input, cache writes, and cache reads">{tokens.total == null ? tokens.pending : tokens.cacheRate == null ? tokens.cachePending : `${percent(tokens.cacheRate)} cache hit · ${tokens.measured} tasks`}</small></article>
 </section>
 
 <style>

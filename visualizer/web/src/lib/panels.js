@@ -1,3 +1,5 @@
+import { tokenCell } from './fleet.js'
+
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 const RUN_SET_STATUSES = ['running', 'ok', 'fail', 'aborted']
 const FINDINGS_PENDING = 'findings unavailable — this review predates structured findings (#170)'
@@ -53,19 +55,30 @@ export function fleetTokens(runs = []) {
   const source = Array.isArray(runs) ? runs : []
   let total = null
   let measured = 0
+  let promptTotal = 0
+  let cacheRead = 0
+  let cacheMeasured = 0
   for (const run of source) {
-    const metrics = run?.metrics ?? run ?? {}
-    let runTotal = null
-    for (const field of TOKEN_FIELDS) {
-      const value = metrics?.[field]
-      if (typeof value === 'number' && Number.isFinite(value)) runTotal = (runTotal ?? 0) + value
-    }
-    if (runTotal == null) continue
-    total = (total ?? 0) + runTotal
+    const usage = tokenCell(run)
+    if (usage.value == null) continue
+    total = (total ?? 0) + usage.value
     measured += 1
+    if (usage.promptTotal != null) {
+      promptTotal += usage.promptTotal
+      cacheRead += usage.cacheRead
+      cacheMeasured += 1
+    }
   }
   const pending = total == null ? (source[0]?.pending?.billed_input_tokens || 'predates this measurement') : null
-  return { total, measured, runs: source.length, pending }
+  return {
+    total,
+    measured,
+    runs: source.length,
+    pending,
+    cacheRate: promptTotal > 0 ? cacheRead / promptTotal * 100 : null,
+    cacheMeasured,
+    cachePending: cacheMeasured ? null : (source[0]?.pending?.billed_cache_read_tokens || 'prompt cache usage was not measured'),
+  }
 }
 
 export function fleetCost() {
@@ -131,7 +144,7 @@ export function fleetEscalationRate(runs = [], options = {}) {
   const measuredRows = absence ? [] : rows.filter((run) => TERMINAL_STATUSES.includes(run?.status))
   const measured = measuredRows.length
   if (measured === 0) return { percent: null, escalated: 0, measured: 0, runs: rows.length, pending: absence?.pending ?? UNMEASURED_WINDOW_WHY }
-  const escalated = measuredRows.filter((run) => run?.status === 'fail' || run?.status === 'aborted' || run?.agents?.some((agent) => agent?.outcome === 'escalate') || envelopeFor(options?.envelopes, run?.adw_id)?.status === 'escalation').length
+  const escalated = measuredRows.filter((run) => run?.agents?.some((agent) => agent?.outcome === 'escalate') || envelopeFor(options?.envelopes, run?.adw_id)?.status === 'escalation').length
   return { percent: Math.round(escalated / measured * 100), escalated, measured, runs: rows.length, pending: null }
 }
 

@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
-import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
+import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -28,6 +28,8 @@ test('fleetTokens sums measured runs and reports partial coverage', () => {
   assert.equal(result.measured, 1)
   assert.equal(result.runs, 2)
   assert.equal(result.pending, null)
+  assert.equal(result.cacheRate, 5 / 18 * 100)
+  assert.equal(result.cacheMeasured, 1)
 })
 
 test('fleetCost never derives money from token totals', () => {
@@ -89,11 +91,11 @@ test('the sessions derivations report a genuinely measured zero as a real zero',
   assert.equal(escalation.pending, null)
 })
 
-test('fleetEscalationRate counts aborted sessions and task-envelope escalations', () => {
+test('fleetEscalationRate counts only recorded escalations, never failures or aborts', () => {
   const run = (adw_id, status = 'ok', extra = {}) => ({ adw_id, status, phases: [], agents: [], ...extra })
-  const aborted = fleetEscalationRate([run('aborted', 'aborted'), run('ok')], { degraded: false })
-  assert.equal(aborted.percent, 50)
-  assert.equal(aborted.escalated, 1)
+  const terminal = fleetEscalationRate([run('aborted', 'aborted'), run('failed', 'fail'), run('ok')], { degraded: false })
+  assert.equal(terminal.percent, 0)
+  assert.equal(terminal.escalated, 0)
 
   const b52 = fleetEscalationRate([run('b52-heartbeat'), run('done')], {
     degraded: false,
@@ -563,11 +565,13 @@ test('fleet cells preserve honest absence and discriminate status evidence', () 
   assert.equal(absenceMark(null).text, 'not measured')
   assert.equal(tokenCell({ metrics: { billed_input_tokens: null }, pending: { billed_input_tokens: 'predates this measurement' } }).value, null)
   assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).value, 20)
+  assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: 3, billed_cache_read_tokens: 5 } }).cacheRate, 5 / 18 * 100)
+  assert.equal(tokenCell({ metrics: { billed_input_tokens: 10, billed_output_tokens: 2, billed_cache_write_tokens: null, billed_cache_read_tokens: 5 } }).cacheRate, null)
   assert.equal(costCell({ transport: 'pane' }).text, 'not measured · pane')
   assert.equal(heartbeatCell({ last_heartbeat_at: new Date(now - 4000).toISOString() }, now).text, '4s ago')
   assert.equal(heartbeatCell({ last_heartbeat_at: new Date(now - 91000).toISOString() }, now).text, 'silent 91s')
   assert.equal(heartbeatCell({ pending: { last_heartbeat_at: 'not measured' } }, now).dashed, true)
-  assert.equal(deriveStatus({ status: 'aborted' }, null).key, 'fail')
+  assert.equal(deriveStatus({ status: 'aborted' }, null).key, 'aborted')
   const why = 'escalation evidence'
   const status = deriveStatus({ status: 'aborted' }, { status: 'escalation', details: { escalation: { where: 'gate', why } } })
   assert.equal(status.key, 'escalated')
@@ -744,6 +748,13 @@ test('phasePanel resolves names, rejects unknown routes, and scopes events', () 
   assert.equal(phasePanel(run, { phase: 'missing', events }).found, false)
 })
 
+test('event-stream phase filters resolve route names to ledger phase ids', () => {
+  const run = { phases: [{ id: 148, name: 'planning' }, { id: 153, name: 'escalation' }] }
+  assert.equal(phaseFilterId(run, 'planning'), 148)
+  assert.equal(phaseFilterId(run, '153'), 153)
+  assert.equal(phaseFilterId(run, ''), '')
+})
+
 test('acceptEvidence joins lead evidence and reports missing evidence separately', () => {
   const run = { accept_decisions: [{ outcome: 'accepted', refuted_count: 2, residual_count: 0 }] }
   const returns = { envelopes: [{ role: 'lead', dispatch_seq: 1, details: { refuted: [{ id: 'f1', why: 'closed' }], residuals: [] } }] }
@@ -767,8 +778,11 @@ test('trace source tripwires keep route, role order, and server read-only', () =
   const root = join(process.cwd(), 'visualizer')
   const shape = readFileSync(join(root, 'server/shape.mjs'), 'utf8')
   const runDetail = readFileSync(join(root, 'web/src/lib/RunDetail.svelte'), 'utf8')
+  const eventStream = readFileSync(join(root, 'web/src/lib/EventStream.svelte'), 'utf8')
   assert.ok(runDetail.includes('phase = null') && runDetail.includes('$props()'))
   assert.ok(runDetail.includes("import PhasePanel from './PhasePanel.svelte'"))
+  assert.ok(eventStream.includes('phaseFilterId(run, requested)'))
+  assert.ok(eventStream.includes('untrack(() =>'))
   for (const file of ['AcceptPanel.svelte', 'EnvelopeInspector.svelte', 'PhaseGantt.svelte', 'PhasePanel.svelte', 'ReviewPanel.svelte', 'RunDetail.svelte']) {
     assert.equal(readFileSync(join(root, 'web/src/lib', file), 'utf8').includes('{@html'), false)
   }

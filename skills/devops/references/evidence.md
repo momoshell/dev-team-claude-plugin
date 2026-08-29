@@ -88,3 +88,11 @@ Unknown, empty, or interrupted searches stay indeterminate until rerun.
 
 This register records what was searched, what was found, and the boundary of
 the claim.
+
+## Ratified 2026-08-29 — the driver publishes (ADR-034, #679)
+
+The worker-path refusal above is superseded for the driver by an operator
+decision, not by a checkout exhibit: "make this step programmatic so we don't
+burn model tokens on those simple steps." The implementation is the #679 lane's
+publish stage in `crew/drive.mjs`; until it merges, the posture is ratified and
+the exhibit is pending. Seats remain forbidden to publish.

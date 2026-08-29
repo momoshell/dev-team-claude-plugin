@@ -10,8 +10,8 @@ Status: no checkout exhibit proves the platform close behavior.
 Preserve the open review until its outcome and teardown policy are decided.
 Status: this preservation rule is unbacked here; see `evidence.md`.
 
-Never publish from a worker path.
-Status: no checkout implementation reachable from a production entry point publishes a branch; see `evidence.md`.
+Never publish from a worker path — except the DRIVER, which publishes from the lane worktree after cold-verify as the last stage before teardown (ADR-034, ratified 2026-08-29 on #679). Every seat is still forbidden.
+Status: ratified posture; the driver's publish stage is the implementation (`crew/drive.mjs`, the #679 lane) and `evidence.md` records the ratification.
 
 The worker-path gate runs before branch resolution or construction of push argv.
 Status: this ordering rule is unbacked here; see `evidence.md`.
@@ -28,8 +28,8 @@ Status: this fail-closed publication rule is unbacked here; see `evidence.md`.
 An unresolved branch refuses publication instead of pushing a default.
 Status: this branch-resolution rule is unbacked here; see `evidence.md`.
 
-Keep lane work and host publication as separate lifecycle stages.
-Status: this lifecycle separation is unbacked here; see `evidence.md`.
+Keep lane work and host publication as separate lifecycle stages: publication is the run's LAST stage (`rebase → suite → suite:cold → publish`), never interleaved with building, and it ends at an open PR — merge, reap and issue closing belong to the batch closeout (#758).
+Status: ratified by ADR-034; see `evidence.md`.
 
 Do not treat a green local test as permission to delete a remote branch.
 Status: this deletion safeguard is unbacked here; see `evidence.md`.

@@ -1569,6 +1569,11 @@ export function paneRetryFrame(surfaceId, deps = {}) {
   return recogniseProviderRetry(res.stdout)
 }
 
+// #583: the operator — and #583's record — must see that the one extension was
+// SPENT. APPENDED to the classifier's own sentence and never woven into it, so
+// the text of a wait that got no extension stays byte-identical to today's.
+const waitExtendedClause = (extensionS) => ` (budget extended once by ${extensionS}s because the seat was working at the first expiry)`
+
 // Which of four states a wait that expired was in. PURE, so the escalation text
 // is unit-testable without a seat. Precedence follows the evidence: a measured
 // stale transcript is the CURRENT state and outranks a refusal frame that may be
@@ -1634,13 +1639,42 @@ export function transcriptGrowth(paths, deps = {}) {
   return latest
 }
 
-export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onSubstrate, onAlive, now, sleep }) {
+export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onSubstrate, onAlive, classifyExpiry, onExtend, now, sleep }) {
   const started = now()
   let deadline = started + timeoutS * 1000
   let lastProbeAt = started
   let misses = 0
   let substrateMisses = 0
-  while (now() < deadline) {
+  let extended = false
+  let expired = null
+  // #583: ONE bounded extension for a seat this driver ITSELF classifies as
+  // WORKING at its first expiry. Measured four times, most recently on
+  // b309-dispatchprep: the escalation text said `the seat is WORKING: planner
+  // produced a transcript frame 30s ago` and the driver exited anyway; the
+  // envelope landed 7 minutes later in a returns/ nobody read. The grant is the
+  // SAME shape as the restartBudget seam below — it moves `deadline` and
+  // nothing else — and it is spent at most once per wait: a second expiry ends
+  // the wait exactly as it does today. A `stale`, `retrying`, `refused` or
+  // UNMEASURED (null) classification buys nothing: a NULL beats a value nobody
+  // measured (#297), and a retrying seat already has its own restartBudget
+  // path. A classifier that throws is an absence, never a grant.
+  const atDeadline = () => {
+    // #669: the deadline is a CLOCK reading, not a measurement of the seat. A
+    // seat that wrote its envelope during the final poll interval loses every
+    // byte of it for no reason; one last read costs one stat.
+    expired = readEnvelope()
+    if (expired != null) return false
+    if (extended || typeof classifyExpiry !== 'function') return false
+    const at = now()
+    let verdict = null
+    try { verdict = classifyExpiry(at) } catch { verdict = null }
+    if (verdict?.state !== 'working') return false
+    extended = true
+    deadline = at + timeoutS * 1000
+    if (onExtend) { try { onExtend({ at, extensionS: timeoutS }) } catch { /* the journal is never load-bearing for a wait */ } }
+    return true
+  }
+  while (now() < deadline || atDeadline()) {
     const env = readEnvelope()
     if (env != null) return env
 
@@ -1711,13 +1745,10 @@ export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, prob
     }
     sleep(WAIT_POLL_MS)
   }
-  // #669: the deadline is a CLOCK reading, not a measurement of the seat. A seat
-  // that wrote its envelope during the final poll interval loses every byte of
-  // it for no reason — b254-retryvis wrote `status: done` with a green gate five
-  // minutes after its driver had already exited on this return. One last read
-  // costs one stat, and the headless transport already does exactly this (its
-  // `raced` read, crew/headless.mjs).
-  return readEnvelope()   // #669: read once more at the deadline before declaring a timeout
+  // The wait ended at an expiry `atDeadline` already read for (#669) — the
+  // envelope it found, or null. b254-retryvis wrote `status: done` with a green
+  // gate five minutes after its driver had already exited on this return.
+  return expired
 }
 
 const SUBSTRATE_DOWN = () => ({ alive: null, substrate: 'down' })
@@ -1891,6 +1922,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const lastRefusal = new Map()       // role -> the last refusal frame seen, the evidence a failure quotes
   const lastGrowth = new Map()        // returnPath -> { at, latest }, the last measured transcript reading
   const lastDiagnosis = new Map()     // returnPath -> the state a wait expired in
+  const waitExtensions = new Map()    // returnPath -> the seconds this dispatch's ONE wait extension bought
   const staleNoted = new Set()        // returnPaths already warned — one per DISPATCH, re-armable
   const substrateNoted = new Set()   // returnPaths whose substrate outage is standing
   const lastRetry = new Map()         // returnPath -> the CURRENT pane retry reading, refreshed on every read
@@ -2119,7 +2151,30 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // The wait ending measures nothing about the pane manager, so a recovery
     // row here would be a claim nobody made; retire the standing edge silently.
     substrateNoted.delete(returnPath)
+    waitExtensions.delete(returnPath)
     if (envelope != null) clearStale(info, returnPath, at)                      // verbatim: mutation X1
+  }
+
+  // The classifier the escalation text already uses, asked at BOTH expiries: the
+  // first (inside waitForEnvelope, where a WORKING seat buys one extension) and
+  // the last (below, where it names the state the wait ended in). ONE function,
+  // so the reading that grants the extension and the reading the operator reads
+  // can never diverge.
+  const diagnoseExpiry = (info, returnPath, at, timeoutS) => waitState({
+    role: info?.role || 'unknown', latest: lastGrowth.get(returnPath)?.latest ?? null,
+    refusal: lastRefusal.get(info?.role) ?? null, at, timeoutS,                  // verbatim: mutation A15
+    retry: lastRetry.get(returnPath) ?? null,
+  })
+
+  // Journalled through the SAME operational path `seat-stale` uses: the role, the
+  // assignment id, the idle seconds the classifier measured, and the seconds
+  // granted. Never load-bearing — the journal is diagnostics, the wait is the run.
+  const noteWaitExtended = (info, returnPath, record) => {
+    waitExtensions.set(returnPath, record.extensionS)
+    const latest = lastGrowth.get(returnPath)?.latest ?? null
+    const idleS = Number.isFinite(latest) ? Math.max(0, Math.round((record.at - latest) / 1000)) : null
+    try { io.log(operationalRow({ at: record.at, event: 'wait-extended', role: info?.role ?? null, id: info?.id ?? null, idle_s: idleS, extension_s: record.extensionS })) }
+    catch { /* the journal is diagnostics, never load-bearing for a wait */ }
   }
 
   const noteGrowth = (info, returnPath, record) => {
@@ -2505,18 +2560,20 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
               try { io.emit?.({ kind: 'heartbeat', at, role: info?.role || null }) }
               catch { /* the ledger is never load-bearing for a wait */ }
             },
+            classifyExpiry: info ? (at) => diagnoseExpiry(info, returnPath, at, timeoutS) : null,
+            onExtend: (record) => noteWaitExtended(info, returnPath, record),
             now, sleep,
           })
         if (env == null) {
           const refusal = lastRefusal.get(info?.role)
-          const verdict = waitState({
-            role: info?.role || 'unknown', latest: lastGrowth.get(returnPath)?.latest ?? null,
-            refusal: refusal ?? null, at: now(), timeoutS,                            // verbatim: mutation A15
-            retry: lastRetry.get(returnPath) ?? null,
-          })
-          if (verdict) lastDiagnosis.set(returnPath, verdict)                       // verbatim: mutation A8
+          const spent = waitExtensions.get(returnPath) ?? null
+          const verdict = diagnoseExpiry(info, returnPath, now(), timeoutS)
+          const diagnosis = (verdict && spent !== null)
+            ? { ...verdict, text: `${verdict.text}${waitExtendedClause(spent)}` }
+            : verdict
+          if (diagnosis) lastDiagnosis.set(returnPath, diagnosis)                    // verbatim: mutation A8
           noteCellFailure(info?.role, info?.id, 'timeout', {
-            message: `no envelope at ${returnPath} within ${timeoutS}s${verdict ? `; ${verdict.text}` : ''}${refusal ? `; the provider says: ${refusal.message}` : ''}`,
+            message: `no envelope at ${returnPath} within ${timeoutS}s${diagnosis ? `; ${diagnosis.text}` : ''}${refusal ? `; the provider says: ${refusal.message}` : ''}`,
             seatRefusal: refusal?.member,
           })
         }

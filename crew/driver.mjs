@@ -127,8 +127,8 @@ export function assignmentLine({ id, role, briefFile, returnPath, taskDir }) {
   return line
 }
 
-function frameNeedleCount(surfaceId, needle) {
-  const res = cmux('read-screen', ['--surface', surfaceId, '--lines', '40'])
+function frameNeedleCount(surfaceId, needle, cmuxFn = cmux) {
+  const res = cmuxFn('read-screen', ['--surface', surfaceId, '--lines', '40'])
   if (!res.ok) return null
   return res.stdout.replace(/\s+/g, '').split(needle).length - 1
 }
@@ -144,7 +144,45 @@ export function pickNeedle(line) {
   return tokens.slice(-8).reduce((a, b) => (b.length > a.length ? b : a), '')
 }
 
-export function sendLine(surfaceId, line) {
+// --- submission proof (b305) --------------------------------------------------
+// An echo proves CHARACTERS REACHED THE SCREEN; it does not prove the agent
+// consumed them. Measured live 2026-08-29 (cmux 0.64.22 build 102, a claude
+// pane in this checkout): with the line typed, the needle was on the frame
+// exactly once; 200 ms after `send-key enter` it was GONE (count 1 -> 0) and
+// the session transcript carried the message — the input box clearing IS the
+// observable difference between a submitted line and one still sitting unsent.
+// So after the enter the count must LEAVE its post-send value.
+const SUBMIT_PROOF_POLL_MS = 250
+// Sized against the MEASURED failure, not against convenience: the 2026-08-28
+// boot race lost the first assignment for about 60 s, while the old budget was
+// one enter and no proof at all (and the echo ladder's own ~9 s could not have
+// covered it either). One enter waits 20 s for the box to clear — 100x the
+// 200 ms measured for a healthy submit — and the whole send is capped at
+// 120 000 ms, twice the measured race, after which the failure is loud.
+export const SUBMIT_PROOF_WINDOW_MS = 20_000
+export const SUBMIT_ENTER_ATTEMPTS = 3
+export const SUBMIT_TOTAL_BUDGET_MS = 120_000
+
+// A resend loop is a cost surface, so every attempt and its outcome is
+// journalled. Callers that pass no deps — every production caller today —
+// still journal: to CREW_SEND_JOURNAL when it is set, and a LOUD row to stderr
+// for any attempt that failed to prove, because a swallowed assignment that
+// nobody records is the defect this lane removes.
+function sendJournal(deps) {
+  const sink = typeof deps.log === 'function' ? deps.log : null
+  const file = process.env.CREW_SEND_JOURNAL || null
+  return (row, loud = false) => {
+    try { if (sink) sink(row) } catch { /* the journal is diagnostics, never load-bearing */ }
+    try { if (file) logLine(file, row) } catch { /* the journal is diagnostics */ }
+    try { if (loud && !sink) process.stderr.write(`${JSON.stringify(row)}\n`) } catch { /* the journal is diagnostics */ }
+  }
+}
+
+export function sendLine(surfaceId, line, deps = {}) {
+  const cmuxFn = deps.cmux || cmux
+  const settleFn = deps.settle || settle
+  const now = deps.now || Date.now
+  const journal = sendJournal(deps)
   assertSafeLine(line)
   const needle = pickNeedle(line)
   if (!needle) throw new Error('sendLine: no verifiable token in line')
@@ -152,15 +190,20 @@ export function sendLine(surfaceId, line) {
   // Verify against a BASELINE, not an absolute count of 1: the needle may
   // already be on screen (the same brief path assigned twice, the seat's own
   // transcript quoting a path it read) and a correct send must still verify.
-  const deadline = Date.now() + SEND_READY_TIMEOUT_MS
-  let before = frameNeedleCount(surfaceId, needle)
+  const startedAt = now()
+  const deadline = startedAt + SEND_READY_TIMEOUT_MS
+  let before = frameNeedleCount(surfaceId, needle, cmuxFn)
   while (before === null) {
-    if (Date.now() >= deadline) throw new Error(`sendLine: surface ${surfaceId} never became readable`)
-    settle(SEND_READY_POLL_MS)
-    before = frameNeedleCount(surfaceId, needle)
+    if (now() >= deadline) throw new Error(`sendLine: surface ${surfaceId} never became readable`)
+    settleFn(SEND_READY_POLL_MS)
+    before = frameNeedleCount(surfaceId, needle, cmuxFn)
   }
 
-  let landed = false
+  const afterSend = before + 1
+  const budgetEnd = startedAt + SUBMIT_TOTAL_BUDGET_MS
+  let everLanded = false
+  let submitted = false
+  let enters = 0
   let last = null
   for (let attempt = 1; attempt <= SEND_VERIFY_ATTEMPTS; attempt += 1) {
     if (attempt > 1) {
@@ -171,34 +214,77 @@ export function sendLine(surfaceId, line) {
       // clear; on an already-empty box it only arms an exit warning, which
       // the retype immediately disarms — never send it twice in a row).
       // Refuse to retype into a box that still shows the needle.
-      cmux('send-key', ['--surface', surfaceId, '--', 'ctrl+u'])
-      settle(SEND_READY_POLL_MS)
-      if (frameNeedleCount(surfaceId, needle) !== before) {
-        cmux('send-key', ['--surface', surfaceId, '--', 'ctrl+c'])
-        settle(SEND_READY_POLL_MS)
+      cmuxFn('send-key', ['--surface', surfaceId, '--', 'ctrl+u'])
+      settleFn(SEND_READY_POLL_MS)
+      if (frameNeedleCount(surfaceId, needle, cmuxFn) !== before) {
+        cmuxFn('send-key', ['--surface', surfaceId, '--', 'ctrl+c'])
+        settleFn(SEND_READY_POLL_MS)
       }
-      if (frameNeedleCount(surfaceId, needle) !== before) {
+      if (frameNeedleCount(surfaceId, needle, cmuxFn) !== before) {
         throw new Error('sendLine: could not clear the pane input back to baseline before retype')
       }
     }
-    const send = cmux('send', ['--surface', surfaceId, '--', line])
+    const send = cmuxFn('send', ['--surface', surfaceId, '--', line])
     if (!send.ok) throw new Error(`sendLine: send failed: ${send.error.message}`)
     // POLL for the echo rather than reading once: a TUI seat right after
     // boot can take a second-plus to render typed input, and a single fast
     // read here mistakes slow rendering for a lost send (live-hit 2026-08-13:
     // both crews' first assignment landed but verified 0, killing the run).
-    const verifyDeadline = Date.now() + SEND_VERIFY_WINDOW_MS
+    const verifyDeadline = now() + SEND_VERIFY_WINDOW_MS
+    let landed = false
     do {
-      settle(SEND_SETTLE_MS)
-      last = frameNeedleCount(surfaceId, needle)
-      if (last === before + 1) { landed = true; break }
-    } while (Date.now() < verifyDeadline)
-    if (landed) break
-  }
-  if (!landed) throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before}, last ${last})`)
+      settleFn(SEND_SETTLE_MS)
+      last = frameNeedleCount(surfaceId, needle, cmuxFn)
+      if (last === afterSend) { landed = true; break }
+    } while (now() < verifyDeadline)
+    if (!landed) continue
+    everLanded = true
 
-  const enter = cmux('send-key', ['--surface', surfaceId, '--', 'enter'])
-  if (!enter.ok) throw new Error(`sendLine: enter failed: ${enter.error.message}`)
+    // The line is on the screen and intact. Press enter, then PROVE the box
+    // let it go. A re-press is the cheapest recovery and the safest one: on an
+    // already-submitted box it submits nothing, so it cannot double an
+    // assignment. Only when the re-presses are spent does the outer attempt
+    // fall back to the clear-and-retype ladder above.
+    for (let enter = 1; enter <= SUBMIT_ENTER_ATTEMPTS && !submitted; enter += 1) {
+      const key = cmuxFn('send-key', ['--surface', surfaceId, '--', 'enter'])
+      if (!key.ok) throw new Error(`sendLine: enter failed: ${key.error.message}`)
+      enters += 1
+      const proofEnd = Math.min(now() + SUBMIT_PROOF_WINDOW_MS, budgetEnd)
+      let seen = null
+      do {
+        settleFn(SUBMIT_PROOF_POLL_MS)
+        seen = frameNeedleCount(surfaceId, needle, cmuxFn)
+        if (seen !== null && seen !== afterSend) { submitted = true; break }
+      } while (now() < proofEnd)
+      journal({
+        at: new Date(now()).toISOString(),
+        event: 'send-submit-attempt',
+        surface_id: surfaceId,
+        attempt,
+        enter,
+        needle_count: seen,
+        expected_in_box: afterSend,
+        outcome: submitted ? 'submitted' : (seen === null ? 'unreadable' : 'unproved'),
+      }, !submitted)
+      if (!submitted && now() >= budgetEnd) break
+    }
+    if (submitted || now() >= budgetEnd) break
+  }
+  if (!everLanded) throw new Error(`sendLine: echo not verified exactly once over baseline (before ${before}, last ${last})`)
+
+  journal({
+    at: new Date(now()).toISOString(),
+    event: 'send-submit',
+    surface_id: surfaceId,
+    enters,
+    elapsed_ms: now() - startedAt,
+    outcome: submitted ? 'submitted' : 'not-submitted',
+  }, !submitted)
+  if (!submitted) {
+    const err = new Error(`sendLine: submit not proved — the line never left the input box on surface ${surfaceId} after ${enters} enters over ${now() - startedAt}ms`)
+    err.code = 'send-not-submitted'
+    throw err
+  }
 }
 
 // --- context-aware surface ops ------------------------------------------------

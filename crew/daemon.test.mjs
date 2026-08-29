@@ -1928,7 +1928,7 @@ function childFenceIo({ taskDir, planFiles, includeBuilder = false, includeRevie
       details: { verdict: 'pass', review_path: `${taskDir}/review.md`, must_fix: 0 },
     }
   }
-  const calls = { assign: [], run: [], commits: [], writes: {} }
+  const calls = { assign: [], run: [], runCold: [], commits: [], writes: {} }
   const counts = {}
   const changedQueue = Array.isArray(changed[0]) ? [...changed] : [changed]
   return {
@@ -1943,6 +1943,8 @@ function childFenceIo({ taskDir, planFiles, includeBuilder = false, includeRevie
     writeFile(path, content) { calls.writes[path] = content },
     readFile() { return null },
     run(cmd) { calls.run.push(cmd); return { ok: true, output: '' } },
+    // The driver's closeout cold-verifies before done and FAILS CLOSED, so an io that drives a task to done must carry a cold runner (crew/drive.mjs).
+    runCold(cmd, names) { calls.runCold.push({ cmd, names }); return { ok: true, output: '', path: '/zz/aa11bb', kept: null } },
     changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
     commit(files, message) { calls.commits.push({ files, message }); return 'abc1234' },
     log() {},

@@ -42,8 +42,8 @@ const CTX = Object.freeze({
 
 // Scripted fake io: `script` maps `${role}:${n-th call}` -> envelope; runs and
 // git are scripted per call. Everything is recorded for assertions.
-function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false } = {}) {
-  const calls = { assign: [], run: [], runClean: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], files }
+function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cleanThrows = false, cold = 'green', showDoc = false, emit = false, files = {}, reseat = null, gh = null, writeThrough = false, throwOn = null, throwWrites = [], seqIds = false } = {}) {
+  const calls = { order: [], assign: [], run: [], runClean: [], runCold: [], wrapped: [], sweeps: [], reseat: [], commits: [], writes: {}, writeLog: [], logs: [], showDoc: [], emits: [], gh: [], waits: [], files }
   const counts = {}; let seq = 0
 
   const writeCounts = {}
@@ -79,6 +79,7 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     },
     run(cmd) {
       if (String(cmd).includes(GATE_REAP_SWEEP_MARKER)) { calls.sweeps.push(cmd); return { ok: true, output: '' } }
+      calls.order.push('run')
       const original = gateReapOriginal(cmd)
       counts[original] = (counts[original] || 0) + 1
       calls.run.push({ cmd: original, n: counts[original] })
@@ -87,10 +88,19 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
       return r
     },
     changedFiles() { return changedQueue.length > 1 ? changedQueue.shift() : changedQueue[0] },
-    commit(files, message) { calls.commits.push({ files, message }); return 'abc1234' },
+    commit(files, message) { calls.order.push('commit'); calls.commits.push({ files, message }); return 'abc1234' },
     status(label) { (calls.status ||= []).push(label) },
     log(obj) { calls.logs.push(obj) },
     now() { return 0 },
+  }
+  if (cold !== null) {
+    io.runCold = (cmd, names) => {
+      calls.order.push('runCold')
+      calls.runCold.push({ cmd, names })
+      if (cold === 'throw') throw new Error('injected cold runner failure')
+      if (cold === 'green') return { ok: true, output: '', path: '/zz/aa11bb', kept: null }
+      return cold
+    }
   }
   if (cleanRuns || cleanThrows) {
     io.runClean = (cmd) => {
@@ -130,6 +140,15 @@ function fakeIo({ envelopes = {}, runs = {}, changed = [], cleanRuns = null, cle
     }
   }
   return io
+}
+
+function closeoutIo(options = {}) {
+  return fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+    ...options,
+  })
 }
 
 // Drive `crew.mjs run` for real without a booted workspace: a throwaway HOME, a
@@ -1152,6 +1171,67 @@ test('happy path: plan -> build -> gates -> review pass -> suite -> commit, zero
   assert.deepEqual(io.calls.run.map((r) => r.cmd), ['lane-cmd', 'suite-cmd'])
 })
 
+test('a red cold run escalates with its commit, paths, and cleanup diagnosis', () => {
+  const io = closeoutIo({
+    cold: { ok: false, output: 'cold failure\n', path: '/zz/coldpath', kept: '/zz/coldpath' },
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'cold-suite')
+  assert.equal(result.details.commit, 'abc1234')
+  assert.match(result.details.escalation.why, /\/tmp\/repo/)
+  assert.match(result.details.escalation.why, /\/zz\/coldpath/)
+  assert.match(result.details.escalation.why, /git worktree remove --force/)
+  assert.match(result.details.escalation.why, /which directory the suite ran in/)
+})
+
+test('a throwing cold runner escalates as unproven and preserves its reason', () => {
+  const result = driveTask(CTX, closeoutIo({ cold: 'throw' }))
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'cold-suite')
+  assert.equal(result.details.commit, 'abc1234')
+  assert.equal(result.details.cold_suite.verdict, 'unproven')
+  assert.match(result.details.cold_suite.why, /injected cold runner failure/)
+})
+
+test('an io without a cold runner cannot reach done', () => {
+  const result = driveTask(CTX, closeoutIo({ cold: null }))
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'cold-suite')
+  assert.equal(result.details.commit, 'abc1234')
+  assert.deepEqual(result.details.cold_suite, {
+    verdict: 'unavailable', why: 'this io provides no runCold, so no cold checkout could be cut',
+  })
+})
+
+test('a green cold run is reported separately and named in the done summary', () => {
+  const result = driveTask(CTX, closeoutIo())
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.cold_suite, { verdict: 'green', path: '/zz/aa11bb' })
+  assert.match(result.summary, /cold-verified from \/zz\/aa11bb/)
+})
+
+test('the cold runner receives lane first and task names exactly once', () => {
+  const ctx = { ...CTX, task: 'zqtask7', laneName: 'zqlane5' }
+  const io = closeoutIo()
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(io.calls.runCold, [{ cmd: ctx.suite, names: ['zqlane5', 'zqtask7'] }])
+
+  const noLane = closeoutIo()
+  driveTask({ ...CTX, laneName: undefined }, noLane)
+  assert.deepEqual(noLane.calls.runCold, [{ cmd: CTX.suite, names: [CTX.task] }])
+})
+
+test('the cold run follows commit and records suite:cold between commit and done', () => {
+  const io = closeoutIo()
+  const { calls } = io
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.ok(calls.order.indexOf('commit') < calls.order.indexOf('runCold'))
+  assert.deepEqual(result.details.stages.slice(-3), ['commit', 'suite:cold', 'done'])
+})
+
 test('scope helpers match directory prefixes and validate only supported entries', () => {
   const match = scopeMatcher(['tasks/x/captures/', 'crew/drive.mjs'])
   assert.equal(match('tasks/x/captures/1.md'), true)
@@ -1427,7 +1507,7 @@ test('clean scope does not fire the sensitivity floor or alter the happy-path st
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
   assert.equal(io.calls.reseat.length, 0)
   assert.deepEqual(res.details.modifiers, [])
   assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'modifier'), [])
@@ -1852,7 +1932,7 @@ test('an unreadable verdict is charged nothing and reuses its round number', () 
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
   assert.deepEqual(
     io.calls.logs.filter((r) => r.review_round).map((r) => r.review_round),
     [
@@ -5013,16 +5093,17 @@ test('the per-point bound still holds at each point', () => {
 
 const HEALTHY_RESULT = {
   status: 'done',
-  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | suite | commit | done',
+  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | suite | commit | suite:cold | done',
   artifacts: [`${TD}/plan.md`, `${TD}/review.md`, `${TD}/journal.jsonl`],
   details: {
     commit: 'abc1234',
-    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'],
+    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'],
     files_committed: ['a.mjs', 'a.test.mjs'],
     consults: 0,
     dissents: [],
     accepted_via: 'review pass',
     escalation: null,
+    cold_suite: { verdict: 'green', path: '/zz/aa11bb' },
     extra_rounds_granted: [],
     growth: [{
       round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null,
@@ -5054,10 +5135,10 @@ test('the unexhausted plan path keeps its diagnostics unchanged', () => {
   })
   const result = driveTask(CTX_TL, io)
   assert.deepEqual(Object.keys(result.details).sort(), [
-    'accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted',
+    'accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted',
     'files_committed', 'gate', 'growth', 'modifiers', 'stages',
   ])
-  assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
   assert.equal(io.calls.logs.filter((entry) => entry.accept_decision).length, 0)
   assert.equal(io.calls.assign.some(({ role }) => role === 'lead'), false)
   assert.equal(Object.keys(io.calls.writes).some((path) => /decision-\d+b?\.md$/.test(path)), false)
@@ -5694,8 +5775,8 @@ test('full is trace-identical and keeps the eleven legacy detail keys', () => {
   const explicitIo = make()
   const omitted = driveTask(CTX, omittedIo)
   const explicit = driveTask({ ...CTX, variant: 'full' }, explicitIo)
-  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
-  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
+  assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.deepEqual(omitted, explicit)
   assert.deepEqual(omittedIo.calls, explicitIo.calls)
 })
@@ -5709,12 +5790,12 @@ test('repair uses one bounded triage round and keeps the reviewed finish path', 
   })
   const result = driveTask(CTX_REPAIR, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'done'])
+  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
   assert.equal(result.details.commit, 'abc1234')
   assert.equal(result.details.gate, null)
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
   assert.equal(io.calls.assign.filter(({ role }) => role === 'planner').length, 1)
-  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.equal(io.calls.assign.find(({ role }) => role === 'builder').briefFile, TRIAGE_NOTE)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /Failure brief \(verbatim\)/)
   assert.match(io.calls.writes[`${TD}/repair-brief.md`], /files_in_scope/)
@@ -6488,7 +6569,7 @@ test("a reviewed shape's acceptance is untouched by the envelope contract", () =
   })
   const result = driveTask({ ...CTX, variant: 'full' }, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
+  assert.deepEqual(Object.keys(result.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.equal(io.calls.logs.some((line) => line.envelope_accepted), false)
 
   const triageIo = fakeIo({ envelopes: { 'planner:1': triageEnv({ summary: '' }) }, changed: [] })
@@ -7254,6 +7335,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at question_answers'],
   ['recordRow', '', 'at review_round'],
   ['recordRow', '', 'at commit_subject'],
+  ['recordRow', '', 'at cold_suite'],
 ])
 
 test('the journal channel vocabulary is closed, exported and additive', () => {
@@ -7271,7 +7353,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 39)
+  assert.equal(sites.length, 40)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)

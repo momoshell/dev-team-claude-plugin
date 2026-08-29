@@ -101,7 +101,7 @@
     <div class="diagnostics-heading"><p class="micro">Deep inspection</p><h2>Evidence & diagnostics</h2><p>The primary execution story is above. Open these only when you need the underlying envelopes, agent trace, or raw events.</p></div>
     <details><summary><span><strong>Outcome & acceptance</strong><small>Envelopes, review findings, and the typed accept decision</small></span><b>Open</b></summary><div class="detail-stack"><EnvelopeInspector {run} {returns} /><ReviewPanel {run} {returns} /><AcceptPanel {run} {returns} /></div></details>
     <details><summary><span><strong>Agent trajectory</strong><small>Seat assignments, handoffs, retries, and operational markers</small></span><b>Open</b></summary><div class="detail-stack"><Trajectory {run} /></div></details>
-    <details><summary><span><strong>Event stream</strong><small>Filterable low-level ledger events for this task</small></span><b>Open</b></summary><div class="detail-stack"><EventStream {run} phaseFilter={selectedPhase} /></div></details>
+    <details><summary><span><strong>Event stream</strong><small>An ordered, filterable account of turns, decisions, and workflow signals</small></span><b>Open</b></summary><div class="detail-stack"><EventStream {run} {events} phaseFilter={selectedPhase} onrefresh={load} /></div></details>
   </section>
 </main>
 

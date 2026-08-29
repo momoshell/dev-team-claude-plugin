@@ -6,6 +6,7 @@ import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHea
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveStatus, escalationProbeTargets, fleetView, gateCell, heartbeatCell, reviewCell, tokenCell } from '../visualizer/web/src/lib/fleet.js'
 import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
+import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -753,6 +754,35 @@ test('event-stream phase filters resolve route names to ledger phase ids', () =>
   assert.equal(phaseFilterId(run, 'planning'), 148)
   assert.equal(phaseFilterId(run, '153'), 153)
   assert.equal(phaseFilterId(run, ''), '')
+})
+
+test('event stories translate low-level rows without discarding their evidence', () => {
+  const phases = [{ id: 148, name: 'planning' }]
+  const started = eventStory({ type:'agent_start', seq:2, phase_id:148, payload_json:JSON.stringify({ role:'planner', dispatch_id:'d1' }) }, phases)
+  assert.equal(started.title, 'Planner started a turn')
+  assert.equal(started.phase, 'Planning')
+  assert.equal(started.dispatch, 'd1')
+
+  const ended = eventStory({ type:'agent_end', seq:3, phase_id:148, payload_json:JSON.stringify({ role:'planner', dispatch_id:'d1', outcome:'insufficient' }) }, phases)
+  assert.equal(ended.title, 'Planner reported insufficient context')
+  assert.equal(ended.tone, 'warn')
+
+  const decision = eventStory({ type:'decision', seq:4, phase_id:148, payload_json:JSON.stringify({ decided:'escalate', why:'operator action required' }) }, phases)
+  assert.equal(decision.title, 'Decision: Escalate')
+  assert.equal(decision.detail, 'operator action required')
+  assert.match(decision.raw, /operator action required/)
+})
+
+test('event stories name workflow markers and summarize the visible sequence', () => {
+  const events = [
+    { type:'log', payload_json:JSON.stringify({ level:'info', message:'plan:r2' }) },
+    { type:'agent_start' }, { type:'agent_end' }, { type:'decision' },
+  ]
+  assert.equal(eventStory(events[0]).title, 'Planning round 2 reached')
+  assert.equal(eventStory({ type:'log', payload_json:JSON.stringify({ message:'scope-gate:r1' }) }).title, 'Scope check round 1 reached')
+  assert.equal(eventStory({ type:'log', payload_json:JSON.stringify({ message:'suite:cold' }) }).title, 'Cold validation reached')
+  assert.equal(eventStory({ type:'log', payload_json:JSON.stringify({ message:'gate-proof:2:checks' }) }).title, 'Gate proof 2 checks recorded')
+  assert.deepEqual(eventStreamSummary(events), { total:4, starts:1, ends:1, decisions:1, logs:1 })
 })
 
 test('acceptEvidence joins lead evidence and reports missing evidence separately', () => {

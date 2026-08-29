@@ -1031,10 +1031,15 @@ test('factory checkpoint inspection stays local and highlights the related water
   const inspect = source.match(/function inspectStep\(step\) \{([^}]*)\}/)?.[1] || ''
   assert.equal(inspect.includes('onselectphase'), false)
   assert.match(source, /class:step-linked=\{sameId\(block\.phase_id, linkedPhase\)\}/)
+  assert.match(source, /class:selected=\{linkedPhase == null && selected === block\.name\}/)
   assert.match(source, /step\.handoffs/)
-  assert.match(source, /upper rail shows overlapping agent handoffs/)
+  assert.match(source, /class="agent-rail">Agent handoff/)
+  assert.match(source, /class="factory-rail">Factory step/)
+  assert.match(source, /class="rail-labels"/)
+  assert.match(source, /border-top:2px dashed var\(--agent-color\)/)
   assert.match(source, /open=\{factoryOpen\}/)
   assert.match(source, /max-height:min\(38rem,65vh\)/)
+  assert.doesNotMatch(source, /<em>Factory step<\/em>/)
 })
 
 test('task detail refreshes do not reset finished-run disclosures for an unchanged task id', () => {

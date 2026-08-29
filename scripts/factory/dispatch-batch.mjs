@@ -1149,20 +1149,14 @@ function registerData({ fences, registerPath, d }) {
   }
 }
 
-function writeUpdatedRegister({ data, lane, reason, files, outDir, d }) {
+function writeUpdatedRegister({ data, lane, reads, outDir, d }) {
   const copy = JSON.parse(JSON.stringify(data))
   if (!Array.isArray(copy?.lanes)) refuse(`compile fence register has no lanes array for ${lane}`, READS_UNRESOLVED)
   const entry = copy.lanes.find((candidate) => candidate && candidate.lane === lane)
   if (!entry) refuse(`compile fence register has no lane ${lane}`, READS_UNRESOLVED)
   const current = Array.isArray(entry.reads) ? entry.reads.filter((read) => read && typeof read.file === 'string') : []
   const byFile = new Map(current.map((read) => [normaliseRepoPath(read.file), { ...read, file: normaliseRepoPath(read.file) }]))
-  if (reason === COUPLED_SOURCE_UNFENCED) {
-    for (const file of files) {
-      byFile.set(file, { file, why: `compiler reported a coupled source while compiling lane ${lane}` })
-    }
-  } else {
-    for (const file of files) byFile.delete(file)
-  }
+  for (const read of reads) byFile.set(read.file, { file: read.file, why: read.why })
   entry.reads = [...byFile.values()].sort((a, b) => a.file < b.file ? -1 : a.file > b.file ? 1 : 0)
   const path = join(outDir, `${lane}.fences.json`)
   try { writeFileSync(path, JSON.stringify(copy, null, 2) + '\n') } catch (err) {
@@ -1357,6 +1351,36 @@ function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, base
   return { file: 'node', args, cwd: laneDir }
 }
 
+// Pass one asks the compiler for the reads this lane must acknowledge; the
+// compile that follows is the only other pass (#737).
+function discoverCommand({ requestPath, lane, laneDir, registerPath }) {
+  const args = [
+    'scripts/factory/make-brief.mjs',
+    '--discover-reads', lane,
+    '--request', requestPath,
+    '--checkout', laneDir,
+    '--fences', registerPath,
+  ]
+  return { file: 'node', args, cwd: laneDir }
+}
+
+// The compiler's --discover-reads payload: a JSON array of {file, why}
+// records. The dispatcher transcribes it and never derives coupling itself.
+function discoveredReads(stdout, lane) {
+  let parsed
+  try { parsed = JSON.parse(textOf(stdout)) } catch {
+    refuse(`compiler read discovery for lane ${lane} produced no JSON: ${JSON.stringify(textOf(stdout).slice(0, 200))}`, READS_UNRESOLVED)
+  }
+  if (!Array.isArray(parsed)) refuse(`compiler read discovery for lane ${lane} produced no array`, READS_UNRESOLVED)
+  return parsed.map((record, index) => {
+    const named = (value) => typeof value === 'string' && value.trim() !== ''
+    if (!plainObject(record) || !named(record.file) || !named(record.why)) {
+      refuse(`compiler read discovery for lane ${lane} record ${index} is not {file, why}: ${JSON.stringify(record)}`, READS_UNRESOLVED)
+    }
+    return { file: normaliseRepoPath(record.file), why: record.why }
+  })
+}
+
 export async function compileLane({ lane, batchDir, requestPath, laneDir, registerPath, outDir, fences, baselinePath, deps } = {}) {
   const d = normalDeps(deps)
   const name = laneNameOf(lane)
@@ -1377,42 +1401,35 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
     }
   }
 
+  let discovered
+  try { discovered = await d.spawnAsync(discoverCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: authoredRegister })) } catch (err) {
+    refuse(`compiler could not start read discovery for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+  }
+  if (!discovered || discovered.status !== 0) {
+    refuse(`compiler could not discover reads for lane ${name}: ${JSON.stringify(childFailure(discovered))}`, READS_UNRESOLVED)
+  }
+  const reads = discoveredReads(discovered.stdout, name)
   let currentRegister = authoredRegister
+  if (reads.length > 0) {
+    const data = registerData({ fences, registerPath: authoredRegister, d })
+    currentRegister = writeUpdatedRegister({ data, lane: name, reads, outDir: outputDir, d })
+  }
   let result
   try { result = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
     refuse(`compiler could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
-  if (result?.status === 0) {
-    const briefPath = join(outputDir, `${name}.brief.md`)
-    let brief
-    try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
-      refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
-    }
-    return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief) }
-  }
-
-  const firstStderr = childFailure(result)
-  const parsed = readsFromRefusal(firstStderr)
-  if (parsed.reason !== COUPLED_SOURCE_UNFENCED && parsed.reason !== STALE_READ_ACK) {
-    refuse(`compiler refused lane ${name}: ${JSON.stringify(firstStderr)}`, READS_UNRESOLVED)
-  }
-  if (parsed.files.length === 0) {
-    refuse(`compiler refusal for lane ${name} did not name any reads: ${JSON.stringify(firstStderr)}`, READS_UNRESOLVED)
-  }
-  const data = registerData({ fences, registerPath: authoredRegister, d })
-  currentRegister = writeUpdatedRegister({ data, lane: name, reason: parsed.reason, files: parsed.files, outDir: outputDir, d })
-
-  let second
-  try { second = await d.spawnAsync(compileCommand({ lane: name, requestPath: compileRequest, laneDir: checkout, registerPath: currentRegister, outDir: outputDir, baselinePath })) } catch (err) {
-    refuse(`compiler retry could not start for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
-  }
-  if (!second || second.status !== 0) {
-    refuse(`compiler retry refused lane ${name}: ${JSON.stringify(childFailure(second))}`, COMPILE_REFUSED)
+  if (!result || result.status !== 0) {
+    const stderr = childFailure(result)
+    const parsed = readsFromRefusal(stderr)
+    // Discovery has already run: a compiler that STILL names reads is naming
+    // ones this lane cannot resolve, never a retry (#737).
+    const detail = parsed.reason ? `still refuses ${parsed.reason} after read discovery` : 'refused after read discovery'
+    refuse(`compiler ${detail} for lane ${name}: ${JSON.stringify(stderr)}`, READS_UNRESOLVED)
   }
   const briefPath = join(outputDir, `${name}.brief.md`)
   let brief
   try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
-    refuse(`compiler retry produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
+    refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
   return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief) }
 }
@@ -2030,8 +2047,15 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     if (run && run.status !== undefined && run.status !== 0 && run.status !== 3) {
       refuse(`crew run failed for ${item.lane}: ${JSON.stringify(childFailure(run))}`, RUN_FAILED)
     }
+    // b313-waitextend's driver died with no pid anywhere on disk (#749 ask 1).
+    // The pid is a DIAGNOSTIC, never the run's liveness: the run log's terminal
+    // {"status":…} line stays the signal.
+    const pid = run && Number.isInteger(run.pid) ? run.pid : null
+    if (pid !== null) {
+      try { writeFileSync(join(crewDir, 'run.pid'), `${pid}\n`) } catch { /* a lane never fails for want of a diagnostic */ }
+    }
     const watchArgs = ['scripts/factory/crew-watch.mjs', item.lane, '--follow']
-    d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} command=node ${watchArgs.join(' ')}`)
+    d.log(`dispatch-batch: watch lane=${item.lane} crew_dir=${crewDir} journal=${journal} run_log=${runLog} run pid=${pid ?? 'none'} command=node ${watchArgs.join(' ')}`)
     runs.push({ lane: item.lane, laneDir: item.plan.dir, result: run, crewDir, journal, runLog, watch: { file: 'node', args: watchArgs, cwd: root }, workspaceId: item.workspaceId, staffing: item.staffing, record: item.record })
   }
 

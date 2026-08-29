@@ -21,7 +21,8 @@ import {
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
-  validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
+  validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATION_BINDING_FAILURES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
+  bindMutationAnchor, applyMutationAnchor,
   FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
   validateAcceptDecision, validatePlanResiduals, acceptContractLines, planAcceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX, ACCEPT_REFUSALS, ACCEPT_REASKS, acceptBounceLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines, divergenceConsultLines,
@@ -3800,6 +3801,135 @@ const CHECK_ENVELOPES = (mutations, extra = {}) => ({
   'planner:1': CHECK_PLAN(mutations), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...extra,
 })
 
+test('mutation anchors bind exact or whitespace-normalized token spans', () => {
+  const original = 'const one = true\nconst two = true\n'
+  assert.deepEqual(bindMutationAnchor(original, 'true'), { mode: 'exact', spans: [] })
+  assert.deepEqual(applyMutationAnchor(original, 'true', 'false'), {
+    mode: 'exact', text: 'const one = false\nconst two = false\n',
+  })
+
+  const wrapped = 'const value = call(first,\n  second)\n'
+  const bound = bindMutationAnchor(wrapped, 'call(first, second)')
+  assert.equal(bound.mode, 'normalized')
+  assert.equal(bound.spans.length, 1)
+  assert.equal(wrapped.slice(bound.spans[0].start, bound.spans[0].end), 'call(first,\n  second)')
+
+  const replacement = 'alpha(\n    "beta",   "gamma"\n)'
+  const applied = applyMutationAnchor(wrapped, 'call(first, second)', replacement)
+  assert.equal(applied.mode, 'normalized')
+  assert.equal(applied.text, `const value = ${replacement}\n`)
+
+  assert.deepEqual(bindMutationAnchor('export const guard = true\n', 'export const guards = true'), { mode: 'absent', spans: [] })
+  const twice = 'const a = pick(one,\n  two)\nconst b = pick(one, two)\n'
+  const ambiguous = bindMutationAnchor(twice, 'pick(one, \n two)')
+  assert.equal(ambiguous.mode, 'ambiguous')
+  assert.equal(ambiguous.spans.length, 2)
+  assert.deepEqual(applyMutationAnchor(twice, 'pick(one, \n two)', 'pick(one)'), { mode: 'ambiguous', text: null })
+
+  for (const [originalInput, findInput] of [[null, 'x'], ['x', null], ['x', '']]) {
+    assert.doesNotThrow(() => bindMutationAnchor(originalInput, findInput))
+    assert.equal(bindMutationAnchor(originalInput, findInput).mode, 'absent')
+  }
+  assert.equal(applyMutationAnchor(null, 'x', 'y').mode, 'absent')
+})
+
+test('a re-wrapped built anchor binds and the per-check proof kills the check', () => {
+  const built = 'export const laneId = (task) =>\n  slug(task.name,\n    task.id)\n'
+  const mutation = { check: 'wrapped', file: 'a.mjs', find: 'slug(task.name, task.id)', replace: 'slug(task.id)' }
+  const mutated = 'export const laneId = (task) =>\n  slug(task.id)\n'
+  const io = fakeIo({
+    files: { [CHECK_FILE]: built }, writeThrough: true, cleanRuns: CHECK_CLEAN,
+    envelopes: CHECK_ENVELOPES([mutation]),
+    runs: CHECK_RUNS(`FAIL wrapped: caught\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":1,"errored":0}`),
+    changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  const res = driveTask(CTX, io)
+  assert.equal(res.status, 'done')
+  const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
+  assert.equal(row.outcome, 'killed')
+  assert.deepEqual(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).map(({ content }) => content), [mutated, built])
+})
+
+test('a token-different anchor is absent and writes nothing', () => {
+  const mutation = { ...CHECK_MUTATION, check: 'token-different', find: 'guards', replace: 'false' }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  driveTask(CTX, io)
+  const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
+  assert.equal(row.outcome, 'anchor-absent')
+  assert.match(row.why, /exactly or whitespace-normalized/)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+})
+
+test('a two-span anchor is ambiguous and writes nothing', () => {
+  const built = 'const a = pick(one,\n  two)\nconst b = pick(one, two)\n'
+  const mutation = { check: 'two-spans', file: 'a.mjs', find: 'pick(one, \n two)', replace: 'pick(one)' }
+  const io = fakeIo({
+    files: { [CHECK_FILE]: built }, writeThrough: true,
+    cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+    runs: { ...CHECK_RUNS(), 'gate-fixed:1': { ok: true, output: '' } }, changed: ['a.mjs', 'a.test.mjs'], emit: true,
+  })
+  driveTask(CTX, io)
+  const row = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks[0]
+  assert.equal(row.outcome, 'anchor-ambiguous')
+  assert.match(row.why, /more than one whitespace-normalized span/)
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+})
+
+test('a missing file and an unbindable find keep unapplied on the missing file only', () => {
+  const mutations = [
+    { check: 'missing-file', file: 'missing.mjs', find: 'anything', replace: 'other' },
+    { check: 'unbindable', file: 'a.mjs', find: 'guards', replace: 'false' },
+  ]
+  const plan = planEnv({ details: { ...planEnv().details, files_in_scope: ['a.mjs', 'a.test.mjs', 'missing.mjs'], gate_cmd: 'gate-cmd', mutations } })
+  const io = fakeIo({
+    files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
+    cleanRuns: { 'gate-cmd': { ok: false, output: RED(3) }, 'gate-fixed': { ok: false, output: RED(3) } },
+    envelopes: {
+      'planner:1': plan, 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } },
+      'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+    },
+    runs: { 'gate-cmd:1': { ok: false, output: RED(3) }, 'gate-cmd:2': { ok: true, output: '' }, 'gate-fixed:1': { ok: true, output: '' }, 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs'], emit: true,
+  })
+  driveTask(CTX, io)
+  const rows = io.calls.emits.find((event) => event.kind === 'check-discrimination').checks
+  assert.deepEqual(rows.map(({ check, outcome }) => ({ check, outcome })), [
+    { check: 'missing-file', outcome: 'unapplied' }, { check: 'unbindable', outcome: 'anchor-absent' },
+  ])
+  assert.equal(io.calls.writeLog.filter(({ path }) => path.startsWith(`${CTX.checkout}/`)).length, 0)
+})
+
+test('binding-failure escalation says BIND while survived keeps did-not-kill wording', () => {
+  const run = (mutation, files, mutationRun) => {
+    const io = fakeIo({
+      files, writeThrough: true,
+      cleanRuns: { ...CHECK_CLEAN, 'gate-fixed': { ok: false, output: RED(3) } },
+      envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
+      runs: { ...CHECK_RUNS(), 'gate-cmd:3': mutationRun, 'gate-fixed:1': { ok: true, output: '' } },
+      changed: ['a.mjs', 'a.test.mjs'], emit: true,
+    })
+    return driveTask(CTX, io)
+  }
+  const binding = run({ ...CHECK_MUTATION, check: 'nobind', find: 'guards', replace: 'false' }, { [CHECK_FILE]: CHECK_BUILT }, { ok: true, output: '' })
+  assert.match(binding.details.escalation.why, /did not BIND/)
+  const survived = run(CHECK_MUTATION, { [CHECK_FILE]: CHECK_BUILT }, { ok: true, output: `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}` })
+  assert.match(survived.details.escalation.why, /did not kill/)
+  assert.doesNotMatch(survived.details.escalation.why, /did not BIND/)
+})
+
+test('mutation binding failures are frozen and exclude gate outcomes', () => {
+  assert.equal(Object.isFrozen(MUTATION_BINDING_FAILURES), true)
+  assert.ok(MUTATION_BINDING_FAILURES.length < MUTATION_OUTCOMES.length)
+  for (const outcome of MUTATION_BINDING_FAILURES) assert.ok(MUTATION_OUTCOMES.includes(outcome))
+  for (const outcome of ['killed', 'exempt', 'survived']) assert.equal(MUTATION_BINDING_FAILURES.includes(outcome), false)
+})
+
 // --- b37: per-check gate discrimination -------------------------------------
 test('validateMutations accepts a mutation and exemption and rejects malformed declarations', () => {
   const inScope = scopeMatcher(['a.mjs', 'a.test.mjs'])
@@ -3964,7 +4094,7 @@ test('a malformed mutation declaration escalates at plan before assigning a buil
   assert.equal(io.calls.assign.filter(({ role }) => role === 'builder').length, 0)
 })
 
-test('an unapplied mutation is not accepted as proof', () => {
+test('an anchor-absent mutation is not accepted as proof', () => {
   const mutation = { ...CHECK_MUTATION, check: 'ghost', find: 'missing text' }
   const io = fakeIo({ files: { [CHECK_FILE]: CHECK_BUILT }, writeThrough: true,
     envelopes: CHECK_ENVELOPES([mutation], { 'lead:1': { status: 'done', role: 'lead', details: { gate_cmd: 'gate-fixed' } } }),
@@ -3974,7 +4104,7 @@ test('an unapplied mutation is not accepted as proof', () => {
   assert.equal(res.status, 'escalation')
   assert.equal(res.details.escalation.where, 'gate')
   assert.equal(res.details.escalation.why.includes('ghost'), true)
-  assert.deepEqual(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0], { check: 'ghost', outcome: 'unapplied', file: 'a.mjs', summary: null, why: 'the declared find text is not in the built a.mjs' })
+  assert.deepEqual(io.calls.logs.find((line) => line.gate_check_discriminations).gate_check_discriminations[0], { check: 'ghost', outcome: 'anchor-absent', file: 'a.mjs', summary: null, why: 'the declared find text is nowhere in the built a.mjs, exactly or whitespace-normalized' })
   assert.equal(io.calls.writeLog.filter(({ path }) => path === CHECK_FILE).length, 0)
 })
 
@@ -4205,7 +4335,7 @@ test('a longer sibling failure is not the intended check failure', () => {
 
 test('mutation outcomes are frozen and every observed row uses the closed vocabulary', () => {
   assert.equal(Object.isFrozen(MUTATION_OUTCOMES), true)
-  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['exempt', 'killed', 'survived', 'unapplied'])
+  assert.deepEqual([...MUTATION_OUTCOMES].sort(), ['anchor-absent', 'anchor-ambiguous', 'exempt', 'killed', 'survived', 'unapplied'])
 })
 
 test('the per-check proof stage is declared by the full variant', () => {

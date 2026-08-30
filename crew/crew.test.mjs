@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -1328,6 +1328,8 @@ test('run plumbs flagged budgets, records defaults when absent, and preserves dr
       runCmd({ task, checkout, 'brief-file': brief, 'build-rounds': '5', 'review-rounds': '1', keep: true }, { drive: capture })
       runCmd({ task, checkout, 'brief-file': brief, keep: true }, { drive: capture })
 
+      assert.equal(RUN_START_EVENT, 'run-start')
+      assert.ok(seen.every((ctx) => ctx.publish && typeof ctx.publish.branch === 'string'))
       assert.deepEqual(seen[0].limits, { plan_rounds: 4 })
       assert.deepEqual(seen[1].limits, { build_rounds: 5, review_rounds: 1 })
       assert.equal(Object.prototype.hasOwnProperty.call(seen[2], 'limits'), false)
@@ -2733,8 +2735,9 @@ test('run refuses an unusable ratified protected-path cell before driving', asyn
 
 test('crew CLI reads the closed variant set from drive.mjs without quoted shape literals', () => {
   const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  const code = source.replace(/\/\/[^\n]*/g, '')
   for (const name of VARIANT_NAMES) {
-    assert.doesNotMatch(source, new RegExp("(['\"`])" + name + "\\1"))
+    assert.doesNotMatch(code, new RegExp("(['\"`])" + name + "\\1"))
   }
   assert.match(source, /import\s*\{[^}]*VARIANT_NAMES[^}]*DEFAULT_VARIANT[^}]*\}\s*from '\.\/drive\.mjs'/)
 })
@@ -4631,7 +4634,7 @@ test('phaseForStage maps every driver stage and defaults unknown labels to build
     'plan:r1': 'planning', 'check:r1': 'planning', 'scout:r1': 'planning', 'repair:r1': 'planning', 'envelope-accept': 'finish',
     'gate-baseline': 'build', 'gate-repair:1': 'build',
     'gate-reverify:1': 'build', 'scope-gate:r1': 'build', 'lane:r1': 'build', 'gate:r1': 'build',
-    'review:pass': 'review', suite: 'finish', commit: 'finish', done: 'done', 'escalate:lane': 'escalation',
+    'review:pass': 'review', suite: 'finish', commit: 'finish', rebase: 'finish', publish: 'publish', done: 'done', 'escalate:lane': 'escalation',
     'future:stage': 'build',
   }
   for (const [label, phase] of Object.entries(table)) assert.equal(phaseForStage(label), phase, label)
@@ -5732,6 +5735,35 @@ test('readHead returns HEAD, answers null when git cannot answer, and honors the
   let seen = null
   assert.equal(readHead('/ignored', { execSync: (command, options) => { seen = { command, options }; return 'injected-head\n' } }), 'injected-head')
   assert.deepEqual(seen, { command: 'git rev-parse HEAD', options: { cwd: '/ignored', encoding: 'utf8' } })
+})
+
+test('readBranch returns a branch, null for detached or blank output, and null when git throws', () => {
+  const root = scratchDir('crew-read-branch-')
+  try {
+    execSync('git init -q', { cwd: root })
+    execSync('git config user.email crew-tests@example.invalid', { cwd: root })
+    execSync('git config user.name crew-tests', { cwd: root })
+    execSync('git commit -q --allow-empty -m init', { cwd: root })
+    const branch = execSync('git symbolic-ref --quiet --short HEAD', { cwd: root, encoding: 'utf8' }).trim()
+    assert.ok(branch)
+    assert.equal(readBranch(root), branch)
+    execSync('git checkout -q --detach HEAD', { cwd: root })
+    assert.equal(readBranch(root), null)
+    assert.equal(readBranch('/ignored', { execSync: () => '' }), null)
+    assert.equal(readBranch('/ignored', { execSync: () => { throw new Error('git unavailable') } }), null)
+  } finally { rmSync(root, { recursive: true, force: true }) }
+})
+
+test('teardownDecision covers publication, retention, envelope, unknown, and escalation outcomes', () => {
+  const cases = [
+    [{ status: 'escalation', variant: 'full', published: false, keep: false }, 'escalation'],
+    [{ status: 'done', variant: 'full', published: false, keep: false }, 'unpublished'],
+    [{ status: 'done', variant: 'full', published: true, keep: true }, 'keep'],
+    [{ status: 'done', variant: 'full', published: true, keep: false }, 'teardown'],
+    [{ status: 'done', variant: 'scout', published: false, keep: false }, 'teardown'],
+    [{ status: 'done', variant: 'unknown', published: false, keep: false }, 'teardown'],
+  ]
+  for (const [input, expected] of cases) assert.equal(teardownDecision(input), expected, JSON.stringify(input))
 })
 
 test('stagesFromJournal bounds stages at the last run-start and handles unreadable journals', () => {

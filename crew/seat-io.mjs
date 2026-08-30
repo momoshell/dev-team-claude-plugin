@@ -1104,7 +1104,7 @@ function newSurfaceIds(before, after) {
 // too — not a new branch. Duplicated rather than imported: seat-io must not
 // import the driver (the MODIFIER_OUTCOMES convention at :608); crew/crew.test.mjs
 // pins this map against crew/drive.mjs's enum.
-export const VARIANT_STAGE_PHASES = Object.freeze({ scout: 'planning', repair: 'planning', directed: 'planning', 'envelope-accept': 'finish' })
+export const VARIANT_STAGE_PHASES = Object.freeze({ scout: 'planning', repair: 'planning', directed: 'planning', 'envelope-accept': 'finish', rebase: 'finish', publish: 'publish' })
 
 export function phaseForStage(label) {
   const head = String(label ?? '').split(':')[0]

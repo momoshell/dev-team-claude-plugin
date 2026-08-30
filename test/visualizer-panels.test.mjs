@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { PANEL_REFRESH_MS, PANEL_STALE_AFTER_MS, acceptRows, brakePanel, cellHealthPanel, fleetCost, fleetEscalationRate, fleetMedianDuration, fleetPassRate, fleetPhasesPerRun, fleetTokens, findingRows, gateChips, intakeCandidateRows, intakePanel, reviewRows, rosterEditForm, rosterPanel, panelAgeLabel, panelReadLoop, readFreshness, rosterProposal, runSetPanel, teardownPanel } from '../visualizer/web/src/lib/panels.js'
 import { parseHash, formatHash } from '../visualizer/web/src/lib/route.js'
 import { absenceMark, costCell, createSemaphore, deriveDisplayStatus, deriveStatus, escalationProbeTargets, fleetActivity, fleetView, gateCell, heartbeatCell, reviewCell, runActivity, tokenCell } from '../visualizer/web/src/lib/fleet.js'
-import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
+import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, laneRows, phaseFilterId, phasePanel, renderMarkdown } from '../visualizer/web/src/lib/trace.js'
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
@@ -261,6 +261,25 @@ test('gateChips leaves absent generations pending without a fabricated verdict',
   assert.deepEqual(result.chips, [])
   assert.equal(result.repaired, false)
   assert.ok(result.pending)
+})
+
+test('gateProofStory turns ledger attempts into a decision path without changing their outcomes', () => {
+  const summary = (total, failed, errored = 0) => [{ label:JSON.stringify({ total, failed, errored }) }]
+  const result = gateProofStory([
+    { gate_generation:1, gate_name:'gate-baseline', attempt:1, ok:0, checks:summary(4, 4) },
+    { gate_generation:1, gate_name:'gate:r1', attempt:2, ok:1, checks:summary(4, 0) },
+    { gate_generation:1, gate_name:'gate-proof:1', attempt:3, ok:0, pristine:1, checks:summary(4, 4) },
+    { gate_generation:1, gate_name:'gate-proof:1:checks:m1', attempt:4, ok:0, checks:summary(4, 1) },
+    { gate_generation:1, gate_name:'gate-proof:1:checks:m2', attempt:5, ok:1, checks:summary(4, 0) },
+  ], 1, [{ gate_generation:1, verdict:'proven' }])
+  assert.equal(result.headline, 'The gate distinguishes the built result')
+  assert.deepEqual(result.stages.map((stage) => [stage.label, stage.result, stage.tone]), [
+    ['Before work', 'Red as expected', 'expected'],
+    ['Built result', 'Passed', 'expected'],
+    ['Without built changes', 'Turned red', 'expected'],
+  ])
+  assert.deepEqual(result.mutation, { total:2, red:1, green:1, unknown:0, summary:'1 of 2 recorded mutation probes turned the gate red' })
+  assert.equal(result.attempts[0].summary, '4 run · 4 failed · 0 errored')
 })
 
 test('reviewRows preserves null counts while retaining recorded zero', () => {
@@ -868,8 +887,20 @@ test('phase inspection explains factory checkpoints and suppresses empty gate co
   assert.match(source, /No agent lane owned this checkpoint/)
   assert.match(source, /No gate ran on this checkpoint/)
   assert.match(source, /Validation evidence is attached to/)
+  assert.match(source, /What this establishes/)
+  assert.match(source, /How the gate was proved/)
+  assert.match(source, /formatted from the ledger/)
+  assert.doesNotMatch(source, /check\.label/)
   assert.doesNotMatch(source, /gate verdict unavailable/)
   assert.doesNotMatch(source, /unlinked.*lane/)
+})
+
+test('operations cadence keeps time labels below the chart baseline', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/OperationsOverview.svelte'), 'utf8')
+  assert.match(source, /\.histogram::before[^}]*inset:0 0 1\.15rem[^}]*border-bottom/)
+  assert.match(source, /\.bar-column[^}]*grid-template-rows:minmax\(0,1fr\) 1\.15rem/)
+  assert.match(source, /\.bar-column > span[^}]*grid-row:2/)
+  assert.match(source, /\.bar-stack[^}]*grid-row:1/)
 })
 
 test('trace source tripwires keep route, role order, and server read-only', () => {
@@ -1023,7 +1054,7 @@ test('task detail shares one journal read between waterfall and trajectory', () 
   assert.match(detail, /<Trajectory[^>]*\{journalState\}/)
   assert.equal(trajectory.includes("fetch(`/api/journal"), false)
   assert.match(waterfall, /Factory steps/)
-  assert.match(waterfall, /not inferred agent tool calls/)
+  assert.match(waterfall, /one measured factory checkpoint/)
 })
 
 test('factory checkpoint inspection stays local and highlights the related waterfall phase', () => {
@@ -1033,8 +1064,12 @@ test('factory checkpoint inspection stays local and highlights the related water
   assert.match(source, /class:step-linked=\{sameId\(block\.phase_id, linkedPhase\)\}/)
   assert.match(source, /class:selected=\{linkedPhase == null && selected === block\.name\}/)
   assert.match(source, /step\.handoffs/)
-  assert.match(source, /class="agent-rail">Agent handoff/)
-  assert.match(source, /class="factory-rail">Factory step/)
+  assert.match(source, /How to read this trace/)
+  assert.match(source, /class="agent-guide"/)
+  assert.match(source, /class="factory-guide"/)
+  assert.match(source, /class="control-guide"/)
+  assert.match(source, /No upper rail · no agent active/)
+  assert.match(source, /class="guide-categories"/)
   assert.match(source, /class="rail-labels"/)
   assert.match(source, /border-top:2px dashed var\(--agent-color\)/)
   assert.match(source, /open=\{factoryOpen\}/)

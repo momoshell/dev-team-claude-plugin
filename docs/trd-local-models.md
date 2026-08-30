@@ -29,8 +29,9 @@ Ranked by value ÷ integration cost. **Programmatic-over-model-tokens still wins
 | U3 | **Mechanical-tier seats** — utility/basement-band builder on gate-first lanes: docs lanes, anchor repairs, fixture regeneration. The gate + kill-mutations are the safety, not the model | `local_providers` + roster + ladder | operator L0, then a measured experiment |
 | U4 | **Monitors and classifiers** — journal-anomaly summaries, escalation-stream triage (propose a cause where `escalationCause()` says `unclassified` — recorded as proposal, never as measurement), CI/build watch digests, #787 report prose | new consumer, off critical path | lane L3, after #786/#787 |
 | U5 | **Codemode-lab runners** (#498) and batch-shape arms (#532) — N independent verdicts, re-runnable programs | those epics' own seams | when those epics run |
+| U6 | **Run-record narration** — a local model writes the *narrative* section of a PR body (and, later, #787 report prose) **from the run record only**: input is `composePrBody`'s record object, never the diff or the checkout. Code keeps composing the factual sections and the narrative is additive above them, labeled as narrated. The endpoint being down changes nothing: the code-composed body publishes as today — narration is never load-bearing (ratified 2026-08-30, amending the pure-code reading of ADR-034: the economic half of programmatic-over-model-tokens does not apply to free tokens; the honesty half — nothing the record does not contain — still binds the prompt) | `composePrBody` + `local_providers` | lane L4, after #800/b336 releases `crew/drive.mjs` |
 
-**Refused uses**, so they are decisions and not drift: judge-tier seats (band floor stands); PR bodies and commit messages (composed by code, ADR-034); test authoring (quality-critical); anything whose output lands unreviewed in a protected file.
+**Refused uses**, so they are decisions and not drift: judge-tier seats (band floor stands); **commit messages** (still code-composed — they are parsed by `refsFromCommitMessage` and drive merge mechanics, so prose drift there breaks machinery); test authoring (quality-critical); anything whose output lands unreviewed in a protected file. PR-body *facts* stay code-composed; only the narration above them is model-written (U6).
 
 ## 3. What the desktop deployment must provide
 
@@ -45,6 +46,7 @@ Ranked by value ÷ integration cost. **Programmatic-over-model-tokens still wins
 - **L1 (build):** advisor endpoint may be non-loopback: probe unchanged, refusal text updated, and the endpoint host recorded in the boot journal so a dead LAN box names itself. Fence: `crew/crew.mjs` advisor block + tests.
 - **L2 (build, after #800/b336):** screener panel — a `scout`-variant pre-review pass seated on a local provider, findings emitted in the #800 disposition shape as proposals to the reviewer seat; measured by must-fix yield against the b152 rubric before it earns a standing place.
 - **L3 (build, after #786):** classifier consumers over the ledger/journal — proposals only, `unclassified` stays `unclassified` unless a human ratifies.
+- **L4 (build, after b336):** `composePrBody` quality + narration — lead with the commit-message body; dedupe the `bounce: bounce:` anomaly prefix; collapse repeated stages (`review:r1 ×2`); render paths relative; then, when a narrator is configured in `local_providers`, prepend a labeled narrative composed from the record object alone, with the code-composed body published unchanged when the endpoint is dead or the narration fails validation (no file, path or number in the narration that is absent from the record).
 
 ## 5. Decisions reserved for an ADR (037 — 035 landed, 036 is #792)
 

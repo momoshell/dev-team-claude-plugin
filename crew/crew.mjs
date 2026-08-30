@@ -59,7 +59,7 @@ import { checkoutProtectedPaths } from '../scripts/factory/probe-repo.mjs'
 import { gatherFences, laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { REAP_VERDICTS, classifyRecord } from '../scripts/factory/reap-stale.mjs'
 import { breakerPolicy, cellHealth, assertCellsClosed } from './breaker.mjs'
-import { CELL_RATE_FLOOR, USAGE_ABSENT_CAUSES, openLedger as realOpenLedger } from '../scripts/factory/ledger.mjs'
+import { CELL_RATE_FLOOR, USAGE_ABSENT_CAUSES, escalationCause, openLedger as realOpenLedger } from '../scripts/factory/ledger.mjs'
 import {
   DEFAULT_BACKEND, DEFAULT_BUDGET_BYTES, openMemory, renderSection,
 } from './memory.mjs'
@@ -1759,6 +1759,16 @@ export function runExitCode(result) {
     : RUN_EXIT_UNEXPECTED
 }
 
+// #779/#774: preserve the legacy status while recording the typed terminal outcome.
+export function runOutcome(result) {
+  if (result?.status === 'done') return { status: 'ok', outcome: 'success', terminal_reason: null, terminal_actor: null }
+  if (result?.status === 'escalation') {
+    const { cause, actor } = escalationCause(result?.details?.escalation ?? {})
+    return { status: 'aborted', outcome: 'escalated', terminal_reason: cause, terminal_actor: actor }
+  }
+  return { status: 'aborted', outcome: 'aborted', terminal_reason: typeof result?.status === 'string' ? result.status : null, terminal_actor: 'driver' }
+}
+
 // The exit marker (#749, driver half). `run` writes exactly ONE terminal
 // line on every exit path this process can reach, so an EMPTY run.log means
 // exactly "killed with an uncatchable signal, or hung" and never "unknown".
@@ -2021,7 +2031,7 @@ export function runCmd(args, deps = {}) {
   // never change the run's recorded outcome.
   writeFileSync(crew.task_return, JSON.stringify(result, null, 2))
   settleSeatTeardown(io)
-  try { emitter?.endRun({ status: result.status === 'done' ? 'ok' : 'aborted' }) } catch { /* never load-bearing */ }
+  try { emitter?.endRun(runOutcome(result)) } catch { /* never load-bearing */ }
 
   // Outcome-gated lifecycle, in code as policy:
   //   done       -> auto-teardown (archive the record, close the view),

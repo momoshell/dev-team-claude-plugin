@@ -22,7 +22,7 @@ import { ROOT, sqliteAvailable } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
-  SESSION_STATUSES, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
+  SESSION_STATUSES, SESSION_OUTCOMES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
@@ -413,6 +413,75 @@ test("M1: dumpTable('sessions') returns the seeded row (not silently vacuous)", 
   // A real query failure here must be COUNTED, not swallowed as a fake
   // "table has zero rows" result.
   assert.deepEqual(ledger.dumpTable('sessions'), rows)
+})
+
+test('typed endSession fields round-trip, default to NULL, and validate their enums', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'typed-end', repo_slug: 'r', task_slug: 't' })
+  ledger.endSession({
+    adw_id: 'typed-end', status: 'aborted', outcome: 'escalated',
+    terminal_reason: 'transport', terminal_actor: 'driver',
+    ended_at: '2024-01-01T00:00:00.000Z',
+  })
+  const typed = ledger.getSession('typed-end')
+  assert.equal(typed.status, 'aborted')
+  assert.equal(typed.outcome, 'escalated')
+  assert.equal(typed.terminal_reason, 'transport')
+  assert.equal(typed.terminal_actor, 'driver')
+
+  ledger.startSession({ adw_id: 'typed-null', repo_slug: 'r', task_slug: 't' })
+  ledger.endSession({ adw_id: 'typed-null', status: 'ok', ended_at: '2024-01-01T00:00:00.000Z' })
+  const omitted = ledger.getSession('typed-null')
+  assert.equal(omitted.status, 'ok')
+  assert.equal(omitted.outcome, null)
+  assert.equal(omitted.terminal_reason, null)
+  assert.equal(omitted.terminal_actor, null)
+
+  assert.throws(
+    () => ledger.endSession({ adw_id: 'typed-end', status: 'ok', outcome: 'not-an-outcome' }),
+    (err) => err instanceof LedgerUsageError && /field 'outcome'/.test(err.message),
+  )
+  assert.throws(
+    () => ledger.endSession({ adw_id: 'typed-end', status: 'ok', terminal_actor: 'not-an-actor' }),
+    (err) => err instanceof LedgerUsageError && /field 'terminal_actor'/.test(err.message),
+  )
+  assert.deepEqual([...SESSION_OUTCOMES], ['success', 'escalated', 'aborted', 'failed'])
+  assert.deepEqual([...TERMINAL_ACTORS], ['driver', 'lead', 'operator', 'finalizer'])
+})
+
+test('escalationCause maps the archived envelopes and never guesses an unknown pair', () => {
+  const cases = [
+    // b309-dispatchprep — /Users/momoshell/.crew/dt-b309-dispatchprep/b309-dispatchprep.archive-2026-08-29T08-11-33-004Z/returns/task.json
+    { where: 'planner', why: 'planner: no valid envelope at /Users/momoshell/.crew/dt-b309-dispatchprep/b309-dispatchprep/returns/d1.planner.json within 1800s — the seat is WORKING: planner produced a transcript frame 30s ago and simply exceeded its ', cause: 'budget', actor: 'driver' },
+    // b317-drivergone — /Users/momoshell/.crew/dt-b317-drivergone/b317-drivergone.archive-2026-08-29T14-24-05-878Z/returns/task.json
+    { where: 'cold-suite', why: 'the cold verification produced no verdict (unproven): neutralColdPath: no neutral cold checkout path for ["b317-drivergone","dt-b317-drivergone","dev-team-claude-plugin"] — every candidate root was rejected [/private/var', cause: 'infrastructure', actor: 'driver' },
+    // b321-driverpublish — /Users/momoshell/.crew/dt-b321-driverpublish/b321-driverpublish.archive-2026-08-29T16-35-01-212Z/returns/task.json
+    { where: 'driver', why: 'sendLine: could not clear the pane input back to baseline before retype', cause: 'transport', actor: 'driver' },
+    // b322-closeout#1 — /Users/momoshell/.crew/dt-b322-closeout/b322-closeout.archive-2026-08-29T15-14-14-427Z/returns/task.json
+    { where: 'driver', why: 'sendLine: echo not verified exactly once over baseline (before 0, last 0)', cause: 'transport', actor: 'driver' },
+    // b322-closeout#2 — /Users/momoshell/.crew/dt-b322-closeout/b322-closeout.archive-2026-08-29T15-18-22-532Z/returns/task.json
+    { where: 'driver', why: 'sendLine: echo not verified exactly once over baseline (before 0, last 0)', cause: 'transport', actor: 'driver' },
+    // b324-closeoutscript — /Users/momoshell/.crew/dt-b324-closeoutscript/b324-closeoutscript.archive-2026-08-29T17-05-09-432Z/returns/task.json
+    { where: 'driver', why: 'sendLine: could not clear the pane input back to baseline before retype', cause: 'transport', actor: 'driver' },
+    // b325-driverpublish#1 — /Users/momoshell/.crew/dt-b325-driverpublish/b325-driverpublish.archive-2026-08-29T17-01-58-919Z/returns/task.json
+    { where: 'driver', why: 'sendLine: could not clear the pane input back to baseline before retype', cause: 'transport', actor: 'driver' },
+    // b325-driverpublish#final — /Users/momoshell/.crew/dt-b325-driverpublish/b325-driverpublish/returns/task.json
+    { where: 'gate', why: 'roof is clean (32/32 red, 0 errored) and 31 of 32 per-check mutations killed. The sole failure is A3b, whose outcome is anchor-absent: the plan declared find text "const rebased = baseSha !== mergeBase" for crew/drive.mjs, but the builder wrote `let rebased = false` at crew/drive', cause: 'plan-build-disagreement', actor: 'driver' },
+    // b329-closeoutscript — /Users/momoshell/.crew/dt-b329-closeoutscript/b329-closeoutscript.archive-2026-08-30T15-32-26-023Z/returns/task.json
+    { where: 'plan', why: "allowlisted read-only recipe' test reddens the moment package.json gains factory:closeout. The compiled brief therefore demands (acceptance h + 'Full suite green') something its own fence forbids — a contradiction inside an artifact compiled outside this workspace. A bounce is wo", cause: 'brief-contradiction', actor: 'operator' },
+    { where: 'review', why: 'the lead could not settle finding 2 within its rounds', cause: 'review-unresolved', actor: 'lead' },
+    { where: 'gate', why: 'the gate check C3 survived its declared mutation and the repair did not fix it', cause: 'gate-defect', actor: 'lead' },
+  ]
+  for (const { where, why, cause, actor } of cases) {
+    const mapped = escalationCause({ where, why })
+    assert.deepEqual(mapped, { cause, actor }, `${where}: ${why}`)
+    assert.equal(Object.isFrozen(mapped), true)
+  }
+  for (const input of [{}, { where: 42, why: 17 }, { where: null, why: false }, null, 'not-an-envelope']) {
+    assert.deepEqual(escalationCause(input), { cause: 'unclassified', actor: null })
+  }
+  assert.deepEqual(escalationCause({ where: 'driver', why: 'anchor-absent in an unapplied change' }), { cause: 'plan-build-disagreement', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'scope', why: 'exceeded its 1800s budget' }), { cause: 'plan-build-disagreement', actor: 'driver' })
 })
 
 // ---------------------------------------------------------------------------
@@ -824,6 +893,24 @@ test('T11: replay failure reasons never echo a marker-bearing unknown kind', { s
     assert.ok(result.first_failure)
     assert.doesNotMatch(result.first_failure.reason, new RegExp(marker))
   } finally { ledger.close() }
+})
+
+test('legacy endSession JSONL without outcome replays to three NULL typed fields', { skip: SKIP }, () => {
+  const jsonlPath = join(nextDir(), 'legacy-outcome.jsonl')
+  writeFileSync(jsonlPath, [
+    { v: 1, kind: 'startSession', at: '2024-01-01T00:00:00.000Z', args: { adw_id: 'legacy-outcome', repo_slug: 'r', task_slug: 'legacy' } },
+    { v: 1, kind: 'endSession', at: '2024-01-01T00:00:01.000Z', args: { adw_id: 'legacy-outcome', ended_at: '2024-01-01T00:00:01.000Z', status: 'ok' } },
+  ].map((line) => JSON.stringify(line)).join('\n') + '\n')
+  const ledger = openTestLedger()
+  const result = replayJsonl(jsonlPath, ledger)
+  assert.equal(result.failed, 0)
+  assert.equal(result.skipped, 0)
+  assert.equal(result.complete, true)
+  const row = ledger.getSession('legacy-outcome')
+  assert.equal(row.status, 'ok')
+  assert.equal(row.outcome, null)
+  assert.equal(row.terminal_reason, null)
+  assert.equal(row.terminal_actor, null)
 })
 
 test('cell failure attributions are a frozen axis separate from failure kinds', () => {
@@ -1910,6 +1997,38 @@ test('taskReadout carries typed accept decisions and bounds invalid reasons', { 
   })
 })
 
+test('taskReadout and ledger task carry typed run outcomes while marking legacy rows absent', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'task-typed-outcome', repo_slug: 'r', task_slug: 'typed-outcome' })
+  ledger.endSession({
+    adw_id: 'task-typed-outcome', status: 'aborted', outcome: 'escalated',
+    terminal_reason: 'budget', terminal_actor: 'driver', ended_at: '2024-01-01T00:00:01.000Z',
+  })
+  const readout = ledger.taskReadout('task-typed-outcome')
+  assert.deepEqual({
+    outcome: readout.session.outcome,
+    terminal_reason: readout.session.terminal_reason,
+    terminal_actor: readout.session.terminal_actor,
+  }, { outcome: 'escalated', terminal_reason: 'budget', terminal_actor: 'driver' })
+  assert.equal(Object.hasOwn(readout.absent, 'outcome'), false)
+
+  ledger.startSession({ adw_id: 'task-legacy-outcome', repo_slug: 'r', task_slug: 'legacy-outcome' })
+  const legacy = ledger.taskReadout('task-legacy-outcome')
+  assert.equal(legacy.session.outcome, null)
+  assert.match(legacy.absent.outcome, /predates typed run outcomes/)
+
+  const dbPath = ledger._dbPath
+  ledger.close()
+  const cli = run(['task', 'task-typed-outcome'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(cli.status, 0, cli.stderr)
+  const payload = JSON.parse(cli.stdout)
+  assert.deepEqual({
+    outcome: payload.session.outcome,
+    terminal_reason: payload.session.terminal_reason,
+    terminal_actor: payload.session.terminal_actor,
+  }, { outcome: 'escalated', terminal_reason: 'budget', terminal_actor: 'driver' })
+})
+
 test('a run with no usage, discrimination or findings reads as absent, not zero', { skip: SKIP }, () => {
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'task-bare', repo_slug: 'r', task_slug: 'bare' })
@@ -1922,6 +2041,7 @@ test('a run with no usage, discrimination or findings reads as absent, not zero'
   assert.deepEqual(readout.accept_decisions, [])
   assert.deepEqual(readout.absent, {
     request: 'this run predates request recording (#b19) / was not dispatched by the intake loop; the request was never measured, and NULL is never an empty ask',
+    outcome: 'this run predates typed run outcomes (#779) — sessions.status carries the legacy verdict alone; NULL is never a measured outcome, and no historical row is backfilled by inference',
     context_occupancy: 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md',
     usage: `this run has no agent_sessions rows: ${USAGE_ABSENT_CAUSES.transport_unrecorded}`,
     gate_discrimination: 'predates gate discrimination (#168)',
@@ -2702,6 +2822,9 @@ test('AC-11: on SIGTERM the finalizer lands the session as fail, closes running 
   const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
   const session = ledger.getSession('sig-1')
   assert.equal(session.status, 'fail')
+  assert.equal(session.outcome, 'failed')
+  assert.equal(session.terminal_reason, 'SIGTERM')
+  assert.equal(session.terminal_actor, 'finalizer')
   const runningProcs = ledger.dumpTable('processes').filter((p) => p.adw_id === 'sig-1' && p.state === 'running')
   assert.equal(runningProcs.length, 0)
 })
@@ -3154,6 +3277,8 @@ test('#443: every documented CLI flag remains accepted', { skip: SKIP }, () => {
     { verb: 'modifier-attempts', flag: 'until', args: ['modifier-attempts', '--since', since, '--until', until] },
     { verb: 'seat-teardowns', flag: 'since', args: ['seat-teardowns', '--since', since, '--until', until] },
     { verb: 'seat-teardowns', flag: 'until', args: ['seat-teardowns', '--since', since, '--until', until] },
+    { verb: 'escalations', flag: 'since', args: ['escalations', '--since', since, '--until', until] },
+    { verb: 'escalations', flag: 'until', args: ['escalations', '--since', since, '--until', until] },
     { verb: 'ci-cycles', flag: 'since', args: ['ci-cycles', '--since', since, '--until', until] },
     { verb: 'ci-cycles', flag: 'until', args: ['ci-cycles', '--since', since, '--until', until] },
     { verb: 'intake-sweeps', flag: 'since', args: ['intake-sweeps', '--since', since, '--until', until] },
@@ -3181,7 +3306,7 @@ test('#443: flagless subcommands refuse an unknown flag', { skip: SKIP }, () => 
 })
 
 test('#443: every window subcommand refuses the misspelled flag', { skip: SKIP }, () => {
-  for (const verb of ['run-set', 'cell-failures', 'cells', 'modifier-attempts', 'seat-teardowns', 'ci-cycles', 'intake-sweeps']) {
+  for (const verb of ['run-set', 'cell-failures', 'cells', 'modifier-attempts', 'seat-teardowns', 'escalations', 'ci-cycles', 'intake-sweeps']) {
     const result = run([verb, '--sicne', '2026-08-21T00:00:00Z'])
     assert.equal(result.status, 2, `${verb}: ${result.stderr}`)
     assert.match(result.stderr, /unknown flag --sicne/)
@@ -3207,6 +3332,40 @@ test('#443: success, usage refusal, and unexpected internal error retain distinc
     env: { ...process.env, DEVTEAM_LEDGER_DB: join(nextDir(), 'ledger.db') },
   })
   assert.equal(internal.status, 1, internal.stderr)
+})
+
+test('escalations CLI prints grouped causes and refuses unbounded or invalid windows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  ledger.startSession({ adw_id: 'cli-escalation-driver', repo_slug: 'r', task_slug: 'cli-escalation-driver' })
+  ledger.endSession({ adw_id: 'cli-escalation-driver', status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver', ended_at: '2024-01-02T00:00:00.000Z' })
+  ledger.startSession({ adw_id: 'cli-escalation-lead', repo_slug: 'r', task_slug: 'cli-escalation-lead' })
+  ledger.endSession({ adw_id: 'cli-escalation-lead', status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'lead', ended_at: '2024-01-02T00:00:01.000Z' })
+  const dbPath = ledger._dbPath
+  ledger.close()
+
+  const result = run(['escalations', '--since', '2024-01-02T00:00:00Z', '--until', '2024-01-02T00:01:00Z'], { DEVTEAM_LEDGER_DB: dbPath })
+  assert.equal(result.status, 0, result.stderr)
+  const payload = JSON.parse(result.stdout)
+  assert.equal(payload.schema, 1)
+  assert.equal(payload.question, 'How many lanes did the factory lose to itself, and to what?')
+  assert.equal(payload.measured, true)
+  assert.equal(payload.escalated, 2)
+  assert.deepEqual(payload.rows.map(({ cause, actor, count }) => ({ cause, actor, count })), [
+    { cause: 'transport', actor: 'driver', count: 1 },
+    { cause: 'transport', actor: 'lead', count: 1 },
+  ])
+  assert.deepEqual(payload.absent, null)
+
+  for (const args of [
+    ['escalations'],
+    ['escalations', '--since', 'not-a-timestamp'],
+    ['escalations', '--since', '2024-01-02T00:01:00Z', '--until', '2024-01-02T00:00:00Z'],
+    ['escalations', '--since', '2024-01-02T00:00:00Z', '--unexpected', 'x'],
+  ]) {
+    const refused = run(args)
+    assert.equal(refused.status, 2, `${args.join(' ')}: ${refused.stderr}`)
+    assert.match(refused.stderr, /escalations/)
+  }
 })
 
 // ---------------------------------------------------------------------------
@@ -3301,6 +3460,30 @@ function readerFixture() {
   })
   return { ledger, run, phaseId }
 }
+
+test('escalations groups typed outcomes by cause and actor over ended_at half-open windows', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  const seed = (adwId, endedAt, outcome = 'escalated', terminalReason = 'transport', terminalActor = 'driver') => {
+    ledger.startSession({ adw_id: adwId, repo_slug: 'r', task_slug: adwId, started_at: '2024-01-01T00:00:00.000Z' })
+    ledger.endSession({ adw_id: adwId, status: outcome === 'escalated' ? 'aborted' : 'ok', outcome, terminal_reason: terminalReason, terminal_actor: terminalActor, ended_at: endedAt })
+  }
+  seed('escalation-driver-1', '2024-01-02T00:00:00.000Z')
+  seed('escalation-driver-2', '2024-01-02T00:00:01.000Z')
+  seed('escalation-lead', '2024-01-02T00:00:02.000Z', 'escalated', 'transport', 'lead')
+  seed('escalation-budget', '2024-01-02T00:00:03.000Z', 'escalated', 'budget', 'driver')
+  seed('escalation-at-until', '2024-01-02T00:01:00.000Z')
+  seed('not-escalated', '2024-01-02T00:00:04.000Z', 'success', null, null)
+
+  const rows = ledger.escalations({ since: '2024-01-02T00:00:00.000Z', until: '2024-01-02T00:01:00.000Z' }).map((row) => ({ ...row }))
+  assert.deepEqual(rows, [
+    { cause: 'budget', actor: 'driver', count: 1, first_at: '2024-01-02T00:00:03.000Z', last_at: '2024-01-02T00:00:03.000Z' },
+    { cause: 'transport', actor: 'driver', count: 2, first_at: '2024-01-02T00:00:00.000Z', last_at: '2024-01-02T00:00:01.000Z' },
+    { cause: 'transport', actor: 'lead', count: 1, first_at: '2024-01-02T00:00:02.000Z', last_at: '2024-01-02T00:00:02.000Z' },
+  ])
+  assert.deepEqual(ledger.escalations({ since: '2024-01-02T00:01:00.000Z' }).map((row) => ({ ...row })), [
+    { cause: 'transport', actor: 'driver', count: 1, first_at: '2024-01-02T00:01:00.000Z', last_at: '2024-01-02T00:01:00.000Z' },
+  ])
+})
 
 test('tableNames reads live schema names', { skip: SKIP }, () => {
   const { ledger } = readerFixture()
@@ -4312,11 +4495,11 @@ test('startProcess has no production caller; future wiring must update the retir
   assert.deepEqual(offenders, [], 'update RETIRED_TABLES.processes and docs/ledger-queries.md when wiring startProcess')
 })
 
-test('sessions ends with tier, proposed_shape, proposed_strength and starts each row with all three NULL', { skip: SKIP }, () => {
+test('sessions ends with typed outcomes and starts each row with all six appended fields NULL', { skip: SKIP }, () => {
   assert.deepEqual(TABLES.sessions.columns.slice(-3).map(({ name }) => name), [
-    'tier', 'proposed_shape', 'proposed_strength',
+    'outcome', 'terminal_reason', 'terminal_actor',
   ])
-  assert.equal(TABLES.sessions.columns.at(-4).name, 'last_heartbeat_at')
+  assert.equal(TABLES.sessions.columns.at(-4).name, 'proposed_strength')
   const ledger = openTestLedger()
   ledger.startSession({ adw_id: 'heartbeat-null', repo_slug: 'r', task_slug: 't' })
   const row = ledger.getSession('heartbeat-null')
@@ -4324,6 +4507,9 @@ test('sessions ends with tier, proposed_shape, proposed_strength and starts each
   assert.equal(row.tier, null)
   assert.equal(row.proposed_shape, null)
   assert.equal(row.proposed_strength, null)
+  assert.equal(row.outcome, null)
+  assert.equal(row.terminal_reason, null)
+  assert.equal(row.terminal_actor, null)
 })
 
 test('openRun records the boot tier and brief proposals, while a blockless brief records null', { skip: SKIP }, () => {
@@ -4377,11 +4563,11 @@ test('proposal parser names malformed, duplicated and unknown blocks, and boot r
   }
 })
 
-test('a sessions table predating the proposal columns upgrades without backfilling any existing value', { skip: SKIP }, () => {
+test('a sessions table predating the typed outcome columns upgrades without backfilling any existing value', { skip: SKIP }, () => {
   const { DatabaseSync } = require('node:sqlite')
-  const dbPath = join(nextDir(), 'proposal-upgrade.db')
+  const dbPath = join(nextDir(), 'outcome-upgrade.db')
   const db = new DatabaseSync(dbPath)
-  const older = TABLES.sessions.columns.filter(({ name }) => !['proposed_shape', 'proposed_strength'].includes(name))
+  const older = TABLES.sessions.columns.filter(({ name }) => !['outcome', 'terminal_reason', 'terminal_actor'].includes(name))
   const names = older.map(({ name }) => name)
   try {
     db.exec(`CREATE TABLE sessions (${older.map(({ name, decl }) => `"${name}" ${decl}`).join(', ')})`)
@@ -4391,8 +4577,9 @@ test('a sessions table predating the proposal columns upgrades without backfilli
     applyMigrations(db)
     const after = db.prepare('SELECT * FROM sessions WHERE adw_id = ?').get('historical-proposal')
     for (const name of names) assert.deepEqual(after[name], before[name], `existing session column changed: ${name}`)
-    assert.equal(after.proposed_shape, null)
-    assert.equal(after.proposed_strength, null)
+    assert.equal(after.outcome, null)
+    assert.equal(after.terminal_reason, null)
+    assert.equal(after.terminal_actor, null)
   } finally { db.close() }
 })
 
@@ -4432,6 +4619,17 @@ test('proposal fields replay through JSONL into sessions', { skip: SKIP }, () =>
   const row = target.getSession('proposal-replay')
   assert.equal(row.proposed_shape, 'mechanical')
   assert.equal(row.proposed_strength, 'workhorse')
+})
+
+test('ledger query docs pin typed outcome columns, the closed cause vocabulary, and the escalations recipe', () => {
+  const docs = readFileSync(join(ROOT, 'docs', 'ledger-queries.md'), 'utf8')
+  for (const field of ['sessions.outcome', 'sessions.terminal_reason', 'sessions.terminal_actor']) {
+    assert.ok(docs.includes(`\`${field}\``), `docs missing ${field}`)
+  }
+  for (const cause of [...ESCALATION_CAUSES, 'unclassified']) {
+    assert.equal((docs.match(new RegExp('`' + cause + '`', 'g')) || []).length, 1, `${cause} must appear as a backticked vocabulary member exactly once`)
+  }
+  assert.match(docs, /ledger\.mjs escalations --since <iso>/)
 })
 
 test('no non-test factory or crew module consumes the recorded proposal columns', () => {

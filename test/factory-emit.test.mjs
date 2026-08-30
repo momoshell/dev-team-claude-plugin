@@ -122,6 +122,43 @@ test('linkRun emits a daemon-to-sidecar association into the real ledger', { ski
   } finally { ledger.close() }
 })
 
+test('endRun forwards typed outcome fields, defaults them to NULL, and still refuses finalizer status fail', { skip: SKIP }, () => {
+  const typedDir = freshDir('typed-end-run')
+  const typedDb = join(typedDir, 'ledger', 'ledger.db')
+  const typed = openRun({ stateDir: typedDir, repoSlug: 'r', taskSlug: 'typed', dbPath: typedDb, stderr: { write: () => {} } })
+  typed.startRun()
+  typed.endRun({ status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver' })
+  const typedLedger = openLedger({ dbPath: typedDb, stderr: { write: () => {} } })
+  try {
+    assert.deepEqual({ ...typedLedger.getSession(typed.adwId) }, {
+      ...typedLedger.getSession(typed.adwId),
+      status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver',
+    })
+  } finally { typedLedger.close(); typed.dispose() }
+
+  const omittedDir = freshDir('omitted-end-run')
+  const omittedDb = join(omittedDir, 'ledger', 'ledger.db')
+  const omitted = openRun({ stateDir: omittedDir, repoSlug: 'r', taskSlug: 'omitted', dbPath: omittedDb, stderr: { write: () => {} } })
+  omitted.startRun()
+  omitted.endRun({ status: 'ok' })
+  const omittedLedger = openLedger({ dbPath: omittedDb, stderr: { write: () => {} } })
+  try {
+    const row = omittedLedger.getSession(omitted.adwId)
+    assert.equal(row.status, 'ok')
+    assert.equal(row.outcome, null)
+    assert.equal(row.terminal_reason, null)
+    assert.equal(row.terminal_actor, null)
+  } finally { omittedLedger.close(); omitted.dispose() }
+
+  const refusedDir = freshDir('refused-end-run')
+  const refused = openRun({ stateDir: refusedDir, repoSlug: 'r', taskSlug: 'refused', stderr: { write: () => {} } })
+  refused.startRun()
+  const droppedBefore = refused.stats().dropped
+  refused.endRun({ status: 'fail', outcome: 'failed', terminal_reason: 'SIGTERM', terminal_actor: 'finalizer' })
+  assert.ok(refused.stats().dropped > droppedBefore)
+  refused.dispose()
+})
+
 test('linkRun(null) and linkRun(\'\') are no-ops, including on a degraded emitter', () => {
   const dir = freshDir('link-run-noop')
   const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 't', stderr: { write: () => {} } })

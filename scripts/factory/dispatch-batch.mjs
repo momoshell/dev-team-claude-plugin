@@ -1445,11 +1445,22 @@ export function reconcileTier({ lane, forced, proposed, requested, requestedFrom
   if (forced && requestedFrom !== 'batch' && requested && TIER_NAMES.indexOf(requested) < TIER_NAMES.indexOf(forced)) {
     refuse(`lane ${lane} requested tier ${requested} below protected floor ${forced}`, TIER_FLOOR_CONFLICT)
   }
-  const known = [forced, proposed, requested].filter((tier) => TIER_NAMES.includes(tier))
+  // #762: an explicit lane tier is the operator's decision. The compiler's
+  // proposal advises and never raises it; only the protected floor does.
+  const laneChoice = requestedFrom === 'lane' && TIER_NAMES.includes(requested)
+  const candidates = laneChoice ? [forced, requested] : [forced, proposed, requested]
+  const known = candidates.filter((tier) => TIER_NAMES.includes(tier))
   const tier = known.length === 0
     ? null
     : known.reduce((best, candidate) => TIER_NAMES.indexOf(candidate) > TIER_NAMES.indexOf(best) ? candidate : best)
-  return { lane, tier, forced, proposed, requested }
+  const overrodeProposal = laneChoice && TIER_NAMES.includes(proposed) && TIER_NAMES.indexOf(proposed) > TIER_NAMES.indexOf(tier)
+  return { lane, tier, forced, proposed, requested, overrodeProposal }
+}
+
+// The override is printed, not merely recorded: an operator reading the dispatch
+// line must see that the lane's own tier beat a higher proposal (#762).
+function overrideNote(result) {
+  return result.overrodeProposal ? ` overrode proposal ${result.proposed} with lane tier ${result.tier}` : ''
 }
 
 export function checkArrival({ crew, lane, batchTotal } = {}) {
@@ -1958,7 +1969,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const seats = mergeSeats(batchSeats, laneEntry?.seats)
     const result = reconcileTier({ lane: item.lane, forced: floor.forced, proposed: item.proposed, requested, requestedFrom: laneEntry?.tier ? 'lane' : 'batch' })
     if (!result.tier) refuse(`lane ${item.lane} has no known tier to boot`, BOOT_FAILED)
-    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'}`)
+    d.log(`dispatch-batch: lane=${item.lane} forced=${floor.forced || 'none'} proposed=${item.proposed || 'none'} requested=${requested || 'none'} requested_from=${laneEntry?.tier ? 'lane' : (tier ? 'batch' : 'none')} variant=${laneVariant || 'none'} variant_from=${laneEntry?.variant ? 'lane' : (variant ? 'batch' : 'none')} settled=${result.tier} seats=${seatSpec(seats)} seats_from=${seatFromSpec(batchSeats, laneEntry?.seats)} shape=${staffing.shape || STAFFING_ABSENT} strength=${staffing.strength || STAFFING_ABSENT} misclassified=${staffing.misclassification ? 'true' : 'false'}${overrideNote(result)}`)
     const recordPath = join(outputDir, `${item.lane}${DISPATCH_RECORD_SUFFIX}`)
     const record = {
       lane: item.lane,
@@ -1970,6 +1981,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
         proposed: item.proposed || null,
         requested: requested || null,
         settled: result.tier,
+        overrode_proposal: result.overrodeProposal === true,
       },
       seats: seatChain(batchSeats, laneEntry?.seats),
       variant: laneVariant || null,

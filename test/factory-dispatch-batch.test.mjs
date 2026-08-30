@@ -1227,6 +1227,16 @@ test('tier floor and reconciliation keep the protected path at judge', () => {
   refusal(() => reconcileTier({ lane: 'lane-a', forced: 'judge', proposed: 'build', requested: 'build' }), 'tier-floor-conflict')
   assert.equal(reconcileTier({ lane: 'lane-a', forced: null, proposed: 'build', requested: 'judge' }).tier, 'judge')
   assert.equal(reconcileTier({ lane: 'lane-a', forced: null, proposed: null, requested: null }).tier, null)
+  const laneOverride = reconcileTier({ lane: 'lane-a', forced: null, proposed: 'judge', requested: 'build', requestedFrom: 'lane' })
+  assert.equal(laneOverride.tier, 'build')
+  assert.equal(laneOverride.overrodeProposal, true)
+  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'judge', proposed: null, requested: 'build', requestedFrom: 'lane' }), 'tier-floor-conflict')
+  refusal(() => reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: 'mechanical', requestedFrom: 'lane' }), 'tier-floor-conflict')
+  assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: 'build', requestedFrom: 'lane' }).tier, 'build')
+  const batchDefault = reconcileTier({ lane: 'lane-a', forced: null, proposed: 'judge', requested: 'build', requestedFrom: 'batch' })
+  assert.equal(batchDefault.tier, 'judge')
+  assert.equal(batchDefault.overrodeProposal, false)
+  assert.equal(reconcileTier({ lane: 'lane-a', forced: 'build', proposed: 'judge', requested: null }).tier, 'judge')
 })
 
 test('REFUSAL_REASONS is frozen, unique, and names every reason argument in the source', () => {
@@ -2290,6 +2300,33 @@ test('a lane tier seats that lane while a sibling takes the batch default', asyn
   const requested = result.logs.filter((line) => line.startsWith('dispatch-batch: lane='))
   assert.ok(requested.some((line) => line.includes('lane=lane-a') && line.includes('requested=judge requested_from=lane')))
   assert.ok(requested.some((line) => line.includes('lane=lane-b') && line.includes('requested=mechanical requested_from=batch')))
+})
+
+test('a lane tier overrides a higher proposal and says so', async () => {
+  const result = await dispatchFixture({
+    label: 'tier-override',
+    names: ['lane-a', 'lane-b'],
+    batchTier: 'mechanical',
+    requests: { 'lane-a': requestFor('lane-a', { tier: 'build' }) },
+    brief: staffingBrief({ shape: 'mechanical', strength: 'workhorse', tier: 'judge' }),
+  })
+  const boots = result.spawned.filter(({ args }) => args.includes('boot'))
+  const seated = Object.fromEntries(boots.map((call) => {
+    const task = call.args[call.args.indexOf('--task') + 1]
+    return [task, call.args[call.args.indexOf('--tier') + 1]]
+  }))
+  assert.equal(seated['lane-a'], 'build')
+  const laneA = result.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-a '))
+  const laneB = result.logs.find((line) => line.startsWith('dispatch-batch: lane=lane-b '))
+  assert.ok(laneA?.includes('settled=build'))
+  assert.ok(laneA?.includes('overrode proposal judge with lane tier build'))
+  assert.ok(laneB?.includes('settled=judge'))
+  assert.equal(laneB?.includes('overrode proposal'), false)
+  const laneARecord = JSON.parse(readFileSync(join(result.out, 'lane-a.dispatch.json'), 'utf8'))
+  const laneBRecord = JSON.parse(readFileSync(join(result.out, 'lane-b.dispatch.json'), 'utf8'))
+  assert.equal(laneARecord.tier.overrode_proposal, true)
+  assert.equal(laneARecord.tier.proposed, 'judge')
+  assert.equal(laneBRecord.tier.overrode_proposal, false)
 })
 
 test('the compiler receives exactly the four schema request keys', async () => {

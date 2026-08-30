@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-08-14",
+  "updated_at": "2026-08-30",
   "tiers": {
     "mechanical": {
       "lead": null,
@@ -129,9 +129,9 @@
       "last_verified": "2026-08-13"
     },
     "openai/gpt-5.6-sol": {
-      "cost_in_per_mtok": 5,
-      "cost_out_per_mtok": 30,
-      "cost_cache_read_per_mtok": 0.5,
+      "cost_in_per_mtok": 4,
+      "cost_out_per_mtok": 20,
+      "cost_cache_read_per_mtok": 0.4,
       "cost_cache_write_per_mtok": 0,
       "cache_rate_source": "openai published prompt-caching rates applied to this entry's own cost_in_per_mtok: cached input 0.10x, and cache writes are not charged, so cost_cache_write_per_mtok is a published 0.00x rate rather than an absent one.",
       "context": 1050000,
@@ -141,7 +141,7 @@
         "vendor-diverse"
       ],
       "source": "models.dev",
-      "last_verified": "2026-08-13"
+      "last_verified": "2026-08-30"
     },
     "openai/gpt-5.6-terra": {
       "cost_in_per_mtok": 2,

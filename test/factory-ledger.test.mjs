@@ -1553,7 +1553,7 @@ test('every roster model carries its ratified cache rates and their provenance',
     'anthropic/claude-sonnet-5': { read: 0.2, write: 4 },
     'anthropic/claude-haiku-4-5': { read: 0.1, write: 2 },
     'anthropic/claude-fable-5': { read: 1, write: 20 },
-    'openai/gpt-5.6-sol': { read: 0.5, write: 0 },
+    'openai/gpt-5.6-sol': { read: 0.4, write: 0 },
     'openai/gpt-5.6-terra': { read: 0.2, write: 0 },
     'openai/gpt-5.6-luna': { read: 0.02, write: 0 },
   }

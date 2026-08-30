@@ -42,6 +42,7 @@
 
 :root,
 :root[data-theme='paper'] {
+  color-scheme: light;
   color: var(--paper-text);
   background: var(--paper-ground);
   --bg: var(--paper-ground);
@@ -66,6 +67,7 @@
 }
 
 :root[data-theme='ink'] {
+  color-scheme: dark;
   color: var(--ink-text);
   background: var(--ink-ground);
   --bg: var(--ink-ground);
@@ -91,6 +93,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='paper']) {
+    color-scheme: dark;
     color: var(--ink-text);
     background: var(--ink-ground);
     --bg: var(--ink-ground);
@@ -130,9 +133,18 @@
   --tech-lead-color: var(--role-tech-lead);
   --lead-color: var(--role-lead);
   --driver-color: var(--role-driver);
+  --scrollbar-track: color-mix(in srgb, var(--panel) 88%, var(--bg));
+  --scrollbar-thumb: color-mix(in srgb, var(--muted) 42%, var(--panel-raised));
+  --scrollbar-thumb-hover: color-mix(in srgb, var(--accent) 62%, var(--muted));
 }
 
 *, *::before, *::after { box-sizing: border-box; }
+* { scrollbar-width: thin; scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track); }
+*::-webkit-scrollbar { width: .625rem; height: .625rem; }
+*::-webkit-scrollbar-track { background: var(--scrollbar-track); }
+*::-webkit-scrollbar-thumb { min-height: 2.5rem; border: 2px solid var(--scrollbar-track); border-radius: 999px; background: var(--scrollbar-thumb); }
+*::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-thumb-hover); }
+*::-webkit-scrollbar-corner { background: var(--scrollbar-track); }
 html { min-width: 320px; background: var(--bg); }
 body { margin: 0; min-height: 100vh; background: var(--bg); color: inherit; overflow-x: hidden; }
 body::before {

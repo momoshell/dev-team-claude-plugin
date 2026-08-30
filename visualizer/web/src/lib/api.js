@@ -23,5 +23,7 @@ export const setIntakeBrake = (engaged, actor) => request('/api/intake/brake', {
 export const postTriage = (adwId, reviewed) => request('/api/triage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adw_id: adwId, reviewed }) })
 export const proposeRosterEdit = (tier, role, cell) => request('/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier, role, cell }) })
 export const getRosterLadder = () => request('/api/roster/ladder')
+export const getModelCatalog = () => request('/api/model-catalog')
+export const setModelCatalogKey = (apiKey) => request('/api/model-catalog/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ api_key: apiKey }) })
 export const stageRosterLadder = (moves) => request('/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })
 export const composeRosterLadder = (moves) => request('/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })

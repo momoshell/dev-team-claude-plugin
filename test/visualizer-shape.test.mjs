@@ -289,6 +289,17 @@ test('theme role and lane aliases follow the ratified role order', () => {
   }
 })
 
+test('theme gives component scrollbars a thin theme-aware treatment', () => {
+  const css = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/theme.css'), 'utf8')
+  assert.match(css, /--scrollbar-track\s*:/)
+  assert.match(css, /--scrollbar-thumb\s*:/)
+  assert.match(css, /scrollbar-width:\s*thin/)
+  assert.match(css, /scrollbar-color:\s*var\(--scrollbar-thumb\) var\(--scrollbar-track\)/)
+  assert.match(css, /\*::\-webkit-scrollbar\s*\{[^}]*width:\s*\.625rem[^}]*height:\s*\.625rem/)
+  assert.match(css, /\*::\-webkit-scrollbar-thumb:hover\s*\{[^}]*var\(--scrollbar-thumb-hover\)/)
+  assert.match(css, /:root\[data-theme='ink'\]\s*\{\s*color-scheme:\s*dark/)
+})
+
 test('matchesFilters covers mode, status, since, until and pending mode', () => {
   const pending = shapeRun(base, [], [], null, missingProbe, Date.parse(end))
   assert.equal(matchesFilters(pending, { mode: '' }), true)

@@ -10,6 +10,7 @@ import { createJournalSource } from './journal-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
+import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
 import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTeardownWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake, shapeSeatTeardowns, shapeCellAttribution } from './shape.mjs'
@@ -85,6 +86,8 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/roster/ladder': [],
   '/api/roster/ladder/stage': [],
   '/api/roster/ladder/compose': [],
+  '/api/model-catalog': [],
+  '/api/model-catalog/key': [],
   '/api/health': [],
   '/api/triage': [],
 })
@@ -274,6 +277,7 @@ export function startServer(options = {}) {
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
+  const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
   const server = createServer(async (req, res) => {
     // #544: the request target and the Host header are both attacker-chosen, and
     // an unparseable one threw ABOVE this handler's try — an unhandled rejection
@@ -494,6 +498,23 @@ export function startServer(options = {}) {
         const failures = feed.cellFailures(window)
         const view = ladderView({ roster: roster.readRoster(), ladder, reference, cells: { ...failures, measured_window: window } })
         return json(res, 200, { schema, ...view })
+      }
+      if (url.pathname === '/api/model-catalog') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        return json(res, 200, { schema, ...await modelCatalog.get() })
+      }
+      if (url.pathname === '/api/model-catalog/key') {
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
+        try {
+          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await modelCatalog.get(), session_only:true }) }
+          modelCatalog.setApiKey(input.api_key)
+        } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid api_key' }) }
+        return json(res, 200, { schema, ...await modelCatalog.get(), session_only:true })
       }
       if (url.pathname === '/api/roster/ladder/stage') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })

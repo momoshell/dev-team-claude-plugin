@@ -1887,8 +1887,20 @@ test('ladder HTTP requests degrade honestly for missing ladder and reference fil
 test('ladder source and API calls carry the required drag surface', () => {
   const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
   const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
+  const server = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
+  const catalog = readFileSync(join(process.cwd(), 'visualizer/server/model-catalog.mjs'), 'utf8')
   for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
   assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
+  for (const needle of ['Roster workspace', 'Add a model manually', 'saved locally', 'Copy local draft', 'Run factory checks', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
+  assert.match(panel, /localStorage\.setItem\(DRAFT_KEY/)
+  assert.match(panel, /do not change the active factory/)
+  for (const needle of ['Artificial Analysis', 'Discover models', 'Intelligence', 'Lowest output price', 'Null means not measured', 'Session only', 'Connect catalog']) assert.match(panel, new RegExp(needle))
+  assert.match(api, /getModelCatalog.*\/api\/model-catalog/)
+  assert.match(api, /setModelCatalogKey.*\/api\/model-catalog\/key/)
+  assert.match(server, /\/api\/model-catalog\/key/)
+  assert.match(catalog, /x-api-key/)
+  assert.doesNotMatch(panel, /x-api-key/)
+  assert.doesNotMatch(panel, /localStorage.*catalogKey|catalogKey.*localStorage/)
 })
 
 test('viz-absent-cause-per-call — a second failure through one handle reports the second cause', { skip: SKIP }, () => {

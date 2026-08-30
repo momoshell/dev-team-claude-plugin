@@ -1,63 +1,105 @@
 <script>
   import { phasePanel } from './trace.js'
+  import EventStory from './EventStory.svelte'
+  import MarkdownView from './MarkdownView.svelte'
   let { run, phase = null, returns = {}, events = [] } = $props()
+  let documentOpen = $state({})
   let panel = $derived(phasePanel(run, { phase, events, returns }))
-  let expandedWhy = $state({})
-  function eventPayload(event) {
-    try { return JSON.parse(event?.payload_json || '{}') } catch { return event?.payload_json || '' }
+  function duration(value) {
+    if (value == null) return 'In progress'
+    if (value < 1000) return `${Math.round(value)} ms`
+    const seconds = value / 1000
+    if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} s`
+    return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`
   }
-  function eventText(value) { return typeof value === 'string' ? value : JSON.stringify(value, null, 2) }
-  function duration(value) { return value == null ? 'running' : `${Math.round(value)}ms` }
-  function phaseRole(value) {
+  function phaseOwner(value) {
     const event = (Array.isArray(events) ? events : []).find((entry) => String(entry?.phase_id) === String(value?.id))
     let eventRole = null
     try { eventRole = JSON.parse(event?.payload_json || '{}')?.role || null } catch {}
     const seat = (Array.isArray(run?.agents) ? run.agents : []).find((agent) => String(agent?.lane) === String(value?.lane))
-    return eventRole || seat?.role || (value?.lane == null ? 'unlinked' : `lane ${value.lane}`)
+    return eventRole || seat?.role || null
+  }
+  function phaseStory(value) {
+    const name = String(value?.name || 'phase').toLowerCase()
+    const owner = phaseOwner(value)
+    const checkpoints = {
+      done: ['Task completion recorded', 'The factory wrote the terminal completion marker. No agent lane owned this checkpoint.'],
+      finish: ['Finalization recorded', 'The factory completed its final bookkeeping after the agent work ended.'],
+      escalation: ['Human handoff recorded', 'The factory preserved the task context and recorded that operator attention is required.'],
+      request: ['Request captured', 'The factory recorded the incoming task before assigning an agent seat.'],
+    }
+    if (owner) return { eyebrow:`${label(owner)} phase`, title:label(value.name), detail:`Owned by ${label(owner)} on lane ${value.lane ?? '—'}.` }
+    if (checkpoints[name]) return { eyebrow:'Factory checkpoint', title:checkpoints[name][0], detail:checkpoints[name][1] }
+    if (value?.lane == null) return { eyebrow:'Factory coordination', title:label(value.name), detail:'This step was recorded by the workflow driver rather than an agent seat.' }
+    return { eyebrow:'Execution phase', title:label(value.name), detail:`Recorded on lane ${value.lane}; an owning seat was not measured.` }
+  }
+  function statusLabel(value) { return value === 'ok' ? 'Completed' : value === 'fail' || value === 'failed' ? 'Failed' : value === 'running' ? 'In progress' : label(value) }
+  function statusTone(value) { return value === 'ok' ? 'ok' : value === 'fail' || value === 'failed' ? 'fail' : value === 'running' ? 'running' : 'neutral' }
+  function gateRecorded(value) { return value?.generation != null || value?.verdict != null || value?.checks?.length > 0 || value?.checks_total != null }
+  function gateLocations(value) {
+    const ids = new Set((Array.isArray(run?.gate_checks) ? run.gate_checks : []).map((row) => row?.phase_id).filter((id) => id != null && String(id) !== String(value?.id)))
+    return (Array.isArray(run?.phases) ? run.phases : []).filter((entry) => ids.has(entry?.id)).map((entry) => label(entry.name))
   }
   function count(value) { return value == null ? '—' : value }
+  function label(value) { return String(value || 'unknown').replaceAll('_', ' ').replaceAll('-', ' ') }
+  function basename(path) { return String(path || '').split('/').filter(Boolean).at(-1) || String(path || '') }
+  function dirname(path) { const parts = String(path || '').split('/').filter(Boolean); parts.pop(); return parts.slice(-3).join('/') || 'path unavailable' }
+  function extension(path) { const name = basename(path); const dot = name.lastIndexOf('.'); return dot > 0 ? name.slice(dot + 1).toUpperCase() : 'FILE' }
+  function documentKey(document) { return `${run?.adw_id || 'run'}:${phase || 'phase'}:${document.id}` }
+  function documentExpanded(document, index) { return documentOpen[documentKey(document)] ?? index === 0 }
+  function rememberDocument(event, document) { documentOpen[documentKey(document)] = event.currentTarget.open }
+  let story = $derived(panel.found ? phaseStory(panel.phase) : { eyebrow:'Phase', title:'Phase unavailable', detail:'' })
+  let otherGateLocations = $derived(panel.found ? gateLocations(panel.phase) : [])
 </script>
-{#snippet runs(items)}
-  {#each items || [] as part}
-    {#if part.kind === 'strong'}<strong>{part.text}</strong>{:else if part.kind === 'emphasis'}<em>{part.text}</em>{:else if part.kind === 'code'}<code>{part.text}</code>{:else if part.kind === 'link' && /^(?:https?:|mailto:)/i.test(part.href || '')}<a href={part.href} rel="noreferrer">{part.text}</a>{:else}<span>{part.text}</span>{/if}
-  {/each}
-{/snippet}
-{#snippet markdown(blocks)}
-  {#each blocks || [] as block}
-    {#if block.kind === 'heading'}
-      {#if block.level === 1}<h3>{@render runs(block.runs)}</h3>{:else if block.level === 2}<h4>{@render runs(block.runs)}</h4>{:else}<h5>{@render runs(block.runs)}</h5>{/if}
-    {:else if block.kind === 'paragraph'}<p>{@render runs(block.runs)}</p>
-    {:else if block.kind === 'list'}<ul>{#each block.items || [] as item}<li>{@render runs(item.runs)}</li>{/each}</ul>
-    {:else if block.kind === 'code'}<pre>{block.text}</pre>
-    {:else if block.kind === 'rule'}<hr />
-    {/if}
-  {/each}
-{/snippet}
 {#snippet countMark(value)}{#if value == null}<span class="mark" title="not measured">—</span>{:else}{value}{/if}{/snippet}
 {#if !phase}<section class="panel"><p class="muted">Select a phase to inspect its gate, events, accept decision, and artifacts.</p></section>
 {:else if !panel.found}<section class="panel"><p class="muted">{panel.pending}</p></section>
 {:else}
   <section class="panel">
-    <header class="phase-header"><div><h2>{panel.phase.name}</h2><p>{phaseRole(panel.phase)} · lane {panel.phase.lane ?? '—'} · {panel.phase.status || '—'}</p></div><span>{duration(panel.phase.duration_ms)}</span></header>
-    <section class="subpanel gate"><h3>Gate proof</h3>
-      {#if panel.gate.verdict}<span class={`chip ${panel.gate.tone}`} title={panel.gate.note || undefined}>{panel.gate.verdict}</span>{:else}<span class="muted">gate verdict unavailable</span>{/if}
-      <div class="counts">checks {@render countMark(panel.gate.checks_total)} · failed {@render countMark(panel.gate.checks_failed)} · errored {@render countMark(panel.gate.checks_errored)}</div>
-      {#if panel.gate.note}<p>{panel.gate.note}</p>{/if}
-      {#if panel.gate.checks.length}<ul class="checks">{#each panel.gate.checks as check}<li><strong>{check.label}</strong>{#if check.ok != null} · {check.ok ? 'ok' : 'not ok'}{/if}{#if check.note}<span class="note"> — {check.note}</span>{/if}</li>{/each}</ul>{/if}
-      {#if panel.gate.checks_pending}<p class="checks-pending muted" title={panel.gate.checks_pending}>checks pending — {panel.gate.checks_pending}</p>{/if}
+    <header class="phase-header"><div class="phase-copy"><p class="micro">{story.eyebrow}</p><h2>{story.title}</h2><p>{story.detail}</p></div><div class="phase-result"><span class={`phase-status ${statusTone(panel.phase.status)}`}>{statusLabel(panel.phase.status)}</span><strong>{duration(panel.phase.duration_ms)}</strong></div></header>
+    <section class="subpanel gate">
+      {#if gateRecorded(panel.gate)}
+        <div class="subpanel-heading"><div><p class="micro">Validation evidence</p><h3>Gate proof</h3></div>{#if panel.gate.generation != null}<span class="generation-chip">Generation {panel.gate.generation}</span>{/if}</div>
+        <div class={`proof-verdict ${panel.gate.tone || 'unproven'}`}>
+          <span class="verdict-icon" aria-hidden="true">{panel.gate.verdict === 'proven' ? '✓' : panel.gate.verdict === 'failed' ? '!' : '?'}</span>
+          <div><span class="verdict-label">{panel.gate.verdict ? label(panel.gate.verdict) : 'Verdict not recorded'}</span><strong>{panel.gate.proof.headline}</strong><p>{panel.gate.proof.explanation}</p></div>
+        </div>
+        {#if panel.gate.proof.stages.length || panel.gate.proof.mutation}
+          <div class="proof-path" aria-label="How the gate was proved">
+            {#each panel.gate.proof.stages as stage, index (stage.label)}
+              <article class={`proof-stage ${stage.tone}`}><div class="stage-top"><span>{index + 1}</span><i aria-hidden="true"></i></div><strong>{stage.label}</strong><p>{stage.detail}</p><b>{stage.result}</b>{#if stage.summary}<small>{stage.summary}</small>{/if}</article>
+            {/each}
+            {#if panel.gate.proof.mutation}<article class="proof-stage mutation"><div class="stage-top"><span>↳</span><i aria-hidden="true"></i></div><strong>Mutation probes</strong><p>Recorded perturbations checked whether the gate reacted.</p><b>{panel.gate.proof.mutation.summary}</b>{#if panel.gate.proof.mutation.green}<small>{panel.gate.proof.mutation.green} stayed green</small>{:else if panel.gate.proof.mutation.unknown}<small>{panel.gate.proof.mutation.unknown} results were not recorded</small>{:else}<small>No recorded probe stayed green</small>{/if}</article>{/if}
+          </div>
+        {/if}
+        <div class="proof-meaning"><span aria-hidden="true">i</span><p><strong>What this establishes</strong>{panel.gate.verdict === 'proven' ? 'The automated gate reacts to the built work. This is a validation floor, not a human review verdict.' : 'The factory could not establish that the automated gate reacts to the built work. Review and task outcome remain separate.'}</p></div>
+        {#if panel.gate.proof.attempts.length}<details class="proof-evidence"><summary><span><strong>Recorded evidence</strong><small>{panel.gate.proof.attempts.length} gate run{panel.gate.proof.attempts.length === 1 ? '' : 's'} · formatted from the ledger</small></span><i aria-hidden="true"></i></summary><div class="attempt-list">{#each panel.gate.proof.attempts as attempt, index (`${attempt.attempt}-${index}`)}<div><span class={`attempt-dot ${attempt.tone}`}></span><strong>{attempt.label}</strong><b>{attempt.result}</b>{#if attempt.summary}<small>{attempt.summary}</small>{/if}</div>{/each}</div></details>{/if}
+        {#if panel.gate.checks_pending}<p class="checks-pending muted" title={panel.gate.checks_pending}>Some gate details were not measured — {panel.gate.checks_pending}</p>{/if}
+      {:else}
+        <div class="evidence-elsewhere"><span aria-hidden="true">↗</span><div><strong>No gate ran on this checkpoint</strong><p>{otherGateLocations.length ? `Validation evidence is attached to ${otherGateLocations.join(', ')}. Select that phase in the waterfall to inspect it.` : 'This phase recorded workflow state only; it did not run validation checks.'}</p></div></div>
+      {/if}
     </section>
-    <section class="subpanel accept"><h3>Typed accept decision</h3>
-      {#if panel.accept?.rows?.length}{#each panel.accept.rows as row (row.seq)}<article class="accept-row"><div><span class={`chip ${row.tone}`} title={row.title}>{row.label}</span> · {row.where_at ?? '—'}</div><div class="counts">residuals {@render countMark(row.residual_count)} · refuted {@render countMark(row.refuted_count)} · cosmetic {@render countMark(row.cosmetic_count)} · unverified {@render countMark(row.unverified_count)}</div>{#if row.evidence?.length}<ul class="evidence">{#each row.evidence as item (`${item.kind}-${item.id}`)}<li><strong>{item.id ?? 'finding —'}</strong> · {item.kind}{#if item.blocks?.length}<div>{@render markdown(item.blocks)}</div>{/if}</li>{/each}</ul>{:else if row.evidence_pending}<p class="muted">{row.evidence_pending}</p>{/if}</article>{/each}{:else}<p class="muted">accept decisions unavailable — {panel.accept?.pending || 'not measured'}</p>{/if}
+    {#if panel.accept?.rows?.length}<section class="subpanel accept"><h3>Typed accept decision</h3>
+      {#if panel.accept?.rows?.length}{#each panel.accept.rows as row (row.seq)}<article class="accept-row"><div><span class={`chip ${row.tone}`} title={row.title}>{row.label}</span> · {row.where_at ?? '—'}</div><div class="counts">residuals {@render countMark(row.residual_count)} · refuted {@render countMark(row.refuted_count)} · cosmetic {@render countMark(row.cosmetic_count)} · unverified {@render countMark(row.unverified_count)}</div>{#if row.evidence?.length}<ul class="evidence">{#each row.evidence as item (`${item.kind}-${item.id}`)}<li><strong>{item.id ?? 'finding —'}</strong> · {item.kind}{#if item.blocks?.length}<MarkdownView blocks={item.blocks} compact />{/if}</li>{/each}</ul>{:else if row.evidence_pending}<p class="muted">{row.evidence_pending}</p>{/if}</article>{/each}{:else}<p class="muted">accept decisions unavailable — {panel.accept?.pending || 'not measured'}</p>{/if}
+    </section>{/if}
+    <section class="subpanel events"><h3>Phase activity <span>{panel.events.length} event{panel.events.length === 1 ? '' : 's'}</span></h3>
+      {#if panel.events.length}<div class="event-list">{#each panel.events as event (event.id)}<EventStory {event} phases={run.phases || []} />{/each}</div>{:else}<p class="muted">No events recorded for this phase.</p>{/if}
     </section>
-    <section class="subpanel events"><h3>Phase events</h3>
-      {#if panel.events.length}{#each panel.events as event (event.id)}{@const value = eventPayload(event)}<article class="event"><code>{event.type} · seq {event.seq ?? '—'} · {event.started_at || event.ended_at || 'time unavailable'}</code><pre class:why={event.type === 'decision'} class:expanded={expandedWhy[event.id]}>{eventText(value)}</pre>{#if event.type === 'decision' && typeof value?.why === 'string' && value.why.length > 240}<button class="expand" onclick={() => expandedWhy[event.id] = !expandedWhy[event.id]}>{expandedWhy[event.id] ? 'Collapse why' : 'Expand why'}</button>{/if}</article>{/each}{:else}<p class="muted">No events recorded for this phase.</p>{/if}
-    </section>
-    <section class="subpanel artifacts"><h3>Artifacts and envelope text</h3>
-      {#if panel.artifacts?.blocks?.length}{@render markdown(panel.artifacts.blocks)}{:else}<p class="muted">No markdown envelope text recorded.</p>{/if}
-      {#if panel.artifacts?.paths?.length}<ul class="paths">{#each panel.artifacts.paths as artifact}<li><code>{artifact.path}</code><span class="muted" title={artifact.reason}> — {artifact.reason}</span></li>{/each}</ul>{/if}
+    <section class="subpanel artifacts">
+      <div class="artifact-heading"><div><p class="micro">Returned evidence</p><h3>Artifacts and envelope text</h3><p>Read each seat’s narrative separately, then inspect the unique files it referenced.</p></div><span>{panel.artifacts?.documents?.length || 0} narratives · {panel.artifacts?.paths?.length || 0} files</span></div>
+      {#if panel.artifacts?.documents?.length}
+        <div class="envelope-documents">{#each panel.artifacts.documents as document, index (document.id)}<details open={documentExpanded(document, index)} ontoggle={(event) => rememberDocument(event, document)} style={`--document-role:var(--role-${document.role})`}><summary><span class="document-icon">{document.role.slice(0,1).toUpperCase()}</span><span><strong>{label(document.role)} return</strong><small>d{document.dispatch_seq ?? '—'} · {label(document.status)}</small></span><b>{index === 0 ? 'Latest' : 'Read'}</b><i aria-hidden="true"></i></summary><div class="document-body"><MarkdownView blocks={document.blocks} /></div></details>{/each}</div>
+      {:else}<p class="muted">No envelope narrative was recorded.</p>{/if}
+      {#if panel.artifacts?.paths?.length}
+        <div class="artifact-files"><div class="file-heading"><h4>Referenced files</h4><p>Paths are evidence references; file contents are not served in this read-only view.</p></div><ul>{#each panel.artifacts.paths as artifact}<li title={artifact.path}><span class="file-type">{extension(artifact.path)}</span><span><strong>{basename(artifact.path)}</strong><code>{dirname(artifact.path)}</code><small>Referenced by {artifact.sources.join(', ')}</small></span></li>{/each}</ul></div>
+      {/if}
     </section>
   </section>
 {/if}
 <style>
-.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem; align-items:start; }.phase-header h2 { margin:.1rem 0; }.phase-header p { margin:.2rem 0; color:var(--muted); }.subpanel { border-top:1px solid var(--line); margin-top:1rem; padding-top:.7rem; }.subpanel h3 { margin:.1rem 0 .5rem; }.chip { border-radius:1rem; padding:.15rem .45rem; font-size:.75rem; white-space:nowrap; }.chip.proven { color:#166534; background:#dcfce7; }.chip.failed { color:#991b1b; background:#fee2e2; }.chip.unproven { color:#92400e; background:#fef3c7; }.counts, .muted { color:var(--muted); }.checks, .evidence, .paths { padding-left:1.2rem; }.note { color:var(--muted); }.mark { border-bottom:1px dashed currentColor; color:var(--muted); }.event { border-top:1px solid var(--line); padding:.5rem 0; }.event pre { margin:.3rem 0 0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:6rem; overflow:auto; }.event pre.why { max-height:5rem; }.event pre.expanded { max-height:none; }.expand { cursor:pointer; }.artifacts p { margin:.4rem 0; }.artifacts pre { white-space:pre-wrap; overflow-wrap:anywhere; }.artifacts code { overflow-wrap:anywhere; }.evidence :global(p) { margin:.25rem 0; }.paths li { margin:.3rem 0; }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.phase-header { display:flex; justify-content:space-between; gap:1rem; align-items:start; }.phase-copy .micro,.subpanel-heading .micro { margin:0 0 .22rem; color:var(--accent); font-size:.55rem; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }.phase-header h2 { margin:.1rem 0; font-size:1.15rem; }.phase-copy > p:last-child { max-width:46rem; margin:.28rem 0 0; color:var(--muted); font-size:.67rem; line-height:1.45; }.phase-result { display:grid; justify-items:end; gap:.45rem; }.phase-result > strong { font:650 .82rem var(--mono); }.phase-status { border:1px solid currentColor; border-radius:2rem; padding:.23rem .45rem; font-size:.58rem; white-space:nowrap; }.phase-status.ok { color:var(--status-ok); }.phase-status.fail { color:var(--status-fail); }.phase-status.running { color:var(--status-running); }.phase-status.neutral { color:var(--muted); }.subpanel { border-top:1px solid var(--line); margin-top:1rem; padding-top:.7rem; }.subpanel h3 { margin:.1rem 0 .5rem; }.subpanel h3 span { color:var(--muted); font-size:.62rem; font-weight:500; }.subpanel-heading { display:flex; align-items:center; justify-content:space-between; gap:1rem; }.chip { border-radius:1rem; padding:.15rem .45rem; font-size:.75rem; white-space:nowrap; }.chip.proven { color:#166534; background:#dcfce7; }.chip.failed { color:#991b1b; background:#fee2e2; }.chip.unproven { color:#92400e; background:#fef3c7; }.counts, .muted { color:var(--muted); }.generation-chip { border:1px solid var(--line); border-radius:2rem; color:var(--muted); padding:.2rem .5rem; font:.55rem var(--mono); }.proof-verdict { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:.7rem; border:1px solid color-mix(in srgb,var(--proof-tone) 30%,var(--line)); border-radius:var(--radius); background:linear-gradient(110deg,color-mix(in srgb,var(--proof-tone) 10%,var(--panel-raised)),var(--panel-raised) 58%); padding:.75rem .8rem; }.proof-verdict.proven { --proof-tone:var(--status-ok); }.proof-verdict.failed { --proof-tone:var(--status-fail); }.proof-verdict.unproven { --proof-tone:var(--status-running); }.verdict-icon { display:grid; place-items:center; width:2.15rem; height:2.15rem; border-radius:50%; background:color-mix(in srgb,var(--proof-tone) 16%,var(--bg)); color:var(--proof-tone); font:750 .82rem var(--mono); }.proof-verdict > div { display:grid; gap:.12rem; }.verdict-label { color:var(--proof-tone); font-size:.52rem; font-weight:750; letter-spacing:.1em; text-transform:uppercase; }.proof-verdict strong { font-size:.76rem; }.proof-verdict p { margin:0; color:var(--muted); font-size:.61rem; line-height:1.4; }.proof-path { display:grid; grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr)); gap:.5rem; margin-top:.55rem; }.proof-stage { min-width:0; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.55rem .6rem; }.stage-top { display:flex; align-items:center; gap:.35rem; margin-bottom:.42rem; }.stage-top span { display:grid; place-items:center; width:1.15rem; height:1.15rem; border-radius:50%; background:var(--panel-raised); color:var(--muted); font:650 .48rem var(--mono); }.stage-top i { flex:1; height:1px; background:var(--line); }.proof-stage.expected .stage-top span { background:color-mix(in srgb,var(--status-ok) 16%,var(--panel)); color:var(--status-ok); }.proof-stage.unexpected .stage-top span { background:color-mix(in srgb,var(--status-fail) 16%,var(--panel)); color:var(--status-fail); }.proof-stage.mutation .stage-top span { background:var(--accent-soft); color:var(--accent); }.proof-stage > strong { display:block; font-size:.64rem; }.proof-stage > p { min-height:2.4em; margin:.17rem 0 .45rem; color:var(--muted); font-size:.54rem; line-height:1.35; }.proof-stage > b { display:block; overflow:hidden; color:var(--text); font-size:.57rem; text-overflow:ellipsis; white-space:nowrap; }.proof-stage.expected > b { color:var(--status-ok); }.proof-stage.unexpected > b { color:var(--status-fail); }.proof-stage > small { display:block; margin-top:.12rem; color:var(--muted); font:.48rem var(--mono); }.proof-meaning { display:flex; align-items:start; gap:.5rem; margin-top:.55rem; border-left:2px solid var(--accent); background:color-mix(in srgb,var(--accent) 5%,transparent); padding:.5rem .6rem; }.proof-meaning > span { display:grid; place-items:center; width:1rem; height:1rem; border:1px solid var(--accent); border-radius:50%; color:var(--accent); font:650 .48rem var(--mono); }.proof-meaning p { margin:0; color:var(--muted); font-size:.56rem; line-height:1.45; }.proof-meaning strong { display:block; margin-bottom:.08rem; color:var(--text); font-size:.56rem; }.proof-evidence { margin-top:.55rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); }.proof-evidence summary { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:.52rem .65rem; list-style:none; cursor:pointer; }.proof-evidence summary::-webkit-details-marker { display:none; }.proof-evidence summary > span { display:grid; gap:.08rem; }.proof-evidence summary strong { font-size:.59rem; }.proof-evidence summary small { color:var(--muted); font-size:.49rem; }.proof-evidence summary > i { width:.4rem; height:.4rem; border-right:1px solid var(--muted); border-bottom:1px solid var(--muted); transform:rotate(45deg); }.proof-evidence[open] summary > i { transform:rotate(225deg); }.attempt-list { display:grid; grid-template-columns:repeat(auto-fit,minmax(14rem,1fr)); gap:1px; border-top:1px solid var(--line); background:var(--line); }.attempt-list > div { display:grid; grid-template-columns:auto minmax(0,1fr) auto; align-items:center; gap:.35rem; min-width:0; background:var(--panel); padding:.4rem .55rem; }.attempt-dot { width:.38rem; height:.38rem; border-radius:50%; background:var(--muted); }.attempt-dot.green { background:var(--status-ok); }.attempt-dot.red { background:var(--status-fail); }.attempt-list strong { overflow:hidden; font-size:.54rem; text-overflow:ellipsis; white-space:nowrap; }.attempt-list b { font-size:.5rem; font-weight:650; }.attempt-list small { grid-column:2/4; color:var(--muted); font:.47rem var(--mono); }.evidence-elsewhere { display:flex; align-items:start; gap:.65rem; border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--panel-raised) 55%,transparent); padding:.7rem .8rem; }.evidence-elsewhere > span { display:grid; place-items:center; width:1.7rem; height:1.7rem; border-radius:.45rem; background:var(--accent-soft); color:var(--accent); font-size:.72rem; }.evidence-elsewhere strong { font-size:.68rem; }.evidence-elsewhere p { margin:.2rem 0 0; color:var(--muted); font-size:.61rem; line-height:1.45; }.checks, .evidence { padding-left:1.2rem; }.note { color:var(--muted); }.mark { border-bottom:1px dashed currentColor; color:var(--muted); }.event-list { max-height:34rem; overflow:auto; padding:.4rem .25rem 0 0; scrollbar-gutter:stable; }.evidence :global(.markdown-document) { margin-top:.35rem; }
+.artifact-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin-bottom:.75rem; }.artifact-heading .micro { margin:0 0 .2rem; color:var(--accent); font-size:.55rem; font-weight:700; letter-spacing:.12em; text-transform:uppercase; }.artifact-heading h3 { margin:0; }.artifact-heading p { margin:.28rem 0 0; color:var(--muted); font-size:.63rem; }.artifact-heading > span { flex:0 0 auto; color:var(--muted); font:.57rem var(--mono); }
+.envelope-documents { display:grid; gap:.5rem; }.envelope-documents details { overflow:hidden; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); }.envelope-documents summary { display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; align-items:center; gap:.6rem; min-height:3rem; padding:.55rem .65rem; list-style:none; cursor:pointer; }.envelope-documents summary::-webkit-details-marker { display:none; }.envelope-documents summary:hover { background:color-mix(in srgb,var(--document-role) 6%,transparent); }.document-icon { display:grid; place-items:center; width:1.8rem; height:1.8rem; border-radius:.48rem; background:color-mix(in srgb,var(--document-role) 13%,var(--panel)); color:var(--document-role); font:700 .66rem var(--mono); }.envelope-documents summary > span:nth-child(2) { display:grid; gap:.12rem; }.envelope-documents summary strong { font-size:.68rem; text-transform:capitalize; }.envelope-documents summary small { color:var(--muted); font-size:.54rem; }.envelope-documents summary b { color:var(--document-role); font-size:.55rem; }.envelope-documents summary i { width:.45rem; height:.45rem; border-right:1px solid var(--muted); border-bottom:1px solid var(--muted); transform:rotate(45deg) translateY(-2px); }.envelope-documents details[open] summary i { transform:rotate(225deg) translate(-1px,-1px); }.document-body { border-top:1px solid var(--line); background:linear-gradient(110deg,color-mix(in srgb,var(--document-role) 4%,transparent),transparent 40%); padding:.85rem .95rem; }
+.artifact-files { margin-top:1rem; }.file-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin-bottom:.5rem; }.file-heading h4 { margin:0; font-size:.72rem; }.file-heading p { max-width:34rem; margin:0; color:var(--muted); font-size:.56rem; text-align:right; }.artifact-files ul { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:.4rem; margin:0; padding:0; list-style:none; }.artifact-files li { min-width:0; display:grid; grid-template-columns:auto minmax(0,1fr); align-items:start; gap:.55rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.55rem .6rem; }.file-type { min-width:2.25rem; border-radius:.35rem; background:var(--panel-raised); color:var(--accent); padding:.25rem .3rem; text-align:center; font:650 .5rem var(--mono); }.artifact-files li > span:last-child { min-width:0; display:grid; gap:.12rem; }.artifact-files strong { overflow:hidden; font-size:.64rem; text-overflow:ellipsis; white-space:nowrap; }.artifact-files code { overflow:hidden; color:var(--muted); font-size:.52rem; text-overflow:ellipsis; white-space:nowrap; }.artifact-files small { color:var(--muted); font-size:.5rem; }
+@media (max-width:720px) { .artifact-heading,.file-heading { align-items:start; flex-direction:column; }.file-heading p { text-align:left; }.artifact-files ul { grid-template-columns:1fr; } } @media (max-width:520px) { .phase-header { align-items:start; flex-direction:column; }.phase-result { width:100%; grid-template-columns:auto 1fr; align-items:center; justify-items:start; }.phase-result strong { justify-self:end; }.proof-path { grid-template-columns:1fr; } }
 </style>

@@ -156,7 +156,7 @@ const TIER_UNMEASURED = "not measured — this run's session row records no tier
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
   if (field === 'tier') return TIER_UNMEASURED
-  if (field === 'last_heartbeat_at') return 'not measured here — agent_sessions.last_heartbeat_at is not selected by this feed (visualizer/server/ledger-feed.mjs:76)'
+  if (field === 'last_heartbeat_at') return 'no session or agent heartbeat was recorded for this run'
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
   const missing = probe?.missing || []
@@ -233,7 +233,10 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     read_tokens: null,
     written_tokens: null,
   }
-  let last_heartbeat_at = null
+  // Session heartbeats cover every transport, including pane runs that never
+  // create agent_sessions rows. Seat heartbeats can be newer, so retain the
+  // latest timestamp across both sources.
+  let last_heartbeat_at = session.last_heartbeat_at ?? null
   for (const row of Array.isArray(agentSessions) ? agentSessions : []) {
     last_heartbeat_at = laterTimestamp(last_heartbeat_at, row?.last_heartbeat_at ?? null)
   }

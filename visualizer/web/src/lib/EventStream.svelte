@@ -1,33 +1,71 @@
 <script>
-  import { getEvents } from './api.js'
-  import { drainEvents } from './drain.js'
-  let { run, phaseFilter = null } = $props()
-  let events = $state([]), cursor = $state(0), loading = $state(false), truncated = $state(false), initialized = $state(false), expandedWhy = $state({})
-  let type = $state(''), role = $state(''), selectedPhase = $state(phaseFilter ?? '')
-  let phaseAvailable = $derived(events.some((event) => event.phase_id != null))
-  let roles = $derived([...new Set(events.map((event) => { try { return JSON.parse(event.payload_json || '{}').role } catch { return null } }).filter(Boolean))].sort())
+  import { untrack } from 'svelte'
+  import { eventPayload, eventStreamSummary } from './event-story.js'
+  import { phaseFilterId } from './trace.js'
+  import EventStory from './EventStory.svelte'
+  import Dropdown from './Dropdown.svelte'
+
+  let { run, events = [], phaseFilter = null, onrefresh = async () => {} } = $props()
+  let type = $state(''), role = $state(''), selectedPhase = $state(''), refreshing = $state(false), error = $state('')
   let phases = $derived(run.phases || [])
-  const types = ['log', 'agent_start', 'agent_end', 'decision']
-  function filters() { return { type, role, phase_id: selectedPhase } }
-  async function load(reset = false) {
-    if (loading) return
-    if (reset) { events = []; cursor = 0; truncated = false }
-    loading = true
-    try {
-      const result = await drainEvents((after, limit) => getEvents(run.adw_id, after, limit, filters()), { after: cursor })
-      events = [...events, ...result.events]; cursor = result.cursor; truncated = truncated || result.truncated
-    } finally { loading = false }
+  let phaseAvailable = $derived(events.some((event) => event.phase_id != null))
+  let roles = $derived([...new Set([...(run.agents || []).map((agent) => agent.role), ...events.map((event) => eventPayload(event)?.role)].filter(Boolean))].sort())
+  let roleOptions = $derived([{ value:'', label:'All roles' }, ...roles.map((value) => ({ value, label:value }))])
+  let phaseOptions = $derived([{ value:'', label:'All phases' }, ...phases.map((phase) => ({ value:phase.id, label:`${phase.name} · ${phase.seq}` }))])
+  let filtered = $derived(events.filter((event) => (!type || event.type === type) && (!role || eventPayload(event)?.role === role) && (!selectedPhase || String(event.phase_id) === String(selectedPhase))))
+  let summary = $derived(eventStreamSummary(filtered))
+  let scope = $derived(phases.find((phase) => String(phase.id) === String(selectedPhase))?.name?.replaceAll('_',' ') || 'All phases')
+  const types = [
+    { value:'', label:'All event types' },
+    { value:'agent_start', label:'Turns started' },
+    { value:'agent_end', label:'Turns ended' },
+    { value:'decision', label:'Decisions' },
+    { value:'log', label:'Workflow logs' },
+  ]
+
+  async function refresh() {
+    if (refreshing) return
+    refreshing = true
+    error = ''
+    try { await onrefresh() }
+    catch (err) { error = err?.message || 'Events could not be refreshed.' }
+    finally { refreshing = false }
   }
-  function changeFilter() { void load(true) }
-  function payload(event) { try { return JSON.parse(event.payload_json || '{}') } catch { return event.payload_json } }
-  function text(value) { return typeof value === 'string' ? value : JSON.stringify(value) }
-  $effect(() => { if (phaseFilter !== undefined && phaseFilter !== null) { selectedPhase = phaseFilter; void load(true) } })
-  $effect(() => { const id = run.adw_id; if (id && !initialized) { initialized = true; void load() } })
+  function clearFilters() { type = ''; role = ''; selectedPhase = '' }
+
+  $effect(() => {
+    const requested = phaseFilter
+    const id = run.adw_id
+    if (id && requested !== undefined && requested !== null) untrack(() => { selectedPhase = phaseFilterId(run, requested) })
+  })
 </script>
-<section class="panel"><h2>Event stream</h2>
-  <div class="filters"><label>type <select bind:value={type} onchange={changeFilter}><option value="">all</option>{#each types as option (option)}<option value={option}>{option}</option>{/each}</select></label><label>role <select bind:value={role} onchange={changeFilter}><option value="">all</option>{#each roles as option (option)}<option value={option}>{option}</option>{/each}</select></label><label>phase <select bind:value={selectedPhase} disabled={!phaseAvailable && !selectedPhase} onchange={changeFilter}><option value="">all</option>{#each phases as phase (phase.id ?? phase.seq)}<option value={phase.id}>{phase.name} · {phase.seq}</option>{/each}</select></label></div>
-  {#if !phaseAvailable}<p class="muted">phase filter unavailable — this run's events predate phase linkage (#123)</p>{/if}
-  <div class="wide rows">{#each events as event (event.id)}{@const value = payload(event)}<div class="event"><code>#{event.id} · seq {event.seq ?? '—'} · {event.type} · phase {event.phase_id ?? '—'}</code><pre class:why={event.type === 'decision'} class:expanded={expandedWhy[event.id]}>{text(value)}</pre>{#if event.type === 'decision' && typeof value?.why === 'string' && value.why.length > 240}<button class="expand" onclick={() => expandedWhy[event.id] = !expandedWhy[event.id]}>{expandedWhy[event.id] ? 'Collapse why' : 'Expand why'}</button>{/if}</div>{:else}<p class="muted">No events.</p>{/each}</div>
-  <button onclick={() => load()} disabled={loading}>{loading ? 'Loading…' : 'Load more'}</button>{#if truncated}<p class="muted">History was cut at the page guard.</p>{/if}
+
+<section class="panel">
+  <header><div><p class="micro">Ordered ledger history</p><h2>What happened</h2><p>Sequence numbers preserve the authoritative order when an event has no timestamp.</p></div><button class="refresh" onclick={refresh} disabled={refreshing}>{refreshing ? 'Refreshing…' : 'Refresh events'}</button></header>
+
+  <div class="filters"><label>Event type<Dropdown bind:value={type} options={types} ariaLabel="Event type" width="10.5rem" variant="compact" /></label><label>Role<Dropdown bind:value={role} options={roleOptions} ariaLabel="Event role" width="9rem" variant="compact" /></label><label>Phase<Dropdown bind:value={selectedPhase} options={phaseOptions} ariaLabel="Event phase" width="11rem" variant="compact" disabled={!phaseAvailable} /></label>{#if type || role || selectedPhase}<button class="clear" type="button" onclick={clearFilters}>Clear filters</button>{/if}</div>
+
+  <div class="scope"><div><strong>{summary.total}</strong><span>{summary.total === 1 ? 'event' : 'events'} · {scope}</span></div><div class="counts"><span>{summary.starts} started</span><span>{summary.ends} ended</span><span>{summary.decisions} decision{summary.decisions === 1 ? '' : 's'}</span><span>{summary.logs} log{summary.logs === 1 ? '' : 's'}</span></div></div>
+  {#if !phaseAvailable && events.length}<p class="notice">Phase filtering is unavailable because these events predate phase linkage.</p>{/if}
+  {#if error}<p class="error">{error}</p>{/if}
+
+  <div class="rows" aria-live="polite" aria-busy={refreshing}>{#each filtered as event (event.id)}<EventStory {event} {phases} />{:else}<div class="empty"><strong>No events match this view.</strong><span>Try a broader event type, role, or phase.</span></div>{/each}</div>
 </section>
-<style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }.filters { display:flex; flex-wrap:wrap; gap:1rem; margin-bottom:.8rem; }.rows { max-height:30rem; }.event { border-top:1px solid var(--line); padding:.5rem 0; }.event pre { margin:.3rem 0 0; white-space:pre-wrap; overflow-wrap:anywhere; max-height:6rem; overflow:auto; }.event pre.why { max-height:5rem; }.event pre.why.expanded { max-height:none; }.expand { cursor:pointer; }.muted { color:var(--muted); }</style>
+
+<style>
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; }
+.panel > header { display:flex; align-items:start; justify-content:space-between; gap:1rem; }
+.panel .micro { margin:0 0 .2rem; color:var(--accent); }.panel h2 { margin:0; }
+.panel header p:last-child { margin:.28rem 0 0; max-width:35rem; color:var(--muted); font-size:.67rem; }
+.filters { display:flex; align-items:end; flex-wrap:wrap; gap:.55rem; margin:.95rem 0 .75rem; }
+.filters label { display:grid; gap:.25rem; color:var(--muted); font-size:.57rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; }
+.refresh,.clear { min-height:2rem; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--panel-raised); color:var(--muted); padding:.35rem .6rem; font-size:.61rem; cursor:pointer; }
+.refresh:hover,.clear:hover { border-color:var(--accent); color:var(--accent); }.refresh:disabled { opacity:.55; cursor:wait; }
+.scope { display:flex; align-items:center; justify-content:space-between; gap:1rem; margin-bottom:.9rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--bg); padding:.55rem .7rem; }
+.scope > div:first-child { display:flex; align-items:baseline; gap:.35rem; }.scope strong { font:650 1.05rem/1 var(--mono); }.scope span { color:var(--muted); font-size:.58rem; }
+.counts { display:flex; flex-wrap:wrap; justify-content:flex-end; gap:.3rem .65rem; }
+.rows { max-height:38rem; overflow:auto; padding-right:.25rem; scrollbar-gutter:stable; transition:opacity .12s ease; }.rows[aria-busy='true'] { opacity:.68; }
+.notice,.error { border-radius:var(--radius-sm); padding:.55rem .7rem; font-size:.63rem; }.notice { border:1px solid var(--line); color:var(--muted); }.error { border:1px solid color-mix(in srgb,var(--status-fail) 45%,var(--line)); color:var(--status-fail); }
+.empty { min-height:9rem; display:grid; place-content:center; gap:.3rem; color:var(--muted); text-align:center; }.empty strong { color:inherit; font-size:.76rem; }.empty span { font-size:.64rem; }
+@media (max-width:650px) { .panel > header { align-items:start; }.scope { align-items:start; flex-direction:column; }.counts { justify-content:flex-start; }.filters label { flex:1 1 8rem; } }
+</style>

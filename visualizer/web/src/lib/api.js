@@ -12,6 +12,7 @@ export const getEvents = (adwId, after = 0, limit, filters = {}) => {
   return request(`/api/events?${params}`)
 }
 export const getReturns = (repoSlug, taskSlug, adwId) => request(`/api/returns?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
+export const getJournal = (repoSlug, taskSlug, adwId) => request(`/api/journal?${new URLSearchParams({ repo_slug: repoSlug, task_slug: taskSlug, adw_id: adwId })}`)
 export const getRoster = () => request('/api/roster')
 export const getCellHealth = (params = {}) => request(`/api/cell-health?${new URLSearchParams(params)}`)
 export const getSeatTeardowns = (params = {}) => request(`/api/seat-teardowns?${new URLSearchParams(params)}`)
@@ -22,5 +23,7 @@ export const setIntakeBrake = (engaged, actor) => request('/api/intake/brake', {
 export const postTriage = (adwId, reviewed) => request('/api/triage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ adw_id: adwId, reviewed }) })
 export const proposeRosterEdit = (tier, role, cell) => request('/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier, role, cell }) })
 export const getRosterLadder = () => request('/api/roster/ladder')
+export const getModelCatalog = () => request('/api/model-catalog')
+export const setModelCatalogKey = (apiKey, options = {}) => request('/api/model-catalog/key', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ api_key: apiKey, ...(apiKey === null ? {} : { persist:options.persist === true }) }) })
 export const stageRosterLadder = (moves) => request('/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })
 export const composeRosterLadder = (moves) => request('/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves }) })

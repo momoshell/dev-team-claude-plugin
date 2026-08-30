@@ -1,6 +1,11 @@
 <script>
   import { getRoster, proposeRosterEdit } from './api.js'
   import { rosterEditForm, rosterProposal } from './panels.js'
+  import Dropdown from './Dropdown.svelte'
+  import { assuranceOption } from './workflow-semantics.js'
+
+  const AGENTS = [{ value:'claude', label:'claude' }, { value:'pi', label:'pi' }]
+  const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'].map((value) => ({ value, label:value }))
 
   let payload = $state({ tiers: null, models: null, path: null, error: null })
   let selection = $state({ tier: '', role: '' })
@@ -9,6 +14,8 @@
   let loading = $state(false)
   let requestError = $state('')
   let form = $derived(rosterEditForm(payload, selection))
+  let tierOptions = $derived(form.tiers.map(assuranceOption))
+  let roleOptions = $derived(form.roles.map((value) => ({ value, label:value })))
   let proposal = $derived(rosterProposal(response))
 
   $effect(() => {
@@ -54,12 +61,12 @@
     <h2>Propose roster edit</h2>
     <form onsubmit={(event) => { event.preventDefault(); submit() }}>
       <div class="fields">
-        <label>Tier <select bind:value={selection.tier}>{#each form.tiers as tier}<option value={tier}>{tier}</option>{/each}</select></label>
-        <label>Role <select bind:value={selection.role}>{#each form.roles as role}<option value={role}>{role}</option>{/each}</select></label>
+        <label>Assurance <Dropdown bind:value={selection.tier} options={tierOptions} ariaLabel="Roster assurance" width="11rem" /></label>
+        <label>Role <Dropdown bind:value={selection.role} options={roleOptions} ariaLabel="Roster role" width="9rem" /></label>
         <label>Provider <input bind:value={draft.provider} required /></label>
         <label>Model ID <input bind:value={draft.id} required /></label>
-        <label>Agent <select bind:value={draft.agent}><option value="claude">claude</option><option value="pi">pi</option></select></label>
-        <label>Effort <select bind:value={draft.effort}><option value="low">low</option><option value="medium">medium</option><option value="high">high</option><option value="xhigh">xhigh</option><option value="max">max</option></select></label>
+        <label>Agent <Dropdown bind:value={draft.agent} options={AGENTS} ariaLabel="Agent adapter" width="8rem" /></label>
+        <label>Effort <Dropdown bind:value={draft.effort} options={EFFORTS} ariaLabel="Reasoning effort" width="8rem" /></label>
       </div>
       <button type="submit" disabled={loading}>{loading ? 'Proposing…' : 'Propose edit'}</button>
     </form>

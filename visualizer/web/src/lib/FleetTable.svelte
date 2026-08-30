@@ -6,7 +6,7 @@
     <span class="mark dashed" title={cell?.title || undefined}>{cell?.text || 'not measured'}</span>
   {/snippet}
   <table>
-    <thead><tr><th class="micro">run</th><th class="micro">status</th><th class="micro">tier</th><th class="micro">gate</th><th class="micro">review</th><th class="micro">duration</th><th class="micro">tokens</th><th class="micro">cost</th><th class="micro">heartbeat</th></tr></thead>
+    <thead><tr><th class="micro">run</th><th class="micro">status</th><th class="micro">assurance</th><th class="micro">gate</th><th class="micro">review</th><th class="micro">duration</th><th class="micro">tokens</th><th class="micro">cost</th><th class="micro">heartbeat</th></tr></thead>
     <tbody>
       {#each rows as row (row.adw_id)}
         <tr>

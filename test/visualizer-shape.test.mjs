@@ -264,7 +264,7 @@ test('shapeRun surfaces a recorded tier and keeps an unmeasured row unmeasured',
   assert.match(unmeasured.pending.tier, /^not measured/)
 })
 
-test('shapeRun keeps tier and heartbeat absent until their sources measure them', () => {
+test('shapeRun uses session and agent heartbeats without fabricating an absent measurement', () => {
   const now = Date.parse('2024-01-01T00:02:00.000Z')
   const absent = shapeRun(base, [], [], null, missingProbe, now)
   assert.equal(absent.tier, null)
@@ -272,8 +272,13 @@ test('shapeRun keeps tier and heartbeat absent until their sources measure them'
   assert.equal(absent.last_heartbeat_at, null)
   assert.equal(absent.heartbeat_age_ms, null)
   assert.ok(absent.pending.last_heartbeat_at)
+  const sessionBeat = '2024-01-01T00:01:30.000Z'
+  const sessionMeasured = shapeRun({ ...base, last_heartbeat_at:sessionBeat }, [], [], null, missingProbe, now)
+  assert.equal(sessionMeasured.last_heartbeat_at, sessionBeat)
+  assert.equal(sessionMeasured.heartbeat_age_ms, 30000)
+  assert.equal(sessionMeasured.pending.last_heartbeat_at, undefined)
   const latest = '2024-01-01T00:01:56.000Z'
-  const measured = shapeRun(base, [], [], null, missingProbe, now, {
+  const measured = shapeRun({ ...base, last_heartbeat_at:sessionBeat }, [], [], null, missingProbe, now, {
     agentSessions: [{ last_heartbeat_at: '2024-01-01T00:01:00.000Z' }, { last_heartbeat_at: latest }],
   })
   assert.equal(measured.last_heartbeat_at, latest)
@@ -287,6 +292,17 @@ test('theme role and lane aliases follow the ratified role order', () => {
     assert.match(css, new RegExp(`--role-${role}\\s*:`))
     assert.match(css, new RegExp(`--lane-${index}\\s*:\\s*var\\(\\s*--role-${role}\\s*\\)`))
   }
+})
+
+test('theme gives component scrollbars a thin theme-aware treatment', () => {
+  const css = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/theme.css'), 'utf8')
+  assert.match(css, /--scrollbar-track\s*:/)
+  assert.match(css, /--scrollbar-thumb\s*:/)
+  assert.match(css, /scrollbar-width:\s*thin/)
+  assert.match(css, /scrollbar-color:\s*var\(--scrollbar-thumb\) var\(--scrollbar-track\)/)
+  assert.match(css, /\*::\-webkit-scrollbar\s*\{[^}]*width:\s*\.625rem[^}]*height:\s*\.625rem/)
+  assert.match(css, /\*::\-webkit-scrollbar-thumb:hover\s*\{[^}]*var\(--scrollbar-thumb-hover\)/)
+  assert.match(css, /:root\[data-theme='ink'\]\s*\{\s*color-scheme:\s*dark/)
 })
 
 test('matchesFilters covers mode, status, since, until and pending mode', () => {

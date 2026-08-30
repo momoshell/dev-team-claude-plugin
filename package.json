@@ -14,7 +14,7 @@
     "ledger:eligible-tasks": "node scripts/factory/ledger.mjs eligible-tasks",
     "ledger:run-set": "node scripts/factory/ledger.mjs run-set",
     "ledger:task": "node scripts/factory/ledger.mjs task",
-    "viz:serve": "node visualizer/server/server.mjs",
+    "viz:serve": "node --env-file-if-exists=.env.local visualizer/server/server.mjs",
     "viz:build": "vite build --config visualizer/web/vite.config.mjs",
     "viz:dev": "vite --config visualizer/web/vite.config.mjs",
     "crew:watch": "node scripts/factory/crew-watch.mjs",

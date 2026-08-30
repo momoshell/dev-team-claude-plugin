@@ -10,6 +10,8 @@ import { createJournalSource } from './journal-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
+import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
+import { saveArtificialAnalysisKey } from './local-env.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
 import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTeardownWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake, shapeSeatTeardowns, shapeCellAttribution } from './shape.mjs'
@@ -19,6 +21,7 @@ import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTea
 export const STOP_SWITCH_PATH = '.factory/STOP'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const PROJECT_ROOT = resolve(ROOT, '..')
 const DIST = resolve(ROOT, 'web', 'dist')
 const schema = 1
 const DEFAULT_PORT = 4488
@@ -85,6 +88,8 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/roster/ladder': [],
   '/api/roster/ladder/stage': [],
   '/api/roster/ladder/compose': [],
+  '/api/model-catalog': [],
+  '/api/model-catalog/key': [],
   '/api/health': [],
   '/api/triage': [],
 })
@@ -269,11 +274,13 @@ function staticResponse(req, res) {
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   config.checkout = resolve(config.checkout || process.cwd())
+  config.envFile = resolve(config.envFile || join(PROJECT_ROOT, '.env.local'))
   const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
   const journal = config.journal || createJournalSource({ crewRoot: config.crewRoot })
   const roster = config.roster || createRosterSource({ rosterPath: config.rosterPath })
+  const modelCatalog = config.modelCatalog || createArtificialAnalysisCatalog({ apiKey: env.ARTIFICIAL_ANALYSIS_API_KEY, fetchImpl: config.fetchImpl })
   const server = createServer(async (req, res) => {
     // #544: the request target and the Host header are both attacker-chosen, and
     // an unparseable one threw ABOVE this handler's try — an unhandled rejection
@@ -495,6 +502,27 @@ export function startServer(options = {}) {
         const view = ladderView({ roster: roster.readRoster(), ladder, reference, cells: { ...failures, measured_window: window } })
         return json(res, 200, { schema, ...view })
       }
+      if (url.pathname === '/api/model-catalog') {
+        if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
+        return json(res, 200, { schema, ...await modelCatalog.get() })
+      }
+      if (url.pathname === '/api/model-catalog/key') {
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
+        try {
+          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await modelCatalog.get(), persisted:false }) }
+          if (input.persist !== undefined && typeof input.persist !== 'boolean') return json(res, 400, { schema, error:'persist must be a boolean' })
+          if (input.persist === true) {
+            saveArtificialAnalysisKey(config.envFile, input.api_key)
+            modelCatalog.setPersistentApiKey(input.api_key)
+          } else modelCatalog.setApiKey(input.api_key)
+        } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid api_key' }) }
+        return json(res, 200, { schema, ...await modelCatalog.get(), persisted:input.persist === true })
+      }
       if (url.pathname === '/api/roster/ladder/stage') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
         const refusal = writeGuard(req)
@@ -557,7 +585,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
   return { server, feed }
 }

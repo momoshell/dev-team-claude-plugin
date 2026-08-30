@@ -258,8 +258,119 @@ function gateTone(verdict) {
   return GATE_TONES[verdict]?.tone ?? (verdict == null ? null : 'unproven')
 }
 
+function gateRunPassed(row) {
+  if (row?.ok === true || row?.ok === 1 || row?.ok === '1') return true
+  if (row?.ok === false || row?.ok === 0 || row?.ok === '0') return false
+  return null
+}
+
+function gateRunSummary(row) {
+  for (const check of Array.isArray(row?.checks) ? row.checks : []) {
+    if (typeof check?.label !== 'string') continue
+    try {
+      const parsed = JSON.parse(check.label)
+      if (parsed && typeof parsed === 'object' && ['total', 'failed', 'errored'].some((key) => parsed[key] != null)) {
+        return {
+          total: parsed.total ?? null,
+          failed: parsed.failed ?? null,
+          errored: parsed.errored ?? null,
+        }
+      }
+    } catch {}
+  }
+  return null
+}
+
+function gateSummaryText(summary) {
+  if (!summary) return null
+  const parts = []
+  if (summary.total != null) parts.push(`${summary.total} run`)
+  if (summary.failed != null) parts.push(`${summary.failed} failed`)
+  if (summary.errored != null) parts.push(`${summary.errored} errored`)
+  return parts.join(' · ') || null
+}
+
+function proofStage(row, { label, detail, passing, passLabel, failLabel }) {
+  if (!row) return null
+  const passed = gateRunPassed(row)
+  const expected = passed == null ? null : passed === passing
+  return {
+    label,
+    detail,
+    result: passed == null ? 'Result not recorded' : passed ? passLabel : failLabel,
+    tone: expected == null ? 'unknown' : expected ? 'expected' : 'unexpected',
+    summary: gateSummaryText(gateRunSummary(row)),
+  }
+}
+
+function gateAttemptLabel(row) {
+  const name = String(row?.gate_name || 'gate run')
+  if (name.startsWith('gate-baseline')) return 'Before work'
+  if (/^gate:r\d+$/.test(name)) return `Built result · ${name.slice(5).toUpperCase()}`
+  if (/^gate-proof:\d+$/.test(name)) return 'Without built changes'
+  const mutation = name.match(/:checks:m(\d+)$/)
+  if (mutation) return `Mutation probe M${mutation[1]}`
+  return name.replaceAll(':', ' · ').replaceAll('-', ' ')
+}
+
+export function gateProofStory(rows = [], generation = null, generations = []) {
+  const selected = (Array.isArray(rows) ? rows : []).filter((row) => generation == null || String(row?.gate_generation) === String(generation))
+  const baseline = selected.find((row) => String(row?.gate_name || '').startsWith('gate-baseline')) ?? null
+  const built = [...selected].reverse().find((row) => /^gate:r\d+$/.test(String(row?.gate_name || ''))) ?? null
+  const pristine = [...selected].reverse().find((row) => /^gate-proof:\d+$/.test(String(row?.gate_name || ''))) ?? null
+  const mutationRows = selected.filter((row) => /:checks:m\d+$/.test(String(row?.gate_name || '')))
+  const mutationRed = mutationRows.filter((row) => gateRunPassed(row) === false).length
+  const mutationGreen = mutationRows.filter((row) => gateRunPassed(row) === true).length
+  const mutationUnknown = mutationRows.length - mutationRed - mutationGreen
+  const generationRow = (Array.isArray(generations) ? generations : []).find((row) => String(row?.gate_generation) === String(generation)) ?? null
+  const verdict = generationRow?.verdict ?? null
+  const generationCount = new Set((Array.isArray(generations) ? generations : []).map((row) => row?.gate_generation).filter((value) => value != null)).size
+  const verdictCopy = verdict === 'proven'
+    ? {
+      headline: generationCount > 1 ? 'The repaired gate distinguishes the built result' : 'The gate distinguishes the built result',
+      explanation: 'It passed with the built changes and turned red when those changes were removed.',
+    }
+    : verdict === 'failed'
+      ? { headline:'The gate did not distinguish the built result', explanation:generationRow?.note || 'The recorded proof did not show that the gate depends on the built changes.' }
+      : { headline:'The gate proof is incomplete', explanation:generationRow?.note || 'The recorded evidence could not establish whether the gate depends on the built changes.' }
+  const stages = [
+    proofStage(baseline, { label:'Before work', detail:'The task should begin with a red gate.', passing:false, passLabel:'Unexpectedly green', failLabel:'Red as expected' }),
+    proofStage(built, { label:'Built result', detail:'The completed work should make the gate pass.', passing:true, passLabel:'Passed', failLabel:'Still failing' }),
+    proofStage(pristine, { label:'Without built changes', detail:'Removing the work should make the gate fail.', passing:false, passLabel:'Stayed green', failLabel:'Turned red' }),
+  ].filter(Boolean)
+  const attempts = selected.map((row) => ({
+    label: gateAttemptLabel(row),
+    result: gateRunPassed(row) == null ? 'Not recorded' : gateRunPassed(row) ? 'Green' : 'Red',
+    tone: gateRunPassed(row) == null ? 'unknown' : gateRunPassed(row) ? 'green' : 'red',
+    summary: gateSummaryText(gateRunSummary(row)),
+    attempt: row?.attempt ?? null,
+  }))
+  return {
+    verdict,
+    headline: verdictCopy.headline,
+    explanation: verdictCopy.explanation,
+    stages,
+    attempts,
+    generation_count: generationCount,
+    mutation: mutationRows.length ? {
+      total: mutationRows.length,
+      red: mutationRed,
+      green: mutationGreen,
+      unknown: mutationUnknown,
+      summary: `${mutationRed} of ${mutationRows.length} recorded mutation probes turned the gate red`,
+    } : null,
+  }
+}
+
 function samePhase(left, right) {
   return left != null && right != null && String(left) === String(right)
+}
+
+export function phaseFilterId(run = {}, value = null) {
+  if (value == null || value === '') return ''
+  const phases = Array.isArray(run?.phases) ? run.phases : []
+  const match = phases.find((phase) => samePhase(phase?.id, value) || phase?.name === value)
+  return match?.id ?? value
 }
 
 function artifactBlocks(envelopes) {
@@ -273,6 +384,30 @@ function artifactBlocks(envelopes) {
     }
   }
   return blocks
+}
+
+function artifactDocuments(envelopes) {
+  return [...envelopes].reverse().map((envelope) => {
+    const blocks = artifactBlocks([envelope])
+    return {
+      id: `${envelope?.role || 'agent'}-${envelope?.dispatch_seq ?? 'unknown'}`,
+      role: envelope?.role || 'agent',
+      dispatch_seq: envelope?.dispatch_seq ?? null,
+      status: envelope?.status ?? null,
+      blocks,
+    }
+  }).filter((document) => document.blocks.length)
+}
+
+function artifactPaths(envelopes) {
+  const paths = new Map()
+  for (const envelope of envelopes) {
+    for (const path of Array.isArray(envelope?.artifacts) ? envelope.artifacts : []) {
+      if (!paths.has(path)) paths.set(path, { path, reason: ARTIFACT_WHY, sources: [] })
+      paths.get(path).sources.push(`${envelope?.role || 'agent'} d${envelope?.dispatch_seq ?? '—'}`)
+    }
+  }
+  return [...paths.values()]
 }
 
 export function phasePanel(run = {}, { phase = null, events = [], returns = {} } = {}) {
@@ -299,6 +434,7 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
   const gatePending = orderedGateRows.map((row) => row?.checks_pending).filter((value) => typeof value === 'string' && value.length).join(' · ') || null
   const generation = (Array.isArray(run.gate_generations) ? run.gate_generations : [])
     .find((entry) => samePhase(entry?.gate_generation, gateRow?.gate_generation)) ?? null
+  const proof = gateProofStory(orderedGateRows, gateRow?.gate_generation ?? null, run.gate_generations)
   const envelopeList = Array.isArray(returns?.envelopes) ? returns.envelopes : []
   const scopedEvents = (Array.isArray(events) ? events : []).filter((event) => samePhase(event?.phase_id, found.id))
   const gate = gateRow == null
@@ -323,6 +459,7 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
       checks_failed: generation?.checks_failed ?? null,
       checks_errored: generation?.checks_errored ?? null,
       note: generation?.note ?? null,
+      proof,
     }
   return {
     phase: found,
@@ -332,7 +469,8 @@ export function phasePanel(run = {}, { phase = null, events = [], returns = {} }
     events: scopedEvents,
     artifacts: {
       blocks: artifactBlocks(envelopeList),
-      paths: envelopeList.flatMap((envelope) => (Array.isArray(envelope?.artifacts) ? envelope.artifacts : []).map((path) => ({ path, reason: ARTIFACT_WHY }))),
+      documents: artifactDocuments(envelopeList),
+      paths: artifactPaths(envelopeList),
     },
     pending: returns?.error ?? null,
   }
@@ -407,7 +545,7 @@ export function renderMarkdown(text) {
   }
   const flushList = () => {
     if (!list.length) return
-    blocks.push({ kind: 'list', items: list.map((item) => ({ runs: inlineRuns(item.text), ordered: item.ordered })) })
+    blocks.push({ kind: 'list', ordered: list[0].ordered, items: list.map((item) => ({ runs: inlineRuns(item.text) })) })
     list = []
   }
   const flushText = () => { flushParagraph(); flushList() }
@@ -435,6 +573,20 @@ export function renderMarkdown(text) {
       blocks.push({ kind: 'heading', level: heading[1].length, runs: inlineRuns(heading[2]) })
       continue
     }
+    const callout = line.match(/^\s*((?:BLOCKER|CLOSED|ALREADY HANDLED(?:\s+by\s+the\s+reference)?|RE-?PROVED|PREFERRED|ALTERNATIVE|WARNING|NOTE|VERDICT|ESCALATE)(?:\s*\([^)]*\))?)(?::|\.|\s+—)\s*(.*)$/i)
+    if (callout) {
+      flushText()
+      const key = callout[1].toUpperCase()
+      const tone = /BLOCKER|ESCALATE/.test(key) ? 'serious' : /CLOSED|HANDLED|PROVED/.test(key) ? 'ok' : /WARNING|VERDICT/.test(key) ? 'warn' : 'neutral'
+      blocks.push({ kind: 'callout', label: callout[1], tone, runs: inlineRuns(callout[2]) })
+      continue
+    }
+    const quote = line.match(/^\s*>\s?(.*)$/)
+    if (quote) {
+      flushText()
+      blocks.push({ kind: 'blockquote', runs: inlineRuns(quote[1]) })
+      continue
+    }
     if (/^\s*(?:---+|\*\*\*|___)\s*$/.test(line)) {
       flushText()
       blocks.push({ kind: 'rule' })
@@ -443,11 +595,14 @@ export function renderMarkdown(text) {
     const item = line.match(/^\s*(?:[-*+]\s+|\d+[.)]\s+)(.*)$/)
     if (item) {
       flushParagraph()
-      list.push({ text: item[1], ordered: /^\s*\d/.test(line) })
+      const ordered = /^\s*\d/.test(line)
+      if (list.length && list[0].ordered !== ordered) flushList()
+      list.push({ text: item[1], ordered })
       continue
     }
     if (list.length) flushList()
     paragraph.push(line)
+    flushParagraph()
   }
   if (code != null) {
     const block = { kind: 'code', text: code.lines.join('\n') }

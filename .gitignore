@@ -17,3 +17,8 @@ Thumbs.db
 node_modules/
 visualizer/web/dist/
 .claude/settings.local.json
+
+# Local secrets and machine-specific environment
+.env
+.env.*
+!.env.example

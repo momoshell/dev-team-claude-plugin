@@ -51,6 +51,7 @@
 // `cells [--since <iso>] [--until <iso>] [--prices <path>]` |
 // `modifier-attempts [--since <iso>] [--until <iso>]` |
 // `seat-teardowns [--since <iso>] [--until <iso>]` |
+// `escalations --since <iso> [--until <iso>]` |
 // `ci-cycles [--since <iso>] [--until <iso>]` |
 // `intake-sweeps [--since <iso>] [--until <iso>]` |
 // `task <adw_id|task_slug>` — the read-only verbs the npm `ledger:*` recipes invoke
@@ -131,6 +132,53 @@ export const EVENT_TYPES = Object.freeze([
 ])
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
+export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+export const TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator', 'finalizer'])
+export const ESCALATION_CAUSES = Object.freeze([
+  'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
+  'gate-defect', 'review-unresolved', 'infrastructure',
+])
+export const ESCALATION_CAUSE_UNCLASSIFIED = 'unclassified'
+
+// The ordered escalation classifier is deliberately the ONE mapping surface:
+// the first matching rule wins, and the fallback refuses to guess. Inputs are
+// untrusted envelope fields, so non-strings become empty text and never throw.
+export function escalationCause(input = {}) {
+  const where = typeof input?.where === 'string' ? input.where : ''
+  const why = typeof input?.why === 'string' ? input.why : ''
+  // Rule 1: transport evidence is the explicit sendLine marker or transport
+  // location; it precedes all other prose so a transport failure stays driver-owned.
+  if (/\bsendLine\b/.test(why) || where === 'transport') {
+    return Object.freeze({ cause: 'transport', actor: 'driver' })
+  }
+  // Rule 2: scope/anchor/unapplied evidence is a plan-build disagreement. It
+  // deliberately precedes the budget rule because b325's anchor prose mentions budget.
+  if (where === 'scope' || /\banchor-(absent|ambiguous|unsafe)\b/.test(why) || /\bunapplied\b/.test(why)) {
+    return Object.freeze({ cause: 'plan-build-disagreement', actor: 'driver' })
+  }
+  // Rule 3: no envelope or an exceeded budget is a driver budget outcome.
+  if (/\bno valid envelope\b/.test(why) || /\bexceeded its \d+s budget\b/.test(why)) {
+    return Object.freeze({ cause: 'budget', actor: 'driver' })
+  }
+  // Rule 4: contradiction in the escalation prose is an operator-owned brief issue.
+  if (/\bcontradict/i.test(why)) {
+    return Object.freeze({ cause: 'brief-contradiction', actor: 'operator' })
+  }
+  // Rule 5: a gate location identifies a lead-owned gate defect.
+  if (where === 'gate') {
+    return Object.freeze({ cause: 'gate-defect', actor: 'lead' })
+  }
+  // Rule 6: review and refuted-must-fix locations identify an unresolved review.
+  if (where === 'review' || where === 'refuted-must-fix') {
+    return Object.freeze({ cause: 'review-unresolved', actor: 'lead' })
+  }
+  // Rule 7: these locations are infrastructure failures owned by the driver.
+  if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
+    return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
+  }
+  // No rule matched: unclassified is an honest non-answer, with no actor guess.
+  return Object.freeze({ cause: ESCALATION_CAUSE_UNCLASSIFIED, actor: null })
+}
 export const REQUEST_SOURCES = Object.freeze(['dispatch', 'brief-file'])
 export const REQUEST_MAX_CHARS = 2000
 export const RETIRED_TABLES = Object.freeze({
@@ -408,6 +456,12 @@ export const TABLES = Object.freeze({
       // COLUMN (#290).
       { name: 'proposed_shape', decl: 'TEXT' },
       { name: 'proposed_strength', decl: 'TEXT' },
+      // #779: NULL means a typed run outcome was not measured. Declared LAST
+      // so an upgraded db receives these fields via ADD COLUMN (#290); no
+      // historical row is backfilled by inference.
+      { name: 'outcome', decl: 'TEXT' },
+      { name: 'terminal_reason', decl: 'TEXT' },
+      { name: 'terminal_actor', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
     indexes: [],
@@ -1810,10 +1864,15 @@ export function openLedger({
   function endSession(input = {}) {
     requireFields(input, ['adw_id', 'status'], 'endSession')
     requireEnum(input.status, SESSION_STATUSES, 'endSession', 'status')
+    if (input.outcome != null) requireEnum(input.outcome, SESSION_OUTCOMES, 'endSession', 'outcome')
+    if (input.terminal_actor != null) requireEnum(input.terminal_actor, TERMINAL_ACTORS, 'endSession', 'terminal_actor')
     const args = redact({
       adw_id: input.adw_id,
       ended_at: isoMs(input.ended_at ?? now()),
       status: input.status,
+      outcome: input.outcome ?? null,
+      terminal_reason: normaliseShortName(input.terminal_reason, 'endSession', 'terminal_reason'),
+      terminal_actor: input.terminal_actor ?? null,
       billed_input_tokens: input.billed_input_tokens ?? null,
       billed_output_tokens: input.billed_output_tokens ?? null,
       billed_cache_write_tokens: input.billed_cache_write_tokens ?? null,
@@ -1830,6 +1889,7 @@ export function openLedger({
       // safe to call without erasing a session's already-recorded spend.
       conn.prepare(`
         UPDATE sessions SET ended_at = ?, status = ?,
+          outcome = ?, terminal_reason = ?, terminal_actor = ?,
           billed_input_tokens = COALESCE(?, billed_input_tokens),
           billed_output_tokens = COALESCE(?, billed_output_tokens),
           billed_cache_write_tokens = COALESCE(?, billed_cache_write_tokens),
@@ -1838,6 +1898,7 @@ export function openLedger({
         WHERE adw_id = ?
       `).run(
         toBindable(args.ended_at), toBindable(args.status),
+        toBindable(args.outcome), toBindable(args.terminal_reason), toBindable(args.terminal_actor),
         toBindable(args.billed_input_tokens), toBindable(args.billed_output_tokens),
         toBindable(args.billed_cache_write_tokens), toBindable(args.billed_cache_read_tokens),
         toBindable(args.billed_cost_usd),
@@ -3268,6 +3329,18 @@ export function openLedger({
     `, [since, since, until, until])
   }
 
+  function escalations({ since = null, until = null } = {}) {
+    return queryRows(`
+      SELECT terminal_reason AS cause, terminal_actor AS actor,
+        COUNT(*) AS count, MIN(ended_at) AS first_at, MAX(ended_at) AS last_at
+      FROM sessions
+      WHERE outcome = 'escalated'
+        AND (? IS NULL OR ended_at >= ?) AND (? IS NULL OR ended_at < ?)
+      GROUP BY terminal_reason, terminal_actor
+      ORDER BY terminal_reason, terminal_actor
+    `, [since, since, until, until])
+  }
+
   function seatReclaims({ since = null, until = null } = {}) {
     return queryRows(`
       SELECT outcome, reason, coverage_outcome, coverage_reason,
@@ -3440,6 +3513,9 @@ export function openLedger({
     const absent = {}
     if (session?.request == null) {
       absent.request = 'this run predates request recording (#b19) / was not dispatched by the intake loop; the request was never measured, and NULL is never an empty ask'
+    }
+    if (session != null && session.outcome == null) {
+      absent.outcome = 'this run predates typed run outcomes (#779) — sessions.status carries the legacy verdict alone; NULL is never a measured outcome, and no historical row is backfilled by inference'
     }
     if (!measuredContextOccupancy) {
       absent.context_occupancy = 'no live transport records occupancy — pane seats land no agent_sessions row at all; headless-json/headless-rpc land rows with both columns NULL; context_window has no verified source (U-4); see docs/ledger-queries.md'
@@ -3683,7 +3759,7 @@ export function openLedger({
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,
@@ -3807,7 +3883,7 @@ function installFinalizerImpl(ledger, { adw_id: adwId, signals = ['SIGTERM', 'SI
       // case an unconditional endSession would clobber real data.
       const status = ledger._registry.sessionStatus(adwId)
       if (status === 'running' || status === null) {
-        ledger.endSession({ adw_id: adwId, status: 'fail' })
+        ledger.endSession({ adw_id: adwId, status: 'fail', outcome: 'failed', terminal_reason: sig, terminal_actor: 'finalizer' })
       }
     } catch {
       // Best-effort: a session that never started has nothing to land.
@@ -3991,6 +4067,7 @@ const VERB_FLAGS = Object.freeze({
   cells: new Set(['since', 'until', 'prices']),
   'modifier-attempts': new Set(['since', 'until']),
   'seat-teardowns': new Set(['since', 'until']),
+  escalations: new Set(['since', 'until']),
   'ci-cycles': new Set(['since', 'until']),
   'intake-sweeps': new Set(['since', 'until']),
   task: new Set([]),
@@ -4374,7 +4451,7 @@ export function main(argv) {
   try {
     const { verb, positional, flags } = parseArgs(argv)
     if (!verb) {
-      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
+      refuse('a verb is required: sessions | phases | tail | procs | gate-review-gap | eligible-tasks | run-set --since <iso> [--until <iso>] | cell-failures [--since <iso>] [--until <iso>] | cells [--since <iso>] [--until <iso>] [--prices <path>] | modifier-attempts [--since <iso>] [--until <iso>] | seat-teardowns [--since <iso>] [--until <iso>] | escalations --since <iso> [--until <iso>] | ci-cycles [--since <iso>] [--until <iso>] | intake-sweeps [--since <iso>] [--until <iso>] | task | request <adw_id> --from-brief <path> | advisor-ab --run-dir <dir> --run-started-at <iso|ms> --adjudications <path> <dispatch-id>… | doctor | kill')
     }
 
     // TEST SEAM: DEVTEAM_LEDGER_FAKE_NODE_VERSION substitutes for
@@ -4574,7 +4651,7 @@ export function main(argv) {
         question: 'For one run-set: what ran, how did each run settle, and what did it cost?',
         definition: {
           run_set: 'the runs whose sessions.started_at falls in [since, until) — a view over the ledger, never a stored batch id; the ledger has no group column',
-          settled: "sessions.status, the ledger's closed enum (running|ok|fail|aborted); today both run drivers map outcome done -> ok and every other terminal outcome, escalation included, -> aborted (crew/crew.mjs:644, crew/child.mjs:141), and fail is reserved for the ledger finalizer's claim that a run died",
+          settled: "sessions.status, the ledger's closed enum (running|ok|fail|aborted); crew/crew.mjs maps outcome done -> ok/success and escalation -> aborted/escalated (crew/crew.mjs:2024), while crew/child.mjs still maps every non-done outcome -> aborted with NULL outcome (crew/child.mjs:196), and fail is reserved for the ledger finalizer's claim that a run died",
           usage: "usage sums billed_* across each run's agent_sessions rows — each row holds a running total, not a delta; tokens only, no cost calculation (#119)",
           variant: 'the run shape derived from the first recorded stage marker; null with absent.variant means unmeasured, never an inferred full',
           absent: 'null with an `absent` marker means the fact was never measured — never a measured zero',
@@ -4798,6 +4875,38 @@ export function main(argv) {
         proven: tally('proven'), leaked: tally('failed'), unproven: tally('unproven'),
         rows,
         absent: measured ? null : { seat_teardowns: 'no rows in this window — not measured, never a measured zero' },
+      })}\n`)
+      return 0
+    }
+
+    if (verb === 'escalations') {
+      if (positional.length > 0) refuse('escalations: takes no positional arguments')
+      if (flags.since == null) refuse('escalations: --since <iso> is required — an implicit window makes its numbers unattributable')
+      const since = windowBound(flags.since, 'since', 'escalations')
+      const hasUntil = Object.prototype.hasOwnProperty.call(flags, 'until')
+      const until = hasUntil ? windowBound(flags.until, 'until', 'escalations') : null
+      if (until != null && until <= since) refuse('escalations: --until must be later than --since')
+      const rows = ledger.escalations({ since, until })
+      if (ledger.stats().degraded) refuse('escalations: the ledger mirror is degraded — this window is unanswerable, not empty')
+      const measured = rows.length > 0
+      stdout.write(`${JSON.stringify({
+        schema: 1,
+        question: 'How many lanes did the factory lose to itself, and to what?',
+        definition: {
+          unit: 'one run whose outcome is escalated',
+          window: 'counted at sessions.ended_at — an escalation is a terminal fact',
+          cause: `the closed vocabulary (${ESCALATION_CAUSES.join(', ')}), plus ${ESCALATION_CAUSE_UNCLASSIFIED} for a pair no rule classifies — never a guess`,
+          absent: 'null with an `absent` marker means the window was never measured — never a measured zero',
+          coverage: 'crew/crew.mjs records typed escalation causes; child-driven runs still carry NULL typed outcome fields until their endRun writer is widened, so they remain unmeasured here',
+        },
+        since,
+        until,
+        causes: ESCALATION_CAUSES,
+        actors: TERMINAL_ACTORS,
+        measured,
+        escalated: measured ? rows.reduce((n, row) => n + Number(row.count ?? 0), 0) : null,
+        rows,
+        absent: measured ? null : { escalations: 'no escalated run in this window — not measured, never a measured zero' },
       })}\n`)
       return 0
     }

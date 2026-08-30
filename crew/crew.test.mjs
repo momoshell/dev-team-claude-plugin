@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -1474,6 +1474,25 @@ test('completion records preserve both terminal outcomes and run-owned paths', a
   }
 })
 
+test('runCmd ends a run with the typed outcome mapping', async () => {
+  const result = await runCompletionFixture({
+    task: 'completion-typed-outcome',
+    result: {
+      status: 'escalation', summary: 'needs transport help', artifacts: [],
+      details: { commit: null, stages: [], escalation: { where: 'driver', why: 'sendLine: no pane echo' } },
+    },
+  })
+  if (!nodeMeetsLedgerFloor) return
+  const ledger = openLedger({ dbPath: join(result.home, 'ledger', 'ledger.db'), stderr: { write: () => {} } })
+  try {
+    const row = ledger.listSessions().find((session) => session.task_slug === 'completion-typed-outcome')
+    assert.ok(row)
+    assert.deepEqual({ status: row.status, outcome: row.outcome, terminal_reason: row.terminal_reason, terminal_actor: row.terminal_actor }, {
+      status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver',
+    })
+  } finally { ledger.close() }
+})
+
 test('completion log path accepts an override and otherwise defaults to the crew root', () => {
   const root = scratchDir('crew-completion-path-')
   const override = join(root, 'x.jsonl')
@@ -2090,6 +2109,28 @@ test('run exits 3 on an escalation, 0 on done, and 1 on anything else', () => {
     [{ status: 'done' }, 0], [{ status: 'escalation' }, 3], [{ status: 'blocked' }, 1],
     [{ status: 'converge' }, 1], [{}, 1], [null, 1],
   ]) assert.equal(runExitCode(result), expected)
+})
+
+test('runOutcome preserves legacy status and maps every typed terminal outcome', () => {
+  assert.deepEqual(runOutcome({ status: 'done' }), {
+    status: 'ok', outcome: 'success', terminal_reason: null, terminal_actor: null,
+  })
+  const cases = [
+    [{ status: 'escalation', details: { escalation: { where: 'driver', why: 'sendLine: pane did not respond' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'transport', terminal_actor: 'driver' }],
+    [{ status: 'escalation', details: { escalation: { where: 'planner', why: 'no valid envelope after exceeded its 1800s budget' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'budget', terminal_actor: 'driver' }],
+    [{ status: 'escalation', details: { escalation: { where: 'scope', why: 'anchor-absent in the compiled plan' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'plan-build-disagreement', terminal_actor: 'driver' }],
+    [{ status: 'escalation', details: { escalation: { where: 'plan', why: 'a contradiction in the brief' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'brief-contradiction', terminal_actor: 'operator' }],
+    [{ status: 'escalation', details: { escalation: { where: 'gate', why: 'a gate defect remained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'gate-defect', terminal_actor: 'lead' }],
+    [{ status: 'escalation', details: { escalation: { where: 'review', why: 'the review remained unresolved' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'review-unresolved', terminal_actor: 'lead' }],
+    [{ status: 'escalation', details: { escalation: { where: 'cold-suite', why: 'the cold suite had no checkout' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'infrastructure', terminal_actor: 'driver' }],
+    [{ status: 'escalation', details: { escalation: { where: 'weather', why: 'it rained' } } }, { status: 'aborted', outcome: 'escalated', terminal_reason: 'unclassified', terminal_actor: null }],
+  ]
+  for (const [result, expected] of cases) assert.deepEqual(runOutcome(result), expected)
+  for (const result of [{ status: 'converge' }, { status: 'unknown' }, {}, null]) {
+    assert.deepEqual(runOutcome(result), {
+      status: 'aborted', outcome: 'aborted', terminal_reason: typeof result?.status === 'string' ? result.status : null, terminal_actor: 'driver',
+    })
+  }
 })
 
 test('installExitMarker writes one terminal line for normal, signal and uncaught exits', () => {

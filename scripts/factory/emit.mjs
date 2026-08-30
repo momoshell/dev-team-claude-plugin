@@ -1132,7 +1132,7 @@ function openRunInner({
   // (non-duplicate) endRun call INSIDE the same lock acquisition that marks
   // `run_ended` — so a second endRun call (a normal teardown racing a
   // finalizer, say) can never double-emit endSession.
-  function endRun({ status } = {}) {
+  function endRun({ status, outcome = null, terminal_reason = null, terminal_actor = null } = {}) {
     try {
       if (status === 'fail') {
         // Reserved for ledger.mjs's own finalizer — the only writer that
@@ -1166,6 +1166,9 @@ function openRunInner({
         handle.endSession({
           adw_id: adwId,
           status,
+          outcome,
+          terminal_reason,
+          terminal_actor,
           billed_input_tokens: billedSnapshot ? billedSnapshot.input : null,
           billed_output_tokens: billedSnapshot ? billedSnapshot.output : null,
           billed_cache_write_tokens: billedSnapshot ? billedSnapshot.cache_write : null,

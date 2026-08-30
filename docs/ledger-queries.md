@@ -21,6 +21,7 @@ The factory ledger is the register for run facts. When a session asks what happe
 | How often does CI catch what the local lane missed, and does one repair cycle fix it? | `node scripts/factory/ledger.mjs ci-cycles [--since <iso>] [--until <iso>]` — prints the watched/caught pair for the window and one row per check × classification × cycle, with the count and first/last timestamps. It also prints `dispatches` from `ci_dispatches`, one row per variant × outcome × cycle, plus the closed `dispatch_outcomes` list. The unit is one watched cycle: one check, on one head, on one cycle number; `ci_cycles` says what was decided and `ci_dispatches` says what the repair produced, joined by `(branch, head_sha, check_name, cycle)`. `watched` is every cycle recorded; `caught` is the cycles the local lane missed and CI reproduced. A `platform-divergent` row is CI catching something the local lane *cannot* run, not something it missed. A terminal park is the deterministic `<crew dir>/task/ci-park-cycle-<n>.json` artifact. This verb returns `measured: false` for every window that has ever existed because its writer is RETIRED, not merely unreached: the watcher that was its only caller measured zero rows for all time and was deleted 2026-08-26 by lane b264-ciretireb2 (#535), while the tables, their writers and this verb stay by decision U-4. |
 | Why is the queue not moving — and what did the loop actually do? | `node scripts/factory/ledger.mjs intake-sweeps [--since <iso>] [--until <iso>]` — prints the swept/picked/parked tally for the window, one row per sweep outcome × reason, one row per refusal reason, and the `intake_dispatches` block. Sweeps and dispatches join on `(board_owner, board_project, sweep_at)`; the unit of a dispatch row is one recorded step. The unit is one sweep; refusal rows are candidates. This verb returns `measured: false` for every window that has ever existed because no production invocation reaches its writer: intake passes `dbPath: null` by design (`scripts/factory/intake.mjs:1744`). |
 | Are we leaking workers? | `node scripts/factory/ledger.mjs seat-teardowns [--since <iso>] [--until <iso>]` — prints the window's torn-down/proven/leaked/unproven tally and one row per outcome × reason with first/last timestamps. The unit is one piped seat at one run's end. |
+| How many lanes did the factory lose to itself, and to what? | `node scripts/factory/ledger.mjs escalations --since <iso> [--until <iso>]` — prints one row per cause × actor with the count and first/last timestamps. The unit is one escalated run, counted at sessions.ended_at. |
 | Can a hand-driven run get its compiled request? | **Supported, hand-driven (#456)** — `node scripts/factory/ledger.mjs request <adw_id> --from-brief <path>` reads the first non-blank paragraph under `## The ask` and records it with `request_source: 'brief-file'`; missing, absent, or blank sections refuse rather than guessing. It is **not retired**: it is the only writer that reaches a production ledger today, because the intake dispatcher's call records under `withLedger`, a no-op without a `dbPath` (`scripts/factory/intake.mjs:812`). |
 
 Replace `<adw_id>` or `<task_slug>` placeholders with the run's identifier, and replace `<iso>` placeholders with an ISO-8601 timestamp such as `2026-08-15T00:00:00Z`; the optional tail flags are literal command-line options.
@@ -48,6 +49,12 @@ A sweep with **no** refusal rows means nothing was refused *that sweep*, never t
 A `claimed` row with no settled row is a **stranded** dispatch — the run may or may not have started, and the issue is deliberately left out of `Ready` so it is never re-dispatched; a `refused` row means nothing executed; `unreadable` is never a `done`; and a `promoted` row is the only evidence that a PR was seen — the loop never merges, approves or closes anything.
 
 The ledger declares **21 tables** plus SQLite's own `sqlite_sequence`. Seven are empty: `envelopes`, `processes`, `ci_cycles`, `ci_dispatches`, `intake_sweeps`, `intake_refusals`, and `intake_dispatches`. `envelopes` and `processes` are retired by declaration. The other five — `ci_cycles`, `ci_dispatches`, `intake_sweeps`, `intake_refusals`, and `intake_dispatches` — are unreached writers, not retired: the production paths do not invoke their writers, so their empty counts are not measured zeros.
+
+## Typed run outcomes
+
+`sessions.outcome` records the typed terminal result (`success`, `escalated`, `aborted`, or `failed`); `sessions.terminal_reason` records the measured cause or signal name; and `sessions.terminal_actor` records the actor that ended the run. NULL in any of these columns means the fact was not measured, never a measured zero, and no historical row is backfilled by inference. `sessions.status` keeps its old meaning and enum (`running`, `ok`, `fail`, or `aborted`), so an escalation remains legacy `aborted` while its typed outcome is `escalated`. The `task` readout carries `absent.outcome` for a row without a typed outcome.
+
+The closed escalation-cause vocabulary is `transport`, `budget`, `plan-build-disagreement`, `brief-contradiction`, `gate-defect`, `review-unresolved`, `infrastructure`, with `unclassified` for a `{where, why}` pair no rule classifies.
 
 ## Retired tables
 
@@ -370,7 +377,7 @@ Therefore a recipe may be run while a batch is live. The operator must still dis
 
 ### Recipe E — every escalation, where and why
 
-`returns/task.json` is the record: `details.escalation` is a `{where, why}` struct and `details.stages[]` ends in `escalate:<where>`. The ledger knows which and when through `phases.name='escalation'`, but not the where or why.
+`returns/task.json` is the record: `details.escalation` is a `{where, why}` struct and `details.stages[]` ends in `escalate:<where>`. The ledger now knows the typed cause and actor through `sessions.terminal_reason` / `sessions.terminal_actor`; this duckdb recipe remains the `why`-text record.
 
 ```sh
 duckdb -csv -c "

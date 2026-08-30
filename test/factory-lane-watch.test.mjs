@@ -11,6 +11,7 @@ import {
   driverGone,
   driverState,
   DRIVER_EXITED,
+  DRIVER_GONE_PERIODS,
   HEARTBEAT_PERIOD_MS,
   hostLoad,
   journalAt,
@@ -440,6 +441,40 @@ test('driverState distinguishes unknown, running and driver-gone with measured a
   assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }), { state: 'driver-gone', heartbeat_age_ms: 61_000 })
   assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: 61_000 })
   assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null })
+})
+
+test('a headless lane reaches driver-gone only after two heartbeat periods', () => {
+  const root = world()
+  const seeded = seedLane(root, {
+    task: 'headless-driver-gone',
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+  })
+  const lane = { ...seeded, id: 'dt-demo/headless-driver-gone', repo: 'dt-demo', task: 'headless-driver-gone', transport: 'headless-json', settled: false }
+  const journal = readJournal(lane.journal)
+  const threshold = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  assert.equal(driverGone(lane, journal, {
+    now: NOW,
+    terminal: null,
+    session: { ended_at: null, last_heartbeat_at: NOW - threshold - 1 },
+  }), true)
+  assert.equal(driverGone(lane, journal, {
+    now: NOW,
+    terminal: null,
+    session: { ended_at: null, last_heartbeat_at: NOW - threshold + 1 },
+  }), false)
+})
+
+test('a headless lane with no measured heartbeat stays unknown and never driver-gone', () => {
+  const root = world()
+  const seeded = seedLane(root, {
+    task: 'headless-unmeasured',
+    journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }],
+  })
+  const lane = { ...seeded, id: 'dt-demo/headless-unmeasured', repo: 'dt-demo', task: 'headless-unmeasured', transport: 'headless-json', settled: false }
+  const journal = readJournal(lane.journal)
+  const ledger = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: null } }
+  assert.deepEqual(driverState(lane, journal, ledger), { state: 'unknown', heartbeat_age_ms: null })
+  assert.equal(driverGone(lane, journal, ledger), false)
 })
 
 test('runLogTerminal reads a bounded tail and treats absent, empty and unparseable logs as unknown', () => {

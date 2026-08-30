@@ -1730,6 +1730,7 @@ test('the visualizer CLI still accepts every flag it reads', async () => {
       'triage sidecar (may create visualizer.db and its WAL/SHM)',
       'stop-switch',
       'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)',
+      'Artificial Analysis key in the project .env.local when explicitly requested',
     ])
     await stopServer(child); child = null
   } finally {
@@ -1891,16 +1892,83 @@ test('ladder source and API calls carry the required drag surface', () => {
   const catalog = readFileSync(join(process.cwd(), 'visualizer/server/model-catalog.mjs'), 'utf8')
   for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
   assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
-  for (const needle of ['Roster workspace', 'Add a model manually', 'saved locally', 'Copy local draft', 'Run factory checks', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
+  for (const needle of ['Task profiles', 'Profiles shape the run', 'Capability bands', 'Separate from task profiles', 'evidence states, not extra bands', 'Roster workspace', 'Add a model manually', 'saved locally', 'Copy local draft', 'Run factory checks', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
+  assert.match(panel, /workflowStep = \$derived/)
+  assert.equal([...panel.matchAll(/class:active=\{workflowStep === \d\}/g)].length, 4)
+  assert.doesNotMatch(panel, /class:active=\{!selectedModel\}|class:active=\{draftCount > 0\}/)
   assert.match(panel, /localStorage\.setItem\(DRAFT_KEY/)
   assert.match(panel, /do not change the active factory/)
-  for (const needle of ['Artificial Analysis', 'Discover models', 'Intelligence', 'Lowest output price', 'Null means not measured', 'Session only', 'Connect catalog']) assert.match(panel, new RegExp(needle))
+  for (const needle of ['Artificial Analysis', 'Discover models', 'Intelligence', 'Lowest output price', 'Null means not measured', 'Remember on this machine', 'Save & connect', 'Connect for this run', 'Connected ·', 'credential_source', 'Reasoning effort', 'groupDirectoryModels', 'reasoning_effort']) assert.match(panel, new RegExp(needle))
   assert.match(api, /getModelCatalog.*\/api\/model-catalog/)
   assert.match(api, /setModelCatalogKey.*\/api\/model-catalog\/key/)
+  assert.match(api, /persist:options\.persist === true/)
   assert.match(server, /\/api\/model-catalog\/key/)
+  assert.match(server, /saveArtificialAnalysisKey/)
   assert.match(catalog, /x-api-key/)
   assert.doesNotMatch(panel, /x-api-key/)
   assert.doesNotMatch(panel, /localStorage.*catalogKey|catalogKey.*localStorage/)
+})
+
+test('the model catalog endpoint persists a key only when explicitly requested', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'visualizer-catalog-env-'))
+  const envFile = join(dir, '.env.local')
+  let handles
+  try {
+    handles = await startInProcess({}, {
+      envFile,
+      fetchImpl:async () => new Response(JSON.stringify({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] }), { status:200, headers:{ 'content-type':'application/json' } }),
+    })
+    const saved = await json(handles.base, '/api/model-catalog/key', {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ api_key:'saved-catalog-secret', persist:true }),
+    })
+    assert.equal(saved.status, 200)
+    assert.equal(saved.json.persisted, true)
+    assert.equal(saved.json.credential_source, 'environment')
+    assert.doesNotMatch(saved.body, /saved-catalog-secret/)
+    assert.match(readFileSync(envFile, 'utf8'), /^ARTIFICIAL_ANALYSIS_API_KEY="saved-catalog-secret"\n$/)
+
+    const temporary = await json(handles.base, '/api/model-catalog/key', {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ api_key:'temporary-catalog-secret', persist:false }),
+    })
+    assert.equal(temporary.json.persisted, false)
+    assert.equal(temporary.json.credential_source, 'session')
+    assert.doesNotMatch(temporary.body, /temporary-catalog-secret/)
+    assert.doesNotMatch(readFileSync(envFile, 'utf8'), /temporary-catalog-secret/)
+
+    const restored = await json(handles.base, '/api/model-catalog/key', {
+      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ api_key:null }),
+    })
+    assert.equal(restored.json.credential_source, 'environment')
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+    rmSync(dir, { recursive:true, force:true })
+  }
+})
+
+test('visualizer loads only a git-ignored local env file for catalog secrets', () => {
+  const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'))
+  const ignore = readFileSync(join(process.cwd(), '.gitignore'), 'utf8')
+  const example = readFileSync(join(process.cwd(), '.env.example'), 'utf8')
+  assert.match(pkg.scripts['viz:serve'], /--env-file-if-exists=\.env\.local/)
+  assert.match(ignore, /^\.env\.\*$/m)
+  assert.match(ignore, /^!\.env\.example$/m)
+  assert.match(example, /^ARTIFICIAL_ANALYSIS_API_KEY=$/m)
+  assert.doesNotMatch(example, /ARTIFICIAL_ANALYSIS_API_KEY=.+/)
+})
+
+test('visualizer dropdowns use the shared themed listbox instead of native menus', () => {
+  const root = join(process.cwd(), 'visualizer', 'web', 'src')
+  const dropdown = readFileSync(join(root, 'lib', 'Dropdown.svelte'), 'utf8')
+  const consumers = ['App.svelte', 'lib/Filters.svelte', 'lib/Pagination.svelte', 'lib/TaskList.svelte', 'lib/EventStream.svelte', 'lib/RosterEditor.svelte', 'lib/RosterPanel.svelte']
+  for (const file of consumers) {
+    const source = readFileSync(join(root, file), 'utf8')
+    assert.match(source, /Dropdown/)
+    assert.doesNotMatch(source, /<select\b/)
+  }
+  for (const needle of ['role="combobox"', 'role="listbox"', 'role="option"', 'aria-controls', 'ArrowDown', 'ArrowUp', 'Escape', 'dropdown-menu']) assert.match(dropdown, new RegExp(needle))
+  assert.match(dropdown, /var\(--panel-raised\)/)
 })
 
 test('viz-absent-cause-per-call — a second failure through one handle reports the second cause', { skip: SKIP }, () => {

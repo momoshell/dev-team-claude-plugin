@@ -1,6 +1,7 @@
 <script>
   import { deriveDisplayStatus, durationCell, gateCell, reviewCell, runActivity, tokenCell } from './fleet.js'
   import Pagination from './Pagination.svelte'
+  import Dropdown from './Dropdown.svelte'
 
   let { runs = [], envelopes = new Map(), now = Date.now(), onopen = () => {} } = $props()
   let query = $state('')
@@ -39,6 +40,7 @@
   function cacheRate(value) { return value == null ? null : `${value.toFixed(1)}% cache hit` }
 
   let tiers = $derived([...new Set(runs.map((run) => run.tier).filter(Boolean))].sort())
+  let tierOptions = $derived([{ value:'all', label:'All tiers' }, ...tiers.map((value) => ({ value, label:value }))])
   let counts = $derived({
     all: runs.filter((run) => !run.triage?.reviewed_at).length,
     active: runs.filter((run) => activityFor(run).live && !run.triage?.reviewed_at).length,
@@ -61,7 +63,7 @@
   </div>
   <div class="toolbar">
     <label class="search"><span class="search-mark" aria-hidden="true"></span><input bind:value={query} placeholder="Search tasks, repositories, or run IDs" aria-label="Search tasks" /></label>
-    <label class="select-label"><span>Tier</span><select bind:value={tier}><option value="all">All tiers</option>{#each tiers as option}<option value={option}>{option}</option>{/each}</select></label>
+    <label class="select-label"><span>Tier</span><Dropdown bind:value={tier} options={tierOptions} ariaLabel="Task tier" width="8rem" variant="compact" /></label>
     <label class="archive"><input type="checkbox" bind:checked={showArchived} /><span>Show archived</span></label>
   </div>
 
@@ -106,7 +108,7 @@
 .search { position:relative; flex:1; min-width:14rem; }.search input { width:100%; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.55rem .75rem .55rem 2.15rem; }
 .search-mark { position:absolute; left:.8rem; top:50%; width:.72rem; height:.72rem; border:1.5px solid var(--muted); border-radius:50%; transform:translateY(-60%); pointer-events:none; }
 .search-mark::after { content:''; position:absolute; width:.38rem; height:1.5px; background:var(--muted); right:-.28rem; bottom:-.16rem; transform:rotate(45deg); }
-.select-label { display:flex; align-items:center; gap:.45rem; color:var(--muted); font-size:.78rem; }.select-label select { border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.4rem .65rem; }
+.select-label { display:flex; align-items:center; gap:.45rem; color:var(--muted); font-size:.78rem; }
 .archive { display:flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.78rem; white-space:nowrap; }.archive input { min-height:auto; accent-color:var(--accent); }
 .table-wrap { overflow:auto; } table { width:100%; min-width:980px; border-collapse:collapse; }
 th { padding:.65rem .85rem; color:var(--muted); font-size:.67rem; letter-spacing:.11em; text-transform:uppercase; text-align:left; font-weight:700; }

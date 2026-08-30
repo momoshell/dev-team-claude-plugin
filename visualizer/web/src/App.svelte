@@ -12,6 +12,9 @@
   import IntakePanel from './lib/IntakePanel.svelte'
   import RosterPanel from './lib/RosterPanel.svelte'
   import RunDetail from './lib/RunDetail.svelte'
+  import Dropdown from './lib/Dropdown.svelte'
+
+  const THEME_OPTIONS = [{ value:'ink', label:'Dark' }, { value:'paper', label:'Light' }, { value:'os', label:'System' }]
 
   let route = $state(parseHash(location.hash))
   let themeValue = 'ink'
@@ -145,7 +148,7 @@
   </nav>
   <div class="tools">
     <span class:degraded={feedDegraded} class:silent={!feedDegraded && !activity.live && (activity.silent || activity.unverified)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.live ? `${activity.live} live` : activity.silent ? `${activity.silent} silent session${activity.silent === 1 ? '' : 's'}` : activity.unverified ? `0 live · ${activity.unverified} heartbeat unavailable` : 'Ledger ready'}</span>
-    <label class="theme"><span>Theme</span><select bind:value={theme} aria-label="Theme"><option value="ink">Dark</option><option value="paper">Light</option><option value="os">System</option></select></label>
+    <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="5.2rem" variant="compact" /></label>
   </div>
 </header>
 
@@ -191,7 +194,7 @@
 nav { justify-self:center; display:flex; gap:.3rem; padding:.25rem; border:1px solid var(--line); border-radius:.65rem; background:color-mix(in srgb,var(--panel) 85%,transparent); }
 nav button { position:relative; border:0; border-radius:.45rem; background:transparent; color:var(--muted); padding:.45rem .8rem; font-size:.78rem; cursor:pointer; } nav button.active { color:inherit; background:var(--panel-raised); box-shadow:0 1px 6px rgba(0,0,0,.15); }
 .tools { justify-self:end; display:flex; align-items:center; gap:.8rem; }.connection { display:inline-flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.7rem; white-space:nowrap; }.connection i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px var(--status-ok); }.connection.degraded,.connection.silent { color:var(--status-escalated); }.connection.degraded i,.connection.silent i { background:var(--status-escalated); box-shadow:none; }
-.theme { display:flex; align-items:center; gap:.35rem; }.theme span { position:absolute; width:1px; height:1px; overflow:hidden; }.theme select { min-height:2rem; border:1px solid var(--line); border-radius:.45rem; background:var(--panel); color:var(--muted); padding:0 .45rem; font-size:.7rem; }
+.theme { display:flex; align-items:center; gap:.35rem; }.theme > span { position:absolute; width:1px; height:1px; overflow:hidden; }
 .page { position:relative; width:min(1440px,100%); margin:auto; padding:2rem 1.25rem 4rem; }.page-heading { display:flex; justify-content:space-between; align-items:end; gap:1rem; margin-bottom:1rem; }.page-heading h1 { margin:.1rem 0 .35rem; font-size:clamp(1.7rem,3vw,2.35rem); letter-spacing:-.04em; }.page-heading p { margin:0; color:var(--muted); max-width:44rem; font-size:.9rem; }.page-heading .eyebrow { color:var(--accent); font-size:.66rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }.updated { color:var(--muted); font-size:.7rem; padding-bottom:.35rem; white-space:nowrap; }
 .ops-grid { display:grid; gap:1rem; grid-template-columns:repeat(2,minmax(0,1fr)); }
 .ops-section-heading { display:flex; align-items:end; justify-content:space-between; gap:1rem; margin:2rem 0 .8rem; }.ops-section-heading h2 { margin:.12rem 0 0; font-size:1.15rem; }.ops-section-heading p { max-width:34rem; margin:0; color:var(--muted); font-size:.7rem; text-align:right; }

@@ -1,4 +1,6 @@
 <script>
+  import Dropdown from './Dropdown.svelte'
+  const PAGE_SIZES = [8, 12, 24, 48].map((value) => ({ value, label:String(value) }))
   let { page = $bindable(1), pageSize = $bindable(12), total = 0, label = 'items' } = $props()
   let pages = $derived(Math.max(1, Math.ceil(total / pageSize)))
   let start = $derived(total ? (page - 1) * pageSize + 1 : 0)
@@ -9,9 +11,7 @@
 <div class="pagination" aria-label="Pagination">
   <p><strong>{start}–{end}</strong> of {total} {label}</p>
   <label>Rows
-    <select bind:value={pageSize} onchange={() => page = 1} aria-label="Rows per page">
-      <option value={8}>8</option><option value={12}>12</option><option value={24}>24</option><option value={48}>48</option>
-    </select>
+    <Dropdown bind:value={pageSize} options={PAGE_SIZES} onchange={() => page = 1} ariaLabel="Rows per page" width="4rem" variant="compact" />
   </label>
   <div class="buttons">
     <button type="button" onclick={() => page = 1} disabled={page === 1} aria-label="First page">«</button>
@@ -26,8 +26,7 @@
 .pagination { display:flex; align-items:center; gap:1rem; padding:1rem 1.1rem; border-top:1px solid var(--line); color:var(--muted); font-size:.82rem; }
 .pagination p { margin:0; }
 .pagination label { display:flex; align-items:center; gap:.45rem; margin-left:auto; }
-select, button { border:1px solid var(--line); background:var(--panel-raised); border-radius:var(--radius-sm); }
-select { min-height:2rem; padding:0 .45rem; }
+.buttons button { border:1px solid var(--line); background:var(--panel-raised); border-radius:var(--radius-sm); }
 .buttons { display:flex; align-items:center; gap:.35rem; }
 .buttons button { width:2rem; min-height:2rem; padding:0; cursor:pointer; }
 .buttons button:disabled { opacity:.35; cursor:not-allowed; }

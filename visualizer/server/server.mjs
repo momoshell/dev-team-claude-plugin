@@ -11,6 +11,7 @@ import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
 import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
+import { saveArtificialAnalysisKey } from './local-env.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
 import { openLedger } from '../../scripts/factory/ledger.mjs'
 import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTeardownWindow, RUN_SET_WINDOW_MS, shapeCellHealth, shapeRunSet, shapeIntake, shapeSeatTeardowns, shapeCellAttribution } from './shape.mjs'
@@ -20,6 +21,7 @@ import { defaultCellWindow, defaultRunSetWindow, defaultIntakeWindow, defaultTea
 export const STOP_SWITCH_PATH = '.factory/STOP'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+const PROJECT_ROOT = resolve(ROOT, '..')
 const DIST = resolve(ROOT, 'web', 'dist')
 const schema = 1
 const DEFAULT_PORT = 4488
@@ -272,6 +274,7 @@ function staticResponse(req, res) {
 export function startServer(options = {}) {
   const config = { ...defaults(), ...options }
   config.checkout = resolve(config.checkout || process.cwd())
+  config.envFile = resolve(config.envFile || join(PROJECT_ROOT, '.env.local'))
   const env = config.env ?? process.env
   const feed = config.feed || createFeed({ kind: config.kind || 'ledger', ledgerDb: config.ledgerDb, triageDb: config.triageDb })
   const returns = config.returns || createReturnsSource({ crewRoot: config.crewRoot })
@@ -511,10 +514,14 @@ export function startServer(options = {}) {
         try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
         if (!input || typeof input !== 'object' || Array.isArray(input)) return json(res, 400, { schema, error: 'request body must be an object' })
         try {
-          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await modelCatalog.get(), session_only:true }) }
-          modelCatalog.setApiKey(input.api_key)
+          if (input.api_key === null) { modelCatalog.clearApiKey(); return json(res, 200, { schema, ...await modelCatalog.get(), persisted:false }) }
+          if (input.persist !== undefined && typeof input.persist !== 'boolean') return json(res, 400, { schema, error:'persist must be a boolean' })
+          if (input.persist === true) {
+            saveArtificialAnalysisKey(config.envFile, input.api_key)
+            modelCatalog.setPersistentApiKey(input.api_key)
+          } else modelCatalog.setApiKey(input.api_key)
         } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid api_key' }) }
-        return json(res, 200, { schema, ...await modelCatalog.get(), session_only:true })
+        return json(res, 200, { schema, ...await modelCatalog.get(), persisted:input.persist === true })
       }
       if (url.pathname === '/api/roster/ladder/stage') {
         if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
@@ -578,7 +585,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
   return { server, feed }
 }

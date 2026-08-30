@@ -16,6 +16,22 @@ function slug(value) {
   return String(value || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
 }
 
+const EFFORT = Object.freeze(['minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+
+export function artificialAnalysisVariant(name) {
+  const value = String(name || '').trim()
+  const suffix = /\(([^()]*)\)\s*$/.exec(value)
+  if (!suffix) return { family_name:value, family_slug:slug(value), reasoning_effort:null, reasoning_mode:null }
+  const detail = suffix[1].toLowerCase()
+  const effort = EFFORT.find((candidate) => new RegExp(`\\b${candidate}\\b`).test(detail)) || null
+  const mode = detail.includes('non-reasoning') ? 'non-reasoning'
+    : detail.includes('adaptive reasoning') ? 'adaptive'
+      : detail.includes('reasoning') ? 'reasoning' : null
+  if (!effort && !mode) return { family_name:value, family_slug:slug(value), reasoning_effort:null, reasoning_mode:null }
+  const familyName = value.slice(0, suffix.index).trim()
+  return { family_name:familyName, family_slug:slug(familyName), reasoning_effort:effort, reasoning_mode:mode }
+}
+
 export function shapeArtificialAnalysisModel(model) {
   if (!record(model) || typeof model.id !== 'string' || typeof model.name !== 'string' || typeof model.slug !== 'string') return null
   const evaluations = record(model.evaluations) ? model.evaluations : {}
@@ -24,6 +40,7 @@ export function shapeArtificialAnalysisModel(model) {
   const indexCost = record(model.artificial_analysis_intelligence_index_cost) ? model.artificial_analysis_intelligence_index_cost : {}
   const costPerTask = record(indexCost.cost_per_task) ? indexCost.cost_per_task : {}
   const creator = record(model.model_creator) ? model.model_creator : {}
+  const variant = artificialAnalysisVariant(model.name)
   return {
     source_id: model.id,
     name: model.name,
@@ -32,6 +49,7 @@ export function shapeArtificialAnalysisModel(model) {
     creator_id: typeof creator.id === 'string' ? creator.id : null,
     provider_hint: slug(creator.name) || null,
     runtime_id_hint: typeof model.openrouter_api_id === 'string' && model.openrouter_api_id ? model.openrouter_api_id : model.slug,
+    ...variant,
     release_date: typeof model.release_date === 'string' ? model.release_date : null,
     intelligence: measured(evaluations.artificial_analysis_intelligence_index),
     coding: measured(evaluations.artificial_analysis_coding_index),
@@ -58,7 +76,9 @@ function errorMessage(status, payload) {
 export function createArtificialAnalysisCatalog({ apiKey, fetchImpl = globalThis.fetch, now = () => Date.now(), cacheMs = CACHE_MS } = {}) {
   let cache = null
   let inFlight = null
-  let currentApiKey = typeof apiKey === 'string' ? apiKey.trim() : ''
+  let environmentApiKey = typeof apiKey === 'string' ? apiKey.trim() : ''
+  let currentApiKey = environmentApiKey
+  let credentialSource = environmentApiKey ? 'environment' : null
 
   async function readPage(page) {
     const response = await fetchImpl(`${API_URL}?page=${page}`, {
@@ -89,6 +109,7 @@ export function createArtificialAnalysisCatalog({ apiKey, fetchImpl = globalThis
     const models = rows.map(shapeArtificialAnalysisModel).filter(Boolean)
     const value = {
       configured: true,
+      credential_source: credentialSource,
       source: SOURCE,
       source_url: SOURCE_URL,
       fetched_at: new Date(now()).toISOString(),
@@ -105,6 +126,7 @@ export function createArtificialAnalysisCatalog({ apiKey, fetchImpl = globalThis
   async function get() {
     if (currentApiKey === '') return {
       configured: false,
+      credential_source: null,
       source: SOURCE,
       source_url: SOURCE_URL,
       fetched_at: null,
@@ -112,7 +134,7 @@ export function createArtificialAnalysisCatalog({ apiKey, fetchImpl = globalThis
       tier: null,
       intelligence_index_version: null,
       models: null,
-      absent: 'Set ARTIFICIAL_ANALYSIS_API_KEY on the visualizer server to load the benchmark catalog.',
+      absent: 'Add an Artificial Analysis API key to load current benchmark data.',
     }
     if (cache && now() - cache.at < cacheMs) return cache.value
     if (!inFlight) inFlight = refresh().finally(() => { inFlight = null })
@@ -120,6 +142,7 @@ export function createArtificialAnalysisCatalog({ apiKey, fetchImpl = globalThis
       if (cache) return { ...cache.value, stale: true, absent: err?.message || String(err) }
       return {
         configured: true,
+        credential_source: credentialSource,
         source: SOURCE,
         source_url: SOURCE_URL,
         fetched_at: null,
@@ -133,17 +156,26 @@ export function createArtificialAnalysisCatalog({ apiKey, fetchImpl = globalThis
   }
 
   function setApiKey(value) {
-    if (typeof value !== 'string' || value.trim().length < 8 || value.trim().length > 512) throw new Error('api_key must be between 8 and 512 characters')
+    if (typeof value !== 'string' || value.trim().length < 8 || value.trim().length > 512 || /[\r\n\0]/.test(value)) throw new Error('api_key must be a single line between 8 and 512 characters')
     currentApiKey = value.trim()
+    credentialSource = 'session'
     cache = null
-    return { configured:true }
+    return { configured:true, credential_source:credentialSource }
+  }
+
+  function setPersistentApiKey(value) {
+    setApiKey(value)
+    environmentApiKey = currentApiKey
+    credentialSource = 'environment'
+    return { configured:true, credential_source:credentialSource }
   }
 
   function clearApiKey() {
-    currentApiKey = ''
+    currentApiKey = environmentApiKey
+    credentialSource = environmentApiKey ? 'environment' : null
     cache = null
-    return { configured:false }
+    return { configured:Boolean(currentApiKey), credential_source:credentialSource }
   }
 
-  return { get, setApiKey, clearApiKey }
+  return { get, setApiKey, setPersistentApiKey, clearApiKey }
 }

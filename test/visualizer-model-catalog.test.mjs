@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { createArtificialAnalysisCatalog, shapeArtificialAnalysisModel } from '../visualizer/server/model-catalog.mjs'
+import { artificialAnalysisVariant, createArtificialAnalysisCatalog, shapeArtificialAnalysisModel } from '../visualizer/server/model-catalog.mjs'
 
 function response(payload, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => payload }
@@ -20,13 +20,26 @@ test('Artificial Analysis rows preserve missing measurements as null', () => {
   }, { creator: 'Example AI', provider: 'example-ai', intelligence: 42, coding: null, input: 0, output: 0.2, speed: null })
 })
 
-test('an unconfigured catalog names the server-side key without making a request', async () => {
+test('Artificial Analysis reasoning variants preserve one model family and a separate effort', () => {
+  assert.deepEqual(artificialAnalysisVariant('Grok 4.6 (xhigh)'), {
+    family_name:'Grok 4.6', family_slug:'grok-4-6', reasoning_effort:'xhigh', reasoning_mode:null,
+  })
+  assert.deepEqual(artificialAnalysisVariant('Claude Opus 5 (Adaptive Reasoning, Medium Effort)'), {
+    family_name:'Claude Opus 5', family_slug:'claude-opus-5', reasoning_effort:'medium', reasoning_mode:'adaptive',
+  })
+  assert.deepEqual(artificialAnalysisVariant("Claude 3.5 Sonnet (Oct '24)"), {
+    family_name:"Claude 3.5 Sonnet (Oct '24)", family_slug:'claude-3-5-sonnet-oct-24', reasoning_effort:null, reasoning_mode:null,
+  })
+})
+
+test('an unconfigured catalog explains how to connect without making a request', async () => {
   let calls = 0
   const catalog = createArtificialAnalysisCatalog({ fetchImpl: async () => { calls += 1 } })
   const result = await catalog.get()
   assert.equal(result.configured, false)
+  assert.equal(result.credential_source, null)
   assert.equal(result.models, null)
-  assert.match(result.absent, /ARTIFICIAL_ANALYSIS_API_KEY/)
+  assert.match(result.absent, /Add an Artificial Analysis API key/)
   assert.equal(calls, 0)
 })
 
@@ -36,13 +49,37 @@ test('a session key can connect and disconnect without ever being returned', asy
     seen.push(options.headers['x-api-key'])
     return response({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] })
   } })
-  assert.deepEqual(catalog.setApiKey('session-secret'), { configured:true })
+  assert.deepEqual(catalog.setApiKey('session-secret'), { configured:true, credential_source:'session' })
   const connected = await catalog.get()
   assert.equal(connected.configured, true)
+  assert.equal(connected.credential_source, 'session')
   assert.equal(Object.hasOwn(connected, 'api_key'), false)
   assert.deepEqual(seen, ['session-secret'])
-  assert.deepEqual(catalog.clearApiKey(), { configured:false })
+  assert.deepEqual(catalog.clearApiKey(), { configured:false, credential_source:null })
   assert.equal((await catalog.get()).configured, false)
+})
+
+test('clearing a temporary override restores the environment key', async () => {
+  const seen = []
+  const catalog = createArtificialAnalysisCatalog({ apiKey:'environment-secret', fetchImpl:async (_url, options) => {
+    seen.push(options.headers['x-api-key'])
+    return response({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] })
+  } })
+  assert.equal((await catalog.get()).credential_source, 'environment')
+  catalog.setApiKey('temporary-secret')
+  assert.equal((await catalog.get()).credential_source, 'session')
+  assert.deepEqual(catalog.clearApiKey(), { configured:true, credential_source:'environment' })
+  assert.equal((await catalog.get()).credential_source, 'environment')
+  assert.deepEqual(seen, ['environment-secret', 'temporary-secret', 'environment-secret'])
+})
+
+test('a persisted key becomes the environment baseline immediately', async () => {
+  const catalog = createArtificialAnalysisCatalog({ fetchImpl:async () => response({ tier:'free', intelligence_index_version:4.1, pagination:{ has_more:false }, data:[] }) })
+  assert.deepEqual(catalog.setPersistentApiKey('saved-secret'), { configured:true, credential_source:'environment' })
+  assert.equal((await catalog.get()).credential_source, 'environment')
+  catalog.setApiKey('temporary-secret')
+  catalog.clearApiKey()
+  assert.equal((await catalog.get()).credential_source, 'environment')
 })
 
 test('the catalog drains pagination and caches a shaped attributed response', async () => {

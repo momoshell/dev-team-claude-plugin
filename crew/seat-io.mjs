@@ -1646,6 +1646,28 @@ export function transcriptGrowth(paths, deps = {}) {
   return latest
 }
 
+// #777: the per-seat files a HEADLESS transport writes. headless-json allocates
+// `<taskDir>/headless/d<N>/` (crew/headless.mjs:355,438,443); headless-rpc a reusable
+// `<taskDir>/headless-rpc/<role>/` (crew/headless-rpc.mjs:264,384-386). READ, never
+// written: this module owns no headless file. An unreadable root yields [], and an
+// empty list is an ABSENCE — transcriptGrowth reports null and nothing is stamped.
+// The headless-json run dirs are allocated per RUN, not per role, so a busy sibling
+// can be read here; the heartbeat is session-scoped (`target: 'session'`, :1316), so
+// a lane-level reading is exactly what it records.
+export function headlessStreamPaths({ taskDir, role, transport, deps = {} } = {}) {
+  const exists = deps.existsSync ?? fsExistsSync
+  const readdir = deps.readdirSync ?? fsReaddirSync
+  const files = (dir) => [join(dir, 'stream.jsonl'), join(dir, 'stderr.log')]
+  if (!taskDir) return []
+  if (transport === HEADLESS_RPC_TRANSPORT) return role ? files(join(taskDir, 'headless-rpc', String(role))) : []
+  if (transport !== HEADLESS_TRANSPORT) return []
+  const root = join(taskDir, 'headless')
+  let names
+  try { if (!exists(root)) return []; names = readdir(root) } catch { return [] }
+  if (!Array.isArray(names)) return []
+  return names.filter((name) => /^d\d+$/.test(String(name))).flatMap((name) => files(join(root, String(name))))
+}
+
 export function waitForEnvelope({ returnPath, timeoutS, role, readEnvelope, probeSeat, sampleSeat, sampleGrowth, onGrowth, onSubstrate, onAlive, classifyExpiry, onExtend, now, sleep }) {
   const started = now()
   let deadline = started + timeoutS * 1000
@@ -1971,11 +1993,39 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       emit: (event) => { try { io.emit?.(event) } catch { /* never load-bearing */ } },
     },
   }
+  // #777: a headless seat NEVER reaches waitForEnvelope — seatIo.wait hands it to
+  // transport.wait and the bounded re-ask hands it to transport.wait, so the pane-only
+  // onAlive is unreachable and the lane reads `heartbeat unavailable` for its whole
+  // life. deps.sleep is the ONE owned seam inside those synchronous poll loops. The
+  // measurement is transcript GROWTH and the stamp is the observation's OWN mtime:
+  // never now(), never a fallback clock.
+  const headlessWatch = { info: null, last: null }
+  const withHeadlessWatch = (info, run) => {
+    headlessWatch.info = info ?? null
+    headlessWatch.last = null
+    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null }
+  }
+  const sampleHeadlessGrowth = () => {
+    const info = headlessWatch.info
+    if (!info) return
+    const reading = transcriptGrowth(headlessStreamPaths({ taskDir: paths.taskDir, role: info.role, transport: info.transport, deps }), deps)
+    // A seat with no readable stream file measured NOTHING. A null beats a value
+    // nobody measured (#297) — never now(), never a fallback clock.
+    const latest = Number.isFinite(reading) ? reading : null
+    if (latest === null) return
+    // No PREVIOUS sample is not a measurement of growth: seed the baseline and
+    // stamp nothing. A first reading is a reading, not an advance.
+    if (headlessWatch.last === null) { headlessWatch.last = latest; return }
+    if (!(latest > headlessWatch.last)) return
+    headlessWatch.last = latest
+    try { io.emit?.({ kind: 'heartbeat', at: latest, role: info.role ?? null }) } catch { /* the ledger is never load-bearing for a wait */ }
+  }
   // Transport waits are synchronous Atomics.wait loops, so this is the only
   // owned seam at which a live seat can be captured without a timer. Always
   // serve the requested delay, even when the diagnostic capture fails.
   transportArgs.deps.sleep = (ms) => {
     try { capture.round() } catch { /* capture is never load-bearing */ }
+    try { sampleHeadlessGrowth() } catch { /* the growth reading is evidence, never load-bearing */ }
     sleep(ms)
   }
   function transportIo(name, role) {
@@ -2364,7 +2414,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     const window = Math.min(timeoutS, REASK_TIMEOUT_S)
     try {
       const env = reassignable
-        ? transport.wait(collectPath, window)
+        ? withHeadlessWatch(info, () => transport.wait(collectPath, window))
         : waitForEnvelope({
         returnPath,
         timeoutS: window,
@@ -2575,7 +2625,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       let settled = null   // the envelope THIS wait produced, if any — the only positive completion evidence
       try {
         const env = transport
-          ? transport.wait(returnPath, timeoutS)
+          ? withHeadlessWatch(info, () => transport.wait(returnPath, timeoutS))
           : waitForEnvelope({
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),

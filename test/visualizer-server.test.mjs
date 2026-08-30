@@ -1912,7 +1912,7 @@ test('ladder source and API calls carry the required drag surface', () => {
 })
 
 test('the model catalog endpoint persists a key only when explicitly requested', async () => {
-  const dir = mkdtempSync(join(tmpdir(), 'visualizer-catalog-env-'))
+  const dir = scratchDir('visualizer-catalog-env-')
   const envFile = join(dir, '.env.local')
   let handles
   try {

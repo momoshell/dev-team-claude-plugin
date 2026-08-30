@@ -1,12 +1,12 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { scratchDir } from './helpers.mjs'
 import { saveArtificialAnalysisKey } from '../visualizer/server/local-env.mjs'
 
 test('saving the catalog key preserves unrelated env values and removes duplicate assignments', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'visualizer-local-env-'))
+  const dir = scratchDir('visualizer-local-env-')
   const path = join(dir, '.env.local')
   try {
     writeFileSync(path, '# local settings\nOTHER=value\nARTIFICIAL_ANALYSIS_API_KEY="old-value"\nexport ARTIFICIAL_ANALYSIS_API_KEY=duplicate\n')
@@ -18,7 +18,7 @@ test('saving the catalog key preserves unrelated env values and removes duplicat
 })
 
 test('catalog keys with line breaks are refused before touching the env file', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'visualizer-local-env-refusal-'))
+  const dir = scratchDir('visualizer-local-env-refusal-')
   const path = join(dir, '.env.local')
   try {
     assert.throws(() => saveArtificialAnalysisKey(path, 'secret-value\nINJECTED=yes'), /single line/)

@@ -49,7 +49,7 @@
     <div class="cells">
       {#each panel.rows as row (row.key)}
         <article class={`cell ${row.tone}`}>
-          <div class="cell-main"><span class={`cell-mark ${row.tone}`}>{row.failures ?? '—'}</span><div><h3>{row.model_label}</h3><p>{row.roles_label} · {row.tiers_label}</p></div></div>
+          <div class="cell-main"><span class={`cell-mark ${row.tone}`}>{row.failures ?? '—'}</span><div><h3>{row.model_label}</h3><p>{row.roles_label} · assurance {row.tiers_label}</p></div></div>
           <div class="cell-result"><span class={`state ${row.tone}`}>{row.state === 'silent' ? 'clear window' : row.state === 'recorded' ? `${row.in_run} in-run failures` : row.state}</span>{#if row.kinds.length}<small>{row.kinds.map((kind) => kind.label).join(' · ')}</small>{:else}<small>No failure kinds recorded</small>{/if}</div>
           <details><summary>Evidence and pricing</summary><p>{row.label}</p><p>First {row.first_at || '—'} · last {row.last_at || '—'}</p>{#if row.price_label}<p>{row.price_label}</p>{:else if row.price_pending}<p>{row.price_pending}</p>{/if}</details>
         </article>

@@ -2,6 +2,7 @@
   import { getRoster, proposeRosterEdit } from './api.js'
   import { rosterEditForm, rosterProposal } from './panels.js'
   import Dropdown from './Dropdown.svelte'
+  import { assuranceOption } from './workflow-semantics.js'
 
   const AGENTS = [{ value:'claude', label:'claude' }, { value:'pi', label:'pi' }]
   const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'].map((value) => ({ value, label:value }))
@@ -13,7 +14,7 @@
   let loading = $state(false)
   let requestError = $state('')
   let form = $derived(rosterEditForm(payload, selection))
-  let tierOptions = $derived(form.tiers.map((value) => ({ value, label:value })))
+  let tierOptions = $derived(form.tiers.map(assuranceOption))
   let roleOptions = $derived(form.roles.map((value) => ({ value, label:value })))
   let proposal = $derived(rosterProposal(response))
 
@@ -60,7 +61,7 @@
     <h2>Propose roster edit</h2>
     <form onsubmit={(event) => { event.preventDefault(); submit() }}>
       <div class="fields">
-        <label>Tier <Dropdown bind:value={selection.tier} options={tierOptions} ariaLabel="Roster tier" width="9rem" /></label>
+        <label>Assurance <Dropdown bind:value={selection.tier} options={tierOptions} ariaLabel="Roster assurance" width="11rem" /></label>
         <label>Role <Dropdown bind:value={selection.role} options={roleOptions} ariaLabel="Roster role" width="9rem" /></label>
         <label>Provider <input bind:value={draft.provider} required /></label>
         <label>Model ID <input bind:value={draft.id} required /></label>

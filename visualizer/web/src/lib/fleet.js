@@ -1,3 +1,5 @@
+import { assuranceMeta } from './workflow-semantics.js'
+
 export const SILENT_AFTER_MS = 30_000
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 export const DEFAULT_FILTERS = Object.freeze({ hide_slugless: true, hide_archived: true })
@@ -84,7 +86,7 @@ export function runActivity(run = {}, now = Date.now()) {
     const quietFor = conciseAge(heartbeat.age_ms)
     return {
       key: 'silent', live: false, attention: true, heartbeat,
-      word: `silent ${quietFor}`, tone: 'serious',
+      word: `stale · heartbeat ${quietFor} ago`, tone: 'serious',
       why: `The session still says running, but its last heartbeat was ${quietFor} ago.`,
     }
   }
@@ -181,7 +183,8 @@ export function reviewCell(run = {}) {
 
 export function tierCell(run = {}) {
   if (run?.tier == null) return absenceMark(run?.pending?.tier)
-  return measuredCell(run.tier, String(run.tier))
+  const assurance = assuranceMeta(run.tier)
+  return { ...measuredCell(run.tier, assurance.label), key: assurance.key, summary: assurance.summary }
 }
 
 export function durationCell(run = {}) {

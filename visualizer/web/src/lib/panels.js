@@ -1,4 +1,5 @@
 import { tokenCell } from './fleet.js'
+import { assuranceMeta } from './workflow-semantics.js'
 
 const TOKEN_FIELDS = ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens']
 const RUN_SET_STATUSES = ['running', 'ok', 'fail', 'aborted']
@@ -342,7 +343,7 @@ export function cellHealthPanel(payload = {}, clock = {}) {
       price_label: priceParts.length ? priceParts.join(' · ') : null,
       price_pending: row?.price_pending ?? (row?.price == null ? 'not in the roster model catalog' : null),
       roles_label: roles.length ? roles.join(', ') : '—',
-      tiers_label: tiers.length ? tiers.join(', ') : '—',
+      tiers_label: tiers.length ? tiers.map((tier) => assuranceMeta(tier).label).join(', ') : '—',
       state,
       tone,
       label,

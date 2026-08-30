@@ -1,12 +1,15 @@
 <script>
   import { deriveDisplayStatus, durationCell, gateCell, reviewCell, runActivity, tokenCell } from './fleet.js'
+  import { assuranceMeta, assuranceOption, executionMeta, taskProfileMeta } from './workflow-semantics.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
-  let { runs = [], envelopes = new Map(), now = Date.now(), onopen = () => {} } = $props()
+  let { runs = [], envelopes = new Map(), now = Date.now(), onopen = () => {}, focus = null } = $props()
   let query = $state('')
   let state = $state('all')
-  let tier = $state('all')
+  let assurance = $state('all')
+  let taskProfile = $state('all')
+  let executionShape = $state('all')
   let showArchived = $state(false)
   let page = $state(1)
   let pageSize = $state(12)
@@ -24,7 +27,7 @@
   function matchesQuery(run) {
     const needle = query.trim().toLowerCase()
     if (!needle) return true
-    return [run.goal, run.repo_slug, run.adw_id, run.tier, run.engineer].some((value) => String(value || '').toLowerCase().includes(needle))
+    return [run.goal, run.repo_slug, run.adw_id, run.tier, assuranceMeta(run.tier).label, run.task_profile, taskProfileMeta(run.task_profile).label, run.variant, executionMeta(run.variant).label, run.engineer].some((value) => String(value || '').toLowerCase().includes(needle))
   }
   function phaseName(phase) { return String(phase?.name || 'phase').replaceAll('_', ' ') }
   function formatDate(value) {
@@ -40,20 +43,34 @@
   function cacheRate(value) { return value == null ? null : `${value.toFixed(1)}% cache hit` }
 
   let tiers = $derived([...new Set(runs.map((run) => run.tier).filter(Boolean))].sort())
-  let tierOptions = $derived([{ value:'all', label:'All tiers' }, ...tiers.map((value) => ({ value, label:value }))])
+  let assuranceOptions = $derived([{ value:'all', label:'All assurance' }, ...tiers.map(assuranceOption)])
+  let profiles = $derived([...new Set(runs.map((run) => run.task_profile).filter(Boolean))].sort())
+  let profileOptions = $derived([{ value:'all', label:'All profiles' }, ...profiles.map((value) => ({ value, label:taskProfileMeta(value).label }))])
+  let executionShapes = $derived([...new Set(runs.map((run) => run.variant).filter(Boolean))].sort())
+  let executionOptions = $derived([{ value:'all', label:'All execution' }, ...executionShapes.map((value) => ({ value, label:executionMeta(value).label }))])
   let counts = $derived({
     all: runs.filter((run) => !run.triage?.reviewed_at).length,
     active: runs.filter((run) => activityFor(run).live && !run.triage?.reviewed_at).length,
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
     attention: runs.filter((run) => ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
   })
-  let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (tier === 'all' || run.tier === tier) && matchesQuery(run)))
+  let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (assurance === 'all' || run.tier === assurance) && (taskProfile === 'all' || run.task_profile === taskProfile) && (executionShape === 'all' || run.variant === executionShape) && matchesQuery(run)))
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))
 
-  $effect(() => { void `${query}|${state}|${tier}|${showArchived}`; page = 1 })
+  $effect(() => { void `${query}|${state}|${assurance}|${taskProfile}|${executionShape}|${showArchived}`; page = 1 })
+  $effect(() => {
+    if (!focus?.revision || !['all', 'active', 'completed', 'attention'].includes(focus.state)) return
+    state = focus.state
+    query = ''
+    assurance = 'all'
+    taskProfile = 'all'
+    executionShape = 'all'
+    showArchived = false
+    page = 1
+  })
 </script>
 
-<section class="tasks-panel">
+<section class="tasks-panel" id="task-board">
   <div class="status-tabs" role="tablist" aria-label="Task status">
     {#each [['all','All tasks'], ['active','Live now'], ['completed','Completed'], ['attention','Needs attention']] as tab (tab[0])}
       <button type="button" class:active={state === tab[0]} onclick={() => state = tab[0]} role="tab" aria-selected={state === tab[0]}>
@@ -63,7 +80,9 @@
   </div>
   <div class="toolbar">
     <label class="search"><span class="search-mark" aria-hidden="true"></span><input bind:value={query} placeholder="Search tasks, repositories, or run IDs" aria-label="Search tasks" /></label>
-    <label class="select-label"><span>Tier</span><Dropdown bind:value={tier} options={tierOptions} ariaLabel="Task tier" width="8rem" variant="compact" /></label>
+    {#if profiles.length}<label class="select-label"><span>Profile</span><Dropdown bind:value={taskProfile} options={profileOptions} ariaLabel="Task profile" width="9rem" variant="compact" /></label>{/if}
+    {#if executionShapes.length}<label class="select-label"><span>Execution</span><Dropdown bind:value={executionShape} options={executionOptions} ariaLabel="Execution shape" width="9rem" variant="compact" /></label>{/if}
+    <label class="select-label"><span>Assurance</span><Dropdown bind:value={assurance} options={assuranceOptions} ariaLabel="Task assurance" width="10.5rem" variant="compact" /></label>
     <label class="archive"><input type="checkbox" bind:checked={showArchived} /><span>Show archived</span></label>
   </div>
 
@@ -80,15 +99,15 @@
           {@const tokens = tokenCell(run)}
           <tr class:running={activity.live} class:silent={activity.attention && run.running} onclick={() => onopen(run)}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'} · <code>{String(run.adw_id || '').slice(0, 8)}</code></span></button></td>
-            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span><small>{run.tier || 'tier unavailable'}</small></td>
-            <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small>{run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
+            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span><small title={assuranceMeta(run.tier).key ? `Stored tier: ${assuranceMeta(run.tier).key}` : assuranceMeta(run.tier).summary}>{assuranceMeta(run.tier).label} assurance</small></td>
+            <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small>{run.variant ? `${executionMeta(run.variant).label} · ` : ''}{run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
             <td class="proof"><span class:muted={gate.dashed}>{gate.dashed ? 'No gate proof' : gate.text}</span><small class:muted={review.dashed}>{review.dashed ? 'No review yet' : review.text}</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
             <td class="usage"><strong>{tokens.dashed ? '—' : shortNumber(tokens.value)}</strong><small title={tokens.cacheRate == null ? tokens.cachePending : 'Cache reads ÷ input, cache writes, and cache reads'}>{tokens.dashed ? 'Not measured' : tokens.cacheRate == null ? 'Cache hit not measured' : cacheRate(tokens.cacheRate)}</small></td>
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>
           </tr>
         {:else}
-          <tr><td colspan="7" class="empty"><strong>No tasks match this view.</strong><span>Try another status, tier, or search term.</span></td></tr>
+          <tr><td colspan="7" class="empty"><strong>No tasks match this view.</strong><span>Try another status, assurance preset, or search term.</span></td></tr>
         {/each}
       </tbody>
     </table>

@@ -9,6 +9,21 @@ import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, 
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
+import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
+
+test('workflow semantics separate profile, execution and assurance without inference', () => {
+  assert.deepEqual(assuranceOption('build'), { value:'build', label:'Standard · build' })
+  assert.equal(assuranceMeta('mechanical').label, 'Quick')
+  assert.equal(assuranceMeta('judge').label, 'Rigorous')
+  assert.equal(executionMeta('scout').label, 'Scout')
+  assert.equal(taskProfileMeta(null).label, 'Not recorded')
+  assert.match(taskProfileMeta(null).summary, /does not infer/)
+  assert.deepEqual(runConfiguration({ tier:'build', variant:'full' }), {
+    profile: taskProfileMeta(null),
+    execution: executionMeta('full'),
+    assurance: assuranceMeta('build'),
+  })
+})
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
   const result = fleetTokens([
@@ -133,12 +148,14 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
   const root = join(process.cwd(), 'visualizer/web/src')
   const strip = readFileSync(join(root, 'lib/MetricsStrip.svelte'), 'utf8')
   const app = readFileSync(join(root, 'App.svelte'), 'utf8')
+  const taskList = readFileSync(join(root, 'lib/TaskList.svelte'), 'utf8')
   const importLine = strip.split('\n').find((line) => line.includes("from './panels.js'"))
   assert.ok(importLine)
   for (const name of ['fleetPassRate', 'fleetMedianDuration', 'fleetPhasesPerRun', 'fleetEscalationRate']) {
     assert.match(importLine, new RegExp(`\\b${name}\\b`))
   }
-  assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false, now = Date\.now\(\) \} = \$props\(\)/)
+  assert.match(strip, /let \{ runs = \[\], envelopes = null, degraded = false, now = Date\.now\(\), onactivity = \(\) => \{\} \} = \$props\(\)/)
+  for (const needle of ['Activity now', 'open', 'live', 'unverified', 'onactivity']) assert.match(strip, new RegExp(needle))
   for (const pattern of [/runs\.filter\(/, /runs\.reduce\(/, /runs\.map\(/, /\.sort\(/]) {
     assert.doesNotMatch(strip, pattern)
   }
@@ -149,7 +166,12 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
     assert.match(mount, /envelopes=/)
     assert.match(mount, /degraded=/)
     assert.match(mount, /\{now\}/)
+    assert.match(mount, /onactivity=/)
   }
+  assert.match(app, /function focusActivity\(\)/)
+  assert.match(app, /focus=\{taskFocus\}/)
+  assert.match(taskList, /focus\?\.revision/)
+  assert.match(taskList, /id="task-board"/)
 })
 
 test('the metrics strip probes task envelopes for successful sessions', () => {
@@ -610,7 +632,7 @@ test('running records require a fresh heartbeat before the UI calls them live', 
   const unverified = { status: 'running', running: true, phases: [{}], pending: { last_heartbeat_at: 'not measured' } }
   assert.equal(runActivity(fresh, now).key, 'live')
   assert.equal(runActivity(stale, now).key, 'silent')
-  assert.equal(runActivity(stale, now).word, 'silent 1h 2m')
+  assert.equal(runActivity(stale, now).word, 'stale · heartbeat 1h 2m ago')
   assert.equal(runActivity(unverified, now).key, 'unverified')
   assert.equal(deriveDisplayStatus(stale, null, now).key, 'silent')
   assert.deepEqual(fleetActivity([fresh, stale, unverified], now), { live: 1, silent: 1, unverified: 1, open: 3 })

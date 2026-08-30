@@ -1,4 +1,5 @@
 <script>
+  import { tick } from 'svelte'
   import { getReturns, getSessions } from './lib/api.js'
   import { createSemaphore, deriveDisplayStatus, fleetActivity } from './lib/fleet.js'
   import { journalPulse } from './lib/live.js'
@@ -25,6 +26,7 @@
   let feedDegraded = $state(false)
   let error = $state('')
   let now = $state(Date.now())
+  let taskFocus = $state(null)
   let refreshGeneration = 0
   const returnRequestSemaphore = createSemaphore(6)
   const envelopeCache = new Map()
@@ -132,6 +134,13 @@
   function openRun(run) { navigate({ view: 'run', adw_id: run.adw_id }) }
   function openPhase(name) { if (selectedRun) navigate({ view: 'phase', adw_id: selectedRun.adw_id, phase: name }) }
   function backToTasks() { navigate({ view: 'fleet' }) }
+  async function focusActivity() {
+    const state = activity.silent || activity.unverified ? 'attention' : activity.live ? 'active' : 'all'
+    taskFocus = { state, revision: Date.now() }
+    if (route.view !== 'fleet') navigate({ view: 'fleet' })
+    await tick()
+    requestAnimationFrame(() => document.getElementById('task-board')?.scrollIntoView({ behavior:'smooth', block:'start' }))
+  }
 </script>
 
 <svelte:head><title>{pageTitle}</title><meta name="description" content="Factory task execution, model roster, and operational health." /></svelte:head>
@@ -147,7 +156,7 @@
     <button class:active={route.view === 'ops'} onclick={() => navigate({ view: 'ops' })}>Operations</button>
   </nav>
   <div class="tools">
-    <span class:degraded={feedDegraded} class:silent={!feedDegraded && !activity.live && (activity.silent || activity.unverified)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.live ? `${activity.live} live` : activity.silent ? `${activity.silent} silent session${activity.silent === 1 ? '' : 's'}` : activity.unverified ? `0 live · ${activity.unverified} heartbeat unavailable` : 'Ledger ready'}</span>
+    <span class:degraded={feedDegraded} class:silent={!feedDegraded && (activity.silent || activity.unverified)} class="connection"><i></i>{feedDegraded ? 'Feed degraded' : activity.silent ? `${activity.open} open · ${activity.silent} stale${activity.unverified ? ` · ${activity.unverified} unverified` : ''}` : activity.unverified ? `${activity.open} open · ${activity.unverified} unverified` : activity.live ? `${activity.live} live` : 'Ledger ready'}</span>
     <label class="theme"><span>Theme</span><Dropdown bind:value={theme} options={THEME_OPTIONS} ariaLabel="Theme" width="5.2rem" variant="compact" /></label>
   </div>
 </header>
@@ -162,27 +171,27 @@
   <main class="page">
     <div class="page-heading"><div><p class="eyebrow">Factory control room</p><h1>Operations</h1><p>See whether work is flowing, where reliability is slipping, and which evidence needs a closer look.</p></div><span class="updated">Live operating windows · refreshed automatically</span></div>
     <OperationsOverview {runs} degraded={feedDegraded} {now} onopen={openRun} />
-    <details class="ops-baseline"><summary>All-time task baseline</summary><MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} /></details>
+    <details class="ops-baseline"><summary>All-time task baseline</summary><MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} onactivity={focusActivity} /></details>
     <div class="ops-section-heading"><div><p class="eyebrow">Subsystem evidence</p><h2>Go deeper</h2></div><p>Each readout keeps its own measurement window and clearly separates zero from unavailable.</p></div>
     <div class="ops-grid"><CellHealthPanel /><RunSetPanel /><TeardownPanel /><IntakePanel /></div>
   </main>
 {:else if route.view === 'roster'}
   <main class="page">
-    <div class="page-heading"><div><p class="eyebrow">Capability map</p><h1>Model roster</h1><p>Who does the work at every factory tier, and why each model has that seat.</p></div></div>
+    <div class="page-heading"><div><p class="eyebrow">Capability map</p><h1>Model roster</h1><p>Who fills each assurance preset, which models are suitable, and what is currently ratified.</p></div></div>
     <RosterPanel />
   </main>
 {:else}
   <main class="page">
     <div class="page-heading task-heading"><div><p class="eyebrow">Work history</p><h1>Factory tasks</h1><p>Follow work in progress, inspect completed runs, and open the full execution waterfall.</p></div><span class="updated">Live ledger · refreshed automatically</span></div>
-    <MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} />
+    <MetricsStrip {runs} envelopes={envelopes} degraded={feedDegraded} {now} onactivity={focusActivity} />
     {#if error}<p class="error-banner">{error}</p>{/if}
     {#if attentionRows.length}
       <details class="attention">
-        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionBreakdown.escalated} escalated{attentionBreakdown.failed ? ` · ${attentionBreakdown.failed} failed` : ''}{attentionBreakdown.aborted ? ` · ${attentionBreakdown.aborted} aborted` : ''}{attentionBreakdown.silent ? ` · ${attentionBreakdown.silent} silent` : ''}{attentionBreakdown.unverified ? ` · ${attentionBreakdown.unverified} unverified` : ''}</small></span><span class="attention-total">{attentionRows.length}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
+        <summary><span class="attention-mark" aria-hidden="true">!</span><span class="attention-title"><strong>Needs attention</strong><small>{attentionBreakdown.escalated} escalated{attentionBreakdown.failed ? ` · ${attentionBreakdown.failed} failed` : ''}{attentionBreakdown.aborted ? ` · ${attentionBreakdown.aborted} aborted` : ''}{attentionBreakdown.silent ? ` · ${attentionBreakdown.silent} stale` : ''}{attentionBreakdown.unverified ? ` · ${attentionBreakdown.unverified} unverified` : ''}</small></span><span class="attention-total">{attentionRows.length}</span><span class="attention-action">Review queue <i aria-hidden="true"></i></span></summary>
         <div class="attention-list" aria-label="Tasks needing attention">{#each attentionRows as row (row.run.adw_id)}<button onclick={() => openRun(row.run)}><span><strong>{row.run.goal || row.run.adw_id}</strong><small>{row.status.where || row.run.repo_slug || (row.status.key === 'fail' ? 'Failed run' : row.status.key === 'aborted' ? 'Aborted run' : 'Escalated')}</small></span><span class="rail-why">{row.why}</span><span class={`rail-status ${row.status.tone}`}>{row.status.word}</span><b>Open →</b></button>{/each}</div>
       </details>
     {/if}
-    <TaskList {runs} {envelopes} {now} onopen={openRun} />
+    <TaskList {runs} {envelopes} {now} onopen={openRun} focus={taskFocus} />
   </main>
 {/if}
 

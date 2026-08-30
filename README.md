@@ -39,9 +39,20 @@ node crew/factoryctl.mjs ls
   `reap-stale.mjs`.
 - **`scripts/factory/`** — the run-trace mirror: a never-throwing emitter
   facade over a SQLite WAL ledger (instrumentation is never load-bearing).
+- **`skills/`, `commands/`** — the operating knowledge as Claude Code surfaces.
+  The knowledge skills (`pr-review`, `qa-test-writing`, `backend-node`,
+  `frontend-svelte`, `ui-design`, `devops`) work in any repo the moment the
+  plugin is installed; the runtime skills (`crew-dispatch`, `crew-recovery`)
+  drive the crew CLI and need this source tree. `crew-onboard` owns the split
+  and the foreign-checkout procedure. Commands are thin entry points that name
+  the skill owning each procedure: `/dispatch`, `/close-out`, `/status`,
+  `/onboard`.
 - **`docs/`** — the live design record: [`docs/adr/`](docs/adr/) is the
   architecture decision register (**grep it before minting an ADR number**),
   [`docs/conventions.md`](docs/conventions.md) the cross-cutting conventions.
+  [`CLAUDE.md`](CLAUDE.md) is the operating brief a session should read first —
+  it carries only the rules that are expensive to rediscover and points at
+  everything else.
 - **`tasks/`, `.claude/dev-team/`** — historical design records, including the
   retired first-generation runtime (a 14-agent orchestrator/lead/coder
   hierarchy with spec contracts and a review ladder). That system was retired

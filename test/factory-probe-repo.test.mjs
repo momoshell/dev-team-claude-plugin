@@ -174,7 +174,11 @@ test('self-hosting proposes the local lane, CI shape, conventions, and remote id
   assert.equal(workflow.jobs[0].id, 'test')
   assert.equal(workflow.jobs[0].check_name, 'test (node 26)')
   assert.ok(profile.fields.conventions.value.files.includes('docs/conventions.md'))
-  assert.ok(!profile.fields.conventions.value.files.includes('CLAUDE.md'))
+  // CLAUDE.md is the FIRST name gatherConventions looks for, and this repo now
+  // ships one. The previous assertion pinned its ABSENCE, which was a fact
+  // about the repo rather than a contract, and it went stale the moment the
+  // file landed. Pinning the presence keeps the detector honest instead.
+  assert.ok(profile.fields.conventions.value.files.includes('CLAUDE.md'))
   // The default branch is read from refs/remotes/origin/HEAD, which a local
   // clone has and a CI checkout does NOT (actions/checkout never sets it).
   // Both outcomes are correct probe behaviour, so this pins the CONTRACT —

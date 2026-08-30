@@ -3,7 +3,7 @@
 // command names its skill, and no command body carries the procedure content.
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT } from '../test/helpers.mjs'
@@ -16,8 +16,9 @@ const DISPATCHES_TO = {
   'dispatch.md': ['crew-dispatch'],
   'close-out.md': ['crew-recovery'],
   'status.md': ['devops', 'crew-recovery'],
+  'onboard.md': ['crew-onboard'],
 }
-const TAKES_ARGUMENT = ['dispatch.md', 'close-out.md']
+const TAKES_ARGUMENT = ['dispatch.md', 'close-out.md', 'onboard.md']
 
 // Procedure content the skills own. A command repeating any of these has
 // stopped being thin, and a single edit no longer keeps both surfaces true.
@@ -54,6 +55,14 @@ function frontValue(front, key) {
 function citedSkills(body) {
   return new Set([...body.matchAll(/`([a-z][a-z0-9-]*)`\s+skill/g)].map(([, name]) => name))
 }
+
+// Without this, a new command file escapes every assertion below: the suites
+// iterate DISPATCHES_TO, so an unlisted command is not thin-checked, not
+// argument-checked, and not skill-checked. The map must cover the directory.
+test('every command on disk is covered by this file', () => {
+  const onDisk = readdirSync(HERE).filter((name) => name.endsWith('.md')).sort()
+  assert.deepEqual(onDisk, Object.keys(DISPATCHES_TO).sort(), 'add the command to DISPATCHES_TO, or it is tested by nothing')
+})
 
 test('every command carries the frontmatter Claude Code reads', () => {
   for (const name of Object.keys(DISPATCHES_TO)) {

@@ -41,7 +41,9 @@ plan-accept check.
 `mechanical → build → judge`. Therefore `make-brief` prints `build` for a
 one-file protected hit even though a pane lane needs `--tier judge` at boot;
 the printed proposal is a proposal and must be overridden on that pane lane.
-Do not turn a proposal into a mid-run reseat.
+Do not turn a proposal into a mid-run reseat. A lane's `tier` is the
+operator's decision; the compiler's proposal advises and never raises it; only
+the protected floor constrains it.
 
 If the protected hit is separable from the ordinary work, split the lane rather
 than paying the protected floor for every file. #507 / b153-lab measured the

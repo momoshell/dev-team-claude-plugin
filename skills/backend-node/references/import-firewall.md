@@ -6,9 +6,10 @@ Exhibit: `crew/daemon.test.mjs:246`.
 The test admits builtins and a small first-party set.
 Exhibit: `crew/daemon.test.mjs:246`.
 
-The daemon's leaf exceptions—`crew/slug.mjs`, `crew/escalation-policy.mjs`, and
-`crew/variants.mjs`—must remain import-free; admitted non-leaf helpers such as
-`crew/headless-rpc.mjs` are outside this rule.
+The daemon's leaf exceptions—`crew/slug.mjs`, `crew/escalation-policy.mjs`,
+`crew/variants.mjs`, `crew/task-profiles.mjs`, `crew/assurances.mjs`, and
+`crew/run-configuration.mjs`—must remain import-free; admitted non-leaf helpers
+such as `crew/headless-rpc.mjs` are outside this rule.
 Exhibit: `crew/daemon.test.mjs:253`, `crew/daemon.test.mjs:255`, and
 `crew/daemon.test.mjs:257`.
 
@@ -21,7 +22,7 @@ Exhibit: `crew/daemon.test.mjs:255`.
 `crew/variants.mjs` must stay import-free.
 Exhibit: `crew/daemon.test.mjs:257`.
 
-These three checks are separate from the allowlist assertion.
+These six checks are separate from the allowlist assertion.
 Exhibit: `crew/daemon.test.mjs:246`.
 
 The separation matters: the daemon can admit a leaf only while its leaf

@@ -245,9 +245,9 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   // slug leaf, escalation policy, variants, and the JSON reader. A leaf is
   // only safe while it stays a leaf, so the next assertions pin that posture.
   assert.equal(
-    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs' || specifier === './variants.mjs' || specifier === './json-leaf.mjs'),
+    imports.every((specifier) => specifier?.startsWith('node:') || specifier === './headless-rpc.mjs' || specifier === './slug.mjs' || specifier === './escalation-policy.mjs' || specifier === './variants.mjs' || specifier === './json-leaf.mjs' || specifier === './task-profiles.mjs' || specifier === './assurances.mjs' || specifier === './run-configuration.mjs'),
     true,
-    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, the escalation policy leaf, the variants leaf, or the JSON leaf',
+    'every daemon import, including side-effect imports, must be a node builtin, the server-side rpc helper, the slug leaf, the escalation policy leaf, the variants leaf, the JSON leaf, or one of the run-configuration declaration leaves',
   )
   // Mutation killed: someone adding an import to slug.mjs — which would pull
   // that dependency into the server process through the allowlisted edge.
@@ -257,6 +257,16 @@ test('IMPORT FIREWALL: daemon.mjs carries no top-level import of the runner', ()
   assert.doesNotMatch(policyCode, /^\s*import\b/m, 'crew/escalation-policy.mjs must stay import-free: the daemon allowlists it as a LEAF')
   const variantsCode = readFileSync(new URL('./variants.mjs', import.meta.url), 'utf8')
   assert.doesNotMatch(variantsCode, /^\s*import\b/m, 'crew/variants.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  // The three run-configuration declaration leaves (#778, TRD §4.4). The
+  // daemon does not name them yet — #780/#781 wire the entry points — but the
+  // allowlist admits them now, so their leaf posture is pinned here beside the
+  // others rather than after the edge already exists.
+  const profilesCode = readFileSync(new URL('./task-profiles.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(profilesCode, /^\s*import\b/m, 'crew/task-profiles.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  const assurancesCode = readFileSync(new URL('./assurances.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(assurancesCode, /^\s*import\b/m, 'crew/assurances.mjs must stay import-free: the daemon allowlists it as a LEAF')
+  const runConfigurationCode = readFileSync(new URL('./run-configuration.mjs', import.meta.url), 'utf8')
+  assert.doesNotMatch(runConfigurationCode, /^\s*import\b/m, 'crew/run-configuration.mjs must stay import-free: the daemon allowlists it as a LEAF')
   // The JSON leaf is the one allowlisted leaf that is NOT import-free — it
   // legitimately reads through node:fs — so the import-free shape above cannot
   // pin it. Its leaf posture is that every import is a BUILTIN: a first-party

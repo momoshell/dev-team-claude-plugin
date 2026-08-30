@@ -43,7 +43,7 @@ import { execSync } from 'node:child_process'
 import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine } from './driver.mjs'
 import { slug } from './slug.mjs'
 import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
-import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord } from './drive.mjs'
+import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, RUN_START_EVENT } from './drive.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
@@ -1831,6 +1831,17 @@ function completionWarning(err, taskSlug) {
   process.stderr.write(`warning: completion record not appended (${err.message}) — run.log stays the record for ${taskSlug}\n`)
 }
 
+// Publication gating is SHAPE-AWARE. "A successful publish tears down" is not a
+// repeal of teardown for read-only shapes: crew/variants.mjs declares `scout` as an
+// envelope shape with no commit, rebase or publish stage, so requiring details.pr of
+// every done run would make every successful scout a permanent live workspace.
+export function teardownDecision({ status, variant, published, keep }) {
+  if (status !== 'done') return 'escalation'
+  if (VARIANTS[variant || DEFAULT_VARIANT]?.execution === 'reviewed' && !published) return 'unpublished'
+  if (keep) return 'keep'
+  return 'teardown'
+}
+
 export function runCmd(args, deps = {}) {
   // Refuse an unknown shape BEFORE any state is read, spawned or written —
   // the same posture as boot's assertCellsClosed and mixed-transport guards.
@@ -1931,6 +1942,7 @@ export function runCmd(args, deps = {}) {
     protectedPathsBasis: protectedFloor.basis,
     ...(laneFence ? { laneFence, laneName: crew.lane_name ?? null } : {}),
     roles: crew.roles, lane: validationLane.lane, suite: args.suite || packageSuite(), variant,
+    publish: { branch: readBranch(checkout) },
     ...(limitsOverlay ? { limits: limitsOverlay } : {}),
     ...(waitsOverlay ? { waits: waitsOverlay } : {}),
     ...(filesInScope ? { files_in_scope: filesInScope } : {}),
@@ -2018,8 +2030,9 @@ export function runCmd(args, deps = {}) {
   //                 (warm members, readable panes) the human needs.
   // An archive failure degrades to a warning: it must never turn an
   // already-committed task into a reported error.
+  const lifecycle = teardownDecision({ status: result.status, variant, published: Boolean(result.details?.pr), keep: Boolean(args.keep) })
   let archived = null
-  if (result.status === 'done' && !args.keep) {
+  if (lifecycle === 'teardown') {
     try { archived = teardownCore(paths, crew, { io }).archived } catch (err) {
       process.stderr.write(`warning: teardown/archive failed (${err.message}) — crew dir left at ${paths.dir}\n`)
     }
@@ -2043,7 +2056,7 @@ export function runCmd(args, deps = {}) {
 // The run-start anchor. A crew dir's journal is append-only ACROSS runs, so the
 // stage list a crashed run's envelope carries must be bounded to the run that
 // crashed. This row is that boundary, and it carries the HEAD the run began at.
-export const RUN_START_EVENT = 'run-start'
+export { RUN_START_EVENT }
 
 // The checkout's HEAD at run start (#583 §1.4): nothing in crew/ records it
 // today, and without it a resume cannot refuse "the worktree has moved on".
@@ -2053,6 +2066,15 @@ export function readHead(checkout, deps = {}) {
   try { out = exec('git rev-parse HEAD', { cwd: checkout, encoding: 'utf8' }) }
   catch { return null }              // a git that cannot answer is an ABSENT head, never a dead run
   return String(out).trim() || null
+}
+
+export function readBranch(checkout, deps = {}) {
+  const exec = deps.execSync || execSync
+  let out
+  try { out = exec('git symbolic-ref --quiet --short HEAD', { cwd: checkout, encoding: 'utf8' }) }
+  catch { return null }
+  const branch = String(out).trim()
+  return !branch || branch === 'HEAD' ? null : branch
 }
 
 // The stage list a crashed run's envelope carries. The driver's `S` dies with

@@ -6,6 +6,7 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, readdirSync } from 'node:fs'; import { ROOT as REPO_ROOT, scratchDir } from '../test/helpers.mjs'
 import { spawnSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
 
 import { join } from 'node:path'
 import { regrantVerdict } from './escalation-policy.mjs'
@@ -20,6 +21,8 @@ import {
   refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, recordRow, operationalRow,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
+  RUN_START_EVENT, PUBLISH_BASE, PUBLISH_CLOSING, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES,
+  shellArg, journalRowsSinceRunStart, prAnomalies, parseSuiteCounts, refsFromCommitMessage, composePrBody,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATION_BINDING_FAILURES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
@@ -1215,7 +1218,7 @@ test('an io without a cold runner cannot reach done', () => {
 test('a green cold run is reported separately and named in the done summary', () => {
   const result = driveTask(CTX, closeoutIo())
   assert.equal(result.status, 'done')
-  assert.deepEqual(result.details.cold_suite, { verdict: 'green', path: '/zz/aa11bb' })
+  assert.deepEqual(result.details.cold_suite, { verdict: 'green', path: '/zz/aa11bb', counts: null })
   assert.match(result.summary, /cold-verified from \/zz\/aa11bb/)
 })
 
@@ -1237,7 +1240,7 @@ test('the cold run follows commit and records suite:cold between commit and done
   const result = driveTask(CTX, io)
   assert.equal(result.status, 'done')
   assert.ok(calls.order.indexOf('commit') < calls.order.indexOf('runCold'))
-  assert.deepEqual(result.details.stages.slice(-3), ['commit', 'suite:cold', 'done'])
+  assert.deepEqual(result.details.stages.slice(-3), ['suite', 'suite:cold', 'done'])
 })
 
 test('scope helpers match directory prefixes and validate only supported entries', () => {
@@ -1515,7 +1518,7 @@ test('clean scope does not fire the sensitivity floor or alter the happy-path st
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
   assert.equal(io.calls.reseat.length, 0)
   assert.deepEqual(res.details.modifiers, [])
   assert.deepEqual(io.calls.emits.filter(({ kind }) => kind === 'modifier'), [])
@@ -1940,7 +1943,7 @@ test('an unreadable verdict is charged nothing and reuses its round number', () 
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'done')
-  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
+  assert.deepEqual(res.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
   assert.deepEqual(
     io.calls.logs.filter((r) => r.review_round).map((r) => r.review_round),
     [
@@ -2656,7 +2659,7 @@ test('fail-closed accept escalation composes with the regrant policy shape', () 
   assert.equal(verdict.reasons.find((reason) => reason.condition === 'grant-spent').ok, true)
 })
 
-test('red full suite after review pass escalates and never commits', () => {
+test('red full suite after review pass escalates and preserves its commit', () => {
   const io = fakeIo({
     envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
     runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'boom' } },
@@ -2664,7 +2667,8 @@ test('red full suite after review pass escalates and never commits', () => {
   })
   const res = driveTask(CTX, io)
   assert.equal(res.status, 'escalation')
-  assert.equal(io.calls.commits.length, 0)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(res.details.commit, 'abc1234')
   assert.match(res.details.escalation.why, /suite red/i)
 })
 
@@ -4402,7 +4406,7 @@ test('mutation outcomes are frozen and every observed row uses the closed vocabu
 
 test('the per-check proof stage is declared by the full variant', () => {
   assert.equal(undeclaredStage(VARIANTS.full, 'gate-proof:1:checks'), null)
-  assert.deepEqual(VARIANTS.full.stages, ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review', 'suite', 'commit', 'converge'])
+  assert.deepEqual(VARIANTS.full.stages, ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review', 'commit', 'rebase', 'suite', 'publish', 'converge'])
 })
 
 test('the whole-gate discrimination event retains its five-field shape beside per-check evidence', () => {
@@ -5285,17 +5289,17 @@ test('the per-point bound still holds at each point', () => {
 
 const HEALTHY_RESULT = {
   status: 'done',
-  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | suite | commit | suite:cold | done',
+  summary: 'Task t1 complete: committed abc1234 (2 files), suite green, cold-verified from /zz/aa11bb, review pass. Stages: plan:r1 | check:r1 | build:r1 | scope-gate:r1 | lane:r1 | review:r1 | review:pass | commit | suite | suite:cold | done',
   artifacts: [`${TD}/plan.md`, `${TD}/review.md`, `${TD}/journal.jsonl`],
   details: {
     commit: 'abc1234',
-    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'],
+    stages: ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'],
     files_committed: ['a.mjs', 'a.test.mjs'],
     consults: 0,
     dissents: [],
     accepted_via: 'review pass',
     escalation: null,
-    cold_suite: { verdict: 'green', path: '/zz/aa11bb' },
+    cold_suite: { verdict: 'green', path: '/zz/aa11bb', counts: null },
     extra_rounds_granted: [],
     growth: [{
       round: 1, plan_bytes: null, gate_bytes: null, plan_delta: null, gate_delta: null,
@@ -5330,7 +5334,7 @@ test('the unexhausted plan path keeps its diagnostics unchanged', () => {
     'accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted',
     'files_committed', 'gate', 'growth', 'modifiers', 'stages',
   ])
-  assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
+  assert.deepEqual(result.details.stages, ['plan:r1', 'check:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
   assert.equal(io.calls.logs.filter((entry) => entry.accept_decision).length, 0)
   assert.equal(io.calls.assign.some(({ role }) => role === 'lead'), false)
   assert.equal(Object.keys(io.calls.writes).some((path) => /decision-\d+b?\.md$/.test(path)), false)
@@ -5967,7 +5971,7 @@ test('full is trace-identical and keeps the eleven legacy detail keys', () => {
   const explicitIo = make()
   const omitted = driveTask(CTX, omittedIo)
   const explicit = driveTask({ ...CTX, variant: 'full' }, explicitIo)
-  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
+  assert.deepEqual(omitted.details.stages, ['plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
   assert.deepEqual(Object.keys(omitted.details).sort(), ['accepted_via', 'cold_suite', 'commit', 'consults', 'dissents', 'escalation', 'extra_rounds_granted', 'files_committed', 'gate', 'growth', 'modifiers', 'stages'])
   assert.deepEqual(omitted, explicit)
   assert.deepEqual(omittedIo.calls, explicitIo.calls)
@@ -5982,7 +5986,7 @@ test('repair uses one bounded triage round and keeps the reviewed finish path', 
   })
   const result = driveTask(CTX_REPAIR, io)
   assert.equal(result.status, 'done')
-  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'suite', 'commit', 'suite:cold', 'done'])
+  assert.deepEqual(result.details.stages, ['repair:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass', 'commit', 'suite', 'suite:cold', 'done'])
   assert.equal(result.details.commit, 'abc1234')
   assert.equal(result.details.gate, null)
   assert.deepEqual(io.calls.commits[0].files, ['a.mjs', 'a.test.mjs'])
@@ -6130,7 +6134,7 @@ test('directed declaration is pinned and honourable', () => {
   const DIRECTED_SNAPSHOT = {
     execution: 'reviewed', required_seats: ['builder', 'reviewer'],
     stages: ['directed', 'build', 'scope-gate', 'lane', 'gate', 'gate-baseline', 'gate-proof',
-      'review', 'suite', 'commit', 'converge'],
+      'review', 'commit', 'rebase', 'suite', 'publish', 'converge'],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [], assignment: null,
@@ -6387,7 +6391,7 @@ test('shape sources and the repair declaration are pinned', () => {
   assert.deepEqual(SHAPE_SOURCES.scope, ['plan', 'inherited', 'brief'])
   assert.deepEqual(SHAPE_SOURCES.lane, ['plan', 'ctx'])
   assert.deepEqual(SHAPE_SOURCES.gate, ['plan', 'none', 'brief'])
-  assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'suite', 'commit'])
+  assert.deepEqual(REVIEWED_CORE_STAGES, ['build', 'scope-gate', 'lane', 'review', 'commit', 'rebase', 'suite', 'publish'])
   assert.equal(TRIAGE_STAGE_HEAD, 'repair')
   assert.deepEqual(TRIAGE_STAGES, ['repair', ...REVIEWED_CORE_STAGES])
 })
@@ -6422,7 +6426,7 @@ test('full, scout and repair declarations remain byte-identical snapshots', () =
     execution: 'reviewed', required_seats: 'tier',
     stages: ['plan', 'check', 'build', 'scope-gate', 'lane', 'gate',
       'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'review',
-      'suite', 'commit', 'converge'],
+      'commit', 'rebase', 'suite', 'publish', 'converge'],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [], assignment: null,
@@ -6436,7 +6440,7 @@ test('full, scout and repair declarations remain byte-identical snapshots', () =
   }
   const REPAIR_SNAPSHOT = {
     execution: 'reviewed', required_seats: 'tier',
-    stages: ['repair', 'build', 'scope-gate', 'lane', 'review', 'suite', 'commit'],
+    stages: ['repair', 'build', 'scope-gate', 'lane', 'review', 'commit', 'rebase', 'suite', 'publish'],
     writes: 'planned',
     accepted_by: 'a review verdict of pass, or a lead accept at review or build exhaustion',
     envelope_fields: [],
@@ -6474,7 +6478,7 @@ test('an unknown variant refuses before assignments or journal lines', () => {
 test('shapeDefect refuses declarations the driver cannot honour', () => {
   assert.equal(shapeDefect(VARIANTS.full), null)
   assert.equal(shapeDefect(VARIANTS.scout), null)
-  const subset = { ...VARIANTS.full, stages: ['build', 'review', 'suite', 'commit'] }
+  const subset = { ...VARIANTS.full, stages: ['build', 'review', 'commit', 'rebase', 'suite', 'publish'] }
   assert.match(shapeDefect(subset), /plan/)
   assert.match(shapeDefect(subset), /declared sources/)
   assert.match(shapeDefect({ ...VARIANTS.scout, stages: ['scout', 'envelope-accept'] }), /scope-gate/)
@@ -7529,6 +7533,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at review_round'],
   ['recordRow', '', 'at commit_subject'],
   ['recordRow', '', 'at cold_suite'],
+  ['recordRow', '', 'at published'],
 ])
 
 test('the journal channel vocabulary is closed, exported and additive', () => {
@@ -7546,7 +7551,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 41)
+  assert.equal(sites.length, 42)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
@@ -7626,7 +7631,7 @@ test('bounce-reviewer at review exhaustion re-reviews the same tree', () => {
   assert.deepEqual(result.details.stages, [
     'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1',
     'build:r2', 'scope-gate:r2', 'lane:r2', 'gate:r2', 'review:r2', 'review:pass',
-    'suite', 'commit', 'suite:cold', 'done',
+    'commit', 'suite', 'suite:cold', 'done',
   ])
   assert.equal(b318Builders(io).length, 2)
   const roles = io.calls.assign.map(({ role }) => role)
@@ -7686,7 +7691,7 @@ test('bounce-reviewer at build exhaustion re-reviews without a build', () => {
   assert.equal(result.status, 'done')
   assert.deepEqual(result.details.stages, [
     'plan:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1',
-    'review:r2', 'review:pass', 'suite', 'commit', 'suite:cold', 'done',
+    'review:r2', 'review:pass', 'commit', 'suite', 'suite:cold', 'done',
   ])
   assert.equal(b318Builders(io).length, 1)
 })
@@ -7758,4 +7763,337 @@ test('a stale re-review brief survives an unreadable in-place re-ask', () => {
     .map(({ content }) => content)
   assert.equal(briefs.length, 2)
   assert.match(briefs[1], /STALE/)
+})
+
+// #679 publication seam fixtures. Unlike the historical fakeIo, these retain a
+// mutable HEAD so the warm and cold observations can prove which commit they saw.
+const PUBLISH_WARM_OUTPUT = '# pass 1\n# fail 0\n# skipped 1\n'
+const PUBLISH_COLD_OUTPUT = '# pass 2\n# fail 0\n# skipped 2\n'
+function publicationIo(options = {}) {
+  const {
+    commands: commandOverrides = {}, envelopes: envelopeOverrides = {}, changed = ['a.mjs', 'a.test.mjs'],
+    warm = PUBLISH_WARM_OUTPUT, coldOutput = PUBLISH_COLD_OUTPUT, coldResult, journal = `${TD}/journal.jsonl`,
+    journalText: initialJournal = JSON.stringify({ event: RUN_START_EVENT }) + '\n', readFileThrows = false,
+  } = options
+  const calls = { run: [], runCold: [], commits: [], logs: [], writes: {}, order: [], suiteHead: null, coldHead: null }
+  const state = { pre: 'pre1111', head: 'pre1111', post: 'post2222' }
+  let journalText = initialJournal
+  let clock = 0
+  const roleCounts = {}
+  const defaults = {
+    'lane-cmd': { ok: true, output: '' },
+    'suite-cmd': () => ({ ok: true, output: warm }),
+    'git fetch origin main': { ok: true, output: '' },
+    'git rev-parse origin/main': { ok: true, output: 'base1111\n' },
+    'git merge-base HEAD origin/main': { ok: true, output: 'older000\n' },
+    'git rebase origin/main': (s) => { s.head = s.post; return { ok: true, output: '' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: '' },
+    'git rebase --abort': (s) => { s.head = s.pre; return { ok: true, output: '' } },
+    'git rev-parse HEAD': (s) => ({ ok: true, output: `${s.head}\n` }),
+    'command -v gh': { ok: true, output: '/usr/bin/gh\n' },
+    'gh auth status': { ok: true, output: 'logged in\n' },
+    'gh pr view': { ok: false, output: 'no pull requests found for this branch\n' },
+    'git push -u origin': { ok: true, output: '' },
+    'gh pr create': { ok: true, output: 'https://github.com/o/r/pull/42\n' },
+  }
+  const commands = { ...defaults, ...commandOverrides }
+  const envelopes = {
+    'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'), ...envelopeOverrides,
+  }
+  const findCommand = (command) => Object.keys(commands).find((key) => command === key || command.startsWith(key))
+  const response = (command) => {
+    const key = findCommand(command)
+    if (!key) return { ok: true, output: '' }
+    const value = commands[key]
+    return typeof value === 'function' ? value(state, command) : value
+  }
+  const io = {
+    calls, state,
+    assign({ role }) {
+      roleCounts[role] = (roleCounts[role] || 0) + 1
+      const n = roleCounts[role]
+      return { id: `${role}${n}`, returnPath: `${role}:${n}` }
+    },
+    wait(path) {
+      const value = envelopes[path]
+      return typeof value === 'function' ? value() : value ?? null
+    },
+    writeFile(path, content) { calls.writes[path] = content },
+    readFile(path) {
+      if (readFileThrows) throw new Error('journal read denied')
+      if (path === journal) return journalText
+      return null
+    },
+    run(command) {
+      const text = String(command)
+      calls.run.push(text); calls.order.push(`run:${text}`)
+      if (text === 'suite-cmd') calls.suiteHead = state.head
+      return response(text)
+    },
+    runCold(command, names) {
+      calls.runCold.push({ cmd: command, names }); calls.order.push('runCold'); calls.coldHead = state.head
+      if (typeof coldResult === 'function') return coldResult(state, command, names)
+      if (coldResult !== undefined) return coldResult
+      return { ok: true, output: coldOutput, path: '/cold/checkout', kept: null }
+    },
+    changedFiles() { return [...changed] },
+    commit(files, message) { calls.commits.push({ files, message }); calls.order.push('commit'); state.head = state.pre; return state.pre },
+    log(row) { calls.logs.push(row); journalText += `${JSON.stringify(row)}\n` },
+    now() { clock += 10; return clock },
+  }
+  return io
+}
+function runPublished(options = {}) {
+  const branch = options.branch === undefined ? 'feature/ship' : options.branch
+  const ctx = {
+    ...CTX, task: options.task || 'published-task', taskDir: options.taskDir || TD,
+    journal: options.journal || `${options.taskDir || TD}/journal.jsonl`,
+    ...(options.ctx || {}), publish: options.publish === undefined ? { branch } : options.publish,
+  }
+  const io = publicationIo(options)
+  let result
+  try { result = driveTask(ctx, io) } catch (error) { return { ctx, io, error } }
+  return { ctx, io, result }
+}
+
+test('armed happy path records commit, rebase, warm/cold suites, publish, and done in order', () => {
+  const { result, io } = runPublished({})
+  assert.equal(result.status, 'done')
+  const at = result.details.stages.indexOf('commit')
+  assert.deepEqual(result.details.stages.slice(at), ['commit', 'rebase', 'suite', 'suite:cold', 'publish', 'done'])
+  assert.equal(io.calls.suiteHead, io.state.post)
+  assert.equal(io.calls.coldHead, io.state.post)
+  assert.equal(result.details.commit, io.state.post)
+  assert.deepEqual(result.details.pr, { url: 'https://github.com/o/r/pull/42', number: 42, head: 'feature/ship', base_sha: 'base1111' })
+  const row = io.calls.logs.find((entry) => entry.published)
+  assert.ok(row)
+  for (const key of ['rebase', 'push', 'pr_create']) assert.equal(Number.isFinite(row.published.durations_ms[key]), true)
+})
+
+test('stateful moved and unmoved bases prove the exact rebase policy', () => {
+  const moved = runPublished({})
+  assert.equal(moved.result.status, 'done')
+  assert.equal(moved.io.calls.run.includes('git rebase origin/main'), true)
+  assert.equal(moved.io.calls.suiteHead, moved.io.state.post)
+  const unmoved = runPublished({
+    commands: {
+      'git rev-parse origin/main': { ok: true, output: 'same1111\n' },
+      'git merge-base HEAD origin/main': { ok: true, output: 'same1111\n' },
+    },
+  })
+  assert.equal(unmoved.result.status, 'done')
+  assert.equal(unmoved.io.calls.run.includes('git rebase origin/main'), false)
+  assert.equal(unmoved.io.calls.logs.find((entry) => entry.published).published.rebased, false)
+  assert.equal(unmoved.result.details.commit, unmoved.io.state.pre)
+})
+
+test('shellArg round-trips through a real /bin/sh without executing payload metacharacters', () => {
+  const sentinel = join(tmpdir(), `crew-shellarg-${process.pid}-${Date.now()}`)
+  const payload = [`a'b; touch`, sentinel, '; $HOME `printf injected` with whitespace'].join(' ')
+  try {
+    const script = `set -- ${shellArg(payload)}; printf '%s\n' "$#"; printf '%s' "$1"`
+    const result = spawnSync('/bin/sh', ['-c', script], { encoding: 'utf8' })
+    assert.equal(result.status, 0, result.stderr)
+    const [argc, value] = result.stdout.split('\n')
+    assert.equal(argc, '1')
+    assert.equal(value, payload)
+    assert.equal(existsSync(sentinel), false)
+  } finally { rmSync(sentinel, { force: true }) }
+})
+
+test('post-commit fetch, push, and warm-suite failures are deliberate escalations with the real commit', () => {
+  const failedFetch = runPublished({ commands: { 'git fetch origin main': { ok: false, output: 'network down' } } })
+  assert.equal(failedFetch.result.status, 'escalation')
+  assert.equal(failedFetch.result.details.escalation.where, 'rebase')
+  assert.equal(failedFetch.result.details.commit, failedFetch.io.state.pre)
+  const failedPush = runPublished({ commands: { 'git push -u origin': { ok: false, output: 'rejected' } } })
+  assert.equal(failedPush.result.status, 'escalation')
+  assert.equal(failedPush.result.details.escalation.where, 'publish')
+  assert.equal(failedPush.result.details.commit, failedPush.io.state.post)
+  const redWarm = runPublished({ commands: { 'suite-cmd': { ok: false, output: 'boom' } } })
+  assert.equal(redWarm.result.status, 'escalation')
+  assert.equal(redWarm.result.details.escalation.where, 'suite')
+  assert.equal(redWarm.result.details.commit, redWarm.io.state.post)
+  for (const run of [failedFetch, failedPush, redWarm]) assert.notEqual(run.result.details.escalation.where, 'driver')
+})
+
+test('failed and blank rebase probes, post-head probes, empty conflicts, and restoration failures fail closed', () => {
+  const probes = [
+    { commands: { 'git rev-parse origin/main': { ok: false, output: 'missing' } } },
+    { commands: { 'git rev-parse origin/main': { ok: true, output: '' } } },
+    { commands: { 'git merge-base HEAD origin/main': { ok: false, output: 'missing' } } },
+    { commands: { 'git merge-base HEAD origin/main': { ok: true, output: '' } } },
+    { commands: { 'git rev-parse HEAD': { ok: false, output: 'missing' } } },
+    { commands: { 'git rev-parse HEAD': { ok: true, output: '' } } },
+  ]
+  for (const options of probes) {
+    const run = runPublished(options)
+    assert.equal(run.result.status, 'escalation')
+    assert.equal(run.result.details.escalation.where, 'rebase')
+    assert.equal(run.io.calls.run.some((command) => command.startsWith('git push')), false)
+  }
+  const emptyConflict = runPublished({ commands: {
+    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: '' },
+    'git rebase --abort': (state) => { state.head = state.pre; return { ok: true, output: '' } },
+  } })
+  assert.equal(emptyConflict.result.status, 'escalation')
+  assert.doesNotMatch(emptyConflict.result.details.escalation.why, /conflict/i)
+  const failedAbort = runPublished({ commands: {
+    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
+    'git rebase --abort': { ok: false, output: 'abort failed' },
+    'git rev-parse HEAD': (state) => ({ ok: true, output: `${state.head}\n` }),
+  } })
+  assert.equal(failedAbort.result.status, 'escalation')
+  assert.match(failedAbort.result.details.escalation.why, /UNPROVEN/)
+  assert.match(failedAbort.result.details.escalation.why, /mid3333/)
+  const wrongHead = runPublished({ commands: {
+    'git rebase origin/main': (state) => { state.head = 'mid3333'; return { ok: false, output: 'rebase failed' } },
+    'git diff --name-only --diff-filter=U': { ok: true, output: 'a.mjs\n' },
+    'git rebase --abort': { ok: true, output: '' },
+    'git rev-parse HEAD': { ok: true, output: 'other4444\n' },
+  } })
+  assert.equal(wrongHead.result.status, 'escalation')
+  assert.match(wrongHead.result.details.escalation.why, /UNPROVEN/)
+  assert.match(wrongHead.result.details.escalation.why, /other4444/)
+})
+
+test('each closed publish refusal is named and never creates a pull request', () => {
+  const cases = [
+    ['branch-unresolved', { branch: '' }],
+    ['branch-main', { branch: 'main' }],
+    ['gh-missing', { commands: { 'command -v gh': { ok: false, output: '' } } }],
+    ['gh-auth', { commands: { 'gh auth status': { ok: false, output: 'not logged in' } } }],
+    ['pr-exists', { commands: { 'gh pr view': { ok: true, output: 'not json' } } }],
+    ['pr-check', { commands: { 'gh pr view': { ok: false, output: 'permission denied' } } }],
+    ['push-rejected', { commands: { 'git push -u origin': { ok: false, output: 'rejected' } } }],
+    ['pr-create', { commands: { 'gh pr create': { ok: true, output: 'created but URL omitted' } } }],
+  ]
+  assert.deepEqual(new Set(cases.map(([reason]) => reason)), new Set(PUBLISH_REFUSAL_NAMES))
+  for (const [reason, options] of cases) {
+    const run = runPublished(options)
+    assert.equal(run.result.status, 'escalation', reason)
+    assert.equal(run.result.details.escalation.where, 'publish', reason)
+    assert.match(run.result.details.escalation.why, new RegExp(reason), reason)
+    assert.equal(run.result.details.publish.refused, reason)
+    assert.equal(run.result.details.pr, undefined, reason)
+    if (reason !== 'pr-create') assert.equal(run.io.calls.run.some((command) => command.startsWith('gh pr create')), false, reason)
+  }
+})
+
+test('all branch and task paths are shellArg quoted in publication commands', () => {
+  const branch = "feat/'$HOME; echo pwn `x` with spaces"
+  const taskDir = "/tmp/task/'$HOME; echo pwn with spaces"
+  const run = runPublished({ branch, taskDir })
+  assert.equal(run.result.status, 'done')
+  const commands = run.io.calls.run
+  const quotedBranch = shellArg(branch)
+  assert.ok(commands.some((command) => command.includes(`git push -u origin ${quotedBranch}`)))
+  assert.ok(commands.some((command) => command.includes(`gh pr view ${quotedBranch}`)))
+  const body = shellArg(`${taskDir}/pr-body.md`)
+  assert.ok(commands.some((command) => command.includes(`--body-file ${body}`)))
+})
+
+test('an exit-zero malformed PR probe, indeterminate probe, and throwing journal read all fail or publish safely', () => {
+  const malformed = runPublished({ commands: { 'gh pr view': { ok: true, output: '{not-json}' } } })
+  assert.equal(malformed.result.details.publish.refused, 'pr-exists')
+  const indeterminate = runPublished({ commands: { 'gh pr view': { ok: false, output: 'gh service unavailable' } } })
+  assert.equal(indeterminate.result.details.publish.refused, 'pr-check')
+  const throwingRead = runPublished({ readFileThrows: true })
+  assert.equal(throwingRead.result.status, 'done')
+  assert.ok(throwingRead.io.calls.writes[`${TD}/pr-body.md`])
+})
+
+test('composePrBody is pure and renders every populated section with its own values', () => {
+  const record = {
+    issues: ['#679', '#758'], stages: ['commit', 'rebase', 'suite', 'publish', 'done'],
+    cursor: { plan_round: 4, build_round: 5, review_round: 6 },
+    gate: { cmd: 'gate-cmd', summary: { total: 2, failed: 0, errored: 0 }, discrimination: 'proven', repairs: 1 },
+    review: { verdict: 'changes-needed', residuals: [{ id: 'R1', type: 'cosmetic', summary: 'leave this note' }] },
+    suite: { warm: { pass: 11, fail: 2, skipped: 3 }, cold: { pass: 13, fail: 4, skipped: 5 }, cold_path: '/cold/path' },
+    anomalies: [{ kind: 'bounce', detail: 'bounce-builder: retry' }],
+  }
+  const first = composePrBody(record)
+  const second = composePrBody(JSON.parse(JSON.stringify(record)))
+  assert.equal(first, second)
+  for (const token of ['Refs #679, #758', '## Stages', 'commit | rebase | suite | publish | done', 'plan 4 · build 5 · review 6',
+    '## Gate', 'gate-cmd', '"failed":0', 'proven', 'repairs: 1', '## Review', 'R1 (cosmetic): leave this note',
+    'warm: pass 11 · fail 2 · skipped 3', 'cold: pass 13 · fail 4 · skipped 5', 'cold checkout: /cold/path',
+    '## Anomalies', 'bounce: bounce-builder: retry', PUBLISH_CLOSING]) assert.ok(first.includes(token), token)
+  assert.ok(first.indexOf('## Gate') > first.indexOf('## Rounds'))
+  assert.ok(first.indexOf('## Review') > first.indexOf('## Gate'))
+  assert.ok(first.indexOf('## Suite') > first.indexOf('## Review'))
+})
+
+test('journal boundaries and anomaly extraction are deterministic and tolerate malformed arrays', () => {
+  const text = [
+    JSON.stringify({ event: RUN_START_EVENT }), JSON.stringify({ event: 'wait-extended', id: 'old' }),
+    JSON.stringify({ event: RUN_START_EVENT }), JSON.stringify({ event: 'wait-extended', role: 'builder', id: 'd7', idle_s: 2, extension_s: 3 }),
+  ].join('\n')
+  assert.deepEqual(journalRowsSinceRunStart(text).map((row) => row.id), ['d7'])
+  const rows = [
+    { event: 'wait-extended', role: 'builder', id: 'd7', idle_s: 2, extension_s: 3 },
+    { stage: 'gate-repair:1' }, { decision: 'bounce-builder', reason: 'try again' },
+    { event: 'tree-witness', outcome: 'modified', modified: ['a.mjs'], removed: [], added: [] },
+    { event: 'tree-witness', outcome: 'unknown', modified: 'not-an-array', removed: null, added: {} },
+  ]
+  const anomalies = prAnomalies(rows)
+  assert.equal(anomalies.length, 5)
+  assert.match(anomalies[0].detail, /builder d7 idle 2s, extended 3s/)
+  assert.equal(anomalies[1].detail, 'gate-repair:1')
+  assert.match(anomalies[2].detail, /bounce-builder: try again/)
+  assert.match(anomalies[3].detail, /modified a.mjs/)
+  assert.doesNotThrow(() => prAnomalies(rows))
+  assert.deepEqual(prAnomalies({}), [])
+})
+
+test('parseSuiteCounts handles TAP, default reporter, ANSI, and last-summary precedence', () => {
+  assert.deepEqual(parseSuiteCounts('# pass 2\n# fail 1\n# skipped 3\n'), { pass: 2, fail: 1, skipped: 3 })
+  assert.deepEqual(parseSuiteCounts('ℹ pass 4\nℹ fail 0\nℹ skipped 1\n'), { pass: 4, fail: 0, skipped: 1 })
+  assert.deepEqual(parseSuiteCounts('\x1b[32m# pass 5\x1b[0m\n\x1b[31m# fail 0\x1b[0m\n'), { pass: 5, fail: 0, skipped: 0 })
+  assert.deepEqual(parseSuiteCounts('# pass 1\n# fail 9\n# pass 2910\n# fail 0\n# skipped 4\n'), { pass: 2910, fail: 0, skipped: 4 })
+  assert.equal(parseSuiteCounts('# pass 1\n'), null)
+})
+
+test('an armed run refuses green suites whose publication counts are unmeasured', () => {
+  const warm = runPublished({ warm: '' })
+  assert.equal(warm.result.status, 'escalation')
+  assert.equal(warm.result.details.escalation.where, 'suite')
+  const cold = runPublished({ coldOutput: '' })
+  assert.equal(cold.result.status, 'escalation')
+  assert.equal(cold.result.details.escalation.where, 'cold-suite')
+  assert.equal(cold.result.details.commit, cold.io.state.post)
+})
+
+test('plan-check accept residuals survive into the single driver-written publication body', () => {
+  const residual = { id: 'PC1-9', type: 'cosmetic', summary: 'phase table remains for the sibling lane' }
+  const io = publicationIo({ envelopes: {
+    'planner:1': planEnv(),
+    'tech-lead:1': checkEnv('revise'),
+    'lead:1': leadEnv('accept', '', { residuals: [residual] }),
+    'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass'),
+  } })
+  const ctx = {
+    ...CTX, roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'],
+    task: 'plan-accept', journal: `${TD}/journal.jsonl`, limits: { plan_rounds: 1 },
+    publish: { branch: 'feature/plan-accept' },
+  }
+  const result = driveTask(ctx, io)
+  assert.equal(result.status, 'done')
+  assert.match(io.calls.writes[`${TD}/pr-body.md`], /PC1-9 \(cosmetic\): phase table remains for the sibling lane/)
+})
+
+test('refsFromCommitMessage reads the trailer in order, de-duplicates, and stays empty without one', () => {
+  assert.deepEqual(refsFromCommitMessage('subject\n\nbody\n\nRefs: #679, #758, #679'), ['#679', '#758'])
+  assert.deepEqual(refsFromCommitMessage('subject\n\nbody'), [])
+})
+
+test('an unarmed context retains the legacy local finish without rebase or publication stages', () => {
+  const io = closeoutIo()
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(result.details.stages.includes('rebase'), false)
+  assert.equal(result.details.stages.includes('publish'), false)
+  assert.deepEqual(io.calls.run.map(({ cmd }) => cmd), ['lane-cmd', 'suite-cmd'])
 })

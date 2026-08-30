@@ -163,7 +163,7 @@ export const SHAPE_SOURCES = Object.freeze({
 })
 // The stages the reviewed executor emits unconditionally after the plan loop —
 // they ARE the reviewed loop, and no declaration may skip them (:1930-2167).
-export const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'review', 'suite', 'commit'])
+export const REVIEWED_CORE_STAGES = Object.freeze(['build', 'scope-gate', 'lane', 'review', 'commit', 'rebase', 'suite', 'publish'])
 // The ONE partial reviewed topology this driver implements: a bounded triage
 // round in place of the plan round, no gate, nothing else changed. A shape that
 // omits a `full` stage is honoured only if it is EXACTLY this — same sources,
@@ -184,7 +184,7 @@ export const DIRECTED_STAGE_HEAD = 'directed'
 export const DIRECTED_SOURCES = Object.freeze({ scope: 'brief', lane: 'ctx', gate: 'brief' })
 export const DIRECTED_SEATS = Object.freeze(['builder', 'reviewer'])
 export const DIRECTED_STAGES = Object.freeze([DIRECTED_STAGE_HEAD, 'build', 'scope-gate',
-  'lane', 'gate', 'gate-baseline', 'gate-proof', 'review', 'suite', 'commit', 'converge'])
+  'lane', 'gate', 'gate-baseline', 'gate-proof', 'review', 'commit', 'rebase', 'suite', 'publish', 'converge'])
 // The CLOSED table of partial reviewed topologies this executor implements. Data
 // consulted at fixed sites, never a composition engine: each key has its own
 // executor branch below, and a name absent from this table is refused before it
@@ -1205,7 +1205,7 @@ export function validateAcceptDecision(input = {}) {
 
   const residualsOut = residualClaims
     .filter(({ id, type }) => id !== null && findingById.has(id) && RESIDUAL_TYPES.includes(type))
-    .map(({ id, type }) => ({ id, type, severity: findingById.get(id).severity }))
+    .map(({ id, type }) => ({ id, type, severity: findingById.get(id).severity, summary: findingById.get(id).summary || '' }))
   const refutedOut = refutedClaims
     .filter(({ id, evidenceValid }) => id !== null && findingById.has(id) && evidenceValid)
     .map(({ id, evidence }) => ({ id, severity: findingById.get(id).severity, evidence: boundedText(evidence) }))
@@ -1585,6 +1585,133 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
   return [subject, bodyPart, refs].filter(Boolean).join('\n\n')
 }
 
+// The run-start anchor MOVES here from crew/crew.mjs:2046: the driver reads the
+// journal's own boundary when it composes a PR body, and drive.mjs may not import
+// crew.mjs. crew.mjs imports and re-exports it, so `run-start` stays one string.
+export const RUN_START_EVENT = 'run-start'
+
+// #679 — the driver publishes. The base is fixed by the ratified design.
+export const PUBLISH_BASE = 'main'
+export const PUBLISH_CLOSING = 'Published by the driver; teardown follows'
+export const PUBLISH_REFUSALS = Object.freeze({
+  branchUnresolved: 'branch-unresolved',
+  branchMain: 'branch-main',
+  ghMissing: 'gh-missing',
+  ghAuth: 'gh-auth',
+  prExists: 'pr-exists',
+  prCheck: 'pr-check',
+  pushRejected: 'push-rejected',
+  prCreate: 'pr-create',
+})
+export const PUBLISH_REFUSAL_NAMES = Object.freeze(Object.values(PUBLISH_REFUSALS))
+
+// The close/quoted-apostrophe/reopen form: a template literal would eat the
+// backslash in `'\''` and emit three apostrophes, reopening shell parsing.
+export function shellArg(value) {
+  return `'${String(value ?? '').replaceAll("'", "'\"'\"'")}'`
+}
+
+export function journalRowsSinceRunStart(text) {
+  const rows = []
+  for (const line of String(text || '').split('\n')) {
+    if (!line.trim()) continue
+    let row
+    try { row = JSON.parse(line) } catch { continue }
+    if (row?.event === RUN_START_EVENT) { rows.length = 0; continue }
+    rows.push(row)
+  }
+  return rows
+}
+
+export function prAnomalies(rows) {
+  if (!Array.isArray(rows)) return []
+  const list = (v) => (Array.isArray(v) ? v.join(' ') : '')
+  const anomalies = []
+  for (const row of rows) {
+    if (row?.event === 'wait-extended') {
+      anomalies.push({ kind: 'wait-extended', detail: `${row.role ?? 'seat'} ${row.id ?? ''} idle ${row.idle_s ?? '?'}s, extended ${row.extension_s ?? '?'}s` })
+    }
+    if (typeof row?.stage === 'string' && row.stage.startsWith('gate-repair:')) {
+      anomalies.push({ kind: 'gate-repair', detail: row.stage })
+    }
+    if (typeof row?.decision === 'string' && row.decision.startsWith('bounce')) {
+      anomalies.push({ kind: 'bounce', detail: `${row.decision}: ${row.reason ?? ''}` })
+    }
+    if (row?.event === 'tree-witness') {
+      anomalies.push({ kind: 'tree-witness', detail: `${row.outcome ?? 'unknown'} — modified ${list(row.modified)} removed ${list(row.removed)} added ${list(row.added)}` })
+    }
+  }
+  return anomalies
+}
+
+export function parseSuiteCounts(output) {
+  const text = String(output || '').replace(/\x1b\[[0-9;]*m/g, '')
+  const measured = { pass: null, fail: null, skipped: null }
+  for (const line of text.split('\n')) {
+    const match = /^(?:#|ℹ)\s*(pass|fail|skipped) (\d+)$/.exec(line)
+    if (!match) continue
+    measured[match[1]] = Number(match[2])
+  }
+  if (measured.pass === null || measured.fail === null) return null
+  return { pass: measured.pass, fail: measured.fail, skipped: measured.skipped === null ? 0 : measured.skipped }
+}
+
+export function refsFromCommitMessage(message) {
+  let trailer = null
+  for (const line of String(message || '').split('\n')) {
+    const match = /^Refs:\s*(.*)$/.exec(line)
+    if (match) trailer = match[1]
+  }
+  if (trailer === null) return []
+  const refs = []
+  for (const match of trailer.matchAll(/#(\d+)/g)) {
+    const ref = `#${match[1]}`
+    if (!refs.includes(ref)) refs.push(ref)
+  }
+  return refs
+}
+
+export function composePrBody(record) {
+  const n = (v) => (Number.isFinite(v) ? v : 0)
+  const cursor = record?.cursor || {}
+  const issues = Array.isArray(record?.issues) ? record.issues : []
+  const anomalies = Array.isArray(record?.anomalies) ? record.anomalies : []
+  const refsLines = issues.length ? [`Refs ${issues.join(', ')}`, ''] : []
+  const stageLines = ['## Stages', (Array.isArray(record?.stages) ? record.stages : []).join(' | '), '']
+  const roundLines = ['## Rounds', `plan ${n(cursor.plan_round)} · build ${n(cursor.build_round)} · review ${n(cursor.review_round)}`, '']
+  const gateLines = record?.gate ? [
+    '## Gate',
+    `cmd: ${record.gate.cmd ?? ''}`,
+    `summary: ${JSON.stringify(record.gate.summary ?? null)}`,
+    `discrimination: ${record.gate.discrimination ?? ''}`,
+    `repairs: ${record.gate.repairs ?? 0}`,
+    '',
+  ] : []
+  const review = record?.review || {}
+  const residuals = Array.isArray(review.residuals) ? review.residuals : []
+  const reviewLines = [
+    '## Review',
+    `verdict: ${review.verdict ?? ''}`,
+    ...(residuals.length
+      ? residuals.map((row) => `- ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`)
+      : ['no residuals']),
+    '',
+  ]
+  const suite = record?.suite || {}
+  const countsLine = (label, counts) => counts && typeof counts === 'object'
+    ? `${label}: pass ${n(counts.pass)} · fail ${n(counts.fail)} · skipped ${n(counts.skipped)}`
+    : `${label}: not measured`
+  const suiteLines = [
+    '## Suite',
+    countsLine('warm', suite.warm),
+    countsLine('cold', suite.cold),
+    `cold checkout: ${suite.cold_path ?? ''}`,
+    '',
+  ]
+  const anomalyLines = anomalies.length ? ['## Anomalies', ...anomalies.map((row) => `- ${row.kind}: ${row.detail}`), ''] : []
+  return [...refsLines, ...stageLines, ...roundLines, ...gateLines, ...reviewLines, ...suiteLines, ...anomalyLines, '', PUBLISH_CLOSING].join('\n')
+}
+
 // --- the driver ----------------------------------------------------------------
 // ctx: { task, briefFile, taskDir, checkout, roles: [..seated roles..],
 //        lane: <fallback validation command|null>, suite: <full-suite command>,
@@ -1798,6 +1925,7 @@ function runTask(ctx, io, crash) {
     })
   }
   let lastGateOutput = null
+  const finalReview = { verdict: null, residuals: [] }
   const gateReapTally = { invocations: 0, 'already-dead': 0, proven: 0, failed: 0, unproven: 0 }
   // `runner` is an io METHOD, so it must be invoked as one: `seatIo.runClean`
   // calls `this.run(cmd)` (crew/seat-io.mjs:241,245), and passing it detached
@@ -2684,6 +2812,7 @@ function runTask(ctx, io, crash) {
         stageComplete()
         return escalate('plan-check', settledPlan.why)
       }
+      finalReview.residuals = settledPlan.record.residuals || []
       stageComplete()
       stageComplete()
       break // accept: proceed on the latest plan, with the residual recorded
@@ -3544,6 +3673,7 @@ function runTask(ctx, io, crash) {
           stageComplete()
           return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
         }
+        finalReview.residuals = settledAccept.record.residuals || []
         accepted = acceptedViaLabel(settledAccept.record)
         stageComplete()
         break build
@@ -3562,6 +3692,7 @@ function runTask(ctx, io, crash) {
       const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
       lastReviewPath = review.details?.review_path || art('review.md')
       const v = verdictOf(review)
+      if (v) finalReview.verdict = v
       if (v) staleVerdict = null
       // A VERIFICATION COSTS NOTHING. Only a round that DEMANDS change spends a
       // review_rounds slot. Measured over 164 archived lanes: of 86 re-reviews,
@@ -3626,6 +3757,7 @@ function runTask(ctx, io, crash) {
             stageComplete()
             return escalate('review', settledAccept.why, [], { accept_decision: settledAccept.record })
           }
+          finalReview.residuals = settledAccept.record.residuals || []
           accepted = acceptedViaLabel(settledAccept.record)
           stageComplete()
           break build
@@ -3655,20 +3787,97 @@ function runTask(ctx, io, crash) {
     return escalate('build', `no accepted build within ${limits.build_rounds + extraRounds} rounds`)
   }
 
-  // ---- 3. FINISH: full suite (code) + commit-on-green (code) --------------------
-  stage('suite')
-  const suiteRes = io.run(ctx.suite)
-  if (!suiteRes.ok) {
-    stageComplete()
-    return escalate('suite', `full suite red after acceptance — this needs eyes:\n${suiteRes.output.slice(-2000)}`)
-  }
-  stageComplete()
+  // ---- 3. FINISH: commit, optional rebase, then full suite (code) -------------
+  const publishing = ctx.publish && typeof ctx.publish === 'object' ? ctx.publish : null
+  let baseSha = null
+  let rebased = false
+  let rebaseMs = 0
+  let coldSuite
+  let published = null
   stage('commit')
   const message = composeCommitMessage({ task: ctx.task, planEnv, builderEnv })
+  const subject = String(message).split('\n')[0]
   const hasCommitSubject = String(planEnv.details?.commit_subject || '').split('\n').some((line) => line.trim())
   if (!hasCommitSubject) io.log(recordRow({ at: io.now(), commit_subject: 'fallback-from-plan-summary' }))
   const committing = io.changedFiles().filter(inScope)
-  S.commit = io.commit(committing, message)
+  const preRebaseCommit = S.commit = io.commit(committing, message)
+  stageComplete()
+
+  if (publishing) {
+    stage('rebase')
+    const rebaseStartedAt = io.now()
+    const base = `origin/${PUBLISH_BASE}`
+    let fetched
+    try { fetched = io.run(`git fetch origin ${PUBLISH_BASE}`) }
+    catch (err) { fetched = { ok: false, output: err?.message ?? String(err) } }
+    if (!fetched?.ok) {
+      stageComplete()
+      return escalate('rebase', `the fetch of ${base} failed${fetched?.output ? `: ${String(fetched.output).slice(-2000)}` : ''}`, [], { commit: S.commit })
+    }
+    const probe = (command) => {
+      let result
+      try { result = io.run(command) } catch { return null }
+      const output = String(result?.output || '').trim()
+      return result?.ok && output ? output : null
+    }
+    baseSha = probe(`git rev-parse ${base}`)
+    if (!baseSha) {
+      stageComplete()
+      return escalate('rebase', `the rebase probe git rev-parse ${base} failed or returned blank output`, [], { commit: S.commit })
+    }
+    const mergeBase = probe(`git merge-base HEAD ${base}`)
+    if (!mergeBase) {
+      stageComplete()
+      return escalate('rebase', `the rebase probe git merge-base HEAD ${base} failed or returned blank output`, [], { commit: S.commit })
+    }
+    rebased = baseSha !== mergeBase
+    if (rebased) {
+      let rebaseResult
+      try { rebaseResult = io.run(`git rebase ${base}`) }
+      catch (err) { rebaseResult = { ok: false, output: err?.message ?? String(err) } }
+      if (!rebaseResult?.ok) {
+        let conflicted = []
+        try {
+          conflicted = String(io.run('git diff --name-only --diff-filter=U')?.output || '')
+            .split('\n').map((line) => line.trim()).filter(Boolean)
+        } catch { conflicted = [] }
+        let aborted
+        try { aborted = io.run('git rebase --abort') }
+        catch { aborted = { ok: false, output: '' } }
+        const restoredHead = probe('git rev-parse HEAD')
+        const conflictDetail = conflicted.length ? ` with conflicts in ${conflicted.join(', ')}` : ''
+        if (!aborted?.ok || !restoredHead || restoredHead !== preRebaseCommit) {
+          const found = restoredHead || '(unavailable)'
+          stageComplete()
+          return escalate('rebase', `the rebase onto ${base} failed${conflictDetail}; restoration is UNPROVEN — HEAD found after abort: ${found}`, [], { commit: S.commit })
+        }
+        stageComplete()
+        return escalate('rebase', conflicted.length
+          ? `the rebase onto ${base} failed with conflicts in ${conflicted.join(', ')}; restoration proven at HEAD ${restoredHead}`
+          : `the rebase onto ${base} failed`, [], { commit: S.commit })
+      }
+      const postRebaseHead = probe('git rev-parse HEAD')
+      if (!postRebaseHead) {
+        stageComplete()
+        return escalate('rebase', 'the rebase succeeded but git rev-parse HEAD failed or returned blank output', [], { commit: S.commit })
+      }
+      S.commit = postRebaseHead
+    }
+    rebaseMs = io.now() - rebaseStartedAt
+    stageComplete()
+  }
+
+  stage('suite')
+  const suiteRes = io.run(ctx.suite)
+  const warmCounts = parseSuiteCounts(suiteRes?.output)
+  if (!suiteRes?.ok) {
+    stageComplete()
+    return escalate('suite', `full suite red after acceptance — this needs eyes:\n${String(suiteRes?.output || '').slice(-2000)}`, [], { commit: S.commit })
+  }
+  if (publishing && warmCounts === null) {
+    stageComplete()
+    return escalate('suite', 'full suite was green, but its pass/fail summary could not be measured for publication', [], { commit: S.commit })
+  }
   stageComplete()
 
   // ---- 3b. COLD VERIFICATION ---------------------------------------------------
@@ -3706,7 +3915,6 @@ function runTask(ctx, io, crash) {
   // second guard; the list is de-duplicated because in a single-slice batch the two
   // are routinely equal, and a duplicate guard would only slow the generator.
   stage('suite:cold')
-  let coldSuite
   if (typeof io.runCold !== 'function') {
     coldSuite = { verdict: 'unavailable', why: 'this io provides no runCold, so no cold checkout could be cut' }
   } else {
@@ -3714,7 +3922,7 @@ function runTask(ctx, io, crash) {
       const coldGuards = [...new Set([ctx.laneName, ctx.task].filter((name) => typeof name === 'string' && name.trim()))]
       const cold = io.runCold(ctx.suite, coldGuards)
       coldSuite = cold.ok
-        ? { verdict: 'green', path: cold.path }
+        ? { verdict: 'green', path: cold.path, counts: parseSuiteCounts(cold.output) }
         : { verdict: 'red', path: cold.path, kept: cold.kept, output: String(cold.output || '').slice(-2000) }
     } catch (err) {
       coldSuite = { verdict: 'unproven', why: err.message }
@@ -3728,6 +3936,74 @@ function runTask(ctx, io, crash) {
       : `the cold verification produced no verdict (${coldSuite.verdict}): ${coldSuite.why}. The suite is green only in the checkout this lane built in (${ctx.checkout}), which is the one piece of evidence a lane may not report done on. The commit ${S.commit} is local and unpushed.`
     return escalate('cold-suite', why, [], { commit: S.commit, cold_suite: coldSuite })
   }
+  if (publishing && coldSuite.counts === null) {
+    stageComplete()
+    return escalate('cold-suite', 'the cold suite was green, but its pass/fail summary could not be measured for publication', [], { commit: S.commit, cold_suite: coldSuite })
+  }
+
+  if (publishing) {
+    stage('publish')
+    const branch = String(publishing.branch || '').trim()
+    const refusePublish = (reason, detail) => {
+      stageComplete()
+      return escalate('publish', `publish refused (${reason}): ${detail}`, [], { commit: S.commit, publish: { refused: reason } })
+    }
+    if (!branch) return refusePublish(PUBLISH_REFUSALS.branchUnresolved, 'the checkout branch is unresolved (detached HEAD)')
+    if (branch === PUBLISH_BASE) return refusePublish(PUBLISH_REFUSALS.branchMain, `the checkout branch is ${PUBLISH_BASE}`)
+
+    let ghMissing
+    try { ghMissing = io.run('command -v gh') } catch (err) { ghMissing = { ok: false, output: err?.message ?? String(err) } }
+    if (!ghMissing?.ok) return refusePublish(PUBLISH_REFUSALS.ghMissing, 'the gh executable is not available')
+    let ghAuth
+    try { ghAuth = io.run('gh auth status') } catch (err) { ghAuth = { ok: false, output: err?.message ?? String(err) } }
+    if (!ghAuth?.ok) return refusePublish(PUBLISH_REFUSALS.ghAuth, 'gh authentication is unavailable')
+
+    let prProbe
+    try { prProbe = io.run(`gh pr view ${shellArg(branch)} --json number,url`) }
+    catch (err) { prProbe = { ok: false, output: err?.message ?? String(err) } }
+    if (prProbe?.ok) return refusePublish(PUBLISH_REFUSALS.prExists, 'an existing pull request was found for this branch')
+    const prOutput = String(prProbe?.output || '')
+    if (!/no pull requests found/i.test(prOutput)) {
+      return refusePublish(PUBLISH_REFUSALS.prCheck, `the existing pull request probe was indeterminate: ${prOutput.slice(-2000)}`)
+    }
+
+    const pushStartedAt = io.now()
+    let pushed
+    try { pushed = io.run(`git push -u origin ${shellArg(branch)}`) }
+    catch (err) { pushed = { ok: false, output: err?.message ?? String(err) } }
+    const pushMs = io.now() - pushStartedAt
+    if (!pushed?.ok) return refusePublish(PUBLISH_REFUSALS.pushRejected, `the branch push was rejected${pushed?.output ? `: ${String(pushed.output).slice(-2000)}` : ''}`)
+
+    const bodyPath = art('pr-body.md')
+    let journalText = ''
+    try { journalText = String(io.readFile(journal) || '') } catch { /* anomalies are never load-bearing */ }
+    const record = {
+      issues: refsFromCommitMessage(message),
+      stages: [...S.stages],
+      cursor: roundCursor(S.stages),
+      gate: gateBlock() ? { ...gateBlock(), summary: parseGateSummary(lastGateOutput) } : null,
+      review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals },
+      suite: { warm: warmCounts, cold: coldSuite.counts, cold_path: coldSuite.path },
+      anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
+    }
+    const prCreateStartedAt = io.now()
+    let created
+    try {
+      io.writeFile(bodyPath, composePrBody(record))
+      created = io.run(`gh pr create --base ${shellArg(PUBLISH_BASE)} --head ${shellArg(branch)} --title ${shellArg(subject)} --body-file ${shellArg(bodyPath)}`)
+    } catch (err) {
+      created = { ok: false, output: err?.message ?? String(err) }
+    }
+    const prCreateMs = io.now() - prCreateStartedAt
+    const urlMatch = String(created?.output || '').match(/https:\/\/[^\s]+\/pull\/(\d+)/)
+    if (!created?.ok || !urlMatch) return refusePublish(PUBLISH_REFUSALS.prCreate, `gh pr create did not return a pull request URL${created?.output ? `: ${String(created.output).slice(-2000)}` : ''}`)
+    const url = urlMatch[0]
+    const number = Number(urlMatch[1])
+    const publishedRow = { url, number, branch, base: PUBLISH_BASE, base_sha: baseSha, rebased, durations_ms: { rebase: rebaseMs, push: pushMs, pr_create: prCreateMs } }
+    io.log(recordRow({ at: io.now(), published: publishedRow }))
+    published = { url, number, head: branch, base_sha: baseSha }
+    stageComplete()
+  }
 
   stage('done')
 
@@ -3739,6 +4015,7 @@ function runTask(ctx, io, crash) {
       ...(variant === DIRECTED_STAGE_HEAD ? { variant } : {}),
       commit: S.commit, stages: S.stages, files_committed: committing, consults: S.consults,
       dissents: S.dissents, accepted_via: accepted, escalation: null,
+      ...(published ? { pr: published } : {}),
       cold_suite: coldSuite,   // the COLD verdict, never folded into the lane's own suite result
       extra_rounds_granted: S.grants, growth: S.growth, modifiers: S.modifiers,
       gate: gateBlock(),

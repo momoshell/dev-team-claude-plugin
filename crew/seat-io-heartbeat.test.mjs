@@ -240,6 +240,16 @@ test('driverState reaches driver-gone for a stalled headless lane and stays runn
     terminal: null,
     session: { ended_at: null, last_heartbeat_at: now - 1_000 },
   })
-  assert.deepEqual(stalled, { state: DRIVER_GONE, heartbeat_age_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS + 1 })
-  assert.deepEqual(beating, { state: DRIVER_RUNNING, heartbeat_age_ms: 1_000 })
+  assert.deepEqual(stalled, {
+    state: DRIVER_GONE,
+    heartbeat_age_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS + 1,
+    stale_after_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS,
+    threshold_origin: 'default',
+  })
+  assert.deepEqual(beating, {
+    state: DRIVER_RUNNING,
+    heartbeat_age_ms: 1_000,
+    stale_after_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS,
+    threshold_origin: 'default',
+  })
 })

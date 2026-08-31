@@ -187,8 +187,15 @@ export function classifyAdvisorCell({ endpoint, model } = {}) {
   const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(endpoint)?.[1] || ''
   const hostText = authority.includes('@') ? authority.slice(authority.lastIndexOf('@') + 1) : authority
   const rawHost = hostText.startsWith('[') ? hostText.slice(0, hostText.indexOf(']') + 1) : hostText.split(':')[0]
-  if (!['http:', 'https:'].includes(parsed.protocol)
-    || !['127.0.0.1', 'localhost', '[::1]'].includes(rawHost.toLowerCase())) {
+  // #809 (TRD docs/trd-local-models.md §1 fact 2, §4 L1): the advisor endpoint's
+  // HOST is not part of the safety boundary — a model served from the operator's
+  // second desktop over the LAN is as admissible as one on the local machine. What stays
+  // closed is WHAT may be reached: http(s) only, no credentials in the URL, a
+  // SAFE_MODEL id — and the authority has to exist at all. The reason token stays
+  // `endpoint-not-local` because ADVISOR_BOOT_REFUSALS is a frozen closed
+  // vocabulary and crew/pi/extensions/advisor.ts:538 keeps its own copy of this
+  // classifier; renaming it here would split the two.
+  if (!['http:', 'https:'].includes(parsed.protocol) || rawHost === '') {
     return { reason: 'endpoint-not-local' }
   }
   if (parsed.username || parsed.password) return { reason: 'endpoint-credentials' }
@@ -197,26 +204,66 @@ export function classifyAdvisorCell({ endpoint, model } = {}) {
   return { endpoint: parsed.href, model }
 }
 
+// The only endpoint facts a record may carry: host and port. Never a path, never a
+// query, never userinfo — a record outlives the boot and a credential in one is a
+// leak nobody revokes. Unknown is null, never a guess (#809).
+export const ADVISOR_DEFAULT_PORTS = Object.freeze({ 'http:': 80, 'https:': 443 })
+export function advisorEndpointOrigin(endpoint) {
+  let parsed
+  let rawEndpoint
+  try { rawEndpoint = String(endpoint || ''); parsed = new URL(rawEndpoint) } catch { return null }
+  const authority = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^\/?#]*)/.exec(rawEndpoint)?.[1] || ''
+  if (authority === '' || parsed.hostname === '') return null
+  const port = parsed.port === '' ? (ADVISOR_DEFAULT_PORTS[parsed.protocol] ?? null) : Number(parsed.port)
+  return { host: parsed.hostname, port }
+}
+
+// What a refusal is allowed to say about where it reached. A LAN box that is down
+// must name itself in the message and in the ledger detail, and nothing else.
+export function advisorEndpointLabel(endpoint) {
+  const origin = advisorEndpointOrigin(endpoint)
+  return origin ? `${origin.host}:${origin.port ?? 'unknown-port'}` : 'an unset or unparseable endpoint'
+}
+
 export function advisorBootRecord({ adapters = {}, env = process.env } = {}) {
   const granted = Object.keys(adapters).filter((role) => adapters[role]?.grants?.advisor === true).sort()
   const rawEndpoint = env?.CREW_ADVISOR_ENDPOINT
+  const origin = advisorEndpointOrigin(rawEndpoint)
   let endpoint = rawEndpoint
-  try { endpoint = new URL(String(rawEndpoint || '')).href } catch { /* assertAdvisorCellLive gives the refusal */ }
+  // Do not normalize an authority-less raw input into a host before preflight sees it.
+  try { if (origin) endpoint = new URL(String(rawEndpoint || '')).href } catch { /* assertAdvisorCellLive gives the refusal */ }
   return {
     granted,
     endpoint,
+    endpoint_host: origin?.host ?? null,
+    endpoint_port: origin?.port ?? null,
     model: env?.CREW_ADVISOR_MODEL,
     config_version: ADVISOR_CONFIG_VERSION,
   }
 }
 
+// The projection the boot JOURNAL carries: host and port identify a dead LAN box,
+// and dropping the rest keeps a path or a credential out of a file that outlives
+// the boot. crew.json keeps the full record because paneCommand's advisorCell is
+// built from it in the same process (#809).
+export function advisorJournalRecord(record) {
+  return {
+    granted: record?.granted ?? [],
+    endpoint_host: record?.endpoint_host ?? null,
+    endpoint_port: record?.endpoint_port ?? null,
+    model: record?.model ?? null,
+    config_version: record?.config_version ?? null,
+  }
+}
+
 function advisorRefusal(reason, role, record) {
+  const where = advisorEndpointLabel(record?.endpoint)
   const fix = reason === 'adapter-unsupported'
     ? 'select --agent-builder pi'
     : reason === 'transport-unsupported'
       ? 'use a pane transport'
       : reason.startsWith('endpoint-') || reason.startsWith('model-')
-        ? 'set the loopback advisor endpoint and safe model'
+        ? `point CREW_ADVISOR_ENDPOINT at an http(s) endpoint reachable from this machine (this boot reached for ${where}) and CREW_ADVISOR_MODEL at a safe model id`
         : 'use a register-granted builder advisor seat'
   return Object.assign(new Error(`advisor seat ${role} refuses to boot: ${reason} — ${fix}`), {
     reason, code: 'advisor-refusal', role, stage: reason === 'endpoint-dead' ? 'advisor-preflight' : undefined,
@@ -240,7 +287,7 @@ export async function assertAdvisorCellLive({ record, adapters = {}, taskSlug, p
         note({ taskSlug, role, kind: 'boot-refusal', err,
           cell: { agent: 'advisor', provider: 'local', id: record.model,
             model: `local/${record.model}`, effort: null },
-          member: { transport: 'loopback' } })
+          member: { transport: 'local-http' } })
       } catch { /* instrumentation is never load-bearing */ }
       if (!advisorLive) throw advisorRefusal('endpoint-dead', role, record)
     }
@@ -1756,7 +1803,7 @@ export async function bootCmd(args, deps = {}) {
     ...(laneFence ? { lane_name: laneFence.lane, fenced_lanes: laneFence.fence.length } : {}),
     capabilities: { schema_version: registry.schema_version, roles: Object.keys(registry.roles) },
     ...(memory.record ? { memory: memory.record } : {}),
-    ...(advisorRecord.granted.length ? { advisor: advisorRecord } : {}),
+    ...(advisorRecord.granted.length ? { advisor: advisorJournalRecord(advisorRecord) } : {}),
   })
   // The seats this boot just launched carry the brief in their argv, so their own
   // ready reply is both due and the only evidence that counts (#741). Gate HERE,

@@ -1049,6 +1049,11 @@ test('PhaseGantt draws named bounce connectors inside the timeline layer', () =>
   assert.match(source, /class="bounce-layer"/)
   assert.ok(source.includes('connectorPath(from, to)'))
   assert.ok(source.includes('connectorLabel(from, to, arrow)'))
+  assert.match(source, /Review → rework/)
+  assert.match(source, /Review requested changes:/)
+  assert.match(source, /class="bounce-hit-layer"/)
+  assert.match(source, /class="bounce-hotspot"/)
+  assert.match(source, /role="tooltip"/)
 })
 
 test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
@@ -1056,7 +1061,30 @@ test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
   assert.ok(source.includes('--identity-column:17rem'))
   assert.ok(source.includes('--lane-gap:.6rem'))
   assert.ok(source.includes('left:calc(var(--identity-column) + var(--lane-gap))'))
-  assert.ok(source.includes('right:0'))
+  assert.ok(source.includes('width:calc(100% - var(--identity-column) - var(--lane-gap))'))
+})
+
+test('PhaseGantt starts its round connector below the phase number', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.match(source, /waterfall-row\.has-rounds \.phase-meta::before/)
+  assert.ok(source.includes('top:calc(50% + .72rem)'))
+})
+
+test('PhaseGantt keeps compact gate proof badges readable on narrow bars', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  assert.match(source, /gateChipLabel\(marker\)/)
+  assert.match(source, /\.bar \{[^}]*overflow:visible/)
+  assert.match(source, /\.bar > span,\.gate \{ flex:0 0 auto; \}/)
+})
+
+test('PhaseGantt clears a selected child when a phase is chosen', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
+  const handler = source.match(/function choosePhase\(block\) \{([^}]*)\}/)?.[1] || ''
+  assert.match(handler, /selectedStep = null/)
+  assert.match(handler, /onselectphase\(block\.phase_id \?\? block\.name\)/)
+  assert.match(source, /onclick=\{\(\) => choosePhase\(block\)\}/)
+  assert.match(source, /resolveSelectedPhaseId\(selected\)/)
+  assert.match(source, /sameId\(block\.phase_id, selectedPhaseId\)/)
 })
 
 test('factory step trace projects measured journal spans into their owning phase', () => {
@@ -1140,7 +1168,7 @@ test('factory checkpoint inspection stays local and highlights the related water
   const inspect = source.match(/function inspectStep\(step\) \{([^}]*)\}/)?.[1] || ''
   assert.equal(inspect.includes('onselectphase'), false)
   assert.match(source, /class:step-linked=\{sameId\(block\.phase_id, linkedPhase\)\}/)
-  assert.match(source, /class:selected=\{linkedPhase == null && selected === block\.name\}/)
+  assert.match(source, /class:selected=\{linkedPhase == null && sameId\(block\.phase_id, selectedPhaseId\)\}/)
   assert.match(source, /step\.handoffs/)
   assert.match(source, /Agent work above, factory control here/)
   assert.match(source, /class="agent-guide"/)

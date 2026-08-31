@@ -34,6 +34,7 @@
   let crew = $derived(crewSummary(run.agents))
   let started = $derived(dateParts(run.started_at))
   let finished = $derived(dateParts(run.ended_at))
+  let selectedPhaseLabel = $derived(resolvePhase(selectedPhase)?.name ?? selectedPhase)
 
   async function load(target = { repo_slug:run.repo_slug, task_slug:run.goal, adw_id:run.adw_id }) {
     const generation = ++detailGeneration
@@ -81,10 +82,17 @@
   $effect(() => {
     const requested = phase
     const phases = run.phases || []
-    selectedPhase = requested ?? phases.find((item) => item.status === 'running')?.name ?? phases.at(-1)?.name ?? null
+    const fallback = phases.find((item) => item.status === 'running') ?? phases.at(-1) ?? null
+    selectedPhase = requested ?? fallback?.id ?? fallback?.name ?? null
   })
 
-  function selectPhase(name) { selectedPhase = name; onphase(name) }
+  function resolvePhase(value) {
+    const phases = run.phases || []
+    return phases.find((item) => item.id != null && value != null && String(item.id) === String(value))
+      ?? phases.find((item) => item.name === value)
+      ?? null
+  }
+  function selectPhase(value) { selectedPhase = value; onphase(value) }
   function title(value) { return String(value || 'phase').replaceAll('_',' ') }
   function dateParts(value) {
     if (!value) return { iso:null, date:'Not recorded', time:'Time unavailable' }
@@ -156,7 +164,7 @@
   </div>
 
   <section class="phase-section">
-    <header><div><p class="micro">Selected phase</p><h2>{selectedPhase ? title(selectedPhase) : 'Choose a phase'}</h2></div>{#if selectedPhase}<span>Click another bar in the waterfall to inspect it.</span>{/if}</header>
+    <header><div><p class="micro">Selected phase</p><h2>{selectedPhaseLabel ? title(selectedPhaseLabel) : 'Choose a phase'}</h2></div>{#if selectedPhase}<span>Click another bar in the waterfall to inspect it.</span>{/if}</header>
     <PhasePanel {run} phase={selectedPhase} {returns} {events} />
   </section>
 

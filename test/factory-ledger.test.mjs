@@ -22,7 +22,7 @@ import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 const NONCE_PREFIX = 'devteam-done-'
 import {
   openLedger, mkdirpBounded, replayJsonl, isoMs, TABLES, MIGRATIONS, applyMigrations, NODE_FLOOR,
-  SESSION_STATUSES, SESSION_OUTCOMES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
+  SESSION_STATUSES, SESSION_OUTCOMES, SEAT_VALUE_SOURCES, TERMINAL_ACTORS, ESCALATION_CAUSES, escalationCause, TERM_TO_KILL_MS, WRITERS, WRITER_MIRROR_TABLES, UPDATE_ONLY_WRITERS, DRIFT_REMEDY, DRIFT_COLLAPSE_REMEDY, LedgerUsageError,
   MODIFIER_KINDS, MODIFIER_ATTEMPT_OUTCOMES, INTAKE_DISPATCH_OUTCOMES,
   SEAT_TEARDOWN_OUTCOMES, GATE_DISCRIMINATION_VERDICTS, CELL_FAILURE_KINDS, CELL_FAILURE_ATTRIBUTIONS,
   RUN_VARIANTS, RUN_VARIANT_MARKERS, STAGE_MARKER_CHUNK, variantFromFirstMessage,
@@ -698,6 +698,11 @@ test('T14: every migration prefix upgrades to the complete current column set', 
 
 function exerciseEveryWriter(ledger, adwId) {
   ledger.startSession({ adw_id: adwId, repo_slug: 'repo', task_slug: 'task' })
+  ledger.recordRunSeat({
+    adw_id: adwId, role: 'planner', agent: 'claude', provider: 'anthropic', model_id: 'claude-sonnet',
+    model: 'sonnet', effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed',
+    warnings: ['fixture-warning'], created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.linkRun({ run_id: 'daemon-run-1', adw_id: adwId, crew_dir: '/tmp/crew' })
   const phaseId = ledger.startPhase({ adw_id: adwId, name: 'plan' })
   ledger.recordEvent({
@@ -821,6 +826,82 @@ test('AC-5: replaying the JSONL through the public write API into a fresh db rep
     replayedAgain[table] = ledger2.dumpTable(table)
   }
   assert.deepEqual(replayedAgain, replayed)
+})
+
+test('run_seats records effective roles, preserves warnings, replays through JSONL, and ignores duplicate roles', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const target = openTestLedger()
+  const seat = (role, over = {}) => ({
+    adw_id: 'seat-roundtrip', role, agent: 'claude', provider: 'anthropic',
+    model_id: 'claude-sonnet', model: 'sonnet', effort: 'high', transport: 'pane',
+    source: 'roster', policy_state: 'passed', warnings: [],
+    created_at: '2024-01-01T00:00:00.000Z', ...over,
+  })
+  try {
+    source.recordRunSeat(seat('planner', { warnings: ['vendor-diversity'] }))
+    source.recordRunSeat(seat('builder', {
+      agent: 'codex', provider: 'openai', model_id: 'gpt-5', model: 'gpt5', effort: 'medium',
+      transport: 'headless-rpc', source: 'operator_override', policy_state: 'warned', warnings: [],
+    }))
+    const result = replayJsonl(source._jsonlPath, target)
+    assert.deepEqual(result, { applied: 2, skipped: 0, failed: 0, complete: true, first_failure: null })
+    assert.deepEqual(target.dumpTable('run_seats'), source.dumpTable('run_seats'))
+    assert.equal(JSON.parse(target.dumpTable('run_seats').find((row) => row.role === 'planner').warnings_json)[0], 'vendor-diversity')
+    target.recordRunSeat(seat('builder', { agent: 'second-should-be-ignored' }))
+    assert.equal(target.dumpTable('run_seats').length, 2)
+  } finally { source.close(); target.close() }
+})
+
+test('run_seats redacts marker warnings before serializing and replays surviving warnings', { skip: SKIP }, () => {
+  const source = openTestLedger()
+  const target = openTestLedger()
+  const marker = `${NONCE_PREFIX}run-seat-warning`
+  const seat = {
+    adw_id: 'seat-redaction', role: 'planner', agent: 'claude', provider: 'anthropic',
+    model_id: 'claude-sonnet', model: 'sonnet', effort: 'high', transport: 'pane',
+    source: 'roster', policy_state: 'passed', warnings: ['keep-me', marker],
+    created_at: '2024-01-01T00:00:00.000Z',
+  }
+  try {
+    source.recordRunSeat(seat)
+    const sourceRows = source.dumpTable('run_seats')
+    assert.equal(sourceRows[0].warnings_json, '["keep-me"]')
+    const jsonl = readFileSync(source._jsonlPath, 'utf8')
+    assert.doesNotMatch(jsonl, new RegExp(marker))
+    assert.deepEqual(replayJsonl(source._jsonlPath, target), {
+      applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+    })
+    assert.deepEqual(target.dumpTable('run_seats'), sourceRows)
+  } finally { source.close(); target.close() }
+})
+
+test('run_seats accepts only the four closed value sources and refuses unknown provenance without writing', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    assert.equal(Object.isFrozen(SEAT_VALUE_SOURCES), true)
+    for (const source of SEAT_VALUE_SOURCES) {
+      ledger.recordRunSeat({
+        adw_id: 'seat-sources', role: `role-${source}`, agent: 'claude', provider: 'anthropic',
+        model_id: 'model', model: 'model', effort: 'high', transport: 'pane', source,
+        policy_state: 'passed', warnings: ['warning'], created_at: '2024-01-01T00:00:00.000Z',
+      })
+    }
+    assert.equal(ledger.dumpTable('run_seats').length, 4)
+    assert.deepEqual(JSON.parse(ledger.dumpTable('run_seats')[0].warnings_json), ['warning'])
+    const bad = 'caller-controlled-seat-source'
+    assert.throws(
+      () => ledger.recordRunSeat({
+        adw_id: 'seat-sources', role: 'bad', agent: 'claude', provider: 'anthropic',
+        model_id: 'model', model: 'model', effort: 'high', transport: 'pane', source: bad,
+        policy_state: 'passed', warnings: [],
+      }),
+      (err) => err instanceof LedgerUsageError
+        && err.message.includes("field 'source'")
+        && err.message.includes('roster|profile_recommendation|operator_override|reseat')
+        && !err.message.includes(bad),
+    )
+    assert.equal(ledger.dumpTable('run_seats').length, 4)
+  } finally { ledger.close() }
 })
 
 test('T6: replaying one authority twice leaves target row counts unchanged', { skip: SKIP }, () => {
@@ -2415,6 +2496,11 @@ const MARKER_ADW = 'devteam-done-marker-should-never-persist-anywhere'
 function seedAllWritersWithMarker(ledger) {
   const ctx = 'marker-run'
   ledger.startSession({ adw_id: ctx, repo_slug: 'r', task_slug: 't', DEVTEAM_SECRET: MARKER_ADW })
+  ledger.recordRunSeat({
+    adw_id: ctx, role: 'builder', agent: MARKER_ADW, provider: 'anthropic', model_id: 'sonnet',
+    model: 'sonnet', effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed',
+    warnings: [MARKER_ADW], created_at: '2024-01-01T00:00:00.000Z',
+  })
   ledger.linkRun({ run_id: MARKER_ADW, adw_id: ctx, crew_dir: MARKER_ADW })
   const phaseId = ledger.startPhase({ adw_id: ctx, name: MARKER_ADW })
   ledger.recordEvent({ adw_id: ctx, type: 'phase_start', phase_id: phaseId, payload: { name: MARKER_ADW } })
@@ -4688,7 +4774,7 @@ test('proposal fields and the run configuration row replay through JSONL', { ski
   assert.equal(configuration.effective_assurance, 'standard')
 })
 
-test('ledger query docs pin typed outcome columns, the closed cause vocabulary, and the escalations recipe', () => {
+test('ledger query docs pin typed outcomes, run seats, closed vocabularies, and their recipes', () => {
   const docs = readFileSync(join(ROOT, 'docs', 'ledger-queries.md'), 'utf8')
   for (const field of ['sessions.outcome', 'sessions.terminal_reason', 'sessions.terminal_actor']) {
     assert.ok(docs.includes(`\`${field}\``), `docs missing ${field}`)
@@ -4697,6 +4783,12 @@ test('ledger query docs pin typed outcome columns, the closed cause vocabulary, 
     assert.equal((docs.match(new RegExp('`' + cause + '`', 'g')) || []).length, 1, `${cause} must appear as a backticked vocabulary member exactly once`)
   }
   assert.match(docs, /ledger\.mjs escalations --since <iso>/)
+  assert.ok(docs.includes('`run_seats`'))
+  for (const source of ['roster', 'profile_recommendation', 'operator_override', 'reseat']) {
+    assert.ok(docs.includes(`\`${source}\``), `docs missing ${source}`)
+  }
+  assert.match(docs, /\*\*23 tables\*\*/)
+  assert.match(docs, /FROM\s+run_seats/i)
 })
 
 test('no non-test factory or crew module consumes the recorded proposal columns', () => {

@@ -65,6 +65,16 @@ function payload(event) {
   try { return event.payload_json ? JSON.parse(event.payload_json) : {} } catch { return {} }
 }
 
+// A row whose warnings_json is unparseable is a torn write, not an absence of
+// warnings — say null, never [].
+function parseWarnings(text) {
+  if (typeof text !== 'string') return null
+  try {
+    const parsed = JSON.parse(text)
+    return Array.isArray(parsed) ? parsed : null
+  } catch { return null }
+}
+
 // A dispatch id is not an assignment's identity: the runtime reuses it across a
 // resumed drive (#461), so b52-heartbeat's journal carries d1 twice (a re-asked
 // planner) and d2 twice (a lead that took over a timed-out builder). Pair the
@@ -153,12 +163,29 @@ function sumBilled(rows, column, fallback) {
 // predates the sessions.tier column and is never backfilled.
 const TIER_UNMEASURED = "not measured — this run's session row records no tier: it was booted with explicit --roles rather than --tier, or it predates the sessions.tier column and is never backfilled; intake_dispatches records tier by issue, not by run"
 const CONFIGURATION_UNMEASURED = 'not recorded for this run — it predates canonical run-configuration recording or its boot record did not carry this axis; the visualizer does not infer configuration from phases or seats'
+const SEATS_UNMEASURED = 'not recorded for this run — the ledger holds no run_seats rows for it, so what actually sat in each role was never measured; an empty list would assert this run had no seats, which is a different claim'
+const DRIVER_UNOBSERVED = 'not observed — driver liveness is authoritative only from run_observations (TRD §5.5), a table that does not exist yet; it is never inferred from session status'
+const HEARTBEAT_NEVER_BEAT = 'no session or agent heartbeat was recorded for this run — a headless lane that never entered a pane wait carries NULL by construction'
+const HEARTBEAT_SETTLED = 'this run has settled; a seat-wait beat bounds a LIVE driver only, so for a finished run freshness is not a stale measurement but no measurement at all'
+const SETTLEMENT_UNTYPED = 'this run settled before typed run outcomes shipped — sessions.outcome is NULL and a legacy status is never translated into the success|escalated|aborted|failed vocabulary'
+
+// docs/ledger-queries.md "Heartbeat cadence": the rate has ONE owner,
+// LIVENESS_PROBE_MS in crew/seat-io.mjs (30_000 ms), and TWO periods is the
+// documented bound. Restated rather than imported so the visualizer server never
+// pulls the crew wait loop into its process. The value is PUBLISHED beside the
+// state it produces and its origin is named, because #813 widens the real bound
+// by the run's seat-wait ceiling — read off the lane journal, which no ledger
+// reader can see. So this is the floor, honestly labelled 'default', not the
+// whole truth.
+export const HEARTBEAT_OVERDUE_MS = 60_000
 
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
   if (field === 'tier') return TIER_UNMEASURED
   if (field === 'task_profile' || field === 'execution_shape' || field === 'assurance') return CONFIGURATION_UNMEASURED
   if (field === 'last_heartbeat_at') return 'no session or agent heartbeat was recorded for this run'
+  if (field === 'seats') return SEATS_UNMEASURED
+  if (field === 'driver_state') return DRIVER_UNOBSERVED
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
   const missing = probe?.missing || []
@@ -219,7 +246,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { runConfiguration = null, agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [] } = extras || {}
+  const { runConfiguration = null, runSeats = [], agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [] } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -266,6 +293,26 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     legacy_tier: runConfiguration.legacy_tier ?? null,
     created_at: runConfiguration.created_at ?? null,
   } : null
+  const shapeSeat = (row) => ({
+    role: row.role ?? null,
+    agent: row.agent ?? null,
+    provider: row.provider ?? null,
+    model_id: row.model_id ?? null,
+    model: row.model ?? null,
+    effort: row.effort ?? null,
+    transport: row.transport ?? null,
+    source: row.source ?? null,
+    policy_state: row.policy_state ?? null,
+    warnings: parseWarnings(row.warnings_json),
+    created_at: row.created_at ?? null,
+  })
+  const seats = runSeats.length ? runSeats.map(shapeSeat) : null
+  const settlementState = ended === null ? 'unsettled' : 'settled'
+  const settlementOutcome = session.outcome ?? null
+  const heartbeatState = settlementState === 'settled' ? 'unmeasured'
+    : heartbeat_age_ms === null
+      ? 'unmeasured'
+      : heartbeat_age_ms >= HEARTBEAT_OVERDUE_MS ? 'overdue' : 'fresh'
   const taskProfile = configuration?.task_profile?.effective ?? null
   const executionShape = configuration?.execution?.effective ?? null
   const assurance = configuration?.assurance?.effective ?? null
@@ -312,6 +359,13 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   }
   pending.read_tokens = pendingFor('read_tokens', probe, metrics.read_tokens)
   pending.written_tokens = pendingFor('written_tokens', probe, metrics.written_tokens)
+  const seatsReason = pendingFor('seats', probe, seats)
+  if (seatsReason) pending.seats = seatsReason
+  pending.driver_state = DRIVER_UNOBSERVED
+  if (heartbeatState === 'unmeasured') {
+    pending.heartbeat_state = settlementState === 'settled' ? HEARTBEAT_SETTLED : HEARTBEAT_NEVER_BEAT
+  }
+  if (settlementState === 'settled' && settlementOutcome === null) pending.settlement_outcome = SETTLEMENT_UNTYPED
   const phaseLanes = new Map()
   for (const event of agentEvents) {
     if (event.phase_id == null) continue
@@ -337,6 +391,23 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     running: session.status === 'running',
     tier,
     configuration,
+    seats,
+    settlement: {
+      state: settlementState,
+      outcome: settlementOutcome,
+      reason: session.terminal_reason ?? null,
+    },
+    runtime: {
+      // TRD §5.5's Driver dimension is alive|gone|unknown, and its authority is
+      // run_observations. Until that table exists the only honest value is
+      // `unknown`, carried with pending.driver_state saying why.
+      driver_state: 'unknown',
+      observed_at: null,
+      heartbeat_state: heartbeatState,
+      heartbeat_threshold_ms: HEARTBEAT_OVERDUE_MS,
+      heartbeat_threshold_origin: 'default',
+      last_heartbeat_at,
+    },
     task_profile: taskProfile,
     execution_shape: executionShape,
     // `variant` is retained as the web client's compatibility name for the

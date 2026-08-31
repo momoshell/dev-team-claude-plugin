@@ -10,6 +10,7 @@ The factory ledger is the register for run facts. When a session asks what happe
 | Did a lead accept with residuals, and did the typed decision hold? | `node scripts/factory/ledger.mjs task <adw_id\|task_slug>` — prints the `accept_decisions` rows: where the accept was attempted, whether it was accepted or fell closed to escalate, the residual/refuted/cosmetic/unverified counts, and the reasons an invalid decision was refused. The unit is one accept attempt. |
 | Which runs exist? | `node scripts/factory/ledger.mjs sessions` — prints the session rows, one row per run, including task slug, status, timestamps, `sessions.request` (**NULL in every production row** today — see the `request` verb below), `request_source`, and the session-level token and cost columns. The unit is one run. |
 | Which task profile, execution shape, and assurance did a run use? | Query `run_configurations` by `adw_id`. One versioned row records requested/effective/source provenance for the three independent axes plus the compatibility `legacy_variant` and `legacy_tier`. No row means the run predates this measurement; never infer configuration from phases or seats. |
+| Which agent, model, effort and transport actually sat in each role? | Query `run_seats` by `adw_id` — one row per effective role, with `source` naming where the value came from (`roster`, `profile_recommendation`, `operator_override`, `reseat`) and `policy_state` whether it passed the boot policy. No rows means the run predates effective-seat recording; never reconstruct seats from `agent_sessions`, which records only seats that produced a transcript. |
 | What phases did a run go through? | `node scripts/factory/ledger.mjs phases <adw_id>` — prints phase rows ordered by sequence, with the phase name, status, and start/end timestamps. The unit is one phase. |
 | What events did a run emit? | `node scripts/factory/ledger.mjs tail <adw_id> [--after n] [--limit n]` — prints ordered event rows and their bounded payloads; `--after` is an exclusive event-row cursor and `--limit` is the page size. The unit is one event. |
 | What processes did a run spawn? | **Retired (#405)** — `node scripts/factory/ledger.mjs procs <adw_id>` still runs, but the `processes` table has no writer, so it returns `[]` for every run. The zero is **retired**, not *no processes spawned*; `ledger doctor` prints the reason in `retired_tables.processes`. |
@@ -43,6 +44,8 @@ A NULL `sessions.request` means **not measured then**, never an empty ask. `requ
 
 `run_configurations` is the configuration authority for newly booted runs. It records the resolved task profile, requested/effective execution, requested/effective assurance, their resolution sources, and the legacy aliases used during migration. `sessions.tier`, `sessions.proposed_shape`, and `sessions.proposed_strength` keep their historical meanings. A historical run with no configuration row is unmeasured; the visualizer may translate a recorded legacy tier (`mechanical`, `build`, or `judge`) to its canonical assurance label, but it does not invent a task profile or execution shape.
 
+A run with **no `run_seats` rows was not measured** — never a run with no seats. `run_seats` records one row for each effective role at boot because a pane seat may produce no `agent_sessions` row at all; that usage/session table is written only when a seat produces a transcript. Therefore seats are never reconstructed from `agent_sessions`, and an absent `run_seats` row is not an empty or zero-seat claim.
+
 Usage is tokens only and is a **sum of running totals** across the run's `agent_sessions` rows. Each row stores that agent session's running total, not a delta, so the readout sums the rows. Money is deliberately out of scope (#119); the query surface reports no cost calculation. **OPEN CONTRADICTION (#626):** `ledger cells` computes and prints a per-cell `cost_usd` from `crew/roster.json` rates under `CELL_PRICE_UNITS` (`scripts/factory/ledger.mjs:154`); a run of `node scripts/factory/ledger.mjs cells --since 2026-08-13T00:00:00Z` measured `cost_usd: 29.193845` for one claude-opus-5 reviewer cell. The decision about which claim governs belongs to a human.
 
 A `ci_cycles` classification of `unknown` is a **measured non-answer carrying its reason** — never a green, and never a repair; a branch with no `ci_cycles` rows was **not watched**, which is not the same as watched-and-green; and `excerpt_source: 'redacted'` means a captured excerpt was dropped by field hygiene, not that none was captured. A `repair` decision with no matching `ci_dispatches` row was **not measured**, never “not dispatched”: a refusal is itself recorded as `outcome: 'refused'` with its reason. A park is a terminal artifact at `<crew dir>/task/ci-park-cycle-<n>.json`, carrying the verbatim recorded log rather than a bare failure. The readout says so in the payload itself: a window with no `ci_cycles` rows carries `measured: false`, an `absent.ci_cycles` marker, and null `watched`/`caught` tallies rather than zeros, while a watched window that reproduced nothing still reports a real measured `caught: 0`.
@@ -51,7 +54,7 @@ A sweep with **no** refusal rows means nothing was refused *that sweep*, never t
 
 A `claimed` row with no settled row is a **stranded** dispatch — the run may or may not have started, and the issue is deliberately left out of `Ready` so it is never re-dispatched; a `refused` row means nothing executed; `unreadable` is never a `done`; and a `promoted` row is the only evidence that a PR was seen — the loop never merges, approves or closes anything.
 
-The ledger declares **22 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` is populated only for runs booted after canonical configuration recording shipped; older runs deliberately have no row. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
+The ledger declares **23 tables** plus SQLite's own `sqlite_sequence`. `run_configurations` and `run_seats` are populated only for runs booted after canonical configuration and effective-seat recording shipped; older runs deliberately have no row. `envelopes` and `processes` are retired by declaration. The empty CI/intake tables remain unreached writers, not measured zeros.
 
 ## Typed run outcomes
 
@@ -680,6 +683,20 @@ per-seat-session (unit: one pi seat session)
 ```
 
 **The claude half is deliberately `left unpriced` here.** A claude transcript frame carries token counts and no cost field, so pricing it needs a rate source and a decision about which rates are authoritative — and `ledger cells` already computes `cost_usd` from `crew/roster.json` rates under `CELL_PRICE_UNITS` (`scripts/factory/ledger.mjs:154`), the OPEN CONTRADICTION (#626) recorded above. Recipe H prices claude pane seats from that same roster. Until #626 is decided, this recipe prices only the half that prices itself rather than adding a second authority.
+
+### Recipe L — which runs were reseated or operator-overridden?
+
+This recipe groups effective seats by their recorded provenance so an operator can find runs with a `reseat` or `operator_override`. It counts **recorded seats only**: a run with no `run_seats` rows is unmeasured, and an older run's absent rows cannot be reconstructed from `agent_sessions`.
+
+```sh
+sqlite3 "$LEDGER_DB" <<'SQL'
+SELECT source, adw_id, COUNT(*) AS recorded_seats
+FROM run_seats
+WHERE source IN ('reseat', 'operator_override')
+GROUP BY source, adw_id
+ORDER BY source, adw_id;
+SQL
+```
 
 ### Mechanics that bite
 

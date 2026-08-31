@@ -122,6 +122,51 @@ test('linkRun emits a daemon-to-sidecar association into the real ledger', { ski
   } finally { ledger.close() }
 })
 
+test('recordSeats records good effective seats while dropping only a malformed seat', { skip: SKIP }, () => {
+  const dir = freshDir('record-seats')
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify({ schema_version: 3, task: 'seats', roles: ['planner', 'builder'] }))
+  const dbPath = join(dir, 'ledger', 'ledger.db')
+  const emitter = openRun({ stateDir: dir, repoSlug: 'r', taskSlug: 'seats', dbPath, stderr: { write: () => {} } })
+  try {
+    emitter.startRun()
+    const good = (role, over = {}) => ({
+      role, agent: 'claude', provider: 'anthropic', model_id: 'sonnet', model: 'sonnet',
+      effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed', warnings: [],
+      created_at: '2024-01-01T00:00:00.000Z', ...over,
+    })
+    const droppedBefore = emitter.stats().dropped
+    assert.doesNotThrow(() => emitter.recordSeats([
+      good('planner'),
+      { role: 'malformed', source: 'unknown-source' },
+      good('builder', { source: 'reseat', warnings: ['vendor-diversity'] }),
+    ]))
+    assert.ok(emitter.stats().dropped > droppedBefore)
+  } finally { emitter.dispose() }
+
+  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })
+  try {
+    assert.deepEqual(ledger.dumpTable('run_seats').map((row) => row.role).sort(), ['builder', 'planner'])
+    assert.equal(ledger.dumpTable('run_seats').find((row) => row.role === 'builder').source, 'reseat')
+  } finally { ledger.close() }
+})
+
+test('recordSeats is inert for non-arrays, empty arrays, and a below-floor ledger', { skip: SKIP }, () => {
+  const dir = freshDir('record-seats-inert')
+  const emitter = openRun({
+    stateDir: dir, repoSlug: 'r', taskSlug: 'seats', dbPath: join(dir, 'ledger', 'ledger.db'),
+    nodeVersion: '20.11.0', stderr: { write: () => {} },
+  })
+  try {
+    const seat = {
+      role: 'planner', agent: 'claude', provider: 'anthropic', model_id: 'sonnet', model: 'sonnet',
+      effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed', warnings: [],
+    }
+    assert.doesNotThrow(() => emitter.recordSeats(null))
+    assert.doesNotThrow(() => emitter.recordSeats([]))
+    assert.doesNotThrow(() => emitter.recordSeats([seat]))
+  } finally { emitter.dispose() }
+})
+
 test('endRun forwards typed outcome fields, defaults them to NULL, and still refuses finalizer status fail', { skip: SKIP }, () => {
   const typedDir = freshDir('typed-end-run')
   const typedDb = join(typedDir, 'ledger', 'ledger.db')

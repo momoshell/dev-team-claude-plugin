@@ -23,7 +23,7 @@ const missingProbe = { missing: ['mode', 'engineer'], latched: false, probes: 1 
 // the implementation's own output cannot notice that output shrinking (#476 V8).
 // MUTATION V8: derive this set from shapeRun's own output and a removed marker is
 // invisible again.
-const PENDING_FIELDS = ['accept_decisions', 'assurance', 'billed_cache_read_tokens', 'billed_cache_write_tokens', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'engineer', 'execution_shape', 'gate_checks', 'gate_discrimination', 'gate_generations', 'last_heartbeat_at', 'mode', 'phase_lanes', 'read_tokens', 'reviews', 'task_profile', 'tier', 'written_tokens']
+const PENDING_FIELDS = ['accept_decisions', 'assurance', 'billed_cache_read_tokens', 'billed_cache_write_tokens', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'driver_state', 'engineer', 'execution_shape', 'gate_checks', 'gate_discrimination', 'gate_generations', 'heartbeat_state', 'last_heartbeat_at', 'mode', 'phase_lanes', 'read_tokens', 'reviews', 'seats', 'settlement_outcome', 'task_profile', 'tier', 'written_tokens']
 // Deliberately NEWEST-FIRST: the generation sort is load-bearing only when input
 // order and generation order disagree (#476 V9).
 // MUTATION V9: pre-sort this fixture ascending and the sort stops being exercised.
@@ -66,10 +66,14 @@ test('shapeRun has an identical card key set for live and finished runs', () => 
 })
 
 test('every unmeasured field is null and has a non-empty pending reason', () => {
-  const run = shapeRun(base, [], [], null, missingProbe, Date.parse(end))
+  const run = shapeRun({ ...base, status: 'ok', ended_at: end }, [], [], null, missingProbe, Date.parse(end))
   for (const field of Object.keys(run.pending)) {
-    const value = field in run.metrics ? run.metrics[field] : run[field]
-    assert.equal(value, null, `${field} must never be fabricated`)
+    const value = field === 'driver_state' || field === 'heartbeat_state'
+      ? run.runtime[field]
+      : field === 'settlement_outcome' ? run.settlement.outcome
+        : field in run.metrics ? run.metrics[field] : run[field]
+    if (field === 'driver_state' || field === 'heartbeat_state') assert.equal(typeof value, 'string')
+    else assert.equal(value, null, `${field} must never be fabricated`)
     assert.equal(typeof run.pending[field], 'string')
     assert.ok(run.pending[field].length > 0)
     assert.notEqual(run.pending[field], 0)
@@ -313,6 +317,74 @@ test('shapeRun uses session and agent heartbeats without fabricating an absent m
   assert.equal(measured.last_heartbeat_at, latest)
   assert.equal(measured.heartbeat_age_ms, 4000)
   assert.equal(measured.pending.last_heartbeat_at, undefined)
+})
+
+test('shapeRun keeps absent seats distinct from an empty measured list and parses warnings safely', () => {
+  const now = Date.parse(end)
+  const absent = shapeRun(base, [], [], null, { missing: [] }, now)
+  assert.equal(absent.seats, null)
+  assert.equal(Array.isArray(absent.seats), false)
+  assert.match(absent.pending.seats, /not recorded/i)
+
+  const measured = shapeRun(base, [], [], null, { missing: [] }, now, {
+    runSeats: [
+      {
+        role: 'planner', agent: 'claude', provider: 'anthropic', model_id: 'sonnet', model: 'sonnet',
+        effort: 'high', transport: 'pane', source: 'roster', policy_state: 'passed',
+        warnings_json: JSON.stringify(['vendor-diversity']), created_at: start,
+      },
+      {
+        role: 'builder', agent: 'codex', provider: 'openai', model_id: 'gpt-5', model: 'gpt5',
+        effort: 'medium', transport: 'headless-rpc', source: 'reseat', policy_state: 'warned',
+        warnings_json: '[]', created_at: end,
+      },
+      {
+        role: 'reviewer', warnings_json: '{torn',
+      },
+    ],
+  })
+  assert.equal(measured.pending.seats, undefined)
+  assert.deepEqual(Object.keys(measured.seats[0]).sort(), [
+    'role', 'agent', 'provider', 'model_id', 'model', 'effort', 'transport',
+    'source', 'policy_state', 'warnings', 'created_at',
+  ].sort())
+  assert.deepEqual(measured.seats[0].warnings, ['vendor-diversity'])
+  assert.deepEqual(measured.seats[1].warnings, [])
+  assert.equal(measured.seats[2].warnings, null)
+})
+
+test('shapeRun derives settlement from the terminal timestamp and typed outcome', () => {
+  const live = shapeRun(base, [], [], null, { missing: [] }, Date.parse(end))
+  assert.deepEqual(live.settlement, { state: 'unsettled', outcome: null, reason: null })
+  assert.equal(live.pending.settlement_outcome, undefined)
+
+  const typed = shapeRun({ ...base, status: 'ok', ended_at: end, outcome: 'escalated', terminal_reason: 'review-unresolved' }, [], [], null, { missing: [] }, Date.parse(end))
+  assert.deepEqual(typed.settlement, { state: 'settled', outcome: 'escalated', reason: 'review-unresolved' })
+
+  const legacy = shapeRun({ ...base, status: 'ok', ended_at: end, outcome: null, terminal_reason: null }, [], [], null, { missing: [] }, Date.parse(end))
+  assert.deepEqual(legacy.settlement, { state: 'settled', outcome: null, reason: null })
+  assert.match(legacy.pending.settlement_outcome, /typed run outcomes/i)
+})
+
+test('shapeRun publishes heartbeat threshold and distinguishes live freshness from settled absence', () => {
+  const now = Date.parse(end)
+  const baseline = shapeRun(base, [], [], null, { missing: [] }, now)
+  assert.equal(baseline.runtime.driver_state, 'unknown')
+  assert.equal(baseline.runtime.observed_at, null)
+  assert.ok(baseline.pending.driver_state)
+  assert.equal(baseline.runtime.heartbeat_threshold_origin, 'default')
+  assert.ok(Number.isInteger(baseline.runtime.heartbeat_threshold_ms))
+  const threshold = baseline.runtime.heartbeat_threshold_ms
+  const at = (age) => shapeRun({ ...base, last_heartbeat_at: new Date(now - age).toISOString() }, [], [], null, { missing: [] }, now).runtime
+  assert.equal(at(Math.floor(threshold / 2)).heartbeat_state, 'fresh')
+  assert.equal(at(threshold * 3).heartbeat_state, 'overdue')
+  assert.equal(baseline.runtime.heartbeat_state, 'unmeasured')
+  assert.match(baseline.pending.heartbeat_state, /no session or agent heartbeat/i)
+
+  const settled = shapeRun({ ...base, status: 'ok', ended_at: end, last_heartbeat_at: new Date(now - 3 * 24 * 60 * 60 * 1000).toISOString() }, [], [], null, { missing: [] }, now)
+  assert.equal(settled.runtime.heartbeat_state, 'unmeasured')
+  assert.match(settled.pending.heartbeat_state, /settled/i)
+  assert.notEqual(settled.pending.heartbeat_state, baseline.pending.heartbeat_state)
 })
 
 test('theme role and lane aliases follow the ratified role order', () => {

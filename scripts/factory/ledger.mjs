@@ -133,6 +133,14 @@ export const EVENT_TYPES = Object.freeze([
 
 export const SESSION_STATUSES = Object.freeze(['running', 'ok', 'fail', 'aborted'])
 export const SESSION_OUTCOMES = Object.freeze(['success', 'escalated', 'aborted', 'failed'])
+// TRD §3.5 (docs/trd-task-configuration-and-run-state.md:222): where a seat's
+// EFFECTIVE value came from. Closed because provenance is a fact the crew
+// decides, not an open vocabulary a caller may extend: a fifth value would
+// record a seat as chosen by a mechanism nothing in the crew implements.
+// `policy_state` beside it is deliberately NOT an enum — the boot policy's
+// vocabulary is owned by crew/roster.json, and restating it here would create a
+// second source of truth (the same reason run_configurations declares none).
+export const SEAT_VALUE_SOURCES = Object.freeze(['roster', 'profile_recommendation', 'operator_override', 'reseat'])
 export const TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator', 'finalizer'])
 export const ESCALATION_CAUSES = Object.freeze([
   'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
@@ -483,6 +491,24 @@ export const TABLES = Object.freeze({
       { name: 'created_at', decl: 'TEXT' },
     ],
     unique: [['adw_id']],
+    indexes: [],
+  },
+  run_seats: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT' },
+      { name: 'role', decl: 'TEXT' },
+      { name: 'agent', decl: 'TEXT' },
+      { name: 'provider', decl: 'TEXT' },
+      { name: 'model_id', decl: 'TEXT' },
+      { name: 'model', decl: 'TEXT' },
+      { name: 'effort', decl: 'TEXT' },
+      { name: 'transport', decl: 'TEXT' },
+      { name: 'source', decl: 'TEXT' },
+      { name: 'policy_state', decl: 'TEXT' },
+      { name: 'warnings_json', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id', 'role']],
     indexes: [],
   },
   phases: {
@@ -886,7 +912,7 @@ export const TABLES = Object.freeze({
 // JSONL line `kind` values. replayJsonl refuses any `kind` outside this set.
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordGateResult', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordRunSeat', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -899,6 +925,7 @@ export const WRITERS = Object.freeze([
 export const WRITER_MIRROR_TABLES = Object.freeze({
   startSession: 'sessions',
   recordRunConfiguration: 'run_configurations',
+  recordRunSeat: 'run_seats',
   startPhase: 'phases',
   recordEvent: 'events',
   recordSourceError: 'events',
@@ -1960,6 +1987,52 @@ export function openLedger({
     mirror((conn) => {
       const cols = tableColumnNames('run_configurations')
       conn.prepare(`INSERT OR IGNORE INTO run_configurations (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((column) => toBindable(args[column])))
+    })
+    return args
+  }
+
+  function recordRunSeat(input = {}) {
+    const required = [
+      'adw_id', 'role', 'agent', 'provider', 'model_id', 'model',
+      'effort', 'transport', 'source', 'policy_state',
+    ]
+    requireFields(input, required, 'recordRunSeat')
+    requireEnum(input.source, SEAT_VALUE_SOURCES, 'recordRunSeat', 'source')
+    const short = (field) => normaliseShortName(input[field], 'recordRunSeat', field)
+    // Replay feeds this writer its own `args` back (ledger.mjs:3911), which carries
+    // warnings_json rather than warnings — accept both so a replayed row equals
+    // its source row exactly.
+    const storedWarnings = typeof input.warnings_json === 'string' ? input.warnings_json : null
+    // Warnings arrive as an array and are stored as JSON text: the column is one
+    // seat's applicable warnings (TRD §3.5), and an absent list is `[]` because the
+    // writer is only ever called for a seat that WAS resolved — absence lives at
+    // the row level (no row) and is never smuggled into a field. Redact the array
+    // elements before serializing: otherwise a protected warning makes redact()
+    // drop the entire JSON string, losing safe siblings and replay equivalence.
+    const warnings = Array.isArray(input.warnings) ? input.warnings : []
+    const storedWarningValues = redact(
+      warnings.filter((w) => typeof w === 'string').map((w) => normaliseShortName(w, 'recordRunSeat', 'warnings')),
+      stats,
+    )
+    const args = redact({
+      adw_id: input.adw_id,
+      role: short('role'),
+      agent: short('agent'),
+      provider: short('provider'),
+      model_id: short('model_id'),
+      model: short('model'),
+      effort: short('effort'),
+      transport: short('transport'),
+      source: input.source,
+      policy_state: short('policy_state'),
+      warnings_json: storedWarnings ?? JSON.stringify(storedWarningValues),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordRunSeat', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('run_seats')
+      conn.prepare(`INSERT OR IGNORE INTO run_seats (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
         .run(...cols.map((column) => toBindable(args[column])))
     })
     return args
@@ -3053,6 +3126,13 @@ export function openLedger({
     return queryRows(`SELECT * FROM run_configurations WHERE adw_id IN (${marks})`, ids)
   }
 
+  function runSeatsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT * FROM run_seats WHERE adw_id IN (${marks}) ORDER BY adw_id, role`, ids)
+  }
+
   function agentEventsFor(adwIds) {
     const ids = [...new Set((adwIds || []).filter(Boolean))]
     if (!ids.length) return []
@@ -3819,11 +3899,11 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, recordSessionRequest, recordRunConfiguration, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordSessionRequest, recordRunConfiguration, recordRunSeat, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, runSeatsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

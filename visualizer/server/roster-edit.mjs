@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { SEAT_DEFAULTS, assertCapabilities, DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS } from '../../crew/crew.mjs'
+import { normalizeRoster, serializeRosterV2 } from '../../crew/roster.mjs'
 
 export const SCHEMA_PATH = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'crew', 'roster.schema.json')
 export const ADAPTERS_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'crew', 'adapters')
@@ -106,44 +107,72 @@ function bodyLine(prefix, value, noNewline = false) {
 export function unifiedDiff(beforeText, afterText, { path = 'crew/roster.json' } = {}) {
   if (beforeText === afterText) return ''
   const before = lines(beforeText), after = lines(afterText)
-  let prefix = 0
-  while (prefix < before.values.length && prefix < after.values.length && before.values[prefix] === after.values[prefix] && terminated(before, prefix) === terminated(after, prefix)) prefix += 1
-  let suffix = 0
-  while (prefix + suffix < before.values.length && prefix + suffix < after.values.length && before.values.at(-1 - suffix) === after.values.at(-1 - suffix) && terminated(before, before.values.length - 1 - suffix) === terminated(after, after.values.length - 1 - suffix)) suffix += 1
-  if (prefix === before.values.length && prefix === after.values.length) {
-    prefix = Math.max(0, prefix - 1)
-    suffix = 0
+  const oldCount = before.values.length
+  const newCount = after.values.length
+  const equal = (oldIndex, newIndex) => before.values[oldIndex] === after.values[newIndex]
+    && terminated(before, oldIndex) === terminated(after, newIndex)
+
+  // Keep unchanged regions out of the patch body. Besides producing a useful
+  // review diff, this prevents a schema migration from echoing the unchanged
+  // model-price catalog into a proposal's API response.
+  const lcs = Array.from({ length: oldCount + 1 }, () => new Uint32Array(newCount + 1))
+  for (let oldIndex = oldCount - 1; oldIndex >= 0; oldIndex -= 1) {
+    for (let newIndex = newCount - 1; newIndex >= 0; newIndex -= 1) {
+      lcs[oldIndex][newIndex] = equal(oldIndex, newIndex)
+        ? lcs[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(lcs[oldIndex + 1][newIndex], lcs[oldIndex][newIndex + 1])
+    }
   }
 
-  const beforeStart = Math.max(0, prefix - 3)
-  const afterStart = Math.max(0, prefix - 3)
-  const beforeChangedEnd = before.values.length - suffix
-  const afterChangedEnd = after.values.length - suffix
-  const contextAfter = Math.min(3, suffix)
-  const beforeEnd = beforeChangedEnd + contextAfter
-  const afterEnd = afterChangedEnd + contextAfter
-  const beforeCount = beforeEnd - beforeStart
-  const afterCount = afterEnd - afterStart
-  const output = [
-    `--- a/${path}`,
-    `+++ b/${path}`,
-    `@@ -${rangeStart(beforeStart, beforeCount)},${beforeCount} +${rangeStart(afterStart, afterCount)},${afterCount} @@`,
-  ]
+  const operations = []
+  let oldIndex = 0
+  let newIndex = 0
+  while (oldIndex < oldCount || newIndex < newCount) {
+    if (oldIndex < oldCount && newIndex < newCount && equal(oldIndex, newIndex)) {
+      operations.push({ type: 'equal', oldIndex, newIndex })
+      oldIndex += 1
+      newIndex += 1
+    } else if (oldIndex < oldCount && (newIndex === newCount || lcs[oldIndex + 1][newIndex] >= lcs[oldIndex][newIndex + 1])) {
+      operations.push({ type: 'delete', oldIndex, newIndex })
+      oldIndex += 1
+    } else {
+      operations.push({ type: 'add', oldIndex, newIndex })
+      newIndex += 1
+    }
+  }
 
-  for (let index = beforeStart; index < prefix; index += 1) {
-    const noNewline = (index === before.values.length - 1 && !before.newline) || (index === after.values.length - 1 && !after.newline)
-    output.push(...bodyLine(' ', before.values[index], noNewline))
+  const changed = operations.map((operation, index) => ({ operation, index })).filter(({ operation }) => operation.type !== 'equal')
+  if (!changed.length) return ''
+  const context = 3
+  const ranges = []
+  for (const { index } of changed) {
+    const start = Math.max(0, index - context)
+    const end = Math.min(operations.length - 1, index + context)
+    const previous = ranges.at(-1)
+    if (previous && start <= previous.end + 1) previous.end = Math.max(previous.end, end)
+    else ranges.push({ start, end })
   }
-  for (let index = prefix; index < beforeChangedEnd; index += 1) {
-    output.push(...bodyLine('-', before.values[index], index === before.values.length - 1 && !before.newline))
-  }
-  for (let index = prefix; index < afterChangedEnd; index += 1) {
-    output.push(...bodyLine('+', after.values[index], index === after.values.length - 1 && !after.newline))
-  }
-  for (let index = beforeChangedEnd; index < beforeEnd; index += 1) {
-    const afterIndex = afterChangedEnd + (index - beforeChangedEnd)
-    const noNewline = (index === before.values.length - 1 && !before.newline) || (afterIndex === after.values.length - 1 && !after.newline)
-    output.push(...bodyLine(' ', after.values[afterIndex], noNewline))
+
+  const output = [`--- a/${path}`, `+++ b/${path}`]
+  for (const { start, end } of ranges) {
+    const selected = operations.slice(start, end + 1)
+    const first = selected[0]
+    const beforeStart = first.oldIndex
+    const afterStart = first.newIndex
+    const beforeLines = selected.filter((operation) => operation.type !== 'add')
+    const afterLines = selected.filter((operation) => operation.type !== 'delete')
+    output.push(`@@ -${rangeStart(beforeStart, beforeLines.length)},${beforeLines.length} +${rangeStart(afterStart, afterLines.length)},${afterLines.length} @@`)
+    for (const operation of selected) {
+      if (operation.type === 'equal') {
+        const noNewline = (operation.oldIndex === oldCount - 1 && !before.newline)
+          || (operation.newIndex === newCount - 1 && !after.newline)
+        output.push(...bodyLine(' ', before.values[operation.oldIndex], noNewline))
+      } else if (operation.type === 'delete') {
+        output.push(...bodyLine('-', before.values[operation.oldIndex], operation.oldIndex === oldCount - 1 && !before.newline))
+      } else {
+        output.push(...bodyLine('+', after.values[operation.newIndex], operation.newIndex === newCount - 1 && !after.newline))
+      }
+    }
   }
   return `${output.map((entry) => typeof entry === 'string' ? entry : entry.text).join('\n')}\n`
 }
@@ -251,6 +280,18 @@ export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json',
     }
   }
 
+  try {
+    roster = normalizeRoster(roster)
+  } catch (err) {
+    return {
+      ok: false,
+      refusals: [{ code: 'roster_unreadable', message: err?.message || String(err) }],
+      diff: null,
+      before: null,
+      after: null,
+    }
+  }
+
   let schema
   try { schema = loadSchema() } catch (err) {
     return {
@@ -323,7 +364,7 @@ export async function proposeEdit({ rosterText, rosterPath = 'crew/roster.json',
   }
 
   if (refusals.length) return { ok: false, refusals, diff: null, before, after: null }
-  const canonicalAfter = JSON.stringify(afterRoster, null, 2)
+  const canonicalAfter = serializeRosterV2(afterRoster)
   const afterText = rosterText.endsWith('\n') ? `${canonicalAfter}\n` : canonicalAfter
   const diff = unifiedDiff(rosterText, afterText, { path: 'crew/roster.json' })
   return { ok: true, refusals: [], diff, before, after: clone(cell) }

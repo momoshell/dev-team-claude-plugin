@@ -5,15 +5,27 @@ import { execFileSync } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { pathToFileURL } from 'node:url'
+import { scratchDir } from '../test/helpers.mjs'
 import { DEFAULT_TRANSPORT, HEADLESS_TRANSPORTS, ROLE_ORDER, assertCapabilities } from '../crew/crew.mjs'
 import { capabilityRefusals, loadSeatSchema, proposeEdit } from '../visualizer/server/roster-edit.mjs'
-import { composeMoves, ladderView, readLadder, readReference, stageMoves } from '../visualizer/server/roster-ladder.mjs'
+import { applyMoves, composeMoves, ladderView, readLadder, readReference, stageMoves } from '../visualizer/server/roster-ladder.mjs'
 
 const rosterPath = join(process.cwd(), 'crew', 'roster.json')
 const schemaPath = join(process.cwd(), 'crew', 'roster.schema.json')
 const rosterText = readFileSync(rosterPath, 'utf8')
 const roster = JSON.parse(rosterText)
 const changedBuildReviewerEffort = roster.tiers.build.reviewer.effort === 'high' ? 'max' : 'high'
+const v2Roster = (policy = {}) => ({
+  schema_version: 2,
+  updated_at: roster.updated_at,
+  assurances: {
+    quick: structuredClone(roster.tiers.mechanical),
+    standard: structuredClone(roster.tiers.build),
+    rigorous: structuredClone(roster.tiers.judge),
+  },
+  models: structuredClone(roster.models),
+  policy: structuredClone(policy),
+})
 const ladderPath = join(process.cwd(), 'crew', 'model-ladder.json')
 const ratifiedLadder = readLadder({ ladderPath })
 
@@ -56,12 +68,15 @@ test('the runtime roster is byte-exactly canonical JSON', () => {
   assert.equal(rosterText.endsWith('\n'), false)
 })
 
-test('a legal edit produces one unified hunk and an applyable diff', async () => {
+test('a legal edit produces an applyable v2 result', async () => {
   const result = await edit()
   assert.equal(result.ok, true)
   assert.match(result.diff, /^--- a\/crew\/roster\.json$/m)
   assert.match(result.diff, /^\+\+\+ b\/crew\/roster\.json$/m)
-  assert.equal(result.diff.match(/^@@/gm).length, 1)
+  const patchBody = result.diff.split('\n').slice(2).join('\n')
+  assert.doesNotMatch(patchBody, /cost_in_per_mtok|cost_out_per_mtok/)
+  assert.doesNotMatch(patchBody, /^[+-]\s*"models":/m)
+  assert.ok(result.diff.split('\n').length < 120)
   const dir = mkdtempSync(join(tmpdir(), 'roster-edit-'))
   try {
     const crew = join(dir, 'crew')
@@ -70,19 +85,39 @@ test('a legal edit produces one unified hunk and an applyable diff', async () =>
     copyFileSync(rosterPath, join(crew, 'roster.json'))
     writeFileSync(patchPath, result.diff)
     execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
-    const expected = structuredClone(roster)
-    expected.tiers.build.reviewer.effort = changedBuildReviewerEffort
-    assert.equal(readFileSync(join(crew, 'roster.json'), 'utf8'), JSON.stringify(expected, null, 2))
+    const after = JSON.parse(readFileSync(join(crew, 'roster.json'), 'utf8'))
+    assert.equal(after.schema_version, 2)
+    assert.equal(Object.hasOwn(after, 'tiers'), false)
+    assert.equal(after.assurances.standard.reviewer.effort, changedBuildReviewerEffort)
+    assert.deepEqual(after.models, roster.models)
+    assert.deepEqual(after.policy, {})
   } finally {
     rmSync(dir, { recursive: true, force: true })
   }
 })
 
-test('an identity edit returns an empty diff', async () => {
-  const result = await edit({ cell: roster.tiers.build.reviewer })
-  assert.equal(result.ok, true)
-  assert.equal(result.diff, '')
-  assert.deepEqual(result.before, result.after)
+test('identity v2 edits are empty while v1 identity edits migrate to v2', async () => {
+  const source = v2Roster()
+  const sourceText = JSON.stringify(source, null, 2)
+  const v2Result = await edit({ rosterText: sourceText, cell: source.assurances.standard.reviewer })
+  assert.equal(v2Result.ok, true)
+  assert.equal(v2Result.diff, '')
+  assert.deepEqual(v2Result.before, v2Result.after)
+
+  const v1Result = await edit({ cell: roster.tiers.build.reviewer })
+  assert.equal(v1Result.ok, true)
+  assert.notEqual(v1Result.diff, '')
+  const dir = scratchDir('roster-edit-identity-')
+  try {
+    mkdirSync(join(dir, 'crew'), { recursive: true })
+    copyFileSync(rosterPath, join(dir, 'crew', 'roster.json'))
+    const patchPath = join(dir, 'edit.patch')
+    writeFileSync(patchPath, v1Result.diff)
+    execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
+    const after = JSON.parse(readFileSync(join(dir, 'crew', 'roster.json'), 'utf8'))
+    assert.equal(after.schema_version, 2)
+    assert.deepEqual(after.assurances.standard, roster.tiers.build)
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 test('unknown tier is refused using resolveTier wording', async () => {
@@ -302,7 +337,10 @@ test('stageMoves validates all four checks and produces an applyable multi-move 
     mkdirSync(join(dir, 'crew')); copyFileSync(rosterPath, join(dir, 'crew', 'roster.json')); const patchPath = join(dir, 'roster.patch'); writeFileSync(patchPath, result.diff)
     execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
     const after = JSON.parse(readFileSync(join(dir, 'crew', 'roster.json'), 'utf8'))
-    assert.equal(after.tiers.build.reviewer.effort, 'high'); assert.equal(after.tiers.mechanical.reviewer.effort, 'high')
+    assert.equal(after.schema_version, 2)
+    assert.equal(after.assurances.standard.reviewer.effort, 'high'); assert.equal(after.assurances.quick.reviewer.effort, 'high')
+    assert.deepEqual(after.models, roster.models)
+    assert.deepEqual(after.policy, {})
   } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
@@ -349,4 +387,106 @@ test('composeMoves returns a deterministic PR-ready bundle and never writes the 
   const moves = [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedBuildReviewerEffort } }]
   const result = await composeMoves({ rosterText, rosterPath: 'crew/roster.json', moves, ladder: ratifiedLadder, branchSeed: 'unit-test', readBreaker: () => null })
   assert.equal(result.ok, true); assert.equal(result.branch, 'roster/ladder-unit-test'); assert.match(result.commit_subject, /^chore\(roster\): reseat/); assert.match(result.patch, /^--- a\/crew\/roster\.json/); assert.equal(readFileSync(rosterPath, 'utf8'), before)
+})
+
+test('proposeEdit and composeMoves emit v2 from a v2 source and preserve policy and unedited cells', async () => {
+  const policy = { visualizer_probe: 'ratified-policy' }
+  const source = v2Roster(policy)
+  const sourceText = JSON.stringify(source, null, 2)
+  const move = { tier: 'build', role: 'reviewer', cell: { ...source.assurances.standard.reviewer, effort: changedBuildReviewerEffort } }
+  const proposal = await proposeEdit({ rosterText: sourceText, rosterPath: 'crew/roster.json', ...move })
+  assert.equal(proposal.ok, true)
+  const applyPatch = (diff, prefix) => {
+    const dir = scratchDir(prefix)
+    try {
+      mkdirSync(join(dir, 'crew'), { recursive: true })
+      writeFileSync(join(dir, 'crew', 'roster.json'), sourceText)
+      const patchPath = join(dir, 'edit.patch')
+      writeFileSync(patchPath, diff)
+      execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
+      return JSON.parse(readFileSync(join(dir, 'crew', 'roster.json'), 'utf8'))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+  const proposalAfter = applyPatch(proposal.diff, 'roster-v2-proposal-')
+  assert.equal(proposalAfter.schema_version, 2)
+  assert.equal(Object.hasOwn(proposalAfter, 'tiers'), false)
+  assert.deepEqual(proposalAfter.policy, policy)
+  assert.deepEqual(proposalAfter.models, source.models)
+  assert.deepEqual(proposalAfter.assurances.quick, source.assurances.quick)
+  assert.deepEqual(proposalAfter.assurances.rigorous, source.assurances.rigorous)
+  assert.equal(proposalAfter.assurances.standard.reviewer.effort, changedBuildReviewerEffort)
+
+  const composed = await composeMoves({
+    rosterText: sourceText,
+    rosterPath: 'crew/roster.json',
+    moves: [move, { tier: 'mechanical', role: 'reviewer', cell: { ...source.assurances.quick.reviewer, effort: changedBuildReviewerEffort } }],
+    ladder: ratifiedLadder,
+    branchSeed: 'v2-unit-test',
+    readBreaker: () => null,
+  })
+  assert.equal(composed.ok, true)
+  const composedAfter = applyPatch(composed.patch, 'roster-v2-compose-')
+  assert.equal(composedAfter.schema_version, 2)
+  assert.deepEqual(composedAfter.policy, policy)
+  assert.deepEqual(composedAfter.models, source.models)
+  assert.equal(composedAfter.assurances.standard.reviewer.effort, changedBuildReviewerEffort)
+  assert.equal(composedAfter.assurances.quick.reviewer.effort, changedBuildReviewerEffort)
+  assert.deepEqual(composedAfter.assurances.rigorous, source.assurances.rigorous)
+})
+
+test('applyMoves preserves the source schema while repository and local previews stay distinct', async () => {
+  const policy = { local_apply_probe: 'ratified-policy' }
+  const sourceV2 = v2Roster(policy)
+  const moveV1 = { tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedBuildReviewerEffort } }
+  const moveV2 = { tier: 'build', role: 'reviewer', cell: { ...sourceV2.assurances.standard.reviewer, effort: changedBuildReviewerEffort } }
+  const write = async (sourceText, move) => {
+    let written = null
+    const result = await applyMoves({
+      rosterText: sourceText,
+      rosterPath: 'crew/roster.json',
+      moves: [move],
+      ladder: ratifiedLadder,
+      readBreaker: () => null,
+      writeRoster: ({ afterText }) => { written = afterText; return { ok: true, changed: true, conflict: false, error: null } },
+    })
+    return { result, written }
+  }
+  const v1 = await write(rosterText, moveV1)
+  assert.equal(v1.result.applied, true)
+  const afterV1 = JSON.parse(v1.written)
+  assert.equal(afterV1.schema_version, 1)
+  assert.ok(afterV1.tiers)
+  assert.equal(Object.hasOwn(afterV1, 'assurances'), false)
+  assert.equal(Object.hasOwn(afterV1, 'policy'), false)
+  assert.equal(afterV1.tiers.build.reviewer.effort, changedBuildReviewerEffort)
+  assert.deepEqual(afterV1.models, roster.models)
+
+  const v2 = await write(JSON.stringify(sourceV2, null, 2), moveV2)
+  assert.equal(v2.result.applied, true)
+  const afterV2 = JSON.parse(v2.written)
+  assert.equal(afterV2.schema_version, 2)
+  assert.ok(afterV2.assurances)
+  assert.equal(Object.hasOwn(afterV2, 'tiers'), false)
+  assert.deepEqual(afterV2.policy, policy)
+  assert.equal(afterV2.assurances.standard.reviewer.effort, changedBuildReviewerEffort)
+
+  const staged = await stageLadder([moveV1])
+  assert.equal(staged.ok, true)
+  const applyPreview = (diff, prefix) => {
+    const dir = scratchDir(prefix)
+    try {
+      mkdirSync(join(dir, 'crew'), { recursive: true })
+      writeFileSync(join(dir, 'crew', 'roster.json'), rosterText)
+      const patchPath = join(dir, 'stage.patch')
+      writeFileSync(patchPath, diff)
+      execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
+      return JSON.parse(readFileSync(join(dir, 'crew', 'roster.json'), 'utf8'))
+    } finally { rmSync(dir, { recursive: true, force: true }) }
+  }
+  const repository = applyPreview(staged.diff, 'roster-stage-repository-')
+  const local = applyPreview(staged.local_diff, 'roster-stage-local-')
+  assert.equal(repository.schema_version, 2)
+  assert.equal(local.schema_version, 1)
+  assert.ok(local.tiers)
+  assert.equal(Object.hasOwn(local, 'assurances'), false)
 })

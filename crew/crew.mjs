@@ -45,7 +45,9 @@ import { slug } from './slug.mjs'
 import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, RUN_START_EVENT } from './drive.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
-import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from './assurances.mjs'
+import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF, canonicalAssurance } from './assurances.mjs'
+import { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS } from './roster.mjs'
+export { loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS }
 import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
@@ -631,13 +633,27 @@ export function refuseFallback(reason, message) {
   return Object.assign(new Error(`${message} [${reason}]`), { reason })
 }
 
+function seatingCells (seating, tier) {
+  // The literal key first: a roster typo must still surface at boot's
+  // SEAT_DEFAULTS check exactly as it does today, never be silently remapped.
+  if (seating?.[tier]) return seating[tier]
+  const canonical = canonicalAssurance(tier)
+  // MUTATION A17 binds the next line: a v2 container addressed by its legacy
+  // tier name. Disable it and the two-fixture block dies.
+  if (canonical && seating[canonical]) return seating[canonical]
+  const legacy = canonical ? ASSURANCE_ALIAS_OF[canonical] : null
+  // A v1 container addressed by a canonical preset name.
+  return legacy ? seating?.[legacy] : undefined
+}
+
 // Resolve a roster tier into seated roles, per-seat cells, and a per-field
 // provenance map. PURE: sync, no imports, no adapter knowledge — the
 // per-adapter model-string translation is a separate step (resolveSeatModels)
 // so this function stays testable with a bare roster object.
 export function resolveTier(roster, tier, args = {}) {
-  const cells = roster?.tiers?.[tier]
-  if (!cells) throw new Error(`unknown tier "${tier}" — valid tiers: ${Object.keys(roster?.tiers || {}).join(', ')}`)
+  const seating = rosterSeating(roster)
+  const cells = seatingCells(seating, tier)
+  if (!cells) throw new Error(`unknown tier "${tier}" — valid tiers: ${Object.keys(seating || {}).join(', ')}`)
   // Canonical order first, then any roster-typo keys ROLE_ORDER doesn't know
   // about — a typo must surface at boot's SEAT_DEFAULTS check, never be
   // silently dropped.
@@ -1041,7 +1057,7 @@ function sameShadowCell(a, b) {
 }
 
 export function shadowCandidates(roster, role) {
-  const tiers = roster?.tiers
+  const tiers = rosterSeating(roster)
   if (!tiers || typeof tiers !== 'object' || Array.isArray(tiers)) return []
   const byKey = new Map()
   for (const [tierName, cells] of Object.entries(tiers)) {
@@ -1576,7 +1592,8 @@ export async function bootCmd(args, deps = {}) {
     // corrupt/missing roster must name the file and that rule, not throw a
     // bare "Unexpected token".
     const rosterPath = join(HERE, 'roster.json')
-    try { roster = JSON.parse(readFileSync(rosterPath, 'utf8')) } catch (err) {
+    try { roster = loadRoster(rosterPath) } catch (err) {
+      if (err?.reason) throw err
       throw new Error(`--tier needs the crew runtime's own roster at ${rosterPath} (not the target checkout's): ${err.message}`)
     }
     ;({ roles, seats: tierSeats, sources } = resolveTier(roster, String(seatingTier), args))

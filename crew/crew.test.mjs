@@ -9,7 +9,7 @@ import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES 
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadRoster, normalizeRoster, refuseRoster, rosterSeating, serializeRosterV1, serializeRosterV2, ROSTER_REFUSALS, ROSTER_SCHEMA_VERSIONS, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
@@ -29,7 +29,7 @@ import {
 import { daemon, resolveRunConfig as resolveDaemonRunConfig, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
 import { resolveRunConfig as resolveFactoryRunConfig, RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, parseArgs as parseFactoryArgs, runVerb } from './factoryctl.mjs'
 import { TASK_PROFILES } from './task-profiles.mjs'
-import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
+import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from './assurances.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
   LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
@@ -67,38 +67,63 @@ const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', impo
 // Focused test-local schema evaluator for the fallback fixtures. The production
 // refresh validator intentionally supports a smaller keyword set, so these
 // tests exercise the shipped $ref chain, minItems and closed entry objects.
-function fallbackSchemaErrors(value) {
+function fallbackSchemaErrors(value, entry = 'seat', document = 'roster.schema.json') {
   const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
-  const deref = (raw, depth = 0) => {
-    if (!raw || typeof raw !== 'object' || typeof raw.$ref !== 'string') return raw
+  const documents = {
+    'roster.schema.json': schema,
+    'roster.v2.schema.json': JSON.parse(readFileSync(new URL('./roster.v2.schema.json', import.meta.url), 'utf8')),
+  }
+  const deref = (raw, docName = 'roster.schema.json', depth = 0) => {
+    if (!raw || typeof raw !== 'object' || typeof raw.$ref !== 'string') return { schema: raw, docName }
     if (depth > 8) throw new Error(`$ref chain too deep: ${raw.$ref}`)
-    return deref(schema.$defs?.[raw.$ref.split('/').pop()], depth + 1)
+    const [file, pointer = ''] = raw.$ref.split('#')
+    const targetName = file ? file.replace(/^.*\//, '') : docName
+    let target = documents[targetName]
+    for (const part of pointer.replace(/^\//, '').split('/').filter(Boolean)) target = target?.[part]
+    return deref(target, targetName, depth + 1)
   }
   const errors = []
-  const walk = (raw, actual, path) => {
-    const shape = deref(raw)
+  const walk = (raw, docName, actual, path) => {
+    const { schema: shape, docName: here } = deref(raw, docName)
     if (!shape || typeof shape !== 'object') { errors.push(`${path}: unresolved schema`); return }
+    if (Object.hasOwn(shape, 'const')) {
+      if (actual !== shape.const) errors.push(`${path}: const`)
+      return
+    }
     const types = Array.isArray(shape.type) ? shape.type : shape.type ? [shape.type] : []
     if (types.length) {
-      const kind = actual === null ? 'null' : Array.isArray(actual) ? 'array' : typeof actual
-      if (!types.includes(kind)) { errors.push(`${path}: expected ${types.join('|')}, found ${kind}`); return }
+      const kinds = actual === null ? ['null'] : Array.isArray(actual) ? ['array'] : typeof actual === 'number' && Number.isInteger(actual) ? ['number', 'integer'] : [typeof actual]
+      if (!types.some((type) => kinds.includes(type))) { errors.push(`${path}: expected ${types.join('|')}, found ${kinds.join('|')}`); return }
     }
     if (actual === null) return
     if (Array.isArray(shape.enum) && !shape.enum.includes(actual)) errors.push(`${path}: enum`)
     if (typeof actual === 'string' && shape.pattern && !new RegExp(shape.pattern).test(actual)) errors.push(`${path}: pattern`)
+    if (typeof actual === 'number' && shape.minimum !== undefined && actual < shape.minimum) errors.push(`${path}: minimum`)
     if (Array.isArray(actual)) {
       if (Number.isFinite(shape.minItems) && actual.length < shape.minItems) errors.push(`${path}: minItems`)
-      if (shape.items) actual.forEach((entry, i) => walk(shape.items, entry, `${path}[${i}]`))
+      if (shape.items) actual.forEach((child, i) => walk(shape.items, here, child, `${path}[${i}]`))
       return
     }
     if (actual && typeof actual === 'object') {
       for (const key of shape.required || []) if (!Object.hasOwn(actual, key)) errors.push(`${path}: required ${key}`)
       const properties = shape.properties || {}
-      if (shape.additionalProperties === false) for (const key of Object.keys(actual)) if (!Object.hasOwn(properties, key)) errors.push(`${path}: additional ${key}`)
-      for (const [key, child] of Object.entries(properties)) if (Object.hasOwn(actual, key)) walk(child, actual[key], `${path}.${key}`)
+      const patterns = Object.entries(shape.patternProperties || {}).map(([pattern, child]) => [new RegExp(pattern), child])
+      if (shape.additionalProperties === false) {
+        for (const key of Object.keys(actual)) {
+          if (Object.hasOwn(properties, key) || patterns.some(([pattern]) => pattern.test(key))) continue
+          errors.push(`${path}: additional ${key}`)
+        }
+      }
+      for (const [key, child] of Object.entries(properties)) if (Object.hasOwn(actual, key)) walk(child, here, actual[key], `${path}.${key}`)
+      for (const [key, value] of Object.entries(actual)) {
+        if (Object.hasOwn(properties, key)) continue
+        const pattern = patterns.find(([candidate]) => candidate.test(key))
+        if (pattern) walk(pattern[1], here, value, `${path}.${key}`)
+      }
     }
   }
-  walk(schema.$defs?.seat, value, 'seat')
+  const root = typeof entry === 'string' ? documents[document]?.$defs?.[entry] : (entry || documents[document])
+  walk(root, document, value, typeof entry === 'string' ? entry : '$')
   return errors
 }
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
@@ -4170,6 +4195,208 @@ test('resolveTier: an override naming a role the tier does not seat throws, nami
     (err) => /model-lead/.test(err.message) && /mechanical/.test(err.message),
   )
 })
+
+// --- BEGIN roster-v2 compatibility ------------------------------------------
+const seatedBuildReviewer = roster.tiers.build.reviewer
+const seatedJudgeTechLeadFallback = roster.tiers.judge['tech-lead'].fallback
+const rosterFixtures = () => {
+  const v1 = structuredClone(roster)
+  const v2 = {
+    schema_version: 2,
+    updated_at: roster.updated_at,
+    assurances: Object.fromEntries(Object.entries(ASSURANCE_ALIAS_OF).map(([canonical, legacy]) => [canonical, structuredClone(roster.tiers[legacy])])),
+    models: structuredClone(roster.models),
+    policy: {},
+  }
+  return { v1, v2 }
+}
+const fixtureEntries = () => Object.entries(rosterFixtures())
+const fixtureTierName = (version, legacy) => version === 'v1' ? legacy : ASSURANCE_ALIASES[legacy]
+const fixtureWithCells = (fixture, version, legacy, cells) => {
+  const out = structuredClone(fixture)
+  const container = version === 'v1' ? 'tiers' : 'assurances'
+  out[container][fixtureTierName(version, legacy)] = cells
+  return out
+}
+
+ test('roster v1 normalises to byte-equivalent seats and exposes both views', () => {
+  const normalized = normalizeRoster(rosterFixtures().v1)
+  for (const tier of Object.keys(roster.tiers)) {
+    assert.equal(JSON.stringify(resolveTier(normalized, tier)), JSON.stringify(resolveTier(roster, tier)))
+  }
+  assert.deepEqual(Object.keys(normalized.tiers), Object.keys(roster.tiers))
+  assert.deepEqual(Object.keys(normalized.assurances), Object.keys(ASSURANCE_ALIAS_OF))
+})
+
+test('canonical assurance spellings seat the legacy tiers', () => {
+  const normalized = normalizeRoster(rosterFixtures().v1)
+  for (const [canonical, legacy] of Object.entries(ASSURANCE_ALIAS_OF)) {
+    assert.equal(JSON.stringify(resolveTier(normalized, canonical)), JSON.stringify(resolveTier(roster, legacy)))
+  }
+})
+
+test('a v2 roster loads directly with both equivalent views', () => {
+  const fixture = rosterFixtures().v2
+  const normalized = normalizeRoster(fixture)
+  assert.equal(normalized.schema_version, 2)
+  for (const [canonical, legacy] of Object.entries(ASSURANCE_ALIAS_OF)) {
+    assert.deepEqual(normalized.assurances[canonical], fixture.assurances[canonical])
+    assert.deepEqual(normalized.tiers[legacy], fixture.assurances[canonical])
+  }
+  for (const [canonical, legacy] of Object.entries(ASSURANCE_ALIAS_OF)) {
+    assert.equal(JSON.stringify(resolveTier(normalized, canonical)), JSON.stringify(resolveTier(roster, legacy)))
+    assert.equal(JSON.stringify(resolveTier(normalized, legacy)), JSON.stringify(resolveTier(roster, legacy)))
+  }
+})
+
+test('resolveTier reaches both raw roster shapes under both spellings', () => {
+  for (const [version, fixture] of fixtureEntries()) {
+    for (const [canonical, legacy] of Object.entries(ASSURANCE_ALIAS_OF)) {
+      const want = JSON.stringify(resolveTier(roster, legacy))
+      assert.equal(JSON.stringify(resolveTier(fixture, legacy)), want, `${version} legacy ${legacy}`)
+      assert.equal(JSON.stringify(resolveTier(fixture, canonical)), want, `${version} canonical ${canonical}`)
+    }
+  }
+  const { v1, v2 } = rosterFixtures()
+  assert.doesNotThrow(() => resolveTier(v2, 'build'))
+  assert.doesNotThrow(() => resolveTier(v1, 'quick'))
+})
+
+test('resolveTier compatibility cases hold for v1 and v2 fixtures', () => {
+  for (const [version, fixture] of fixtureEntries()) {
+    const tier = fixtureTierName(version, 'build')
+    const seatedTier = version === 'v1' ? roster.tiers.build : rosterFixtures().v2.assurances.standard
+    const overridden = resolveTier(fixture, tier, { 'model-builder': 'raw-id', 'agent-builder': 'claude', 'effort-builder': 'max' })
+    assert.equal(overridden.seats.builder.model, 'raw-id')
+    assert.equal(overridden.seats.builder.agent, 'claude')
+    assert.equal(overridden.seats.builder.effort, 'max')
+    assert.deepEqual(overridden.sources.builder, { agent: 'override', model: 'override', effort: 'override' })
+    assert.deepEqual(Object.keys(seatedTier).filter((role) => role !== 'builder').sort(), Object.keys(resolveTier(fixture, tier).seats).filter((role) => role !== 'builder').sort())
+
+    const unknownTier = 'nope'
+    assert.throws(
+      () => resolveTier(fixture, unknownTier, {}),
+      (err) => Object.keys(rosterSeating(fixture)).every((name) => err.message.includes(name)),
+    )
+    const absentTier = fixtureTierName(version, 'mechanical')
+    assert.throws(
+      () => resolveTier(fixture, absentTier, { 'model-lead': 'x' }),
+      (err) => /model-lead/.test(err.message) && err.message.includes(absentTier),
+    )
+  }
+})
+
+test('declared fallback chain survives both roster paths', () => {
+  for (const [version, fixture] of fixtureEntries()) {
+    const tier = fixtureTierName(version, 'judge')
+    const resolved = resolveTier(fixture, tier)
+    assert.deepEqual(resolved.seats['tech-lead'].fallback, seatedJudgeTechLeadFallback)
+  }
+  assert.ok(seatedBuildReviewer)
+})
+
+test('malformed fallback fixtures keep their shape refusals on both paths', () => {
+  for (const [version, fixture] of fixtureEntries()) {
+    const tier = fixtureTierName(version, 'judge')
+    const malformed = (fallback) => fixtureWithCells(fixture, version, 'judge', { 'tech-lead': { ...seatedBuildReviewer, fallback } })
+    assert.throws(() => resolveTier(malformed([]), tier), (err) => err.reason === 'fallback-empty')
+    assert.throws(() => resolveTier(malformed([{ provider: seatedBuildReviewer.provider, id: seatedBuildReviewer.id, agent: seatedBuildReviewer.agent }]), tier), (err) => err.reason === 'fallback-self')
+    assert.throws(() => resolveTier(malformed([{ provider: 'other-vendor', id: 'other-model', agent: 'claude' }]), tier), (err) => err.reason === 'fallback-agent-change')
+    const overridden = resolveTier(malformed([{ provider: 'other-vendor', id: 'other-model', agent: 'claude' }]), tier, { 'agent-tech-lead': 'claude' })
+    assert.equal(overridden.seats['tech-lead'].agent, 'claude')
+    assert.equal(overridden.seats['tech-lead'].fallback[0].agent, 'claude')
+  }
+})
+
+test('refuseRoster is frozen and closed at construction', () => {
+  assert.equal(Object.isFrozen(ROSTER_REFUSALS), true)
+  assert.deepEqual([...ROSTER_SCHEMA_VERSIONS], [1, 2])
+  assert.throws(() => refuseRoster('not-real', 'why'), /unknown roster refusal reason "not-real"/)
+  for (const reason of ROSTER_REFUSALS) {
+    const err = refuseRoster(reason, 'why')
+    assert.equal(err.reason, reason)
+    assert.match(err.message, new RegExp(`\\[${reason}\\]$`))
+  }
+})
+
+test('each roster refusal has its own malformed input', () => {
+  const { v1, v2 } = rosterFixtures()
+  const reasonOf = (document) => {
+    try { normalizeRoster(document); return null } catch (err) { return err.reason }
+  }
+  const cases = [
+    [{ ...v2, tiers: [] }, 'roster-seating-both'],
+    [{ ...v1, assurances: null }, 'roster-seating-both'],
+    [{ ...v1, tiers: [] }, 'roster-seating-invalid'],
+    [{ ...v2, assurances: 'rigorous' }, 'roster-seating-invalid'],
+    [{ ...v1, tiers: { mechanical: v1.tiers.mechanical, build: v1.tiers.build } }, 'roster-seating-incomplete'],
+    [{ schema_version: 1, models: v1.models }, 'roster-seating-absent'],
+  ]
+  for (const [document, expected] of cases) assert.equal(reasonOf(document), expected)
+  assert.equal(reasonOf({ ...v1, schema_version: 2 }), 'roster-version-mismatch')
+  assert.equal(reasonOf({ ...v1, schema_version: 3 }), 'roster-version-unknown')
+  assert.equal(reasonOf({ ...v1, tiers: v2.assurances }), 'roster-seating-unknown')
+})
+
+test('loadRoster normalises v1 and v2 files at the boundary', () => {
+  const dir = scratchDir('crew-roster-load-')
+  try {
+    const v1Path = join(dir, 'v1.json')
+    const v2Path = join(dir, 'v2.json')
+    const badPath = join(dir, 'bad.json')
+    writeFileSync(v1Path, JSON.stringify(rosterFixtures().v1, null, 2))
+    writeFileSync(v2Path, JSON.stringify(rosterFixtures().v2, null, 2))
+    writeFileSync(badPath, JSON.stringify({ ...roster, schema_version: 2 }, null, 2))
+    const loadedV1 = loadRoster(v1Path)
+    const loadedV2 = loadRoster(v2Path)
+    assert.equal(loadedV1.schema_version, 1)
+    assert.equal(loadedV2.schema_version, 2)
+    assert.equal(JSON.stringify(resolveTier(loadedV1, 'quick')), JSON.stringify(resolveTier(roster, 'mechanical')))
+    assert.equal(JSON.stringify(resolveTier(loadedV2, 'rigorous')), JSON.stringify(resolveTier(roster, 'judge')))
+    assert.throws(() => loadRoster(badPath), (err) => err.reason === 'roster-version-mismatch')
+  } finally { rmSync(dir, { recursive: true, force: true }) }
+})
+
+test('shadowCandidates reads a raw v2 roster', () => {
+  const { v1, v2 } = rosterFixtures()
+  const fromV1 = shadowCandidates(v1, 'reviewer')
+  const fromV2 = shadowCandidates(v2, 'reviewer')
+  assert.ok(fromV2.length)
+  const legacyView = (rows) => rows.map((row) => ({ ...row, tiers: row.tiers.map((tier) => ASSURANCE_ALIAS_OF[tier] || tier) }))
+  assert.deepEqual(legacyView(fromV2), fromV1)
+})
+
+test('serializers round-trip seats, preserve policy, and emit a compatibility v1', () => {
+  const v1 = rosterFixtures().v1
+  const v2 = rosterFixtures().v2
+  const roundTrip = normalizeRoster(JSON.parse(serializeRosterV2(v1)))
+  for (const [canonical, legacy] of Object.entries(ASSURANCE_ALIAS_OF)) {
+    assert.equal(JSON.stringify(resolveTier(roundTrip, canonical)), JSON.stringify(resolveTier(v1, legacy)))
+  }
+  const v1Document = JSON.parse(serializeRosterV1(v2))
+  assert.equal(v1Document.schema_version, 1)
+  assert.ok(v1Document.tiers)
+  assert.equal(Object.hasOwn(v1Document, 'assurances'), false)
+  assert.equal(Object.hasOwn(v1Document, 'policy'), false)
+  const policy = { roster_probe: 'ratified-policy' }
+  const preserved = JSON.parse(serializeRosterV2({ ...v2, policy }))
+  assert.deepEqual(preserved.policy, policy)
+  assert.deepEqual(JSON.parse(serializeRosterV2(v1)).policy, {})
+})
+
+test('v2 schema validates its root while the old root remains v1', () => {
+  const v2 = rosterFixtures().v2
+  assert.deepEqual(fallbackSchemaErrors(v2, null, 'roster.v2.schema.json'), [])
+  const missingPreset = structuredClone(v2)
+  delete missingPreset.assurances.rigorous
+  assert.notDeepEqual(fallbackSchemaErrors(missingPreset, null, 'roster.v2.schema.json'), [])
+  const missingPolicy = structuredClone(v2)
+  delete missingPolicy.policy
+  assert.notDeepEqual(fallbackSchemaErrors(missingPolicy, null, 'roster.v2.schema.json'), [])
+  assert.deepEqual(fallbackSchemaErrors(roster, null, 'roster.schema.json'), [])
+  assert.notDeepEqual(fallbackSchemaErrors({ ...roster, schema_version: 2 }, null, 'roster.schema.json'), [])
+})
+// --- END roster-v2 compatibility --------------------------------------------
 
 test('modelString: claude passes the id through; pi namespaces by provider and refuses an unmapped one', () => {
   assert.equal(claudeModelString({ provider: 'anthropic', id: 'claude-opus-5' }), 'claude-opus-5')

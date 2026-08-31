@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { ROOT, sqliteAvailable } from './helpers.mjs'
+import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 // Inlined from the retired legacy runtime's contract (scripts/cmux/contract.mjs):
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
@@ -486,7 +486,7 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
 })
 
 test('a budget-refused headless outcome composes the ledger budget escalation cause', () => {
-  const dir = mkdtempSync(join(tmpdir(), 'factory-ledger-budget-refused-'))
+  const dir = scratchDir('factory-ledger-budget-refused-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
   const crew = { checkout: dir, members: { builder: { model: 'claude-fable-5', transport: 'headless-json' } } }

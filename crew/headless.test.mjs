@@ -8,7 +8,7 @@ import {
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, updateCrewJson,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
-import { startFileWriter } from '../test/helpers.mjs'
+import { scratchDir, startFileWriter } from '../test/helpers.mjs'
 
 // The final three bytes of each real 2026-08-30 refusal tail, copied
 // byte-for-byte so classification is adjudicated against the provider's own
@@ -693,7 +693,7 @@ const FALLBACK_TEST_CHAIN = [
 ]
 
 function fallbackFixture(script, { chain = FALLBACK_TEST_CHAIN, clock = null, onSleep = null } = {}) {
-  const dir = mkdtempSync(join(tmpdir(), 'headless-fallback-'))
+  const dir = scratchDir('headless-fallback-')
   const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
   mkdirSync(taskDir); mkdirSync(returnsDir)
   const member = {

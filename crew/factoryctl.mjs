@@ -7,10 +7,21 @@ import { homedir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
 import { splitFrames } from './headless-rpc.mjs'
-import { VARIANTS } from './variants.mjs'
+import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
+import { TASK_PROFILES } from './task-profiles.mjs'
+import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
+import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { archivedLanes, crewRoot, discoverLanes } from '../scripts/factory/lane-watch.mjs'
 
 export const DEFAULT_TIMEOUT_MS = 5000
+
+// TRD §4.4: this wiring is deliberately duplicated at each entry point;
+// crew.mjs, daemon.mjs and factoryctl.mjs keep the same declarations shape
+// because crew.mjs already imports this client and a shared owner would cycle.
+export const RUN_CONFIG_DECLARATIONS = Object.freeze({ profiles: TASK_PROFILES, variantNames: VARIANT_NAMES, assurances: ASSURANCES, assuranceAliases: ASSURANCE_ALIASES })
+export function resolveRunConfig(args = {}) {
+  return resolveRunConfiguration({ profile: args.profile, execution: args.execution, variant: args.variant, assurance: args.assurance, tier: args.tier }, RUN_CONFIG_DECLARATIONS)
+}
 
 // A --flag followed by another --flag (or by nothing) is a BOOLEAN true.
 export function parseArgs(argv) {
@@ -30,7 +41,7 @@ export function parseArgs(argv) {
 // to `run` and nothing at all to `ls`, and one global bag would re-admit exactly
 // the confusion F12 measured.
 export const KNOWN_FLAGS = Object.freeze({
-  run: Object.freeze(['root', 'crew-dir', 'tier', 'brief', 'task', 'checkout', 'variant', 'files-in-scope', 'lane']),
+  run: Object.freeze(['root', 'crew-dir', 'tier', 'brief', 'task', 'checkout', 'variant', 'files-in-scope', 'lane', 'profile', 'execution', 'assurance']),
   ls: Object.freeze(['root', 'json']),
   attach: Object.freeze(['root']),
   send: Object.freeze(['root', 'role']),
@@ -274,35 +285,50 @@ function outputSink(value, fallback) {
 function requireRunArgs(args) {
   const hasDir = typeof args['crew-dir'] === 'string' && !!args['crew-dir']
   const hasTier = typeof args.tier === 'string' && !!args.tier
+  const hasAssurance = typeof args.assurance === 'string' && !!args.assurance
+  const hasSeating = hasTier || hasAssurance
   if (args['crew-dir'] !== undefined && !hasDir) throw new Error('run requires --crew-dir <dir>')
   if (args.tier !== undefined && !hasTier) throw new Error('run requires --tier <tier>')
-  if (hasDir && hasTier) throw new Error('run takes --crew-dir <dir> or --tier <tier>, never both: --crew-dir runs a crew you booted, --tier asks the daemon to boot one')
-  if (!hasDir && !hasTier) throw new Error('run requires --crew-dir <dir> (a booted crew) or --tier <tier> (the daemon boots one)')
+  if (args.assurance !== undefined && !hasAssurance) throw new Error('run requires --assurance <assurance>')
+  if (hasDir && hasSeating) throw new Error('run takes --crew-dir <dir> or --assurance/--tier <assurance>, never both: --crew-dir runs a crew you booted, --assurance/--tier asks the daemon to boot one')
+  if (!hasDir && !hasSeating) throw new Error('run requires --crew-dir <dir> (a booted crew) or --assurance/--tier <assurance> (the daemon boots one)')
   if (typeof args.brief !== 'string' || !args.brief) throw new Error('run requires --brief <file>')
   if (args.task !== undefined && (typeof args.task !== 'string' || !args.task)) throw new Error('run requires --task <slug> when --task is present')
   if (args.checkout !== undefined && (typeof args.checkout !== 'string' || !args.checkout)) throw new Error('run requires --checkout <dir> when --checkout is present')
+  if (args.profile !== undefined && (typeof args.profile !== 'string' || !args.profile)) throw new Error('run requires --profile <profile> when --profile is present')
+  if (args.execution !== undefined && (typeof args.execution !== 'string' || !args.execution)) throw new Error('run requires --execution <name> when --execution is present')
   if (args.variant !== undefined && (typeof args.variant !== 'string' || !args.variant)) throw new Error('run requires --variant <name> when --variant is present')
   if (args['files-in-scope'] !== undefined && (typeof args['files-in-scope'] !== 'string' || !args['files-in-scope'].trim())) throw new Error('run requires --files-in-scope <a,b> when --files-in-scope is present')
   if (args.lane !== undefined && (typeof args.lane !== 'string' || !args.lane.trim())) throw new Error('run requires --lane <lane> when --lane is present')
   if (typeof args['files-in-scope'] === 'string' && args['files-in-scope'].split(',').map((entry) => entry.trim()).filter(Boolean).length === 0) throw new Error('--files-in-scope supplied an empty list — an empty scope is never a scope')
-  if (VARIANTS[args.variant]?.sources?.scope === 'inherited' && args['files-in-scope'] === undefined) throw new Error(`run requires --files-in-scope for a ${args.variant} run — scope-sourced runs cannot declare an empty scope`)
+  const configuration = resolveRunConfig(args)
+  if (VARIANTS[configuration.execution.effective]?.sources?.scope === 'inherited' && args['files-in-scope'] === undefined) throw new Error(`run requires --files-in-scope for a ${configuration.execution.effective} run — scope-sourced runs cannot declare an empty scope`)
+  return configuration
 }
 
 // The slug defaults to the brief's filename; crew.mjs slugs it and refuses a degenerate one.
 function briefTask(file) { return basename(file).replace(/\.[^.]+$/, '') }
 
 export async function runVerb(args, deps = {}) {
-  requireRunArgs(args)
+  const configuration = requireRunArgs(args)
+  const warn = outputSink(deps.stderr, process.stderr)
+  for (const [axis, alias] of Object.entries(REQUEST_ALIASES)) {
+    if (configuration[axis]?.source !== 'alias') continue
+    warn(`warning: --${alias} is a DEPRECATED alias for --${axis}, removed after one release window (ADR-035 §4): requested ${JSON.stringify(configuration[axis].requested)}, effective ${JSON.stringify(configuration[axis].effective)} — pass --${axis} ${configuration[axis].effective} instead\n`)
+  }
   const call = deps.call || deps.connection?.call
   if (typeof call !== 'function') throw new Error('run requires a daemon connection')
   const params = { brief_file: resolvePath(args.brief) }
   if (typeof args['crew-dir'] === 'string' && args['crew-dir']) params.crew_dir = resolvePath(args['crew-dir'])
   else {
     const cwd = typeof deps.cwd === 'function' ? deps.cwd() : process.cwd()
-    params.tier = args.tier
+    if (typeof args.tier === 'string' && args.tier) params.tier = args.tier
     params.checkout = resolvePath(args.checkout || cwd)
     params.task = typeof args.task === 'string' && args.task ? args.task : briefTask(args.brief)
   }
+  if (typeof args.profile === 'string' && args.profile) params.profile = args.profile
+  if (typeof args.execution === 'string' && args.execution) params.execution = args.execution
+  if (typeof args.assurance === 'string' && args.assurance) params.assurance = args.assurance
   if (typeof args.variant === 'string' && args.variant) params.variant = args.variant
   if (typeof args.lane === 'string' && args.lane) params.lane = args.lane
   if (typeof args['files-in-scope'] === 'string') {
@@ -311,12 +337,12 @@ export async function runVerb(args, deps = {}) {
     // Per-entry rules are adjudicated by enqueue; keeping no second copy here
     // ensures the daemon names the offending entry in the operator's refusal.
     params.files_in_scope = files
-  } else if (VARIANTS[args.variant]?.sources?.scope === 'inherited') {
-    throw new Error(`run requires --files-in-scope for a ${args.variant} run — scope-sourced runs cannot declare an empty scope`)
+  } else if (VARIANTS[configuration.execution.effective]?.sources?.scope === 'inherited') {
+    throw new Error(`run requires --files-in-scope for a ${configuration.execution.effective} run — scope-sourced runs cannot declare an empty scope`)
   }
   const result = await call('enqueue', params)
   const stdout = outputSink(deps.stdout, process.stdout)
-  stdout(`${JSON.stringify({ run_id: result?.run_id, ...(params.tier && result?.crew_dir ? { crew_dir: result.crew_dir } : {}) })}\n`)
+  stdout(`${JSON.stringify({ run_id: result?.run_id, ...((params.tier || params.assurance) && result?.crew_dir ? { crew_dir: result.crew_dir } : {}) })}\n`)
   return result
 }
 

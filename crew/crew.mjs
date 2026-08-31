@@ -44,6 +44,9 @@ import { cmux, tree, sendLine, renameTab, closeSurface, closeWorkspace, logLine 
 import { slug } from './slug.mjs'
 import { FINGERPRINT_FILE, fingerprintWithheld, recordTreeFingerprint } from './tree-fingerprint.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, validateScopeEntries, WAITS_S, WAIT_FLAGS, resolveWaits, waitsCtx, waitsRecord, RUN_START_EVENT } from './drive.mjs'
+import { TASK_PROFILES } from './task-profiles.mjs'
+import { ASSURANCES, ASSURANCE_ALIASES, ASSURANCE_ALIAS_OF } from './assurances.mjs'
+import { REQUEST_ALIASES, resolveRunConfiguration } from './run-configuration.mjs'
 import { limitsCtx, limitsRecord, resolveLimits } from './limits.mjs'
 import { reclaimStore } from './reclaim.mjs'
 import {
@@ -377,22 +380,36 @@ function seatAgent(role, args) {
 // can't enforce it would boot a silently weaker seat. Returns undefined on
 // success.
 
-// The closed set lives in crew/drive.mjs and is IMPORTED, never restated:
-// a second list here is exactly how the CLI and the driver drift apart, and
-// a shape added to VARIANTS becomes selectable from the CLI with no edit.
-export function resolveVariant(args = {}) {
-  const raw = args.variant
-  if (raw === undefined) return DEFAULT_VARIANT
-  // parseArgs turns a valueless --variant into boolean true — that is a
-  // missing value, not a shape name.
-  if (raw === true) {
-    throw new Error(`--variant needs a shape name — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+// TRD §4.4: this wiring is deliberately duplicated at each entry point;
+// crew.mjs, daemon.mjs and factoryctl.mjs keep the same declarations shape
+// because the daemon import firewall forbids a shared owner.
+export const RUN_CONFIG_DECLARATIONS = Object.freeze({ profiles: TASK_PROFILES, variantNames: VARIANT_NAMES, assurances: ASSURANCES, assuranceAliases: ASSURANCE_ALIASES })
+function flagNamedAliasError(error) {
+  if (error?.code !== 'alias_conflict') return error
+  error.message = String(error.message).replace(/\b(execution|variant|assurance|tier)=/g, '--$1=')
+  return error
+}
+export function resolveRunConfig(request = {}) {
+  return resolveRunConfiguration(request, RUN_CONFIG_DECLARATIONS)
+}
+export function aliasDeprecationLines(config = {}) {
+  const lines = []
+  for (const [axis, alias] of Object.entries(REQUEST_ALIASES)) {
+    if (config[axis]?.source !== 'alias') continue
+    lines.push(`warning: --${alias} is a DEPRECATED alias for --${axis}, removed after one release window (ADR-035 §4): requested ${JSON.stringify(config[axis].requested)}, effective ${JSON.stringify(config[axis].effective)} — pass --${axis} ${config[axis].effective} instead`)
   }
-  const name = String(raw)
-  if (!VARIANT_NAMES.includes(name)) {
-    throw new Error(`unknown variant ${JSON.stringify(name)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
-  }
-  return name
+  return lines
+}
+export function writeAliasDeprecations(config, write) {
+  const sink = typeof write === 'function' ? write : (text) => process.stderr.write(text)
+  for (const line of aliasDeprecationLines(config)) sink(`${line}\n`)
+}
+export function assuranceTier(assurance) { return ASSURANCE_ALIAS_OF[assurance] ?? null }
+export function persistedRunConfig(crew) {
+  const stored = crew?.run_configuration
+  if (stored && typeof stored === 'object') return { profile: stored.profile ?? null, assurance: stored.assurance ?? null }
+  const derived = resolveRunConfig({ tier: typeof crew?.tier === 'string' ? crew.tier : undefined })
+  return { profile: derived.profile, assurance: derived.assurance }
 }
 
 export function resolveFilesInScope(args = {}, variant, taskReturn, deps = {}) {
@@ -1538,12 +1555,23 @@ export async function bootCmd(args, deps = {}) {
   // Capture the invocation environment before async adapter resolution so the
   // breaker and host-load policies cannot be lost while boot is awaiting imports.
   const bootEnv = { ...process.env }
+  // TRD §4.4: boot owns profile and assurance; execution belongs to run, so
+  // boot deliberately neither resolves nor persists the execution axis here.
+  let configuration
+  try {
+    configuration = resolveRunConfig({ profile: args.profile, assurance: args.assurance, tier: args.tier })
+  } catch (err) {
+    throw flagNamedAliasError(err)
+  }
+  const bootConfigRecord = Object.freeze({ profile: configuration.profile, assurance: configuration.assurance })
+  writeAliasDeprecations(configuration)
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const laneFence = resolveLaneFence(args)
   let roles, tierName = null, tierSeats = null, sources = null, roster = null
-  if (args.tier) {
-    if (args.roles) throw new Error('--tier and --roles are mutually exclusive: the tier defines the seating')
+  const seatingTier = args.tier !== undefined || args.assurance !== undefined ? assuranceTier(configuration.assurance.effective) : null
+  if (seatingTier) {
+    if (args.roles) throw new Error('--assurance/--tier and --roles are mutually exclusive: the assurance defines the seating')
     // The roster is the RUNTIME's policy, not the target checkout's. A
     // corrupt/missing roster must name the file and that rule, not throw a
     // bare "Unexpected token".
@@ -1551,8 +1579,8 @@ export async function bootCmd(args, deps = {}) {
     try { roster = JSON.parse(readFileSync(rosterPath, 'utf8')) } catch (err) {
       throw new Error(`--tier needs the crew runtime's own roster at ${rosterPath} (not the target checkout's): ${err.message}`)
     }
-    ;({ roles, seats: tierSeats, sources } = resolveTier(roster, String(args.tier), args))
-    tierName = String(args.tier)
+    ;({ roles, seats: tierSeats, sources } = resolveTier(roster, String(seatingTier), args))
+    tierName = seatingTier
   } else {
     roles = (args.roles ? args.roles.split(',') : [...DEFAULT_ROLES]).map((r) => r.trim())
     if (!roles.includes('lead')) roles = ['lead', ...roles]
@@ -1774,6 +1802,7 @@ export async function bootCmd(args, deps = {}) {
     schema_version: 3, task: taskSlug, checkout,
     workspace_id: workspace ? workspace.id : null, window_id: windowId ?? null,
     roles, members, task_return: join(paths.returnsDir, 'task.json'),
+    run_configuration: bootConfigRecord,
     created_at: new Date().toISOString(),
     ...(workerBin ? { claude_bin: workerBin } : {}),
     ...(tierName ? { tier: tierName, seats } : {}),
@@ -1792,6 +1821,7 @@ export async function bootCmd(args, deps = {}) {
     : null
   logLine(join(paths.dir, 'journal.jsonl'), {
     at: new Date().toISOString(), event: 'boot', roles,
+    run_configuration: bootConfigRecord,
     models: Object.fromEntries(roles.map((r) => [r, members[r].model])),
     transports: Object.fromEntries(roles.map((r) => [r, members[r].transport])),
     ...(workerBin ? { claude_bin: workerBin } : {}),
@@ -1948,7 +1978,13 @@ export function teardownDecision({ status, variant, published, keep }) {
 export function runCmd(args, deps = {}) {
   // Refuse an unknown shape BEFORE any state is read, spawned or written —
   // the same posture as boot's assertCellsClosed and mixed-transport guards.
-  const variant = resolveVariant(args)
+  const executionRequest = { execution: args.execution, variant: args.variant }
+  let executionConfiguration
+  try {
+    executionConfiguration = resolveRunConfig(executionRequest)
+  } catch (err) {
+    throw flagNamedAliasError(err)
+  }
   // Refuse a malformed budget in the same breath as an unknown shape: before
   // any state is read, spawned or written, and never by falling back to the
   // default (a silently defaulted budget is the ambiguity this flag removes).
@@ -1965,13 +2001,21 @@ export function runCmd(args, deps = {}) {
   // Same breath again: a shape whose declaration takes an input from the
   // dispatch refuses HERE when the dispatch carries none — before crew state is
   // read and long before a seat is driven.
-  assertCtxSources(variant, { validationLane })
+  assertCtxSources(executionConfiguration.execution.effective, { validationLane })
   const { drive = driveTask, appendCompletion: appendCompletionDep = appendCompletion, awaitSeatsReady: awaitSeatsReadyDep = awaitSeatsReady, writeTerminalLine: writeTerminalLineDep } = deps
   const taskSlug = slug(args.task)
   const checkout = resolvePath(args.checkout || process.cwd())
   const paths = pathsFor(taskSlug, checkout)
   const crew = loadCrew(paths)
   assertSameCheckout(crew, checkout)
+  // Resolve twice on purpose: the first pure call refuses malformed dispatch
+  // input before state is read; this second call can apply the persisted
+  // profile, compatibility matrix and boot-owned provenance to the run.
+  const persisted = persistedRunConfig(crew)
+  const resolved = resolveRunConfig({ profile: persisted.profile?.effective ?? undefined, ...executionRequest })
+  const runConfiguration = Object.freeze({ profile: persisted.profile, execution: resolved.execution, assurance: persisted.assurance })
+  writeAliasDeprecations(resolved)
+  const variant = runConfiguration.execution.effective
   if (!args['brief-file']) throw new Error('run requires --brief-file <path to the task brief>')
   const briefFile = resolvePath(args['brief-file'])
   if (!existsSync(briefFile)) throw new Error(`brief file not found: ${briefFile}`)
@@ -1998,6 +2042,7 @@ export function runCmd(args, deps = {}) {
   // The EFFECTIVE round validation lane and its source, recorded on every run:
   // an escalation at the lane stage reads differently when no lane was declared.
   logLine(journal, { at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+  logLine(journal, { at: new Date().toISOString(), event: 'run-configuration', run_configuration: runConfiguration })
   if (crew.advisor?.granted?.length) {
     const runStartedAt = Date.now()
     const briefText = readFileSync(briefFile, 'utf8')
@@ -2700,8 +2745,8 @@ export function parseArgs(argv) {
 }
 
 export const KNOWN_FLAGS = Object.freeze({
-  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin']),
-  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
+  boot: Object.freeze(['task', 'checkout', 'roles', 'tier', 'fences', 'lane', 'headless', 'headless-rpc', 'headless-all', 'memory-dir', 'memory-backend', 'memory-budget-bytes', 'claude-bin', 'profile', 'assurance']),
+  run: Object.freeze(['task', 'checkout', 'brief-file', 'variant', 'execution', 'files-in-scope', 'validation-lane', 'lane', 'plan-rounds', 'build-rounds', 'review-rounds', ...WAIT_FLAGS, 'suite', 'keep', 'claude-bin']),
   handoff: Object.freeze(['task', 'checkout', 'brief-file']),
   wait: Object.freeze(['task', 'checkout', 'timeout-s']),
   status: Object.freeze(['task', 'checkout']),
@@ -2719,6 +2764,7 @@ export const FLAG_VALUE_REFUSAL = 'invalid-flag-value'
 export const FLAG_VALUE_CONTRACT = Object.freeze({
   task: 'value', checkout: 'value', roles: 'value', tier: 'value',
   fences: 'value', lane: 'value', 'brief-file': 'value', variant: 'value',
+  profile: 'value', execution: 'value', assurance: 'value',
   'files-in-scope': 'value', 'validation-lane': 'value',
   'plan-rounds': 'value', 'build-rounds': 'value', 'review-rounds': 'value',
   ...Object.fromEntries(WAIT_FLAGS.map((flag) => [flag, 'value'])),

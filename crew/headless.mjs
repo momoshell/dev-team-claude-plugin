@@ -127,10 +127,34 @@ export const BUDGET_TERMINAL_REASON = 'api_error'
 // still runs out of chain, an unconsumed chain still hits the cap.
 export const FALLBACK_MAX = 1
 
+// The named signals a degraded run can carry. Each is a POSITIVE observation
+// about how the worker ENDED; absence of evidence is never one of them.
+export const DEGRADED_SIGNALS = { EXIT_NONZERO: 'exit-nonzero', EXIT_SIGNAL: 'exit-signal', TERMINAL_MISSING: 'terminal-missing' }
+
+// Why exit evidence was absent on the headless-json path (#816, measured on the
+// b337 lane, 2026-08-30): it was never missing. It is written AFTER the driver
+// reads it. The seat writes its ReturnEnvelope and KEEPS TALKING, and the
+// wrapper writes `exit` only once the worker process is gone. d1's envelope
+// landed at 21:29:52, the driver classified it at 21:29:56 with the stream 578 lines long
+// and no `exit` file at all, and the worker went on to write lines 579-583 —
+// 583 being the terminal `result` — plus `exit` 0 at 21:30:05, thirteen
+// seconds later. All four ok-degraded rows in that journal read exit_code null
+// and terminal_reason null. So an UNOBSERVED exit marker is unobserved, never
+// degraded: only evidence that is present and WRONG degrades a run.
+export function degradedSignals({ exitCode, signal, terminal }) {
+  const signals = []
+  if (signal != null) signals.push(DEGRADED_SIGNALS.EXIT_SIGNAL)
+  if (!Number.isFinite(exitCode)) return signals
+  if (exitCode >= 128) { if (!signals.includes(DEGRADED_SIGNALS.EXIT_SIGNAL)) signals.push(DEGRADED_SIGNALS.EXIT_SIGNAL) }
+  else if (exitCode !== 0) signals.push(DEGRADED_SIGNALS.EXIT_NONZERO)
+  if (!terminal) signals.push(DEGRADED_SIGNALS.TERMINAL_MISSING)
+  return signals
+}
+
 // The envelope is the record of a turn. Stream and exit evidence are useful
 // diagnostics, but can never replace a missing ReturnEnvelope.
 export function classifyRun({ exitCode, signal, terminal, sawJson, envelope, timedOut, budgetRefused = false }) {
-  if (envelope) return (exitCode === 0 && terminal) ? 'ok' : 'ok-degraded'
+  if (envelope) return degradedSignals({ exitCode, signal, terminal }).length ? 'ok-degraded' : 'ok'
   if (budgetRefused) return 'budget-refused'
   if (timedOut) return 'timeout'
   if (!sawJson) return 'malformed'
@@ -415,7 +439,8 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     try { write(join(paths.dir, 'journal.jsonl'), `${JSON.stringify(obj)}\n`, { flag: 'a' }) } catch { /* diagnostics only */ }
   }
   function recordOutcome(run, outcome, stream, exitCode, signal = null) {
-    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, ...(outcome === 'ok-degraded' ? { mismatch: 'envelope arrived but exit/terminal evidence was not a clean match' } : {}) })
+    const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
+    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, ...(degraded ? { degraded } : {}) })
   }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)

@@ -1,6 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { artificialAnalysisVariant, createArtificialAnalysisCatalog, shapeArtificialAnalysisModel } from '../visualizer/server/model-catalog.mjs'
+import { directoryModelMatchesChip, fallbackModelName, groupDirectoryModels, providerDisplayName } from '../visualizer/web/src/lib/model-directory.js'
 
 function response(payload, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => payload }
@@ -30,6 +31,24 @@ test('Artificial Analysis reasoning variants preserve one model family and a sep
   assert.deepEqual(artificialAnalysisVariant("Claude 3.5 Sonnet (Oct '24)"), {
     family_name:"Claude 3.5 Sonnet (Oct '24)", family_slug:'claude-3-5-sonnet-oct-24', reasoning_effort:null, reasoning_mode:null,
   })
+})
+
+test('directory families match roster models across API slug punctuation', () => {
+  const [terra] = groupDirectoryModels([
+    { source_id:'terra-high', name:'GPT-5.6 Terra (high)', family_name:'GPT-5.6 Terra', slug:'gpt-5-6-terra-high', family_slug:'gpt-5-6-terra', creator:'OpenAI', provider_hint:'openai', reasoning_effort:'high' },
+    { source_id:'terra-max', name:'GPT-5.6 Terra (max)', family_name:'GPT-5.6 Terra', slug:'gpt-5-6-terra', family_slug:'gpt-5-6-terra', creator:'OpenAI', provider_hint:'openai', reasoning_effort:'max' },
+  ])
+  assert.equal(directoryModelMatchesChip(terra, { key:'openai/gpt-5.6-terra', provider:'openai', id:'gpt-5.6-terra' }), true)
+  assert.equal(directoryModelMatchesChip(terra, { key:'openai/gpt-5.6-luna', provider:'openai', id:'gpt-5.6-luna' }), false)
+  assert.equal(directoryModelMatchesChip(terra, { key:'anthropic/gpt-5.6-terra', provider:'anthropic', id:'gpt-5.6-terra' }), false)
+})
+
+test('roster display fallbacks use human model and provider labels', () => {
+  assert.equal(fallbackModelName('openai/gpt-5.6-terra'), 'GPT 5.6 Terra')
+  assert.equal(fallbackModelName('local-pi/qwen3-27b'), 'Qwen3 27B')
+  assert.equal(fallbackModelName('anthropic/claude-haiku-4-5'), 'Claude Haiku 4.5')
+  assert.equal(providerDisplayName('openai-codex'), 'OpenAI')
+  assert.equal(providerDisplayName('local-pi'), 'Local')
 })
 
 test('an unconfigured catalog explains how to connect without making a request', async () => {

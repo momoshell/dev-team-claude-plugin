@@ -1,6 +1,6 @@
 <script>
   import { composeRosterLadder, getModelCatalog, getRosterLadder, setModelCatalogKey, stageRosterLadder } from './api.js'
-  import { directoryVariantLabel, groupDirectoryModels, selectedDirectoryVariant } from './model-directory.js'
+  import { directoryModelMatchesChip, directoryVariantLabel, fallbackModelName, groupDirectoryModels, providerDisplayName, selectedDirectoryVariant } from './model-directory.js'
   import { assuranceMeta } from './workflow-semantics.js'
   import Dropdown from './Dropdown.svelte'
 
@@ -133,6 +133,18 @@
   function modelName(key) { return String(key || '').split('/').at(-1) || 'Unassigned' }
   function provider(key) { return String(key || '').split('/')[0] || 'none' }
   function providerMark(key) { return provider(key).slice(0, 2).toUpperCase() }
+  function directoryModelForChip(chip) { return directoryFamilies.find((model) => directoryModelMatchesChip(model, chip)) || null }
+  function capabilityModel(key) {
+    const chip = chipFor(key) || { key, provider:provider(key), id:modelName(key) }
+    const directoryModel = directoryModelForChip(chip)
+    const providerName = directoryModel?.creator || providerDisplayName(chip.provider)
+    return {
+      name:directoryModel?.name || fallbackModelName(chip.id),
+      provider:providerName,
+      providerKey:chip.provider || provider(key),
+      mark:providerName.slice(0, 2).toUpperCase(),
+    }
+  }
   function roleColor(role) { return `var(--${role}-color)` }
   function money(value) { return value == null ? '—' : value < 0.01 ? `$${value.toFixed(3)}` : `$${value.toFixed(2)}` }
   function score(value) { return value == null ? '—' : Number(value).toFixed(1) }
@@ -141,7 +153,11 @@
     return [...(payload?.bands || [])].sort((left, right) => right.rank - left.rank).find((band) => intelligence >= band.floor_reference_score)?.band || 'basement'
   }
   function directoryKey(model) { return `${model.provider_hint || 'provider'}/${model.slug}` }
-  function isKnownDirectoryModel(model) { return chips.some((chip) => chip.key === directoryKey(model) || chip.id === model.slug) }
+  function directoryChip(model) { return chips.find((chip) => directoryModelMatchesChip(model, chip)) || null }
+  function directoryModelState(model) {
+    const chip = directoryChip(model)
+    return chip ? { known:true, label:chip.local_draft ? 'In draft' : 'In roster' } : { known:false, label:'+ Add' }
+  }
   function sourceCell(chip, target) {
     const source = rail.flatMap((column) => column.seats || []).find((seat) => seat.model_key === chip.key)?.cell
     const base = source || target?.cell || { agent:'pi', effort:'medium' }
@@ -207,7 +223,7 @@
   function addDirectoryModel(model) {
     const variant = selectedDirectoryVariant(model, directorySelections)
     const key = directoryKey(model)
-    if (chips.some((chip) => chip.key === key)) { draftNotice = `${model.name} is already in the roster or draft.`; return }
+    if (directoryChip(model)) { draftNotice = `${model.name} is already in the roster or draft.`; return }
     customModels = [...customModels, {
       key, provider:model.provider_hint || 'provider', id:model.slug, band:suggestedBand(variant.intelligence),
       local_draft:true, benchmark_draft:true, source_id:variant.source_id, source:'Artificial Analysis',
@@ -338,7 +354,7 @@
       <header><div><p class="micro">Model suitability</p><h2>Capability bands</h2></div><p><strong>Separate from assurance.</strong> Bands recommend model capability; local and unmeasured are evidence states, not extra bands.</p></header>
       <div class="band-list">
         {#each payload.bands || [] as band (band.band)}
-          <article class={`band ${band.band}`}><span class="band-name"><b>{band.band}</b><small>reference floor {band.floor_reference_score}</small></span><div>{#each band.members as key (key)}<span class="model-pill"><b class={`provider ${provider(key)}`}>{providerMark(key)}</b>{modelName(key)}</span>{/each}</div></article>
+          <article class={`band ${band.band}`}><span class="band-name"><b>{band.band}</b><small>reference floor {band.floor_reference_score}</small></span><div>{#each band.members as key (key)}{@const display = capabilityModel(key)}<span class="model-pill" title={key}><b class={`provider ${display.providerKey}`}>{display.mark}</b><span><strong>{display.name}</strong><small>{display.provider}</small></span></span>{/each}</div></article>
         {/each}
       </div>
     </section>
@@ -406,13 +422,14 @@
                 <div class="directory-head"><span>Model</span><span>Intelligence</span><span>Coding</span><span>Price / Mtok</span><span>Speed</span><span></span></div>
                 {#each visibleDirectoryModels as model (model.family_key)}
                   {@const variant = activeDirectoryVariant(model)}
+                  {@const modelState = directoryModelState(model)}
                   <article>
                     <div class="directory-name"><b class="provider">{model.creator.slice(0,2).toUpperCase()}</b><span><strong>{model.name}</strong><small>{model.creator}{model.release_date ? ` · ${model.release_date}` : ''}</small>{#if model.variant_count > 1}<label class="effort-control"><span>Effort</span><Dropdown value={variant.source_id} options={directoryVariantOptions(model)} onchange={(value) => chooseDirectoryVariant(model, value)} ariaLabel={`Reasoning effort for ${model.name}`} width="7rem" variant="pill" /></label>{:else if variant.reasoning_effort || variant.reasoning_mode}<small class="variant-note">{directoryVariantLabel(variant)} benchmark</small>{/if}</span></div>
                     <div class="score"><strong>{score(variant.intelligence)}</strong><small>AA Index</small></div>
                     <div class="score"><strong>{score(variant.coding)}</strong><small>Coding</small></div>
                     <div class="price"><strong>{money(variant.price_output)}</strong><small>{money(variant.price_input)} input</small></div>
                     <div class="speed"><strong>{variant.output_tokens_per_second == null ? '—' : Math.round(variant.output_tokens_per_second)}</strong><small>tok/s</small></div>
-                    <button type="button" disabled={isKnownDirectoryModel(model)} onclick={() => addDirectoryModel(model)}>{isKnownDirectoryModel(model) ? 'Added' : '+ Add'}</button>
+                    <button type="button" disabled={modelState.known} onclick={() => addDirectoryModel(model)}>{modelState.label}</button>
                   </article>
                 {/each}
                 {#if !visibleDirectoryModels.length}<p class="empty-catalog">No benchmarked models match that search.</p>{/if}
@@ -515,7 +532,7 @@
 .tier-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:.8rem; }.tier-card { position:relative; overflow:hidden; border:1px solid var(--line); border-radius:var(--radius-lg); background:color-mix(in srgb,var(--panel) 95%,transparent); padding:1rem; box-shadow:var(--shadow); }.tier-card::before { content:''; position:absolute; inset:0 auto 0 0; width:2px; background:var(--planner-color); }.tier-card:nth-child(2)::before { background:var(--builder-color); }.tier-card:nth-child(3)::before { background:var(--tech-lead-color); }
 .tier-card > header { display:flex; align-items:start; justify-content:space-between; gap:1rem; }.micro { margin:0 0 .25rem; color:var(--muted); }.tier-card h2 { display:inline; margin:0; font-size:1.2rem; }.tier-card header code { margin-left:.4rem; color:var(--muted); font:500 .58rem/1 var(--mono); }.floor { border:1px solid var(--line); border-radius:1rem; padding:.25rem .5rem; color:var(--muted); font-size:.67rem; text-transform:capitalize; }.tier-note { display:grid; gap:.18rem; margin:.45rem 0 .9rem; }.tier-note strong { font-size:.65rem; }.tier-note span,.tier-note small { color:var(--muted); font-size:.57rem; line-height:1.4; }
 .seats { display:grid; gap:.45rem; }.seat { width:100%; display:grid; grid-template-columns:5.5rem minmax(0,1fr) auto; align-items:center; gap:.65rem; min-height:4rem; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel-raised); padding:.65rem; text-align:left; }.seat.changeable { cursor:copy; border-style:dashed; }.seat.changeable:hover { border-color:var(--accent); background:var(--accent-soft); }.role { display:flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.68rem; text-transform:capitalize; }.role i { width:.42rem; height:.42rem; border-radius:50%; background:var(--seat-color); box-shadow:0 0 7px color-mix(in srgb,var(--seat-color) 60%,transparent); }.model { display:flex; align-items:center; gap:.55rem; min-width:0; }.model > span { min-width:0; display:grid; gap:.16rem; }.model strong { font-size:.78rem; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }.model small,.health { color:var(--muted); font-size:.62rem; }.provider { display:grid; place-content:center; flex:0 0 auto; width:1.7rem; height:1.7rem; border:1px solid var(--line); border-radius:.45rem; background:var(--bg); color:var(--muted); font:700 .58rem/1 var(--mono); }.provider.openai { color:var(--builder-color); }.provider.anthropic { color:var(--tech-lead-color); }.health { text-align:right; white-space:nowrap; }.health.warn { color:var(--status-escalated); }.seat.empty { color:var(--muted); border-style:dashed; }
-.bands { border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--panel); overflow:hidden; }.bands > header { display:flex; justify-content:space-between; align-items:end; gap:1.5rem; padding:1rem; border-bottom:1px solid var(--line); }.bands h2 { margin:.15rem 0 0; font-size:1.05rem; }.bands header > p { max-width:36rem; margin:0; color:var(--muted); font-size:.68rem; line-height:1.45; text-align:right; }.bands header > p strong { color:var(--text); }.band { display:grid; grid-template-columns:9rem 1fr; align-items:center; min-height:4.25rem; border-top:1px solid var(--line); }.band:first-child { border-top:0; }.band-name { align-self:stretch; display:grid; align-content:center; gap:.2rem; padding:.8rem 1rem; border-right:1px solid var(--line); text-transform:capitalize; }.band-name b { font-size:.82rem; }.band-name small { color:var(--muted); font-size:.6rem; }.band > div { display:flex; flex-wrap:wrap; gap:.45rem; padding:.75rem; }.model-pill { display:inline-flex; align-items:center; gap:.45rem; border:1px solid var(--line); border-radius:2rem; background:var(--panel-raised); padding:.3rem .6rem .3rem .35rem; font:600 .7rem/1 var(--mono); }.model-pill .provider { width:1.35rem; height:1.35rem; border-radius:50%; }.frontier .band-name { box-shadow:inset 3px 0 var(--lead-color); }.workhorse .band-name { box-shadow:inset 3px 0 var(--tech-lead-color); }.utility .band-name { box-shadow:inset 3px 0 var(--reviewer-color); }.basement .band-name { box-shadow:inset 3px 0 var(--muted); }
+.bands { border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--panel); overflow:hidden; }.bands > header { display:flex; justify-content:space-between; align-items:end; gap:1.5rem; padding:1rem; border-bottom:1px solid var(--line); }.bands h2 { margin:.15rem 0 0; font-size:1.05rem; }.bands header > p { max-width:36rem; margin:0; color:var(--muted); font-size:.68rem; line-height:1.45; text-align:right; }.bands header > p strong { color:var(--text); }.band { display:grid; grid-template-columns:9rem 1fr; align-items:center; min-height:4.25rem; border-top:1px solid var(--line); }.band:first-child { border-top:0; }.band-name { align-self:stretch; display:grid; align-content:center; gap:.2rem; padding:.8rem 1rem; border-right:1px solid var(--line); text-transform:capitalize; }.band-name b { font-size:.82rem; }.band-name small { color:var(--muted); font-size:.6rem; }.band > div { display:flex; flex-wrap:wrap; gap:.45rem; padding:.75rem; }.model-pill { display:inline-flex; align-items:center; gap:.5rem; min-width:9rem; border:1px solid var(--line); border-radius:2rem; background:var(--panel-raised); padding:.35rem .7rem .35rem .4rem; }.model-pill .provider { width:1.45rem; height:1.45rem; border-radius:50%; }.model-pill > span { display:grid; gap:.12rem; }.model-pill strong { font-size:.67rem; line-height:1.1; }.model-pill small { color:var(--muted); font-size:.5rem; line-height:1; }.frontier .band-name { box-shadow:inset 3px 0 var(--lead-color); }.workhorse .band-name { box-shadow:inset 3px 0 var(--tech-lead-color); }.utility .band-name { box-shadow:inset 3px 0 var(--reviewer-color); }.basement .band-name { box-shadow:inset 3px 0 var(--muted); }
 .studio { border:1px solid var(--line); border-radius:var(--radius-lg); background:var(--panel); overflow:hidden; }
 .studio-title { display:flex; align-items:center; justify-content:space-between; gap:1rem; padding:1.1rem 1.2rem; border-bottom:1px solid var(--line); background:linear-gradient(110deg,color-mix(in srgb,var(--accent) 7%,var(--panel)),var(--panel) 45%); }.studio-title h2 { margin:.1rem 0 .25rem; font-size:1.2rem; }.studio-title p:last-child { margin:0; color:var(--muted); font-size:.72rem; }.draft-state { display:flex; align-items:center; gap:.45rem; border:1px solid var(--line); border-radius:2rem; padding:.45rem .7rem; color:var(--muted); font-size:.68rem; white-space:nowrap; }.draft-state i { width:.45rem; height:.45rem; border-radius:50%; background:var(--status-ok); box-shadow:0 0 8px color-mix(in srgb,var(--status-ok) 65%,transparent); }
 .workspace-modes { display:grid; grid-template-columns:minmax(0,1fr) auto minmax(0,1fr); align-items:center; gap:.8rem; padding:.8rem 1.2rem; border-bottom:1px solid var(--line); background:color-mix(in srgb,var(--bg) 35%,var(--panel)); }.workspace-modes article { display:grid; grid-template-columns:auto 1fr; align-items:baseline; gap:.18rem .55rem; min-width:0; }.workspace-modes article > span { grid-row:1/3; align-self:center; border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line)); border-radius:2rem; background:var(--accent-soft); padding:.32rem .55rem; color:var(--accent); font-size:.58rem; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }.workspace-modes strong { font-size:.68rem; }.workspace-modes small { color:var(--muted); font-size:.57rem; line-height:1.35; }.workspace-modes > i { color:var(--muted); font-style:normal; font-size:.8rem; }

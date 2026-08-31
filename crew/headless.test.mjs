@@ -4,11 +4,17 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  classifyRun, foldUsage, headlessIo, recogniseProviderCondition, recogniseSeatRefusal,
+  classifyRun, foldUsage, headlessIo, parseStream, recogniseProviderCondition, recogniseSeatRefusal,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, updateCrewJson,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { startFileWriter } from '../test/helpers.mjs'
+
+// The final three bytes of each real 2026-08-30 refusal tail, copied
+// byte-for-byte so classification is adjudicated against the provider's own
+// stream shape rather than a synthetic approximation.
+const B332_D2_TAIL = Buffer.from('eyJ0eXBlIjoicmF0ZV9saW1pdF9ldmVudCIsInJhdGVfbGltaXRfaW5mbyI6eyJzdGF0dXMiOiJyZWplY3RlZCIsInJlc2V0c0F0IjoxNzg4MTE1MjAwLCJyYXRlTGltaXRUeXBlIjoiZml2ZV9ob3VyIiwib3ZlcmFnZVN0YXR1cyI6InJlamVjdGVkIiwib3ZlcmFnZURpc2FibGVkUmVhc29uIjoib3JnX2xldmVsX2Rpc2FibGVkIiwiaXNVc2luZ092ZXJhZ2UiOmZhbHNlLCJ1bmlmaWVkV2luZG93cyI6eyJmaXZlX2hvdXIiOnsidXRpbGl6YXRpb24iOjEsInJlc2V0c0F0IjoxNzg4MTE1MjAwfSwic2V2ZW5fZGF5Ijp7InV0aWxpemF0aW9uIjowLjMxLCJyZXNldHNBdCI6MTc4ODU2NjQwMH19fSwidXVpZCI6IjJjMmYyOWI2LWEyNjctNDE5OS1iNTgzLTAxNmEwOGMzNmRkYyIsInNlc3Npb25faWQiOiI0MmJhNjFhMC0wYTQ4LTRlZWYtOGMzMy1lN2FiNDUyMzgxNzEifQp7InR5cGUiOiJhc3Npc3RhbnQiLCJtZXNzYWdlIjp7ImRpYWdub3N0aWNzIjpudWxsLCJpZCI6IjlkZWI5MGNhLWMwYmItNDQyZS1hZmFmLTdjNDU5MGJlMGEyMiIsImNvbnRhaW5lciI6bnVsbCwibW9kZWwiOiI8c3ludGhldGljPiIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdG9wX2RldGFpbHMiOm51bGwsInN0b3BfcmVhc29uIjoic3RvcF9zZXF1ZW5jZSIsInN0b3Bfc2VxdWVuY2UiOiIiLCJ0eXBlIjoibWVzc2FnZSIsInVzYWdlIjp7Im91dHB1dF90b2tlbnNfZGV0YWlscyI6bnVsbCwiaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjowLCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjAsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjowLCJzZXJ2ZXJfdG9vbF91c2UiOnsid2ViX3NlYXJjaF9yZXF1ZXN0cyI6MCwid2ViX2ZldGNoX3JlcXVlc3RzIjowfSwic2VydmljZV90aWVyIjpudWxsLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowfSwiaW5mZXJlbmNlX2dlbyI6bnVsbCwiaXRlcmF0aW9ucyI6bnVsbCwic3BlZWQiOm51bGx9LCJjb250ZW50IjpbeyJ0eXBlIjoidGV4dCIsInRleHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgODo0MHBtIChFdXJvcGUvQmVsZ3JhZGUpIn1dLCJjb250ZXh0X21hbmFnZW1lbnQiOm51bGx9LCJwYXJlbnRfdG9vbF91c2VfaWQiOm51bGwsInNlc3Npb25faWQiOiI0MmJhNjFhMC0wYTQ4LTRlZWYtOGMzMy1lN2FiNDUyMzgxNzEiLCJ1dWlkIjoiMzAzOGY2MDAtYTliOS00NmZlLWJkZWEtZTFlOGJhYjVhYjExIiwidGltZXN0YW1wIjoiMjAyNi0wOC0zMFQxNzoyNjozMC4xMjFaIiwiZXJyb3IiOiJyYXRlX2xpbWl0IiwicmVxdWVzdF9pZCI6InJlcV8wMTFDZVpLb0xBYTlRdkJNNjZGaVNacmkiLCJpc19hcGlfZXJyb3JfbWVzc2FnZSI6dHJ1ZX0KeyJkdXJhdGlvbl9hcGlfbXMiOjE1MzU5Mywic3RvcF9yZWFzb24iOiJzdG9wX3NlcXVlbmNlIiwic2Vzc2lvbl9pZCI6IjQyYmE2MWEwLTBhNDgtNGVlZi04YzMzLWU3YWI0NTIzODE3MSIsInRvdGFsX2Nvc3RfdXNkIjozLjc4ODA4Mzk5OTk5OTk5OTYsInVzYWdlIjp7ImlucHV0X3Rva2VucyI6MjAsImNhY2hlX2NyZWF0aW9uX2lucHV0X3Rva2VucyI6MjM0MDIxLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MjIwMjU5OCwib3V0cHV0X3Rva2VucyI6MTM4NTksIm91dHB1dF90b2tlbnNfZGV0YWlscyI6eyJ0aGlua2luZ190b2tlbnMiOjUyNjN9LCJzZXJ2ZXJfdG9vbF91c2UiOnsid2ViX3NlYXJjaF9yZXF1ZXN0cyI6MCwid2ViX2ZldGNoX3JlcXVlc3RzIjowfSwic2VydmljZV90aWVyIjoic3RhbmRhcmQiLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjoyMzQwMjEsImVwaGVtZXJhbF81bV9pbnB1dF90b2tlbnMiOjB9LCJpbmZlcmVuY2VfZ2VvIjoibm90X2F2YWlsYWJsZSIsIml0ZXJhdGlvbnMiOlt7ImlucHV0X3Rva2VucyI6Miwib3V0cHV0X3Rva2VucyI6NDk4LCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MjUzMjEwLCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjIzNjUsImNhY2hlX2NyZWF0aW9uIjp7ImVwaGVtZXJhbF81bV9pbnB1dF90b2tlbnMiOjAsImVwaGVtZXJhbF8xaF9pbnB1dF90b2tlbnMiOjIzNjV9LCJ0eXBlIjoibWVzc2FnZSJ9XSwic3BlZWQiOiJzdGFuZGFyZCJ9LCJtb2RlbFVzYWdlIjp7ImNsYXVkZS1vcHVzLTUiOnsiaW5wdXRUb2tlbnMiOjIwLCJvdXRwdXRUb2tlbnMiOjEzODU5LCJjYWNoZVJlYWRJbnB1dFRva2VucyI6MjIwMjU5OCwiY2FjaGVDcmVhdGlvbklucHV0VG9rZW5zIjoyMzQwMjEsIndlYlNlYXJjaFJlcXVlc3RzIjowLCJjb3N0VVNEIjozLjc4ODA4Mzk5OTk5OTk5OTYsImNvbnRleHRXaW5kb3ciOjEwMDAwMDAsIm1heE91dHB1dFRva2VucyI6NjQwMDAsImNhbm9uaWNhbE1vZGVsIjoiY2xhdWRlLW9wdXMtNSIsInByb3ZpZGVyIjoiZmlyc3RQYXJ0eSIsImNvc3RCYXNpcyI6Imxpc3QifX0sInBlcm1pc3Npb25fZGVuaWFscyI6W10sInRlcm1pbmFsX3JlYXNvbiI6ImFwaV9lcnJvciIsImZhc3RfbW9kZV9zdGF0ZSI6Im9mZiIsImZhc3RfbW9kZV9kaXNhYmxlZF9yZWFzb24iOiJzZGtfb3B0X2luX3JlcXVpcmVkIiwic3ViYWdlbnRfc3RhdHMiOnsic3Bhd25lZCI6MCwicmVxdWVzdGVkIjp7ImJhY2tncm91bmQiOjAsImZvcmVncm91bmQiOjAsInVuc2V0IjowfSwic3RhcnRlZF9pbl9iYWNrZ3JvdW5kIjowLCJtYXhfZGVwdGgiOjAsInNwYXduZWRfYnlfc3ViYWdlbnRzIjowLCJjb21wbGV0ZWQiOjAsImZhaWxlZCI6MCwia2lsbGVkIjp7InBhcmVudCI6MCwidXNlciI6MCwic3lzdGVtIjowfSwicmVmdXNlZCI6eyJkZXB0aF9saW1pdCI6MCwiY29uY3VycmVuY3lfbGltaXQiOjAsImJ1ZGdldCI6MH0sImJ5X3R5cGUiOnt9fSwiaXNfZXJyb3IiOnRydWUsIm51bV90dXJucyI6MTEsInN1YnR5cGUiOiJzdWNjZXNzIiwiYXBpX2Vycm9yX3N0YXR1cyI6NDI5LCJyZXN1bHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgODo0MHBtIChFdXJvcGUvQmVsZ3JhZGUpIiwidHlwZSI6InJlc3VsdCIsImR1cmF0aW9uX21zIjoyMjA1NzksInV1aWQiOiI3MjBhNTI4Ny0xZDNhLTQxYTAtYmU3YS01ZGQ4N2M5ZWQ1MzIiLCJxdWV1ZWRfdHVybl9jb3VudCI6MH0K', 'base64').toString('utf8')
+const B333_D2_TAIL = Buffer.from('eyJ0eXBlIjoicmF0ZV9saW1pdF9ldmVudCIsInJhdGVfbGltaXRfaW5mbyI6eyJzdGF0dXMiOiJyZWplY3RlZCIsInJlc2V0c0F0IjoxNzg4MTE1MjAwLCJyYXRlTGltaXRUeXBlIjoiZml2ZV9ob3VyIiwib3ZlcmFnZVN0YXR1cyI6InJlamVjdGVkIiwib3ZlcmFnZURpc2FibGVkUmVhc29uIjoib3JnX2xldmVsX2Rpc2FibGVkIiwiaXNVc2luZ092ZXJhZ2UiOmZhbHNlLCJ1bmlmaWVkV2luZG93cyI6eyJmaXZlX2hvdXIiOnsidXRpbGl6YXRpb24iOjEsInJlc2V0c0F0IjoxNzg4MTE1MjAwfSwic2V2ZW5fZGF5Ijp7InV0aWxpemF0aW9uIjowLjMxLCJyZXNldHNBdCI6MTc4ODU2NjQwMH19fSwidXVpZCI6IjgwZjUwM2ZjLTc2ODMtNDQ2Zi04OGE3LTU5OWI1MDgxNmMwNSIsInNlc3Npb25faWQiOiIwYmIxZTIyNC02MmZkLTQ5YjctOTM0MC05NGNmYjJhN2RiM2MifQp7InR5cGUiOiJhc3Npc3RhbnQiLCJtZXNzYWdlIjp7ImRpYWdub3N0aWNzIjpudWxsLCJpZCI6IjcyZTY2Y2FkLTE3MWUtNGIwMS1hZjIyLTcwZjk5MzhiNGY3YSIsImNvbnRhaW5lciI6bnVsbCwibW9kZWwiOiI8c3ludGhldGljPiIsInJvbGUiOiJhc3Npc3RhbnQiLCJzdG9wX2RldGFpbHMiOm51bGwsInN0b3BfcmVhc29uIjoic3RvcF9zZXF1ZW5jZSIsInN0b3Bfc2VxdWVuY2UiOiIiLCJ0eXBlIjoibWVzc2FnZSIsInVzYWdlIjp7Im91dHB1dF90b2tlbnNfZGV0YWlscyI6bnVsbCwiaW5wdXRfdG9rZW5zIjowLCJvdXRwdXRfdG9rZW5zIjowLCJjYWNoZV9jcmVhdGlvbl9pbnB1dF90b2tlbnMiOjAsImNhY2hlX3JlYWRfaW5wdXRfdG9rZW5zIjowLCJzZXJ2ZXJfdG9vbF91c2UiOnsid2ViX3NlYXJjaF9yZXF1ZXN0cyI6MCwid2ViX2ZldGNoX3JlcXVlc3RzIjowfSwic2VydmljZV90aWVyIjpudWxsLCJjYWNoZV9jcmVhdGlvbiI6eyJlcGhlbWVyYWxfMWhfaW5wdXRfdG9rZW5zIjowLCJlcGhlbWVyYWxfNW1faW5wdXRfdG9rZW5zIjowfSwiaW5mZXJlbmNlX2dlbyI6bnVsbCwiaXRlcmF0aW9ucyI6bnVsbCwic3BlZWQiOm51bGx9LCJjb250ZW50IjpbeyJ0eXBlIjoidGV4dCIsInRleHQiOiJZb3UndmUgaGl0IHlvdXIgc2Vzc2lvbiBsaW1pdCDCtyByZXNldHMgODo0MHBtIChFdXJvcGUvQmVsZ3JhZGUpIn1dLCJjb250ZXh0X21hbmFnZW1lbnQiOm51bGx9LCJwYXJlbnRfdG9vbF91c2VfaWQiOm51bGwsInNlc3Npb25faWQiOiIwYmIxZTIyNC02MmZkLTQ5YjctOTM0MC05NGNmYjJhN2RiM2MiLCJ1dWlkIjoiMzM3ZTJiZWQtMjdhNC00MTgwLTk3ZTktMTM0YjUyODIzMDQ5IiwidGltZXN0YW1wIjoiMjAyNi0wOC0zMFQxNzozMzo1MC4wNTNaIiwiZXJyb3IiOiJyYXRlX2xpbWl0IiwicmVxdWVzdF9pZCI6InJlcV8wMTFDZVpMTW1FTHl3ZndLNHBIZlFIaWsiLCJpc19hcGlfZXJyb3JfbWVzc2FnZSI6dHJ1ZX0KeyJkdXJhdGlvbl9hcGlfbXMiOjAsInN0b3BfcmVhc29uIjoic3RvcF9zZXF1ZW5jZSIsInNlc3Npb25faWQiOiIwYmIxZTIyNC02MmZkLTQ5YjctOTM0MC05NGNmYjJhN2RiM2MiLCJ0b3RhbF9jb3N0X3VzZCI6MCwidXNhZ2UiOnsib3V0cHV0X3Rva2Vuc19kZXRhaWxzIjp7InRoaW5raW5nX3Rva2VucyI6MH0sImlucHV0X3Rva2VucyI6MCwiY2FjaGVfY3JlYXRpb25faW5wdXRfdG9rZW5zIjowLCJjYWNoZV9yZWFkX2lucHV0X3Rva2VucyI6MCwib3V0cHV0X3Rva2VucyI6MCwic2VydmVyX3Rvb2xfdXNlIjp7IndlYl9zZWFyY2hfcmVxdWVzdHMiOjAsIndlYl9mZXRjaF9yZXF1ZXN0cyI6MH0sInNlcnZpY2VfdGllciI6InN0YW5kYXJkIiwiY2FjaGVfY3JlYXRpb24iOnsiZXBoZW1lcmFsXzFoX2lucHV0X3Rva2VucyI6MCwiZXBoZW1lcmFsXzVtX2lucHV0X3Rva2VucyI6MH0sImluZmVyZW5jZV9nZW8iOiIiLCJpdGVyYXRpb25zIjpbXSwic3BlZWQiOiJzdGFuZGFyZCJ9LCJtb2RlbFVzYWdlIjp7fSwicGVybWlzc2lvbl9kZW5pYWxzIjpbXSwidGVybWluYWxfcmVhc29uIjoiYXBpX2Vycm9yIiwiZmFzdF9tb2RlX3N0YXRlIjoib2ZmIiwiZmFzdF9tb2RlX2Rpc2FibGVkX3JlYXNvbiI6InNka19vcHRfaW5fcmVxdWlyZWQiLCJzdWJhZ2VudF9zdGF0cyI6eyJzcGF3bmVkIjowLCJyZXF1ZXN0ZWQiOnsiYmFja2dyb3VuZCI6MCwiZm9yZWdyb3VuZCI6MCwidW5zZXQiOjB9LCJzdGFydGVkX2luX2JhY2tncm91bmQiOjAsIm1heF9kZXB0aCI6MCwic3Bhd25lZF9ieV9zdWJhZ2VudHMiOjAsImNvbXBsZXRlZCI6MCwiZmFpbGVkIjowLCJraWxsZWQiOnsicGFyZW50IjowLCJ1c2VyIjowLCJzeXN0ZW0iOjB9LCJyZWZ1c2VkIjp7ImRlcHRoX2xpbWl0IjowLCJjb25jdXJyZW5jeV9saW1pdCI6MCwiYnVkZ2V0IjowfSwiYnlfdHlwZSI6e319LCJpc19lcnJvciI6dHJ1ZSwibnVtX3R1cm5zIjoxLCJzdWJ0eXBlIjoic3VjY2VzcyIsImFwaV9lcnJvcl9zdGF0dXMiOjQyOSwicmVzdWx0IjoiWW91J3ZlIGhpdCB5b3VyIHNlc3Npb24gbGltaXQgwrcgcmVzZXRzIDg6NDBwbSAoRXVyb3BlL0JlbGdyYWRlKSIsInR5cGUiOiJyZXN1bHQiLCJkdXJhdGlvbl9tcyI6NDk3LCJ1dWlkIjoiM2M4OGFkNjUtZTk2NS00MDU0LThiNzEtYjE5OTc4YTdjM2E1IiwicXVldWVkX3R1cm5fY291bnQiOjB9Cg==', 'base64').toString('utf8')
 
 // The b200-helperdedup envelope, byte-exact: 1921 bytes, schema-shaped, and
 // unparseable on ONE literal newline inside the `summary` string value.
@@ -66,6 +72,38 @@ test('classifyRun keeps all six worker traps distinct', () => {
 
 test('envelope wins over exit and stream evidence', () => {
   assert.equal(classifyRun({ exitCode: 137, terminal: false, sawJson: true, envelope: { status: 'done' }, timedOut: false }), 'ok-degraded')
+})
+
+test('real provider refusal tails classify budget-refused from parseStream bytes', () => {
+  for (const tail of [B332_D2_TAIL, B333_D2_TAIL]) {
+    const stream = parseStream('/fixture/stream.jsonl', () => tail, () => true)
+    assert.equal(stream.lines, 3)
+    assert.equal(stream.terminal, true)
+    assert.equal(stream.terminalReason, 'api_error')
+    assert.equal(stream.budgetRefused, true)
+    assert.equal(classifyRun({
+      exitCode: 1, signal: null, terminal: stream.terminal, sawJson: stream.sawJson,
+      envelope: null, timedOut: false, budgetRefused: stream.budgetRefused,
+    }), 'budget-refused')
+  }
+})
+
+test('budget classification is conjunctive and unreadable streams carry no refusal evidence', () => {
+  const apiError = parseStream('/fixture/api-error.jsonl', () => `${JSON.stringify({ type: 'result', terminal_reason: 'api_error' })}\n`, () => true)
+  assert.equal(apiError.budgetRefused, false)
+  assert.equal(classifyRun({ ...apiError, exitCode: 1, envelope: null, timedOut: false }), 'no-envelope')
+  const synthetic = parseStream('/fixture/synthetic.jsonl', () => `${JSON.stringify({ type: 'assistant', message: { model: '<synthetic>' } })}\n${JSON.stringify({ type: 'result', terminal_reason: 'completed' })}\n`, () => true)
+  assert.equal(synthetic.budgetRefused, false)
+  assert.equal(classifyRun({ ...synthetic, exitCode: 0, envelope: null, timedOut: false }), 'no-envelope')
+  const missing = parseStream('/fixture/missing.jsonl', () => '', () => false)
+  assert.equal(missing.budgetRefused, false)
+  const denied = parseStream('/fixture/denied.jsonl', () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }) }, () => true)
+  assert.equal(denied.budgetRefused, false)
+})
+
+test('classifyRun reaches budget-refused only when the caller names evidence', () => {
+  assert.equal(classifyRun({ exitCode: 1, terminal: true, sawJson: true, envelope: null, timedOut: false }), 'no-envelope')
+  assert.equal(classifyRun({ exitCode: 1, terminal: true, sawJson: true, envelope: null, timedOut: false, budgetRefused: true }), 'budget-refused')
 })
 
 test('assign composes through adapter, removes stale envelope, and resumes one session', () => {
@@ -647,6 +685,148 @@ test('T7 headless transport journals a failed crew.json persist', () => {
     assert.ok(failures.length >= 1)
     assert.ok(failures.every((event) => event.role === 'reviewer' && event.reason === 'write-failed'))
   } finally { rmSync(paths.dir, { recursive: true, force: true }) }
+})
+
+const FALLBACK_TEST_CHAIN = [
+  { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high', model: 'claude-opus-5' },
+  { provider: 'anthropic', id: 'claude-sonnet-5', agent: 'claude', effort: 'high', model: 'claude-sonnet-5' },
+]
+
+function fallbackFixture(script, { chain = FALLBACK_TEST_CHAIN, clock = null, onSleep = null } = {}) {
+  const dir = mkdtempSync(join(tmpdir(), 'headless-fallback-'))
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const member = {
+    transport: 'headless-json', agent: 'claude', model: 'claude-fable-5',
+    provider: 'anthropic', id: 'claude-fable-5', effort: 'high',
+    ...(chain ? { fallback: chain.map((entry) => ({ ...entry })) } : {}),
+  }
+  const crew = { schema_version: 3, tier: 'judge', checkout: dir, members: { 'tech-lead': member }, seats: { 'tech-lead': { ...member, ...(member.fallback ? { fallback: member.fallback.map((entry) => ({ ...entry })) } : {}) } } }
+  writeFileSync(join(dir, 'crew.json'), JSON.stringify(crew, null, 2))
+  const journal = []; let spawns = 0; let pid = 4200; let lastRunDir = null
+  const deps = {
+    log: (row) => journal.push(row), kill: () => {},
+    ...(clock ? { now: () => clock.t } : {}),
+    sleep(ms) {
+      if (clock) clock.t += Number(ms) || 0
+      onSleep?.({ clock, runDir: lastRunDir, spawns, returnsDir })
+    },
+    uuid: (() => { let n = 0; return () => `fallback-${++n}` })(),
+    spawn() {
+      spawns += 1
+      const root = join(taskDir, 'headless')
+      const dirs = readdirSync(root).filter((name) => /^d\d+$/.test(name)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1)))
+      lastRunDir = join(root, dirs.at(-1))
+      script(spawns, lastRunDir, returnsDir)
+      return { pid: ++pid, unref() {} }
+    },
+  }
+  const io = headlessIo({ crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir, adapters: null, bin: '/frozen/worker/bin', deps })
+  const commands = () => readdirSync(join(taskDir, 'headless')).filter((name) => /^d\d+$/.test(name)).sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))).map((name) => JSON.parse(readFileSync(join(taskDir, 'headless', name, 'cmd.json'), 'utf8')))
+  return {
+    dir, taskDir, returnsDir, crew, journal, io, commands,
+    spawnCount: () => spawns,
+    diskCrew: () => JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8')),
+    fallbackRows: () => journal.filter((row) => row.event === 'seat-fallback'),
+    cleanup: () => rmSync(dir, { recursive: true, force: true }),
+  }
+}
+
+function writeBudgetRefusal(runDir) {
+  writeFileSync(join(runDir, 'stream.jsonl'), B333_D2_TAIL)
+  writeFileSync(join(runDir, 'exit'), '1')
+}
+
+function writeBudgetAnswer(runDir, returnsDir) {
+  writeFileSync(join(returnsDir, 'd1.tech-lead.json'), JSON.stringify({ assignment_id: 'd1', role: 'tech-lead', status: 'done' }))
+  writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
+  writeFileSync(join(runDir, 'exit'), '0')
+}
+
+test('a budget refusal re-asks the same assignment on the consumed fallback cell', () => {
+  const f = fallbackFixture((n, runDir, returnsDir) => n === 1 ? writeBudgetRefusal(runDir) : writeBudgetAnswer(runDir, returnsDir))
+  try {
+    const run = f.io.assign({ role: 'tech-lead', briefFile: join(f.taskDir, 'brief.md') })
+    const envelope = f.io.wait(run.returnPath, 600)
+    assert.equal(envelope.assignment_id, 'd1')
+    assert.equal(f.spawnCount(), 2)
+    const commands = f.commands()
+    assert.equal(commands[1].bin, '/frozen/worker/bin')
+    assert.equal(commands[1].args[commands[1].args.indexOf('--model') + 1], 'claude-opus-5')
+    const prompt = commands[1].args[commands[1].args.indexOf('-p') + 1]
+    assert.match(prompt, /ASSIGNMENT d1:/)
+    assert.equal(f.fallbackRows().length, 1)
+    assert.deepEqual(f.fallbackRows()[0], {
+      at: f.fallbackRows()[0].at, event: 'seat-fallback', role: 'tech-lead',
+      from: { provider: 'anthropic', id: 'claude-fable-5', model: 'claude-fable-5', effort: 'high', agent: 'claude' },
+      to: { provider: 'anthropic', id: 'claude-opus-5', model: 'claude-opus-5', effort: 'high', agent: 'claude' },
+      cause: 'budget', assignment_id: 'd1',
+    })
+    for (const view of [f.crew.members['tech-lead'], f.crew.seats['tech-lead'], f.diskCrew().members['tech-lead'], f.diskCrew().seats['tech-lead']]) {
+      assert.equal(view.provider, 'anthropic'); assert.equal(view.id, 'claude-opus-5'); assert.equal(view.model, 'claude-opus-5')
+      assert.equal(view.fallback.length, 1); assert.equal(view.fallback[0].id, 'claude-sonnet-5')
+    }
+  } finally { f.cleanup() }
+})
+
+test('a second budget refusal spends no second fallback and escapes as budget', () => {
+  const f = fallbackFixture((n, runDir) => writeBudgetRefusal(runDir))
+  try {
+    const run = f.io.assign({ role: 'tech-lead', briefFile: join(f.taskDir, 'brief.md') })
+    assert.throws(() => f.io.wait(run.returnPath, 600), (err) => err.stage === 'headless-budget-refused')
+    assert.equal(f.spawnCount(), 2); assert.equal(f.fallbackRows().length, 1)
+    assert.equal(f.crew.members['tech-lead'].fallback.length, 1)
+  } finally { f.cleanup() }
+})
+
+test('a fallback inherits the original absolute deadline and a late declared cell does not spawn', () => {
+  const clock = { t: 0 }; const deadline = 600_000
+  const f = fallbackFixture(() => {}, { clock, onSleep: ({ clock: c, runDir, spawns }) => {
+    if (spawns === 1 && c.t > 590_000) writeBudgetRefusal(runDir)
+  } })
+  try {
+    const run = f.io.assign({ role: 'tech-lead', briefFile: join(f.taskDir, 'brief.md') })
+    assert.throws(() => f.io.wait(run.returnPath, 600), (err) => ['headless-timeout', 'headless-budget-refused'].includes(err.stage))
+    assert.equal(f.spawnCount(), 2); assert.ok(clock.t <= deadline + 15_000)
+  } finally { f.cleanup() }
+
+  const lateClock = { t: 0 }; let lateDeadline = null
+  const late = fallbackFixture(() => {}, { clock: lateClock, onSleep: ({ clock: c, runDir }) => {
+    if (lateDeadline !== null && c.t > lateDeadline) writeBudgetRefusal(runDir)
+  } })
+  try {
+    const run = late.io.assign({ role: 'tech-lead', briefFile: join(late.taskDir, 'brief.md') })
+    lateDeadline = 600_000
+    assert.throws(() => late.io.wait(run.returnPath, 600), (err) => err.stage === 'headless-budget-refused')
+    assert.equal(late.spawnCount(), 1)
+    assert.equal(late.journal.filter((row) => row.event === 'seat-fallback-expired').length, 1)
+  } finally { late.cleanup() }
+})
+
+test('a chainless budget refusal and a legacy no-envelope run never invent fallback events', () => {
+  const lateClock = { t: 0 }; let lateDeadline = null
+  const chainless = fallbackFixture(() => {}, { chain: null, clock: lateClock, onSleep: ({ clock: c, runDir }) => {
+    if (lateDeadline !== null && c.t > lateDeadline) writeBudgetRefusal(runDir)
+  } })
+  try {
+    const run = chainless.io.assign({ role: 'tech-lead', briefFile: join(chainless.taskDir, 'brief.md') })
+    lateDeadline = 600_000
+    assert.throws(() => chainless.io.wait(run.returnPath, 600), (err) => err.stage === 'headless-budget-refused')
+    assert.equal(chainless.spawnCount(), 1)
+    assert.equal(chainless.fallbackRows().length, 0)
+    assert.equal(chainless.journal.filter((row) => row.event === 'seat-fallback-expired').length, 0)
+  } finally { chainless.cleanup() }
+
+  const legacy = fallbackFixture((n, runDir) => {
+    writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
+    writeFileSync(join(runDir, 'exit'), '0')
+  })
+  try {
+    const run = legacy.io.assign({ role: 'tech-lead', briefFile: join(legacy.taskDir, 'brief.md') })
+    assert.throws(() => legacy.io.wait(run.returnPath, 600), (err) => err.stage === 'headless-no-envelope')
+    assert.equal(legacy.spawnCount(), 1); assert.equal(legacy.fallbackRows().length, 0)
+    assert.equal(legacy.crew.members['tech-lead'].fallback.length, 2)
+  } finally { legacy.cleanup() }
 })
 
 function headlessReaskFixture(overrides = {}) {

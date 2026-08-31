@@ -548,6 +548,25 @@ export function bootAllocation(roles, args = {}, sources = null, transports = nu
   return Object.keys(out).length ? out : null
 }
 
+// A seat's declared BUDGET fallback chain: the cells to try, in order, when the
+// booted cell refuses a turn for budget (crew/headless.mjs classifyRun's
+// `budget-refused`). Closed set, the BAND_FLOOR_REFUSALS shape (:645) — every
+// member is an operator error caught at BOOT, never a runtime guess.
+export const FALLBACK_REFUSALS = Object.freeze([
+  'fallback-empty',         // a seat declared `fallback` with no entries at all
+  'fallback-self',          // an entry names the seat's OWN provider/id
+  'fallback-agent-change',  // an entry names an agent the seat does not run
+])
+
+// Closed AT THE CONSTRUCTOR, not merely in the array: a caller branches on
+// `err.reason`, so a free-form reason would make "frozen and closed" a claim
+// about the enum that no caller can rely on. The posture, and the message shape,
+// are refuseBandFloor's (crew/crew.mjs:652-654).
+export function refuseFallback(reason, message) {
+  if (!FALLBACK_REFUSALS.includes(reason)) throw new Error(`unknown fallback refusal reason ${JSON.stringify(reason)}`)
+  return Object.assign(new Error(`${message} [${reason}]`), { reason })
+}
+
 // Resolve a roster tier into seated roles, per-seat cells, and a per-field
 // provenance map. PURE: sync, no imports, no adapter knowledge — the
 // per-adapter model-string translation is a separate step (resolveSeatModels)
@@ -579,6 +598,20 @@ export function resolveTier(roster, tier, args = {}) {
       // CLI's namespace).
       model: modelOverride || null,
     }
+    if (cell.fallback !== undefined) {
+      if (!Array.isArray(cell.fallback) || cell.fallback.length === 0) {
+        throw refuseFallback('fallback-empty', `seat ${role} in tier ${tier} declared "fallback" with no entries — omit the key, or name at least one cell, at crew/roster.json tiers.${tier}.${role}.fallback`)
+      }
+      for (const entry of cell.fallback) {
+        if (entry.provider === cell.provider && entry.id === cell.id) {
+          throw refuseFallback('fallback-self', `seat ${role} in tier ${tier} lists its OWN cell ${cell.provider}/${cell.id} as a fallback — a refused seat cannot fall back to itself, at crew/roster.json tiers.${tier}.${role}.fallback`)
+        }
+        if (entry.agent !== seats[role].agent) {
+          throw refuseFallback('fallback-agent-change', `seat ${role} in tier ${tier} declares a fallback on agent "${entry.agent}" but the seat runs "${seats[role].agent}" — the agent picks the seat's transport at boot (crew/crew.mjs:501) and is fixed for the run, at crew/roster.json tiers.${tier}.${role}.fallback`)
+        }
+      }
+      seats[role].fallback = cell.fallback.map((entry) => ({ ...entry }))
+    }
     sources[role] = {
       agent: agentOverride ? 'override' : 'roster',
       model: modelOverride ? 'override' : 'roster',
@@ -608,14 +641,26 @@ export function resolveSeatModels(seats, adapters, localProviders = null) {
     // that cell's provider/id would make the boot record name a model the seat
     // is not running (#161). Never guess a provider from a raw string — null is
     // the honest answer.
-    if (seat.model) { out[role] = { ...seat, provider: null, id: null }; continue }
+    if (seat.model) { const { fallback, ...rest } = seat; out[role] = { ...rest, provider: null, id: null }; continue }
     const adapter = adapters[role]?.adapter
     // The typeof fallback keeps a third-party adapter without modelString
     // bootable.
     const model = typeof adapter?.modelString === 'function'
       ? adapter.modelString({ provider: seat.provider, id: seat.id, localProviders })
       : seat.id
-    out[role] = { ...seat, model }
+    // The chain is translated by the ROLE's own adapter, which is legal because
+    // an entry may not change agent (resolveTier's fallback-agent-change). An
+    // untranslated id is the guessed passthrough adapter-pi refuses (#147/#239),
+    // and adapter-pi's own refusal is the honest error for a provider it cannot
+    // map (crew/adapters/adapter-pi.mjs:101-108).
+    const fallback = Array.isArray(seat.fallback) ? seat.fallback.map((entry) => ({
+      ...entry,
+      effort: entry.effort ?? seat.effort,
+      model: typeof adapter?.modelString === 'function'
+        ? adapter.modelString({ provider: entry.provider, id: entry.id, localProviders })
+        : entry.id,
+    })) : null
+    out[role] = fallback ? { ...seat, model, fallback } : { ...seat, model }
   }
   return out
 }
@@ -1616,6 +1661,7 @@ export async function bootCmd(args, deps = {}) {
     transport: adapters[role].transport, model: seats?.[role]?.model || seatModel(role, args), agent: adapters[role].name,
     tools: effectiveTools(role, adapters[role].grants), deny: SEAT_DEFAULTS[role].deny,
     ...(seats ? { effort: seats[role].effort, provider: seats[role].provider, id: seats[role].id } : {}),
+    ...(seats?.[role]?.fallback ? { fallback: seats[role].fallback } : {}),
   })
   if (headlessOnly) {
     for (const role of roles) members[role] = memberFor(role)

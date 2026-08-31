@@ -111,8 +111,31 @@
             "xhigh",
             "max"
           ]
+        },
+        "fallback": {
+          "$ref": "#/$defs/fallbackChain"
         }
       }
+    },
+    "fallbackChain": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/fallbackEntry" }
+    },
+    "fallbackEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "title": "a fallback cell",
+      "required": ["provider", "id", "agent"],
+      "properties": {
+        "provider": { "type": "string", "pattern": "^[a-z0-9-]+$" },
+        "id": { "type": "string", "pattern": "^[A-Za-z0-9._-]+$" },
+        "agent": { "enum": ["claude", "pi"] },
+        "effort": { "$ref": "#/$defs/fallbackEffort" }
+      }
+    },
+    "fallbackEffort": {
+      "enum": ["low", "medium", "high", "xhigh", "max"]
     },
     "model": {
       "type": "object",

@@ -10,7 +10,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 // node:module is not imported here: D1's node:sqlite probe lives in test/helpers.mjs.
 import {
-  daemon, deriveState, normalizeEvent, usageWindow, scopeEntryDefects, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
+  daemon, resolveRunConfig, RUN_CONFIG_DECLARATIONS, deriveState, normalizeEvent, usageWindow, scopeEntryDefects, PANE_TRANSPORT, RUN_STATES, EVENT_KINDS, DAEMON_COMMANDS, DEFAULT_CONCURRENCY, DEFAULT_BUDGET_WINDOW_MS, LEDGER_NODE_FLOOR,
 } from './daemon.mjs'
 import { driveTask, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
@@ -332,6 +332,68 @@ test('a tier enqueue boots through the spawn seam and forks the run child', asyn
   })
 })
 
+test('crew_dir enqueue inherits boot configuration and refuses boot-owned axes', async () => {
+  await each(async (f) => {
+    const bootConfiguration = {
+      profile: { requested: 'investigation', effective: 'investigation', source: 'explicit' },
+      assurance: { requested: 'build', effective: 'standard', source: 'alias' },
+    }
+    const crew = JSON.parse(readFileSync(join(f.crewDir, 'crew.json'), 'utf8'))
+    writeFileSync(join(f.crewDir, 'crew.json'), JSON.stringify({ ...crew, run_configuration: bootConfiguration }))
+    const result = f.d.enqueue({ crew_dir: f.crewDir, brief_file: f.brief })
+    const record = readFileSync(join(f.root, 'runs.jsonl'), 'utf8').split('\n').filter(Boolean).map(JSON.parse)
+      .find((row) => row.kind === 'enqueued')
+    assert.equal(result.run_id, record.run_id)
+    assert.deepEqual(record.run_configuration, {
+      profile: bootConfiguration.profile,
+      execution: { requested: null, effective: 'scout', source: 'profile_recommendation', status: 'existing' },
+      assurance: bootConfiguration.assurance,
+    })
+    assert.equal(Object.hasOwn(record, 'variant'), false)
+    const childSpec = JSON.parse(f.forks[0][1][1])
+    assert.deepEqual(childSpec.run_configuration, record.run_configuration)
+    assert.equal(Object.hasOwn(childSpec, 'variant'), false)
+  })
+
+  await each(async (f) => {
+    for (const [axis, value] of [['profile', 'investigation'], ['assurance', 'standard'], ['tier', 'build']]) {
+      assert.throws(() => f.d.enqueue({ crew_dir: f.crewDir, brief_file: f.brief, [axis]: value }), (err) => {
+        assert.equal(err.code, 'invalid-spec')
+        assert.match(err.message, new RegExp(`--${axis}`))
+        assert.match(err.message, /fixed by the boot/)
+        return true
+      })
+    }
+    assert.equal(f.boots.length, 0)
+    assert.equal(f.forks.length, 0)
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
+  })
+})
+
+test('tier enqueue records the resolved configuration and forwards canonical seating/profile flags', async () => {
+  await each(async (f) => {
+    f.d.enqueue({ assurance: 'rigorous', task: 'assured', checkout: f.dir, brief_file: f.brief, profile: 'investigation', execution: 'scout' })
+    const argv = f.boots[0]?.[1] || []
+    assert.equal(argv[argv.indexOf('--assurance') + 1], 'rigorous')
+    assert.equal(argv[argv.indexOf('--profile') + 1], 'investigation')
+    assert.equal(argv.includes('--tier'), false)
+  })
+})
+
+test('enqueue refuses canonical/alias conflicts before boot, fork, or registry writes', async () => {
+  await each(async (f) => {
+    for (const spec of [
+      { crew_dir: f.crewDir, execution: 'full', variant: 'full' },
+      { tier: 'build', task: 'conflict', checkout: f.dir, brief_file: f.brief, assurance: 'standard' },
+    ]) {
+      assert.throws(() => f.d.enqueue(spec), (err) => err.code === 'invalid-spec' && /alias/.test(err.message))
+    }
+    assert.equal(f.boots.length, 0)
+    assert.equal(f.forks.length, 0)
+    assert.equal(existsSync(join(f.root, 'runs.jsonl')), false)
+  })
+})
+
 test('scopeEntryDefects agrees with drive.mjs over good and bad entries', () => {
   const entries = ['crew/crew.mjs', 'tasks/x/captures/', 'lib/*.mjs', '/abs/path.mjs', '../up.mjs', 'crew/', '', 42, 'a{b}.mjs']
   for (const entry of entries) assert.deepEqual(scopeEntryDefects([entry]), validateScopeEntries([entry]), entry)
@@ -487,11 +549,11 @@ test('a tier boot does not reject a distinct manually supplied crew directory', 
   })
 })
 
-test('a boot that exits non-zero refuses by name and registers no run', async () => {
+test('an unknown assurance alias refuses before boot and registers no run', async () => {
   await each(async (f) => {
-    f.deps.spawnSync = (...args) => { f.boots.push(args); return { status: 1, stderr: 'error: unknown tier "nope" — valid tiers: mechanical, build, judge\n' } }
+    f.deps.spawnSync = (...args) => { f.boots.push(args); return { status: 1, stderr: 'boot should not be reached\n' } }
     f.d = daemon({ root: f.root, deps: f.deps })
-    assert.throws(() => f.d.enqueue({ tier: 'nope', task: 'tier-task', checkout: f.dir, brief_file: f.brief }), (err) => err.code === 'boot-failed' && /nope/.test(err.message) && /unknown tier/.test(err.message))
+    assert.throws(() => f.d.enqueue({ tier: 'nope', task: 'tier-task', checkout: f.dir, brief_file: f.brief }), (err) => err.code === 'invalid-spec' && /nope/.test(err.message) && /unknown assurance/.test(err.message))
     assert.deepEqual(f.d.list(), [])
     assert.equal(f.forks.length, 0)
   })

@@ -76,6 +76,18 @@ function declaredScope(value, variant) {
   return [...value]
 }
 
+// Deliberate duplicate of the execution-shape seam: the child cannot import
+// crew.mjs, and this check keeps its legacy variant projection aligned with
+// the daemon's run_configuration. crew/crew.test.mjs pins the two spellings.
+export function specExecution(spec = {}) {
+  const declared = spec.run_configuration?.execution?.effective
+  if (declared === undefined || declared === null) return spec.variant ?? null
+  if (spec.variant !== undefined && spec.variant !== declared) {
+    throw new Error(`this child spec carries variant ${JSON.stringify(spec.variant)} and run_configuration.execution.effective ${JSON.stringify(declared)} — boot and run may never disagree about the shape a lane ran under`)
+  }
+  return declared
+}
+
 // An identical copy of crew/crew.mjs's resolver: the two run entrypoints must
 // agree on what the round validation lane is, and child.mjs deliberately never
 // imports crew.mjs. crew/crew.test.mjs runs both against one shared table.
@@ -159,7 +171,6 @@ export function runChild(argv, injected = {}) {
     // lane and suite are both RESOLVED below, inside the try, so an unreadable
     // one becomes this run's child-preflight escalation rather than a throw out of fork.
     lane: null, suite: null,
-    ...(spec.variant ? { variant: spec.variant } : {}),
   }
   const failure = (err) => ({
     status: 'escalation', summary: `Task ${ctx.task} needs a human: the driver crashed (${err.message})`,
@@ -214,11 +225,13 @@ export function runChild(argv, injected = {}) {
   // child-side cleanup needs the async/worker shape tracked in #419; arming a
   // handler in a turn-free function is not a step towards it.
   try {
+    const execution = specExecution(spec)
+    if (execution) ctx.variant = execution
     const pane = paneSeat(crew)
     if (pane) throw new Error(`daemon run refuses pane transport for seat ${pane}`)
     // Resolve inside this try so an invalid scope becomes this run's
     // escalation envelope (`child-preflight`), not a stack trace out of fork.
-    const filesInScope = declaredScope(spec.files_in_scope, spec.variant)
+    const filesInScope = declaredScope(spec.files_in_scope, execution)
     if (filesInScope) ctx.files_in_scope = filesInScope
     // The same validation the attended entrypoint runs, from the same leaf: an
     // invalid budget refuses here as a child-preflight escalation rather than
@@ -235,7 +248,7 @@ export function runChild(argv, injected = {}) {
       // The shape's DECLARED seats, not the tier three: an envelope shape runs
       // exactly the seats crew/variants.mjs declares (crew/crew.mjs:assertSeats
       // is the same rule at the attended entrypoint).
-      const declaredSeats = VARIANTS[spec.variant]?.required_seats
+      const declaredSeats = VARIANTS[execution]?.required_seats
       for (const role of Array.isArray(declaredSeats) ? declaredSeats : ['planner', 'builder', 'reviewer']) if (!crew.members?.[role]) throw new Error(`v3 run requires a ${role} seat (booted roles: ${roles.join(', ')})`)
       if (roles.includes('lead') && !crew.members?.lead) throw new Error(`v3 run requires a lead seat (booted roles: ${roles.join(', ')})`)
       if (!briefFile) throw new Error('run requires --brief-file <path to the task brief>')
@@ -307,6 +320,9 @@ export function runChild(argv, injected = {}) {
       } catch { /* instrumentation is never load-bearing */ }
       try {
         io.log?.({ at: new Date().toISOString(), event: 'validation-lane', lane: validationLane.lane, source: validationLane.source })
+      } catch { /* instrumentation is never load-bearing */ }
+      try {
+        io.log?.({ at: new Date().toISOString(), event: 'run-configuration', run_configuration: spec.run_configuration ?? null })
       } catch { /* instrumentation is never load-bearing */ }
       // The lane fence rides the same seam as the protected paths: crew.mjs's
       // run verb resolves it out of crew.json (crew/crew.mjs:1190) and the

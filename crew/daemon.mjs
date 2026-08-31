@@ -25,6 +25,9 @@ import { splitFrames, seatCommandPath, steerFrame } from './headless-rpc.mjs'
 import { slugOrNull } from './slug.mjs'
 import { regrantVerdict, continuationBrief } from './escalation-policy.mjs'
 import { VARIANTS, VARIANT_NAMES } from './variants.mjs'
+import { TASK_PROFILES } from './task-profiles.mjs'
+import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
+import { resolveRunConfiguration } from './run-configuration.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 
 const regranted = new Set()
@@ -39,13 +42,30 @@ const SEND_INTERJECTION = 'boundary'
 const MAX_SEND_BYTES = 512
 
 function runError(code, message) { const err = new Error(message); err.code = code; return err }
+function flagNamedAliasMessage(error) {
+  return String(error?.message || error).replace(/\b(execution|variant|assurance|tier)=/g, '--$1=')
+}
 
 // The set is imported and never restated; this guard sits at the point of request (#184).
-function requestedVariant(spec) {
-  const raw = spec.variant
-  if (raw === undefined || raw === null) return null
-  if (typeof raw === 'string' && VARIANT_NAMES.includes(raw)) return raw
-  throw runError('invalid-spec', `unknown variant ${JSON.stringify(raw)} — the closed set is: ${VARIANT_NAMES.join(', ')}`)
+export const RUN_CONFIG_DECLARATIONS = Object.freeze({ profiles: TASK_PROFILES, variantNames: VARIANT_NAMES, assurances: ASSURANCES, assuranceAliases: ASSURANCE_ALIASES })
+export function resolveRunConfig(spec = {}) {
+  try { return resolveRunConfiguration({ profile: spec.profile, execution: spec.execution, variant: spec.variant, assurance: spec.assurance, tier: spec.tier }, RUN_CONFIG_DECLARATIONS) }
+  catch (err) { throw runError('invalid-spec', flagNamedAliasMessage(err)) }
+}
+
+// The daemon cannot import crew.mjs; derive pre-#780 records through the same
+// resolver while carrying a current boot record's provenance verbatim.
+function persistedRunConfig(crew) {
+  const stored = crew?.run_configuration
+  if (stored && typeof stored === 'object') return { profile: stored.profile ?? null, assurance: stored.assurance ?? null }
+  const derived = resolveRunConfig({ tier: typeof crew?.tier === 'string' ? crew.tier : undefined })
+  return { profile: derived.profile, assurance: derived.assurance }
+}
+
+function resolvedEnqueueConfig(spec, persisted = null) {
+  const configuration = resolveRunConfig(spec)
+  if (!persisted) return configuration
+  return Object.freeze({ profile: persisted.profile, execution: configuration.execution, assurance: persisted.assurance })
 }
 
 // Deliberate duplicate of drive.mjs:830-848. The IMPORT FIREWALL forbids the
@@ -583,6 +603,7 @@ export function daemon(options = {}) {
       task: record.task,
       brief_file: record.brief_file,
       variant: record.variant || null,
+      run_configuration: record.run_configuration || null,
       files_in_scope: record.files_in_scope || null,
       lane: record.lane,
       suite: record.suite,
@@ -1061,7 +1082,7 @@ export function daemon(options = {}) {
   // Boot a crew for a tier in a CHILD PROCESS: importing crew.mjs would pull
   // the runner back into the server (#174/PR #191, daemon.test.mjs firewall).
   function bootTierCrew(spec) {
-    const tier = String(spec.tier)
+    const tier = String(spec.assurance ?? spec.tier)
     if (typeof spec.task !== 'string' || !spec.task) throw runError('invalid-spec', 'a tier enqueue requires task')
     if (typeof spec.checkout !== 'string' || !spec.checkout) throw runError('invalid-spec', 'a tier enqueue requires checkout')
     const checkout = resolvePath(spec.checkout)
@@ -1069,7 +1090,9 @@ export function daemon(options = {}) {
     if (typeof briefFile !== 'string' || !briefFile || !exists(resolvePath(briefFile))) {
       throw runError('invalid-spec', `brief file not found: ${briefFile ? resolvePath(briefFile) : '<missing>'}`)
     }
-    const argv = [CREW_PATH, 'boot', '--task', String(spec.task), '--checkout', checkout, '--tier', tier, '--headless-all']
+    const seatingFlag = typeof spec.assurance === 'string' && spec.assurance ? ['--assurance', String(spec.assurance)] : ['--tier', String(spec.tier)]
+    const argv = [CREW_PATH, 'boot', '--task', String(spec.task), '--checkout', checkout, ...seatingFlag, '--headless-all',
+      ...(typeof spec.profile === 'string' && spec.profile ? ['--profile', String(spec.profile)] : [])]
     const result = spawnSync(process.execPath, argv, { cwd: checkout, encoding: 'utf8' })
     const stderr = String(result?.stderr || '').trim()
     if (result?.error || result?.status !== 0) {
@@ -1115,6 +1138,7 @@ export function daemon(options = {}) {
       crew_dir: run.crew_dir, task: run.task, brief_file: run.brief_file,
       run_id: run.run_id,
       lane: run.lane, suite: run.suite, checkout: run.checkout, task_return: run.task_return,
+      ...(run.run_configuration ? { run_configuration: run.run_configuration } : {}),
       ...(run.variant ? { variant: run.variant } : {}),
       ...(run.files_in_scope ? { files_in_scope: run.files_in_scope } : {}),
       continuation: run.continuation === true,
@@ -1225,21 +1249,35 @@ export function daemon(options = {}) {
     ensureFolded()
     if (!isObject(spec)) throw runError('invalid-spec', 'enqueue requires a spec object')
     const hasDir = typeof spec.crew_dir === 'string' && !!spec.crew_dir
-    const hasTier = typeof spec.tier === 'string' && !!spec.tier
-    if (hasDir && hasTier) throw runError('invalid-spec', 'enqueue takes crew_dir or tier, never both')
-    if (!hasDir && !hasTier) throw runError('invalid-spec', 'enqueue requires crew_dir or tier')
+    const hasSeating = (typeof spec.tier === 'string' && !!spec.tier) || (typeof spec.assurance === 'string' && !!spec.assurance)
+    const bootOwnedAxes = ['profile', 'assurance', 'tier'].filter((axis) => Object.hasOwn(spec, axis) && spec[axis] !== undefined && spec[axis] !== null)
+    if (hasDir && bootOwnedAxes.length) throw runError('invalid-spec', `enqueue with crew_dir cannot supply ${bootOwnedAxes.map((axis) => `--${axis}`).join(', ')} — those axes are fixed by the boot that made the crew dir`)
+    if (hasDir && hasSeating) throw runError('invalid-spec', 'enqueue takes crew_dir or assurance/tier, never both')
+    if (!hasDir && !hasSeating) throw runError('invalid-spec', 'enqueue requires crew_dir or assurance/tier')
     const runId = String(spec.run_id || uuid())
     if (!RUN_ID_OK.test(runId)) throw runError('invalid-spec', 'run_id must match /^[A-Za-z0-9._-]{1,64}$/')
-    const variant = requestedVariant(spec)
+    let crewDir
+    let crew
+    let persisted = null
+    let configurationRequest = spec
+    if (hasDir) {
+      crewDir = resolvePath(spec.crew_dir)
+      try { crew = JSON.parse(String(read(join(crewDir, 'crew.json'), 'utf8'))) } catch (err) { throw runError('invalid-spec', `cannot read crew.json at ${join(crewDir, 'crew.json')}: ${err.message}`) }
+      persisted = persistedRunConfig(crew)
+      configurationRequest = { profile: persisted.profile?.effective ?? undefined, execution: spec.execution, variant: spec.variant }
+    }
+    const configuration = resolvedEnqueueConfig(configurationRequest, persisted)
+    const variant = configuration.execution.requested === null ? null : configuration.execution.effective
     const filesInScope = requestedScope(spec, variant)
     assertBudget()
-    if (hasTier) {
+    if (hasSeating) {
       const active = activeTierRun(spec)
       if (active) throw runError('run-active', `run ${active.run_id} is already active for ${active.crew_dir}`)
     }
-    const crewDir = hasDir ? resolvePath(spec.crew_dir) : bootTierCrew(spec)
-    let crew
-    try { crew = JSON.parse(String(read(join(crewDir, 'crew.json'), 'utf8'))) } catch (err) { throw runError('invalid-spec', `cannot read crew.json at ${join(crewDir, 'crew.json')}: ${err.message}`) }
+    if (!hasDir) {
+      crewDir = bootTierCrew(spec)
+      try { crew = JSON.parse(String(read(join(crewDir, 'crew.json'), 'utf8'))) } catch (err) { throw runError('invalid-spec', `cannot read crew.json at ${join(crewDir, 'crew.json')}: ${err.message}`) }
+    }
     const pane = paneSeat(crew)
     if (pane) throw runError('invalid-spec', `daemon run refuses pane transport for seat ${pane}`)
     const active = [...runs.values()].find((run) => run.crew_dir === crewDir && !SETTLED_LIFECYCLES.includes(run.lifecycle))
@@ -1263,11 +1301,12 @@ export function daemon(options = {}) {
       throw runError('crew-settled', `return path ${taskReturn} is already occupied`
         + ' — a reused run id cannot overwrite an existing run-addressed envelope')
     }
-    const identity = hasTier ? tierIdentity(spec) : null
+    const identity = hasSeating ? tierIdentity(spec) : null
     const record = {
       kind: 'enqueued', run_id: runId, at: now(), crew_dir: crewDir,
       task: spec.task || crew.task || null, brief_file: spec.brief_file || spec.briefFile || null,
       lane: spec.lane || null, suite: spec.suite || 'node --test', checkout: canonicalCheckout(spec.checkout || crew.checkout),
+      run_configuration: configuration,
       ...(variant ? { variant } : {}),
       ...(filesInScope ? { files_in_scope: filesInScope } : {}),
       ...(identity ? { tier_identity: identity } : {}),

@@ -208,6 +208,40 @@ function treeSnapshot(root) {
   return entries
 }
 
+test('run forwards canonical configuration flags only when supplied', async () => {
+  const f = fixture()
+  try {
+    const sent = []
+    const deps = { call: (cmd, params) => { sent.push({ cmd, params }); return { run_id: 'run-config' } }, stdout: () => {}, stderr: () => {}, cwd: () => f.root }
+    await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--profile', 'investigation', '--execution', 'scout']), deps)
+    assert.equal(sent.at(-1).params.profile, 'investigation')
+    assert.equal(sent.at(-1).params.execution, 'scout')
+    assert.equal(Object.hasOwn(sent.at(-1).params, 'assurance'), false)
+    await runVerb(parseArgs(['run', '--brief', f.brief, '--assurance', 'rigorous', '--checkout', f.root, '--task', 'assured']), deps)
+    assert.equal(sent.at(-1).params.assurance, 'rigorous')
+    assert.equal(Object.hasOwn(sent.at(-1).params, 'tier'), false)
+    await runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief]), deps)
+    for (const key of ['profile', 'execution', 'assurance', 'tier', 'variant']) assert.equal(Object.hasOwn(sent.at(-1).params, key), false, key)
+  } finally { f.cleanup() }
+})
+
+test('run rejects unknown or conflicting configuration locally before opening a socket', async () => {
+  const f = fixture()
+  try {
+    let calls = 0
+    const deps = { call: () => { calls += 1; return { run_id: 'not-reached' } }, stdout: () => {}, stderr: () => {}, cwd: () => f.root }
+    await assert.rejects(
+      runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--execution', 'no-such-shape']), deps),
+      /no-such-shape/,
+    )
+    await assert.rejects(
+      runVerb(parseArgs(['run', '--crew-dir', f.crewDir, '--brief', f.brief, '--execution', 'full', '--variant', 'full']), deps),
+      /alias/,
+    )
+    assert.equal(calls, 0)
+  } finally { f.cleanup() }
+})
+
 test('run forwards --variant, --files-in-scope, and --lane to enqueue and omits them when absent', async () => {
   const f = fixture()
   try {
@@ -322,13 +356,13 @@ withDaemon('run refuses --crew-dir with --tier before touching the socket', asyn
   assert.equal(touched, false)
 })
 
-withDaemon('run --tier surfaces the daemon boot refusal verbatim', async (f) => {
+withDaemon('run --tier refuses an unknown assurance alias before daemon boot', async (f) => {
   const result = await invoke(f, ['run', '--brief', f.brief, '--tier', 'nope', '--checkout', f.root, '--task', 'tier-task'])
   assert.equal(result.code, 1)
   assert.match(result.stderr, /nope/)
-  assert.match(result.stderr, /unknown tier/)
+  assert.match(result.stderr, /unknown assurance/)
   assert.deepEqual(f.daemon.list(), [])
-}, { spawnSync: () => ({ status: 1, stderr: 'error: unknown tier "nope" — valid tiers: mechanical, build, judge\n' }) })
+})
 
 withDaemon("ls lists the daemon's runs with their daemon-derived state", async (f) => {
   // Pins STATE to the daemon's list projection rather than a client lifecycle guess.

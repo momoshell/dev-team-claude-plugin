@@ -11,7 +11,7 @@ import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
   resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
-  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
+  parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, RUN_CONFIG_DECLARATIONS, resolveRunConfig, aliasDeprecationLines, persistedRunConfig, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
   parseArgs, FLAG_VALUE_REFUSAL, FLAG_VALUE_CONTRACT, BOOLEAN_FLAGS,
   resolveTimeoutS, TIMEOUT_S_REFUSAL, TIMEOUT_S_DEFAULT,
@@ -23,10 +23,13 @@ import {
   advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
 } from './crew.mjs'
 import {
-  runChild, resolveValidationLane as resolveChildValidationLane,
+  runChild, specExecution, resolveValidationLane as resolveChildValidationLane,
   packageSuite as childPackageSuite, SUITE_OWNER_PATH as CHILD_SUITE_OWNER_PATH,
 } from './child.mjs'
-import { daemon } from './daemon.mjs'
+import { daemon, resolveRunConfig as resolveDaemonRunConfig, RUN_CONFIG_DECLARATIONS as DAEMON_RUN_CONFIG_DECLARATIONS } from './daemon.mjs'
+import { resolveRunConfig as resolveFactoryRunConfig, RUN_CONFIG_DECLARATIONS as FACTORY_RUN_CONFIG_DECLARATIONS, completionLogPath, parseArgs as parseFactoryArgs, runVerb } from './factoryctl.mjs'
+import { TASK_PROFILES } from './task-profiles.mjs'
+import { ASSURANCES, ASSURANCE_ALIASES } from './assurances.mjs'
 import { driveTask, LIMITS, VARIANTS, VARIANT_NAMES, DEFAULT_VARIANT, PROTECTED_PATHS, validateScopeEntries } from './drive.mjs'
 import {
   LIMIT_REFUSALS, PLAN_ROUNDS_MAX, BUILD_ROUNDS_MAX, REVIEW_ROUNDS_MAX,
@@ -43,7 +46,6 @@ import { testCheckout } from '../test/fixtures.mjs'
 import { ROOT, scratchDir } from '../test/helpers.mjs'
 import { FINGERPRINT_FILE, FINGERPRINT_OUTCOMES, FINGERPRINT_WITHHELD, checkRecordedTree } from './tree-fingerprint.mjs'
 import { probeRepo } from '../scripts/factory/probe-repo.mjs'
-import { completionLogPath } from './factoryctl.mjs'
 
 // Ledger sandbox (#432): every ledger writer this file drives resolves its db
 // through DEVTEAM_LEDGER_DIR (scripts/factory/ledger.mjs:2903), so this
@@ -1089,19 +1091,154 @@ test('boot refusal records a run-less boot-refusal row naming the rejected cell'
   }
 })
 
-test('resolveVariant defaults to the driver default and round-trips every driver name', () => {
-  assert.equal(resolveVariant({}), DEFAULT_VARIANT)
-  for (const name of VARIANT_NAMES) assert.equal(resolveVariant({ variant: name }), name)
+test('run configuration declarations stay identical across every entry point', () => {
+  const declarations = [RUN_CONFIG_DECLARATIONS, DAEMON_RUN_CONFIG_DECLARATIONS, FACTORY_RUN_CONFIG_DECLARATIONS]
+  for (const value of declarations) {
+    assert.deepEqual(Object.keys(value).sort(), ['assuranceAliases', 'assurances', 'profiles', 'variantNames'])
+    assert.equal(value.profiles, TASK_PROFILES)
+    assert.equal(value.assurances, ASSURANCES)
+    assert.equal(value.assuranceAliases, ASSURANCE_ALIASES)
+    assert.deepEqual(value.variantNames, VARIANT_NAMES)
+  }
 })
 
-test('resolveVariant refuses unknown and valueless forms with the complete closed set', () => {
-  const assertClosedSet = (err) => {
-    assert.match(err.message, /variant/)
-    for (const name of VARIANT_NAMES) assert.match(err.message, new RegExp(name))
-    return true
+test('run configuration resolves every canonical and deprecated request through all entry points', () => {
+  const resolveEverywhere = (request) => {
+    const expected = resolveRunConfig(request)
+    assert.deepEqual(resolveDaemonRunConfig(request), expected)
+    assert.deepEqual(resolveFactoryRunConfig(request), expected)
+    return expected
   }
-  assert.throws(() => resolveVariant({ variant: 'no-such-shape' }), assertClosedSet)
-  assert.throws(() => resolveVariant({ variant: true }), assertClosedSet)
+  assert.equal(resolveEverywhere({}).execution.effective, DEFAULT_VARIANT)
+  for (const profile of Object.keys(TASK_PROFILES)) {
+    const resolved = resolveEverywhere({ profile })
+    assert.equal(resolved.profile.effective, profile)
+  }
+  for (const name of VARIANT_NAMES) {
+    assert.deepEqual(resolveEverywhere({ execution: name }).execution, {
+      requested: name, effective: name, source: 'explicit', status: 'existing',
+    })
+    const alias = resolveEverywhere({ variant: name })
+    assert.deepEqual(alias.execution, {
+      requested: name, effective: name, source: 'alias', status: 'existing',
+    })
+  }
+  for (const assurance of Object.keys(ASSURANCES)) {
+    assert.equal(resolveEverywhere({ assurance }).assurance.effective, assurance)
+  }
+  for (const [tier, assurance] of Object.entries(ASSURANCE_ALIASES)) {
+    assert.deepEqual(resolveEverywhere({ tier }).assurance, { requested: tier, effective: assurance, source: 'alias' })
+  }
+  assert.equal(resolveEverywhere({ profile: 'investigation' }).execution.effective, 'scout')
+  assert.equal(resolveEverywhere({ profile: 'investigation' }).execution.source, 'profile_recommendation')
+  assert.throws(() => resolveRunConfig({ profile: 'investigation', execution: 'full' }), /investigation.*full/)
+})
+
+test('run configuration refuses unknown, blank, and alias-conflicting requests at every entry point', () => {
+  const invalid = [
+    { profile: 'no-such-profile', token: 'no-such-profile' },
+    { execution: 'no-such-shape', token: 'no-such-shape' },
+    { assurance: 'no-such-assurance', token: 'no-such-assurance' },
+    { execution: '', token: 'blank' },
+    { variant: '', token: 'blank' },
+    { assurance: '', token: 'blank' },
+    { tier: '', token: 'blank' },
+    { execution: 'full', variant: 'full', token: 'alias' },
+    { execution: 'full', variant: 'scout', token: 'alias' },
+    { assurance: 'standard', tier: 'build', token: 'alias' },
+    { assurance: 'quick', tier: 'judge', token: 'alias' },
+  ]
+  for (const request of invalid) {
+    assert.throws(() => resolveRunConfig(request), new RegExp(request.token))
+    assert.throws(() => resolveFactoryRunConfig(request), new RegExp(request.token))
+    assert.throws(() => resolveDaemonRunConfig(request), (err) => err.code === 'invalid-spec' && new RegExp(request.token).test(err.message))
+  }
+})
+
+test('alias deprecation lines are one-per-alias, canonical-safe, and shared with factoryctl', async () => {
+  const both = resolveRunConfig({ variant: 'full', tier: 'build' })
+  const lines = aliasDeprecationLines(both)
+  assert.equal(lines.length, 2)
+  assert.match(lines[0], /--variant.*--execution/)
+  assert.match(lines[1], /--tier.*--assurance/)
+  assert.deepEqual(aliasDeprecationLines(resolveRunConfig({ execution: 'full', assurance: 'standard' })), [])
+  assert.deepEqual(aliasDeprecationLines(resolveRunConfig({})), [])
+
+  let stderr = ''
+  await runVerb(parseFactoryArgs(['run', '--crew-dir', '/tmp/crew', '--brief', '/tmp/brief.md', '--variant', 'full']), {
+    call: async () => ({ run_id: 'alias-warning-test' }), stdout: () => {}, stderr: (text) => { stderr += String(text) },
+  })
+  assert.equal(stderr, `${aliasDeprecationLines(resolveRunConfig({ variant: 'full' }))[0]}\n`)
+})
+
+test('run configuration flags are admitted only on their owning crew verbs', () => {
+  assert.deepEqual(FLAG_VALUE_CONTRACT.profile, 'value')
+  assert.deepEqual(FLAG_VALUE_CONTRACT.execution, 'value')
+  assert.deepEqual(FLAG_VALUE_CONTRACT.assurance, 'value')
+  assert.doesNotThrow(() => assertUsage('boot', { task: 'task', profile: 'investigation', assurance: 'standard' }))
+  assert.doesNotThrow(() => assertUsage('run', { task: 'task', 'brief-file': 'brief.md', execution: 'scout' }))
+  assert.throws(() => assertUsage('boot', { task: 'task', execution: 'scout' }), /--execution/)
+  assert.throws(() => assertUsage('run', { task: 'task', 'brief-file': 'brief.md', assurance: 'standard' }), /--assurance/)
+})
+
+test('persisted run configuration derives honest values from legacy crew records', () => {
+  assert.deepEqual(persistedRunConfig({ tier: 'build' }), {
+    profile: { requested: null, effective: null, source: 'legacy_missing' },
+    assurance: { requested: 'build', effective: 'standard', source: 'alias' },
+  })
+  assert.deepEqual(persistedRunConfig({}), {
+    profile: { requested: null, effective: null, source: 'legacy_missing' },
+    assurance: { requested: null, effective: 'standard', source: 'migration_default' },
+  })
+})
+
+test('child execution projection follows the resolved shape and refuses disagreement', () => {
+  const resolved = { execution: { effective: 'full' } }
+  assert.equal(specExecution({ run_configuration: resolved, variant: 'full' }), 'full')
+  assert.throws(() => specExecution({ run_configuration: resolved, variant: 'scout' }), /scout.*full/)
+  assert.equal(specExecution({ variant: 'scout' }), 'scout')
+  assert.equal(specExecution({}), null)
+})
+
+test('boot and run persist one configuration while the driver sees only effective execution', async () => {
+  const { root: checkoutRoot, checkout } = testCheckout('crew-run-config-checkout-')
+  const home = scratchDir('crew-run-config-home-')
+  const task = 'run-config'
+  const brief = join(home, 'brief.md')
+  writeFileSync(brief, '# run configuration\n')
+  execSync('git init -q', { cwd: checkout })
+  const done = { status: 'done', summary: '', artifacts: [], details: { commit: null, stages: [] } }
+  let seen = null
+  try {
+    await withHome(home, async () => {
+      await bootCmd({ task, checkout, profile: 'investigation', assurance: 'rigorous', 'headless-all': true, 'claude-bin': process.execPath }, {
+        cmux: callCounter(), tree: callCounter(), renameTab: callCounter(),
+      })
+      const dir = testCrewDir(home, checkout, task)
+      const crew = JSON.parse(readFileSync(join(dir, 'crew.json'), 'utf8'))
+      assert.equal(crew.tier, 'judge')
+      assert.deepEqual(crew.run_configuration, {
+        profile: { requested: 'investigation', effective: 'investigation', source: 'explicit' },
+        assurance: { requested: 'rigorous', effective: 'rigorous', source: 'explicit' },
+      })
+      assert.deepEqual(bootRecord(dir).run_configuration, crew.run_configuration)
+      runCmd({ task, checkout, 'brief-file': brief, execution: 'scout', keep: true }, {
+        drive: (ctx) => { seen = ctx; return done }, awaitSeatsReady: () => {}, writeTerminalLine: () => {},
+      })
+      const rows = readFileSync(join(dir, 'journal.jsonl'), 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+      const runConfig = rows.find((row) => row.event === 'run-configuration')?.run_configuration
+      assert.deepEqual(runConfig, {
+        profile: crew.run_configuration.profile,
+        execution: { requested: 'scout', effective: 'scout', source: 'explicit', status: 'existing' },
+        assurance: crew.run_configuration.assurance,
+      })
+    })
+    assert.equal(seen?.variant, 'scout')
+    assert.equal(Object.hasOwn(seen || {}, 'run_configuration'), false)
+  } finally {
+    rmSync(home, { recursive: true, force: true })
+    rmSync(checkoutRoot, { recursive: true, force: true })
+  }
 })
 
 test('resolveFilesInScope parses a comma list, handles neutral shapes, and refuses a valueless flag', () => {
@@ -2597,18 +2734,18 @@ test('assertCtxSources follows every variant declaration without restating shape
   }
 })
 
-test('run refuses an unknown variant before reading or writing crew state', async () => {
+test('run refuses an unknown execution shape before reading or writing crew state', async () => {
   const home = mkdtempSync(join(tmpdir(), 'crew-variant-refusal-home-'))
   let drove = 0
   try {
     await withHome(home, () => {
       assert.throws(
         () => runCmd(
-          { task: 'variant-never-booted', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), variant: 'no-such-shape' },
+          { task: 'variant-never-booted', checkout: process.cwd(), 'brief-file': join(home, 'missing.md'), execution: 'no-such-shape' },
           { drive: () => { drove += 1 } },
         ),
         (err) => {
-          assert.match(err.message, /unknown variant/)
+          assert.match(err.message, /unknown execution shape/)
           for (const name of VARIANT_NAMES) assert.match(err.message, new RegExp(name))
           return true
         },

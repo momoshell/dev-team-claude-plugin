@@ -1,7 +1,8 @@
 <script>
-  import { composeRosterLadder, getModelCatalog, getRosterLadder, setModelCatalogKey, stageRosterLadder } from './api.js'
+  import { applyRosterLadder, composeRosterLadder, getModelCatalog, getRosterLadder, setModelCatalogKey, stageRosterLadder } from './api.js'
   import { directoryModelMatchesChip, directoryVariantLabel, fallbackModelName, groupDirectoryModels, providerDisplayName, selectedDirectoryVariant } from './model-directory.js'
   import { assuranceMeta } from './workflow-semantics.js'
+  import DiffBlock from './DiffBlock.svelte'
   import Dropdown from './Dropdown.svelte'
 
   const CHECK_NAMES = ['band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']
@@ -15,6 +16,11 @@
     { value:'agentic', label:'Agentic' }, { value:'price_output', label:'Lowest output price' },
     { value:'output_tokens_per_second', label:'Output speed' },
   ]
+  const EFFORT_OPTIONS = [
+    { value:'low', label:'Low' }, { value:'medium', label:'Medium' },
+    { value:'high', label:'High' }, { value:'xhigh', label:'Extra high' },
+    { value:'max', label:'Max' },
+  ]
 
   let payload = $state(null)
   let loading = $state(true)
@@ -24,8 +30,10 @@
   let attemptResult = $state(null)
   let composed = $state(null)
   let selectedModel = $state(null)
+  let assignmentDraft = $state(null)
   let staging = $state(false)
   let composing = $state(false)
+  let applying = $state(false)
   let customModels = $state([])
   let draftReady = $state(false)
   let catalogQuery = $state('')
@@ -73,13 +81,14 @@
   let containsCustomMoves = $derived(staged.some((move) => customKeys.has(modelKey(move.cell))))
   let failedChecks = $derived((visibleResult?.checks || []).filter((check) => !check.ok))
   let publishReady = $derived(Boolean(stagedResult?.ok) && !containsCustomMoves)
+  let localReady = $derived(Boolean(staged.length) && !containsCustomMoves && Boolean(visibleResult?.local_apply_allowed))
   let filteredChips = $derived(chips.filter((chip) => {
     const query = catalogQuery.trim().toLowerCase()
     const inScope = catalogScope === 'all' || (catalogScope === 'local' ? chip.local_draft : chip.band === catalogScope)
     return inScope && (!query || `${chip.key} ${chip.band || ''}`.toLowerCase().includes(query))
   }))
   let draftCount = $derived(staged.length + customModels.length)
-  let workflowStep = $derived(selectedModel ? 2 : publishReady ? 4 : draftCount > 0 ? 3 : 1)
+  let workflowStep = $derived(selectedModel ? 2 : localReady ? 4 : draftCount > 0 ? 3 : 1)
   let directoryFamilies = $derived(groupDirectoryModels(directory?.models || []))
   let directoryModels = $derived(directoryFamilies.filter((model) => {
     const query = directoryQuery.trim().toLowerCase()
@@ -158,16 +167,35 @@
     const chip = directoryChip(model)
     return chip ? { known:true, label:chip.local_draft ? 'In draft' : 'In roster' } : { known:false, label:'+ Add' }
   }
-  function sourceCell(chip, target) {
+  function sourceCell(chip, target, effort = null) {
     const source = rail.flatMap((column) => column.seats || []).find((seat) => seat.model_key === chip.key)?.cell
-    const base = source || target?.cell || { agent:'pi', effort:'medium' }
-    return { provider:chip.provider, id:chip.id, agent:chip.local_draft ? 'pi' : (base.agent || 'pi'), effort:chip.reasoning_effort || base.effort || 'medium' }
+    const agent = chip.local_draft ? 'pi' : (source?.agent || target?.cell?.agent || 'pi')
+    const selectedEffort = effort || chip.reasoning_effort || target?.cell?.effort || source?.effort || 'medium'
+    return { provider:chip.provider, id:chip.id, agent, effort:selectedEffort }
   }
-  async function move(tier, role, key) {
+  function beginAssignment(tier, role, key) {
     const chip = chipFor(key)
     if (!chip?.id) return
     const target = rail.find((column) => column.tier === tier)?.seats?.find((seat) => seat.role === role)
-    const next = [...staged.filter((candidate) => !(candidate.tier === tier && candidate.role === role)), { tier, role, cell:sourceCell(chip, target) }]
+    const cell = sourceCell(chip, target)
+    assignmentDraft = { tier, role, key, effort:cell.effort, agent:cell.agent, previousEffort:target?.cell?.effort || null }
+  }
+  function closeAssignment() { assignmentDraft = null }
+  function chooseModel(key) {
+    selectedModel = selectedModel === key ? null : key
+    assignmentDraft = null
+  }
+  async function applyAssignment() {
+    if (!assignmentDraft) return
+    const { tier, role, key, effort } = assignmentDraft
+    assignmentDraft = null
+    await move(tier, role, key, effort)
+  }
+  async function move(tier, role, key, effort = null) {
+    const chip = chipFor(key)
+    if (!chip?.id) return
+    const target = rail.find((column) => column.tier === tier)?.seats?.find((seat) => seat.role === role)
+    const next = [...staged.filter((candidate) => !(candidate.tier === tier && candidate.role === role)), { tier, role, cell:sourceCell(chip, target, effort) }]
     const revision = ++validationRevision
     staged = next
     stagedResult = null
@@ -187,15 +215,17 @@
       stagedResult = result.ok ? result : null
       const recommendationCount = result.checks?.filter((check) => !check.ok).length || result.refusals?.length || 0
       draftNotice = result.ok
-        ? `${modelName(chip.key)} is saved in the private draft and passes current publish guidance.`
-        : `${modelName(chip.key)} is saved in the private draft. Review ${recommendationCount ? `${recommendationCount} publish recommendation${recommendationCount === 1 ? '' : 's'}` : 'the publish guidance'} before preparing a standard patch.`
+        ? `${modelName(chip.key)} is saved in the private draft and passes the activation checks.`
+        : result.local_apply_allowed
+          ? `${modelName(chip.key)} is saved with ${recommendationCount || 1} policy warning${recommendationCount === 1 ? '' : 's'}. You can apply it locally for testing; repository sharing remains paused.`
+          : `${modelName(chip.key)} is saved in the private draft. Resolve the readiness guidance before activation or sharing.`
     } catch (err) {
-      if (revision === validationRevision) requestError = err.message || 'publish guidance could not be loaded'
+      if (revision === validationRevision) requestError = err.message || 'roster guidance could not be loaded'
     } finally {
       if (revision === validationRevision) staging = false
     }
   }
-  function drop(event, tier, role) { event.preventDefault(); move(tier, role, event.dataTransfer?.getData('text/plain')) }
+  function drop(event, tier, role) { event.preventDefault(); beginAssignment(tier, role, event.dataTransfer?.getData('text/plain')) }
   function dragStart(event, chip) { event.dataTransfer?.setData('text/plain', chip.key); if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move' }
   function addLocalModel(event) {
     event.preventDefault()
@@ -267,11 +297,12 @@
     staged = staged.filter((move) => modelKey(move.cell) !== key)
     stagedResult = null; attemptResult = null; composed = null; staging = false
     if (selectedModel === key) selectedModel = null
+    if (assignmentDraft?.key === key) assignmentDraft = null
     draftNotice = `${key} was removed from the local draft.`
   }
   function resetDraft() {
     validationRevision += 1
-    staged = []; customModels = []; selectedModel = null; stagedResult = null; attemptResult = null; composed = null; staging = false
+    staged = []; customModels = []; selectedModel = null; assignmentDraft = null; stagedResult = null; attemptResult = null; composed = null; staging = false
     draftNotice = 'Local roster draft cleared.'
   }
   async function exportDraft() {
@@ -288,9 +319,13 @@
       if (revision !== validationRevision) return
       attemptResult = result
       stagedResult = result.ok ? result : null
-      draftNotice = result.ok ? 'This draft is ready to prepare as a standard roster patch.' : 'The draft is still saved. Its experiment is unrestricted; the standard patch needs the guidance below resolved.'
+      draftNotice = result.ok
+        ? 'This draft is ready to apply locally or prepare as a repository patch.'
+        : result.local_apply_allowed
+          ? 'This draft has policy warnings. You can apply it anyway for the next local task; resolve the warnings before preparing a repository patch.'
+          : 'The draft is still saved. Resolve the readiness guidance below before activation or sharing.'
     } catch (err) {
-      if (revision === validationRevision) requestError = err.message || 'publish guidance could not be loaded'
+      if (revision === validationRevision) requestError = err.message || 'roster guidance could not be loaded'
     } finally {
       if (revision === validationRevision) staging = false
     }
@@ -300,7 +335,30 @@
     composing = true; requestError = ''
     try { composed = await composeRosterLadder(staged) } catch (err) { requestError = err.message || 'roster ladder compose failed'; composed = null } finally { composing = false }
   }
+  async function applyLocal() {
+    if (!localReady || applying) return
+    applying = true; requestError = ''; composed = null
+    try {
+      const result = await applyRosterLadder(staged, { allowWarnings:!visibleResult?.ok })
+      if (!result.applied) {
+        attemptResult = result
+        stagedResult = null
+        draftNotice = result.refusals?.[0]?.message || result.error || 'The local roster was not changed.'
+        return
+      }
+      validationRevision += 1
+      staged = []; selectedModel = null; assignmentDraft = null; stagedResult = null; attemptResult = null; composed = null
+      draftNotice = result.warnings_overridden
+        ? 'Applied locally with policy warnings. The next newly booted task will try these seat settings; running tasks and the remote repository were not changed.'
+        : 'Applied locally. The next newly booted task will use these seat settings; running tasks and the remote repository were not changed.'
+      try { payload = await getRosterLadder() }
+      catch (err) { requestError = `The roster was applied, but the refreshed view could not load: ${err.message || 'unknown error'}` }
+    } catch (err) { requestError = err.message || 'local roster apply failed' }
+    finally { applying = false }
+  }
 </script>
+
+<svelte:window onkeydown={(event) => assignmentDraft && event.key === 'Escape' && closeAssignment()} />
 
 {#if loading}
   <section class="loading"><span></span><p>Loading the ratified roster…</p></section>
@@ -335,14 +393,14 @@
             <div class="seats">
               {#each column.seats || [] as seat (seat.role)}
                 {@const health = chipFor(seat.model_key)?.measured}
-                <button type="button" class="seat" class:changeable={selectedModel} onclick={() => selectedModel && move(column.tier, seat.role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, seat.role)}>
+                <button type="button" class="seat" class:changeable={selectedModel} onclick={() => selectedModel && beginAssignment(column.tier, seat.role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, seat.role)}>
                   <span class="role"><i style={`--seat-color:${roleColor(seat.role)}`}></i>{seat.role}</span>
                   <span class="model"><b class={`provider ${provider(seat.model_key)}`}>{providerMark(seat.model_key)}</b><span><strong>{modelName(seat.model_key)}</strong><small>{seat.cell?.agent || 'agent —'} · {seat.cell?.effort || 'effort —'}</small></span></span>
                   {#if health == null}<span class="health">Not measured</span>{:else if health.failures > 0}<span class="health warn" title={`${health.failures} measured failures across ${health.cells} cells`}>{health.failures} recent failure{health.failures === 1 ? '' : 's'}</span>{:else}<span class="health">No recent failures</span>{/if}
                 </button>
               {/each}
               {#each column.unseated || [] as role (role)}
-                <button type="button" class="seat empty" class:changeable={selectedModel} onclick={() => selectedModel && move(column.tier, role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, role)}><span class="role"><i style={`--seat-color:${roleColor(role)}`}></i>{role}</span><span>Unassigned</span></button>
+                <button type="button" class="seat empty" class:changeable={selectedModel} onclick={() => selectedModel && beginAssignment(column.tier, role, selectedModel)} ondragover={(event) => event.preventDefault()} ondrop={(event) => drop(event, column.tier, role)}><span class="role"><i style={`--seat-color:${roleColor(role)}`}></i>{role}</span><span>Unassigned</span></button>
               {/each}
             </div>
           </article>
@@ -368,14 +426,14 @@
       <div class="workspace-modes" aria-label="Roster workspace modes">
         <article><span>Explore</span><strong>Any model, any seat</strong><small>Assignments are always kept in your private browser draft. Guidance never discards an experiment.</small></article>
         <i aria-hidden="true">→</i>
-        <article><span>Publish</span><strong>Deliberate and guarded</strong><small>The current factory policy applies only when preparing the standard repository patch.</small></article>
+        <article><span>Activate</span><strong>Next task, this machine</strong><small>Apply after the readiness check. Repository sharing remains a separate, optional action.</small></article>
       </div>
 
       <ol class="workflow" aria-label="Roster change workflow">
         <li class:active={workflowStep === 1} aria-current={workflowStep === 1 ? 'step' : undefined}><b>1</b><span><strong>Choose or add</strong><small>Find a catalog model or describe a local one.</small></span></li>
         <li class:active={workflowStep === 2} aria-current={workflowStep === 2 ? 'step' : undefined}><b>2</b><span><strong>Assign a seat</strong><small>Click above; local models use pi and keep the seat effort.</small></span></li>
-        <li class:active={workflowStep === 3} aria-current={workflowStep === 3 ? 'step' : undefined}><b>3</b><span><strong>Review the draft</strong><small>Publish guidance stays visible beside your changes.</small></span></li>
-        <li class:active={workflowStep === 4} aria-current={workflowStep === 4 ? 'step' : undefined}><b>4</b><span><strong>Prepare a patch</strong><small>A PR is optional until you choose to publish.</small></span></li>
+        <li class:active={workflowStep === 3} aria-current={workflowStep === 3 ? 'step' : undefined}><b>3</b><span><strong>Review the draft</strong><small>Readiness checks stay visible beside your changes.</small></span></li>
+        <li class:active={workflowStep === 4} aria-current={workflowStep === 4 ? 'step' : undefined}><b>4</b><span><strong>Activate or share</strong><small>Apply locally for the next task, or prepare a patch.</small></span></li>
       </ol>
 
       <div class="studio-layout">
@@ -472,7 +530,7 @@
             <div class="model-palette">
               {#each filteredChips as chip (chip.key)}
                 <article class:selected={selectedModel === chip.key} class:local={chip.local_draft} class:benchmark={chip.benchmark_draft}>
-                  <button class="model-choice" type="button" draggable="true" ondragstart={(event) => dragStart(event, chip)} onclick={() => selectedModel = selectedModel === chip.key ? null : chip.key}>
+                  <button class="model-choice" type="button" draggable="true" ondragstart={(event) => dragStart(event, chip)} onclick={() => chooseModel(chip.key)}>
                     <b class={`provider ${provider(chip.key)}`}>{providerMark(chip.key)}</b>
                     <span><strong>{modelName(chip.key)}</strong><small>{chip.provider} · {chip.band || 'unratified'} · ${chip.cost_out_per_mtok ?? '—'} output / Mtok</small>{#if chip.intelligence != null}<small>Intelligence {score(chip.intelligence)} · Coding {score(chip.coding)}</small>{:else if chip.measured}<small>{chip.measured.failures ? `${chip.measured.failures} recent failures` : 'No recent failures'} · {chip.measured.cells} cells measured</small>{:else}<small>{chip.measured_pending}</small>{/if}{#if chip.drift}<small class="drift">Band review: {chip.drift.proposed || chip.drift.why}</small>{/if}</span>
                   </button>
@@ -487,7 +545,7 @@
         <aside class="draft-panel">
           <header><div><p class="micro">Local draft</p><h3>{draftCount ? `${draftCount} pending change${draftCount === 1 ? '' : 's'}` : 'Ready when you are'}</h3></div>{#if draftCount}<button type="button" class="clear" onclick={resetDraft}>Clear draft</button>{/if}</header>
 
-          {#if requestError}<div class="inline-alert fail"><strong>Publish guidance unavailable</strong><p>{requestError} Your local draft is still saved.</p></div>{/if}
+          {#if requestError}<div class="inline-alert fail"><strong>Roster guidance unavailable</strong><p>{requestError} Your local draft is still saved.</p></div>{/if}
           {#if draftNotice}<div class="inline-alert"><strong>Draft update</strong><p>{draftNotice}</p></div>{/if}
           {#if selectedModel}<div class="selected-model"><b class={`provider ${provider(selectedModel)}`}>{providerMark(selectedModel)}</b><span><small>Selected model</small><strong>{modelName(selectedModel)}</strong><em>Choose a seat above</em></span><button type="button" onclick={() => selectedModel = null}>×</button></div>{/if}
 
@@ -496,29 +554,47 @@
           {/if}
 
           {#if visibleResult && !containsCustomMoves}
-            <section class="validation"><header><div><p class="micro">Standard patch</p><h3>Publish guidance</h3></div><span class:pass={visibleResult.ok} class:advice={!visibleResult.ok}>{visibleResult.ok ? 'Patch ready' : `${failedChecks.length || visibleResult.refusals?.length || 1} to review`}</span></header>
-              <p class="guidance-intro">These checks recommend the factory's ratified operating envelope. They do not restrict this private experiment.</p>
-              <ul>{#each CHECK_NAMES.map((name) => visibleResult.checks?.find((check) => check.check === name)).filter(Boolean) as check (check.check)}<li class:pass={check.ok} class:advice={!check.ok}><b>{check.ok ? '✓' : '!'}</b><span><strong>{CHECK_LABELS[check.check] || check.check.replaceAll('_',' ')}</strong><small>{check.message}</small><em>{check.ok ? 'Within current policy' : 'Recommendation for the standard patch'}</em></span></li>{/each}</ul>
-              {#if visibleResult.refusals?.length}<div class="refusals"><strong>Why the standard patch is paused</strong>{#each visibleResult.refusals as refusal (refusal.code + refusal.message)}<p>{refusal.message}</p>{/each}</div>{/if}
-              {#if visibleResult.diff !== null}<details class="diff"><summary>Preview roster diff</summary><pre>{visibleResult.diff || '(no roster change)'}</pre></details>{/if}
+            <section class="validation"><header><div><p class="micro">Activation check</p><h3>Roster readiness</h3></div><span class:pass={visibleResult.ok} class:advice={!visibleResult.ok}>{visibleResult.ok ? 'Ready' : visibleResult.local_apply_allowed ? `${failedChecks.length || 1} warning${failedChecks.length === 1 ? '' : 's'}` : `${failedChecks.length || visibleResult.refusals?.length || 1} to review`}</span></header>
+              <p class="guidance-intro">Policy warnings do not block a local experiment. Repository patches stay strict, and structurally invalid seats still cannot be activated.</p>
+              <ul>{#each CHECK_NAMES.map((name) => visibleResult.checks?.find((check) => check.check === name)).filter(Boolean) as check (check.check)}<li class:pass={check.ok} class:advice={!check.ok}><b>{check.ok ? '✓' : '!'}</b><span><strong>{CHECK_LABELS[check.check] || check.check.replaceAll('_',' ')}</strong><small>{check.message}</small><em>{check.ok ? 'Within current policy' : visibleResult.local_apply_allowed ? 'Warning · blocks repository patch' : 'Resolve before activation'}</em></span></li>{/each}</ul>
+              {#if visibleResult.refusals?.length}<div class="refusals"><strong>{visibleResult.local_apply_allowed ? 'Warnings for this local experiment' : 'Why activation is paused'}</strong>{#each visibleResult.refusals as refusal (refusal.code + refusal.message)}<p>{refusal.message}</p>{/each}</div>{/if}
+              {#if (visibleResult.diff ?? visibleResult.local_diff) !== null}<details class="diff"><summary>Preview roster diff</summary><DiffBlock text={visibleResult.diff ?? visibleResult.local_diff} empty="(no roster change)" label="Roster draft diff" /></details>{/if}
             </section>
           {/if}
 
           {#if containsCustomMoves}
-            <section class="activation-note"><span>Experiment saved</span><strong>Runtime setup comes before publishing</strong><p>This draft uses a model that is not yet in the ratified roster. You can keep arranging or export it now; connect its provider and ratify its metadata before preparing the standard patch.</p></section>
+            <section class="activation-note"><span>Experiment saved</span><strong>Runtime setup comes before activation</strong><p>This draft uses a model that is not yet in the ratified roster. You can keep arranging or export it now; connect its provider and ratify its metadata before applying or sharing it.</p></section>
           {/if}
 
           <div class="draft-actions">
             <button type="button" class="secondary" disabled={!draftCount} onclick={exportDraft}>Copy experiment draft</button>
-            <button type="button" class="secondary" disabled={!staged.length || containsCustomMoves || staging} onclick={validateDraft}>{staging ? 'Checking…' : 'Check publish readiness'}</button>
-            <button class="compose" type="button" disabled={!publishReady || staging || composing} onclick={compose}>{composing ? 'Preparing…' : publishReady ? 'Prepare repository patch' : !staged.length ? 'Assign a seat to prepare a patch' : containsCustomMoves ? 'Complete model setup to publish' : 'Resolve guidance to publish'}</button>
+            <button type="button" class="secondary" disabled={!staged.length || containsCustomMoves || staging} onclick={validateDraft}>{staging ? 'Checking…' : 'Check readiness'}</button>
+            <button class="apply-local" type="button" disabled={!localReady || staging || applying || composing} onclick={applyLocal}>{applying ? 'Applying…' : publishReady ? 'Apply for next task' : localReady ? 'Apply anyway for next task' : !staged.length ? 'Assign a seat to apply locally' : containsCustomMoves ? 'Complete model setup to apply' : 'Resolve structural issues to apply'}</button>
+            <button class="secondary prepare-patch" type="button" disabled={!publishReady || staging || applying || composing} onclick={compose}>{composing ? 'Preparing…' : publishReady ? 'Prepare repository patch' : 'Repository patch unavailable'}</button>
           </div>
-          <p class="publish-note"><strong>Experiments stay flexible.</strong> Local drafts can always be copied and do not change the active factory. Policy becomes binding only for the standard patch; creating a PR remains a separate decision.</p>
+          <p class="publish-note"><strong>Apply changes only this machine.</strong> It updates <code>crew/roster.json</code> for the next newly booted task. Running tasks continue unchanged; no branch, commit, PR, or remote push is created.</p>
         </aside>
       </div>
 
-      {#if composed?.ok}<section class="bundle"><h3>Repository-ready bundle</h3><p><strong>{composed.branch}</strong> · {composed.commit_subject}</p><pre>{composed.patch}</pre><small>The live roster was not changed and no PR was created.</small></section>{/if}
+      {#if composed?.ok}<section class="bundle"><h3>Repository-ready bundle</h3><p><strong>{composed.branch}</strong> · {composed.commit_subject}</p><DiffBlock text={composed.patch} empty="(no roster change)" label="Repository-ready roster patch" /><small>The live roster was not changed and no PR was created.</small></section>{/if}
     </section>
+
+    {#if assignmentDraft}
+      {@const assignmentModel = capabilityModel(assignmentDraft.key)}
+      <div class="assignment-backdrop" role="presentation" onclick={closeAssignment}>
+        <div class="assignment-dialog" role="dialog" aria-modal="true" aria-labelledby="assignment-title" tabindex="-1" onclick={(event) => event.stopPropagation()} onkeydown={(event) => event.stopPropagation()}>
+          <header><div><p class="micro">Seat assignment</p><h2 id="assignment-title">Set thinking effort</h2></div><button type="button" aria-label="Close assignment" onclick={closeAssignment}>×</button></header>
+          <p class="assignment-intro">Confirm how much reasoning this model may use in this seat before adding the change to your local draft.</p>
+          <dl>
+            <div><dt>Assurance</dt><dd>{assuranceMeta(assignmentDraft.tier).label}</dd></div>
+            <div><dt>Seat</dt><dd>{assignmentDraft.role}</dd></div>
+            <div><dt>Model</dt><dd>{assignmentModel.name}<small>{assignmentModel.provider}</small></dd></div>
+          </dl>
+          <label class="assignment-effort"><span>Thinking effort</span><Dropdown bind:value={assignmentDraft.effort} options={EFFORT_OPTIONS} ariaLabel={`Thinking effort for ${assignmentModel.name} in the ${assignmentDraft.role} seat`} width="100%" /><small>{assignmentDraft.previousEffort ? `This seat currently uses ${assignmentDraft.previousEffort}.` : 'This seat is currently unassigned.'} Effort is stored independently for every assurance profile and seat.</small></label>
+          <footer><button type="button" class="secondary" onclick={closeAssignment}>Cancel</button><button type="button" class="confirm-assignment" onclick={applyAssignment}>Add to draft</button></footer>
+        </div>
+      </div>
+    {/if}
   </section>
 {/if}
 
@@ -547,8 +623,9 @@
 .model-palette { display:grid; grid-template-columns:repeat(auto-fit,minmax(14rem,1fr)); gap:.5rem; }.model-palette article { position:relative; display:flex; border:1px solid var(--line); border-radius:var(--radius); background:var(--panel-raised); overflow:hidden; }.model-palette article:hover { border-color:color-mix(in srgb,var(--accent) 55%,var(--line)); }.model-palette article.selected { border-color:var(--accent); background:var(--accent-soft); box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--accent) 30%,transparent); }.model-palette article.local::before { content:'LOCAL DRAFT'; position:absolute; top:.32rem; right:.38rem; color:var(--accent); font:600 .48rem/1 var(--mono); letter-spacing:.06em; }.model-choice { display:flex; align-items:center; gap:.6rem; width:100%; min-width:0; border:0; background:transparent; color:var(--text); padding:.65rem; text-align:left; cursor:grab; }.model-choice > span { min-width:0; display:grid; gap:.15rem; }.model-choice strong { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:.72rem; }.model-choice small { overflow:hidden; color:var(--muted); font-size:.57rem; line-height:1.35; text-overflow:ellipsis; white-space:nowrap; }.model-choice .drift { color:var(--status-escalated); }.remove-model { position:absolute; right:.35rem; bottom:.25rem; border:0; background:transparent; color:var(--muted); cursor:pointer; font-size:.9rem; }.remove-model:hover { color:var(--status-fail); }.empty-catalog { grid-column:1/-1; margin:0; border:1px dashed var(--line); border-radius:var(--radius); padding:2rem; color:var(--muted); text-align:center; font-size:.7rem; }
 .model-palette article.benchmark::before { content:'CATALOG DRAFT'; }
 .inline-alert,.setup-warning { border:1px solid var(--line); border-radius:var(--radius); background:var(--panel-raised); padding:.7rem; }.inline-alert { border-left:2px solid var(--accent); }.inline-alert.fail { border-left-color:var(--status-fail); }.inline-alert strong { font-size:.68rem; }.inline-alert p { margin:.2rem 0 0; color:var(--muted); font-size:.62rem; line-height:1.45; }.selected-model { display:flex; align-items:center; gap:.55rem; border:1px solid var(--accent); border-radius:var(--radius); background:var(--accent-soft); padding:.65rem; }.selected-model span { display:grid; gap:.1rem; min-width:0; }.selected-model small,.selected-model em { color:var(--muted); font-size:.56rem; font-style:normal; }.selected-model strong { font-size:.72rem; }.selected-model button { margin-left:auto; border:0; background:transparent; color:var(--muted); cursor:pointer; }.setup-warning { border-color:color-mix(in srgb,var(--status-escalated) 45%,var(--line)); background:color-mix(in srgb,var(--status-escalated) 5%,var(--panel-raised)); }.setup-warning header { display:flex; justify-content:space-between; color:var(--status-escalated); font-size:.66rem; font-weight:700; }.setup-warning header b { display:grid; place-content:center; width:1.25rem; height:1.25rem; border:1px solid currentColor; border-radius:50%; }.setup-warning p,.setup-warning small { color:var(--muted); font-size:.6rem; line-height:1.45; }.setup-warning ul { margin:.5rem 0; padding-left:1.1rem; color:var(--text); font-size:.61rem; line-height:1.6; }
-.validation { display:grid; gap:.55rem; }.validation > header { display:flex; align-items:center; justify-content:space-between; }.validation h3,.bundle h3 { margin:.1rem 0; font-size:.78rem; }.validation header span { border:1px solid currentColor; border-radius:2rem; padding:.28rem .45rem; font-size:.58rem; font-weight:700; }.guidance-intro { margin:0; color:var(--muted); font-size:.58rem; line-height:1.45; }.validation ul { display:grid; gap:.35rem; margin:0; padding:0; list-style:none; }.validation li { display:flex; align-items:start; gap:.45rem; border:1px solid var(--line); border-radius:var(--radius-sm); padding:.5rem; }.validation li.advice { border-color:color-mix(in srgb,var(--status-escalated) 36%,var(--line)); background:color-mix(in srgb,var(--status-escalated) 4%,var(--panel)); }.validation li > b { display:grid; place-content:center; flex:0 0 auto; width:1.15rem; height:1.15rem; border:1px solid currentColor; border-radius:50%; font-size:.57rem; }.validation li span { display:grid; gap:.12rem; }.validation li strong { color:var(--text); font-size:.62rem; text-transform:capitalize; }.validation li small { color:var(--muted); font-size:.56rem; line-height:1.35; }.validation li em { color:currentColor; font-size:.5rem; font-style:normal; text-transform:uppercase; letter-spacing:.04em; }.pass { color:var(--status-ok); }.advice { color:var(--status-escalated); }.fail,.error { color:var(--status-fail); }.refusals { border:1px solid color-mix(in srgb,var(--status-escalated) 35%,var(--line)); border-radius:var(--radius-sm); padding:.55rem; }.refusals > strong { color:var(--status-escalated); font-size:.6rem; }.refusals p { margin:.35rem 0 0; border-left:2px solid var(--status-escalated); padding-left:.5rem; color:var(--muted); font-size:.58rem; line-height:1.4; }.activation-note { display:grid; gap:.25rem; border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); border-radius:var(--radius); background:var(--accent-soft); padding:.7rem; }.activation-note span { color:var(--accent); font-size:.54rem; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }.activation-note strong { font-size:.68rem; }.activation-note p { margin:0; color:var(--muted); font-size:.58rem; line-height:1.45; }.diff { margin:.15rem 0; }.diff summary { color:var(--muted); cursor:pointer; font-size:.65rem; }.diff pre,.bundle pre { max-height:20rem; overflow:auto; border:1px solid var(--line); border-radius:var(--radius-sm); background:var(--bg); padding:.75rem; white-space:pre-wrap; font-size:.62rem; }.draft-actions { display:grid; grid-template-columns:1fr 1fr; gap:.45rem; }.draft-actions .compose { grid-column:1/-1; }.draft-actions button { min-height:2.35rem; }.compose { border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); padding:.55rem .65rem; cursor:pointer; font-size:.67rem; font-weight:700; }.compose:disabled,.secondary:disabled { opacity:.38; cursor:not-allowed; }.publish-note { margin:0; border-top:1px solid var(--line); padding-top:.65rem; color:var(--muted); font-size:.58rem; line-height:1.45; }.publish-note strong { color:var(--text); }.bundle { border-top:1px solid var(--line); padding:1rem; }.bundle p { color:var(--muted); font-size:.7rem; }.bundle small { color:var(--muted); }
+.assignment-backdrop { position:fixed; z-index:80; inset:0; display:grid; place-items:center; background:color-mix(in srgb,var(--bg) 72%,transparent); padding:1rem; backdrop-filter:blur(4px); }.assignment-dialog { width:min(31rem,100%); overflow:hidden; border:1px solid color-mix(in srgb,var(--accent) 48%,var(--line)); border-radius:var(--radius-lg); background:var(--panel); box-shadow:0 1.5rem 5rem rgba(0,0,0,.48); }.assignment-dialog > header { display:flex; align-items:start; justify-content:space-between; gap:1rem; border-bottom:1px solid var(--line); background:linear-gradient(110deg,color-mix(in srgb,var(--accent) 8%,var(--panel)),var(--panel)); padding:1rem 1.1rem; }.assignment-dialog h2 { margin:0; font-size:1.05rem; }.assignment-dialog > header button { display:grid; place-content:center; width:2rem; height:2rem; min-width:2rem; min-height:2rem; flex:0 0 2rem; border:1px solid var(--line); border-radius:50%; background:transparent; color:var(--muted); padding:0; cursor:pointer; font-size:1rem; }.assignment-intro { margin:0; padding:.9rem 1.1rem 0; color:var(--muted); font-size:.68rem; line-height:1.5; }.assignment-dialog dl { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); margin:.9rem 1.1rem 0; border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }.assignment-dialog dl > div { display:grid; gap:.2rem; min-width:0; padding:.7rem; border-right:1px solid var(--line); }.assignment-dialog dl > div:last-child { border-right:0; }.assignment-dialog dt { color:var(--muted); font-size:.5rem; font-weight:750; letter-spacing:.07em; text-transform:uppercase; }.assignment-dialog dd { display:grid; gap:.12rem; margin:0; overflow:hidden; color:var(--text); font-size:.68rem; font-weight:700; text-overflow:ellipsis; text-transform:capitalize; white-space:nowrap; }.assignment-dialog dd small { overflow:hidden; color:var(--muted); font-size:.53rem; font-weight:500; text-overflow:ellipsis; }.assignment-effort { display:grid; gap:.4rem; margin:.9rem 1.1rem; }.assignment-effort > span { font-size:.65rem; font-weight:700; }.assignment-effort > small { color:var(--muted); font-size:.56rem; line-height:1.45; }.assignment-dialog > footer { display:flex; justify-content:flex-end; gap:.45rem; border-top:1px solid var(--line); padding:.8rem 1.1rem; }.assignment-dialog > footer button { min-height:2rem; padding:.45rem .75rem; }.confirm-assignment { border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); cursor:pointer; font-size:.67rem; font-weight:750; }
+.validation { display:grid; gap:.55rem; }.validation > header { display:flex; align-items:center; justify-content:space-between; }.validation h3,.bundle h3 { margin:.1rem 0; font-size:.78rem; }.validation header span { border:1px solid currentColor; border-radius:2rem; padding:.28rem .45rem; font-size:.58rem; font-weight:700; }.guidance-intro { margin:0; color:var(--muted); font-size:.58rem; line-height:1.45; }.validation ul { display:grid; gap:.35rem; margin:0; padding:0; list-style:none; }.validation li { display:flex; align-items:start; gap:.45rem; border:1px solid var(--line); border-radius:var(--radius-sm); padding:.5rem; }.validation li.advice { border-color:color-mix(in srgb,var(--status-escalated) 36%,var(--line)); background:color-mix(in srgb,var(--status-escalated) 4%,var(--panel)); }.validation li > b { display:grid; place-content:center; flex:0 0 auto; width:1.15rem; height:1.15rem; border:1px solid currentColor; border-radius:50%; font-size:.57rem; }.validation li span { display:grid; gap:.12rem; }.validation li strong { color:var(--text); font-size:.62rem; text-transform:capitalize; }.validation li small { color:var(--muted); font-size:.56rem; line-height:1.35; }.validation li em { color:currentColor; font-size:.5rem; font-style:normal; text-transform:uppercase; letter-spacing:.04em; }.pass { color:var(--status-ok); }.advice { color:var(--status-escalated); }.fail,.error { color:var(--status-fail); }.refusals { border:1px solid color-mix(in srgb,var(--status-escalated) 35%,var(--line)); border-radius:var(--radius-sm); padding:.55rem; }.refusals > strong { color:var(--status-escalated); font-size:.6rem; }.refusals p { margin:.35rem 0 0; border-left:2px solid var(--status-escalated); padding-left:.5rem; color:var(--muted); font-size:.58rem; line-height:1.4; }.activation-note { display:grid; gap:.25rem; border:1px solid color-mix(in srgb,var(--accent) 35%,var(--line)); border-radius:var(--radius); background:var(--accent-soft); padding:.7rem; }.activation-note span { color:var(--accent); font-size:.54rem; font-weight:800; text-transform:uppercase; letter-spacing:.06em; }.activation-note strong { font-size:.68rem; }.activation-note p { margin:0; color:var(--muted); font-size:.58rem; line-height:1.45; }.diff { margin:.15rem 0; }.diff summary { color:var(--muted); cursor:pointer; font-size:.65rem; }.draft-actions { display:grid; grid-template-columns:1fr 1fr; gap:.45rem; }.draft-actions .apply-local,.draft-actions .prepare-patch { grid-column:1/-1; }.draft-actions button { min-height:2.35rem; }.apply-local { border:1px solid var(--accent); border-radius:var(--radius-sm); background:var(--accent); color:var(--bg); padding:.55rem .65rem; cursor:pointer; font-size:.67rem; font-weight:750; }.apply-local:disabled,.secondary:disabled { opacity:.38; cursor:not-allowed; }.prepare-patch { color:var(--accent); }.publish-note { margin:0; border-top:1px solid var(--line); padding-top:.65rem; color:var(--muted); font-size:.58rem; line-height:1.45; }.publish-note strong { color:var(--text); }.publish-note code { color:var(--accent); }.bundle { border-top:1px solid var(--line); padding:1rem; }.bundle p { color:var(--muted); font-size:.7rem; }.bundle small { color:var(--muted); }
 @media (max-width: 1100px) { .roster-summary { grid-template-columns:repeat(4,1fr); }.roster-summary > p { grid-column:1/-1; border-top:1px solid var(--line); }.tier-grid { grid-template-columns:1fr; }.seat { grid-template-columns:7rem minmax(0,1fr) auto; }.studio-layout { grid-template-columns:1fr; }.catalog { border-right:0; border-bottom:1px solid var(--line); }.draft-panel { position:static; grid-template-columns:repeat(2,minmax(0,1fr)); }.draft-panel > header,.draft-actions,.publish-note { grid-column:1/-1; } }
 @media (max-width: 760px) { .axis-guide { grid-template-columns:1fr; }.axis-guide article { border-right:0; border-bottom:1px solid var(--line); }.axis-guide article:last-child { border-bottom:0; }.workflow { grid-template-columns:repeat(2,1fr); }.workflow li:nth-child(2) { border-right:0; }.workflow li:nth-child(-n+2) { border-bottom:1px solid var(--line); }.workspace-modes { grid-template-columns:1fr; }.workspace-modes > i { display:none; }.model-form { grid-template-columns:1fr 1fr; }.model-form label.wide { grid-column:span 1; }.catalog-tools { align-items:stretch; flex-direction:column; }.search { width:100%; }.scope { justify-content:flex-start; }.draft-panel { grid-template-columns:1fr; }.draft-panel > * { grid-column:1!important; }.directory-tools { grid-template-columns:1fr 1fr; }.source-meta { justify-items:start; }.directory-head { display:none; }.directory-list article { grid-template-columns:minmax(10rem,1.5fr) repeat(2,4rem) 3.5rem; }.directory-list article .price { grid-column:2; }.directory-list article .speed { grid-column:3; }.directory-list article > button { grid-column:4; grid-row:1/3; }.directory-footer { align-items:start; flex-direction:column; } }
-@media (max-width: 620px) { .roster-summary { grid-template-columns:repeat(2,1fr); }.roster-summary article:nth-child(2) { border-right:0; }.section-intro { align-items:start; flex-direction:column; gap:.35rem; }.section-intro > p { text-align:left; }.seat { grid-template-columns:5rem minmax(0,1fr); }.health { grid-column:2; text-align:left; }.bands > header { align-items:start; flex-direction:column; gap:.35rem; }.bands header > p { text-align:left; }.band { grid-template-columns:1fr; }.band-name { border-right:0; border-bottom:1px solid var(--line); }.studio-title { align-items:start; flex-direction:column; }.model-form { grid-template-columns:1fr; }.model-form label,.model-form label.wide,.create-model { grid-column:1; }.workflow { grid-template-columns:1fr; }.workflow li { border-right:0; border-bottom:1px solid var(--line); }.workflow li:last-child { border-bottom:0; } }
+@media (max-width: 620px) { .roster-summary { grid-template-columns:repeat(2,1fr); }.roster-summary article:nth-child(2) { border-right:0; }.section-intro { align-items:start; flex-direction:column; gap:.35rem; }.section-intro > p { text-align:left; }.seat { grid-template-columns:5rem minmax(0,1fr); }.health { grid-column:2; text-align:left; }.bands > header { align-items:start; flex-direction:column; gap:.35rem; }.bands header > p { text-align:left; }.band { grid-template-columns:1fr; }.band-name { border-right:0; border-bottom:1px solid var(--line); }.studio-title { align-items:start; flex-direction:column; }.model-form { grid-template-columns:1fr; }.model-form label,.model-form label.wide,.create-model { grid-column:1; }.workflow { grid-template-columns:1fr; }.workflow li { border-right:0; border-bottom:1px solid var(--line); }.workflow li:last-child { border-bottom:0; }.assignment-dialog dl { grid-template-columns:1fr; }.assignment-dialog dl > div { border-right:0; border-bottom:1px solid var(--line); }.assignment-dialog dl > div:last-child { border-bottom:0; } }
 </style>

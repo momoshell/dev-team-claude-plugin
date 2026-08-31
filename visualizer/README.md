@@ -16,3 +16,11 @@ The ledger feed is a read-only sqlite source and the swap point for the planned
 
 `POST /api/roster/propose` validates an edit and returns an applyable unified diff; it never writes `crew/roster.json`.
 A human ratifies the proposal by applying the diff with `git apply` (or `patch -p1`).
+
+`POST /api/roster/ladder/apply` is the explicit local-control exception. It
+revalidates a non-empty seat-change draft and atomically updates only the
+configured runtime roster. The change is read by the next newly booted task;
+running tasks are unaffected. This route never invokes Git, creates a PR, or
+touches a remote repository. Policy failures can be explicitly accepted for a
+local experiment with `allow_warnings`; schema, model, adapter, and boot-shape
+refusals remain hard blockers. Repository patch composition stays strict.

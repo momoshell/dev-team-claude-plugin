@@ -11,6 +11,7 @@ import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelo
 import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
 import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
+import { diffLines } from '../visualizer/web/src/lib/diff-lines.js'
 
 test('workflow semantics separate profile, execution and assurance without inference', () => {
   assert.deepEqual(assuranceOption('build'), { value:'build', label:'Standard · build' })
@@ -197,6 +198,44 @@ test('model directory pagination uses compact named controls', () => {
   assert.match(source, /Next model page/)
   assert.match(source, /\.directory-pager button \{ width:auto; min-width:0; height:auto; min-height:1\.5rem/)
   assert.doesNotMatch(source, /onclick=\{\(\) => directoryPage -= 1\}>←<\/button>/)
+})
+
+test('roster seat assignment asks for an explicit per-seat thinking effort', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /const EFFORT_OPTIONS = \[/)
+  for (const effort of ['low', 'medium', 'high', 'xhigh', 'max']) assert.match(source, new RegExp(`value:'${effort}'`))
+  assert.match(source, /function beginAssignment\(tier, role, key\)/)
+  assert.match(source, /onclick=\{\(\) => selectedModel && beginAssignment\(column\.tier, seat\.role, selectedModel\)\}/)
+  assert.match(source, /<h2 id="assignment-title">Set thinking effort<\/h2>/)
+  assert.match(source, /bind:value=\{assignmentDraft\.effort\}/)
+  assert.match(source, /Effort is stored independently for every assurance profile and seat\./)
+  assert.match(source, /onclick=\{applyAssignment\}>Add to draft<\/button>/)
+  assert.match(source, /assignment-dialog > header button \{[^}]*width:2rem; height:2rem; min-width:2rem; min-height:2rem; flex:0 0 2rem;[^}]*padding:0;/)
+})
+
+test('roster drafts have an explicit local activation path for the next task', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /async function applyLocal\(\)/)
+  assert.match(source, /applyRosterLadder\(staged, \{ allowWarnings:!visibleResult\?\.ok \}\)/)
+  assert.match(source, /'Apply for next task'/)
+  assert.match(source, /'Apply anyway for next task'/)
+  assert.match(source, /Policy warnings do not block a local experiment/)
+  assert.match(source, /next newly booted task/)
+  assert.match(source, /Running tasks continue unchanged/)
+  assert.match(source, /no branch, commit, PR, or remote push is created/)
+  assert.match(source, /Prepare repository patch/)
+  assert.match(source, /staged = \[\]; selectedModel = null/)
+})
+
+test('roster diffs distinguish metadata, additions, removals, and context', () => {
+  const lines = diffLines('--- a/crew/roster.json\n+++ b/crew/roster.json\n@@ -1 +1 @@\n-  "effort": "max"\n+  "effort": "high"\n }')
+  assert.deepEqual(lines.map((line) => line.kind), ['meta', 'meta', 'meta', 'removal', 'addition', 'context'])
+  const panel = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  const block = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/DiffBlock.svelte'), 'utf8')
+  assert.equal((panel.match(/<DiffBlock /g) || []).length, 2)
+  assert.match(block, /diff-line\.addition/)
+  assert.match(block, /diff-line\.removal/)
+  assert.match(block, /diff-line\.meta/)
 })
 
 test('the metrics strip probes task envelopes for successful sessions', () => {

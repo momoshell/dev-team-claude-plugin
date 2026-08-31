@@ -373,6 +373,12 @@ function check(checkName, ok, message) {
   return { check: checkName, ok: Boolean(ok), message: String(message || (ok ? `${checkName} passed` : `${checkName} failed`)) }
 }
 
+const LOCAL_POLICY_REFUSALS = new Set(['cross_vendor', 'judge_vendor_split'])
+
+function localBlockingRefusals(refusals) {
+  return (Array.isArray(refusals) ? refusals : []).filter((refusal) => !LOCAL_POLICY_REFUSALS.has(refusal?.code))
+}
+
 function affectedTiers(moves, roster) {
   return [...new Set((Array.isArray(moves) ? moves : [])
     .filter((move) => typeof move?.tier === 'string' && record(roster?.tiers) && Object.prototype.hasOwnProperty.call(roster.tiers, move.tier))
@@ -540,11 +546,17 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
   checks.push(await breakerStateCheck({ moves: requested, roster: candidate, breaker: breakerConfig, readBreaker }))
   checks.push(costCeilingCheck(requested, parsed.roster, ladder))
   const ok = refusals.length === 0 && checks.every((entry) => entry.ok)
+  const blockingRefusals = localBlockingRefusals(refusals)
+  const localApplyAllowed = requested.length > 0 && parsed.roster != null && blockingRefusals.length === 0
+  const candidateDiff = localApplyAllowed && afterText != null ? unifiedDiff(rosterText, afterText, { path: 'crew/roster.json' }) : null
   return {
     ok,
     checks,
     refusals,
-    diff: ok && afterText != null ? unifiedDiff(rosterText, afterText, { path: 'crew/roster.json' }) : null,
+    blocking_refusals: blockingRefusals,
+    local_apply_allowed: localApplyAllowed,
+    diff: ok ? candidateDiff : null,
+    local_diff: candidateDiff,
     before_text_canonical: beforeTextCanonical,
   }
 }
@@ -593,3 +605,25 @@ export async function composeMoves({ rosterText, rosterPath = 'crew/roster.json'
   }
 }
 
+export async function applyMoves({ rosterText, rosterPath = 'crew/roster.json', readError = null, moves, ladder, breaker, readBreaker, writeRoster, allowWarnings = false } = {}) {
+  const result = await stageMoves({ rosterText, rosterPath, readError, moves, ladder, breaker, readBreaker })
+  if (!result.ok && (!allowWarnings || !result.local_apply_allowed)) return { ...result, applied:false, changed:false, requires_warning_override:Boolean(result.local_apply_allowed) }
+  const parsed = parseRosterText(rosterText)
+  if (!parsed.roster) return {
+    ...result, ok:false, applied:false, changed:false,
+    refusals:[...(result.refusals || []), { code:'roster_unreadable', message:readError || `unable to read roster at ${rosterPath}` }],
+  }
+  const candidate = clone(parsed.roster)
+  for (const move of Array.isArray(moves) ? moves : []) setMove(candidate, move)
+  const afterText = canonicalRosterText(candidate, rosterText)
+  if (typeof writeRoster !== 'function') return {
+    ...result, ok:false, applied:false, changed:false,
+    refusals:[...(result.refusals || []), { code:'roster_write', message:`local roster writer unavailable for ${rosterPath}` }],
+  }
+  const write = await writeRoster({ path:rosterPath, beforeText:rosterText, afterText })
+  if (!write?.ok) return {
+    ...result, ok:false, applied:false, changed:false,
+    refusals:[...(result.refusals || []), { code:write?.conflict ? 'roster_conflict' : 'roster_write', message:write?.error || `could not update ${rosterPath}` }],
+  }
+  return { ...result, ok:true, policy_ok:result.ok, applied:true, changed:write.changed === true, warnings_overridden:!result.ok }
+}

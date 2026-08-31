@@ -10,7 +10,7 @@ import { spawn, spawn as spawnProcess, spawnSync } from 'node:child_process'
 import { openLedger, NODE_FLOOR, replayJsonl, WRITERS, USAGE_ABSENT_CAUSES } from '../scripts/factory/ledger.mjs'
 import { cellHealth } from '../crew/breaker.mjs'
 import { gitGrepHits } from '../scripts/factory/absence.mjs'
-import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer } from '../visualizer/server/server.mjs'
+import { parseCliArgs, ServerUsageError, startServer as startVisualizerServer, writeRosterAtomically } from '../visualizer/server/server.mjs'
 import { createLedgerFeed } from '../visualizer/server/ledger-feed.mjs'
 import { shapeIntake } from '../visualizer/server/shape.mjs'
 import { rawRequest, scratchDir, sqliteAvailable, treeDigest } from './helpers.mjs'
@@ -189,6 +189,7 @@ const WRITE_ROUTES = [
   { path: '/api/roster/propose', body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: null }) },
   { path: '/api/roster/ladder/stage', body: JSON.stringify({ moves: [] }) },
   { path: '/api/roster/ladder/compose', body: JSON.stringify({ moves: [] }) },
+  { path: '/api/roster/ladder/apply', body: JSON.stringify({ moves: [] }) },
 ]
 
 test('state-writing routes refuse CORS simple requests before reading the body', { skip: SKIP }, async () => {
@@ -270,7 +271,7 @@ test('same-origin and originless JSON clients still engage the stop switch', { s
 
     const api = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/api.js'), 'utf8')
     const posts = api.split('\n').filter((line) => line.includes("method: 'POST'"))
-    assert.equal(posts.length, 6)
+    assert.equal(posts.length, 7)
     assert.ok(posts.every((line) => line.includes("'content-type': 'application/json'")))
   } finally {
     if (server) await stopServer(server.child)
@@ -1150,7 +1151,7 @@ test('roster endpoint serves the runtime roster read-only and degrades honestly'
     const onDisk = JSON.parse(readFileSync(roster.path, 'utf8'))
     assert.deepEqual(roster.tiers.map((tier) => tier.tier), Object.keys(onDisk.tiers))
     const buildReviewer = roster.tiers.find((tier) => tier.tier === 'build').seats.find((seat) => seat.role === 'reviewer')
-    assert.equal(buildReviewer.effort, 'max')
+    assert.equal(buildReviewer.effort, onDisk.tiers.build.reviewer.effort)
     for (const field of ['provider', 'id', 'agent', 'effort']) assert.ok(buildReviewer[field])
     const mechanical = roster.tiers.find((tier) => tier.tier === 'mechanical')
     assert.equal(mechanical.seats.some((seat) => seat.role === 'lead'), false)
@@ -1204,7 +1205,8 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json' })).status, 400)
     assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
     assert.equal((await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: 'opus' }) })).status, 400)
-    const legal = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }) })
+    const changedEffort = roster.tiers.build.reviewer.effort === 'high' ? 'max' : 'high'
+    const legal = await json(base, '/api/roster/propose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedEffort } }) })
     assert.equal(legal.status, 200)
     assert.equal(legal.json.ok, true)
     assert.match(legal.json.diff, /^--- a\/crew\/roster\.json$/m)
@@ -1219,7 +1221,7 @@ test('roster proposals validate, refuse safely, and never write the roster', asy
     const read = await json(base, '/api/roster')
     assert.equal(read.status, 200)
     assert.equal(read.json.degraded, false)
-    assert.equal(read.json.tiers.find((tier) => tier.tier === 'build').seats.find((seat) => seat.role === 'reviewer').effort, 'max')
+    assert.equal(read.json.tiers.find((tier) => tier.tier === 'build').seats.find((seat) => seat.role === 'reviewer').effort, roster.tiers.build.reviewer.effort)
     assert.equal((await json(base, '/api/roster', { method: 'POST' })).status, 405)
     await stopServer(child); child = null
 
@@ -1730,6 +1732,7 @@ test('the visualizer CLI still accepts every flag it reads', async () => {
       'triage sidecar (may create visualizer.db and its WAL/SHM)',
       'stop-switch',
       'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)',
+      'configured roster file when Apply for next task is explicitly requested',
       'Artificial Analysis key in the project .env.local when explicitly requested',
     ])
     await stopServer(child); child = null
@@ -1845,6 +1848,7 @@ test('roster ladder routes stage and compose read-only bundles', { skip: SKIP },
   fixture(ledgerDb)
   const rosterPath = join(process.cwd(), 'crew', 'roster.json')
   const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
+  const changedEffort = roster.tiers.build.reviewer.effort === 'high' ? 'max' : 'high'
   const before = digest(rosterPath)
   let child, base
   try {
@@ -1855,17 +1859,88 @@ test('roster ladder routes stage and compose read-only bundles', { skip: SKIP },
     assert.equal((await json(base, '/api/roster/ladder/stage')).status, 405)
     assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{ not json' })).status, 400)
     assert.equal((await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 400)
-    const legal = await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }] }) })
+    const legal = await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedEffort } }] }) })
     assert.equal(legal.status, 200); assert.equal(legal.json.ok, true); assert.match(legal.json.diff, /^--- a\/crew\/roster\.json/m); assert.equal(legal.json.checks.length, 4)
     const illegal = await json(base, '/api/roster/ladder/stage', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'builder', cell: { provider: 'anthropic', id: 'claude-haiku-4-5', agent: 'claude', effort: 'medium' } }] }) })
     assert.equal(illegal.status, 200); assert.equal(illegal.json.ok, false); assert.equal(illegal.json.diff, null); assert.equal(illegal.json.checks.find((check) => check.check === 'band_floor').ok, false)
-    const composed = await json(base, '/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }] }) })
+    const composed = await json(base, '/api/roster/ladder/compose', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ moves: [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedEffort } }] }) })
     assert.equal(composed.status, 200); assert.equal(composed.json.ok, true); assert.ok(composed.json.branch); assert.ok(composed.json.commit_subject); assert.match(composed.json.patch, /^--- a\/crew\/roster\.json/m); assert.equal(composed.json.applyable_with, 'git apply / patch -p1')
     await stopServer(child); child = null
     assert.equal(digest(rosterPath), before)
   } finally {
     if (child) await stopServer(child)
     rmSync(dir, { recursive: true, force: true })
+  }
+})
+
+test('atomic roster writes refuse a stale draft and preserve the current file', () => {
+  const dir = scratchDir('visualizer-roster-atomic-')
+  const rosterPath = join(dir, 'roster.json')
+  try {
+    writeFileSync(rosterPath, '{"version":1}\n', { mode:0o640 })
+    const conflict = writeRosterAtomically({ path:rosterPath, beforeText:'{"version":0}\n', afterText:'{"version":2}\n' })
+    assert.equal(conflict.ok, false)
+    assert.equal(conflict.conflict, true)
+    assert.equal(readFileSync(rosterPath, 'utf8'), '{"version":1}\n')
+
+    const applied = writeRosterAtomically({ path:rosterPath, beforeText:'{"version":1}\n', afterText:'{"version":2}\n' })
+    assert.deepEqual(applied, { ok:true, changed:true, conflict:false, error:null })
+    assert.equal(readFileSync(rosterPath, 'utf8'), '{"version":2}\n')
+    assert.equal(statSync(rosterPath).mode & 0o777, 0o640)
+  } finally { rmSync(dir, { recursive:true, force:true }) }
+})
+
+test('roster ladder apply updates only the configured local roster for the next task', { skip: SKIP }, async () => {
+  const dir = scratchDir('visualizer-roster-apply-')
+  const rosterPath = join(dir, 'roster.json')
+  const ledgerDb = join(dir, 'ledger.db')
+  const sourcePath = join(process.cwd(), 'crew', 'roster.json')
+  writeFileSync(rosterPath, readFileSync(sourcePath))
+  fixture(ledgerDb)
+  const originalProjectDigest = digest(sourcePath)
+  const roster = JSON.parse(readFileSync(rosterPath, 'utf8'))
+  const effort = roster.tiers.build.reviewer.effort === 'high' ? 'xhigh' : 'high'
+  let handles
+  try {
+    handles = await startInProcess({}, { rosterPath, ledgerDb })
+    assert.equal((await json(handles.base, '/api/roster/ladder/apply')).status, 405)
+    assert.equal((await json(handles.base, '/api/roster/ladder/apply', { method:'POST', headers:{ 'content-type':'application/json' }, body:'{}' })).status, 400)
+    const response = await json(handles.base, '/api/roster/ladder/apply', {
+      method:'POST', headers:{ 'content-type':'application/json' },
+      body:JSON.stringify({ moves:[{ tier:'build', role:'reviewer', cell:{ ...roster.tiers.build.reviewer, effort } }] }),
+    })
+    assert.equal(response.status, 200)
+    assert.equal(response.json.ok, true)
+    assert.equal(response.json.applied, true)
+    assert.equal(response.json.changed, true)
+    assert.equal(response.json.takes_effect, 'next_new_task')
+    assert.ok(response.json.applied_at)
+    assert.equal(response.json.branch, undefined)
+    assert.equal(response.json.commit_subject, undefined)
+    assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.build.reviewer.effort, effort)
+
+    const warningMove = { tier:'judge', role:'reviewer', cell:{ ...roster.tiers.judge['tech-lead'] } }
+    const warned = await json(handles.base, '/api/roster/ladder/apply', {
+      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ moves:[warningMove] }),
+    })
+    assert.equal(warned.status, 200)
+    assert.equal(warned.json.applied, false)
+    assert.equal(warned.json.requires_warning_override, true)
+    assert.equal(warned.json.local_apply_allowed, true)
+
+    const overridden = await json(handles.base, '/api/roster/ladder/apply', {
+      method:'POST', headers:{ 'content-type':'application/json' }, body:JSON.stringify({ moves:[warningMove], allow_warnings:true }),
+    })
+    assert.equal(overridden.status, 200)
+    assert.equal(overridden.json.ok, true)
+    assert.equal(overridden.json.policy_ok, false)
+    assert.equal(overridden.json.applied, true)
+    assert.equal(overridden.json.warnings_overridden, true)
+    assert.equal(JSON.parse(readFileSync(rosterPath, 'utf8')).tiers.judge.reviewer.provider, warningMove.cell.provider)
+    assert.equal(digest(sourcePath), originalProjectDigest)
+  } finally {
+    if (handles) await stopInProcess(handles.server)
+    rmSync(dir, { recursive:true, force:true })
   }
 })
 
@@ -1891,18 +1966,20 @@ test('ladder source and API calls carry the required drag surface', () => {
   const server = readFileSync(join(process.cwd(), 'visualizer/server/server.mjs'), 'utf8')
   const catalog = readFileSync(join(process.cwd(), 'visualizer/server/model-catalog.mjs'), 'utf8')
   for (const needle of ['draggable', 'ondragstart', 'ondragover', 'ondrop', 'reference_pending', 'measured_pending', 'drift', 'band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling']) assert.match(panel, new RegExp(needle))
-  assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
-  for (const needle of ['Assurance presets', 'Assurance changes who oversees a run', 'Task profile', 'What outcome is needed', 'Not recorded or configured by the current runtime', 'Capability bands', 'Separate from assurance', 'evidence states, not extra bands', 'Roster workspace', 'Add a model manually', 'saved locally', 'Any model, any seat', 'Copy experiment draft', 'Check publish readiness', 'Publish guidance', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
+  assert.doesNotMatch(panel, /blended|composite|overall_score|combined_score/); assert.doesNotMatch(panel, /--role-|--lane-\d/); assert.match(api, /getRosterLadder|stageRosterLadder|composeRosterLadder|applyRosterLadder/); assert.match(api, /\/api\/roster\/ladder/)
+  for (const needle of ['Assurance presets', 'Assurance changes who oversees a run', 'Task profile', 'What outcome is needed', 'Not recorded or configured by the current runtime', 'Capability bands', 'Separate from assurance', 'evidence states, not extra bands', 'Roster workspace', 'Add a model manually', 'saved locally', 'Any model, any seat', 'Copy experiment draft', 'Check readiness', 'Roster readiness', 'Apply for next task', 'next newly booted task', 'Prepare repository patch', 'local_providers', 'pi']) assert.match(panel, new RegExp(needle))
   assert.match(panel, /workflowStep = \$derived/)
   assert.equal([...panel.matchAll(/class:active=\{workflowStep === \d\}/g)].length, 4)
   assert.doesNotMatch(panel, /class:active=\{!selectedModel\}|class:active=\{draftCount > 0\}/)
   assert.match(panel, /localStorage\.setItem\(DRAFT_KEY/)
-  assert.match(panel, /do not change the active factory/)
+  assert.match(panel, /Running tasks continue unchanged/)
   assert.match(panel, /staged = next[\s\S]*stageRosterLadder\(next\)/)
   assert.doesNotMatch(panel, /if \(result\.ok\) \{ staged = next/)
   for (const needle of ['Artificial Analysis', 'Discover models', 'Intelligence', 'Lowest output price', 'Null means not measured', 'Remember on this machine', 'Save & connect', 'Connect for this run', 'Connected ·', 'credential_source', 'Reasoning effort', 'groupDirectoryModels', 'reasoning_effort']) assert.match(panel, new RegExp(needle))
   assert.match(api, /getModelCatalog.*\/api\/model-catalog/)
   assert.match(api, /setModelCatalogKey.*\/api\/model-catalog\/key/)
+  assert.match(api, /applyRosterLadder.*\/api\/roster\/ladder\/apply/)
+  assert.match(server, /\/api\/roster\/ladder\/apply/)
   assert.match(api, /persist:options\.persist === true/)
   assert.match(server, /\/api\/model-catalog\/key/)
   assert.match(server, /saveArtificialAnalysisKey/)

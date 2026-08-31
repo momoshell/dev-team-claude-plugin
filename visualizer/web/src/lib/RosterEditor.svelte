@@ -3,6 +3,7 @@
   import { rosterEditForm, rosterProposal } from './panels.js'
   import Dropdown from './Dropdown.svelte'
   import { assuranceOption } from './workflow-semantics.js'
+  import DiffBlock from './DiffBlock.svelte'
 
   const AGENTS = [{ value:'claude', label:'claude' }, { value:'pi', label:'pi' }]
   const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'].map((value) => ({ value, label:value }))
@@ -72,7 +73,7 @@
     </form>
     {#if proposal.pending}<p class="error">{proposal.pending}</p>{/if}
     {#if proposal.refusals.length}<ul class="error">{#each proposal.refusals as refusal}<li>{refusal.message}</li>{/each}</ul>{/if}
-    {#if proposal.diff !== null}<pre>{proposal.diff || '(no change)'}</pre>{/if}
+    {#if proposal.diff !== null}<DiffBlock text={proposal.diff} label="Roster proposal diff" />{/if}
   </section>
 {/if}
 <style>.panel { background:var(--panel); border:1px solid var(--line); border-radius:.6rem; padding:1rem; margin:1rem 0; }.panel h2 { margin-top:0; }.fields { display:flex; gap:.75rem; flex-wrap:wrap; }.fields label { display:grid; gap:.25rem; font-size:.8rem; }.error { color:#b42318; }.muted { color:var(--muted); }pre { overflow:auto; padding:1rem; background:var(--line); }</style>

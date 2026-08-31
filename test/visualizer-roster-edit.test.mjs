@@ -13,6 +13,7 @@ const rosterPath = join(process.cwd(), 'crew', 'roster.json')
 const schemaPath = join(process.cwd(), 'crew', 'roster.schema.json')
 const rosterText = readFileSync(rosterPath, 'utf8')
 const roster = JSON.parse(rosterText)
+const changedBuildReviewerEffort = roster.tiers.build.reviewer.effort === 'high' ? 'max' : 'high'
 const ladderPath = join(process.cwd(), 'crew', 'model-ladder.json')
 const ratifiedLadder = readLadder({ ladderPath })
 
@@ -38,7 +39,7 @@ async function edit(input = {}) {
     rosterPath: 'crew/roster.json',
     tier: 'build',
     role: 'reviewer',
-    cell: { ...roster.tiers.build.reviewer, effort: 'high' },
+    cell: { ...roster.tiers.build.reviewer, effort: changedBuildReviewerEffort },
     ...input,
   })
 }
@@ -70,7 +71,7 @@ test('a legal edit produces one unified hunk and an applyable diff', async () =>
     writeFileSync(patchPath, result.diff)
     execFileSync('patch', ['-p1', '-i', patchPath], { cwd: dir, stdio: 'pipe' })
     const expected = structuredClone(roster)
-    expected.tiers.build.reviewer.effort = 'high'
+    expected.tiers.build.reviewer.effort = changedBuildReviewerEffort
     assert.equal(readFileSync(join(crew, 'roster.json'), 'utf8'), JSON.stringify(expected, null, 2))
   } finally {
     rmSync(dir, { recursive: true, force: true })
@@ -312,6 +313,8 @@ test('stageMoves names floor, cost and vendor refusals and keeps the diff null',
   assert.equal(cost.checks.find((entry) => entry.check === 'cost_ceiling').ok, false); assert.match(cost.checks.find((entry) => entry.check === 'cost_ceiling').message, /25.*build.*reviewer.*claude-fable-5/)
   const vendor = await stageLadder([{ tier: 'build', role: 'reviewer', cell: { provider: 'anthropic', id: 'claude-opus-5', agent: 'claude', effort: 'high' } }])
   assert.equal(vendor.checks.find((entry) => entry.check === 'vendor_diversity').ok, false); assert.match(vendor.checks.find((entry) => entry.check === 'vendor_diversity').message, /cross-vendor/)
+  assert.equal(vendor.local_apply_allowed, true)
+  assert.match(vendor.local_diff, /^--- a\/crew\/roster\.json/m)
 })
 
 test('stageMoves breaker and shape refusals still return every named check', async () => {
@@ -321,6 +324,8 @@ test('stageMoves breaker and shape refusals still return every named check', asy
   const cell = { ...move.cell }; delete cell.effort
   const shape = await stageLadder([{ ...move, cell }])
   assert.ok(shape.refusals.some((refusal) => refusal.code === 'cell_shape')); assert.deepEqual(shape.checks.map((entry) => entry.check), ['band_floor', 'vendor_diversity', 'breaker_state', 'cost_ceiling'])
+  assert.equal(shape.local_apply_allowed, false)
+  assert.equal(shape.local_diff, null)
   const degraded = await stageMoves({ rosterText, rosterPath: 'crew/roster.json', moves: [move], ladder: readLadder({ ladderPath: '/tmp/missing-model-ladder.json' }), readBreaker: () => null })
   assert.equal(degraded.checks.find((entry) => entry.check === 'band_floor').ok, false); assert.equal(degraded.checks.find((entry) => entry.check === 'cost_ceiling').ok, false)
 })
@@ -341,7 +346,7 @@ test('stageMoves can compose an optional cell:null move without model checks', a
 
 test('composeMoves returns a deterministic PR-ready bundle and never writes the roster', async () => {
   const before = readFileSync(rosterPath, 'utf8')
-  const moves = [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: 'high' } }]
+  const moves = [{ tier: 'build', role: 'reviewer', cell: { ...roster.tiers.build.reviewer, effort: changedBuildReviewerEffort } }]
   const result = await composeMoves({ rosterText, rosterPath: 'crew/roster.json', moves, ladder: ratifiedLadder, branchSeed: 'unit-test', readBreaker: () => null })
   assert.equal(result.ok, true); assert.equal(result.branch, 'roster/ladder-unit-test'); assert.match(result.commit_subject, /^chore\(roster\): reseat/); assert.match(result.patch, /^--- a\/crew\/roster\.json/); assert.equal(readFileSync(rosterPath, 'utf8'), before)
 })

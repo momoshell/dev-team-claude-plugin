@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 import { createServer } from 'node:http'
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { resolve, join, dirname } from 'node:path'
+import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { resolve, join, dirname, basename } from 'node:path'
 import { homedir } from 'node:os'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { createFeed } from './feed.mjs'
 import { createReturnsSource } from './returns-source.mjs'
 import { createJournalSource } from './journal-source.mjs'
 import { createRosterSource } from './roster-source.mjs'
 import { proposeEdit } from './roster-edit.mjs'
-import { readLadder, readReference, ladderView, stageMoves, composeMoves } from './roster-ladder.mjs'
+import { readLadder, readReference, ladderView, stageMoves, composeMoves, applyMoves } from './roster-ladder.mjs'
 import { createArtificialAnalysisCatalog } from './model-catalog.mjs'
 import { saveArtificialAnalysisKey } from './local-env.mjs'
 import { breakerPolicy } from '../../crew/breaker.mjs'
@@ -88,6 +89,7 @@ const ROUTE_PARAMS = Object.freeze({
   '/api/roster/ladder': [],
   '/api/roster/ladder/stage': [],
   '/api/roster/ladder/compose': [],
+  '/api/roster/ladder/apply': [],
   '/api/model-catalog': [],
   '/api/model-catalog/key': [],
   '/api/health': [],
@@ -146,6 +148,28 @@ export function writeGuard(req) {
   const origin = req.headers.origin
   if (origin != null && origin !== '' && !sameOrigin(origin, req.headers.host)) return { status: 403, error: 'cross-origin request refused' }
   return null
+}
+
+export function writeRosterAtomically({ path, beforeText, afterText } = {}) {
+  const target = resolve(path || '')
+  if (!target || typeof beforeText !== 'string' || typeof afterText !== 'string') return { ok:false, changed:false, conflict:false, error:'roster write needs a path and before/after text' }
+  let temporary = null
+  try {
+    const current = readFileSync(target, 'utf8')
+    if (current !== beforeText) return { ok:false, changed:false, conflict:true, error:`${target} changed after the draft was validated; reload the roster and try again` }
+    if (current === afterText) return { ok:true, changed:false, conflict:false, error:null }
+    const mode = statSync(target).mode & 0o777
+    temporary = join(dirname(target), `.${basename(target)}.visualizer-${process.pid}-${randomUUID()}.tmp`)
+    writeFileSync(temporary, afterText, { flag:'wx', mode })
+    renameSync(temporary, target)
+    temporary = null
+    if (readFileSync(target, 'utf8') !== afterText) return { ok:false, changed:false, conflict:false, error:`${target} did not match the requested roster after write` }
+    return { ok:true, changed:true, conflict:false, error:null }
+  } catch (err) {
+    return { ok:false, changed:false, conflict:false, error:`${target}: ${err?.message || String(err)}` }
+  } finally {
+    if (temporary) try { rmSync(temporary, { force:true }) } catch {}
+  }
 }
 function integer(value, fallback) {
   if (value == null || value === '') return fallback
@@ -557,6 +581,39 @@ export function startServer(options = {}) {
         const result = await composeMoves({ rosterText: raw.text, rosterPath: raw.path, readError: raw.error, moves: input.moves, ladder, breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb } })
         return json(res, 200, { schema, roster_path: raw.path, applyable_with: 'git apply / patch -p1', ...result })
       }
+      if (url.pathname === '/api/roster/ladder/apply') {
+        if (method !== 'POST') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'POST' })
+        const refusal = writeGuard(req)
+        if (refusal) return json(res, refusal.status, { schema, error: refusal.error })
+        let input
+        try { input = await body(req) } catch (err) { return json(res, 400, { schema, error: err.message || 'invalid json' }) }
+        if (!input || typeof input !== 'object' || Array.isArray(input) || !Array.isArray(input.moves) || input.moves.length === 0) return json(res, 400, { schema, error: 'moves must be a non-empty array' })
+        if (input.allow_warnings !== undefined && typeof input.allow_warnings !== 'boolean') return json(res, 400, { schema, error: 'allow_warnings must be a boolean' })
+        for (let index = 0; index < input.moves.length; index += 1) {
+          const move = input.moves[index]
+          if (!move || typeof move !== 'object' || Array.isArray(move) || typeof move.tier !== 'string' || typeof move.role !== 'string') return json(res, 400, { schema, error: `moves[${index}].tier and moves[${index}].role are required` })
+          if (move.cell !== null && (typeof move.cell !== 'object' || Array.isArray(move.cell))) return json(res, 400, { schema, error: `moves[${index}].cell must be an object or null` })
+        }
+        const raw = roster.readRaw()
+        const ladder = readLadder({ ladderPath: config.ladderPath })
+        const result = await applyMoves({
+          rosterText: raw.text,
+          rosterPath: raw.path,
+          readError: raw.error,
+          moves: input.moves,
+          ladder,
+          breaker: { policy: breakerPolicy(env), dbPath: config.ledgerDb },
+          allowWarnings:input.allow_warnings === true,
+          writeRoster: ({ beforeText, afterText }) => writeRosterAtomically({ path:raw.path, beforeText, afterText }),
+        })
+        return json(res, 200, {
+          schema,
+          roster_path: raw.path,
+          applied_at:result.applied ? new Date().toISOString() : null,
+          takes_effect:result.applied ? 'next_new_task' : null,
+          ...result,
+        })
+      }
       if (url.pathname === '/api/health') {
         if (method !== 'GET') return json(res, 405, { schema, error: 'method not allowed' }, { allow: 'GET' })
         return json(res, 200, { schema, ...feed.health(), ...returns.health(), returns_readonly: true })
@@ -585,7 +642,7 @@ export function startServer(options = {}) {
   process.once('SIGTERM', close); process.once('SIGINT', close)
   server.listen(config.port, config.host, () => {
     const address = server.address()
-    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
+    process.stdout.write(`${JSON.stringify({ listening: true, port: address.port, ledger_db: config.ledgerDb, triage_db: config.triageDb || join(dirname(config.ledgerDb), 'visualizer.db'), crew_root: config.crewRoot, returns_readonly: true, readonly: false, ledger_feed_readonly: true, triage_sidecar_writable: true, writes: ['triage sidecar (may create visualizer.db and its WAL/SHM)', 'stop-switch', 'intake brake ledger rows (may create the ledger directory, ledger.jsonl, ledger.db, WAL and SHM)', 'configured roster file when Apply for next task is explicitly requested', 'Artificial Analysis key in the project .env.local when explicitly requested'] })}\n`)
   })
   return { server, feed }
 }

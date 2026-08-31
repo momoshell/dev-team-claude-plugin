@@ -164,7 +164,10 @@ test('HTTP route returns a read-only, unmeasured run', { skip: SKIP }, async () 
     child = started.child
     const get = await json(started.base, '/api/seat-teardowns')
     assert.equal(get.status, 200)
-    assert.equal(get.json.schema, 1)
+    // The API schema is ONE shared constant for every route (visualizer/server/server.mjs:27).
+    // It went 1 -> 2 when run_configurations joined the shape, and this is the only
+    // route test that pinned the old number by hand.
+    assert.equal(get.json.schema, 2)
     assert.ok(Array.isArray(get.json.runs))
     assert.equal(get.json.runs.find((row) => row.adw_id === adw_id)?.state, 'not-measured')
     assert.doesNotMatch(get.body, /"proven":0/)

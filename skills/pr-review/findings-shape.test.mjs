@@ -7,10 +7,12 @@ import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { ROOT as REPO } from '../../test/helpers.mjs'
+import { FINDING_DISPOSITIONS, FINDING_ID_SHAPE } from '../../crew/drive.mjs'
 
 const HERE = fileURLToPath(new URL('./', import.meta.url))
 const SCOUT = join(REPO, 'crew/pi/agents/scout.json')
 const DOC = join(HERE, 'references/findings-shape.md')
+const CHARTER = join(REPO, 'crew/roles/reviewer.md')
 
 const TOP_KEYS = ['summary', 'findings', 'gaps']
 const FINDING_KEYS = ['claim', 'evidence', 'confidence']
@@ -72,6 +74,34 @@ test('the skill documents that shape and no other', () => {
 test('the skill names the definition it is pinned to', () => {
   assert.ok(doc.includes('crew/pi/agents/scout.json'))
   assert.ok(doc.includes('skills/pr-review/findings-shape.test.mjs'))
+})
+
+test('the skill documents the reviewer finding disposition', () => {
+  const enumLine = '`auto-fix` · `ask-user` · `no-op`'
+  assert.equal(doc.includes(enumLine), true)
+  const values = [...enumLine.matchAll(/`([^`]+)`/g)].map((match) => match[1])
+  assert.deepEqual(values, [...FINDING_DISPOSITIONS])
+})
+
+test('the skill and the reviewer charter agree on the disposition set', () => {
+  const charter = readFileSync(CHARTER, 'utf8')
+  const line = charter.split('\n').find((entry) => entry.includes('"disposition":'))
+  assert.ok(line)
+  const values = [...line.slice(line.indexOf(':') + 1).matchAll(/"([^"]+)"/g)].map((match) => match[1])
+  assert.deepEqual(values, [...FINDING_DISPOSITIONS])
+})
+
+test('the skill states the disposition window and the pass/must-fix refusal', () => {
+  assert.match(doc, /`disposition` field is optional in this release and required from the next/i)
+  assert.match(doc, /`pass` may\s+not carry a `must-fix`/)
+})
+
+test('the skill and the charter state the same finding-id shape', () => {
+  const charter = readFileSync(CHARTER, 'utf8')
+  const shape = String(FINDING_ID_SHAPE).slice(1, -1)
+  assert.equal(doc.includes(shape), true)
+  assert.equal(charter.includes(shape), true)
+  assert.equal(shape, '^[A-Za-z0-9_-]{1,64}$')
 })
 
 test('every worked example in the skill conforms to the shape', () => {

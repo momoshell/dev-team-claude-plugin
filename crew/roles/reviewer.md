@@ -42,6 +42,8 @@ Where one of its classes still worries you in this diff, write it as a
              "must_fix": <n>, "should_fix": <n>, "consider": <n>,
              "findings": [ { "id": "<stable within THIS review>",
                              "severity": "must-fix"|"should-fix"|"consider",
+                             "disposition": "auto-fix" | "ask-user" | "no-op",
+                             "patch": "<a unified diff, only with auto-fix>",
                              "location": "<file:line>",
                              "summary": "<the concrete failure scenario, one line>" } ] }
 
@@ -52,6 +54,46 @@ review, and must not be reused for a different finding in the same review.
 Reuse the same id across rounds only if it is literally the same finding.
 `findings` is optional: omit it and the run behaves exactly as before. The
 driver never invents an id you did not write.
+
+`auto-fix` is mechanically safe and intent-neutral (a lint slip, a dead import,
+a typo, a missing test name). Ship a `patch` with it: a unified diff the driver
+applies **without a seat**. It is applied only on a `changes-needed` verdict,
+only if the whole patch's write surface is readable and inside the plan's
+`files_in_scope`, and only after the driver has re-run the scope check, the
+validation lane and the acceptance gate against the patched tree. A patch that
+fails any of those is refused, journalled, and sent to the builder.
+
+Rename, copy, binary, quoted-path, mode-only and empty-path sections are refused
+unread, and one bad section refuses the WHOLE patch. Ship an ordinary text hunk
+or accept a builder round.
+
+`ask-user` touches behaviour or scope. Code never closes one: it goes to the
+lead as a closed decision **on either verdict**, and an unresolved one escalates
+as `review-unresolved`.
+
+`no-op` is informational; it changes nothing and demands nothing.
+
+`disposition` is OPTIONAL in this release and REQUIRED from the next — until
+then a finding without it is handled exactly as it is today. A value outside the
+closed set is read as **absent**, never guessed.
+
+Only a finding the driver ACCEPTS (unique id, severity in the closed set) can
+authorize a mechanical apply; a malformed entry is dropped, and its patch bytes
+never execute — not even under a later valid finding that shares its id.
+
+`VERDICT: pass` may never carry a `must-fix`: the driver refuses that envelope by
+shape (`verdict-findings`), re-asks, and never accepts it — on a continuation
+panel round too, where the refusal fires before any partner is assigned. A
+refused envelope's own dispositions are **not** executed: refusal is not partial
+execution.
+
+Each `id` is yours to mint (for example, `RV1-1`), must be unique within this
+review, and must match `^[A-Za-z0-9_-]{1,64}$`. The driver interpolates it into a
+patch artifact FILENAME, so an id outside that set is refused by shape
+(`finding-id`), re-asked, and **never rewritten and never truncated** — a
+truncated id is a collision, and two findings sharing one artifact path is
+worse than a refusal. `RV1-1` and `panel-class-3` are inside it; `../x`, an id
+carrying a space, and a 1,000-character id are not.
 
 ## Gate triage
 

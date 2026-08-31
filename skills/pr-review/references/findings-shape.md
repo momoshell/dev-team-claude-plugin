@@ -23,11 +23,30 @@ so neither side can move to match the other without a deliberate edit to the
 check. If the check goes red, read both sources, decide which side is right, and
 change the check last.
 
-The reviewer envelope's finding is a different object —
-`{id, severity, location, summary}` at `crew/roles/reviewer.md:37-42` and
-optional at `crew/roles/reviewer.md:49`. Never fill one shape with the other's
-keys. The scout shape is for one narrow, cited answer; the reviewer shape is the
-optional finding entry in a review envelope.
+The reviewer envelope's finding is a different object — `{id, severity,
+location, summary, disposition, patch}` — declared in the reviewer's `## Envelope
+details fields` section. Never fill one shape with the other's keys. The scout
+shape is for one narrow, cited answer; the reviewer shape is the optional finding
+entry in a review envelope.
+
+The disposition set is exactly: `auto-fix` · `ask-user` · `no-op`
+
+- `auto-fix` is mechanically safe and intent-neutral. A `patch` rides with
+  `auto-fix` only; the driver applies that unified diff with no seat, and refuses
+  it when its whole write surface is unreadable or outside `files_in_scope`.
+- `ask-user` touches behaviour or scope. It goes to the lead as a closed decision
+  on either verdict; unresolved findings escalate as `review-unresolved`.
+- `no-op` is informational: it changes nothing and demands nothing.
+
+The `disposition` field is optional in this release and required from the next;
+until then a finding without it is handled exactly as it is today. A `pass` may
+not carry a `must-fix`: the driver refuses that envelope by shape and re-asks it.
+Only an accepted finding can authorize a mechanical apply; malformed entries are
+dropped and their patch bytes never execute.
+
+A finding `id` must match `^[A-Za-z0-9_-]{1,64}$` because the driver turns it into
+a patch artifact filename. An id outside that set is refused rather than
+rewritten or truncated.
 
 When filling this shape, `evidence` is a `file:line` that you actually read.
 `verified` means you read that location this round. `assumed` means the claim was

@@ -475,6 +475,7 @@ function buildDegradedEmitter(stderr, reason) {
     adwId: null,
     sidecar: drop(null),
     startRun: drop(undefined),
+    recordSeats: drop(undefined),
     linkRun: drop(undefined),
     phaseTransition: drop({ phase_id: null }),
     reserveSeq: drop([]),
@@ -1095,6 +1096,29 @@ function openRunInner({
     }
   }
 
+  // TRD §5.3: one row per EFFECTIVE role, recorded rather than derived. This is
+  // the seam the boot call site uses; crew/crew.mjs owns WHEN it fires and is
+  // deliberately untouched by this lane (b355 holds that file). Instrumentation is
+  // never load-bearing: a refused seat is counted and named, never thrown at the
+  // caller, and it never costs the well-formed seats beside it.
+  function recordSeats(seats) {
+    try {
+      if (!Array.isArray(seats) || seats.length === 0) return
+      emit((handle) => {
+        for (const seat of seats) {
+          if (!seat || typeof seat !== 'object') { localStats.dropped += 1; continue }
+          try { handle.recordRunSeat({ adw_id: adwId, ...seat }) } catch (err) {
+            localStats.dropped += 1
+            noteStderrOnce(`emit: recordSeats refused a seat: ${err && err.message}`)
+          }
+        }
+      })
+    } catch (err) {
+      localStats.dropped += 1
+      noteStderrOnce(`emit: recordSeats failed unexpectedly: ${err && err.message}`)
+    }
+  }
+
   function linkRun(runId, { crewDir = null } = {}) {
     try {
       if (typeof runId !== 'string' || runId.length === 0) return
@@ -1319,6 +1343,7 @@ function openRunInner({
     },
     startRun,
     linkRun,
+    recordSeats,
     phaseTransition,
     reserveSeq,
     updateSidecar,

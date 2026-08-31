@@ -9,6 +9,7 @@ import {
   CROSS_BATCH_BLIND_SPOT,
   CROSS_BATCH_UNKNOWN_PREFIX,
   baseContains,
+  baselineCacheRoot,
   batchSeatsFrom,
   BOOT_TRANSPORT,
   PANE_TRANSPORT,
@@ -37,8 +38,10 @@ import {
   crewJsonPath,
   compileLane,
   dispatchBatch,
+  factoryStateRoot,
   laneOutcome,
   main,
+  measureBatchBaseline,
   normalDeps,
   parseCliArgs,
   planWaves,
@@ -1549,6 +1552,92 @@ function cachePath(home, sha) {
   return join(home, 'factory-state', 'baselines', `${sha}.json`)
 }
 
+function directBaseline({ label, sha = 'a'.repeat(40), capacity = '1', cachedFor = null, waitOnce = false, onWait = null } = {}) {
+  const home = join(root, `slot-baseline-${label}-${Math.random().toString(36).slice(2)}`)
+  const state = join(home, 'factory-state')
+  const outDir = join(home, 'out')
+  mkdirSync(home, { recursive: true })
+  mkdirSync(outDir, { recursive: true })
+  if (cachedFor) put(cachePath(home, cachedFor), JSON.stringify({ sha: cachedFor, command: 'npm test', pass: 1, fail: 0, status: 'green' }))
+  const events = []
+  const logs = []
+  const plans = [{ lane: 'lane-a', dir: home }, { lane: 'lane-b', dir: home }]
+  const heads = new Map([['lane-a', sha], ['lane-b', sha]])
+  let clock = 1000
+  let waits = 0
+  const pool = {
+    acquire: () => {
+      events.push('acquire')
+      if (waitOnce && waits++ === 0) return { waiting: true, depth: 1 }
+      return { slot: 'suite-0', handle: { kind: 'suite', slot: 'suite-0', token: 'token', owner: 'test' } }
+    },
+    release: () => { events.push('release'); return true },
+  }
+  const deps = {
+    home,
+    env: { DEVTEAM_LEDGER_DIR: state, CREW_SUITE_SLOTS: capacity },
+    readFileSync: (path, encoding) => String(path).endsWith('/package.json')
+      ? JSON.stringify({ private: true, scripts: { test: 'npm test' } })
+      : readFileSync(path, encoding || 'utf8'),
+    now: () => clock,
+    sleep: (ms) => {
+      clock += ms
+      if (onWait) onWait({ home, state, sha })
+    },
+    slots: () => pool,
+    spawn: (call) => {
+      events.push('spawn')
+      const args = (call.args || []).map(String)
+      const path = args[args.indexOf('--measure-baseline') + 1]
+      put(path, JSON.stringify({ sha, command: 'npm test', pass: 2, fail: 0, status: 'green' }))
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    log: (line) => logs.push(String(line)),
+  }
+  const result = measureBatchBaseline({ plans, outDir, checkout: home, heads, deps })
+  return { result, events, logs, home, state, outDir }
+}
+
+test('measureBatchBaseline acquires before measurement and releases after it', () => {
+  const run = directBaseline({ label: 'ordered' })
+  assert.equal(run.result, join(run.outDir, 'batch-baseline.json'))
+  assert.deepEqual(run.events, ['acquire', 'spawn', 'release'])
+})
+
+test('measureBatchBaseline rechecks the cache after waiting for a slot', () => {
+  const sha = 'a'.repeat(40)
+  const run = directBaseline({
+    label: 'queued-recheck', waitOnce: true,
+    onWait: ({ state }) => put(join(state, 'baselines', `${sha}.json`), JSON.stringify({ sha, command: 'npm test', pass: 3, fail: 0, status: 'green' })),
+  })
+  assert.equal(run.result, cachePath(run.home, sha))
+  assert.equal(run.events.includes('spawn'), false)
+  assert.equal(run.events.at(-1), 'release')
+  assert.equal(run.logs.filter((line) => /dispatch-batch: suite slots: K=1, waited \d+s behind 1/.test(line)).length, 1)
+})
+
+test('measureBatchBaseline still measures a sha with no cache record', () => {
+  const run = directBaseline({ label: 'other-sha-cache', cachedFor: 'b'.repeat(40) })
+  assert.equal(run.events.filter((event) => event === 'spawn').length, 1)
+  assert.equal(run.result, join(run.outDir, 'batch-baseline.json'))
+})
+
+test('measureBatchBaseline preserves the unslotted path when slots are disabled', () => {
+  const run = directBaseline({ label: 'disabled', capacity: '0' })
+  assert.equal(run.result, join(run.outDir, 'batch-baseline.json'))
+  assert.deepEqual(run.events, ['spawn'])
+  assert.equal(run.logs.some((line) => line.includes('suite slots:')), false)
+})
+
+test('factoryStateRoot is relocatable and baselineCacheRoot keeps its suffix', () => {
+  const relocated = join(root, 'relocated-state')
+  assert.equal(factoryStateRoot({ env: { DEVTEAM_LEDGER_DIR: relocated }, home: '/tmp/nope' }), relocated)
+  const fallback = join(root, 'fallback-home')
+  const deps = { env: {}, home: fallback }
+  assert.equal(factoryStateRoot(deps), join(fallback, '.dev-team', 'factory'))
+  assert.equal(baselineCacheRoot(deps), join(fallback, '.dev-team', 'factory', 'baselines'))
+})
+
 test('a four-lane batch measures the baseline once', async () => {
   const names = ['lane-a', 'lane-b', 'lane-c', 'lane-d']
   const result = await fakedDispatch({ label: 'four', names, shaFor: () => 'a'.repeat(40) })
@@ -1968,7 +2057,7 @@ test('a dispatch over a checkout with pinned files unrelated to the batch still 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['assertQuiet', 'env', 'existsSync', 'home', 'log', 'readFileSync', 'readdirSync', 'spawn', 'spawnAsync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['assertQuiet', 'env', 'existsSync', 'home', 'log', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync'])
 })
 
 test('compileLane discovers reads once and compiles once', async () => {

@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet } from './host-load.mjs'
+import { LOAD_ENV, loadPolicy, hostLoad, assertHostQuiet, slotPolicy, withSuiteSlot } from './host-load.mjs'
 
 test('loadPolicy is opt-in and strictly validates a positive finite threshold', () => {
   assert.deepEqual(LOAD_ENV, { threshold: 'CREW_LOAD_THRESHOLD' })
@@ -74,4 +74,112 @@ test('saturated host refusal names measured load, basis, threshold, and remediat
     assert.match(err.message, /wait for the host|seat fewer roles|unset CREW_LOAD_THRESHOLD/)
     return true
   })
+})
+
+test('slotPolicy delegates capacity resolution and preserves its throw rule', () => {
+  assert.equal(slotPolicy({ env: { CREW_SUITE_SLOTS: '0' }, cpus: () => new Array(48).fill({}) }), null)
+  assert.deepEqual(slotPolicy({ env: { CREW_SUITE_SLOTS: '3' }, cpus: () => [] }), { capacity: 3 })
+  assert.deepEqual(slotPolicy({ env: {}, cpus: () => new Array(17).fill({}) }), { capacity: 2 })
+  assert.deepEqual(slotPolicy({ env: {}, cpus: () => new Array(48).fill({}) }), { capacity: 8 })
+  for (const value of ['-1', 'abc']) {
+    assert.throws(() => slotPolicy({ env: { CREW_SUITE_SLOTS: value }, cpus: () => [] }), (err) => {
+      assert.match(err.message, /CREW_SUITE_SLOTS/)
+      return true
+    })
+  }
+})
+
+test('withSuiteSlot acquires before running, releases after, and passes through the result', () => {
+  const order = []
+  const handle = { kind: 'suite', slot: 'suite-0', token: 'token', owner: 'owner' }
+  const pool = {
+    acquire: ({ owner }) => { order.push(`acquire:${owner}`); return { slot: 'suite-0', handle } },
+    release: (released) => { order.push(`release:${released.token}`); return true },
+  }
+  const result = withSuiteSlot({
+    owner: 'owner', root: '/tmp/factory', env: { CREW_SUITE_SLOTS: '1' },
+    slots: () => pool, log: () => {},
+  }, () => { order.push('run'); return 42 })
+  assert.equal(result, 42)
+  assert.deepEqual(order, ['acquire:owner', 'run', 'release:token'])
+})
+
+test('withSuiteSlot polls and logs the last completed depth', () => {
+  const sleeps = []
+  const logs = []
+  let clock = 100
+  let attempts = 0
+  const pool = {
+    acquire: () => {
+      attempts += 1
+      if (attempts <= 2) return { waiting: true, depth: 2 }
+      return { slot: 'suite-0', handle: { kind: 'suite', slot: 'suite-0', token: 'token', owner: 'owner' } }
+    },
+    release: () => true,
+  }
+  const result = withSuiteSlot({
+    owner: 'owner', root: '/tmp/factory', env: { CREW_SUITE_SLOTS: '1' },
+    slots: () => pool, now: () => clock,
+    sleep: (ms) => { sleeps.push(ms); clock += ms }, log: (line) => logs.push(line),
+  }, () => 'done')
+  assert.equal(result, 'done')
+  assert.deepEqual(sleeps, [2000, 2000])
+  assert.equal(logs.length, 1)
+  assert.match(logs[0], /^suite slots: K=1, waited \d+s behind 2$/)
+})
+
+test('withSuiteSlot carries an unknown depth instead of flattening it to zero', () => {
+  const logs = []
+  let clock = 0
+  let attempts = 0
+  const pool = {
+    acquire: () => {
+      attempts += 1
+      return attempts === 1
+        ? { waiting: true, depth: null }
+        : { slot: 'suite-0', handle: { kind: 'suite', slot: 'suite-0', token: 'token', owner: 'owner' } }
+    },
+    release: () => true,
+  }
+  withSuiteSlot({
+    owner: 'owner', root: '/tmp/factory', env: { CREW_SUITE_SLOTS: '1' },
+    slots: () => pool, now: () => clock, sleep: (ms) => { clock += ms }, log: (line) => logs.push(line),
+  }, () => {})
+  assert.equal(logs.length, 1)
+  assert.match(logs[0], /behind unknown/)
+  assert.doesNotMatch(logs[0], /behind 0/)
+})
+
+test('withSuiteSlot gives up at the ceiling and runs unslotted without releasing', () => {
+  let clock = 0
+  let releases = 0
+  const logs = []
+  const pool = {
+    acquire: () => ({ waiting: true, depth: 1 }),
+    release: () => { releases += 1 },
+  }
+  let runs = 0
+  const result = withSuiteSlot({
+    owner: 'owner', root: '/tmp/factory', env: { CREW_SUITE_SLOTS: '1' },
+    slots: () => pool, now: () => clock,
+    sleep: (ms) => { clock += ms }, ceiling: 2000, log: (line) => logs.push(line),
+  }, () => { runs += 1; return 'unslotted' })
+  assert.equal(result, 'unslotted')
+  assert.equal(runs, 1)
+  assert.equal(releases, 0)
+  assert.equal(logs.length, 1)
+  assert.match(logs[0], /and gave up/)
+})
+
+test('withSuiteSlot does nothing when suite slots are disabled', () => {
+  let constructed = 0
+  const logs = []
+  const result = withSuiteSlot({
+    owner: 'owner', root: '/tmp/factory', env: { CREW_SUITE_SLOTS: '0' },
+    slots: () => { constructed += 1; throw new Error('pool must stay disabled') },
+    log: (line) => logs.push(line),
+  }, () => 'direct')
+  assert.equal(result, 'direct')
+  assert.equal(constructed, 0)
+  assert.deepEqual(logs, [])
 })

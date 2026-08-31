@@ -1153,8 +1153,25 @@ test('waitForEnvelope keeps seat-died accounting unchanged and never stamps miss
   assert.ok(error)
   assert.equal(error.stage, 'seat-died')
   assert.equal(error.role, 'builder')
+  assert.equal(error.reclaim, undefined)
   assert.equal(error.message, `seat died: builder — its pane is gone (${LIVENESS_MISSES_TO_DIE} consecutive liveness probes) and no envelope arrived at /tmp/return.json`)
   assert.deepEqual(aliveAt, [])
+})
+
+test('waitForEnvelope never consults a root reading and still runs its full budget', () => {
+  let clock = 0
+  let rootProbes = 0
+  const envelope = waitForEnvelope({
+    returnPath: '/tmp/return.json', timeoutS: 1200, role: 'builder',
+    readEnvelope: () => null,
+    probeSeat: () => true,
+    probeRoot: () => { rootProbes += 1 },
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+  })
+  assert.equal(envelope, null)
+  assert.equal(clock, 1_200_000)
+  assert.equal(rootProbes, 0)
 })
 
 test('emitAdapter maps only finite heartbeat timestamps to the session writer', () => {

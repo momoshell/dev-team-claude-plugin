@@ -148,7 +148,11 @@ test("#404: a PANE-seated review is attributable to the reviewing seat's boot ce
 
 test('#404: a raw --model-<role> override is recorded, not the roster cell', { skip: SKIP }, () => {
   const cell = {
-    agent: 'pi', provider: null, id: null, model: 'openai-codex/gpt-5.6-sol', effort: 'high', transport: 'pane',
+    // A model the roster does NOT seat: this test proves the raw override is
+    // recorded INSTEAD of the roster cell, so the fixture must differ from it.
+    // gpt-5.6-sol was seated at build/reviewer on 2026-08-31, which made the
+    // final assertion vacuously false; terra is catalogued but seated nowhere.
+    agent: 'pi', provider: null, id: null, model: 'openai-codex/gpt-5.6-terra', effort: 'high', transport: 'pane',
   }
   const { dbPath, adwId } = paneReviewRun(cell)
   const { DatabaseSync } = require('node:sqlite')

@@ -650,8 +650,11 @@ test('headless-json reseat applies and reaches the next assignment command', () 
   const f = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi' })
   const result = f.io.reseat('reviewer', { reason: 'lane' })
   assert.equal(result.applied, true)
-  assert.equal(result.to.effort, 'max')
-  assert.equal(f.crew.members.reviewer.effort, 'max')
+  // Derived from the roster, not pinned: a mechanical->build reviewer reseat
+  // lands on whatever build/reviewer seats, and that cell was changed on
+  // 2026-08-31 (gpt-5.6-terra/max -> gpt-5.6-sol/high).
+  assert.equal(result.to.effort, ROSTER.tiers.build.reviewer.effort)
+  assert.equal(f.crew.members.reviewer.effort, ROSTER.tiers.build.reviewer.effort)
   let spec = null
   const adapter = { headlessCommand: (received) => { spec = received; return { bin: '/bin/worker', args: [] } } }
   const hio = makeHeadlessReseatIo(f.crew, adapter, f.paths)
@@ -673,7 +676,7 @@ test('headless-rpc reseat retires the seat before it changes the cell', () => {
   const result = f.io.reseat('reviewer', { reason: 'lane' })
   assert.equal(result.applied, true)
   assert.deepEqual(calls, [{ role: 'reviewer', effort: f.source.effort }])
-  assert.equal(f.crew.members.reviewer.effort, 'max')
+  assert.equal(f.crew.members.reviewer.effort, ROSTER.tiers.build.reviewer.effort)
   assert.equal(f.logs[0].reseat.retired, true)
 })
 
@@ -744,7 +747,7 @@ test('build reviewer reseat refuses an agent change', () => {
 test('nextRung follows mechanical to build to judge and refuses missing or unknown rungs', () => {
   assert.deepEqual(nextRung(ROSTER, 'mechanical', 'reviewer'), {
     rung: 'mechanical→build',
-    cell: { provider: 'openai', id: 'gpt-5.6-terra', effort: 'max', agent: 'pi' },
+    cell: { provider: 'openai', id: 'gpt-5.6-sol', effort: 'high', agent: 'pi' },
   })
   assert.equal(nextRung(ROSTER, 'build', 'reviewer').rung, 'build→judge')
   assert.equal(nextRung(ROSTER, 'judge', 'reviewer'), null)
@@ -776,7 +779,7 @@ test('reseat translates through injected and run-path adapters and persists the 
   const translated = makeTierFixture({ role: 'reviewer', tier: 'mechanical', transport: 'headless-json', agent: 'pi', adapter: { modelString: ({ id }) => `X:${id}` } })
   const first = translated.io.reseat('reviewer')
   assert.equal(first.applied, true)
-  assert.equal(translated.crew.members.reviewer.model, 'X:gpt-5.6-terra')
+  assert.equal(translated.crew.members.reviewer.model, `X:${ROSTER.tiers.build.reviewer.id}`)
 
   const expected = resolveSeatModels(
     { reviewer: ROSTER.tiers.build.reviewer },
@@ -787,7 +790,10 @@ test('reseat translates through injected and run-path adapters and persists the 
   assert.equal(second.applied, true)
   assert.equal(second.to.model, expected)
   assert.equal(runPath.crew.members.reviewer.model, expected)
-  assert.notEqual(runPath.crew.members.reviewer.model, 'gpt-5.6-terra')
+  // The untranslated bare id, not a hardcoded model: reseat must persist the
+  // adapter's translation, and naming a model the roster no longer seats would
+  // make this vacuous (gpt-5.6-terra was reseated off build/reviewer 2026-08-31).
+  assert.notEqual(runPath.crew.members.reviewer.model, ROSTER.tiers.build.reviewer.id)
 })
 
 test('reseat refuses when no adapter can translate the next cell', () => {

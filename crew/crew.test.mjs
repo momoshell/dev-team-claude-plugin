@@ -4261,8 +4261,8 @@ test('resolveSeatModels: an agent-only override keeps the roster cell and transl
     agent: 'claude',
     effort: roster.tiers.build.reviewer.effort,
     provider: 'openai',
-    id: 'gpt-5.6-terra',
-    model: 'gpt-5.6-terra',
+    id: 'gpt-5.6-sol',
+    model: 'gpt-5.6-sol',
   })
 })
 
@@ -4277,7 +4277,7 @@ test('resolveSeatModels end to end through the REAL adapters, on the real roster
   }
   const out = resolveSeatModels(seats, adapters)
   assert.equal(out.builder.model, 'openai-codex/gpt-5.6-luna')
-  assert.equal(out.reviewer.model, 'openai-codex/gpt-5.6-terra')
+  assert.equal(out.reviewer.model, 'openai-codex/gpt-5.6-sol')
   // Tracks the LIVE roster cell (planning floor, ratified 2026-08-13: the
   // planner seat is opus-grade at EVERY tier — never sonnet/haiku/luna).
   assert.equal(out.planner.model, 'claude-opus-5')
@@ -6009,9 +6009,15 @@ test('shadowPick applies the ratified reviewer vendor partner for build and judg
   const buildEntry = shadowPick({ roster, tier: 'build', seats: build.seats, sources: build.sources, ladder, breaker: null }).seats.reviewer
   const judgeEntry = shadowPick({ roster, tier: 'judge', seats: judge.seats, sources: judge.sources, ladder, breaker: null }).seats.reviewer
   const buildOpus = buildEntry.candidates.find((candidate) => candidate.provider === 'anthropic')
-  const judgeTerra = judgeEntry.candidates.find((candidate) => candidate.provider === 'openai' && candidate.id === 'gpt-5.6-terra')
+  // Look the collision up by VENDOR, never by a model id: the rule is about the
+  // partner's vendor, and pinning an id made this test fail when the roster
+  // reseated build/reviewer off gpt-5.6-terra (2026-08-31) even though the rule
+  // still held. build's partner is the anthropic planner; judge's is the openai
+  // tech-lead, so each tier excludes the OTHER seat's vendor.
+  const judgeSameVendor = judgeEntry.candidates.find((candidate) => candidate.provider === 'openai')
   assert.equal(buildOpus.excluded_by.reason, 'vendor-collision')
-  assert.equal(judgeTerra.excluded_by.reason, 'vendor-collision')
+  assert.equal(judgeSameVendor.excluded_by.reason, 'vendor-collision')
+  assert.equal(judgeEntry.candidates.some((candidate) => candidate.provider === 'anthropic' && !candidate.excluded_by), true)
 })
 
 test('shadowPick excludes open breaker cells and marks absent breaker health as unmeasured', () => {

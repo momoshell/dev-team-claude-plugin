@@ -26,8 +26,10 @@ import {
 } from 'node:fs'
 import { homedir, loadavg as osLoadavg, cpus as osCpus } from 'node:os'
 import { join } from 'node:path'
-import { LIVENESS_PROBE_MS } from '../../crew/seat-io.mjs'
+import { LIVENESS_PROBE_MS, SEAT_LIVENESS_EVENT } from '../../crew/seat-io.mjs'
 import { defaultDbPath, openLedger } from './ledger.mjs'
+
+export { SEAT_LIVENESS_EVENT }
 
 export const NOTE_KINDS = Object.freeze(['silent-lane', 'host-load', 'final-round', 'driver-gone'])
 export const WATCH_EVENT = 'lane-watch'
@@ -96,7 +98,7 @@ export function journalAt(value) {
 export function readJournal(path, deps = {}) {
   const d = normalDeps(deps)
   let text = ''
-  try { text = d.readFileSync(path, 'utf8') } catch { return { lines: [], lastActivityAt: null, lastStage: null, limits: null, notes: [] } }
+  try { text = d.readFileSync(path, 'utf8') } catch { return { lines: [], lastActivityAt: null, lastStage: null, limits: null, waits: null, liveness: [], notes: [] } }
   const lines = []
   for (const raw of text.split('\n')) {
     if (!raw.trim()) continue
@@ -105,17 +107,27 @@ export function readJournal(path, deps = {}) {
   let lastActivityAt = null
   let lastStage = null
   let limits = null
+  let waits = null
+  const liveness = []
   const notes = []
   for (const line of lines) {
     if (line.event === WATCH_EVENT) { notes.push(line); continue }
+    if (line.event === SEAT_LIVENESS_EVENT) {
+      liveness.push(line)
+      // A probed-no-growth reading is proof the PROBE ran, never proof the LANE
+      // advanced. Counting it as activity would silence silenceNote for a wedged
+      // lane whose driver is still politely probing it.
+      if (line.growth !== true) continue
+    }
     const at = journalAt(line.at)
     // The watchdog must never count its OWN notes as lane activity, or it
     // silences itself after the first pass.
     if (at !== null && (lastActivityAt === null || at > lastActivityAt)) lastActivityAt = at
     if (typeof line.stage === 'string') lastStage = line.stage
     if (line.event === 'limits') limits = line
+    if (line.event === 'waits') waits = line
   }
-  return { lines, lastActivityAt, lastStage, limits, notes }
+  return { lines, lastActivityAt, lastStage, limits, waits, liveness, notes }
 }
 
 export function latestArtifactMs(taskDir, deps = {}) {
@@ -209,6 +221,34 @@ export function laneActive(lane, journal) {
 export const HEARTBEAT_PERIOD_MS = LIVENESS_PROBE_MS
 // TWO periods: one missed beat is a scheduling hiccup, two is silence.
 export const DRIVER_GONE_PERIODS = 2
+
+// The run's LONGEST configured seat wait, in ms, or null when the run recorded
+// none. Read off the journal's `waits` line (crew/crew.mjs:2041) rather than
+// imported from crew/drive.mjs: the recorded value is the EFFECTIVE budget,
+// flag or default, and it is what the seat was actually given.
+export function seatWaitCeilingMs(journal) {
+  const row = journal?.waits
+  if (!row || typeof row !== 'object') return null
+  let max = null
+  for (const [key, value] of Object.entries(row)) {
+    if (key === 'at' || key === 'event' || key === 'source' || key === 'channel') continue
+    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) continue
+    if (max === null || value > max) max = value
+  }
+  return max === null ? null : max * 1000
+}
+
+// #813: a seat whose configured wait is 1800s cannot be judged silent at 60s.
+// The threshold is the longest wait the driver may legitimately sit inside,
+// PLUS the two-period floor, and its ORIGIN is named rather than inferred —
+// the same posture resolveTunables takes at :47.
+export function driverGoneThresholdMs(journal) {
+  const floor = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  const ceiling = seatWaitCeilingMs(journal)
+  if (ceiling === null) return { ms: floor, origin: 'default' }
+  return { ms: Math.max(floor, ceiling + floor), origin: 'waits' }
+}
+
 export const DRIVER_RUNNING = 'running'
 export const DRIVER_GONE = 'driver-gone'
 export const DRIVER_EXITED = 'exited'
@@ -292,28 +332,30 @@ export function driverGone(lane, journal, ledger) {
   const beat = journalAt(session.last_heartbeat_at)
   if (beat === null) return false                    // never measured (#297)
   if (!Number.isFinite(ledger.now)) return false
-  return ledger.now - beat >= DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  const threshold = driverGoneThresholdMs(journal).ms
+  return ledger.now - beat >= threshold
 }
 
 export function driverState(lane, journal, ledger) {
-  if (!laneActive(lane, journal)) return { state: null, heartbeat_age_ms: null }
+  const threshold = driverGoneThresholdMs(journal)
+  if (!laneActive(lane, journal)) return { state: null, heartbeat_age_ms: null, stale_after_ms: null, threshold_origin: null }
   const terminal = ledger?.terminal
   const session = ledger?.session
   // A terminal frame is positive evidence that this run's driver exited even
   // when the read-only ledger is missing or degraded.
   if (session == null) {
     return terminal != null
-      ? { state: DRIVER_EXITED, heartbeat_age_ms: null }
-      : { state: DRIVER_UNKNOWN, heartbeat_age_ms: null }
+      ? { state: DRIVER_EXITED, heartbeat_age_ms: null, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
+      : { state: DRIVER_UNKNOWN, heartbeat_age_ms: null, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
   }
   const beat = journalAt(session.last_heartbeat_at)
   const age = beat === null || !Number.isFinite(ledger.now) ? null : ledger.now - beat
   // It is not a fresh liveness observation, so never fold terminal evidence
   // back into `running`.
-  if (terminal != null) return { state: DRIVER_EXITED, heartbeat_age_ms: age }
-  if (age === null) return { state: DRIVER_UNKNOWN, heartbeat_age_ms: null }
-  if (driverGone(lane, journal, ledger)) return { state: DRIVER_GONE, heartbeat_age_ms: age }
-  return { state: DRIVER_RUNNING, heartbeat_age_ms: age }
+  if (terminal != null) return { state: DRIVER_EXITED, heartbeat_age_ms: age, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
+  if (age === null) return { state: DRIVER_UNKNOWN, heartbeat_age_ms: null, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
+  if (driverGone(lane, journal, ledger)) return { state: DRIVER_GONE, heartbeat_age_ms: age, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
+  return { state: DRIVER_RUNNING, heartbeat_age_ms: age, stale_after_ms: threshold.ms, threshold_origin: threshold.origin }
 }
 
 export function hostLoad({ threshold, deps = {} } = {}) {
@@ -407,7 +449,8 @@ export function watchPass({ root, now, silenceS, loadThreshold, deps = {} } = {}
       laneNotes.push({
         note: 'driver-gone',
         heartbeat_age_s: Math.max(0, Math.floor(driver.heartbeat_age_ms / 1000)),
-        threshold_s: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS / 1000,
+        threshold_s: Math.round(driver.stale_after_ms / 1000),
+        threshold_origin: driver.threshold_origin,
         last_stage: journal.lastStage,
       })
     } else if (driver.state !== DRIVER_EXITED) {

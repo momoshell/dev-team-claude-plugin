@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
-  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
@@ -160,6 +160,8 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='seat-teardown'", 'at ...seat'],
   ['operationalRow', "event='seat-teardown-record-failed'", 'at role outcome reason'],
   ['operationalRow', "event='seat-teardown-sweep'", 'at ...summary'],
+  ['operationalRow', '', 'at event role transport growth probed_at_ms latest_ms source'],
+  ['operationalRow', '', 'at event role transport growth probed_at_ms latest_ms source'],
   ['recordRow', "event='seat-refusal'", "role id member source message at outcome ...(frame.member === 'overflowed' ? { news: 'first-occurrence' } : {}) ...extra"],
   ['operationalRow', "event='seat-retrying'", 'at role id attempt of retry_in_s condition source'],
   ['operationalRow', "event='seat-retry-cleared'", 'at role id source'],
@@ -183,10 +185,10 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 29)
+  assert.equal(sites.length, 31)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 23)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 25)
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
 })
 
@@ -2214,6 +2216,103 @@ function withTranscriptSeat({ start = 0, timeoutS = 2000, transcriptPaths, statS
     return body({ io, paths, logs, events, env, assignment, clock: () => clock })
   } finally { rmSync(root, { recursive: true, force: true }) }
 }
+
+function streamFile(taskDir, runId, mtimeMs) {
+  const dir = join(taskDir, 'headless', runId)
+  mkdirSync(dir, { recursive: true })
+  const path = join(dir, 'stream.jsonl')
+  writeFileSync(path, '{"type":"assistant"}\n')
+  const seconds = mtimeMs / 1000
+  utimesSync(path, seconds, seconds)
+  return path
+}
+
+function runHeadlessLiveness({ ticks = [], role = 'builder' } = {}) {
+  const root = scratchDir('seat-headless-liveness-')
+  const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
+  mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
+  const logs = []; const beats = []
+  const envelope = { assignment_id: 'd1', role, status: 'done' }
+  const transportFactory = ({ deps }) => ({
+    assign(spec) {
+      const id = spec.reask?.id || 'd1'
+      const returnPath = spec.reask?.returnPath || join(paths.returnsDir, `${id}.${role}.json`)
+      return { id, returnPath }
+    },
+    wait() {
+      for (const tick of ticks) {
+        tick({ paths, taskDir: paths.taskDir })
+        deps.sleep(1)
+      }
+      return envelope
+    },
+  })
+  const emitter = {
+    adwId: 'seat-headless-liveness',
+    emit: (fn) => fn({ heartbeat: (row) => { beats.push(row); return row }, recordEvent: () => ({}) }, () => 1),
+    phaseTransition: () => ({ phase_id: null }),
+  }
+  const crew = { claude_bin: '/nonexistent/claude', members: { [role]: { transport: HEADLESS_TRANSPORT, agent: 'claude', model: 'test-model' } } }
+  let clock = 1_600_000_000_000
+  const io = seatIo(crew, paths, root, emitter, null, {}, {
+    headlessIo: transportFactory,
+    resolveWorkerBin: () => '/nonexistent/claude',
+    now: () => { clock += 1_000; return clock },
+    sleep: () => {},
+    logLine: (_path, row) => logs.push(row),
+  })
+  const assignment = io.assign({ role, briefFile: join(paths.taskDir, 'brief.md') })
+  const returned = io.wait(assignment.returnPath, 30)
+  return { paths, logs, beats, returned, envelope, clock }
+}
+
+test('a headless seat whose stream exists but never grows records one no-growth observation and no heartbeat', () => {
+  const base = 1_700_000_000_000
+  const run = runHeadlessLiveness({ ticks: [
+    ({ taskDir }) => streamFile(taskDir, 'd1', base),
+    () => {},
+    () => {},
+  ] })
+  assert.deepEqual(run.returned, run.envelope)
+  const observations = run.logs.filter((row) => row.event === SEAT_LIVENESS_EVENT)
+  assert.equal(observations.length, 1)
+  assert.equal(observations[0].growth, false)
+  assert.equal(Number.isFinite(observations[0].probed_at_ms), true)
+  assert.equal(observations[0].latest_ms, base)
+  assert.deepEqual(run.beats, [])
+})
+
+test('a headless seat with no readable stream records no liveness observation', () => {
+  const run = runHeadlessLiveness({ ticks: [() => {}, () => {}, () => {}] })
+  assert.deepEqual(run.returned, run.envelope)
+  assert.deepEqual(run.logs.filter((row) => row.event === SEAT_LIVENESS_EVENT), [])
+  assert.deepEqual(run.beats, [])
+})
+
+test('a growing headless seat records the mtime as growth and emits its heartbeat', () => {
+  const base = 1_700_100_000_000
+  const grown = base + 45_000
+  let path = null
+  const run = runHeadlessLiveness({ ticks: [
+    ({ taskDir }) => { path = streamFile(taskDir, 'd1', base) },
+    () => { const seconds = grown / 1000; utimesSync(path, seconds, seconds) },
+  ] })
+  assert.deepEqual(run.returned, run.envelope)
+  const observations = run.logs.filter((row) => row.event === SEAT_LIVENESS_EVENT)
+  assert.equal(observations.filter((row) => row.growth === true).length, 1)
+  const growth = observations.find((row) => row.growth === true)
+  assert.equal(growth.at, new Date(grown).toISOString())
+  assert.equal(growth.latest_ms, grown)
+  assert.equal(Number.isFinite(growth.probed_at_ms), true)
+  assert.deepEqual(run.beats, [{ adw_id: 'seat-headless-liveness', target: 'session', at: grown }])
+})
+
+test("a pane seat records no seat-liveness observation", () => {
+  withTranscriptSeat({ timeoutS: 30, envelopeAt: 30_000 }, ({ env, logs }) => {
+    assert.deepEqual(env, { status: 'done' })
+    assert.deepEqual(logs.filter((row) => row.event === SEAT_LIVENESS_EVENT), [])
+  })
+})
 
 test('waitForEnvelope consumes an envelope written at the deadline and times out after it', () => {
   withTranscriptSeat({ timeoutS: 30, envelopeAt: 30_000 }, ({ env, events }) => {

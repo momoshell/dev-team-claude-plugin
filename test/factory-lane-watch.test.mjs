@@ -9,8 +9,10 @@ import {
   archivedLanes,
   discoverLanes,
   driverGone,
+  driverGoneThresholdMs,
   driverState,
   DRIVER_EXITED,
+  DRIVER_RUNNING,
   DRIVER_GONE_PERIODS,
   HEARTBEAT_PERIOD_MS,
   hostLoad,
@@ -19,13 +21,15 @@ import {
   readJournal,
   readLaneSession,
   resolveTunables,
+  seatWaitCeilingMs,
   runLogTerminal,
   watchPass,
   WATCH_DEFAULTS,
+  SEAT_LIVENESS_EVENT,
 } from '../scripts/factory/lane-watch.mjs'
 import { LIVENESS_PROBE_MS } from '../crew/seat-io.mjs'
 import { openLedger } from '../scripts/factory/ledger.mjs'
-import { makeSeedLane } from './helpers.mjs'
+import { makeSeedLane, scratchDir } from './helpers.mjs'
 
 const fixtureRoot = mkdtempSync(join(tmpdir(), 'factory-lane-watch-'))
 const NOW = Date.parse('2026-08-19T18:00:00.000Z')
@@ -43,6 +47,17 @@ function iso(msAgo) {
   return new Date(NOW - msAgo).toISOString()
 }
 
+const WAITS_LINE = {
+  at: iso(3_600_000),
+  event: 'waits',
+  planner: 1800,
+  'tech-lead': 1500,
+  builder: 2400,
+  reviewer: 1800,
+  lead: 900,
+  source: { planner: 'default', 'tech-lead': 'default', builder: 'default', reviewer: 'default', lead: 'default' },
+}
+
 function world() {
   const root = join(fixtureRoot, `world-${++worldNumber}`)
   mkdirSync(root, { recursive: true })
@@ -58,6 +73,18 @@ function limits(plan = 4, build = 5, review = 3) {
     review_rounds: review,
     source: { plan_rounds: 'flag', build_rounds: 'flag', review_rounds: 'default' },
   }
+}
+
+function journalFixture(lines) {
+  const dir = scratchDir('factory-lane-watch-journal-')
+  const path = join(dir, 'journal.jsonl')
+  writeFileSync(path, `${lines.map((line) => JSON.stringify(line)).join('\n')}\n`)
+  return { dir, path, lane: { id: 'repo/lane', repo: 'repo', task: 'lane', dir, journal: path, taskDir: join(dir, 'task'), settled: false, archived: false } }
+}
+
+function readLane(lines) {
+  const fx = journalFixture(lines)
+  return { ...fx, journal: readJournal(fx.path) }
 }
 
 function pass(root, extra = {}) {
@@ -434,13 +461,81 @@ test('driverState distinguishes unknown, running and driver-gone with measured a
   const seeded = seedLane(root, { task: 'driver-state', journalLines: [{ at: NOW - 5_000, stage: 'build:r1' }] })
   const lane = { ...seeded, id: 'dt-demo/driver-state', repo: 'dt-demo', task: 'driver-state', settled: false }
   const journal = readJournal(lane.journal)
-  assert.deepEqual(driverState(lane, journal, { session: null, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null })
-  assert.deepEqual(driverState(lane, journal, { session: null, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(5_000) }, terminal: null, now: NOW }), { state: 'running', heartbeat_age_ms: 5_000 })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }), { state: 'driver-gone', heartbeat_age_ms: 61_000 })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: 61_000 })
-  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null })
+  const threshold = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  const defaults = { stale_after_ms: threshold, threshold_origin: 'default' }
+  assert.deepEqual(driverState(lane, journal, { session: null, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null, ...defaults })
+  assert.deepEqual(driverState(lane, journal, { session: null, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null, ...defaults })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: null, now: NOW }), { state: 'unknown', heartbeat_age_ms: null, ...defaults })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(5_000) }, terminal: null, now: NOW }), { state: 'running', heartbeat_age_ms: 5_000, ...defaults })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: null, now: NOW }), { state: 'driver-gone', heartbeat_age_ms: 61_000, ...defaults })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: iso(61_000) }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: 61_000, ...defaults })
+  assert.deepEqual(driverState(lane, journal, { session: { ended_at: null, last_heartbeat_at: null }, terminal: 'exited', now: NOW }), { state: DRIVER_EXITED, heartbeat_age_ms: null, ...defaults })
+})
+
+test('seat wait ceilings and driver-gone thresholds use recorded waits with a default floor', () => {
+  const floor = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+  assert.equal(seatWaitCeilingMs({}), null)
+  const noWaits = readLane([{ at: iso(3_600_000), stage: 'build:r1' }])
+  assert.equal(seatWaitCeilingMs(noWaits.journal), null)
+  assert.deepEqual(driverGoneThresholdMs(noWaits.journal), { ms: floor, origin: 'default' })
+
+  const waits = readLane([{ at: iso(3_600_000), stage: 'build:r1' }, WAITS_LINE])
+  assert.equal(seatWaitCeilingMs(waits.journal), 2_400_000)
+  assert.deepEqual(driverGoneThresholdMs(waits.journal), { ms: 2_460_000, origin: 'waits' })
+
+  const running = driverState(waits.lane, waits.journal, {
+    now: NOW,
+    terminal: null,
+    session: { ended_at: null, last_heartbeat_at: NOW - 60_000 },
+  })
+  assert.equal(running.state, DRIVER_RUNNING)
+  assert.equal(running.stale_after_ms, 2_460_000)
+  assert.equal(running.threshold_origin, 'waits')
+  assert.deepEqual(waits.journal.waits, WAITS_LINE)
+})
+
+test('a run with recorded waits stays running at the floor and trips past its own threshold', () => {
+  const { journal, lane } = readLane([{ at: iso(3_600_000), stage: 'build:r1' }, WAITS_LINE])
+  const threshold = driverGoneThresholdMs(journal).ms
+  const atFloor = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: NOW - (DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS) } }
+  assert.equal(driverState(lane, journal, atFloor).state, DRIVER_RUNNING)
+  const beyond = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: NOW - threshold - 1 } }
+  assert.equal(driverState(lane, journal, beyond).state, 'driver-gone')
+  assert.equal(driverGone(lane, journal, beyond), true)
+})
+
+test('readJournal replays liveness observations and growth alone controls activity', () => {
+  const observed = [
+    { at: iso(200_000), event: SEAT_LIVENESS_EVENT, role: 'builder', growth: false, probed_at_ms: NOW - 200_000, latest_ms: NOW - 900_000 },
+    { at: iso(100_000), event: SEAT_LIVENESS_EVENT, role: 'builder', growth: true, probed_at_ms: NOW - 100_000, latest_ms: NOW - 100_000 },
+  ]
+  const replay = readLane([{ at: iso(3_600_000), stage: 'build:r1' }, ...observed])
+  assert.deepEqual(replay.journal.liveness, observed)
+
+  const quiet = readLane([
+    { at: iso(3_600_000), stage: 'build:r1' },
+    { at: iso(10_000), event: SEAT_LIVENESS_EVENT, role: 'builder', growth: false, probed_at_ms: NOW - 10_000, latest_ms: NOW - 3_600_000 },
+  ])
+  const busy = readLane([
+    { at: iso(3_600_000), stage: 'build:r1' },
+    { at: iso(10_000), event: SEAT_LIVENESS_EVENT, role: 'builder', growth: true, probed_at_ms: NOW - 10_000, latest_ms: NOW - 10_000 },
+  ])
+  assert.equal(quiet.journal.lastActivityAt, NOW - 3_600_000)
+  assert.equal(busy.journal.lastActivityAt, NOW - 10_000)
+})
+
+test('watchPass reports a driver-gone threshold derived from the waits line', () => {
+  const root = world()
+  const lane = seedLane(root, {
+    task: 'scaled-driver-gone-note',
+    journalLines: [{ at: NOW - 3_600_000, stage: 'build:r1' }, WAITS_LINE],
+    artifacts: [{ name: 'plan.md', ageS: 800 }],
+  })
+  const result = pass(root, { deps: { readSession: () => ({ ended_at: null, last_heartbeat_at: iso(2_460_001) }) } })
+  const note = result.notes.find((entry) => entry.note === 'driver-gone')
+  assert.equal(note.threshold_s, 2_460)
+  assert.equal(note.threshold_origin, 'waits')
+  assert.equal(notesFor(lane.journal, 'driver-gone')[0].threshold_s, 2_460)
 })
 
 test('a headless lane reaches driver-gone only after two heartbeat periods', () => {
@@ -473,7 +568,10 @@ test('a headless lane with no measured heartbeat stays unknown and never driver-
   const lane = { ...seeded, id: 'dt-demo/headless-unmeasured', repo: 'dt-demo', task: 'headless-unmeasured', transport: 'headless-json', settled: false }
   const journal = readJournal(lane.journal)
   const ledger = { now: NOW, terminal: null, session: { ended_at: null, last_heartbeat_at: null } }
-  assert.deepEqual(driverState(lane, journal, ledger), { state: 'unknown', heartbeat_age_ms: null })
+  assert.deepEqual(driverState(lane, journal, ledger), {
+    state: 'unknown', heartbeat_age_ms: null,
+    stale_after_ms: DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS, threshold_origin: 'default',
+  })
   assert.equal(driverGone(lane, journal, ledger), false)
 })
 

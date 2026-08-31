@@ -36,6 +36,10 @@ export const HEADLESS_TRANSPORT = 'headless-json'
 export const HEADLESS_RPC_TRANSPORT = 'headless-rpc'
 export const WAIT_POLL_MS = 5000
 export const LIVENESS_PROBE_MS = 30_000
+// #813: the journal vocabulary for one liveness OBSERVATION. Owned here
+// because seat-io is what measures it; scripts/factory/lane-watch.mjs
+// imports it exactly as it imports LIVENESS_PROBE_MS above.
+export const SEAT_LIVENESS_EVENT = 'seat-liveness'
 export const LIVENESS_MISSES_TO_DIE = 2
 // Every gate, baseline, repair, validation lane and full suite reaches the
 // shell through io.run below. Node's spawnSync default maxBuffer is 1 MiB, and
@@ -2081,27 +2085,40 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // life. deps.sleep is the ONE owned seam inside those synchronous poll loops. The
   // measurement is transcript GROWTH and the stamp is the observation's OWN mtime:
   // never now(), never a fallback clock.
-  const headlessWatch = { info: null, last: null, waitContext: null }
+  const headlessWatch = { info: null, last: null, noted: null, waitContext: null }
   const withHeadlessWatch = (info, run, waitContext = null) => {
     headlessWatch.info = info ?? null
     headlessWatch.last = null
+    headlessWatch.noted = null
     headlessWatch.waitContext = waitContext
-    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null; headlessWatch.waitContext = null }
+    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null; headlessWatch.noted = null; headlessWatch.waitContext = null }
   }
   const sampleHeadlessGrowth = () => {
     const info = headlessWatch.info
     if (!info) return
     const reading = transcriptGrowth(headlessStreamPaths({ taskDir: paths.taskDir, role: info.role, transport: info.transport, deps }), deps)
     // A seat with no readable stream file measured NOTHING. A null beats a value
-    // nobody measured (#297) — never now(), never a fallback clock.
+    // nobody measured (#297) — never now(), never a fallback clock. Silence in
+    // the journal therefore means "nothing probed", and nothing else (#813).
     const latest = Number.isFinite(reading) ? reading : null
     if (latest === null) return
-    // No PREVIOUS sample is not a measurement of growth: seed the baseline and
-    // stamp nothing. A first reading is a reading, not an advance.
-    if (headlessWatch.last === null) { headlessWatch.last = latest; return }
-    if (!(latest > headlessWatch.last)) return
-    headlessWatch.last = latest
-    try { io.emit?.({ kind: 'heartbeat', at: latest, role: info.role ?? null }) } catch { /* the ledger is never load-bearing for a wait */ }
+    const probedAt = now()
+    // GROWTH: the observation's own timestamp is the mtime, exactly as #777
+    // requires, and it is the ONE measured-liveness ledger write.
+    if (headlessWatch.last !== null && latest > headlessWatch.last) {
+      headlessWatch.last = latest
+      headlessWatch.noted = probedAt
+      io.log(operationalRow({ at: new Date(latest).toISOString(), event: SEAT_LIVENESS_EVENT, role: info.role ?? null, transport: info.transport ?? null, growth: true, probed_at_ms: probedAt, latest_ms: latest, source: 'transcript-growth' }))
+      try { io.emit?.({ kind: 'heartbeat', at: latest, role: info.role ?? null }) } catch { /* the ledger is never load-bearing for a wait */ }
+      return
+    }
+    if (headlessWatch.last === null) headlessWatch.last = latest
+    // PROBED, NO GROWTH: a measurement, not an absence. Its own timestamp is the
+    // PROBE's clock, and it carries growth:false so no consumer can mistake it for
+    // a heartbeat. Recorded on the probe's own cadence, not the poll loop's.
+    if (headlessWatch.noted !== null && probedAt - headlessWatch.noted < LIVENESS_PROBE_MS) return
+    headlessWatch.noted = probedAt
+    io.log(operationalRow({ at: new Date(probedAt).toISOString(), event: SEAT_LIVENESS_EVENT, role: info.role ?? null, transport: info.transport ?? null, growth: false, probed_at_ms: probedAt, latest_ms: latest, source: 'transcript-growth' }))
   }
   const currentHeadlessIdentity = (transport, role, result = null) => {
     const dirName = DESCENDANT_STORE_DIRS[transport]

@@ -187,6 +187,16 @@ test('the metrics strip renders the sessions derivations and derives nothing', (
   assert.match(app, /focus=\{taskFocus\}/)
   assert.match(taskList, /focus\?\.revision/)
   assert.match(taskList, /id="task-board"/)
+  assert.match(strip, /padding:\.12rem 0 \.1rem/)
+})
+
+test('model directory pagination uses compact named controls', () => {
+  const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/RosterPanel.svelte'), 'utf8')
+  assert.match(source, /class="directory-pager"/)
+  assert.match(source, /Previous model page/)
+  assert.match(source, /Next model page/)
+  assert.match(source, /\.directory-pager button \{ width:auto; min-width:0; height:auto; min-height:1\.5rem/)
+  assert.doesNotMatch(source, /onclick=\{\(\) => directoryPage -= 1\}>←<\/button>/)
 })
 
 test('the metrics strip probes task envelopes for successful sessions', () => {

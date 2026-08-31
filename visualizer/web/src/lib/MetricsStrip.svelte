@@ -39,7 +39,7 @@
 </section>
 
 <style>
-.metrics { display:grid; grid-template-columns:repeat(7,minmax(8.5rem,1fr)); gap:.65rem; margin:.9rem 0 1rem; overflow:auto; padding-bottom:.1rem; }
+.metrics { display:grid; grid-template-columns:repeat(7,minmax(8.5rem,1fr)); gap:.65rem; margin:.9rem 0 1rem; overflow:auto; padding:.12rem 0 .1rem; }
 article,.metric-card { position:relative; min-width:9rem; min-height:6.2rem; display:grid; align-content:space-between; border:1px solid var(--line); border-radius:var(--radius); background:color-mix(in srgb,var(--panel) 91%,transparent); padding:.75rem .8rem; color:inherit; text-align:left; }
 article::before,.metric-card::before { content:''; position:absolute; top:0; left:.8rem; right:.8rem; height:1px; background:linear-gradient(90deg,transparent,var(--line),transparent); }
 .metric-card { font:inherit; cursor:pointer; transition:border-color .15s ease,background .15s ease,transform .15s ease; }.metric-card:hover { border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); background:color-mix(in srgb,var(--accent) 4%,var(--panel)); transform:translateY(-1px); }.metric-card:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }

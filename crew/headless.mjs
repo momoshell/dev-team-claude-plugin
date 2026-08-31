@@ -122,6 +122,46 @@ export function shq(value) {
 // failure, and a `<synthetic>` message on its own is a turn that still ran.
 export const SYNTHETIC_MODEL = '<synthetic>'
 export const BUDGET_TERMINAL_REASON = 'api_error'
+// WHICH provider condition ended the turn, as a closed enum rather than the one
+// bit `budgetRefused` carries. The stream's terminal `result` frame already
+// records `api_error_status` and the driver has been discarding it, so a rate
+// limit, an expired key and a capacity outage have all been arriving as the
+// same `budget-refused` row — three causes an operator has to act on
+// differently, grouped as one (#779).
+//
+// Measured 2026-09-01 against a stand-in upstream (test/fake-upstream.mjs),
+// which returns a chosen status so the mapping is evidence and not a guess:
+//
+//   429 -> {terminal_reason: "api_error", api_error_status: 429, is_error: true}
+//   401 -> {terminal_reason: "api_error", api_error_status: 401, is_error: true}
+//   529 -> {terminal_reason: "api_error", api_error_status: 529, is_error: true}
+//
+// All three ALSO carry `subtype: "success"`, which is why nothing here reads
+// subtype: on a refused turn it says success while `is_error` says otherwise.
+//
+// The names are borrowed from the Agent Client Protocol's `data.errorKind`.
+// Nothing here depends on that protocol — the status has always been in our own
+// terminal frame — but a cause enum shared with the wider ecosystem costs
+// nothing and keeps one taxonomy if the question is ever reopened.
+export const PROVIDER_FAILURE_KINDS = Object.freeze({
+  RATE_LIMIT: 'rate_limit',
+  AUTHENTICATION_FAILED: 'authentication_failed',
+  SERVER_ERROR: 'server_error',
+  UNCLASSIFIED: 'provider-unclassified',
+})
+
+// A status nobody recorded is NULL, never a kind: an unmeasured cell carries no
+// guess. A status we DID record but do not recognise is `provider-unclassified`
+// — a positive observation that the provider failed in a way this map does not
+// name yet, which is a different fact from no observation at all.
+export function providerFailureKind(status) {
+  if (!Number.isFinite(status)) return null
+  if (status === 429) return PROVIDER_FAILURE_KINDS.RATE_LIMIT
+  if (status === 401 || status === 403) return PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED
+  if (status >= 500 && status <= 599) return PROVIDER_FAILURE_KINDS.SERVER_ERROR
+  return PROVIDER_FAILURE_KINDS.UNCLASSIFIED
+}
+
 // EXACTLY one fallback per assignment. The chain is also CONSUMED (the entry is
 // dropped from the member), so the two bounds are independent: a raised cap
 // still runs out of chain, an unconsumed chain still hits the cap.
@@ -214,7 +254,7 @@ export function foldUsage(text) {
 }
 
 export function parseStream(path, readFileSync, existsSync) {
-  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false }
+  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false, providerFailure: null }
   if (!existsSync(path)) return absent
   let text
   try { text = readFileSync(path, 'utf8') } catch { return absent }
@@ -224,6 +264,7 @@ export function parseStream(path, readFileSync, existsSync) {
   let lines = 0
   let sawSynthetic = false
   let sawApiError = false
+  let apiErrorStatus = null
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
     lines += 1
@@ -235,10 +276,19 @@ export function parseStream(path, readFileSync, existsSync) {
         terminal = true
         terminalReason = event.terminal_reason || event.subtype || null
         if (event.terminal_reason === BUDGET_TERMINAL_REASON) sawApiError = true
+        // Read the status wherever it appears, independent of the refusal
+        // conjunction: "the provider answered 429" is true whether or not the
+        // turn was also refused, and the two facts are journaled separately.
+        if (Number.isFinite(event.api_error_status)) apiErrorStatus = event.api_error_status
       }
     } catch { /* truncated trailing JSONL is not itself a malformed run */ }
   }
-  return { sawJson, terminal, terminalReason, lines, usage: foldUsage(text), budgetRefused: sawSynthetic && sawApiError }
+  const kind = providerFailureKind(apiErrorStatus)
+  return {
+    sawJson, terminal, terminalReason, lines, usage: foldUsage(text),
+    budgetRefused: sawSynthetic && sawApiError,
+    providerFailure: kind === null ? null : { kind, status: apiErrorStatus },
+  }
 }
 
 function parseExit(path, readFileSync, existsSync) {
@@ -440,7 +490,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
   }
   function recordOutcome(run, outcome, stream, exitCode, signal = null) {
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
-    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, ...(degraded ? { degraded } : {}) })
+    log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}) })
   }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)

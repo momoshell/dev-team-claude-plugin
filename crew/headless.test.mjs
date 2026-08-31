@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  classifyRun, degradedSignals, foldUsage, headlessIo, parseStream, recogniseProviderCondition, recogniseSeatRefusal,
+  classifyRun, degradedSignals, foldUsage, headlessIo, parseStream, PROVIDER_FAILURE_KINDS,
+  providerFailureKind, recogniseProviderCondition, recogniseSeatRefusal,
   SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, updateCrewJson,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
@@ -990,5 +991,89 @@ test('wait collects the re-ask envelope from the caller path', () => {
     const envelope = { assignment_id: f.first.id, role: 'builder', status: 'done' }
     writeFileSync(f.reaskPath, JSON.stringify(envelope))
     assert.deepEqual(f.io.wait(second.returnPath, 1), envelope)
+  } finally { f.cleanup() }
+})
+
+// The provider condition the driver used to discard. `budgetRefused` says a
+// turn was refused; it never said WHY, so a rate limit, an expired key and a
+// capacity outage all arrived as one `budget-refused` row. The status was in
+// the terminal frame the whole time (#779).
+test('providerFailureKind names the condition and never guesses one', () => {
+  assert.equal(providerFailureKind(429), PROVIDER_FAILURE_KINDS.RATE_LIMIT)
+  assert.equal(providerFailureKind(401), PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED)
+  assert.equal(providerFailureKind(403), PROVIDER_FAILURE_KINDS.AUTHENTICATION_FAILED)
+  assert.equal(providerFailureKind(500), PROVIDER_FAILURE_KINDS.SERVER_ERROR)
+  assert.equal(providerFailureKind(529), PROVIDER_FAILURE_KINDS.SERVER_ERROR)
+  // A status we recorded but do not name yet is a POSITIVE observation, and it
+  // is not the same fact as no observation at all.
+  assert.equal(providerFailureKind(418), PROVIDER_FAILURE_KINDS.UNCLASSIFIED)
+  // Unmeasured is null: never a kind, never a zero.
+  for (const absent of [undefined, null, NaN, '429', {}]) assert.equal(providerFailureKind(absent), null)
+})
+
+test('the real 2026-08-30 refusal tails carry their condition, not just the refusal bit', () => {
+  for (const tail of [B332_D2_TAIL, B333_D2_TAIL]) {
+    const stream = parseStream('/fixture/stream.jsonl', () => tail, () => true)
+    // The conjunction that already existed is untouched...
+    assert.equal(stream.budgetRefused, true)
+    assert.equal(stream.terminalReason, 'api_error')
+    // ...and the condition is now named from the same bytes.
+    assert.deepEqual(stream.providerFailure, { kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429 })
+  }
+})
+
+// Kill-mutation: derive the kind from `budgetRefused` instead of the recorded
+// status and this fails. The two facts are independent — a refused turn whose
+// frame carried no status has NO condition to report, and inventing one would
+// be exactly the guess the honesty rule forbids.
+test('a refusal with no recorded status reports no condition', () => {
+  const refusedNoStatus = [
+    JSON.stringify({ type: 'assistant', message: { model: '<synthetic>' } }),
+    JSON.stringify({ type: 'result', terminal_reason: 'api_error', is_error: true }),
+  ].join('\n') + '\n'
+  const stream = parseStream('/fixture/no-status.jsonl', () => refusedNoStatus, () => true)
+  assert.equal(stream.budgetRefused, true)
+  assert.equal(stream.providerFailure, null)
+})
+
+// The mirror mutation: a status present WITHOUT the refusal conjunction is
+// still a real observation. Reading the status only inside the `budgetRefused`
+// branch would drop it, and an ordinary transport failure would lose its cause.
+test('a recorded status is reported even when the turn was not refused', () => {
+  const erroredNotRefused = JSON.stringify({
+    type: 'result', terminal_reason: 'api_error', api_error_status: 503, is_error: true,
+  }) + '\n'
+  const stream = parseStream('/fixture/no-synthetic.jsonl', () => erroredNotRefused, () => true)
+  assert.equal(stream.budgetRefused, false)
+  assert.deepEqual(stream.providerFailure, { kind: PROVIDER_FAILURE_KINDS.SERVER_ERROR, status: 503 })
+})
+
+test('a clean run reports no provider condition at all', () => {
+  const stream = parseStream('/fixture/clean.jsonl', () => B337_D1_AT_READ + B337_D1_RESULT, () => true)
+  assert.equal(stream.providerFailure, null)
+})
+
+test('the journal row carries the provider condition beside the outcome', () => {
+  const logs = []
+  const f = fixture({ log: (row) => logs.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+    const runDir = join(f.taskDir, 'headless', run.id)
+    writeFileSync(join(runDir, 'stream.jsonl'), B332_D2_TAIL)
+    writeFileSync(join(runDir, 'exit'), '1')
+    assert.throws(() => f.io.wait(run.returnPath, 1))
+    const row = logs.find((entry) => entry.headless_outcome === 'budget-refused')
+    assert.deepEqual(row.provider_failure, { kind: PROVIDER_FAILURE_KINDS.RATE_LIMIT, status: 429 })
+    // A clean row must not carry the key at all — absent is absent.
+    const clean = []
+    const g = fixture({ log: (r) => clean.push(r) })
+    try {
+      const ok = g.io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
+      writeFileSync(join(g.taskDir, 'headless', ok.id, 'stream.jsonl'), B337_D1_AT_READ + B337_D1_RESULT)
+      writeFileSync(ok.returnPath, JSON.stringify({ assignment_id: ok.id, role: 'builder', status: 'done' }))
+      assert.equal(g.io.wait(ok.returnPath, 1).status, 'done')
+      const okRow = clean.find((entry) => entry.headless_outcome === 'ok')
+      assert.equal(Object.hasOwn(okRow, 'provider_failure'), false)
+    } finally { g.cleanup() }
   } finally { f.cleanup() }
 })

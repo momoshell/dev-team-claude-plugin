@@ -1576,13 +1576,23 @@ export function composeCommitMessage({ task, planEnv, builderEnv }) {
   const subject = subjectLine || `crew(${task}): ${planLine || 'task change'}`
   const body = String(builderEnv?.details?.commit_message || builderEnv?.summary || '').trim()
   const bodyPart = body && body.split('\n')[0] === subject ? '' : body
-  const issues = []
-  for (const issue of Array.isArray(planEnv?.details?.issues) ? planEnv.details.issues : []) {
-    const digits = String(issue).trim().replace(/^#/, '')
-    if (/^\d+$/.test(digits) && !issues.includes(`#${digits}`)) issues.push(`#${digits}`)
+  const normalizeIssues = (values) => {
+    const out = []
+    for (const issue of Array.isArray(values) ? values : []) {
+      const digits = String(issue).trim().replace(/^#/, '')
+      if (/^\d+$/.test(digits) && !out.includes(`#${digits}`)) out.push(`#${digits}`)
+    }
+    return out
   }
+  // #806 — GitHub auto-closes from `Closes`, never from `Refs`, and six shipped
+  // issues stayed open because the trailer said the wrong word. The plan DECLARES
+  // which issues the lane closes; everything else stays a reference, and a lane
+  // that declares nothing emits exactly today's trailer.
+  const closes = normalizeIssues(planEnv?.details?.closes)
+  const issues = normalizeIssues(planEnv?.details?.issues).filter((ref) => !closes.includes(ref))
+  const closesTrailer = closes.length ? `Closes: ${closes.join(', ')}` : ''
   const refs = issues.length ? `Refs: ${issues.join(', ')}` : ''
-  return [subject, bodyPart, refs].filter(Boolean).join('\n\n')
+  return [subject, bodyPart, closesTrailer, refs].filter(Boolean).join('\n\n')
 }
 
 // The run-start anchor MOVES here from crew/crew.mjs:2046: the driver reads the
@@ -1592,7 +1602,31 @@ export const RUN_START_EVENT = 'run-start'
 
 // #679 — the driver publishes. The base is fixed by the ratified design.
 export const PUBLISH_BASE = 'main'
-export const PUBLISH_CLOSING = 'Published by the driver; teardown follows'
+// #806 (TRD docs/trd-local-models.md §2 U6, §4 L4) — the reserved `local_providers`
+// key that turns narration on. crew/capabilities.schema.json:50-71 declares every
+// provider entry `additionalProperties: false`, so a narrator carries no extra keys:
+// the KEY is the switch, `base_url` is the endpoint, and the served model is RESOLVED
+// from `<root>/models` — `pi_provider` is pi's namespace, never a served model name.
+export const NARRATOR_PROVIDER = 'narrator'
+export const NARRATION_HEADING = '## Narrative (local model)'
+export const NARRATION_MAX_CHARS = 1200
+export const NARRATION_REFUSALS = Object.freeze({
+  unconfigured: 'narrator-unconfigured',
+  endpointUnsafe: 'narrator-endpoint-unsafe',
+  unreachable: 'narrator-unreachable',
+  unreadable: 'narrator-unreadable',
+  empty: 'narration-empty',
+  tooLong: 'narration-too-long',
+  unknownFact: 'narration-unknown-fact',
+  // #806 plan-check r1 — the model is RESOLVED from the endpoint, never guessed from
+  // the register: `pi_provider` is pi's namespace (`<pi_provider>/<roster id>`,
+  // crew/adapters/adapter-pi.mjs:100-103), not a served model name.
+  modelsUnreadable: 'narrator-models-unreadable',
+  modelAbsent: 'narrator-model-absent',
+  modelAmbiguous: 'narrator-model-ambiguous',
+  rawJson: 'narration-raw-json',
+})
+export const NARRATION_REFUSAL_NAMES = Object.freeze(Object.values(NARRATION_REFUSALS))
 export const PUBLISH_REFUSALS = Object.freeze({
   branchUnresolved: 'branch-unresolved',
   branchMain: 'branch-main',
@@ -1623,6 +1657,103 @@ export function journalRowsSinceRunStart(text) {
   return rows
 }
 
+// A lead bounce decision is EITHER `bounce-<seat>` or the bare `bounce` a consult
+// offering ['bounce','escalate'] records (askLead writes `decision: decided`). The row
+// carried `${decision}: ${reason}` and composePrBody prefixed the kind again, so #791's
+// body read `- bounce: bounce: The reviewer never reviewed...`. Only the seat is worth
+// keeping, and a bare decision names NO seat — returning 'bounce' here just moved the
+// doubled prefix one layer down (#806).
+export function bounceSeatOf(decision) {
+  const text = String(decision ?? '')
+  const hyphen = text.indexOf('-')
+  return hyphen >= 0 ? text.slice(hyphen + 1) : ''
+}
+
+// The seat is optional, so the separator is too: a bare row must read
+// `- bounce: try again`, never `- bounce:  — try again`.
+export function bounceDetail(decision, reason) {
+  return [bounceSeatOf(decision), String(reason ?? '').trim()].filter(Boolean).join(' — ')
+}
+
+// Adjacent identical stages collapse with a count, so an honest `review:r1 | review:r1`
+// reads as `review:r1 ×2` rather than as a typo (#806).
+export function collapseStages(stages) {
+  const out = []
+  for (const stage of Array.isArray(stages) ? stages : []) {
+    if (typeof stage !== 'string' || stage === '') continue
+    const last = out[out.length - 1]
+    if (last && last.token === stage) { last.count += 1; continue }
+    out.push({ token: stage, count: 1 })
+  }
+  return out
+}
+
+// The SHAPE of a run: major phases only, each carrying its DISTINCT round count. The
+// full stage list stays in the journal (#806 defect 4); nothing is lost, only folded.
+//
+// An ALLOW-LIST, not a deny-list: the full variant declares sixteen stage heads
+// (crew/variants.mjs, pinned by crew/drive.test.mjs:4421) and a judge run journals
+// `check`, `gate-baseline`, `gate-repair`, `gate-reverify` and `gate-proof` too, so
+// a three-item deny-list still published the instrumentation. `review:pass` is a
+// verdict, not a round, and `suite:cold` folds into `suite` because its head does.
+export const SHAPE_MAJOR_PHASES = Object.freeze(['plan', 'build', 'review', 'commit', 'rebase', 'suite', 'publish'])
+export const SHAPE_ROUNDED_STAGES = Object.freeze(['plan', 'build', 'review'])
+export function stageShape(stages) {
+  const order = []
+  const rounds = new Map()
+  for (const stage of Array.isArray(stages) ? stages : []) {
+    if (typeof stage !== 'string' || stage === '') continue
+    const [head, suffix] = stage.split(':')
+    if (!SHAPE_MAJOR_PHASES.includes(head)) continue
+    if (!rounds.has(head)) { order.push(head); rounds.set(head, new Set()) }
+    // A numbered round is counted once however many times it is journaled; the
+    // adjacent repetition itself is the Repeated: line's business, not the shape's.
+    if (SHAPE_ROUNDED_STAGES.includes(head) && /^r\d+$/.test(String(suffix ?? ''))) rounds.get(head).add(suffix)
+  }
+  return order.map((head) => {
+    const count = rounds.get(head).size
+    return count > 1 ? `${head} ×${count}` : head
+  }).join(' → ')
+}
+
+// A published body may carry no operator-local path (#806 defect 4). The two known
+// roots render as `task/...` and repo-relative; anything absolute that survives them
+// keeps only its last segment — a floor, not a guess.
+export function relativizeCommand(text, { checkout = '', taskDir = '' } = {}) {
+  let out = String(text ?? '')
+  const taskLeaf = String(taskDir).split('/').filter(Boolean).pop() || ''
+  if (taskDir && taskLeaf) out = out.split(taskDir).join(taskLeaf)
+  if (checkout) out = out.split(`${checkout}/`).join('')
+  return out.replace(/(^|[\s(`'"=,[])\/(?:[A-Za-z0-9._@~+-]+\/)*([A-Za-z0-9._@~+-]+)/g, '$1$2')
+}
+
+// The commit message body — the why — verbatim, with the subject line and the FINAL
+// contiguous trailer block removed. Verbatim is the whole point (#806), so a
+// trailer-shaped line INSIDE the body ("Refs: are explained below") survives
+// byte-for-byte: the walk starts at the end and stops at the first line that is
+// neither a trailer nor a blank separator between two trailers.
+// ONLY the trailers the driver itself composes: a keyword, a colon, then one or more
+// `#<digits>` references and NOTHING else on the line. "Refs: are explained below" is
+// prose, and "verbatim" covers the body's LAST line as much as an internal one (#806).
+export const COMMIT_TRAILER = /^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|refs?)\s*:\s*#\d+(?:\s*,\s*#\d+)*\s*$/i
+export function commitIntent(message) {
+  const body = String(message ?? '').split('\n').slice(1)
+  let i = body.length - 1
+  while (i >= 0 && body[i].trim() === '') i -= 1   // trailing blanks belong to nobody
+  let cut = i + 1
+  let inBlock = false
+  while (i >= 0) {
+    if (COMMIT_TRAILER.test(body[i])) { inBlock = true; cut = i; i -= 1; continue }
+    if (inBlock && body[i].trim() === '') {
+      let j = i
+      while (j >= 0 && body[j].trim() === '') j -= 1
+      if (j >= 0 && COMMIT_TRAILER.test(body[j])) { i = j; continue }
+    }
+    break
+  }
+  return body.slice(0, cut).join('\n').trim()
+}
+
 export function prAnomalies(rows) {
   if (!Array.isArray(rows)) return []
   const list = (v) => (Array.isArray(v) ? v.join(' ') : '')
@@ -1635,7 +1766,18 @@ export function prAnomalies(rows) {
       anomalies.push({ kind: 'gate-repair', detail: row.stage })
     }
     if (typeof row?.decision === 'string' && row.decision.startsWith('bounce')) {
-      anomalies.push({ kind: 'bounce', detail: `${row.decision}: ${row.reason ?? ''}` })
+      anomalies.push({ kind: 'bounce', detail: bounceDetail(row.decision, row.reason) })
+    }
+    // #806 defect 1 — a code-driven review bounce is journaled as a `review_outcome`
+    // row (crew/drive.mjs:2158), never as a lead `decision`, so a collector reading
+    // only decisions left the most interesting fact about a two-round run out of the
+    // body entirely.
+    if (row?.review_outcome?.verdict === 'changes-needed') {
+      const outcome = row.review_outcome
+      const findings = Array.isArray(outcome.findings) ? outcome.findings : []
+      const mustFix = findings.filter((finding) => finding?.severity === 'must-fix').map((finding) => finding?.summary).filter(Boolean)
+      const why = mustFix.length ? mustFix.join('; ') : `${outcome.must_fix ?? '?'} must-fix, ${outcome.should_fix ?? '?'} should-fix`
+      anomalies.push({ kind: 'review-bounce', detail: `${outcome.dispatch ?? 'reviewer'} returned changes-needed: ${why}` })
     }
     if (row?.event === 'tree-witness') {
       anomalies.push({ kind: 'tree-witness', detail: `${row.outcome ?? 'unknown'} — modified ${list(row.modified)} removed ${list(row.removed)} added ${list(row.added)}` })
@@ -1671,45 +1813,268 @@ export function refsFromCommitMessage(message) {
   return refs
 }
 
+// #806 — the commit message stays the single source of the issue distinction, parsed
+// once: a closing keyword (GitHub's own set) names an issue the merge closes, the
+// `Refs:` trailer names one the lane only touches, and a closed issue is never also
+// listed as a reference.
+export function issueTrailers(message) {
+  const text = String(message ?? '')
+  const closes = []
+  const add = (ref) => { if (!closes.includes(ref)) closes.push(ref) }
+  for (const line of text.split('\n')) {
+    if (!/^\s*(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:/i.test(line)) continue
+    for (const match of line.matchAll(/#(\d+)/g)) add(`#${match[1]}`)
+  }
+  for (const match of text.matchAll(/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+#(\d+)/gi)) add(`#${match[1]}`)
+  const refs = refsFromCommitMessage(text).filter((ref) => !closes.includes(ref))
+  return { closes, refs }
+}
+
 export function composePrBody(record) {
-  const n = (v) => (Number.isFinite(v) ? v : 0)
-  const cursor = record?.cursor || {}
+  // Narration is labeled and additive; terminal empties delimit blocks without changing un-narrated facts (#806 U6).
+  const narrative = String(record?.narrative ?? '').trim()
+  const narrativeLines = narrative ? [NARRATION_HEADING, narrative, ''] : []
+  const intent = String(record?.intent || '').trim()
+  const intentLines = intent ? [intent, ''] : []
+  const closes = Array.isArray(record?.closes) ? record.closes : []
   const issues = Array.isArray(record?.issues) ? record.issues : []
-  const anomalies = Array.isArray(record?.anomalies) ? record.anomalies : []
-  const refsLines = issues.length ? [`Refs ${issues.join(', ')}`, ''] : []
-  const stageLines = ['## Stages', (Array.isArray(record?.stages) ? record.stages : []).join(' | '), '']
-  const roundLines = ['## Rounds', `plan ${n(cursor.plan_round)} · build ${n(cursor.build_round)} · review ${n(cursor.review_round)}`, '']
-  const gateLines = record?.gate ? [
-    '## Gate',
-    `cmd: ${record.gate.cmd ?? ''}`,
-    `summary: ${JSON.stringify(record.gate.summary ?? null)}`,
-    `discrimination: ${record.gate.discrimination ?? ''}`,
-    `repairs: ${record.gate.repairs ?? 0}`,
-    '',
-  ] : []
+  const closesLines = closes.length ? [`Closes ${closes.join(', ')}`] : []
+  const refsLines = issues.length ? [`Refs ${issues.join(', ')}`] : []
+  const trailerLines = closes.length || issues.length ? [...closesLines, ...refsLines, ''] : []
+  const gate = record?.gate || null
+  const summary = gate?.summary || null
+  const gateLines = (() => {
+    if (!gate) return ['No acceptance gate ran.'].concat('')
+    const where = gate.cmd ? ` (${gate.cmd})` : ''
+    if (!summary) return [`The acceptance gate${where} ran; its summary could not be measured.`].concat('')
+    const repairs = Number.isFinite(gate.repairs) ? gate.repairs : 0
+    const repaired = repairs > 0 ? `, repaired ${repairs} time${repairs === 1 ? '' : 's'}` : ''
+    return [`**${summary.total} gate checks, ${summary.failed} failed, ${summary.errored} errored, discrimination ${gate.discrimination || 'unproven'}**${where}${repaired}.`].concat('')
+  })()
+  // Unknown is never a zero: an unmeasured count says so rather than reading as green.
+  const suite = record?.suite || {}
+  const countText = (label, value) => (value && typeof value === 'object'
+    ? `${label} ${value.pass} pass / ${value.fail} fail / ${value.skipped} skip`
+    : null)
+  const measured = [countText('warm', suite.warm), countText('cold', suite.cold)].filter(Boolean)
+  const suiteLines = measured.length
+    ? [`Suite ${measured.join('; ')}${suite.cold_verified ? ', cold-verified from a fresh checkout' : '; cold verification not recorded'}.`].concat('')
+    : ['Suite counts: not measured.'].concat('')
   const review = record?.review || {}
   const residuals = Array.isArray(review.residuals) ? review.residuals : []
   const reviewLines = [
-    '## Review',
-    `verdict: ${review.verdict ?? ''}`,
-    ...(residuals.length
-      ? residuals.map((row) => `- ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`)
-      : ['no residuals']),
-    '',
+    `Review: ${review.verdict || 'not recorded'}, ${residuals.length ? `${residuals.length} residual${residuals.length === 1 ? '' : 's'}:` : 'no residuals'}`,
+    ...residuals.map((row) => `- ${row?.id ?? ''} (${row?.type ?? ''}): ${row?.summary ?? ''}`), '',
   ]
-  const suite = record?.suite || {}
-  const countsLine = (label, counts) => counts && typeof counts === 'object'
-    ? `${label}: pass ${n(counts.pass)} · fail ${n(counts.fail)} · skipped ${n(counts.skipped)}`
-    : `${label}: not measured`
-  const suiteLines = [
-    '## Suite',
-    countsLine('warm', suite.warm),
-    countsLine('cold', suite.cold),
-    `cold checkout: ${suite.cold_path ?? ''}`,
+  const files = Array.isArray(record?.files) ? record.files : []
+  const changedLines = files.length ? [`Changed: ${files.join(', ')}`] : []
+  const stages = Array.isArray(record?.stages) ? record.stages : []
+  const shapeLines = stages.length ? [`Shape: ${stageShape(stages)}`, ''] : []
+  const repeats = collapseStages(stages).filter(({ count }) => count > 1).map(({ token, count }) => `${token} ×${count}`)
+  const repeatLines = repeats.length ? [`Repeated: ${repeats.join(', ')}`] : []
+  const anomalies = Array.isArray(record?.anomalies) ? record.anomalies : []
+  const anomalyLines = anomalies.length ? [...anomalies.map((row) => `- ${row?.kind ?? 'anomaly'}: ${row?.detail ?? ''}`), ''] : []
+  for (const lines of [changedLines, repeatLines]) if (lines.length) lines.push('')
+  const blocks = [[]]
+  for (const line of [
+    ...narrativeLines, ...intentLines, ...trailerLines,
+    ...gateLines, ...suiteLines, ...reviewLines,
+    ...changedLines, ...shapeLines, ...repeatLines, ...anomalyLines,
+  ]) {
+    if (line === '') blocks.push([])
+    else blocks.at(-1).push(line)
+  }
+  return blocks.filter((lines) => lines.length).map((lines) => lines.join('\n')).join('\n\n')
+}
+
+// --- record-only narration (#806 U6) -------------------------------------------
+// The honesty half of programmatic-over-model-tokens still binds: the prompt is the
+// record and nothing else, and a narration naming a path, stage or number the record
+// does not carry is REFUSED. A dead endpoint, an unreadable reply or a failed
+// validation publishes the code-composed body unchanged.
+// ONE OpenAI API root, whichever way the operator spelled base_url. The repo's own
+// fixture is `http://127.0.0.1:11434/v1` (crew/crew.test.mjs:5315-5317), so blindly
+// appending `/v1` produced `/v1/v1`: preserve a trailing `/v1`, otherwise add it once.
+export function narratorApiRoot(baseUrl) {
+  const trimmed = String(baseUrl ?? '').replace(/\/+$/, '')
+  return /\/v1$/.test(trimmed) ? trimmed : `${trimmed}/v1`
+}
+
+export function narratorConfig(registerText) {
+  let register = null
+  try { register = JSON.parse(String(registerText ?? '')) } catch { return { refused: NARRATION_REFUSALS.unconfigured } }
+  const entry = register?.local_providers?.[NARRATOR_PROVIDER]
+  if (!entry || typeof entry !== 'object') return { refused: NARRATION_REFUSALS.unconfigured }
+  const raw = String(entry.base_url ?? '')
+  let parsed
+  try { parsed = new URL(raw) } catch { return { refused: NARRATION_REFUSALS.endpointUnsafe } }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return { refused: NARRATION_REFUSALS.endpointUnsafe }
+  if (parsed.username || parsed.password) return { refused: NARRATION_REFUSALS.endpointUnsafe }
+  // `pi_provider` is NOT a model name — it is pi's namespace. The served model is
+  // resolved from the endpoint below, so nothing here guesses one.
+  return { root: narratorApiRoot(raw) }
+}
+
+export function narratorModelsCommand(root) {
+  return `curl -sS --max-time 15 ${shellArg(`${root}/models`)} -H ${shellArg('accept: application/json')}`
+}
+
+// Exactly ONE non-empty id, or a NAMED refusal. Zero ids and several ids are
+// different operator mistakes and they get different names; a narrator that picked
+// the first of several would be narrating from a model nobody chose.
+export function narratorModelId(output) {
+  let parsed
+  try { parsed = JSON.parse(String(output ?? '')) } catch { return { refused: NARRATION_REFUSALS.modelsUnreadable } }
+  const data = parsed?.data
+  if (!Array.isArray(data)) return { refused: NARRATION_REFUSALS.modelsUnreadable }
+  const ids = []
+  for (const row of data) {
+    const id = typeof row?.id === 'string' ? row.id.trim() : ''
+    if (id && !ids.includes(id)) ids.push(id)
+  }
+  if (ids.length === 0) return { refused: NARRATION_REFUSALS.modelAbsent }
+  if (ids.length > 1) return { refused: NARRATION_REFUSALS.modelAmbiguous, why: ids.join(', ') }
+  return { id: ids[0] }
+}
+
+export function narrationPrompt(record) {
+  return [
+    'You are writing the narrative paragraph of a pull-request body for an automated code lane.',
+    'The JSON object below is the ENTIRE record of the run; you have not seen the diff or the checkout.',
+    'Write at most four sentences saying what the lane set out to do and how it went.',
+    'Use no file path, no stage name and no number that does not appear in this JSON.',
+    'Return prose only: no headings, no JSON, no speculation.',
     '',
-  ]
-  const anomalyLines = anomalies.length ? ['## Anomalies', ...anomalies.map((row) => `- ${row.kind}: ${row.detail}`), ''] : []
-  return [...refsLines, ...stageLines, ...roundLines, ...gateLines, ...reviewLines, ...suiteLines, ...anomalyLines, '', PUBLISH_CLOSING].join('\n')
+    JSON.stringify(record),
+  ].join('\n')
+}
+
+export function narratorCommand({ root, model, prompt }) {
+  const payload = JSON.stringify({ model, stream: false, messages: [{ role: 'user', content: prompt }] })
+  return `curl -sS --max-time 30 -X POST ${shellArg(`${root}/chat/completions`)} -H ${shellArg('content-type: application/json')} --data-binary ${shellArg(payload)}`
+}
+
+export function narrationFromResponse(output) {
+  let parsed
+  try { parsed = JSON.parse(String(output ?? '')) } catch { return null }
+  const content = parsed?.choices?.[0]?.message?.content
+  return typeof content === 'string' && content.trim() ? content.trim() : null
+}
+
+// A path token at the end of a sentence carries the full stop; `.` is legal INSIDE a
+// path, so the trailing run is trimmed rather than excluded from the class.
+export function trimPathToken(token) {
+  return String(token ?? '').replace(/[.,;:)\]]+$/, '')
+}
+
+export function recordFacts(record) {
+  const numbers = new Set()
+  const paths = new Set()
+  const stages = new Set()
+  const scan = (value) => {
+    if (typeof value === 'number') { numbers.add(String(value)); return }
+    if (typeof value === 'string') {
+      for (const match of value.matchAll(/\d+/g)) numbers.add(match[0])
+      for (const match of value.matchAll(/[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+/g)) {
+        const token = trimPathToken(match[0])
+        paths.add(token); paths.add(token.split('/').pop())
+      }
+      for (const match of value.matchAll(/\b[A-Za-z0-9_-]+\.(?:mjs|js|ts|json|md|ya?ml)\b/g)) paths.add(match[0])
+      for (const match of value.matchAll(/\b[a-z][a-z-]*:(?:r\d+|pass|\d+)\b/g)) stages.add(match[0])
+      return
+    }
+    if (Array.isArray(value)) { for (const item of value) scan(item); return }
+    if (value && typeof value === 'object') { for (const item of Object.values(value)) scan(item) }
+  }
+  scan(record)
+  return { numbers, paths, stages }
+}
+
+// Raw JSON is refused BEFORE the fact guards run, and for its own named reason: a
+// reply like {"total":11} carries only numbers the record does have, so the fact
+// guards would pass it and the body would carry the machine dump #806 removed.
+export function narrationIsRawJson(text) {
+  const narration = String(text ?? '').trim()
+  return /\{\s*"/.test(narration) || /"[\w-]+"\s*:/.test(narration) || /^[[{]/.test(narration)
+}
+
+// The closed narration-stage vocabulary: every stage head this driver implements —
+// the variant declarations plus the universal terminals. A narration may name a stage
+// only if the RECORD ran it, and a plain head bypassed the colon-shaped scan entirely:
+// "The lane ran converge." passed against a record whose stages were plan:r1 and
+// build:r1 (#806 plan-check r2).
+export const NARRATION_STAGE_VOCABULARY = Object.freeze([...new Set([
+  ...UNIVERSAL_STAGE_HEADS,
+  ...Object.values(VARIANTS).flatMap((variant) => (Array.isArray(variant?.stages) ? variant.stages : [])),
+])].sort())
+export const NARRATION_STAGE_TOKEN = /\b[a-z][a-z-]*:(?:r\d+|pass|\d+)\b/g
+
+// ONE predicate for the whole stage-name guard: an unknown colon-shaped token, or a
+// vocabulary head named plainly that the record never ran.
+export function narrationStageDefect(narration, record) {
+  const text = String(narration ?? '')
+  const stages = (Array.isArray(record?.stages) ? record.stages : []).filter((s) => typeof s === 'string')
+  const ran = new Set(stages)
+  const heads = new Set(stages.map((stage) => stage.split(':')[0]))
+  for (const match of text.matchAll(NARRATION_STAGE_TOKEN)) {
+    if (!ran.has(match[0])) return NARRATION_REFUSALS.unknownFact
+  }
+  for (const head of NARRATION_STAGE_VOCABULARY) {
+    if (heads.has(head)) continue
+    if (new RegExp(`(?<![A-Za-z0-9:-])${head}(?![A-Za-z0-9:-])`).test(text)) return NARRATION_REFUSALS.unknownFact
+  }
+  return null
+}
+
+export function narrationDefect(text, record) {
+  const narration = String(text ?? '').trim()
+  if (!narration) return NARRATION_REFUSALS.empty
+  if (narration.length > NARRATION_MAX_CHARS) return NARRATION_REFUSALS.tooLong
+  if (narrationIsRawJson(narration)) return NARRATION_REFUSALS.rawJson
+  const facts = recordFacts(record)
+  const knownPath = (token) => facts.paths.has(token) || [...facts.paths].some((known) => known.endsWith(`/${token}`))
+  // Stages before numbers: `audit:r9` must be refused as an invented STAGE, not
+  // silently reduced to the digit inside it.
+  const stageDefect = narrationStageDefect(narration, record)
+  if (stageDefect) return stageDefect
+  for (const match of narration.matchAll(/[A-Za-z0-9_.-]+\/[A-Za-z0-9_./-]+/g)) {
+    if (!knownPath(trimPathToken(match[0]))) return NARRATION_REFUSALS.unknownFact
+  }
+  for (const match of narration.matchAll(/\b[A-Za-z0-9_-]+\.(?:mjs|js|ts|json|md|ya?ml)\b/g)) {
+    if (!knownPath(trimPathToken(match[0]))) return NARRATION_REFUSALS.unknownFact
+  }
+  for (const match of narration.matchAll(/\d+/g)) {
+    if (!facts.numbers.has(match[0])) return NARRATION_REFUSALS.unknownFact
+  }
+  return null
+}
+
+export function narrateRecord({ record, registerText, io } = {}) {
+  const config = narratorConfig(registerText)
+  if (config.refused) return { refused: config.refused }
+  const ask = (command) => {
+    try { return io?.run?.(command) } catch (err) { return { ok: false, threw: String(err?.message || err) } }
+  }
+  const listed = ask(narratorModelsCommand(config.root))
+  if (!listed?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: listed?.threw }
+  const model = narratorModelId(listed.output)
+  if (model.refused) return { refused: model.refused, why: model.why }
+  const chat = ask(narratorCommand({ root: config.root, model: model.id, prompt: narrationPrompt(record) }))
+  if (!chat?.ok) return { refused: NARRATION_REFUSALS.unreachable, why: chat?.threw }
+  const text = narrationFromResponse(chat.output)
+  if (!text) return { refused: NARRATION_REFUSALS.unreadable }
+  const defect = narrationDefect(text, record)
+  if (defect) return { refused: defect }
+  return { text, model: model.id }
+}
+
+// The publish wiring, as a pure function so it can be gated: ONLY accepted narration
+// reaches the record. A refusal leaves the record — and therefore the published body
+// — byte-identical to a run with no narrator at all.
+export function applyNarration(record, narrated) {
+  const text = typeof narrated?.text === 'string' ? narrated.text.trim() : ''
+  if (!text) return record
+  return { ...record, narrative: text }
 }
 
 // --- the driver ----------------------------------------------------------------
@@ -4170,19 +4535,41 @@ function runTask(ctx, io, crash) {
     const bodyPath = art('pr-body.md')
     let journalText = ''
     try { journalText = String(io.readFile(journal) || '') } catch { /* anomalies are never load-bearing */ }
+    const trailers = issueTrailers(message)
+    const gateNow = gateBlock()
+    // The record IS the narrator's prompt. Driver-composed fields are path-clean: the
+    // cold checkout stays in the journal and the gate command renders checkout-relative.
+    // `intent` is the builder's commit body verbatim, so an absolute path it carries reaches the body.
     const record = {
-      issues: refsFromCommitMessage(message),
+      intent: commitIntent(message),
+      closes: trailers.closes,
+      issues: trailers.refs,
       stages: [...S.stages],
       cursor: roundCursor(S.stages),
-      gate: gateBlock() ? { ...gateBlock(), summary: parseGateSummary(lastGateOutput) } : null,
+      files: [...committing],
+      gate: gateNow ? {
+        cmd: relativizeCommand(gateNow.cmd, { checkout: ctx.checkout, taskDir: ctx.taskDir }),
+        summary: parseGateSummary(lastGateOutput),
+        discrimination: gateNow.discrimination ?? '',
+        repairs: gateNow.repairs ?? 0,
+      } : null,
       review: { verdict: finalReview.verdict === 'pass' ? 'pass' : 'changes-needed', residuals: finalReview.residuals },
-      suite: { warm: warmCounts, cold: coldSuite.counts, cold_path: coldSuite.path },
+      suite: { warm: warmCounts, cold: coldSuite.counts, cold_verified: coldSuite.counts !== null },
       anomalies: prAnomalies(journalRowsSinceRunStart(journalText)),
     }
+    let registerText = ''
+    try { registerText = String(io.readFile(`${ctx.checkout}/crew/capabilities.json`) || '') } catch { /* narration is never load-bearing */ }
+    const narrated = narrateRecord({ record, registerText, io })
+    const bodyRecord = applyNarration(record, narrated)
+    try {
+      io.log(recordRow({ at: io.now(), narration: bodyRecord.narrative
+        ? { outcome: 'accepted', chars: bodyRecord.narrative.length, model: narrated.model ?? null }
+        : { outcome: 'refused', reason: narrated.refused ?? null } }))
+    } catch { /* instrumentation is never load-bearing */ }
     const prCreateStartedAt = io.now()
     let created
     try {
-      io.writeFile(bodyPath, composePrBody(record))
+      io.writeFile(bodyPath, composePrBody(bodyRecord))
       created = io.run(`gh pr create --base ${shellArg(PUBLISH_BASE)} --head ${shellArg(branch)} --title ${shellArg(subject)} --body-file ${shellArg(bodyPath)}`)
     } catch (err) {
       created = { ok: false, output: err?.message ?? String(err) }

@@ -21,7 +21,13 @@ import {
   refuseWait, resolveWaits, waitsCtx, waitsRecord, DECISIONS, SECOND_OPINION, PERSPECTIVE_TARGETS,
   FAILURE_UPGRADE, SENSITIVITY_FLOOR, JUDGE_TIER, PROTECTED_PATHS, resolveProtectedPaths, MODIFIER_OUTCOMES, JOURNAL_CHANNELS, JOURNAL_CHANNEL_NAMES, recordRow, operationalRow,
   validateScopeEntries, scopeMatcher, protectedHits, laneFenceHits, composeCommitMessage,
-  RUN_START_EVENT, PUBLISH_BASE, PUBLISH_CLOSING, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES,
+  RUN_START_EVENT, PUBLISH_BASE, PUBLISH_REFUSALS, PUBLISH_REFUSAL_NAMES,
+  NARRATOR_PROVIDER, NARRATION_HEADING, NARRATION_MAX_CHARS, NARRATION_REFUSALS, NARRATION_REFUSAL_NAMES,
+  bounceSeatOf, collapseStages, stageShape, relativizeCommand, commitIntent, issueTrailers,
+  SHAPE_MAJOR_PHASES, SHAPE_ROUNDED_STAGES, COMMIT_TRAILER, applyNarration, bounceDetail,
+  NARRATION_STAGE_VOCABULARY, narrationStageDefect,
+  narratorConfig, narratorApiRoot, narratorModelsCommand, narratorModelId, narrationPrompt, narratorCommand,
+  narrationFromResponse, narrationIsRawJson, trimPathToken, recordFacts, narrationDefect, narrateRecord,
   shellArg, journalRowsSinceRunStart, prAnomalies, parseSuiteCounts, refsFromCommitMessage, composePrBody,
   parseGateSummary, baselineGateDefect, GATE_SUMMARY_PREFIX, GATE_CUSTODIAN, roundCursor,
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
@@ -7545,6 +7551,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at auto_fix'],
   ['recordRow', '', 'at commit_subject'],
   ['recordRow', '', 'at cold_suite'],
+  ['recordRow', '', 'at narration'],
   ['recordRow', '', 'at published'],
 ])
 
@@ -7563,7 +7570,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 45)
+  assert.equal(sites.length, 46)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
@@ -7786,6 +7793,7 @@ function publicationIo(options = {}) {
     commands: commandOverrides = {}, envelopes: envelopeOverrides = {}, changed = ['a.mjs', 'a.test.mjs'],
     warm = PUBLISH_WARM_OUTPUT, coldOutput = PUBLISH_COLD_OUTPUT, coldResult, journal = `${TD}/journal.jsonl`,
     journalText: initialJournal = JSON.stringify({ event: RUN_START_EVENT }) + '\n', readFileThrows = false,
+    capabilities = null,
   } = options
   const calls = { run: [], runCold: [], commits: [], logs: [], writes: {}, order: [], suiteHead: null, coldHead: null }
   const state = { pre: 'pre1111', head: 'pre1111', post: 'post2222' }
@@ -7834,6 +7842,7 @@ function publicationIo(options = {}) {
     readFile(path) {
       if (readFileThrows) throw new Error('journal read denied')
       if (path === journal) return journalText
+      if (capabilities !== null && path === `${CTX.checkout}/crew/capabilities.json`) return capabilities
       return null
     },
     run(command) {
@@ -8023,19 +8032,277 @@ test('composePrBody is pure and renders every populated section with its own val
     cursor: { plan_round: 4, build_round: 5, review_round: 6 },
     gate: { cmd: 'gate-cmd', summary: { total: 2, failed: 0, errored: 0 }, discrimination: 'proven', repairs: 1 },
     review: { verdict: 'changes-needed', residuals: [{ id: 'R1', type: 'cosmetic', summary: 'leave this note' }] },
-    suite: { warm: { pass: 11, fail: 2, skipped: 3 }, cold: { pass: 13, fail: 4, skipped: 5 }, cold_path: '/cold/path' },
-    anomalies: [{ kind: 'bounce', detail: 'bounce-builder: retry' }],
+    suite: { warm: { pass: 11, fail: 2, skipped: 3 }, cold: { pass: 13, fail: 4, skipped: 5 }, cold_verified: true },
+    intent: 'why the lane existed', closes: ['#806'], files: ['crew/drive.mjs'],
+    anomalies: [{ kind: 'bounce', detail: 'retry' }],
   }
   const first = composePrBody(record)
   const second = composePrBody(JSON.parse(JSON.stringify(record)))
   assert.equal(first, second)
-  for (const token of ['Refs #679, #758', '## Stages', 'commit | rebase | suite | publish | done', 'plan 4 · build 5 · review 6',
-    '## Gate', 'gate-cmd', '"failed":0', 'proven', 'repairs: 1', '## Review', 'R1 (cosmetic): leave this note',
-    'warm: pass 11 · fail 2 · skipped 3', 'cold: pass 13 · fail 4 · skipped 5', 'cold checkout: /cold/path',
-    '## Anomalies', 'bounce: bounce-builder: retry', PUBLISH_CLOSING]) assert.ok(first.includes(token), token)
-  assert.ok(first.indexOf('## Gate') > first.indexOf('## Rounds'))
-  assert.ok(first.indexOf('## Review') > first.indexOf('## Gate'))
-  assert.ok(first.indexOf('## Suite') > first.indexOf('## Review'))
+  assert.equal(first, [
+    'why the lane existed',
+    'Closes #806\nRefs #679, #758',
+    '**2 gate checks, 0 failed, 0 errored, discrimination proven** (gate-cmd), repaired 1 time.',
+    'Suite warm 11 pass / 2 fail / 3 skip; cold 13 pass / 4 fail / 5 skip, cold-verified from a fresh checkout.',
+    'Review: changes-needed, 1 residual:\n- R1 (cosmetic): leave this note',
+    'Changed: crew/drive.mjs',
+    'Shape: commit → rebase → suite → publish',
+    '- bounce: retry',
+  ].join('\n\n'))
+  assert.doesNotMatch(first, /\n{3,}/)
+  const sparse = composePrBody({ closes: ['#806'] })
+  assert.equal(sparse, [
+    'Closes #806',
+    'No acceptance gate ran.',
+    'Suite counts: not measured.',
+    'Review: not recorded, no residuals',
+  ].join('\n\n'))
+  for (const token of ['why the lane existed', 'Closes #806', 'Refs #679, #758',
+    '2 gate checks, 0 failed, 0 errored, discrimination proven', '(gate-cmd)', 'repaired 1 time',
+    'warm 11 pass / 2 fail / 3 skip', 'cold 13 pass / 4 fail / 5 skip', 'cold-verified from a fresh checkout',
+    'Review: changes-needed, 1 residual:', 'R1 (cosmetic): leave this note', 'Changed: crew/drive.mjs',
+    'Shape: commit → rebase → suite → publish', '- bounce: retry']) assert.ok(first.includes(token), token)
+  assert.equal(first.split('\n')[0], 'why the lane existed')
+  assert.ok(!/\{\s*"/.test(first))
+})
+
+// ---------------------------------------------------------------------------
+// #806 — the published body leads with meaning, and record-only narration.
+// ---------------------------------------------------------------------------
+const NARRATOR_REGISTER = (base_url) => JSON.stringify({ local_providers: {
+  narrator: { settings: 'crew/pi/settings.json', pi_provider: 'local-pi', base_url },
+} })
+const HONEST_NARRATION = 'The lane took 2 build rounds and 11 gate checks, changing crew/drive.mjs at stage review:r1.'
+const NARRATION_RECORD = Object.freeze({
+  intent: 'why the lane existed', closes: ['#806'], issues: ['#799'],
+  stages: ['plan:r1', 'check:r1', 'gate-baseline', 'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1',
+    'review:r1', 'review:r1', 'build:r2', 'review:r2', 'commit', 'rebase', 'suite', 'publish'],
+  cursor: { plan_round: 1, build_round: 2, review_round: 2 },
+  files: ['crew/drive.mjs'],
+  gate: { cmd: 'node task/gate.mjs', summary: { total: 11, failed: 0, errored: 0 }, discrimination: 'proven', repairs: 0 },
+  review: { verdict: 'pass', residuals: [] },
+  suite: { warm: { pass: 3098, fail: 0, skipped: 0 }, cold: { pass: 3098, fail: 0, skipped: 0 }, cold_verified: true },
+  anomalies: [],
+})
+// One io.run for the model list and one for the chat completion; both injected, so no
+// test here contacts a real endpoint or reaches a binary-resolution seam.
+const narratorIo = ({ models, chat, collect = [] } = {}) => ({ run: (command) => {
+  collect.push(command)
+  return /\/models(\b|$)/.test(command)
+    ? (models ?? { ok: true, output: JSON.stringify({ data: [{ id: 'qwen3-coder' }] }) })
+    : (chat ?? { ok: true, output: JSON.stringify({ choices: [{ message: { content: HONEST_NARRATION } }] }) })
+} })
+
+test('commitIntent removes only the final trailer block and keeps an internal one verbatim', () => {
+  const internal = 'fix(crew): subject\n\nRefs: are explained below\nand here they are.\n\nCloses: #806\nRefs: #799'
+  assert.equal(commitIntent(internal), 'Refs: are explained below\nand here they are.')
+  assert.equal(commitIntent('subject\n\nbody text\n\nCloses: #806\nRefs: #799'), 'body text')
+  assert.equal(commitIntent('subject\n\nbody text'), 'body text')
+  assert.equal(commitIntent('subject\n\nCloses: #1'), '')
+  assert.equal(commitIntent('subject'), '')
+  assert.equal(commitIntent(undefined), '')
+  // the blank separator between two trailers is crossed; the paragraph above is not
+  assert.equal(commitIntent('s\n\nfirst\n\nsecond\n\nCloses: #1\n\nRefs: #2'), 'first\n\nsecond')
+  // "verbatim" covers the body's LAST line: trailer-shaped PROSE is not a trailer, and
+  // COMMIT_TRAILER recognises only what the driver itself composes.
+  for (const tail of ['Refs: are explained below', 'Fixes: are explained below', 'Closes: see the issue']) {
+    assert.equal(commitIntent('subject\n\nbody\n' + tail), 'body\n' + tail, tail)
+    assert.doesNotMatch(tail, COMMIT_TRAILER)
+  }
+  for (const trailer of ['Refs: #799', 'Closes: #806', 'Refs: #799, #806', 'Fixes: #12']) {
+    assert.equal(commitIntent('subject\n\nbody\n' + trailer), 'body', trailer)
+    assert.match(trailer, COMMIT_TRAILER)
+  }
+})
+
+test('stageShape keeps only major phases and counts distinct rounds', () => {
+  // A faithful judge-run publish-time list: the instrumentation a judge run really
+  // journals, both rounds, suite + suite:cold, publish — and no `done`, because the
+  // body record is built during publish and stage('done') happens afterwards.
+  const stages = ['plan:r1', 'check:r1', 'gate-baseline', 'gate-proof:1', 'gate-proof:1:checks',
+    'build:r1', 'scope-gate:r1', 'lane:r1', 'gate:r1', 'review:r1', 'review:r1',
+    'build:r2', 'scope-gate:r2', 'lane:r2', 'gate:r2', 'review:r2', 'review:pass',
+    'commit', 'rebase', 'suite', 'suite:cold', 'publish']
+  assert.equal(stageShape(stages), 'plan → build ×2 → review ×2 → commit → rebase → suite → publish')
+  for (const noisy of ['check', 'gate-baseline', 'gate-repair', 'gate-reverify', 'gate-proof', 'scope-gate', 'lane', 'gate', 'done']) {
+    assert.equal(stageShape(stages).includes(noisy), false, noisy)
+    assert.equal(SHAPE_MAJOR_PHASES.includes(noisy), false, noisy)
+  }
+  // the allow-list is closed and every full-variant head is either a phase or omitted
+  assert.deepEqual([...SHAPE_MAJOR_PHASES], ['plan', 'build', 'review', 'commit', 'rebase', 'suite', 'publish'])
+  assert.equal(Object.isFrozen(SHAPE_MAJOR_PHASES), true)
+  // suite:cold folds into suite because its head does
+  assert.equal(stageShape(['suite', 'suite:cold']), 'suite')
+  // review:pass is a verdict, never a round
+  assert.equal(stageShape(['review:r1', 'review:pass']), 'review')
+  assert.deepEqual([...SHAPE_ROUNDED_STAGES], ['plan', 'build', 'review'])
+  assert.equal(stageShape([]), '')
+  assert.equal(stageShape('not-an-array'), '')
+  // the exact adjacent repetition stays collapseStages' business
+  assert.deepEqual(collapseStages(['review:r1', 'review:r1', 'commit']), [{ token: 'review:r1', count: 2 }, { token: 'commit', count: 1 }])
+})
+
+test('issueTrailers separates closing keywords from references and an undeclared closes changes no commit message', () => {
+  assert.deepEqual(issueTrailers('subject\n\nbody\n\nCloses: #806\nRefs: #806, #799'), { closes: ['#806'], refs: ['#799'] })
+  assert.deepEqual(issueTrailers('subject\n\nbody\n\nFixes #12\n\nRefs: #13'), { closes: ['#12'], refs: ['#13'] })
+  assert.deepEqual(issueTrailers('subject\n\nbody'), { closes: [], refs: [] })
+  const today = composeCommitMessage({
+    task: 'x', planEnv: { summary: 'plan', details: { commit_subject: 'fix(crew): subject', issues: [679, '#758', 679] } },
+    builderEnv: { details: { commit_message: 'body text' } },
+  })
+  assert.equal(today, 'fix(crew): subject\n\nbody text\n\nRefs: #679, #758')
+  const closing = composeCommitMessage({
+    task: 'x', planEnv: { summary: 'plan', details: { commit_subject: 'fix(crew): subject', issues: [679, 806], closes: [806] } },
+    builderEnv: { details: { commit_message: 'body text' } },
+  })
+  assert.equal(closing, 'fix(crew): subject\n\nbody text\n\nCloses: #806\n\nRefs: #679')
+})
+
+test('narratorApiRoot normalises every base_url spelling to exactly one API root', () => {
+  assert.equal(narratorApiRoot('http://127.0.0.1:11434/v1'), 'http://127.0.0.1:11434/v1')
+  assert.equal(narratorApiRoot('http://127.0.0.1:11434/v1/'), 'http://127.0.0.1:11434/v1')
+  assert.equal(narratorApiRoot('http://desk.lan:1234'), 'http://desk.lan:1234/v1')
+  assert.equal(narratorApiRoot('http://desk.lan:1234/'), 'http://desk.lan:1234/v1')
+  for (const spelling of ['http://127.0.0.1:11434/v1', 'http://desk.lan:1234']) {
+    const collect = []
+    narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER(spelling), io: narratorIo({ collect }) })
+    assert.equal(collect.length, 2, spelling)
+    assert.equal(collect.some((command) => command.includes('/v1/v1')), false, spelling)
+    assert.equal(collect.filter((command) => /\/v1\/models/.test(command)).length, 1, spelling)
+    assert.equal(collect.filter((command) => /\/v1\/chat\/completions/.test(command)).length, 1, spelling)
+  }
+  assert.ok(narratorModelsCommand('http://desk.lan:1234/v1').includes('http://desk.lan:1234/v1/models'))
+})
+
+test('narratorModelId accepts exactly one id and names zero and several differently', () => {
+  assert.deepEqual(narratorModelId(JSON.stringify({ data: [{ id: 'qwen3-coder' }] })), { id: 'qwen3-coder' })
+  assert.deepEqual(narratorModelId(JSON.stringify({ data: [{ id: 'q' }, { id: 'q' }] })), { id: 'q' })
+  assert.equal(narratorModelId(JSON.stringify({ data: [] })).refused, NARRATION_REFUSALS.modelAbsent)
+  assert.equal(narratorModelId(JSON.stringify({ data: [{ id: '  ' }] })).refused, NARRATION_REFUSALS.modelAbsent)
+  assert.equal(narratorModelId(JSON.stringify({ data: [{ id: 'a' }, { id: 'b' }] })).refused, NARRATION_REFUSALS.modelAmbiguous)
+  assert.equal(narratorModelId('not json').refused, NARRATION_REFUSALS.modelsUnreadable)
+  assert.equal(narratorModelId(JSON.stringify({ data: 'nope' })).refused, NARRATION_REFUSALS.modelsUnreadable)
+  assert.notEqual(NARRATION_REFUSALS.modelAbsent, NARRATION_REFUSALS.modelAmbiguous)
+  for (const name of Object.values(NARRATION_REFUSALS)) assert.ok(NARRATION_REFUSAL_NAMES.includes(name), name)
+})
+
+test('narrateRecord narrates from an honest endpoint and never sends pi_provider as the model', () => {
+  const collect = []
+  const accepted = narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://127.0.0.1:11434/v1'), io: narratorIo({ collect }) })
+  assert.equal(accepted.refused, undefined)
+  assert.equal(accepted.text, HONEST_NARRATION)
+  assert.equal(accepted.model, 'qwen3-coder')
+  const chat = collect.find((command) => command.includes('/chat/completions'))
+  assert.ok(chat.includes('qwen3-coder'))
+  assert.equal(/"model":"local-pi"/.test(chat), false)
+  assert.ok(chat.startsWith('curl -sS --max-time 30 -X POST'))
+  // the prompt is the record and nothing else
+  const prompt = narrationPrompt(NARRATION_RECORD)
+  assert.ok(prompt.includes(JSON.stringify(NARRATION_RECORD)))
+  assert.ok(prompt.includes('you have not seen the diff or the checkout'))
+})
+
+test('every narration failure is a named refusal and never a throw', () => {
+  const ask = (options) => narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://desk.lan:1234'), io: narratorIo(options) })
+  const cases = [
+    [{ models: { ok: false, output: 'connection refused' } }, NARRATION_REFUSALS.unreachable],
+    [{ models: { ok: true, output: 'not json' } }, NARRATION_REFUSALS.modelsUnreadable],
+    [{ models: { ok: true, output: JSON.stringify({ data: [] }) } }, NARRATION_REFUSALS.modelAbsent],
+    [{ models: { ok: true, output: JSON.stringify({ data: [{ id: 'a' }, { id: 'b' }] }) } }, NARRATION_REFUSALS.modelAmbiguous],
+    [{ chat: { ok: false, output: 'gone' } }, NARRATION_REFUSALS.unreachable],
+    [{ chat: { ok: true, output: '{}' } }, NARRATION_REFUSALS.unreadable],
+    [{ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: '{"total":11}' } }] }) } }, NARRATION_REFUSALS.rawJson],
+    [{ chat: { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'It rewrote src/vendor/blob.' } }] }) } }, NARRATION_REFUSALS.unknownFact],
+  ]
+  for (const [options, reason] of cases) {
+    let out
+    assert.doesNotThrow(() => { out = ask(options) }, JSON.stringify(options))
+    assert.equal(out.text, undefined, reason)
+    assert.equal(out.refused, reason)
+  }
+  let threw
+  assert.doesNotThrow(() => { threw = narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://desk.lan:1234'), io: { run: () => { throw new Error('EPERM') } } }) })
+  assert.equal(threw.refused, NARRATION_REFUSALS.unreachable)
+  assert.equal(narrateRecord({ record: NARRATION_RECORD, registerText: '{"local_providers":{}}', io: narratorIo() }).refused, NARRATION_REFUSALS.unconfigured)
+  assert.equal(narrateRecord({ record: NARRATION_RECORD, registerText: 'not json', io: narratorIo() }).refused, NARRATION_REFUSALS.unconfigured)
+  assert.equal(narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('file:///etc/passwd'), io: narratorIo() }).refused, NARRATION_REFUSALS.endpointUnsafe)
+  assert.equal(narrateRecord({ record: NARRATION_RECORD, registerText: NARRATOR_REGISTER('http://u:p@desk.lan:1234'), io: narratorIo() }).refused, NARRATION_REFUSALS.endpointUnsafe)
+})
+
+test('the narration stage guard refuses an unknown token and an absent plain stage head', () => {
+  const record = { stages: ['plan:r1', 'build:r1', 'lane:r1', 'review:r1', 'commit', 'publish'] }
+  // (a) an unknown colon-shaped token
+  assert.equal(narrationStageDefect('The lane ran audit:r2 before commit.', record), NARRATION_REFUSALS.unknownFact)
+  assert.equal(narrationStageDefect('The lane ran review:r2 before commit.', record), NARRATION_REFUSALS.unknownFact)
+  assert.equal(narrationStageDefect('The lane ran review:r1 before commit.', record), null)
+  // (b) a KNOWN plain stage head the record never ran — the hole a colon-only scan left
+  for (const absent of ['converge', 'rebase', 'suite', 'scope-gate', 'gate-proof', 'check', 'done']) {
+    assert.equal(narrationStageDefect('The lane ran ' + absent + '.', record), NARRATION_REFUSALS.unknownFact, absent)
+    assert.ok(NARRATION_STAGE_VOCABULARY.includes(absent), absent)
+  }
+  for (const present of ['plan', 'build', 'review', 'commit', 'publish', 'lane']) {
+    assert.equal(narrationStageDefect('The lane ran ' + present + '.', record), null, present)
+  }
+  // The vocabulary is the driver's, not English: `lane` IS a stage head, so a narration
+  // saying "the lane" against a record that never journaled one is refused. Strictness
+  // costs nothing — a refusal drops the narration and publishes the code-composed body.
+  assert.equal(narrationStageDefect('The lane did well.', { stages: ['plan:r1'] }), NARRATION_REFUSALS.unknownFact)
+  assert.equal(narrationStageDefect('It went well.', { stages: ['plan:r1'] }), null)
+  // a head embedded in a longer word is not a stage name
+  assert.equal(narrationStageDefect('It ran 11 gate checks and rebased cleanly.', { stages: ['plan:r1', 'gate:r1'] }), null)
+  // the vocabulary is the driver's own declarations, closed and sorted
+  assert.equal(Object.isFrozen(NARRATION_STAGE_VOCABULARY), true)
+  for (const head of VARIANTS.full.stages) assert.ok(NARRATION_STAGE_VOCABULARY.includes(head), head)
+  assert.ok(NARRATION_STAGE_VOCABULARY.includes('done'))
+  assert.ok(NARRATION_STAGE_VOCABULARY.includes('escalate'))
+  // narrationDefect routes through the one shared predicate
+  assert.equal(narrationDefect('The lane ran converge.', record), NARRATION_REFUSALS.unknownFact)
+  assert.equal(narrationDefect('The lane ran publish.', record), null)
+})
+
+test('raw-JSON narration is refused by its own name even when every number is a record fact', () => {
+  assert.equal(narrationIsRawJson('{"gate":{"total":11},"build_round":2}'), true)
+  assert.equal(narrationIsRawJson('The lane took 2 build rounds.'), false)
+  const refused = narrationDefect('{"gate":{"total":11},"build_round":2}', NARRATION_RECORD)
+  assert.equal(refused, NARRATION_REFUSALS.rawJson)
+  assert.notEqual(refused, NARRATION_REFUSALS.unknownFact)
+  assert.equal(narrationDefect(HONEST_NARRATION, NARRATION_RECORD), null)
+})
+
+test('applyNarration transfers accepted narration only, and never mutates its input', () => {
+  const record = { ...NARRATION_RECORD }
+  assert.equal(applyNarration(record, { text: HONEST_NARRATION }).narrative, HONEST_NARRATION)
+  assert.equal('narrative' in record, false)
+  for (const narrated of [undefined, null, {}, { refused: NARRATION_REFUSALS.unreachable }, { text: '' }, { text: '   ' }]) {
+    assert.equal('narrative' in applyNarration(record, narrated), false, JSON.stringify(narrated))
+  }
+  assert.equal(applyNarration(record, { text: '  ' + HONEST_NARRATION + '  ' }).narrative, HONEST_NARRATION)
+})
+
+test('a published run prepends the local narrative and leaves the code-composed facts byte-identical', () => {
+  const narratorCommands = {
+    'curl -sS --max-time 15': { ok: true, output: JSON.stringify({ data: [{ id: 'qwen3-coder' }] }) },
+    'curl -sS --max-time 30 -X POST': { ok: true, output: JSON.stringify({ choices: [{ message: { content: 'The lane ran 2 build rounds.' } }] }) },
+  }
+  const register = NARRATOR_REGISTER('http://127.0.0.1:11434/v1')
+  const narrated = runPublished({ capabilities: register, commands: narratorCommands })
+  assert.equal(narrated.result.status, 'done')
+  const narratedBody = narrated.io.calls.writes[TD + '/pr-body.md']
+  assert.ok(narratedBody.startsWith(NARRATION_HEADING + '\nThe lane ran 2 build rounds.\n\n'), JSON.stringify(narratedBody.slice(0, 140)))
+  const row = narrated.io.calls.logs.find((entry) => entry.narration)
+  assert.deepEqual(row.narration, { outcome: 'accepted', chars: 'The lane ran 2 build rounds.'.length, model: 'qwen3-coder' })
+
+  // a dead endpoint publishes exactly the no-narrator body — byte for byte
+  const dead = runPublished({ capabilities: register, commands: { 'curl -sS --max-time 15': { ok: false, output: 'connection refused' } } })
+  const none = runPublished({})
+  const deadBody = dead.io.calls.writes[TD + '/pr-body.md']
+  const noneBody = none.io.calls.writes[TD + '/pr-body.md']
+  assert.equal(deadBody, noneBody)
+  assert.ok(narratedBody.endsWith(deadBody))
+  assert.equal(dead.result.status, 'done')
+  assert.equal(dead.io.calls.logs.find((entry) => entry.narration).narration.outcome, 'refused')
+  assert.equal(noneBody.includes(NARRATION_HEADING), false)
+  assert.equal(none.io.calls.logs.find((entry) => entry.narration).narration.reason, NARRATION_REFUSALS.unconfigured)
 })
 
 test('journal boundaries and anomaly extraction are deterministic and tolerate malformed arrays', () => {
@@ -8054,7 +8321,17 @@ test('journal boundaries and anomaly extraction are deterministic and tolerate m
   assert.equal(anomalies.length, 5)
   assert.match(anomalies[0].detail, /builder d7 idle 2s, extended 3s/)
   assert.equal(anomalies[1].detail, 'gate-repair:1')
-  assert.match(anomalies[2].detail, /bounce-builder: try again/)
+  assert.match(anomalies[2].detail, /^builder — try again$/)
+  // the BARE `bounce` a consult offering ['bounce','escalate'] records names no seat,
+  // so the row must carry no dangling separator either
+  assert.equal(bounceSeatOf('bounce'), '')
+  assert.equal(bounceSeatOf('bounce-reviewer'), 'reviewer')
+  assert.equal(bounceDetail('bounce', 'try again'), 'try again')
+  assert.equal(bounceDetail('bounce-builder', 'try again'), 'builder — try again')
+  assert.equal(bounceDetail('bounce', ''), '')
+  assert.equal(prAnomalies([{ decision: 'bounce', reason: 'try again' }])[0].detail, 'try again')
+  const bare = composePrBody({ anomalies: prAnomalies([{ decision: 'bounce', reason: 'try again' }]) })
+  assert.equal(bare.split('\n').find((line) => line.startsWith('- bounce')), '- bounce: try again')
   assert.match(anomalies[3].detail, /modified a.mjs/)
   assert.doesNotThrow(() => prAnomalies(rows))
   assert.deepEqual(prAnomalies({}), [])

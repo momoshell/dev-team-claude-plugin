@@ -9,7 +9,7 @@ import { EVENT_TYPES, PAYLOAD_KEYS, NODE_FLOOR, openLedger, USAGE_ABSENT_CAUSES 
 import { openRun, _resetNoticeGuardsForTest } from '../scripts/factory/emit.mjs'
 import {
   composeLayout, SEAT_DEFAULTS, FANOUT_TOOLS, DEFAULT_ROLES, ROLE_ORDER, transportFor, seatTransport, HEADLESS_TRANSPORTS, assertCapabilities, resolveAdapters, bootAllocation, resolveWorkerBin, docOpenArgs,
-  resolveTier, resolveSeatModels, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
+  resolveTier, resolveSeatModels, FALLBACK_REFUSALS, refuseFallback, loadLadder, assertBandFloors, grantedDefModels, assertDefBandFloors, refuseBandFloor, seatModelKey, bandForMember, bandForRaw, seatBand, LADDER_PATH, BAND_FLOOR_REFUSALS, shadowCandidates, shadowExclusion, shadowPick, shadowPickBoot, SHADOW_EXCLUSIONS, SHADOW_OUTCOMES, SHADOW_ABSENT, seatReadySignal, assertSeats, phaseForStage, emitAdapter,
   waitForEnvelope, WAIT_POLL_MS, LIVENESS_PROBE_MS, LIVENESS_MISSES_TO_DIE,
   parkSeats, parkOnOutcome, escalationAttention, bootCmd, runCmd, runExitCode, runOutcome, RUN_EXIT_CODES, RUN_EXIT_UNEXPECTED, RUN_START_EVENT, readHead, readBranch, teardownDecision, stagesFromJournal, assignmentsFromJournal, resolveVariant, resolveFilesInScope, resolveLaneFence, resolveValidationLane, VALIDATION_LANE_REFUSAL, assertCtxSources, seatLiveness, awaitSeatsReady, teardownCore, teardownCmd, TEARDOWN_EXIT_SEATLESS, TEARDOWN_EXIT_UNPROVEN, TEARDOWN_ABSENT_CAUSES, teardownAbsentCause, TEARDOWN_DRAIN_MS, TEARDOWN_DRAIN_ERROR_MS, installExitMarker, writeTerminalLine, EXITED_STATUS, SIGNAL_EXIT_CODES, UNCAUGHT_EXIT_CODE, terminalLineSeen,
   UsageError, KNOWN_FLAGS, ROLE_FLAG_PREFIXES, REQUIRED_FLAGS, BOOT_ONLY_FLAGS, assertUsage,
@@ -60,6 +60,44 @@ after(() => {
 
 const roster = JSON.parse(readFileSync(new URL('./roster.json', import.meta.url), 'utf8'))
 const rosterLadder = JSON.parse(readFileSync(new URL('./model-ladder.json', import.meta.url), 'utf8'))
+
+// Focused test-local schema evaluator for the fallback fixtures. The production
+// refresh validator intentionally supports a smaller keyword set, so these
+// tests exercise the shipped $ref chain, minItems and closed entry objects.
+function fallbackSchemaErrors(value) {
+  const schema = JSON.parse(readFileSync(new URL('./roster.schema.json', import.meta.url), 'utf8'))
+  const deref = (raw, depth = 0) => {
+    if (!raw || typeof raw !== 'object' || typeof raw.$ref !== 'string') return raw
+    if (depth > 8) throw new Error(`$ref chain too deep: ${raw.$ref}`)
+    return deref(schema.$defs?.[raw.$ref.split('/').pop()], depth + 1)
+  }
+  const errors = []
+  const walk = (raw, actual, path) => {
+    const shape = deref(raw)
+    if (!shape || typeof shape !== 'object') { errors.push(`${path}: unresolved schema`); return }
+    const types = Array.isArray(shape.type) ? shape.type : shape.type ? [shape.type] : []
+    if (types.length) {
+      const kind = actual === null ? 'null' : Array.isArray(actual) ? 'array' : typeof actual
+      if (!types.includes(kind)) { errors.push(`${path}: expected ${types.join('|')}, found ${kind}`); return }
+    }
+    if (actual === null) return
+    if (Array.isArray(shape.enum) && !shape.enum.includes(actual)) errors.push(`${path}: enum`)
+    if (typeof actual === 'string' && shape.pattern && !new RegExp(shape.pattern).test(actual)) errors.push(`${path}: pattern`)
+    if (Array.isArray(actual)) {
+      if (Number.isFinite(shape.minItems) && actual.length < shape.minItems) errors.push(`${path}: minItems`)
+      if (shape.items) actual.forEach((entry, i) => walk(shape.items, entry, `${path}[${i}]`))
+      return
+    }
+    if (actual && typeof actual === 'object') {
+      for (const key of shape.required || []) if (!Object.hasOwn(actual, key)) errors.push(`${path}: required ${key}`)
+      const properties = shape.properties || {}
+      if (shape.additionalProperties === false) for (const key of Object.keys(actual)) if (!Object.hasOwn(properties, key)) errors.push(`${path}: additional ${key}`)
+      for (const [key, child] of Object.entries(properties)) if (Object.hasOwn(actual, key)) walk(child, actual[key], `${path}.${key}`)
+    }
+  }
+  walk(schema.$defs?.seat, value, 'seat')
+  return errors
+}
 const CLAUDE_USAGE_SETTINGS = fileURLToPath(new URL('./adapters/claude-usage.settings.json', import.meta.url))
 // Hoisted: tests both above and below this point branch on it. Below the
 // ledger's Node floor the emitter degrades to JSONL and writes no database,
@@ -3930,6 +3968,48 @@ test('resolveTier(judge) seats every role in canonical order, tech-lead last', (
   assert.deepEqual(r.roles, ['lead', 'planner', 'builder', 'reviewer', 'tech-lead'])
 })
 
+test('fallback schema accepts inherited effort and refuses malformed chain entries', () => {
+  const base = { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh' }
+  assert.deepEqual(fallbackSchemaErrors({ ...base }), [])
+  assert.deepEqual(fallbackSchemaErrors({ ...base, fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi' }] }), [])
+  assert.deepEqual(fallbackSchemaErrors({ ...base, fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'xhigh' }] }), [])
+  for (const omitted of ['provider', 'id', 'agent']) {
+    const entry = { provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'xhigh' }
+    delete entry[omitted]
+    assert.notDeepEqual(fallbackSchemaErrors({ ...base, fallback: [entry] }), [])
+  }
+  assert.notDeepEqual(fallbackSchemaErrors({ ...base, fallback: [] }), [])
+  assert.notDeepEqual(fallbackSchemaErrors({ ...base, fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'turbo' }] }), [])
+  assert.notDeepEqual(fallbackSchemaErrors({ ...base, fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', transport: 'headless-json' }] }), [])
+})
+
+test('resolveTier carries declared fallback chains and leaves absent keys absent', () => {
+  const r = resolveTier(roster, 'judge', {})
+  assert.deepEqual(r.seats['tech-lead'].fallback, [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'xhigh' }])
+  for (const role of ['lead', 'planner', 'builder', 'reviewer']) assert.equal(Object.hasOwn(r.seats[role], 'fallback'), false)
+})
+
+test('resolveTier refuses empty, self-referential and cross-agent fallback entries', () => {
+  const seat = { provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh' }
+  const rosterFor = (fallback) => ({ tiers: { judge: { 'tech-lead': { ...seat, fallback } } } })
+  assert.throws(() => resolveTier(rosterFor([]), 'judge', {}), (err) => err.reason === 'fallback-empty')
+  assert.throws(() => resolveTier(rosterFor([{ provider: seat.provider, id: seat.id, agent: 'pi' }]), 'judge', {}), (err) => err.reason === 'fallback-self')
+  assert.throws(() => resolveTier(rosterFor([{ provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }]), 'judge', {}), (err) => err.reason === 'fallback-agent-change')
+  const overridden = resolveTier(rosterFor([{ provider: 'anthropic', id: 'claude-opus-5', agent: 'claude' }]), 'judge', { 'agent-tech-lead': 'claude' })
+  assert.equal(overridden.seats['tech-lead'].agent, 'claude')
+  assert.equal(overridden.seats['tech-lead'].fallback[0].agent, 'claude')
+})
+
+test('refuseFallback is a frozen closed set and preserves each declared reason', () => {
+  assert.equal(Object.isFrozen(FALLBACK_REFUSALS), true)
+  assert.throws(() => refuseFallback('not-real', 'why'), /unknown fallback refusal reason "not-real"/)
+  for (const reason of FALLBACK_REFUSALS) {
+    const err = refuseFallback(reason, 'why')
+    assert.equal(err.reason, reason)
+    assert.match(err.message, new RegExp(`\\[${reason}\\]$`))
+  }
+})
+
 test('resolveTier: per-seat flags override the roster cell and stay distinguishable from roster values', () => {
   const r = resolveTier(roster, 'build', { 'model-builder': 'raw-id', 'agent-builder': 'claude', 'effort-builder': 'max' })
   assert.equal(r.seats.builder.model, 'raw-id')
@@ -3982,6 +4062,32 @@ test('resolveSeatModels: a fake adapters map proves translation, raw passthrough
   assert.equal(out.b.provider, null)
   assert.equal(out.b.id, null)
   assert.equal(out.c.model, 'bare-fallback')
+})
+
+test('resolveSeatModels translates fallback entries with the role adapter and inherits effort', () => {
+  const seats = {
+    'tech-lead': {
+      agent: 'pi', effort: 'high', provider: 'openai', id: 'gpt-5.6-sol', model: null,
+      fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi' }],
+    },
+  }
+  const out = resolveSeatModels(seats, {
+    'tech-lead': { adapter: { modelString: ({ provider, id }) => `${provider}/${id}` } },
+  })
+  assert.equal(out['tech-lead'].model, 'openai/gpt-5.6-sol')
+  assert.deepEqual(out['tech-lead'].fallback, [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi', effort: 'high', model: 'anthropic/claude-opus-5' }])
+})
+
+test('resolveSeatModels drops a declared chain behind a raw model override', () => {
+  const resolved = resolveTier({ tiers: { judge: { 'tech-lead': {
+    provider: 'openai', id: 'gpt-5.6-sol', agent: 'pi', effort: 'xhigh',
+    fallback: [{ provider: 'anthropic', id: 'claude-opus-5', agent: 'pi' }],
+  } } } }, 'judge', { 'model-tech-lead': 'operator-raw-id' })
+  const out = resolveSeatModels(resolved.seats, { 'tech-lead': { adapter: { modelString: () => { throw new Error('must not translate an override') } } } })
+  assert.equal(out['tech-lead'].model, 'operator-raw-id')
+  assert.equal(Object.hasOwn(out['tech-lead'], 'fallback'), false)
+  assert.equal(out['tech-lead'].provider, null)
+  assert.equal(out['tech-lead'].id, null)
 })
 
 test('resolveSeatModels: a --model-<role> override clears the roster cell it replaced and never guesses a provider (#161)', async () => {
@@ -4037,6 +4143,18 @@ test('resolveSeatModels end to end through the REAL adapters, on the real roster
   // Tracks the LIVE roster cell (planning floor, ratified 2026-08-13: the
   // planner seat is opus-grade at EVERY tier — never sonnet/haiku/luna).
   assert.equal(out.planner.model, 'claude-opus-5')
+
+  const judge = resolveTier(roster, 'judge', {})
+  const judgeOut = resolveSeatModels(judge.seats, {
+    lead: { name: 'claude', adapter: claudeMod },
+    planner: { name: 'claude', adapter: claudeMod },
+    builder: { name: 'pi', adapter: piMod },
+    reviewer: { name: 'claude', adapter: claudeMod },
+    'tech-lead': { name: 'pi', adapter: piMod },
+  })
+  assert.equal(judgeOut['tech-lead'].model, 'openai-codex/gpt-5.6-sol')
+  assert.equal(judgeOut['tech-lead'].fallback[0].model, 'anthropic/claude-opus-5')
+  assert.equal(judgeOut['tech-lead'].fallback[0].effort, 'xhigh')
 })
 
 test('grantedDefModels reads only pinned defs', () => {

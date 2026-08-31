@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { spawnSync, spawn } from 'node:child_process'
 import { createRequire } from 'node:module'
-import { ROOT, sqliteAvailable } from './helpers.mjs'
+import { ROOT, scratchDir, sqliteAvailable } from './helpers.mjs'
 // Inlined from the retired legacy runtime's contract (scripts/cmux/contract.mjs):
 // the completion-nonce prefix the ledger's sweep guard checks against.
 const NONCE_PREFIX = 'devteam-done-'
@@ -31,6 +31,7 @@ import {
 } from '../scripts/factory/ledger.mjs'
 import { FAILURE_UPGRADE, MODIFIER_OUTCOMES, SENSITIVITY_FLOOR, VARIANT_NAMES } from '../crew/drive.mjs'
 import { emitAdapter } from '../crew/seat-io.mjs'
+import { headlessIo } from '../crew/headless.mjs'
 import { modelString as piModelString } from '../crew/adapters/adapter-pi.mjs'
 // openRun is the only production writer of sessions.tier and the compiler
 // proposal columns: it reads the boot record/brief and forwards them. The
@@ -482,6 +483,36 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
   }
   assert.deepEqual(escalationCause({ where: 'driver', why: 'anchor-absent in an unapplied change' }), { cause: 'plan-build-disagreement', actor: 'driver' })
   assert.deepEqual(escalationCause({ where: 'scope', why: 'exceeded its 1800s budget' }), { cause: 'plan-build-disagreement', actor: 'driver' })
+})
+
+test('a budget-refused headless outcome composes the ledger budget escalation cause', () => {
+  const dir = scratchDir('factory-ledger-budget-refused-')
+  const taskDir = join(dir, 'task'); const returnsDir = join(dir, 'returns')
+  mkdirSync(taskDir); mkdirSync(returnsDir)
+  const crew = { checkout: dir, members: { builder: { model: 'claude-fable-5', transport: 'headless-json' } } }
+  const logs = []
+  try {
+    const io = headlessIo({
+      crew, paths: { dir, taskDir, returnsDir }, taskDir, checkout: dir,
+      adapters: { builder: { headlessCommand: () => ({ bin: '/bin/worker', args: [], env: {} }) } },
+      bin: '/bin/worker',
+      deps: {
+        uuid: () => 'budget-refused-session', log: (row) => logs.push(row), kill: () => {},
+        spawn: () => {
+          const runDir = join(taskDir, 'headless', 'd1')
+          writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'assistant', message: { model: '<synthetic>' } })}\n${JSON.stringify({ type: 'result', terminal_reason: 'api_error' })}\n`)
+          writeFileSync(join(runDir, 'exit'), '1')
+          return { pid: 7001, unref() {} }
+        },
+      },
+    })
+    const run = io.assign({ role: 'builder', briefFile: join(taskDir, 'brief.md') })
+    let error
+    try { io.wait(run.returnPath, 1) } catch (err) { error = err }
+    assert.equal(error?.stage, 'headless-budget-refused')
+    assert.ok(logs.some((row) => row.headless_outcome === 'budget-refused'))
+    assert.deepEqual(escalationCause({ where: 'builder', why: error.message }), { cause: 'budget', actor: 'driver' })
+  } finally { rmSync(dir, { recursive: true, force: true }) }
 })
 
 // ---------------------------------------------------------------------------

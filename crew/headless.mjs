@@ -114,10 +114,24 @@ export function shq(value) {
   return `'${String(value).replaceAll("'", `'\\''`)}'`
 }
 
+// The provider's own marker for a turn it REFUSED rather than ran: a
+// `<synthetic>` assistant message carrying the refusal prose, followed by a
+// terminal result whose terminal_reason is `api_error`. Measured on two real
+// 2026-08-30 tails (b332 d2 planner, b333 d2 lead). The CONJUNCTION is
+// load-bearing: an `api_error` result on its own is an ordinary transport
+// failure, and a `<synthetic>` message on its own is a turn that still ran.
+export const SYNTHETIC_MODEL = '<synthetic>'
+export const BUDGET_TERMINAL_REASON = 'api_error'
+// EXACTLY one fallback per assignment. The chain is also CONSUMED (the entry is
+// dropped from the member), so the two bounds are independent: a raised cap
+// still runs out of chain, an unconsumed chain still hits the cap.
+export const FALLBACK_MAX = 1
+
 // The envelope is the record of a turn. Stream and exit evidence are useful
 // diagnostics, but can never replace a missing ReturnEnvelope.
-export function classifyRun({ exitCode, signal, terminal, sawJson, envelope, timedOut }) {
+export function classifyRun({ exitCode, signal, terminal, sawJson, envelope, timedOut, budgetRefused = false }) {
   if (envelope) return (exitCode === 0 && terminal) ? 'ok' : 'ok-degraded'
+  if (budgetRefused) return 'budget-refused'
   if (timedOut) return 'timeout'
   if (!sawJson) return 'malformed'
   if (!terminal) return 'aborted'
@@ -175,27 +189,32 @@ export function foldUsage(text) {
   return total
 }
 
-function parseStream(path, readFileSync, existsSync) {
-  if (!existsSync(path)) return { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null }
+export function parseStream(path, readFileSync, existsSync) {
+  const absent = { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null, budgetRefused: false }
+  if (!existsSync(path)) return absent
   let text
-  try { text = readFileSync(path, 'utf8') } catch { return { sawJson: false, terminal: false, terminalReason: null, lines: 0, usage: null } }
+  try { text = readFileSync(path, 'utf8') } catch { return absent }
   let sawJson = false
   let terminal = false
   let terminalReason = null
   let lines = 0
+  let sawSynthetic = false
+  let sawApiError = false
   for (const line of String(text).split('\n')) {
     if (!line.trim()) continue
     lines += 1
     try {
       const event = JSON.parse(line)
       sawJson = true
+      if (event?.type === 'assistant' && event.message?.model === SYNTHETIC_MODEL) sawSynthetic = true
       if (event?.type === 'result') {
         terminal = true
         terminalReason = event.terminal_reason || event.subtype || null
+        if (event.terminal_reason === BUDGET_TERMINAL_REASON) sawApiError = true
       }
     } catch { /* truncated trailing JSONL is not itself a malformed run */ }
   }
-  return { sawJson, terminal, terminalReason, lines, usage: foldUsage(text) }
+  return { sawJson, terminal, terminalReason, lines, usage: foldUsage(text), budgetRefused: sawSynthetic && sawApiError }
 }
 
 function parseExit(path, readFileSync, existsSync) {
@@ -474,7 +493,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     store.advance(handle, PHASES.RUNNING, { pid: child.pid })
     member.started = true
     notePersist(role, persistCrew(paths, role, { started: true }, crewDeps))
-    const run = { role, id, runId, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
+    const run = { role, id, runId, briefFile, note: note ?? null, model: member.model ?? null, sessionId, pid: child.pid, reservation_id: handle.reservation_id, dir, stream, stderr, exit, cmdPath, returnPath, startedAt: now() }
     runs.set(returnPath, run)
     log({ at: now(), event: 'headless-spawn', role, id, run_id: runId, pid: child.pid, dir, returnPath })
     return { id, returnPath }
@@ -494,14 +513,77 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       throw err
     }
   }
+  // One counter per (role, assignment id): a NEW assignment gets a fresh
+  // allowance, the SAME one does not.
+  const fallbacksUsed = new Map()
+  // The seat the crew booted refused this turn for BUDGET — not for anything the
+  // brief said. Swap in the next declared cell and let the caller re-ask.
+  // Returns null when there is nothing to fall back to, or no lawful budget
+  // left to spend, which is the escalation path in both cases.
+  function fallbackFor(run, deadline) {
+    const member = crew.members?.[run.role]
+    const chain = Array.isArray(member?.fallback) ? member.fallback : []
+    const key = `${run.role}:${run.id}`
+    if ((fallbacksUsed.get(key) ?? 0) >= FALLBACK_MAX) return null
+    // ORDER IS LOAD-BEARING. Read and validate the next entry FIRST: a cell
+    // nobody translated is not a cell (resolveSeatModels is the only author of
+    // `model`, and an untranslated id is the guessed passthrough adapter-pi
+    // refuses, #147/#239), and an operator who declared NO chain must get no
+    // fallback EVENT either. `seat-fallback-expired` says a real declared cell
+    // ran out of time; it must never say that about a seat that never had one.
+    const next = chain[0]
+    if (!next || typeof next.model !== 'string' || !next.model) return null
+    // The role wait is a DISPATCH deadline (crew/drive.mjs:2155,
+    // crew/crew.mjs:1864-1866). A second turn with zero budget is not a turn,
+    // and the refusal is recorded rather than silently skipped.
+    if (now() >= deadline) {
+      log({ at: now(), event: 'seat-fallback-expired', role: run.role, assignment_id: run.id, cause: 'budget' })
+      return null
+    }
+    const from = { provider: member.provider ?? null, id: member.id ?? null, model: member.model ?? null, effort: member.effort ?? null, agent: member.agent ?? null }
+    const to = { provider: next.provider ?? null, id: next.id ?? null, model: next.model, effort: next.effort ?? member.effort ?? null, agent: next.agent ?? member.agent ?? null }
+    const rest = chain.slice(1)
+    const patch = { model: to.model, provider: to.provider, id: to.id, effort: to.effort ?? member.effort ?? null, fallback: rest }
+    // BOTH authoritative views, in memory and on disk, in one locked
+    // read-modify-write — the posture crew/seat-io.mjs:3045-3064 already takes,
+    // because crew/seat-io.mjs:2896 reads `crew.seats?.[role] || m` as the LIVE
+    // cell and a member-only update leaves that reader on the refused one.
+    for (const target of [member, crew.seats?.[run.role]]) { if (target) Object.assign(target, patch) }
+    fallbacksUsed.set(key, (fallbacksUsed.get(key) ?? 0) + 1)
+    notePersist(run.role, updateCrewJson(paths, (disk) => {
+      for (const target of [disk.members?.[run.role], disk.seats?.[run.role]]) { if (target) Object.assign(target, patch) }
+      return true
+    }, crewDeps))
+    log({ at: now(), event: 'seat-fallback', role: run.role, from, to, cause: 'budget', assignment_id: run.id })
+    return { from, to }
+  }
+  // A re-ask is not a new assignment: same id, same return path, same brief
+  // (the reask contract at :416), and the SAME absolute deadline. A re-assign
+  // that THROWS is journalled and yields null, so the caller escalates on the
+  // original outcome rather than on a reservation error nobody asked about.
+  function reaskOnFallback(run, returnPath, deadline) {
+    if (!fallbackFor(run, deadline)) return null
+    try {
+      runs.delete(returnPath)
+      assign({ role: run.role, briefFile: run.briefFile, note: run.note, reask: { id: run.id, returnPath: run.returnPath } })
+    } catch (err) {
+      log({ at: now(), event: 'seat-fallback-failed', role: run.role, assignment_id: run.id, error: String(err?.message ?? err) })
+      return null
+    }
+    return () => waitUntil(returnPath, deadline)
+  }
+  // ONE deadline is minted per assignment, here and nowhere else. Everything
+  // below judges itself against that absolute instant.
   function wait(returnPath, timeoutS) {
+    return waitUntil(returnPath, now() + Number(timeoutS) * 1000)
+  }
+  function waitUntil(returnPath, deadline) {
     const run = runs.get(returnPath) || { role: 'unknown', returnPath, stream: '', exit: '' }
-    const deadline = now() + Number(timeoutS) * 1000
     while (now() < deadline) {
       const env = readEnvelopeOrFail(run)
-      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
+      if (env) { const exitCode = parseExit(run.exit, read, exists); const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: env, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return env }
       const exitCode = parseExit(run.exit, read, exists)
-      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); throw outcomeError(run, outcome) }
+      if (exitCode !== null) { const stream = parseStream(run.stream, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline); if (again) return again() } throw outcomeError(run, outcome) }
       sleep(WAIT_POLL_MS)
     }
     if (run.pid != null) { try { kill(-run.pid, 'SIGTERM') } catch {} }
@@ -518,9 +600,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id, run_id: run.runId })
     }
     const raced = readEnvelopeOrFail(run)
-    if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
-    const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true })
-    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); throw outcomeError(run, outcome)
+    if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }
+    const exitCode = parseExit(run.exit, read, exists), stream = parseStream(run.stream, read, exists), outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: null, timedOut: true, budgetRefused: stream.budgetRefused })
+    recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); if (outcome === 'budget-refused') { const again = reaskOnFallback(run, returnPath, deadline); if (again) return again() } throw outcomeError(run, outcome)
   }
   return { assign, wait }
 }

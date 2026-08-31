@@ -78,7 +78,15 @@
         "provider": "openai",
         "id": "gpt-5.6-sol",
         "agent": "pi",
-        "effort": "xhigh"
+        "effort": "xhigh",
+        "fallback": [
+          {
+            "provider": "anthropic",
+            "id": "claude-opus-5",
+            "agent": "pi",
+            "effort": "xhigh"
+          }
+        ]
       }
     }
   },

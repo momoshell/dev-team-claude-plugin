@@ -9,7 +9,7 @@ import { homedir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
 import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
-import { assertHostQuiet, hostLoad, loadPolicy } from '../../crew/host-load.mjs'
+import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
@@ -403,6 +403,11 @@ export function normalDeps(deps = {}) {
     spawnAsync: deps.spawnAsync || deps.spawn || spawnAsyncDefault,
     assertQuiet: deps.assertQuiet || ((env) => assertHostQuiet(hostLoad({ policy: loadPolicy(env) }))),
     log: deps.log || ((line) => process.stdout.write(`${line}\n`)),
+    // Suite-slot seams (#825): pass-through only. withSuiteSlot owns their
+    // defaults, so an absent seam must stay `undefined` rather than become null.
+    now: deps.now,
+    sleep: deps.sleep,
+    slots: deps.slots,
   }
 }
 
@@ -1210,9 +1215,13 @@ export const BASELINE_CACHE_DIRNAME = 'baselines'
 // The factory state root, relocatable exactly as the ledger's is
 // (scripts/factory/ledger.mjs:3658). One file per commit; a {sha, command} key needs no
 // eviction because both halves are immutable facts about that commit.
-export function baselineCacheRoot(deps) {
+export function factoryStateRoot(deps) {
   const d = normalDeps(deps)
-  return join(d.env.DEVTEAM_LEDGER_DIR || join(d.home, '.dev-team', 'factory'), BASELINE_CACHE_DIRNAME)
+  return d.env.DEVTEAM_LEDGER_DIR || join(d.home, '.dev-team', 'factory')
+}
+
+export function baselineCacheRoot(deps) {
+  return join(factoryStateRoot(deps), BASELINE_CACHE_DIRNAME)
 }
 
 export function baselineCachePath({ sha, deps } = {}) {
@@ -1317,24 +1326,44 @@ export function measureBatchBaseline({ plans, outDir, checkout, heads, deps } = 
     return cached
   }
   const path = join(outDir, 'batch-baseline.json')
-  let result
-  try {
-    result = d.spawn({
-      file: 'node',
-      args: ['scripts/factory/make-brief.mjs', '--measure-baseline', path, '--checkout', plans[0].dir],
-      cwd: plans[0].dir,
-    })
-  } catch (err) {
-    d.log(`dispatch-batch: batch baseline measurement failed: ${err?.message || String(err)}; measuring per lane`)
-    return null
-  }
-  if (!result || result.status !== 0) {
-    d.log(`dispatch-batch: batch baseline measurement failed; measuring per lane`)
-    return null
-  }
-  recordBaselineCache({ measured: path, sha, deps: d })
-  d.log(`dispatch-batch: measured shared baseline sha=${sha} path=${path}`)
-  return path
+  // Acquire, then LOOK AGAIN (#825). The cache is keyed by sha, so the lane that
+  // held this slot before may have recorded the very baseline this one queued to
+  // measure: five lanes on one commit become one suite and four reads. The
+  // recheck lives INSIDE the slot, because outside it the answer is the one that
+  // was already false above.
+  return withSuiteSlot({
+    owner: `dispatch-batch:${sha}`,
+    root: factoryStateRoot(d),
+    env: d.env,
+    log: (line) => d.log(`dispatch-batch: ${line}`),
+    now: d.now,
+    sleep: d.sleep,
+    slots: d.slots,
+  }, () => {
+    const queued = readBaselineCache({ sha, command, deps: d })
+    if (queued) {
+      d.log(`dispatch-batch: reusing cached baseline sha=${sha} path=${queued} (recorded while queued for a suite slot)`)
+      return queued
+    }
+    let result
+    try {
+      result = d.spawn({
+        file: 'node',
+        args: ['scripts/factory/make-brief.mjs', '--measure-baseline', path, '--checkout', plans[0].dir],
+        cwd: plans[0].dir,
+      })
+    } catch (err) {
+      d.log(`dispatch-batch: batch baseline measurement failed: ${err?.message || String(err)}; measuring per lane`)
+      return null
+    }
+    if (!result || result.status !== 0) {
+      d.log(`dispatch-batch: batch baseline measurement failed; measuring per lane`)
+      return null
+    }
+    recordBaselineCache({ measured: path, sha, deps: d })
+    d.log(`dispatch-batch: measured shared baseline sha=${sha} path=${path}`)
+    return path
+  })
 }
 
 function compileCommand({ requestPath, lane, laneDir, registerPath, outDir, baselinePath }) {

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { unifiedDiff, proposeEdit } from './roster-edit.mjs'
+import { normalizeRoster, serializeRosterV1, serializeRosterV2 } from '../../crew/roster.mjs'
 import { breakerPolicy, cellHealth } from '../../crew/breaker.mjs'
 
 const SERVER_DIR = dirname(fileURLToPath(import.meta.url))
@@ -341,19 +342,32 @@ export function ladderView({ roster, ladder, reference, cells } = {}) {
   }
 }
 
-function canonicalRosterText(roster, sourceText) {
-  const canonical = JSON.stringify(roster, null, 2)
+// The REPOSITORY text: what a patch proposes to land in git. Always v2.
+function repositoryRosterText (roster, sourceText) {
+  const canonical = serializeRosterV2(roster)
+  return sourceText.endsWith('\n') ? `${canonical}\n` : canonical
+}
+
+// The COMPATIBILITY text: what a LOCAL apply writes back over the active file.
+// A v1 source is written back as canonical v1 and a v2 source as canonical v2,
+// because the active file still has readers that cannot read v2 —
+// visualizer/server/roster-source.mjs:58, crew/seat-io.mjs:3121,3155 and
+// scripts/factory/dispatch-batch.mjs:1047, and the out-of-scope proof at
+// test/visualizer-server.test.mjs:1920 reads `.tiers` straight back out.
+function canonicalRosterText (roster, sourceText, version) {
+  const canonical = version === 2 ? serializeRosterV2(roster) : serializeRosterV1(roster)
   return sourceText.endsWith('\n') ? `${canonical}\n` : canonical
 }
 
 function parseRosterText(rosterText) {
-  if (typeof rosterText !== 'string') return { roster: null, canonical: false }
+  if (typeof rosterText !== 'string') return { roster: null, canonical: false, version: null }
   try {
-    const roster = JSON.parse(rosterText)
-    const canonical = JSON.stringify(roster, null, 2) === (rosterText.endsWith('\n') ? rosterText.slice(0, -1) : rosterText)
-    return { roster, canonical }
+    const raw = JSON.parse(rosterText)
+    const canonical = JSON.stringify(raw, null, 2) === (rosterText.endsWith('\n') ? rosterText.slice(0, -1) : rosterText)
+    const roster = normalizeRoster(raw)
+    return { roster, canonical, version: roster.schema_version }
   } catch {
-    return { roster: null, canonical: false }
+    return { roster: null, canonical: false, version: null }
   }
 }
 
@@ -518,7 +532,8 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
   const refusals = []
   let candidate = parsed.roster ? clone(parsed.roster) : null
   if (candidate) for (const move of requested) setMove(candidate, move)
-  const afterText = candidate ? canonicalRosterText(candidate, rosterText) : null
+  const afterText = candidate ? repositoryRosterText(candidate, rosterText) : null
+  const localAfterText = candidate ? canonicalRosterText(candidate, rosterText, parsed.version) : null
 
   let evolvingText = rosterText
   for (const move of requested) {
@@ -535,7 +550,7 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
     if (parsed.roster) {
       const evolvingRoster = parseRosterText(evolvingText).roster
       setMove(evolvingRoster, move)
-      evolvingText = canonicalRosterText(evolvingRoster, evolvingText)
+      evolvingText = canonicalRosterText(evolvingRoster, evolvingText, parsed.version)
     }
   }
 
@@ -549,6 +564,7 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
   const blockingRefusals = localBlockingRefusals(refusals)
   const localApplyAllowed = requested.length > 0 && parsed.roster != null && blockingRefusals.length === 0
   const candidateDiff = localApplyAllowed && afterText != null ? unifiedDiff(rosterText, afterText, { path: 'crew/roster.json' }) : null
+  const localCandidateDiff = localApplyAllowed && localAfterText != null ? unifiedDiff(rosterText, localAfterText, { path: 'crew/roster.json' }) : null
   return {
     ok,
     checks,
@@ -556,7 +572,7 @@ export async function stageMoves({ rosterText, rosterPath = 'crew/roster.json', 
     blocking_refusals: blockingRefusals,
     local_apply_allowed: localApplyAllowed,
     diff: ok ? candidateDiff : null,
-    local_diff: candidateDiff,
+    local_diff: localCandidateDiff,
     before_text_canonical: beforeTextCanonical,
   }
 }
@@ -578,7 +594,7 @@ function resultingLineCount(rosterText, moves) {
   const parsed = parseRosterText(rosterText)
   if (!parsed.roster) return null
   for (const move of Array.isArray(moves) ? moves : []) setMove(parsed.roster, move)
-  const text = canonicalRosterText(parsed.roster, rosterText)
+  const text = repositoryRosterText(parsed.roster, rosterText)
   if (!text) return 0
   return text.endsWith('\n') ? text.split('\n').length - 1 : text.split('\n').length
 }
@@ -615,7 +631,7 @@ export async function applyMoves({ rosterText, rosterPath = 'crew/roster.json', 
   }
   const candidate = clone(parsed.roster)
   for (const move of Array.isArray(moves) ? moves : []) setMove(candidate, move)
-  const afterText = canonicalRosterText(candidate, rosterText)
+  const afterText = canonicalRosterText(candidate, rosterText, parsed.version)
   if (typeof writeRoster !== 'function') return {
     ...result, ok:false, applied:false, changed:false,
     refusals:[...(result.refusals || []), { code:'roster_write', message:`local roster writer unavailable for ${rosterPath}` }],

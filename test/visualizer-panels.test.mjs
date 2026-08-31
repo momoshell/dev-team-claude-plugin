@@ -9,6 +9,7 @@ import { ROLE_ORDER, acceptEvidence, bounceArrows, gateMarkers, gateProofStory, 
 import { eventStory, eventStreamSummary } from '../visualizer/web/src/lib/event-story.js'
 import { assignmentPath, envelopeFacts, envelopeGroups, envelopeOverview, envelopeSections, trajectoryRowStory, trajectorySummary } from '../visualizer/web/src/lib/diagnostic-story.js'
 import { factoryStepCategory, factoryStepName, factoryStepTrace } from '../visualizer/web/src/lib/execution-steps.js'
+import { crewSummary } from '../visualizer/web/src/lib/crew.js'
 import { assuranceMeta, assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from '../visualizer/web/src/lib/workflow-semantics.js'
 
 test('workflow semantics separate profile, execution and assurance without inference', () => {
@@ -23,6 +24,20 @@ test('workflow semantics separate profile, execution and assurance without infer
     execution: executionMeta('full'),
     assurance: assuranceMeta('build'),
   })
+})
+
+test('crew summary separates distinct seats, assignment turns, and reused dispatch labels', () => {
+  const result = crewSummary([
+    { key:'d1#1', dispatch_id:'d1', role:'planner', lane:0, model:'claude-opus-5', outcome:'done' },
+    { key:'d2#1', dispatch_id:'d2', role:'planner', lane:0, model:null, outcome:'done' },
+    { key:'d2#2', dispatch_id:'d2', role:'tech-lead', lane:3, model:'openai/gpt-sol', outcome:'done' },
+    { key:'d3#1', dispatch_id:'d3', role:'lead', lane:4, model:'claude-opus-5', outcome:'failed' },
+  ])
+  assert.deepEqual([result.seat_count, result.assignment_count, result.dispatch_count, result.process_count], [3, 4, 3, null])
+  assert.deepEqual(result.seats[0].dispatch_ids, ['d1', 'd2'])
+  assert.equal(result.seats[0].model, 'claude-opus-5')
+  assert.equal(result.seats[0].model_coverage, 1)
+  assert.deepEqual(result.seats[2].outcome, { key:'failed', label:'1 failed' })
 })
 
 test('fleetTokens never fabricates a zero for an unmeasured fleet', () => {
@@ -1038,7 +1053,7 @@ test('PhaseGantt draws named bounce connectors inside the timeline layer', () =>
 
 test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
   const source = readFileSync(join(process.cwd(), 'visualizer/web/src/lib/PhaseGantt.svelte'), 'utf8')
-  assert.ok(source.includes('--identity-column:15rem'))
+  assert.ok(source.includes('--identity-column:17rem'))
   assert.ok(source.includes('--lane-gap:.6rem'))
   assert.ok(source.includes('left:calc(var(--identity-column) + var(--lane-gap))'))
   assert.ok(source.includes('right:0'))
@@ -1067,6 +1082,11 @@ test('factory step trace projects measured journal spans into their owning phase
   assert.equal(trace.steps[1].depth, 1)
   assert.deepEqual(trace.steps.map((step) => step.handoffs.map((handoff) => [handoff.role, handoff.id])), [[['builder','d1']],[]])
   assert.deepEqual(trace.steps[0].handoffs.map((handoff) => [handoff.model, handoff.effort, handoff.state.label]), [['openai/gpt-test','high','Returned']])
+  assert.deepEqual(
+    [trace.steps[0].coverage.stage_ms, trace.steps[0].coverage.seat_ms, trace.steps[0].coverage.factory_only_ms],
+    [700, 550, 150],
+  )
+  assert.deepEqual(trace.steps[0].coverage.gaps.map((gap) => gap.duration_ms), [50, 100])
   assert.deepEqual(
     trace.steps[1].handoffs.map((handoff) => [Number(handoff.x.toFixed(2)), Number(handoff.width.toFixed(2))]),
     [],
@@ -1131,14 +1151,17 @@ test('factory checkpoint inspection stays local and highlights the related water
   assert.match(source, /class="checkpoint"/)
   assert.match(source, /roundsFor\(block\)/)
   assert.match(source, /controlsFor\(block\)/)
-  assert.match(source, /border-top:2px dashed var\(--agent-color\)/)
+  assert.match(source, /background:var\(--agent-color\)/)
   assert.match(source, /class="round-row"/)
   assert.match(source, /class:has-rounds=/)
   assert.match(source, /class:last-round=/)
   assert.match(source, /class:missing-return=/)
   assert.match(source, /selectedDetail\.state\.label/)
   assert.match(source, /How to read this trace/)
-  assert.match(source, /Dashed seat · solid round/)
+  assert.match(source, /Thin seat · solid round/)
+  assert.match(source, /class="coverage-line"/)
+  assert.match(source, /class="factory-gap"/)
+  assert.match(source, /Empty track is genuinely unassigned time/)
   assert.match(source, /Gate proof/)
   assert.match(source, /handoffTooltip\(handoff\)/)
   assert.match(source, /stepTooltip\(step\)/)

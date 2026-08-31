@@ -87,6 +87,37 @@ function projectAt(block, at, now) {
   return block.x + fraction * block.width
 }
 
+function assignmentCoverage(stage, handoffs, now, project) {
+  const startedAt = time(stage.started_at)
+  const endedAt = time(stage.ended_at) ?? now
+  if (startedAt == null || endedAt == null || endedAt < startedAt) return null
+  const intervals = handoffs.map((handoff) => {
+    const start = Math.max(startedAt, time(handoff.started_at) ?? startedAt)
+    const end = Math.min(endedAt, time(handoff.effective_ended_at) ?? endedAt)
+    return end >= start ? [start, end] : null
+  }).filter(Boolean).sort((left, right) => left[0] - right[0])
+  const merged = []
+  for (const interval of intervals) {
+    const previous = merged.at(-1)
+    if (previous && interval[0] <= previous[1]) previous[1] = Math.max(previous[1], interval[1])
+    else merged.push([...interval])
+  }
+  const gaps = []
+  let cursor = startedAt
+  for (const [start, end] of merged) {
+    if (start > cursor) gaps.push([cursor, start])
+    cursor = Math.max(cursor, end)
+  }
+  if (cursor < endedAt) gaps.push([cursor, endedAt])
+  const seatMs = merged.reduce((total, [start, end]) => total + end - start, 0)
+  return {
+    stage_ms: endedAt - startedAt,
+    seat_ms: seatMs,
+    factory_only_ms: Math.max(0, endedAt - startedAt - seatMs),
+    gaps: gaps.map(([start, end]) => ({ ...project({ started_at:start, ended_at:end }), started_at:start, ended_at:end, duration_ms:end - start })),
+  }
+}
+
 export function factoryStepTrace(journalState = {}, timeline = {}, { now = Date.now(), activity = 'live' } = {}) {
   const payload = journalState.payload || {}
   const rows = Array.isArray(payload.rows) ? payload.rows : []
@@ -126,6 +157,7 @@ export function factoryStepTrace(journalState = {}, timeline = {}, { now = Date.
         ...visual,
         state,
         no_return:state.key === 'missing',
+        effective_ended_at:assignment.ended_at ?? knownEnd,
         model:seat.model ?? seat.id ?? null,
         effort:seat.effort ?? null,
       }
@@ -148,6 +180,7 @@ export function factoryStepTrace(journalState = {}, timeline = {}, { now = Date.
       kind:handoffs.length ? 'agent' : 'control',
       state,
       handoffs,
+      coverage:assignmentCoverage(span, handoffs, now, project),
     }
   })
   const readError = journalState.error || payload.error

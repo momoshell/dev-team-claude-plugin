@@ -1390,6 +1390,7 @@ export function openLedger({
   if (!dbPath) {
     refuse('openLedger requires dbPath')
   }
+  if (underTest() && resolve(dbPath) === homeDefaultDbPath()) refuseHomeLedgerUnderTest('openLedger')
 
   const dir = dirname(dbPath)
   const stats = {
@@ -3931,11 +3932,33 @@ function installFinalizerImpl(ledger, { adw_id: adwId, signals = ['SIGTERM', 'SI
 // spawned CLI's own environment so the real ~/.dev-team/factory/ is never
 // touched by the suite.
 // ---------------------------------------------------------------------------
+// The RUNTIME half of the ledger sandbox (#821). test/factory-env.test.mjs is
+// the static half and stays exactly as it is — it is the second line, and it
+// cannot read a CLI a test SPAWNS, which is how b346 landed 21 fixture runs in
+// the operator's ledger while shipping green. NODE_TEST_CONTEXT is set by
+// `node --test` and INHERITS into every child, so the refusal reaches the
+// child the scan never sees. It is a THROW, never a silent redirect to a temp
+// dir: a test that means to write a ledger must say where.
+// ---------------------------------------------------------------------------
+
+export function homeDefaultDbPath() {
+  return join(homedir(), '.dev-team', 'factory', 'ledger.db')
+}
+
+function underTest() {
+  return Boolean(process.env.NODE_TEST_CONTEXT)
+}
+
+function refuseHomeLedgerUnderTest(where) {
+  refuse(`${where}: refusing the home ledger at ${homeDefaultDbPath()} from a process under node --test — set DEVTEAM_LEDGER_DB to a temporary path in this process's own environment, or pass an explicit stateDir/dbPath; scripts/factory/ledger.mjs owns this refusal`, 'home_ledger_under_test')
+}
 
 export function defaultDbPath() {
   if (process.env.DEVTEAM_LEDGER_DB) return process.env.DEVTEAM_LEDGER_DB
   const dir = process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory')
-  return join(dir, 'ledger.db')
+  const path = join(dir, 'ledger.db')
+  if (underTest() && path === homeDefaultDbPath()) refuseHomeLedgerUnderTest('defaultDbPath')
+  return path
 }
 
 // ---------------------------------------------------------------------------

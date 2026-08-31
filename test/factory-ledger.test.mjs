@@ -5376,3 +5376,132 @@ test('an update-only writer line is not counted as a missing row', { skip: SKIP 
     assert.equal(drift.writers.some((writer) => writer.writer === 'endSession'), false)
   } finally { ledger.close() }
 })
+
+// #821 — the runtime ledger sandbox
+const SANDBOX_LEDGER_URL = new URL('../scripts/factory/ledger.mjs', import.meta.url).href
+const SANDBOX_DEFAULT_RESOLVER = ['default', 'Db', 'Path'].join('')
+
+function runSandboxChild(source, home, extra = {}) {
+  const script = join(home, 'sandbox-child.mjs')
+  writeFileSync(script, `${source}\n`)
+  const env = { ...process.env, HOME: home }
+  delete env.DEVTEAM_LEDGER_DB
+  delete env.DEVTEAM_LEDGER_DIR
+  for (const [key, value] of Object.entries(extra)) {
+    if (value === undefined) delete env[key]
+    else env[key] = value
+  }
+  return spawnSync(process.execPath, [script], {
+    encoding: 'utf8', env,
+  })
+}
+
+test('home-default resolution refuses from a process under node --test', () => {
+  const home = scratchDir('factory-ledger-home-default-')
+  const source = [
+    `import { ${SANDBOX_DEFAULT_RESOLVER} } from ${JSON.stringify(SANDBOX_LEDGER_URL)}`,
+    'let result',
+    `try { ${SANDBOX_DEFAULT_RESOLVER}(); result = { threw: false } } catch (err) { result = { threw: true, name: err?.name, message: err?.message } }`,
+    'process.stdout.write(JSON.stringify(result))',
+    '',
+  ].join('\n')
+  const child = runSandboxChild(source, home)
+  assert.equal(child.status, 0, child.stderr)
+  const result = JSON.parse(child.stdout.trim())
+  assert.equal(result.threw, true)
+  assert.equal(result.name, 'LedgerUsageError')
+  assert.match(result.message, /DEVTEAM_LEDGER_DB/)
+  assert.match(result.message, /scripts\/factory\/ledger\.mjs/)
+})
+
+test('explicit database and directory paths still resolve under node --test', () => {
+  const home = scratchDir('factory-ledger-explicit-')
+  const explicitDb = join(home, 'x.db')
+  const explicitDir = join(home, 'explicit-dir')
+  const source = [
+    `import { ${SANDBOX_DEFAULT_RESOLVER} } from ${JSON.stringify(SANDBOX_LEDGER_URL)}`,
+    `const dbPath = ${SANDBOX_DEFAULT_RESOLVER}()`,
+    'delete process.env.DEVTEAM_LEDGER_DB',
+    `const dirPath = ${SANDBOX_DEFAULT_RESOLVER}()`,
+    'process.stdout.write(JSON.stringify({ dbPath, dirPath }))',
+    '',
+  ].join('\n')
+  const child = runSandboxChild(source, home, {
+    DEVTEAM_LEDGER_DB: explicitDb,
+    DEVTEAM_LEDGER_DIR: explicitDir,
+  })
+  assert.equal(child.status, 0, child.stderr)
+  assert.deepEqual(JSON.parse(child.stdout.trim()), { dbPath: explicitDb, dirPath: join(explicitDir, 'ledger.db') })
+})
+
+test('openLedger refuses the home default under node --test without creating state', () => {
+  const home = scratchDir('factory-ledger-open-home-')
+  const source = [
+    "import { homedir } from 'node:os'",
+    "import { join } from 'node:path'",
+    `import { openLedger } from ${JSON.stringify(SANDBOX_LEDGER_URL)}`,
+    "const dbPath = join(homedir(), '.dev-team', 'factory', 'ledger.db')",
+    'let result',
+    'try {',
+    "  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })",
+    '  ledger.close()',
+    '  result = { threw: false }',
+    '} catch (err) {',
+    '  result = { threw: true, name: err?.name, message: err?.message }',
+    '}',
+    'process.stdout.write(JSON.stringify(result))',
+    '',
+  ].join('\n')
+  const child = runSandboxChild(source, home)
+  assert.equal(child.status, 0, child.stderr)
+  const result = JSON.parse(child.stdout.trim())
+  assert.equal(result.threw, true)
+  assert.equal(result.name, 'LedgerUsageError')
+  assert.equal(existsSync(join(home, '.dev-team')), false)
+})
+
+test('the crew home-default spawn shape is refused before any ledger state lands', () => {
+  const home = scratchDir('factory-ledger-crew-shape-')
+  const source = [
+    "import { homedir } from 'node:os'",
+    "import { join } from 'node:path'",
+    `import { openLedger } from ${JSON.stringify(SANDBOX_LEDGER_URL)}`,
+    'const dbPath = process.env.DEVTEAM_LEDGER_DB',
+    "  || join(process.env.DEVTEAM_LEDGER_DIR || join(homedir(), '.dev-team', 'factory'), 'ledger.db')",
+    'let result',
+    'try {',
+    "  const ledger = openLedger({ dbPath, stderr: { write: () => {} } })",
+    "  ledger.startSession({ adw_id: 'b350-test-spawn', repo_slug: 'test', task_slug: 'home-default' })",
+    '  ledger.close()',
+    '  result = { threw: false }',
+    '} catch (err) {',
+    '  result = { threw: true, name: err?.name, message: err?.message }',
+    '}',
+    'process.stdout.write(JSON.stringify(result))',
+    '',
+  ].join('\n')
+  const child = runSandboxChild(source, home)
+  assert.equal(child.status, 0, child.stderr)
+  const result = JSON.parse(child.stdout.trim())
+  assert.equal(result.threw, true)
+  assert.equal(result.name, 'LedgerUsageError')
+  assert.equal(existsSync(join(home, '.dev-team')), false)
+})
+
+test('outside a test process the home-default resolution and open remain unchanged', { skip: SKIP }, () => {
+  const home = scratchDir('factory-ledger-production-')
+  const source = [
+    `import { ${SANDBOX_DEFAULT_RESOLVER}, openLedger } from ${JSON.stringify(SANDBOX_LEDGER_URL)}`,
+    `const dbPath = ${SANDBOX_DEFAULT_RESOLVER}()`,
+    "const ledger = openLedger({ dbPath, stderr: { write: () => {} } })",
+    "ledger.startSession({ adw_id: 'b350-test-production', repo_slug: 'test', task_slug: 'production' })",
+    'ledger.close()',
+    'process.stdout.write(JSON.stringify({ dbPath }))',
+    '',
+  ].join('\n')
+  const child = runSandboxChild(source, home, { NODE_TEST_CONTEXT: undefined })
+  assert.equal(child.status, 0, child.stderr)
+  const expected = join(home, '.dev-team', 'factory', 'ledger.db')
+  assert.deepEqual(JSON.parse(child.stdout.trim()), { dbPath: expected })
+  assert.equal(existsSync(expected), true)
+})

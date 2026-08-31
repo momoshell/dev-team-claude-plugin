@@ -1,5 +1,6 @@
 import { existsSync as fsExistsSync, readFileSync as fsReadFileSync, writeFileSync as fsWriteFileSync, unlinkSync as fsUnlinkSync, mkdirSync as fsMkdirSync, readdirSync as fsReaddirSync, renameSync as fsRenameSync, linkSync as fsLinkSync } from 'node:fs'
 import { join } from 'node:path'
+import { cpus as osCpus } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { readJsonAt, readJsonTri, JSON_STATES } from './json-leaf.mjs'
 
@@ -151,7 +152,7 @@ function leaseSetKeysEqual(expected, actual) {
   return expected.every((key) => actualSet.has(key))
 }
 
-export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, deps = {}, _lockOnly = false }) {
+export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, deps = {}, _lockOnly = false, _staleCorruptLock = false }) {
   const d = normalDeps(deps)
   const lockDir = join(dir, 'locks')
   const overridePath = join(dir, 'overrides.jsonl')
@@ -205,6 +206,20 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
   function ownerForLock(cur) {
     return cur?.record ? ownerState(cur.record.owner, d) : LIVENESS.UNKNOWN
   }
+  // The shape of the record acquire() writes for itself below. A parsed value
+  // that is not this shape is DAMAGED, not a lock: `{}`, `[]`, `1` and a row
+  // missing its token or owner all parse into a truthy `cur.record`, and asking
+  // ownerForLock about one yields LIVENESS.UNKNOWN — never DEAD — so the default
+  // path retries such an epoch to contention forever.
+  function validLockRecord(cur) {
+    const record = cur?.record
+    if (!record || typeof record !== 'object' || Array.isArray(record)) return false
+    if (record.fence !== cur.fence || !nonblank(record.token)) return false
+    const owner = record.owner
+    if (!owner || typeof owner !== 'object' || Array.isArray(owner)) return false
+    if (!Number.isSafeInteger(owner.pid) || owner.pid <= 0 || !Number.isFinite(owner.startedAt)) return false
+    return typeof record.released === 'boolean'
+  }
   function releaseEpoch(handle) {
     if (!handle?.name) return false
     const cur = current(handle.name)
@@ -243,12 +258,32 @@ export function reclaimStore({ dir, actor, probes = {}, evidencePolicies = {}, d
       const cur = current(name)
       const overridden = matchingLockOverride(name, cur)
       if (cur && !overridden) {
-        if (!cur.record) return { ok: false, reason: 'unresolvable', attempts }
-        if (cur.record.released !== true && ownerForLock(cur) !== LIVENESS.DEAD) {
-          attempts += 1
-          if (attempts >= LOCK_ATTEMPTS) return { ok: false, reason: 'contended', attempts }
-          d.sleep(LOCK_INTERVAL_MS)
-          continue
+        // The opt-in stale case is BYTES WERE READ *and* the parsed value is not
+        // a valid epoch record. Both halves are load-bearing.
+        //
+        // `cur.raw !== null` fails closed on a read failure: current() collapses
+        // "could not read the bytes" and "read them but they would not parse"
+        // into the same `record: null` (crew/reclaim.mjs:186-196), and an
+        // EIO/EACCES over a possibly LIVE lock is no evidence its bytes are
+        // damaged — stealing it would put two callbacks in one critical section.
+        //
+        // `!validLockRecord(cur)` is what catches PARSEABLE damage, which a bare
+        // truthiness test misses entirely and which the default path turns into a
+        // permanent wedge rather than a refusal.
+        //
+        // The option stays private and default-off. For markers, leases and parks
+        // a damaged lock is repaired by an ATTESTED override
+        // (crew/reclaim.test.mjs:106); only the slot pool opts out, because there
+        // one lock stands in front of K slots (docs/conventions.md:64).
+        const staleCorrupt = _staleCorruptLock && cur.raw !== null && !validLockRecord(cur)
+        if (!staleCorrupt) {
+          if (!cur.record) return { ok: false, reason: 'unresolvable', attempts }
+          if (cur.record.released !== true && ownerForLock(cur) !== LIVENESS.DEAD) {
+            attempts += 1
+            if (attempts >= LOCK_ATTEMPTS) return { ok: false, reason: 'contended', attempts }
+            d.sleep(LOCK_INTERVAL_MS)
+            continue
+          }
         }
       }
       const fence = (cur?.fence || 0) + 1
@@ -1080,4 +1115,196 @@ export function reservationEngine({ dir, actor, pathFor, lockNameFor, phases, co
     appendLine(join(dir, 'overrides.jsonl'), { at: d.now(), actor: input.actor, reason: input.reason, kind: 'reservation', key, identity, marker: item.marker }, d)
   }
   return { reserve, advance, clear, reconcile, override, probeEvidence }
+}
+
+// --- suite slots (#823, parent #822) -----------------------------------------
+// A suite slot is a COUNTED LEASE: the discipline reclaimStore already runs for
+// markers, leases and parks — linkSync exclusive creates, one epoch lock per
+// mutation, LOCK_ATTEMPTS/LOCK_INTERVAL_MS, and the FREE/RECLAIMABLE/BUSY
+// verdicts — differing only in that there are K numbered slots in ONE shared
+// directory rather than one lease per seat. No second locking scheme exists
+// here: slotStore builds a lock-only reclaimStore and borrows its withLock.
+
+export const SLOT_ENV = Object.freeze({ capacity: 'CREW_SUITE_SLOTS' })
+export const SLOT_DEFAULT_FLOOR = 2
+export const SLOT_CORES_PER_SLOT = 6
+
+export function slotLockName(kind) {
+  return digest(JSON.stringify(['slot-lock', kind])).slice(0, 32)
+}
+
+// DELIBERATE DIVERGENCE from CREW_LOAD_THRESHOLD's no-default precedent
+// (crew/host-load.mjs: "There is deliberately NO default threshold — a guessed
+// number is a number nobody measured"). That precedent guards a REFUSAL: a
+// guessed threshold refuses boots that would have succeeded, and work nobody
+// asked to lose is lost. This guards a QUEUE, and the failure mode of a wrong K
+// is WAITING, not refusing — so a default is safe, and being on by default is
+// what removes the cross-lane contention #822 measured. The default answers
+// ABSENCE only: a blank value reads as absent (crew/limits.mjs:31), 0 means
+// disabled, and every other malformed value is an operator typo that throws,
+// exactly as the threshold does.
+//
+// `cpus` is the injected probe seam, defaulting to the real node:os reader, so
+// the default path is genuinely CPU-derived while every test stays deterministic.
+// A probe that throws or reports no usable core count falls back to the floor
+// rather than to a number nobody measured.
+export function slotCapacity({ env = process.env, cpus = osCpus } = {}) {
+  const raw = env?.[SLOT_ENV.capacity]
+  if (raw !== undefined && raw !== null && String(raw).trim() !== '') {
+    const configured = Number(raw)
+    if (!Number.isSafeInteger(configured) || configured < 0) {
+      throw new Error(`${SLOT_ENV.capacity} must be a non-negative integer (got ${JSON.stringify(raw)})`)
+    }
+    return configured
+  }
+  let cores = null
+  try { cores = cpus()?.length ?? null } catch { cores = null }
+  const measured = Number.isSafeInteger(cores) && cores > 0 ? cores : 0
+  return Math.max(SLOT_DEFAULT_FLOOR, Math.floor(measured / SLOT_CORES_PER_SLOT))
+}
+
+export function slotStore({ dir, kind, capacity, deps = {} }) {
+  const d = normalDeps(deps)
+  if (!nonblank(kind) || !safeId(kind)) throw new Error('slotStore requires a filesystem-safe kind')
+  const size = Number.isSafeInteger(capacity) && capacity > 0 ? capacity : 0
+  // Capacity 0 is the documented off switch (CREW_SUITE_SLOTS=0 reaching here
+  // through slotCapacity), so it touches no disk at all: a disabled pool that
+  // still mkdirs is a pool. The handle is inert and its release is a no-op, so
+  // no caller needs a branch.
+  if (size === 0) {
+    const idle = Object.freeze({ kind, slot: null, token: null, disabled: true })
+    return { kind, capacity: 0, acquire: () => ({ slot: null, handle: idle }), release: (handle) => handle?.disabled === true }
+  }
+  // Everything this pool creates lives under poolDir — the records AND the lock
+  // epochs the borrowed store keeps — because `dir` is a SHARED cross-lane root
+  // and a store must never shape another consumer's layout (the hazard recorded
+  // at the _lockOnly return above). _staleCorruptLock is the pool's opt-in to
+  // the corrupt-lock-is-stale rule: one lock stands in front of K slots here, so
+  // a damaged epoch must not wedge the pool (docs/conventions.md:64). It is only
+  // ever DAMAGE — an epoch whose bytes could not be read at all stays
+  // unresolvable, because unreadable is not evidence of corrupt.
+  const poolDir = join(dir, 'slots')
+  const store = reclaimStore({ dir: poolDir, actor: kind, deps: d, _lockOnly: true, _staleCorruptLock: true })
+  const lockName = slotLockName(kind)
+  const slots = Array.from({ length: size }, (_, index) => `${kind}-${index}`)
+  const slotPath = (slot) => join(poolDir, `${slot}.json`)
+  const validRecord = (record) => !!record && typeof record === 'object' && !Array.isArray(record)
+    && Number.isSafeInteger(record.pid) && record.pid > 0
+    && Number.isFinite(record.start) && Number.isFinite(record.acquired_at)
+    && nonblank(record.owner) && nonblank(record.token)
+
+  // Stale is never a wedge (docs/conventions.md 2026-08-02). Absent is FREE;
+  // unreadable, misshapen and dead-pid rows are all RECLAIMABLE; only a
+  // well-formed row whose pid is alive is BUSY. So no torn byte parks a slot
+  // forever, and the verdicts are the store's existing ones verbatim. readJsonAt
+  // rather than readJsonTri because a literal `null` on disk is a FILE that
+  // exists, and treating it as absent would send the claim into a certain EEXIST.
+  const verdictFor = (read) => {
+    if (read.state === JSON_STATES.ABSENT) return VERDICTS.FREE
+    if (read.state === JSON_STATES.UNREADABLE || !validRecord(read.value)) return VERDICTS.RECLAIMABLE
+    return ownerState({ pid: read.value.pid, startedAt: read.value.start }, d) === LIVENESS.ALIVE ? VERDICTS.BUSY : VERDICTS.RECLAIMABLE
+  }
+  // The identity of the exact row a scan adjudicated: a token for a well-formed
+  // row, the digest of the raw bytes for damaged ones. `null` means there is
+  // nothing this store may claim to have observed — an absent row, or one whose
+  // bytes could not be read at all (a directory planted at the path) — and a null
+  // identity never authorises an unlink.
+  const rowIdentity = (read) => {
+    if (read.state === JSON_STATES.ABSENT) return null
+    if (read.state === JSON_STATES.VALUE && validRecord(read.value)) return { kind: 'token', value: read.value.token }
+    return read.raw == null ? null : { kind: 'digest', value: digest(read.raw) }
+  }
+  const identityMatches = (read, identity) => {
+    const current = rowIdentity(read)
+    return !!identity && !!current && current.kind === identity.kind && current.value === identity.value
+  }
+  // Fence, re-read, identity, fence, mutate — the shape reservationEngine's
+  // `mutation` uses. The re-read is the window in which a newer epoch can
+  // displace this callback, so the fence is checked on BOTH sides of it; a lost
+  // fence yields no ownership at all rather than moving on to another slot.
+  const dropRow = (slot, lockHandle, identity) => {
+    if (!store.checkFence(lockHandle)) return 'lost'
+    if (!identityMatches(readJsonAt(slotPath(slot), d), identity)) return 'skip'
+    if (!store.checkFence(lockHandle)) return 'lost' // the guard that matters: the re-read above is the displacement window
+    try { d.unlinkSync(slotPath(slot)) } catch (err) { return err?.code === 'ENOENT' ? 'ok' : 'skip' }
+    return 'ok'
+  }
+  // Exclusive create, EEXIST = loser (docs/conventions.md 2026-08-02): even
+  // holding the pool lock the claim is a linkSync, so a writer that raced the
+  // lock can never make two acquirers believe they hold one slot.
+  const claimRow = (slot, owner, lockHandle) => {
+    if (!store.checkFence(lockHandle)) return { outcome: 'lost' }
+    const at = finiteNow(d.now)
+    const record = { pid: d.pid, start: at, owner, acquired_at: at, token: d.uuid() }
+    const tmp = join(poolDir, `.${slot}.${record.token}.tmp`)
+    try {
+      d.writeFileSync(tmp, JSON.stringify(record))
+      if (!store.checkFence(lockHandle)) return { outcome: 'lost' } // last look before the exclusive create
+      d.linkSync(tmp, slotPath(slot))
+      if (!store.checkFence(lockHandle)) {
+        // The outer epoch is already dead, so nesting this lock is safe:
+        // releaseEpoch re-reads the maximum and the outer finally cannot release
+        // a newer epoch. This pool opts into _staleCorruptLock, so a readable
+        // damaged own maximum is re-acquired immediately. If another supervisor
+        // advanced after adjudicating us DEAD, it reclaims this row itself; and a
+        // fresh dropRow `skip` means a successor token won and must stay intact.
+        // withLock can contend out after 20x50ms, so preserve the lost result
+        // rather than throw. A live operator-override displacer can leave a row
+        // for that operator — a residual strictly better than an unconditional
+        // orphan from this callback.
+        try {
+          store.withLock(lockName, (fresh) => dropRow(slot, fresh, { kind: 'token', value: record.token }))
+        } catch { /* the row could not be reclaimed under a fresh fence */ }
+        return { outcome: 'lost' }
+      }
+    } catch (err) {
+      if (err?.code === 'EEXIST') return { outcome: 'skip' }
+      const failure = Error(`slot claim failed: ${slot}`, { cause: err })
+      failure.stage = 'slot-claim-unresolvable'
+      throw failure
+    } finally { try { if (d.existsSync(tmp)) d.unlinkSync(tmp) } catch {} }
+    return { outcome: 'ok', handle: { kind, slot, token: record.token, owner } }
+  }
+  // `depth` is pool OCCUPANCY on a completed scan, not a queue length — there
+  // is no queue here and FIFO is not promised, only eventual admission (#823).
+  // It is returned so a caller can log "waiting behind N holders" without a
+  // second read of the pool. A lost fence cuts the scan short, so its depth is
+  // null rather than a partial counter. `lost: true` is the separate, honest
+  // signal that a newer epoch displaced this attempt.
+  const acquire = (input = {}) => {
+    const owner = nonblank(input?.owner) ? input.owner : null
+    if (!owner) throw new Error('slotStore.acquire requires a non-blank owner')
+    return store.withLock(lockName, (lockHandle) => {
+      let busy = 0
+      for (const slot of slots) {
+        const read = readJsonAt(slotPath(slot), d)
+        const verdict = verdictFor(read)
+        if (verdict === VERDICTS.BUSY) { busy += 1; continue }
+        if (verdict === VERDICTS.RECLAIMABLE) {
+          const dropped = dropRow(slot, lockHandle, rowIdentity(read))
+          if (dropped === 'lost') return { waiting: true, depth: null, lost: true }
+          if (dropped === 'skip') { busy += 1; continue }
+        }
+        const claimed = claimRow(slot, owner, lockHandle)
+        if (claimed.outcome === 'lost') return { waiting: true, depth: null, lost: true }
+        if (claimed.outcome === 'ok') return { slot, handle: claimed.handle }
+        busy += 1
+      }
+      return { waiting: true, depth: busy }
+    })
+  }
+  const release = (handle) => {
+    if (handle?.disabled === true) return true
+    if (!handle || handle.kind !== kind || !slots.includes(handle.slot) || !nonblank(handle.token)) return false
+    try {
+      // Verified before unlink (docs/conventions.md 2026-08-02): a handle whose
+      // token no longer matches the row on disk was already reclaimed, and
+      // unlinking then would hand the successor's slot to a third acquirer. The
+      // comparison lives in dropRow and ONLY there — a second copy here would
+      // leave neither copy provable by mutation, because either one alone
+      // already refuses.
+      return store.withLock(lockName, (lockHandle) => dropRow(handle.slot, lockHandle, { kind: 'token', value: handle.token }) === 'ok')
+    } catch { return false }
+  }
+  return { kind, capacity: size, acquire, release }
 }

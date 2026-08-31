@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, existsSync
 import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { tmpdir } from 'node:os'
-import { reclaimStore, reservationEngine, PHASES, VERDICTS, EVIDENCE_KINDS, LEASE_PHASES, SUCCESSOR_STATES, PARK_STATES, LAUNCH_STATES, CONFLICT_REASONS, LIVENESS, markerLockName, leaseKey, parkLockName, LOCK_ATTEMPTS, LOCK_INTERVAL_MS } from './reclaim.mjs'
+import { reclaimStore, reservationEngine, PHASES, VERDICTS, EVIDENCE_KINDS, LEASE_PHASES, SUCCESSOR_STATES, PARK_STATES, LAUNCH_STATES, CONFLICT_REASONS, LIVENESS, markerLockName, leaseKey, parkLockName, slotCapacity, slotStore, slotLockName, LOCK_ATTEMPTS, LOCK_INTERVAL_MS } from './reclaim.mjs'
 
 function fixture() {
   const dir = mkdtempSync(join(tmpdir(), 'reclaim-'))
@@ -761,3 +761,364 @@ test('a park tampered between the scan and its lock is re-validated, not acted o
   assert.equal(out.waiting.length, 0, 'residue-carrying parked/null is never read as a healthy waiting row')
   assert.equal(JSON.parse(readFileSync(parkPath, 'utf8')).state, 'parked', 'the row is left untouched for a human')
 } finally { f.done() } })
+
+// --- suite slots (#823, parent #822) -----------------------------------------
+
+test('slot capacity scales with the injected CPU probe', () => {
+  for (const [cores, expected] of [[16, 2], [18, 3], [48, 8], [96, 16]]) {
+    assert.equal(slotCapacity({ env: {}, cpus: () => new Array(cores) }), expected)
+  }
+})
+
+test('slot capacity never drops below its floor', () => {
+  for (const cores of [1, 2, 6, 11]) assert.equal(slotCapacity({ env: {}, cpus: () => new Array(cores) }), 2)
+})
+
+test('unusable CPU probes fall back to the slot floor', () => {
+  const probes = [
+    () => null,
+    () => [],
+    () => { throw new Error('no /proc') },
+    () => ({ length: -1 }),
+    () => ({ length: 1.5 }),
+    () => ({ length: 'many' }),
+    () => ({ length: Number.NaN }),
+    () => undefined,
+  ]
+  for (const cpus of probes) {
+    let got
+    assert.doesNotThrow(() => { got = slotCapacity({ env: {}, cpus }) })
+    assert.equal(got, 2)
+    assert.equal(Number.isNaN(got), false)
+  }
+})
+
+test('configured suite slot capacity overrides CPU derivation', () => {
+  for (const [raw, expected] of [['5', 5], ['0', 0], ['12', 12]]) {
+    assert.equal(slotCapacity({ env: { CREW_SUITE_SLOTS: raw }, cpus: () => new Array(96) }), expected)
+  }
+})
+
+test('blank or absent capacity derives and malformed capacity names the key', () => {
+  for (const env of [{}, { CREW_SUITE_SLOTS: '' }, { CREW_SUITE_SLOTS: '   ' }, { CREW_SUITE_SLOTS: undefined }]) {
+    assert.equal(slotCapacity({ env, cpus: () => new Array(96) }), 16)
+  }
+  for (const raw of ['x', '-1', '1.5', '2 slots', 'NaN', 'Infinity']) {
+    assert.throws(() => slotCapacity({ env: { CREW_SUITE_SLOTS: raw }, cpus: () => new Array(96) }), (err) => err.message.includes('CREW_SUITE_SLOTS'))
+  }
+})
+
+test('disabled slot pool is a composed no-op', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'disabled')
+  mkdirSync(poolDir, { recursive: true })
+  const capacity = slotCapacity({ env: { CREW_SUITE_SLOTS: '0' }, cpus: () => new Array(96) })
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity, deps: f.deps })
+  const got = pool.acquire({ owner: 'lane-a' })
+  assert.equal(got.slot, null)
+  assert.equal(got.handle.disabled, true)
+  assert.equal(pool.release(got.handle), true)
+  assert.deepEqual(readdirSync(poolDir), [])
+}))
+
+test('a full one-slot pool waits and release admits the waiter', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'one-slot')
+  const a = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...f.deps, pid: 700 } })
+  const b = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...f.deps, pid: 800 } })
+  const first = a.acquire({ owner: 'lane-a' })
+  assert.equal(first.slot, 'suite-0')
+  const second = b.acquire({ owner: 'lane-b' })
+  assert.deepEqual({ waiting: second.waiting, depth: second.depth }, { waiting: true, depth: 1 })
+  assert.equal(JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8')).owner, 'lane-a')
+  assert.equal(a.release(first.handle), true)
+  const admitted = b.acquire({ owner: 'lane-b' })
+  assert.equal(admitted.slot, 'suite-0')
+  const record = JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8'))
+  assert.equal(record.owner, 'lane-b')
+  assert.equal(record.pid, 800)
+}))
+
+test('a dead-pid slot row is reclaimed with a fresh token', () => {
+  const f = deadFixture()
+  try {
+    const poolDir = join(f.dir, 'dead-slot')
+    const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+    const old = { pid: 111, start: 1, owner: 'lane-dead', acquired_at: 1, token: 'old-token' }
+    writeFileSync(join(poolDir, 'slots', 'suite-0.json'), JSON.stringify(old))
+    const got = pool.acquire({ owner: 'lane-heir' })
+    assert.equal(got.slot, 'suite-0')
+    const record = JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8'))
+    assert.equal(record.owner, 'lane-heir')
+    assert.equal(record.pid, 700)
+    assert.notEqual(record.token, old.token)
+  } finally { f.done() }
+})
+
+test('corrupt slot rows are reclaimed rather than wedging the pool', () => {
+  const f = deadFixture()
+  try {
+    const poolDir = join(f.dir, 'corrupt-slots')
+    const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+    const corrupt = [
+      '{not json',
+      'null',
+      '[]',
+      JSON.stringify({ pid: 'seven', start: 1, owner: 'lane-a', acquired_at: 1, token: 't' }),
+      JSON.stringify({ owner: 'lane-a' }),
+    ]
+    for (const bytes of corrupt) {
+      writeFileSync(join(poolDir, 'slots', 'suite-0.json'), bytes)
+      const got = pool.acquire({ owner: 'lane-a' })
+      assert.equal(got.slot, 'suite-0')
+      assert.equal(JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8')).owner, 'lane-a')
+      assert.equal(pool.release(got.handle), true)
+    }
+  } finally { f.done() }
+})
+
+test('two contending acquirers leave the slot with the acquirer that linked it', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'nested-contention')
+  let nested = null
+  let b
+  const linkSync = (from, to) => {
+    if (nested === null && String(to).endsWith('suite-0.json')) nested = b.acquire({ owner: 'lane-b' })
+    return fsLink(from, to)
+  }
+  const a = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...f.deps, pid: 700, linkSync } })
+  b = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: {
+    ...f.deps,
+    pid: 800,
+    kill(pid) {
+      if (Math.abs(pid) === 700) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
+      return true
+    },
+  } })
+  const first = a.acquire({ owner: 'lane-a' })
+  assert.notEqual(nested, null)
+  assert.equal(nested.slot, 'suite-0')
+  const held = [first, nested].filter((result) => result.slot !== undefined && result.slot !== null)
+  assert.equal(held.length, 1)
+  assert.equal(held[0], nested)
+  assert.equal(first.handle, undefined)
+  assert.equal(first.waiting, true)
+  assert.equal(JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8')).token, nested.handle.token)
+}))
+
+test('a post-link displaced acquirer returns no handle', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'post-link-displacement')
+  let nested = null
+  let b
+  const linkSync = (from, to) => {
+    const result = fsLink(from, to)
+    if (nested === null && String(to).endsWith('suite-0.json')) nested = b.acquire({ owner: 'lane-b' })
+    return result
+  }
+  const a = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...f.deps, pid: 700, linkSync } })
+  b = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: {
+    ...f.deps,
+    pid: 800,
+    kill(pid) {
+      if (Math.abs(pid) === 700) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
+      return true
+    },
+  } })
+  const first = a.acquire({ owner: 'lane-a' })
+  assert.notEqual(nested, null)
+  assert.equal(nested.slot, 'suite-0')
+  assert.equal(first.lost, true)
+  assert.equal(first.depth, null)
+  assert.equal(first.handle, undefined)
+  const record = JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8'))
+  assert.equal(record.token, nested.handle.token)
+  const held = [first, nested].filter((result) => result.slot !== undefined && result.slot !== null)
+  assert.equal(held.length, 1)
+  assert.equal(held[0], nested)
+}))
+
+test('a torn post-link pool lock reclaims its orphan under a fresh fence', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'torn-post-link-lock')
+  const lockPath = join(poolDir, 'slots', 'locks', `${slotLockName('suite')}.lock.1`)
+  let torn = false
+  const linkSync = (from, to) => {
+    const result = fsLink(from, to)
+    if (!torn && String(to).endsWith('suite-0.json')) {
+      torn = true
+      writeFileSync(lockPath, '{torn')
+    }
+    return result
+  }
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...f.deps, pid: 700, kill: () => true, linkSync } })
+  const first = pool.acquire({ owner: 'lane-a' })
+  assert.equal(torn, true)
+  assert.equal(first.lost, true)
+  assert.equal(first.handle, undefined)
+  assert.equal(first.depth, null)
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), false)
+  assert.equal(pool.acquire({ owner: 'lane-a' }).slot, 'suite-0')
+}))
+
+test('a displaced callback unlinks nothing and claims nothing', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'displaced')
+  const planter = slotStore({ dir: poolDir, kind: 'suite', capacity: 2, deps: { ...f.deps, pid: 111 } })
+  const planted = planter.acquire({ owner: 'lane-dead' })
+  assert.equal(planted.slot, 'suite-0')
+  let reads = 0
+  let nested = null
+  let b
+  const readFileSyncHook = (path, encoding) => {
+    const out = readFileSync(path, encoding)
+    if (String(path).endsWith('suite-0.json')) {
+      reads += 1
+      if (reads === 2 && nested === null) nested = b.acquire({ owner: 'lane-b' })
+    }
+    return out
+  }
+  const a = slotStore({ dir: poolDir, kind: 'suite', capacity: 2, deps: {
+    ...f.deps,
+    pid: 700,
+    kill(pid) {
+      if (Math.abs(pid) === 111) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
+      return true
+    },
+    readFileSync: readFileSyncHook,
+  } })
+  b = slotStore({ dir: poolDir, kind: 'suite', capacity: 2, deps: {
+    ...f.deps,
+    pid: 800,
+    kill(pid) {
+      if ([111, 700].includes(Math.abs(pid))) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
+      return true
+    },
+  } })
+  const first = a.acquire({ owner: 'lane-a' })
+  assert.notEqual(nested, null)
+  assert.equal(nested.slot, 'suite-0')
+  assert.equal(first.slot, undefined)
+  assert.equal(first.waiting, true)
+  assert.equal(first.lost, true)
+  assert.equal(first.depth, null)
+  const record = JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8'))
+  assert.equal(record.token, nested.handle.token)
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-1.json')), false)
+}))
+
+test('a stale slot handle cannot remove its successor row', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'stale-release')
+  const a = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: { ...f.deps, pid: 700 } })
+  const first = a.acquire({ owner: 'lane-a' })
+  const b = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: {
+    ...f.deps,
+    pid: 800,
+    kill(pid) {
+      if (Math.abs(pid) === 700) { const err = Error('gone'); err.code = 'ESRCH'; throw err }
+      return true
+    },
+  } })
+  const heir = b.acquire({ owner: 'lane-b' })
+  assert.equal(heir.slot, 'suite-0')
+  assert.equal(a.release(first.handle), false)
+  const record = JSON.parse(readFileSync(join(poolDir, 'slots', 'suite-0.json'), 'utf8'))
+  assert.equal(record.owner, 'lane-b')
+  assert.equal(record.token, heir.handle.token)
+}))
+
+test('pool lock corruption at the maximum epoch is stale', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'corrupt-lock')
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+  const name = slotLockName('suite')
+  writeFileSync(join(poolDir, 'slots', 'locks', `${name}.lock.7`), 'corrupt')
+  const got = pool.acquire({ owner: 'lane-a' })
+  assert.equal(got.slot, 'suite-0')
+  const epochs = readdirSync(join(poolDir, 'slots', 'locks')).filter((entry) => entry.startsWith(`${name}.lock.`)).map((entry) => Number(entry.slice(`${name}.lock.`.length))).sort((x, y) => x - y)
+  assert.equal(epochs.at(-1), 8)
+  assert.equal(existsSync(join(poolDir, 'slots', 'overrides.jsonl')), false)
+}))
+
+test('default reclaim locks still refuse corrupt maximum epochs', () => each((f) => {
+  const { dir } = f
+  const storeDir = join(dir, 'default-lock')
+  const store = reclaimStore({ dir: storeDir, actor: 'test', deps: f.deps })
+  const name = markerLockName('a')
+  writeFileSync(join(storeDir, 'locks', `${name}.lock.3`), 'corrupt')
+  const got = store.acquire(name)
+  assert.equal(got.ok, false)
+  assert.equal(got.reason, 'unresolvable')
+  assert.deepEqual(readdirSync(join(storeDir, 'locks')).filter((entry) => entry.startsWith(`${name}.lock.`)), [`${name}.lock.3`])
+}))
+
+test('parseable damaged pool lock epochs are stale', () => each((f) => {
+  const { dir } = f
+  const name = slotLockName('suite')
+  const damaged = [
+    '{}',
+    '[]',
+    '1',
+    JSON.stringify({ fence: 7, actor: 'other', at: 1 }),
+    JSON.stringify({ fence: 7, token: 't', owner: { pid: 'nine', startedAt: 1 }, released: false }),
+    JSON.stringify({ fence: 3, token: 't', owner: { pid: 999, startedAt: 1 }, released: false }),
+  ]
+  for (const [index, bytes] of damaged.entries()) {
+    const poolDir = join(dir, `parseable-${index}`)
+    const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+    writeFileSync(join(poolDir, 'slots', 'locks', `${name}.lock.7`), bytes)
+    const got = pool.acquire({ owner: 'lane-a' })
+    assert.equal(got.slot, 'suite-0')
+    const epochs = readdirSync(join(poolDir, 'slots', 'locks')).filter((entry) => entry.startsWith(`${name}.lock.`)).map((entry) => Number(entry.slice(`${name}.lock.`.length)))
+    assert.equal(Math.max(...epochs), 8)
+  }
+}))
+
+test('an unreadable pool lock maximum remains unresolvable', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'unreadable-lock')
+  const seed = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+  assert.equal(seed.capacity, 1)
+  const name = slotLockName('suite')
+  writeFileSync(join(poolDir, 'slots', 'locks', `${name}.lock.7`), JSON.stringify({ fence: 7, token: 'held-7', owner: { pid: 999, startedAt: 1 }, actor: 'other', at: 1, released: false }))
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: {
+    ...f.deps,
+    readFileSync(path, encoding) {
+      if (String(path).endsWith(`${name}.lock.7`)) { const err = Error('input/output error'); err.code = 'EIO'; throw err }
+      return readFileSync(path, encoding)
+    },
+  } })
+  assert.throws(() => pool.acquire({ owner: 'lane-a' }), (err) => err.reason === 'unresolvable')
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), false)
+  const epochs = readdirSync(join(poolDir, 'slots', 'locks')).filter((entry) => entry.startsWith(`${name}.lock.`))
+  assert.equal(epochs.includes(`${name}.lock.8`), false)
+}))
+
+test('a readable live pool lock maximum remains contended', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'live-lock')
+  const seed = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+  assert.equal(seed.capacity, 1)
+  const name = slotLockName('suite')
+  writeFileSync(join(poolDir, 'slots', 'locks', `${name}.lock.7`), JSON.stringify({ fence: 7, token: 'held-7', owner: { pid: 999, startedAt: 1 }, actor: 'other', at: 1, released: false }))
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 1, deps: f.deps })
+  assert.throws(() => pool.acquire({ owner: 'lane-a' }), (err) => err.reason === 'contended')
+  assert.equal(existsSync(join(poolDir, 'slots', 'suite-0.json')), false)
+  const epochs = readdirSync(join(poolDir, 'slots', 'locks')).filter((entry) => entry.startsWith(`${name}.lock.`))
+  assert.equal(epochs.includes(`${name}.lock.8`), false)
+}))
+
+test('slot lock names are stable distinct and filesystem-safe', () => {
+  assert.equal(slotLockName('suite'), slotLockName('suite'))
+  assert.notEqual(slotLockName('suite'), slotLockName('other'))
+  assert.match(slotLockName('suite'), /^[0-9a-f]{32}$/)
+})
+
+test('slot pool state is confined to its slots directory', () => each((f) => {
+  const { dir } = f
+  const poolDir = join(dir, 'confined')
+  const pool = slotStore({ dir: poolDir, kind: 'suite', capacity: 2, deps: f.deps })
+  assert.equal(pool.acquire({ owner: 'lane-a' }).slot, 'suite-0')
+  assert.deepEqual(readdirSync(poolDir), ['slots'])
+}))

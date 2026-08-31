@@ -19,6 +19,7 @@ import {
   MEMORY_ROLES, memoryConfig, CAPABILITY_REFUSALS, loadCapabilities,
   grantsFor, assertGrantsBacked, assertFanoutCoherent, deniedFanout, EMPTY_GRANTS, probeLocalEndpoint,
   effectiveTools, ADVISOR_CONFIG_VERSION, ADVISOR_BOOT_REFUSALS, SAFE_MODEL, classifyAdvisorCell,
+  advisorBootRecord, advisorJournalRecord, advisorEndpointOrigin, assertAdvisorCellLive,
   advisorManifest, assertAdvisorManifest, packageSuite, SUITE_OWNER_PATH, SUITE_REFUSAL,
 } from './crew.mjs'
 import {
@@ -35,7 +36,7 @@ import { reclaimStore } from './reclaim.mjs'
 import { seatCommand, headlessCommand as claudeHeadlessCommand, capabilitiesFor, modelString as claudeModelString, paneUsageRecords } from './adapters/adapter-claude.mjs'
 import { seatCommand as piSeatCommand, capabilitiesFor as piCapabilitiesFor, modelString as piModelString, translateDeny, PI_BUILTIN_TOOLS } from './adapters/adapter-pi.mjs'
 import {
-  cellFailureKind, paneAlive, paneProbe, seatIo, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
+  cellFailureKind, paneAlive, paneProbe, seatIo, DEFAULT_TRANSPORT, SEAT_REFUSAL_STAGE, SUBSTRATE_GRACE_MS, SUBSTRATE_MISSES_TO_DIE,
   VARIANT_STAGE_PHASES, paneTeardownRows, PANE_SETTLE_POLLS, PANE_SETTLE_MS,
 } from './seat-io.mjs'
 import { testCheckout } from '../test/fixtures.mjs'
@@ -5702,6 +5703,89 @@ test('advisor boot and manifest contracts stay closed and fail closed', () => {
   assert.deepEqual(manifest.tripwires, ['crew/crew.mjs'])
   assert.throws(() => assertAdvisorManifest({ granted: ['builder'], manifest: null, written: false }), /manifest/)
   assert.doesNotThrow(() => assertAdvisorManifest({ granted: [], manifest: null, written: false }))
+})
+
+test('#809 a LAN advisor endpoint is admitted and only http(s), userinfo and unsafe ids are refused', () => {
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'http://192.168.1.42:8080/v1', model: 'qwen3-coder' }),
+    { endpoint: 'http://192.168.1.42:8080/v1', model: 'qwen3-coder' })
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'https://desktop2.lan/v1', model: 'qwen3-coder' }),
+    { endpoint: 'https://desktop2.lan/v1', model: 'qwen3-coder' })
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'ftp://192.168.1.42/v1', model: 'qwen3-coder' }), { reason: 'endpoint-not-local' })
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'http:///v1', model: 'qwen3-coder' }), { reason: 'endpoint-not-local' })
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'http://u:p@192.168.1.42/v1', model: 'qwen3-coder' }), { reason: 'endpoint-credentials' })
+  assert.deepEqual(classifyAdvisorCell({ endpoint: 'http://192.168.1.42/v1', model: 'not safe' }), { reason: 'model-unsafe' })
+})
+
+test('#809 the advisor boot record carries host and port and the journal projection carries nothing else', () => {
+  const record = advisorBootRecord({
+    adapters: { builder: { grants: { advisor: true } } },
+    env: { CREW_ADVISOR_ENDPOINT: 'http://user:sekrit@192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' },
+  })
+  assert.equal(record.endpoint_host, '192.168.1.42')
+  assert.equal(record.endpoint_port, 8080)
+  assert.deepEqual(advisorEndpointOrigin('http://desktop2.lan/v1'), { host: 'desktop2.lan', port: 80 })
+  assert.deepEqual(advisorEndpointOrigin('https://desktop2.lan/v1'), { host: 'desktop2.lan', port: 443 })
+  assert.equal(advisorEndpointOrigin('not a url'), null)
+  assert.equal(advisorEndpointOrigin('http:///v1'), null)
+  const unset = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } }, env: {} })
+  assert.equal(unset.endpoint_host, null)
+  assert.equal(unset.endpoint_port, null)
+  const row = advisorJournalRecord(record)
+  assert.equal(Object.hasOwn(row, 'endpoint'), false)
+  assert.doesNotMatch(JSON.stringify(row), /sekrit|\/v1/)
+  assert.deepEqual(row, { granted: ['builder'], endpoint_host: '192.168.1.42', endpoint_port: 8080, model: 'qwen3-coder', config_version: ADVISOR_CONFIG_VERSION })
+  // The boot journal is the redacted projection; crew.json keeps the full record
+  // because paneCommand's advisorCell is built from it in the same process.
+  const source = readFileSync(new URL('./crew.mjs', import.meta.url), 'utf8')
+  assert.equal(source.split('advisor: advisorJournalRecord(advisorRecord)').length - 1, 1)
+  assert.equal(source.split('advisor: advisorRecord }').length - 1, 1)
+})
+
+test('#809 an authority-less advisor endpoint refuses before a probe on the boot path', async () => {
+  const adapters = { builder: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
+    env: { CREW_ADVISOR_ENDPOINT: 'http:///v1', CREW_ADVISOR_MODEL: 'qwen3-coder' } })
+  assert.equal(record.endpoint_host, null)
+  assert.equal(record.endpoint_port, null)
+  let probes = 0
+  let notes = 0
+  await assert.rejects(
+    () => assertAdvisorCellLive({ record, adapters, taskSlug: 't',
+      probeEndpoint: async () => { probes += 1; return true }, note: () => { notes += 1 } }),
+    (err) => {
+      assert.equal(err.reason, 'endpoint-not-local')
+      assert.doesNotMatch(err.message, /\/v1/)
+      return true
+    })
+  assert.equal(probes, 0)
+  assert.equal(notes, 0)
+})
+
+test('#809 a dead LAN advisor endpoint refuses the boot naming host and port, never a path or a credential', async () => {
+  const adapters = { builder: { name: 'pi', transport: DEFAULT_TRANSPORT, grants: { advisor: true } } }
+  const record = advisorBootRecord({ adapters: { builder: { grants: { advisor: true } } },
+    env: { CREW_ADVISOR_ENDPOINT: 'http://192.168.1.42:8080/v1', CREW_ADVISOR_MODEL: 'qwen3-coder' } })
+  const notes = []
+  let probes = 0
+  await assert.rejects(
+    () => assertAdvisorCellLive({ record, adapters, taskSlug: 't',
+      probeEndpoint: async () => { probes += 1; return false }, note: (row) => notes.push(row) }),
+    (err) => {
+      assert.equal(err.reason, 'endpoint-dead')
+      assert.equal(err.stage, 'advisor-preflight')
+      assert.match(err.message, /192\.168\.1\.42:8080/)
+      assert.doesNotMatch(err.message, /loopback|\/v1/)
+      return true
+    })
+  assert.equal(probes, 1)
+  assert.equal(notes.length, 1)
+  assert.equal(notes[0].member.transport, 'local-http')
+  assert.equal(notes[0].cell.model, 'local/qwen3-coder')
+  // A live LAN endpoint boots where loopback did, with one probe and no fallback.
+  let liveProbes = 0
+  await assertAdvisorCellLive({ record, adapters, taskSlug: 't',
+    probeEndpoint: async () => { liveProbes += 1; return true }, note: () => { throw new Error('no cell failure is recorded on the accepting path') } })
+  assert.equal(liveProbes, 1)
 })
 
 test('shadowCandidates deduplicates roster cells and retains their tiers', () => {

@@ -793,9 +793,20 @@ test('bounceArrows reports pending reviews instead of empty measured output', ()
 })
 
 test('gateMarkers keeps proven failed and unproven tones distinct', () => {
-  const result = gateMarkers({ gate_generations: [{ gate_generation: 1, verdict: 'failed' }, { gate_generation: 2, verdict: 'unproven' }, { gate_generation: 3, verdict: 'proven' }], gate_checks: [] })
+  const result = gateMarkers({
+    gate_generations: [
+      { gate_generation: 1, verdict: 'failed' },
+      { gate_generation: 2, verdict: 'unproven' },
+      { gate_generation: 3, verdict: 'proven', checks_total: 11, checks_failed: 9, checks_errored: 0 },
+    ],
+    gate_checks: [],
+  })
   assert.equal(new Set(result.markers.map((marker) => marker.tone)).size, 3)
-  assert.doesNotMatch(result.markers.find((marker) => marker.verdict === 'unproven').label, /fail/i)
+  assert.equal(result.markers[0].label, 'Gate G1 · Failed proof')
+  assert.equal(result.markers[1].label, 'Gate G2 · Proof incomplete')
+  assert.equal(result.markers[2].label, 'Gate G3 · Proven')
+  assert.match(result.markers[2].title, /turned red when those changes were removed/i)
+  assert.match(result.markers[2].title, /9 failed · 0 errored · 11 checks/)
 })
 
 test('phasePanel resolves names, rejects unknown routes, and scopes events', () => {
@@ -1035,6 +1046,7 @@ test('PhaseGantt offsets bounce SVG to the geometry track column', () => {
 
 test('factory step trace projects measured journal spans into their owning phase', () => {
   const journalState = { payload:{ rows:[
+    { at:1000, event:'boot', seats:{ builder:{ model:'openai/gpt-test', effort:'high' } } },
     { at:1100, stage:'build:r1' },
     { at:1150, assign:'d1', role:'builder' },
     { at:1200, stage:'gate:r1' },
@@ -1047,16 +1059,39 @@ test('factory step trace projects measured journal spans into their owning phase
   assert.equal(trace.unavailable, null)
   assert.equal(trace.steps.length, 2)
   assert.deepEqual(trace.steps.map((step) => [step.name, step.category.label, step.phase]), [
-    ['build · round 1', 'Agent work', 'building'],
-    ['gate · round 1', 'Validation', 'building'],
+    ['Build · round 1', 'Agent work', 'building'],
+    ['Gate · round 1', 'Validation', 'building'],
   ])
+  assert.deepEqual(trace.steps.map((step) => step.kind), ['agent','control'])
   assert.deepEqual(trace.steps.map((step) => [Number(step.x.toFixed(2)), Number(step.width.toFixed(2))]), [[.18,.56],[.26,.16]])
   assert.equal(trace.steps[1].depth, 1)
-  assert.deepEqual(trace.steps.map((step) => step.handoffs.map((handoff) => [handoff.role, handoff.id])), [[['builder','d1']],[['builder','d1']]])
+  assert.deepEqual(trace.steps.map((step) => step.handoffs.map((handoff) => [handoff.role, handoff.id])), [[['builder','d1']],[]])
+  assert.deepEqual(trace.steps[0].handoffs.map((handoff) => [handoff.model, handoff.effort, handoff.state.label]), [['openai/gpt-test','high','Returned']])
   assert.deepEqual(
     trace.steps[1].handoffs.map((handoff) => [Number(handoff.x.toFixed(2)), Number(handoff.width.toFixed(2))]),
-    [[.22,.44]],
+    [],
   )
+})
+
+test('factory step trace makes a closed stage with no envelope visibly incomplete', () => {
+  const trace = factoryStepTrace({ payload:{ rows:[
+    { at:1000, stage:'build:r1' },
+    { at:1100, assign:'d1', role:'builder' },
+    { at:1900, stage_done:'build:r1' },
+  ] } }, { blocks:[{ phase_id:1, name:'build', started_at:1000, ended_at:2000, x:0, width:1, status:'ok' }] }, { now:2000 })
+  assert.equal(trace.steps[0].state.label, 'No return recorded')
+  assert.equal(trace.steps[0].handoffs[0].no_return, true)
+  assert.equal(trace.steps[0].handoffs[0].marker, false)
+  assert.equal(Number(trace.steps[0].handoffs[0].width.toFixed(1)), .8)
+})
+
+test('factory step trace does not call an open assignment live after its heartbeat went stale', () => {
+  const trace = factoryStepTrace({ payload:{ rows:[
+    { at:1000, stage:'build:r1' },
+    { at:1100, assign:'d1', role:'builder' },
+  ] } }, { blocks:[{ phase_id:1, name:'build', started_at:1000, ended_at:null, x:0, width:1, status:'running' }] }, { now:2000, activity:'silent' })
+  assert.equal(trace.steps[0].state.label, 'No return recorded')
+  assert.equal(trace.steps[0].handoffs[0].marker, false)
 })
 
 test('factory step trace distinguishes unavailable telemetry from a measured empty journal', () => {
@@ -1065,7 +1100,8 @@ test('factory step trace distinguishes unavailable telemetry from a measured emp
   assert.equal(empty.unavailable, null)
   assert.equal(empty.measured, false)
   assert.deepEqual(factoryStepCategory('suite:cold'), { key:'validation', label:'Validation' })
-  assert.equal(factoryStepName('envelope-accept'), 'envelope accept')
+  assert.equal(factoryStepName('envelope-accept'), 'Accept return')
+  assert.equal(factoryStepName('gate-proof:2:checks'), 'Mutation checks · generation 2')
 })
 
 test('task detail shares one journal read between waterfall and trajectory', () => {
@@ -1075,8 +1111,8 @@ test('task detail shares one journal read between waterfall and trajectory', () 
   assert.match(detail, /<PhaseGantt[^>]*\{journalState\}/)
   assert.match(detail, /<Trajectory[^>]*\{journalState\}/)
   assert.equal(trajectory.includes("fetch(`/api/journal"), false)
-  assert.match(waterfall, /Factory steps/)
-  assert.match(waterfall, /one measured factory checkpoint/)
+  assert.match(waterfall, /Factory internals/)
+  assert.match(waterfall, /validation and control checkpoints/)
 })
 
 test('factory checkpoint inspection stays local and highlights the related waterfall phase', () => {
@@ -1086,16 +1122,26 @@ test('factory checkpoint inspection stays local and highlights the related water
   assert.match(source, /class:step-linked=\{sameId\(block\.phase_id, linkedPhase\)\}/)
   assert.match(source, /class:selected=\{linkedPhase == null && selected === block\.name\}/)
   assert.match(source, /step\.handoffs/)
-  assert.match(source, /How to read this trace/)
+  assert.match(source, /Agent work above, factory control here/)
   assert.match(source, /class="agent-guide"/)
   assert.match(source, /class="factory-guide"/)
   assert.match(source, /class="control-guide"/)
-  assert.match(source, /No upper rail · no agent active/)
-  assert.match(source, /class="guide-categories"/)
-  assert.match(source, /class="rail-labels"/)
+  assert.match(source, /Seat assignment ended without a return/)
+  assert.match(source, /class="checkpoint-groups"/)
+  assert.match(source, /class="checkpoint"/)
+  assert.match(source, /roundsFor\(block\)/)
+  assert.match(source, /controlsFor\(block\)/)
   assert.match(source, /border-top:2px dashed var\(--agent-color\)/)
-  assert.match(source, /open=\{factoryOpen\}/)
-  assert.match(source, /max-height:min\(38rem,65vh\)/)
+  assert.match(source, /class="round-row"/)
+  assert.match(source, /class:has-rounds=/)
+  assert.match(source, /class:last-round=/)
+  assert.match(source, /class:missing-return=/)
+  assert.match(source, /selectedDetail\.state\.label/)
+  assert.match(source, /How to read this trace/)
+  assert.match(source, /Dashed seat · solid round/)
+  assert.match(source, /Gate proof/)
+  assert.match(source, /handoffTooltip\(handoff\)/)
+  assert.match(source, /stepTooltip\(step\)/)
   assert.doesNotMatch(source, /<em>Factory step<\/em>/)
 })
 

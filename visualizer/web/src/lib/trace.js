@@ -9,9 +9,9 @@ const MUST_FIX_WHY = 'predates this measurement — the review recorded no must-
 const ARTIFACT_WHY = 'artifact bytes are not served: no endpoint serves file bytes and server.mjs is fenced this batch'
 
 const GATE_TONES = Object.freeze({
-  proven: { tone: 'proven', label: 'gate proven' },
-  failed: { tone: 'failed', label: 'gate failed' },
-  unproven: { tone: 'unproven', label: 'gate unproven' },
+  proven: { tone: 'proven', label: 'Proven', explanation:'The gate passed with the built changes and turned red when those changes were removed.' },
+  failed: { tone: 'failed', label: 'Failed proof', explanation:'The recorded proof did not establish that the gate depends on the built changes.' },
+  unproven: { tone: 'unproven', label: 'Proof incomplete', explanation:'The factory could not complete enough counterfactual evidence to judge the gate.' },
 })
 
 function mark(text, title) {
@@ -165,12 +165,16 @@ export function gateMarkers(run = {}) {
     const verdict = generation?.verdict
     const tone = GATE_TONES[verdict] || GATE_TONES.unproven
     const row = generation?.gate_generation == null ? null : (checksByGeneration.get(String(generation.gate_generation)) ?? null)
+    const generationLabel = generation?.gate_generation == null ? 'Gate' : `Gate G${generation.gate_generation}`
+    const counts = generation?.checks_total == null
+      ? null
+      : `${generation.checks_failed ?? '—'} failed · ${generation.checks_errored ?? '—'} errored · ${generation.checks_total} checks`
     return {
       generation: generation?.gate_generation ?? null,
       verdict: verdict ?? null,
       tone: tone.tone,
-      label: tone.label,
-      title: generation?.note || `${generation?.checks_failed ?? '—'}/${generation?.checks_total ?? '—'} failed`,
+      label: `${generationLabel} · ${tone.label}`,
+      title: [tone.explanation, counts, generation?.note].filter(Boolean).join(' '),
       phase_id: row?.phase_id ?? null,
       checks: row?.checks ?? [],
     }

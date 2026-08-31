@@ -51,13 +51,41 @@ After `commit`, the reviewed shapes run:
 | `publish` | `git push -u origin <branch>`; `gh pr create --base main --head <branch>` with a body composed **purely** from the run record (`composePrBody`, a pure function beside `composeCommitMessage`) | no `gh`, `gh auth status` non-zero, push rejected, a PR already open for the branch, or the branch is `main` → `escalate:publish` with the reason; the commit stays local and intact |
 | `done` | records `details.pr = {url, number, head, base_sha}`, a `published` journal row with the durations of rebase, push and pr-create, and the ledger phase `publish`; tears down unless `--keep` | an escalation never tears down |
 
-The PR body contains nothing the record does not: the `Refs` trailer, the stage
-trace, round counts, gate summary and discrimination, the final review verdict
-and residuals, suite counts, the cold-verify checkout, and one line per anomaly
-row (`wait-extended`, `gate-repair`, a `bounce`, `tree-witness`).
+The PR body contains nothing the record does not, and it leads with meaning: the
+commit-message body verbatim, the `Closes` trailer for the issues the merge closes
+and `Refs` for the ones the lane only touches, the gate summary as a sentence, suite
+counts, the final review verdict and residuals, the changed files, the run's shape
+with any repeated round named, and one line per anomaly row (`wait-extended`,
+`gate-repair`, a `bounce`, a code-driven `review-bounce`, `tree-witness`). No
+driver-composed line carries an operator-local absolute path: the gate command renders
+checkout-relative and the cold-verify checkout renders as *cold-verified from a fresh
+checkout*, its path staying in the journal. The commit-message body is the one
+exception, and deliberately so: it is reproduced **verbatim**, so an absolute path a
+builder wrote into it publishes as written. That is a fact about the builder prose,
+not about the driver composition.
 
-Publication ends at an open PR. Merging, branch deletion, issue closing and
-worktree reaping are the batch closeout's (#758), never the driver's.
+Amended 2026-08-31 (#806, TRD `docs/trd-local-models.md` §2 U6): when
+`crew/capabilities.json`'s `local_providers` register carries a `narrator` entry, the
+driver asks that local endpoint for a short narrative composed from the **record
+only** — never the diff, never the checkout — and prepends it under a
+`## Narrative (local model)` heading. The endpoint is one OpenAI API root — a
+`base_url` already ending in `/v1` is used as given, never doubled — and the served
+model is **resolved** from `GET <root>/models`, which must answer with exactly one
+id; `pi_provider` is pi's namespace and is never used as a model name. Any file
+path, stage name or number in the narration that the record does not carry, and any
+reply that is raw JSON, refuses the narration, not the publish; a dead endpoint, an
+unreadable or ambiguous model list, an unreadable reply or a failed validation
+publishes the code-composed body unchanged. **Narration is additive and narration is never
+load-bearing**, so `composePrBody` stays a pure function of the record and the facts
+below the heading are byte-identical to the body a run with no narrator publishes.
+
+Publication ends at an open PR. Merging, branch deletion and worktree reaping are
+the batch closeout's (#758), never the driver's. Issue closing is now **declared**
+by the plan and **executed by GitHub**: a plan's `details.closes` becomes a
+`Closes: #N` trailer in the commit message and a `Closes #N` line in the body, so
+the issues a lane declares close when a human merges the PR. The driver still never
+merges and never calls the issues API; `details.issues` stays a `Refs` trailer,
+which closes nothing.
 
 ## 3. What this supersedes, and what it leaves standing
 

@@ -348,6 +348,26 @@ function markerEntries(dir) {
   return names.filter((name) => /^\.(.+)\.active\.json$/.test(name) && !name.includes('.json.tmp.'))
 }
 
+// The transport marker owns the CURRENT physical reservation. A descendant record's
+// reservation_id is the record's own lease; its seat_reservation_id is the marker
+// lease we must bind, so an older RPC record cannot win merely because it appears first.
+function storedHeadlessIdentity(taskDir, transport, role) {
+  const dirName = DESCENDANT_STORE_DIRS[transport]
+  if (!taskDir || !dirName || !role) return { state: 'absent', workerId: null, reservationId: null }
+  const path = join(taskDir, dirName, `.${role}.active.json`)
+  let present
+  try { present = fsExistsSync(path) } catch { return { state: 'unknown', workerId: null, reservationId: null } }
+  if (!present) return { state: 'absent', workerId: null, reservationId: null }
+  let marker
+  try { marker = JSON.parse(String(fsReadFileSync(path, 'utf8'))) } catch { return { state: 'unknown', workerId: null, reservationId: null } }
+  if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return { state: 'unknown', workerId: null, reservationId: null }
+  const reservationId = typeof marker.reservation_id === 'string' && marker.reservation_id.trim() ? marker.reservation_id : null
+  if (!reservationId) return { state: 'unknown', workerId: null, reservationId: null }
+  const workerId = typeof marker.id === 'string' && marker.id.trim() ? marker.id : null
+  if (transport === HEADLESS_TRANSPORT && !workerId) return { state: 'unknown', workerId: null, reservationId: null }
+  return { state: 'value', workerId, reservationId }
+}
+
 function readMarker(dir, name) {
   const marker = readJsonTri(join(dir, name)) ?? null
   return marker && typeof marker === 'object' ? marker : null
@@ -405,6 +425,10 @@ function zeroCaptureSummary(ok = true) {
 export function descendantCapture({ taskDir, log, deps = {} } = {}) {
   const storeDir = descendantStorePath(taskDir)
   let engine = null
+  // #815: the ps table this round already paid for. A caller on the same tick
+  // reuses it rather than shelling ps twice per WAIT_POLL_MS. Cleared at the top
+  // of every round, so a round that threw leaves an ABSENCE, never a stale table.
+  let lastSnapshot = null
   const getEngine = () => { if (!engine) engine = descendantEngine(taskDir, deps); return engine }
   const writeKnown = (states, force = false) => {
     if (!states.size || !storeDir || !fsExistsSync(storeDir)) return 0
@@ -421,7 +445,9 @@ export function descendantCapture({ taskDir, log, deps = {} } = {}) {
     return writes
   }
   function round(force = false) {
+    lastSnapshot = null
     const snapshot = freshDescendantSnapshot(deps)
+    lastSnapshot = snapshot
     const existing = fsExistsSync(storeDir) ? descendantRecordEntries(storeDir) : []
     if (snapshot.ok !== true) {
       const states = new Map()
@@ -545,7 +571,7 @@ export function descendantCapture({ taskDir, log, deps = {} } = {}) {
     }
     return { ...zeroCaptureSummary(true), records: discoveries, captures, discovery_failures: discoveryFailures }
   }
-  return { round }
+  return { round, lastSnapshot: () => lastSnapshot }
 }
 
 function groupProbe(pgid, deps = {}) {
@@ -757,6 +783,62 @@ export function settleSeatRoots({ taskDir, log, deps = {} } = {}) {
   }
   callTeardownCallback(() => log?.(operationalRow({ at: recordTimestamp(deps), event: 'seat-root-settle-sweep', ...summary })))
   return summary
+}
+
+// #815: the ONE reading that lets a wait end on its own seat's death. The seat's
+// worker root identity is captured in the descendant store; BINDING that identity
+// against a live ps snapshot is the measurement. b337-fallback proves reading a
+// settle is not enough on its own — its root_settled row landed 232ms AFTER the
+// escalation the driver had already spent 64 minutes reaching.
+// Only a bound DEAD state, or a root_settled another process already MEASURED, is
+// a death. Everything else is an ABSENCE that keeps the wait running: no store dir
+// for the transport (every pane seat), no record, ALIVE, UNKNOWN, root-unidentified
+// (RV3-1, :687-689). Never throws — a reading that cannot be taken is not a death.
+export const ROOT_SETTLED_DEATHS = Object.freeze(['already-dead', 'proven'])
+
+export function seatRootDeath({ taskDir, transport, seatId = null, role = null, workerId = null, reservationId = null, snapshot = null, deps = {} } = {}) {
+  try {
+    if (!DESCENDANT_STORE_DIRS[transport]) return null
+    const active = storedHeadlessIdentity(taskDir, transport, role)
+    if (active.state === 'unknown') return null
+    const requestedReservation = reservationId == null
+      ? null
+      : typeof reservationId === 'string' && reservationId.trim() ? reservationId : null
+    if (reservationId != null && requestedReservation === null) return null
+    if (requestedReservation && active.state === 'value' && active.reservationId !== requestedReservation) return null
+    const currentReservation = active.state === 'value' ? active.reservationId : requestedReservation
+    const currentWorker = active.state === 'value'
+      ? active.workerId || workerId || seatId
+      : workerId ?? seatId
+    const matches = descendantRecordEntries(descendantStorePath(taskDir)).filter(({ record }) => {
+      const reservationMatches = currentReservation == null
+        ? true
+        : typeof record.seat_reservation_id === 'string'
+          ? record.seat_reservation_id === currentReservation
+          : record.reservation_id === currentReservation
+      return record.transport === transport && record.swept_at == null
+        && (currentWorker != null ? (record.seat_id === currentWorker || record.seat_id === role) : record.seat_id === role)
+        && reservationMatches
+    })
+    // A role-local RPC record has no physical directory in its seat_id, so two
+    // reservations with no readable current marker are intentionally ambiguous:
+    // choosing the first stale row would turn an old death into this wait's death.
+    if (matches.length !== 1) return null
+    const entry = matches[0]
+    const record = entry.record
+    if (!Number.isSafeInteger(record.root_pid) || record.root_pid <= 0) return null
+    const evidence = (reason) => ({
+      root_pid: record.root_pid, root_pgid: record.root_pgid ?? null, root_start: record.root_start ?? null,
+      root_liveness: LIVENESS.DEAD, reason, root_settled: record.root_settled ?? null,
+      reservation_id: record.reservation_id, key: entry.key,
+    })
+    if (ROOT_SETTLED_DEATHS.includes(record.root_settled)) return evidence('probe-dead')
+    const table = snapshot && snapshot.rows instanceof Map ? { ok: snapshot.ok === true, rows: snapshot.rows } : null
+    if (!table || table.ok !== true) return null
+    const bound = rootBinding(record, table, deps)
+    if (bound.state !== LIVENESS.DEAD) return null   // verbatim: mutations A4, A8
+    return evidence(bound.reason || 'probe-dead')
+  } catch { return null }
 }
 
 function zeroSweepSummary(sweep_id) {
@@ -1999,11 +2081,12 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   // life. deps.sleep is the ONE owned seam inside those synchronous poll loops. The
   // measurement is transcript GROWTH and the stamp is the observation's OWN mtime:
   // never now(), never a fallback clock.
-  const headlessWatch = { info: null, last: null }
-  const withHeadlessWatch = (info, run) => {
+  const headlessWatch = { info: null, last: null, waitContext: null }
+  const withHeadlessWatch = (info, run, waitContext = null) => {
     headlessWatch.info = info ?? null
     headlessWatch.last = null
-    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null }
+    headlessWatch.waitContext = waitContext
+    try { return run() } finally { headlessWatch.info = null; headlessWatch.last = null; headlessWatch.waitContext = null }
   }
   const sampleHeadlessGrowth = () => {
     const info = headlessWatch.info
@@ -2020,12 +2103,86 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     headlessWatch.last = latest
     try { io.emit?.({ kind: 'heartbeat', at: latest, role: info.role ?? null }) } catch { /* the ledger is never load-bearing for a wait */ }
   }
+  const currentHeadlessIdentity = (transport, role, result = null) => {
+    const dirName = DESCENDANT_STORE_DIRS[transport]
+    let markerPath = null
+    try { markerPath = dirName && role ? join(paths.taskDir, dirName, `.${role}.active.json`) : null }
+    catch { return { state: 'unknown', workerId: null, reservationId: null } }
+    let explicitWorkerId = null
+    let explicitReservationId = null
+    let logicalId = null
+    try {
+      explicitWorkerId = result?.workerId ?? result?.worker_id ?? result?.physicalId ?? result?.physical_id ?? result?.runId ?? result?.run_id ?? null
+      explicitReservationId = result?.reservationId ?? result?.reservation_id ?? null
+      logicalId = result?.id ?? null
+    } catch { /* an injected result is diagnostics, never a wait failure */ }
+    explicitWorkerId = typeof explicitWorkerId === 'string' && explicitWorkerId.trim() ? explicitWorkerId : null
+    explicitReservationId = typeof explicitReservationId === 'string' && explicitReservationId.trim() ? explicitReservationId : null
+    if (markerPath) {
+      let present
+      try { present = existsSync(markerPath) } catch { return { state: 'unknown', workerId: null, reservationId: null } }
+      if (present) {
+        let marker
+        try { marker = JSON.parse(String(readFileSync(markerPath, 'utf8'))) } catch { return { state: 'unknown', workerId: null, reservationId: null } }
+        if (!marker || typeof marker !== 'object' || Array.isArray(marker)) return { state: 'unknown', workerId: null, reservationId: null }
+        const markerReservationId = typeof marker.reservation_id === 'string' && marker.reservation_id.trim() ? marker.reservation_id : null
+        if (!markerReservationId) return { state: 'unknown', workerId: null, reservationId: null }
+        const markerWorkerId = typeof marker.id === 'string' && marker.id.trim() ? marker.id : null
+        const workerId = explicitWorkerId || markerWorkerId
+        if (transport === HEADLESS_TRANSPORT && !workerId) return { state: 'unknown', workerId: null, reservationId: null }
+        return { state: 'value', workerId, reservationId: explicitReservationId || markerReservationId }
+      }
+    }
+    return {
+      state: markerPath ? 'absent' : 'unknown',
+      workerId: explicitWorkerId || (typeof logicalId === 'string' && logicalId.trim() ? logicalId : null),
+      reservationId: explicitReservationId,
+    }
+  }
+  const bindHeadlessIdentity = (info, result = null) => {
+    if (!info || !info.transport) return null
+    const identity = currentHeadlessIdentity(info.transport, info.role, result)
+    info.workerId = identity.workerId ?? info.workerId ?? null
+    info.reservationId = identity.reservationId ?? info.reservationId ?? null
+    info.identityState = identity.state
+    return identity
+  }
+  // #815: the ONE reading that may end a headless wait early — a PROVEN dead
+  // worker root for the seat this wait belongs to.
+  const headlessRootDeath = () => {
+    const info = headlessWatch.info
+    if (!info) return null
+    const identity = currentHeadlessIdentity(info.transport, info.role)
+    if (identity.state === 'unknown') return null
+    const workerId = identity.workerId ?? info.workerId ?? info.id
+    const reservationId = identity.reservationId ?? info.reservationId ?? null
+    return seatRootDeath({
+      taskDir: paths.taskDir, transport: info.transport, seatId: workerId, workerId,
+      reservationId, role: info.role, snapshot: capture.lastSnapshot(), deps,
+    })
+  }
+  const seatDiedError = (info, death) => {
+    const role = info?.role || 'unknown'
+    const waitContext = headlessWatch.waitContext
+    const returnPath = waitContext?.returnPath ?? info?.returnPath
+    const err = new Error(`seat died: ${role} — its worker root ${death.root_pid} (pgid ${death.root_pgid}) is gone (${death.reason}) and no envelope arrived at ${returnPath}`)
+    err.stage = SEAT_DIED_STAGE
+    err.role = role
+    err.reclaim = death   // verbatim: mutation A3
+    if (waitContext) err.waitContext = waitContext
+    return err
+  }
   // Transport waits are synchronous Atomics.wait loops, so this is the only
   // owned seam at which a live seat can be captured without a timer. Always
-  // serve the requested delay, even when the diagnostic capture fails.
+  // serve the requested delay when a DIAGNOSTIC fails — a capture that threw, an
+  // unavailable ps table, an unreadable transcript. #815 narrows that invariant
+  // by exactly one reading and no other: a proven dead worker root ends the wait
+  // here, because that is the one case where silence IS evidence.
   transportArgs.deps.sleep = (ms) => {
     try { capture.round() } catch { /* capture is never load-bearing */ }
     try { sampleHeadlessGrowth() } catch { /* the growth reading is evidence, never load-bearing */ }
+    const death = headlessRootDeath()
+    if (death) throw seatDiedError(headlessWatch.info, death)   // verbatim: mutation A1
     sleep(ms)
   }
   function transportIo(name, role) {
@@ -2071,6 +2228,32 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
         attribution: failure === 'timeout' ? timeoutAttribution() : (err && err.stage === 'substrate-gone' ? 'host' : null),
       })
     } catch { /* never load-bearing */ }
+  }
+  // A wait ended by a root death leaves the transport's own turn UNFINISHED:
+  // crew/headless-rpc.mjs:692 and crew/headless.mjs:587 are unguarded bottom-of-loop
+  // sleeps, so finishTurn/emitUsage (rpc) and recordOutcome/emitUsage (json) never
+  // run. That spend is UNMEASURED, and an unknown is never a zero (#297): the row
+  // says null and names which of the two closed reasons applies.
+  const FINAL_TURN_UNMEASURED = Object.freeze({
+    [HEADLESS_RPC_TRANSPORT]: 'rpc-turn-not-finished',
+    [HEADLESS_TRANSPORT]: 'headless-run-not-recorded',
+  })
+  const seatDiedRow = (info, returnPath, failure, timeoutS, waitStartedAt) => {
+    const at = now()
+    const waitedMs = Math.max(0, at - waitStartedAt)
+    const budgetMs = Math.max(0, Math.round(Number(timeoutS) * 1000))
+    const death = failure.reclaim || {}
+    return {
+      at, seat_died: info?.role || 'unknown', returnPath,
+      transport: info?.transport ?? null,
+      root_pid: death.root_pid ?? null, root_pgid: death.root_pgid ?? null,
+      root_liveness: death.root_liveness ?? null, reason: death.reason ?? null,
+      root_settled: death.root_settled ?? null,
+      waited_ms: waitedMs, budget_ms: budgetMs,
+      wasted_ms: Math.max(0, budgetMs - waitedMs),   // verbatim: mutation A5
+      final_turn_usage: null,                        // verbatim: mutation A6
+      final_turn_usage_reason: FINAL_TURN_UNMEASURED[info?.transport] ?? null,
+    }
   }
   const refusalError = (info, returnPath, frame) => {
     const at = Number.isFinite(frame?.at) ? frame.at : now()
@@ -2393,6 +2576,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           try {
             const attempt = transport.assign({ role, briefFile: briefPath, reask: { id: reaskId, returnPath: reaskPath } })
             collectPath = attempt?.returnPath || reaskPath
+            bindHeadlessIdentity(info, attempt)
             break
           } catch (assignErr) {
             if (!REASK_BUSY_STAGES.has(assignErr?.stage) || polls >= REASK_SETTLE_POLLS) throw assignErr
@@ -2413,8 +2597,10 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     note('sent', { brief: briefPath, attempt: attempts })
     const window = Math.min(timeoutS, REASK_TIMEOUT_S)
     try {
+      const waitStartedAt = now()
+      const waitContext = { returnPath: reassignable ? collectPath : returnPath, timeoutS: window, waitStartedAt }
       const env = reassignable
-        ? withHeadlessWatch(info, () => transport.wait(collectPath, window))
+        ? withHeadlessWatch(info, () => transport.wait(collectPath, window), waitContext)
         : waitForEnvelope({
         returnPath,
         timeoutS: window,
@@ -2450,8 +2636,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       // could produce a usable envelope, and it says so rather than borrowing a
       // parse defect's name.
       const secondKind = cellFailureKind(secondErr)
-      if (secondErr && secondErr.stage === SEAT_REFUSAL_STAGE) {
-        note('failed', { failure: secondKind, second: secondErr.stage || null, refused: true })
+      if (secondErr && [SEAT_REFUSAL_STAGE, SEAT_DIED_STAGE].includes(secondErr.stage)) {
+        note('failed', { failure: secondKind, second: secondErr.stage || null, ...(secondErr.stage === SEAT_REFUSAL_STAGE ? { refused: true } : {}) })
         throw secondErr
       }
       if (secondKind === 'unusable-envelope') {
@@ -2597,7 +2783,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           id = result?.id ?? null
           transportForPath.set(result.returnPath, transport)
           const assignedAt = now()
-          seatFor.set(result.returnPath, { role, id, brief: briefFile, at: assignedAt, returnPath: result.returnPath, transport: m.transport })
+          const info = { role, id, brief: briefFile, at: assignedAt, returnPath: result.returnPath, transport: m.transport }
+          bindHeadlessIdentity(info, result)
+          seatFor.set(result.returnPath, info)
           refusalFloor.set(role, assignedAt)
           lastRefusal.delete(role)
           return result
@@ -2622,10 +2810,11 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     wait(returnPath, timeoutS) {
       const transport = transportForPath.get(returnPath)
       const info = seatFor.get(returnPath)
+      const waitStartedAt = now()
       let settled = null   // the envelope THIS wait produced, if any — the only positive completion evidence
       try {
         const env = transport
-          ? withHeadlessWatch(info, () => transport.wait(returnPath, timeoutS))
+          ? withHeadlessWatch(info, () => transport.wait(returnPath, timeoutS), { returnPath, timeoutS, waitStartedAt })
           : waitForEnvelope({
             returnPath, timeoutS, role: info?.role || 'unknown',
             readEnvelope: () => readEnvelopeFile(returnPath, { existsSync, readFileSync, role: info?.role }),
@@ -2662,8 +2851,17 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       } catch (err) {
         let failure = err
         if (cellFailureKind(err) === 'unusable-envelope') {
-          const recovery = reaskUnusableEnvelope({ returnPath, info, transport, err, timeoutS })
-          if (recovery.envelope != null) {
+          let recovery = null
+          try {
+            recovery = reaskUnusableEnvelope({ returnPath, info, transport, err, timeoutS })
+          } catch (reaskErr) {
+            // A replacement worker that dies has a stronger, measured outcome
+            // than the first run's parse defect. Keep that stage for the journal;
+            // the refusal path retains its historical direct rethrow.
+            if (reaskErr?.stage !== SEAT_DIED_STAGE) throw reaskErr
+            failure = reaskErr
+          }
+          if (recovery?.envelope != null) {
             // One cell failure is still recorded — the wasted turn is a real
             // cell defect — but the RUN continues as if the first envelope had
             // been readable.
@@ -2671,9 +2869,17 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             settled = recovery.envelope
             return recovery.envelope
           }
-          failure = recovery.error || err
+          if (recovery) failure = recovery.error || err
         }
-        if (failure.stage === 'seat-died') io.log(recordRow({ at: now(), seat_died: info?.role || 'unknown', returnPath }))
+        // The pane arm is byte-identical to what it has always written; only a
+        // refusal carrying reclaim evidence (#815) widens the row, and it widens
+        // it with MEASUREMENTS: what this wait spent, what its budget was, and
+        // the wait this death would have wasted had the deadline been run out —
+        // b337-fallback burned 64 minutes of it and nothing said so.
+        if (failure.stage === SEAT_DIED_STAGE) {
+          const context = failure.waitContext || { returnPath, timeoutS, waitStartedAt }
+          io.log(recordRow(failure.reclaim ? seatDiedRow(info, context.returnPath, failure, context.timeoutS, context.waitStartedAt) : { at: now(), seat_died: info?.role || 'unknown', returnPath }))
+        }
         if (failure.stage === 'substrate-gone') io.log(recordRow({ at: now(), substrate_gone: info?.role || 'unknown', returnPath }))
         const refusal = lastRefusal.get(info?.role)
         if (refusal) failure.seatRefusal = refusal.member
@@ -3182,6 +3388,9 @@ function needsStaging(entries, path) {
 }
 
 export const SEAT_REFUSAL_STAGE = 'seat-refused'
+// #815: a seat whose process is measurably dead is NOT a budget overrun. Named
+// here, beside the other stage tokens, and never folded into a transport timeout.
+export const SEAT_DIED_STAGE = 'seat-died'   // verbatim: mutation A2
 const PI_REFUSAL_STOPS = new Set(['error', 'length'])
 
 export function piSessionDir(checkout, deps = {}) {

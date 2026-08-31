@@ -27,7 +27,8 @@ import {
   gateReapCommand, gateReapSweepCommand, gateReapOriginal, gateReapVerdict, gateReapFresh, GATE_REAP_CMD_EOF, GATE_REAP_SWEEP_MARKER,
   validateMutations, checkFailureLine, MUTATION_OUTCOMES, MUTATION_BINDING_FAILURES, MUTATIONS_MAX, CHECK_FAIL_PREFIX,
   bindMutationAnchor, applyMutationAnchor,
-  FINDING_SEVERITIES, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
+  FINDING_SEVERITIES, FINDING_DISPOSITIONS, FINDING_ID_SHAPE, RESIDUAL_TYPES, reviewFindings, reviewOutcome,
+  verdictFindingsDefect, findingIdDefect, reviewShapeDefect, guardedWrite, acceptedRawById, patchTargets, dispositionOf, dispositionPlan, askUserLines,
   validateAcceptDecision, validatePlanResiduals, acceptContractLines, planAcceptContractLines, acceptedViaLabel, REFUTATION_EVIDENCE_MAX, ACCEPT_REFUSALS, ACCEPT_REASKS, acceptBounceLines,
   CARVE_VERDICTS, validateCarve, GROWTH_DIVERGENCE_FACTOR, growthRecord, growthLines, divergenceConsultLines,
   PANEL_PARTNERS, PANEL_ADJUDICATORS, panelSeats,
@@ -743,8 +744,8 @@ test('reviewOutcome carries reviewer findings verbatim and stable', () => {
   const first = reviewOutcome('reviewer', envelope)
   const second = reviewOutcome('reviewer', envelope)
   assert.deepEqual(first.findings, [
-    { id: 'RV1-2', severity: 'should-fix', location: 'a.mjs:12', summary: 'second' },
-    { id: 'RV1-1', severity: 'must-fix', location: 'b.mjs:3', summary: 'first' },
+    { id: 'RV1-2', severity: 'should-fix', location: 'a.mjs:12', summary: 'second', disposition: null },
+    { id: 'RV1-1', severity: 'must-fix', location: 'b.mjs:3', summary: 'first', disposition: null },
   ])
   assert.deepEqual(second.findings, first.findings)
   assert.deepEqual(first.findings_report, {
@@ -767,7 +768,7 @@ test('malformed findings are dropped and reported, never thrown', () => {
       ],
     },
   })
-  assert.deepEqual(out.findings, [{ id: 'ok-1', severity: 'must-fix', location: null, summary: null }])
+  assert.deepEqual(out.findings, [{ id: 'ok-1', severity: 'must-fix', location: null, summary: null, disposition: null }])
   assert.deepEqual(out.findings_report.rejected, [
     { index: 1, why: 'duplicate id' },
     { index: 2, why: 'missing id' },
@@ -821,12 +822,14 @@ test('a drive with findings produces the same result as one without', () => {
   }
   const without = run(reviewer())
   const withFindings = run(reviewer([
-    { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'failure scenario' },
+    { id: 'RV1-1', severity: 'should-fix', location: 'a.mjs:1', summary: 'failure scenario', patch: '@@ not a diff the driver may read @@' },
   ]))
   assert.deepEqual(withFindings.result, without.result)
+  assert.equal(withFindings.io.calls.run.filter((r) => /^git apply /.test(r.cmd)).length, 0)
+  assert.equal(withFindings.io.calls.assign.filter((a) => a.role === 'lead').length, 0)
   assert.ok(withFindings.io.calls.logs.some((line) => line.review_outcome?.findings?.some((f) => f.id === 'RV1-1')))
   const note = withFindings.io.calls.logs.find((line) => line.review_findings_note)?.review_findings_note
-  assert.deepEqual(note?.count_mismatch, ['must_fix'])
+  assert.deepEqual(note?.count_mismatch, ['should_fix'])
 })
 
 test('validateAcceptDecision collects each typed residual error without throwing', () => {
@@ -941,6 +944,11 @@ test('the shared charter and validator agree on the findings contract', () => {
   assert.ok(severityField)
   const documented = [...severityField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
   assert.deepEqual(documented, [...FINDING_SEVERITIES])
+  const dispositionField = block.match(/"disposition":\s*([^\n]+)/)?.[1]
+  assert.ok(dispositionField)
+  const dispositions = [...dispositionField.matchAll(/"([^\"]+)"/g)].map((match) => match[1])
+  assert.deepEqual(dispositions, [...FINDING_DISPOSITIONS])
+  assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
 })
 
 test("the reviewer guidelines carry a defended 'Do not flag' list", () => {
@@ -6560,7 +6568,7 @@ test('scout rejects envelopes that do not match its declared shape', () => {
 
 test('the envelope refusal reason set is closed and frozen', () => {
   assert.equal(Object.isFrozen(ENVELOPE_REFUSAL_REASONS), true)
-  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item'])
+  assert.deepEqual([...ENVELOPE_REFUSAL_REASONS], ['no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id'])
   const malformed = [
     null,
     'not an object',
@@ -7051,7 +7059,7 @@ const CRASH_STAGES = [
   'plan:r1', 'gate-baseline', 'build:r1', 'build:r2', 'scope-gate:r2',
   'lane:r2', 'gate:r2', 'gate-proof:1', 'review:r1', 'build:r3',
 ]
-const CRASH_FINDINGS = [{ id: 'B263-1', severity: 'must-fix', location: 'a.mjs:7', summary: 'the distinctive finding' }]
+const CRASH_FINDINGS = [{ id: 'B263-1', severity: 'must-fix', location: 'a.mjs:7', summary: 'the distinctive finding', disposition: null }]
 const crashIo = () => fakeIo({
   envelopes: {
     'planner:1': planEnv({ details: { ...planEnv().details, gate_cmd: 'gate-cmd' } }),
@@ -7326,9 +7334,10 @@ test('consults and reviewer findings carry into an escalation', () => {
   assert.equal(consulted.details.consults_spent, 1)
   const noConsult = driveTask({ ...CTX, limits: { build_rounds: 1 } }, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv() }, changed: ['a.mjs', 'outside.mjs'] }))
   assert.equal(noConsult.details.consults_spent, 0)
-  const findings = [{ id: 'RV1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]
+  const findings = [{ id: 'RV1', severity: 'should-fix', location: 'a.mjs:1', summary: 'open' }]
+  const normalizedFindings = [{ ...findings[0], disposition: null }]
   const carried = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass', findings) }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }))
-  assert.deepEqual(carried.details.accept_findings, findings)
+  assert.deepEqual(carried.details.accept_findings, normalizedFindings)
   const absent = driveTask(CTX, fakeIo({ envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') }, runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: false, output: 'red' } }, changed: ['a.mjs'] }))
   assert.equal(absent.details.accept_findings, null)
 })
@@ -7528,9 +7537,12 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at gate_check_proof_unproven gate_generation'],
   ['recordRow', '', 'at gate_check_discrimination gate_generation gate_check_discriminations ...(checkProofNote ? { gate_check_proof_note: checkProofNote } : {})'],
   ['recordRow', '', 'at ...entry'],
+  ['recordRow', '', 'at auto_fix'],
+  ['recordRow', '', 'at auto_fix_revalidation'],
   ['recordRow', '', 'at member_questions'],
   ['recordRow', '', 'at question_answers'],
   ['recordRow', '', 'at review_round'],
+  ['recordRow', '', 'at auto_fix'],
   ['recordRow', '', 'at commit_subject'],
   ['recordRow', '', 'at cold_suite'],
   ['recordRow', '', 'at published'],
@@ -7551,7 +7563,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 42)
+  assert.equal(sites.length, 45)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
@@ -8096,4 +8108,766 @@ test('an unarmed context retains the legacy local finish without rebase or publi
   assert.equal(result.details.stages.includes('rebase'), false)
   assert.equal(result.details.stages.includes('publish'), false)
   assert.deepEqual(io.calls.run.map(({ cmd }) => cmd), ['lane-cmd', 'suite-cmd'])
+})
+
+// #800 §7b — permanent regression coverage for reviewer finding dispositions.
+// The acceptance gate exercises these paths once; these tests keep their evidence in
+// the checkout that every future `npm test` run actually executes.
+const D_HUNK = (path) => [
+  `diff --git a/${path} b/${path}`,
+  `--- a/${path}`,
+  `+++ b/${path}`,
+  '@@ -1 +1 @@',
+  '-const x = 1',
+  '+const x = 2',
+]
+const D_PATCH_A = [...D_HUNK('a.mjs'), ''].join('\n')
+const D_PATCH_B = [...D_HUNK('b.mjs'), ''].join('\n')
+const D_PATCH_MIXED_MODE = [...D_HUNK('a.mjs'), 'diff --git a/b.mjs b/b.mjs', 'old mode 100644', 'new mode 100755', ''].join('\n')
+const D_PATCH_MIXED_RENAME = [
+  ...D_HUNK('a.mjs'),
+  'diff --git a/a.test.mjs b/b.mjs',
+  'similarity index 96%',
+  'rename from a.test.mjs',
+  'rename to b.mjs',
+  '--- a/a.test.mjs',
+  '+++ b/b.mjs',
+  '@@ -1 +1 @@',
+  '-const y = 1',
+  '+const y = 2',
+  '',
+].join('\n')
+const D_PATCH_EMPTY_PATH = ['diff --git a/ b/', '--- a/', '+++ b/', '@@ -1 +1 @@', '-const x = 1', '+const x = 2', ''].join('\n')
+const D_GREEN_GATE = `green\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":0,"errored":0}`
+const D_RED_GATE = (marker) => `${marker}\n${GATE_SUMMARY_PREFIX} {"total":3,"failed":3,"errored":0}`
+const D_AUTO = { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'a dead import survives', disposition: 'auto-fix', patch: D_PATCH_A }
+const D_ASK = { id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'the change narrows the public contract', disposition: 'ask-user' }
+const D_PANEL_CTX = Object.freeze({ ...CTX_TL, continuation: true })
+
+const dPlanEnv = (details = {}) => planEnv({ details: { ...planEnv().details, ...details } })
+const dReviewEnv = (verdict, findings, counts = {}) => {
+  const normalized = findings === undefined ? undefined : (Array.isArray(findings) ? findings : [findings])
+  const base = reviewEnv(verdict, normalized)
+  return { ...base, details: { ...base.details, ...counts } }
+}
+const dPartnerEnv = (verdict, findings) => ({ status: 'done', role: 'tech-lead', details: { verdict, findings } })
+const dAdjEnv = (details = {}) => ({ status: 'done', role: 'lead', details: { adjudications: [], class_invariant: 'class', closes_class: true, ...details } })
+const dGitApplies = (io) => io.calls.run.filter(({ cmd }) => /^git apply /.test(cmd))
+const dBuilders = (io) => io.calls.assign.filter(({ role }) => role === 'builder')
+const dLeads = (io) => io.calls.assign.filter(({ role }) => role === 'lead')
+const dAutoRows = (io) => io.calls.logs.map((row) => row.auto_fix).filter(Boolean)
+const dDecisionBrief = (io) => Object.entries(io.calls.writes).find(([path]) => /\/decision-\d+\.md$/.test(path))?.[1] || ''
+const dOffers = (brief, option) => brief.split('\n').some((line) => line.trim() === `- ${option}`)
+const dPatchWrite = (io) => Object.entries(io.calls.writes).find(([path]) => /\/auto-fix-r\d+-.*\.patch$/.test(path))
+const dApplyCommand = (id, round = 1) => `git apply --whitespace=nowarn ${shellArg(`${TD}/auto-fix-r${round}-${id}.patch`)}`
+
+function dispositionIo(findings, {
+  verdict = 'changes-needed', plan = {}, runs = {}, changed = ['a.mjs', 'a.test.mjs'],
+  leadDecision = 'escalate', reviewer2 = dReviewEnv('pass', []), reviewer3 = dReviewEnv('pass', []),
+} = {}) {
+  return fakeIo({
+    envelopes: {
+      'planner:1': dPlanEnv(plan),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': dReviewEnv(verdict, findings), 'reviewer:2': reviewer2, 'reviewer:3': reviewer3,
+      'lead:1': leadEnv(leadDecision), 'lead:2': leadEnv('escalate'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
+    changed,
+  })
+}
+
+function dispositionPanelIo({
+  reviewer1, partner1, adjudication1 = dAdjEnv(), reviewer2 = dReviewEnv('pass', []),
+  partner2 = dPartnerEnv('pass', []), adjudication2 = dAdjEnv(), lead3 = leadEnv('escalate'),
+  runs = {}, changed = ['a.mjs', 'a.test.mjs'],
+} = {}) {
+  return fakeIo({
+    envelopes: {
+      'planner:1': dPlanEnv(), 'tech-lead:1': checkEnv('approve'),
+      'builder:1': buildEnv(), 'builder:2': buildEnv(), 'builder:3': buildEnv(),
+      'reviewer:1': reviewer1, 'tech-lead:2': partner1, 'lead:1': adjudication1,
+      'reviewer:2': reviewer2, 'tech-lead:3': partner2, 'lead:2': adjudication2,
+      'reviewer:3': dReviewEnv('pass', []), 'tech-lead:4': dPartnerEnv('pass', []), 'lead:3': lead3,
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' }, ...runs },
+    changed,
+  })
+}
+
+test('#800 §7b 1 — verdictFindingsDefect refuses raw pass must-fixes', () => {
+  const mustFix = { id: 'RV1-1', severity: 'must-fix' }
+  assert.equal(verdictFindingsDefect({ verdict: 'pass', findings: [mustFix] })?.reason, 'verdict-findings')
+  assert.equal(verdictFindingsDefect({ verdict: 'approve', must_fix: 2 })?.reason, 'verdict-findings')
+  assert.equal(verdictFindingsDefect({ verdict: 'pass', findings: [{ id: 'RV1-1', severity: 'should-fix' }] }), null)
+  assert.equal(verdictFindingsDefect({ verdict: 'changes-needed', findings: [mustFix] }), null)
+  const duplicate = { verdict: 'pass', findings: [{ id: 'RV1-1', severity: 'should-fix' }, mustFix] }
+  assert.deepEqual(reviewFindings(duplicate).findings.map(({ severity }) => severity), ['should-fix'])
+  assert.equal(verdictFindingsDefect(duplicate)?.reason, 'verdict-findings')
+})
+
+test('#800 §7b 2 — reviewer envelope refusals are closed and shape-owned', () => {
+  assert.ok(ENVELOPE_REFUSAL_REASONS.includes('verdict-findings'))
+  assert.ok(ENVELOPE_REFUSAL_REASONS.includes('finding-id'))
+  const envelope = (details) => ({ status: 'done', role: 'reviewer', summary: 'reviewed', artifacts: [], details })
+  assert.equal(envelopeDefect(envelope({ verdict: 'pass', findings: [{ id: 'RV1-1', severity: 'must-fix' }] }), VARIANTS.full, { taskDir: TD })?.reason, 'verdict-findings')
+  assert.equal(envelopeDefect(envelope({ verdict: 'changes-needed', findings: [{ id: '../../escape', severity: 'must-fix' }] }), VARIANTS.full, { taskDir: TD })?.reason, 'finding-id')
+})
+
+test('#800 §7b 3 — a refused pass must-fix re-asks the reviewer at the free round', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': dPlanEnv(), 'builder:1': buildEnv(),
+      'reviewer:1': dReviewEnv('pass', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]),
+      'lead:1': leadEnv('bounce'), 'reviewer:2': dReviewEnv('pass', []),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.commits.length, 1)
+  assert.deepEqual(result.details.stages.filter((stage) => stage.startsWith('review')), ['review:r1', 'review:r1', 'review:pass'])
+  assert.equal(io.calls.logs.find((row) => row.review_round?.refused)?.review_round.refused, 'verdict-findings')
+})
+
+test('#800 §7b 4 — a refused pass must-fix escalates at review when the lead declines a re-ask', () => {
+  const io = dispositionIo([{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }], { verdict: 'pass' })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('#800 §7b 5 — a refused pass must-fix never becomes canonical accept findings', () => {
+  const io = dispositionIo([{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }], { verdict: 'pass' })
+  const result = driveTask(CTX, io)
+  assert.equal(result.details.accept_findings, null)
+})
+
+test('#800 §7b 6 — a refused ask-user finding reaches only the reviewer-refusal consult', () => {
+  const io = dispositionIo([{ ...D_ASK, verdict: undefined }], { verdict: 'pass', leadDecision: 'bounce' })
+  const result = driveTask(CTX, io)
+  const brief = dDecisionBrief(io)
+  assert.equal(result.status, 'done')
+  assert.equal(dOffers(brief, 'bounce'), true)
+  assert.equal(dOffers(brief, 'escalate'), true)
+  assert.equal(dOffers(brief, 'bounce-builder'), false)
+  assert.equal(io.calls.writes[`${TD}/build-bounce-r1.md`], undefined)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+})
+
+test('#800 §7b 7 — a continuation panel refuses pass must-fix before assigning panel seats', () => {
+  const io = fakeIo({
+    envelopes: {
+      'planner:1': dPlanEnv(), 'tech-lead:1': checkEnv('approve'), 'builder:1': buildEnv(),
+      'reviewer:1': dReviewEnv('pass', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]),
+      'lead:1': leadEnv('escalate'),
+    },
+    runs: { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } },
+    changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  const brief = dDecisionBrief(io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.some(({ note }) => note === 'panel-b' || note === 'panel-adjudication'), false)
+  assert.equal(io.calls.commits.length, 0)
+  assert.equal(dOffers(brief, 'bounce'), true)
+  assert.equal(dOffers(brief, 'bounce-builder'), false)
+})
+
+test('#800 §7b 8 — an unreadable verdict cannot execute ask-user routing', () => {
+  const io = dispositionIo([D_ASK], { verdict: 'not-a-verdict' })
+  const result = driveTask(CTX, io)
+  const brief = dDecisionBrief(io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review')
+  assert.equal(dOffers(brief, 'bounce'), true)
+  assert.equal(dOffers(brief, 'bounce-builder'), false)
+  assert.equal(dGitApplies(io).length, 0)
+})
+
+test('#800 §7b 9 — disposition parsing routes only accepted declared values', () => {
+  for (const declared of FINDING_DISPOSITIONS) assert.equal(dispositionOf({ disposition: declared }), declared)
+  assert.equal(dispositionOf({ disposition: 'surprise' }), null)
+  const routed = dispositionPlan({
+    findings: [
+      { id: 'auto', severity: 'must-fix', disposition: 'auto-fix', patch: D_PATCH_A },
+      { id: 'seat', severity: 'must-fix', disposition: 'auto-fix' },
+      { id: 'ask', severity: 'should-fix', location: 'a.mjs:2', summary: 'human choice', disposition: 'ask-user' },
+      { id: 'noop', severity: 'must-fix', disposition: 'no-op' },
+    ],
+  })
+  assert.deepEqual(routed.autoFix, [{ id: 'auto', severity: 'must-fix', patch: D_PATCH_A }])
+  assert.deepEqual(routed.askUser, [{ id: 'ask', severity: 'should-fix', location: 'a.mjs:2', summary: 'human choice' }])
+  assert.deepEqual(routed.needsSeat, ['seat'])
+  const hostile = dispositionPlan({
+    findings: [
+      { id: 'same', severity: 'blocker', disposition: 'auto-fix', patch: D_PATCH_B },
+      { id: 'same', severity: 'must-fix', disposition: 'auto-fix', patch: D_PATCH_A },
+      { id: 'duplicate', severity: 'must-fix', disposition: 'auto-fix', patch: D_PATCH_A },
+      { id: 'duplicate', severity: 'must-fix', disposition: 'ask-user', patch: D_PATCH_B },
+    ],
+  })
+  assert.deepEqual(hostile.autoFix.map(({ id, patch }) => ({ id, patch })), [{ id: 'same', patch: D_PATCH_A }, { id: 'duplicate', patch: D_PATCH_A }])
+  assert.deepEqual(hostile.askUser, [])
+})
+
+test('#800 §7b 10 — acceptedRawById mirrors reviewFindings acceptance order', () => {
+  const details = {
+    findings: [
+      { id: 'second', severity: 'blocker', patch: 'rejected' },
+      { id: 'second', severity: 'must-fix', patch: 'accepted-second' },
+      { id: 'first', severity: 'must-fix', patch: 'accepted-first' },
+      { id: 'first', severity: 'should-fix', patch: 'duplicate' },
+      { severity: 'must-fix', patch: 'missing-id' },
+    ],
+  }
+  const accepted = acceptedRawById(details)
+  assert.equal(accepted.get('second').patch, 'accepted-second')
+  assert.equal(accepted.get('first').patch, 'accepted-first')
+  assert.equal(accepted.has(undefined), false)
+  assert.deepEqual([...accepted.keys()], reviewFindings(details).findings.map(({ id }) => id))
+})
+
+test('#800 §7b 11 — ordinary confused-deputy findings apply only accepted patch bytes', () => {
+  const io = dispositionIo([
+    { id: 'RV1-1', severity: 'blocker', location: 'b.mjs:1', summary: 'rejected', disposition: 'auto-fix', patch: D_PATCH_B },
+    { ...D_AUTO, summary: 'accepted' },
+  ])
+  const result = driveTask(CTX, io)
+  const written = dPatchWrite(io)?.[1] || ''
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 1)
+  assert.equal(written.includes('a/a.mjs'), true)
+  assert.equal(written.includes('a/b.mjs'), false)
+})
+
+test('#800 §7b 12 — panel confused-deputy findings apply only accepted patch bytes', () => {
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [
+      { id: 'RV1-1', severity: 'blocker', location: 'b.mjs:1', summary: 'rejected', disposition: 'auto-fix', patch: D_PATCH_B },
+      { ...D_AUTO, summary: 'accepted' },
+    ]),
+    partner1: dPartnerEnv('changes-needed', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'accepted' }]),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  const written = dPatchWrite(io)?.[1] || ''
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 1)
+  assert.equal(written.includes('a/a.mjs'), true)
+  assert.equal(written.includes('a/b.mjs'), false)
+})
+
+test('#800 §7b 13 — patchTargets fails closed for every unreadable section form', () => {
+  assert.deepEqual(patchTargets(D_PATCH_A), { targets: ['a.mjs'], refusal: null })
+  const created = patchTargets(['diff --git a/new.mjs b/new.mjs', '--- /dev/null', '+++ b/new.mjs', '@@ -0,0 +1 @@', '+x', ''].join('\n'))
+  assert.deepEqual(created, { targets: ['new.mjs'], refusal: null })
+  const deleted = patchTargets(['diff --git a/old.mjs b/old.mjs', '--- a/old.mjs', '+++ /dev/null', '@@ -1 +0,0 @@', '-x', ''].join('\n'))
+  assert.deepEqual(deleted, { targets: ['old.mjs'], refusal: null })
+  const cases = [
+    'diff --git a/x b/x\n--- /dev/null\n+++ /dev/null\n',
+    `diff --git a/x b/y\nrename from x\nrename to y\n--- a/x\n+++ b/y\n`,
+    `diff --git a/x b/y\ncopy from x\ncopy to y\n--- a/x\n+++ b/y\n`,
+    'diff --git a/x b/x\nGIT binary patch\n',
+    'diff --git a/x b/x\n--- "a/x"\n+++ "b/x"\n',
+    'diff --git a/x b/x\nold mode 100644\nnew mode 100755\n',
+    D_PATCH_EMPTY_PATH,
+    D_PATCH_MIXED_MODE,
+    `noise before diff\n${D_PATCH_A}`,
+  ]
+  for (const patch of cases) {
+    const parsed = patchTargets(patch)
+    assert.ok(parsed.refusal, patch)
+    assert.deepEqual(parsed.targets, [], patch)
+  }
+})
+
+test('#800 §7b 14 — one safe auto-fix applies with no second builder seat', () => {
+  const io = dispositionIo(D_AUTO)
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 1)
+  assert.equal(dBuilders(io).length, 1)
+  assert.equal(io.calls.assign.length, 4)
+  assert.equal(io.calls.commits.length, 1)
+  assert.deepEqual(dAutoRows(io)[0], { round: 1, total: 1, applied: ['RV1-1'], refused: [] })
+})
+
+test('#800 §7b 15 — an out-of-scope auto-fix is refused and reaches a builder', () => {
+  const io = dispositionIo({ ...D_AUTO, location: 'b.mjs:1', patch: D_PATCH_B })
+  const result = driveTask(CTX, io)
+  const refused = dAutoRows(io)[0]?.refused || []
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 0)
+  assert.match(refused.find(({ id }) => id === 'RV1-1')?.why || '', /b\.mjs/)
+  assert.equal(dBuilders(io).length, 2)
+})
+
+test('#800 §7b 16 — one unreadable section refuses a mixed patch as a whole', () => {
+  for (const patch of [D_PATCH_MIXED_RENAME, D_PATCH_MIXED_MODE]) {
+    const io = dispositionIo({ ...D_AUTO, patch })
+    const result = driveTask(CTX, io)
+    assert.equal(result.status, 'done')
+    assert.equal(dGitApplies(io).length, 0)
+    assert.equal(dAutoRows(io)[0]?.applied.length, 0)
+    assert.equal(dAutoRows(io)[0]?.refused.length, 1)
+  }
+})
+
+test('#800 §7b 17 — git apply refusal is journalled and falls back to a builder', () => {
+  const io = dispositionIo(D_AUTO, { runs: { [dApplyCommand('RV1-1')]: { ok: false, output: 'APPLY-RED-MARKER' } } })
+  const result = driveTask(CTX, io)
+  const refused = dAutoRows(io)[0]?.refused.find(({ id }) => id === 'RV1-1')
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 1)
+  assert.match(refused?.why || '', /APPLY-RED-MARKER/)
+  assert.equal(dBuilders(io).length, 2)
+})
+
+test('#800 §7b 18 — post-apply lane red is re-run verbatim and cannot commit that round', () => {
+  const io = dispositionIo(D_AUTO, {
+    runs: { 'lane-cmd:2': { ok: false, output: 'LANE-RED-MARKER' } },
+    reviewer2: dReviewEnv('changes-needed'),
+  })
+  const result = driveTask(CTX, io)
+  const laneCalls = io.calls.run.filter(({ cmd }) => cmd === 'lane-cmd')
+  assert.equal(result.status, 'escalation')
+  assert.ok(laneCalls.length >= 2)
+  assert.match(io.calls.writes[`${TD}/build-bounce-r1.md`] || '', /LANE-RED-MARKER/)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('#800 §7b 19 — post-apply acceptance-gate red bounces without re-proving pristine discrimination', () => {
+  const gate = 'disposition-gate-cmd'
+  const io = dispositionIo(D_AUTO, {
+    plan: { gate_cmd: gate },
+    runs: {
+      [`${gate}:1`]: { ok: false, output: D_RED_GATE('baseline red') },
+      [gate]: { ok: true, output: D_GREEN_GATE },
+      [`${gate}:3`]: { ok: false, output: D_RED_GATE('GATE-RED-MARKER') },
+    },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, review_rounds: 1, gate_fails_to_triage: 9 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(io.calls.writes[`${TD}/build-bounce-r1.md`] || '', /GATE-RED-MARKER/)
+  assert.equal(io.calls.commits.length, 0)
+  // baseline, built tree, post-apply revalidation, then the rebound build: no
+  // extra pristine/discrimination invocation is introduced after the patch.
+  assert.deepEqual(io.calls.run.filter(({ cmd }) => cmd === gate).map(({ n }) => n), [1, 2, 3, 4])
+})
+
+test('#800 §7b 20 — post-apply scope red bounces without a commit', () => {
+  const io = dispositionIo(D_AUTO, {
+    changed: [['a.mjs', 'a.test.mjs'], ['a.mjs', 'b.mjs'], ['a.mjs', 'a.test.mjs']],
+    reviewer2: dReviewEnv('changes-needed'),
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.match(io.calls.writes[`${TD}/build-bounce-r1.md`] || '', /b\.mjs/)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('#800 §7b 21 — green scope, lane, and gate revalidation commits with one builder', () => {
+  const gate = 'disposition-green-gate'
+  const io = dispositionIo(D_AUTO, {
+    plan: { gate_cmd: gate },
+    runs: {
+      [`${gate}:1`]: { ok: false, output: D_RED_GATE('baseline red') },
+      [gate]: { ok: true, output: D_GREEN_GATE },
+    },
+  })
+  const result = driveTask({ ...CTX, limits: { build_rounds: 2, gate_fails_to_triage: 9 } }, io)
+  assert.equal(result.status, 'done')
+  assert.equal(dBuilders(io).length, 1)
+  assert.equal(io.calls.commits.length, 1)
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'lane-cmd').length, 2)
+})
+
+test('#800 §7b 22 — final post-apply failures either fund one real builder round or escalate by failed check', () => {
+  const bounced = dispositionIo(D_AUTO, {
+    runs: { 'lane-cmd:2': { ok: false, output: 'LANE-RED-MARKER' } },
+    leadDecision: 'bounce-builder',
+  })
+  const bouncedResult = driveTask({ ...CTX, limits: { build_rounds: 1 } }, bounced)
+  assert.equal(bouncedResult.status, 'done')
+  assert.deepEqual(bouncedResult.details.extra_rounds_granted, [{ where: 'review', round: 1 }])
+  assert.equal(dBuilders(bounced).length, 2)
+
+  const escalated = dispositionIo(D_AUTO, { runs: { 'lane-cmd:2': { ok: false, output: 'LANE-RED-MARKER' } } })
+  const escalatedResult = driveTask({ ...CTX, limits: { build_rounds: 1 } }, escalated)
+  assert.equal(escalatedResult.status, 'escalation')
+  assert.equal(escalatedResult.details.escalation.where, 'lane')
+  assert.equal(dLeads(escalated).length, 1)
+  assert.equal(dBuilders(escalated).length, 1)
+  assert.equal(escalated.calls.commits.length, 0)
+})
+
+test('#800 §7b 23 — changes-needed ask-user findings go to the lead or review-unresolved', () => {
+  const io = dispositionIo(D_ASK)
+  const result = driveTask(CTX, io)
+  const brief = dDecisionBrief(io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review-unresolved')
+  assert.deepEqual(result.details.ask_user, ['RV1-1'])
+  assert.equal(dOffers(brief, 'bounce-builder'), true)
+  assert.equal(dOffers(brief, 'escalate'), true)
+})
+
+test('#800 §7b 24 — pass ask-user findings pause acceptance for the lead', () => {
+  const io = dispositionIo({ ...D_ASK, severity: 'should-fix' }, { verdict: 'pass' })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review-unresolved')
+  assert.equal(dLeads(io).length, 1)
+  assert.equal(io.calls.commits.length, 0)
+})
+
+test('#800 §7b 25 — a lead bounce carries ask-user guidance verbatim', () => {
+  const guidance = 'keep the observable default and update its docs'
+  const io = dispositionIo(D_ASK, { leadDecision: 'bounce-builder' })
+  io.wait = ((wait) => (path, timeout) => {
+    const env = wait(path, timeout)
+    if (path === 'lead:1') return leadEnv('bounce-builder', guidance)
+    return env
+  })(io.wait)
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(dLeads(io).length, 1)
+  assert.match(io.calls.writes[`${TD}/build-bounce-r1.md`] || '', new RegExp(guidance))
+})
+
+test('#800 §7b 26 — mixed dispositions apply the safe patch and send guidance to a builder', () => {
+  const guidance = 'preserve compatibility for the observable option'
+  const io = dispositionIo([D_AUTO, { ...D_ASK, id: 'RV1-2' }], { leadDecision: 'bounce-builder' })
+  io.wait = ((wait) => (path, timeout) => {
+    const env = wait(path, timeout)
+    if (path === 'lead:1') return leadEnv('bounce-builder', guidance)
+    return env
+  })(io.wait)
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 1)
+  assert.equal(dLeads(io).length, 1)
+  assert.match(io.calls.writes[`${TD}/build-bounce-r1.md`] || '', new RegExp(guidance))
+  assert.equal(dBuilders(io).length, 2)
+})
+
+test('#800 §7b 27 — a mixed-disposition lead escalation applies nothing', () => {
+  const io = dispositionIo([D_AUTO, { ...D_ASK, id: 'RV1-2' }])
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'review-unresolved')
+  assert.equal(dGitApplies(io).length, 0)
+})
+
+test('#800 §7b 28 — a final ask-user round has one funded bounce or one unresolved escalation', () => {
+  const bounced = dispositionIo(D_ASK, { leadDecision: 'bounce-builder' })
+  const bouncedResult = driveTask({ ...CTX, limits: { build_rounds: 1 } }, bounced)
+  assert.equal(bouncedResult.status, 'done')
+  assert.deepEqual(bouncedResult.details.extra_rounds_granted, [{ where: 'review', round: 1 }])
+  assert.equal(dLeads(bounced).length, 1)
+  assert.equal(dBuilders(bounced).length, 2)
+
+  const escalated = dispositionIo(D_ASK)
+  const escalatedResult = driveTask({ ...CTX, limits: { build_rounds: 1 } }, escalated)
+  assert.equal(escalatedResult.status, 'escalation')
+  assert.equal(escalatedResult.details.escalation.where, 'review-unresolved')
+  assert.equal(dLeads(escalated).length, 1)
+  assert.equal(dBuilders(escalated).length, 1)
+})
+
+test('#800 §7b 29 — a panel pass must-fix refusal re-asks reviewer A before any panel work', () => {
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('pass', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: leadEnv('bounce'),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  const firstLead = io.calls.assign.findIndex(({ role }) => role === 'lead')
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.slice(0, firstLead).some(({ note }) => note === 'panel-b' || note === 'panel-adjudication'), false)
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+  assert.equal(io.calls.logs.some((row) => row.panel_skipped === 'verdict-findings'), true)
+  assert.deepEqual(result.details.stages.filter((stage) => stage.startsWith('review')), ['review:r1', 'review:panel-r1', 'review:r1', 'review:panel-r1', 'review:pass'])
+})
+
+test('#800 §7b 30 — upheld panel reviewer findings retain auto-fix and ask-user routing', () => {
+  const auto = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [D_AUTO]),
+    partner1: dPartnerEnv('changes-needed', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: D_AUTO.summary }]),
+  })
+  const autoResult = driveTask(D_PANEL_CTX, auto)
+  assert.equal(autoResult.status, 'done')
+  assert.equal(dGitApplies(auto).length, 1)
+
+  const ask = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [D_ASK]),
+    partner1: dPartnerEnv('changes-needed', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: D_ASK.summary }]),
+    adjudication2: leadEnv('escalate'),
+  })
+  const askResult = driveTask(D_PANEL_CTX, ask)
+  assert.equal(askResult.status, 'escalation')
+  assert.equal(askResult.details.escalation.where, 'review-unresolved')
+  assert.equal(dLeads(ask).length, 2)
+})
+
+test('#800 §7b 31 — dismissed panel auto-fixes never execute', () => {
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [D_AUTO]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: dAdjEnv({ adjudications: [{ id: 'RV1-1', disposition: 'dismiss', reason: 'not a defect' }] }),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  assert.equal(result.status, 'done')
+  assert.equal(dGitApplies(io).length, 0)
+})
+
+test('#800 §7b 32 — panel canonical findings are patch-free and match their journal outcome', () => {
+  const auto = { ...D_AUTO, id: 'RV1-1', severity: 'should-fix' }
+  const ask = { ...D_ASK, id: 'RV1-2' }
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [auto, ask]),
+    partner1: dPartnerEnv('changes-needed', [
+      { id: 'TL-1', severity: 'should-fix', location: 'a.mjs:1', summary: auto.summary },
+      { id: 'TL-2', severity: 'must-fix', location: 'a.mjs:1', summary: ask.summary },
+    ]),
+    adjudication2: leadEnv('escalate'),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  const outcome = io.calls.logs.map((row) => row.review_outcome).find((row) => row?.panel)
+  assert.equal(result.status, 'escalation')
+  assert.ok(outcome)
+  assert.ok(result.details.accept_findings.every((finding) => !Object.hasOwn(finding, 'patch')))
+  assert.deepEqual(result.details.accept_findings, outcome.findings)
+})
+
+test('#800 §7b 33 — a patch without a disposition preserves legacy pass behavior', () => {
+  const without = dispositionIo([], { verdict: 'pass' })
+  const withPatch = dispositionIo([{ id: 'RV1-1', severity: 'should-fix', location: 'a.mjs:1', summary: 'legacy', patch: D_PATCH_A }], { verdict: 'pass' })
+  const plain = driveTask(CTX, without)
+  const legacy = driveTask(CTX, withPatch)
+  assert.deepEqual(legacy, plain)
+  assert.equal(dGitApplies(withPatch).length, 0)
+  assert.equal(dLeads(withPatch).length, 0)
+})
+
+test('#800 §7b 34 — the shared charter pin includes disposition and its compatibility window', () => {
+  const charter = readFileSync(new URL('./roles/reviewer.md', import.meta.url), 'utf8')
+  const block = charter.slice(charter.indexOf('## Envelope details fields'), charter.indexOf('## Perspective assignments'))
+  const line = block.match(/"disposition":\s*([^\n]+)/)?.[1]
+  assert.ok(line)
+  assert.deepEqual([...line.matchAll(/"([^\"]+)"/g)].map((match) => match[1]), [...FINDING_DISPOSITIONS])
+  assert.ok(block.includes('`disposition` is OPTIONAL in this release and REQUIRED from the next'))
+})
+
+test('#800 §7b 35 — findingIdDefect admits bounded tokens and refuses unsafe raw ids', () => {
+  for (const id of ['RV1-1', 'panel-class-3', 'a', 'x'.repeat(64), 'A_b-9']) {
+    assert.equal(findingIdDefect({ findings: [{ id, severity: 'must-fix' }] }), null, id)
+  }
+  for (const id of ['../../escape', 'a/b', 'a.b', '  RV1-1  ', 'a b', 'x'.repeat(65), 'x'.repeat(1000)]) {
+    assert.equal(findingIdDefect({ findings: [{ id, severity: 'must-fix' }] })?.reason, 'finding-id', id)
+  }
+  for (const entry of [{ severity: 'must-fix' }, { id: 1, severity: 'must-fix' }, { id: '  ', severity: 'must-fix' }]) {
+    assert.equal(findingIdDefect({ findings: [entry] }), null)
+  }
+  const long = findingIdDefect({ findings: [{ id: 'x'.repeat(1000), severity: 'must-fix' }] })
+  assert.ok(long.why.length < 300)
+  assert.match(long.why, /…/)
+})
+
+test('#800 §7b 36 — reviewShapeDefect has a stable refusal precedence', () => {
+  assert.equal(reviewShapeDefect({ verdict: 'pass', findings: [{ id: '../../escape', severity: 'must-fix' }] })?.reason, 'verdict-findings')
+  assert.equal(reviewShapeDefect({ verdict: 'changes-needed', findings: [{ id: '../../escape', severity: 'must-fix' }] })?.reason, 'finding-id')
+  assert.equal(reviewShapeDefect({ verdict: 'pass', findings: [{ id: 'RV1-1', severity: 'should-fix' }] }), null)
+})
+
+function assertDriverIdRefusal(io, result, id) {
+  const firstRound = io.calls.logs.find((row) => row.review_round?.refused)?.review_round
+  assert.equal(firstRound?.refused, 'finding-id')
+  assert.match(dDecisionBrief(io), /finding-id/)
+  assert.equal(dGitApplies(io).length, 0)
+  assert.equal(Object.keys(io.calls.writes).some((path) => /\/auto-fix-/.test(path)), false)
+  assert.equal(Object.keys(io.calls.writes).some((path) => path.split('/').some((part) => part === '.' || part === '..')), false)
+  assert.equal(result.status, 'done')
+  assert.equal(io.calls.assign.filter(({ role }) => role === 'reviewer').length, 2)
+  assert.equal(id.length > 64 || !FINDING_ID_SHAPE.test(id), true)
+}
+
+test('#800 §7b 37 — traversal finding ids are refused by name before any artifact path', () => {
+  const id = '../../escape'
+  const io = dispositionIo({ ...D_AUTO, id }, { leadDecision: 'bounce' })
+  const result = driveTask(CTX, io)
+  assertDriverIdRefusal(io, result, id)
+})
+
+test('#800 §7b 38 — thousand-character finding ids are refused before filesystem limits', () => {
+  const id = 'x'.repeat(1000)
+  const io = dispositionIo({ ...D_AUTO, id }, { leadDecision: 'bounce' })
+  const result = driveTask(CTX, io)
+  assertDriverIdRefusal(io, result, id)
+  assert.equal(Object.keys(io.calls.writes).some((path) => path.split('/').some((part) => Buffer.byteLength(part) > 255)), false)
+})
+
+test('#800 §7b 39 — a panel refuses an out-of-shape reviewer-A id before panel assignments', () => {
+  const io = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [{ ...D_AUTO, id: '../../escape' }]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: leadEnv('escalate'),
+  })
+  const result = driveTask(D_PANEL_CTX, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.assign.some(({ note }) => note === 'panel-b' || note === 'panel-adjudication'), false)
+  assert.equal(io.calls.logs.some((row) => row.panel_skipped === 'finding-id'), true)
+  assert.equal(Object.keys(io.calls.writes).some((path) => /\/auto-fix-/.test(path)), false)
+})
+
+test('#800 §7b 40 — guardedWrite returns write failures and preserves successful bytes', () => {
+  const denied = { writeFile() { throw new Error('EPERM: read-only') } }
+  assert.equal(guardedWrite(denied, '/x', 'y'), 'EPERM: read-only')
+  const blank = { writeFile() { throw new Error('') } }
+  assert.equal(guardedWrite(blank, '/x', 'y'), 'the write threw with no message')
+  let received = null
+  const ok = { writeFile(path, contents) { received = { path, contents } } }
+  assert.equal(guardedWrite(ok, '/x', 'exact bytes'), null)
+  assert.deepEqual(received, { path: '/x', contents: 'exact bytes' })
+})
+
+function throwAutoFixWrites(io, message = 'ENAMETOOLONG: name too long') {
+  const write = io.writeFile
+  io.writeFile = (path, contents) => {
+    if (/\/auto-fix-.*\.patch$/.test(String(path))) throw new Error(message)
+    return write(path, contents)
+  }
+  return io
+}
+
+test('#800 §7b 41 — a failed patch-artifact write is refused and the driver continues', () => {
+  const io = throwAutoFixWrites(dispositionIo(D_AUTO))
+  let result
+  assert.doesNotThrow(() => { result = driveTask(CTX, io) })
+  const row = dAutoRows(io)[0]
+  assert.ok(result?.status)
+  assert.equal(dGitApplies(io).length, 0)
+  assert.deepEqual(row.applied, [])
+  assert.match(row.refused.find(({ id }) => id === 'RV1-1')?.why || '', /could not be written/)
+  assert.equal(dBuilders(io).length, 2)
+})
+
+test('#800 §7b 42 — a failed artifact write cannot take the seat-free revalidation shortcut', () => {
+  const io = throwAutoFixWrites(dispositionIo(D_AUTO))
+  const result = driveTask({ ...CTX, limits: { build_rounds: 1 } }, io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(io.calls.run.filter(({ cmd }) => cmd === 'lane-cmd').length, 1)
+  assert.equal(io.calls.logs.some((row) => row.auto_fix_revalidation), false)
+  assert.equal(dBuilders(io).length, 1)
+})
+
+const D_CLASS_COLLIDING = {
+  id: 'panel-class-1', severity: 'should-fix', location: 'a.mjs:1',
+  summary: 'a dead import survives', disposition: 'auto-fix', patch: D_PATCH_A,
+}
+const D_CLASS_PARTNER = { id: 'TL-1', severity: 'should-fix', location: 'a.mjs:1', summary: D_CLASS_COLLIDING.summary }
+const D_DIVERGENT_A = { ...D_AUTO, summary: 'reviewer A patch' }
+const D_DIVERGENT_PARTNER = { id: 'RV1-1', severity: 'must-fix', location: 'a.test.mjs:1', summary: 'partner finding' }
+const D_COLLISION_CTX = Object.freeze({ ...D_PANEL_CTX, limits: { build_rounds: 2, review_rounds: 2 } })
+const dPanelOutcomes = (io) => io.calls.logs.map((row) => row.review_outcome).filter((row) => row?.panel)
+const dRemintRows = (io) => io.calls.logs.map((row) => row.panel_id_reminted).filter(Boolean)
+
+function classCollisionIo() {
+  return dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [D_CLASS_COLLIDING]),
+    partner1: dPartnerEnv('changes-needed', [D_CLASS_PARTNER]),
+    adjudication1: dAdjEnv({ closes_class: false, class_invariant: 'the class is not closed' }),
+  })
+}
+
+function divergentCollisionIo() {
+  return dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [D_DIVERGENT_A]),
+    partner1: dPartnerEnv('changes-needed', [D_DIVERGENT_PARTNER]),
+  })
+}
+
+test('#800 §7b 43 — panel class findings remint around a reviewer-origin collision', () => {
+  const io = classCollisionIo()
+  const result = driveTask(D_COLLISION_CTX, io)
+  const first = dPanelOutcomes(io)[0]
+  const ids = first.findings.map(({ id }) => id)
+  const klass = first.findings.filter(({ severity, reviewer }) => severity === 'must-fix' && reviewer === 'adjudicator')
+  assert.equal(result.status, 'done')
+  assert.equal(new Set(ids).size, ids.length)
+  assert.deepEqual(klass.map(({ id }) => id), ['panel-remint-1'])
+  assert.deepEqual(dRemintRows(io), [{ source: 'adjudicator', from: 'panel-class-1', to: 'panel-remint-1' }])
+  assert.equal(dBuilders(io).length, 2)
+  assert.equal(dGitApplies(io).length, 1)
+})
+
+test('#800 §7b 44 — divergent collisions preserve reviewer A ids and route its patch', () => {
+  const io = divergentCollisionIo()
+  const result = driveTask(D_COLLISION_CTX, io)
+  const first = dPanelOutcomes(io)[0]
+  const adjudication = io.calls.writes[`${TD}/panel-adjudication-1.md`] || ''
+  const patch = dPatchWrite(io)?.[1] || ''
+  assert.equal(result.status, 'done')
+  assert.ok(first.findings.some(({ id, reviewer }) => id === 'RV1-1' && reviewer === 'reviewer'))
+  assert.ok(first.findings.some(({ id, reviewer }) => id === 'panel-remint-1' && reviewer === 'tech-lead'))
+  assert.match(adjudication, /panel-remint-1/)
+  assert.equal(dGitApplies(io).length, 1)
+  assert.equal(patch.includes('a/a.mjs'), true)
+})
+
+test('#800 §7b 45 — each reminted final id has one auditable remint join', () => {
+  const cases = [
+    [classCollisionIo(), 'panel-class-1'],
+    [divergentCollisionIo(), 'RV1-1'],
+  ]
+  for (const [io, original] of cases) {
+    const result = driveTask(D_COLLISION_CTX, io)
+    assert.equal(result.status, 'done')
+    const reminted = dPanelOutcomes(io)[0].findings.filter(({ id }) => id.startsWith('panel-remint-')).map(({ id }) => id)
+    const rows = dRemintRows(io)
+    assert.deepEqual(reminted, ['panel-remint-1'])
+    assert.deepEqual(rows, [{ source: original === 'panel-class-1' ? 'adjudicator' : 'tech-lead', from: original, to: 'panel-remint-1' }])
+    assert.equal(rows.every(({ to }) => reminted.includes(to)), true)
+  }
+})
+
+test('#800 §7b 46 — a pass carrying ask-user and auto-fix records the skipped patch', () => {
+  const auto = { ...D_AUTO, severity: 'should-fix' }
+  const ask = { ...D_ASK, id: 'RV1-2', severity: 'should-fix' }
+  const io = dispositionIo([auto, ask], { verdict: 'pass' })
+  const result = driveTask(CTX, io)
+  const rows = dAutoRows(io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(dLeads(io).length, 1)
+  assert.equal(dGitApplies(io).length, 0)
+  assert.equal(rows.length, 1)
+  assert.deepEqual(rows[0].applied, [])
+  assert.deepEqual(rows[0].refused, [{ id: 'RV1-1', why: 'a pass verdict is not a fix path — the driver applies a patch only on changes-needed' }])
+})
+
+test('#800 §7b 47 — guardedWrite empty-message errors never stringify as Error', () => {
+  const blank = { writeFile() { throw new Error('') } }
+  assert.equal(guardedWrite(blank, '/x', 'y'), 'the write threw with no message')
+})
+
+test('#800 §7b 48 — continuation panels journal the exact shape refusal they saw', () => {
+  const idIo = dispositionPanelIo({
+    reviewer1: dReviewEnv('changes-needed', [{ ...D_AUTO, id: '../../escape' }]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: leadEnv('escalate'),
+  })
+  const idResult = driveTask(D_PANEL_CTX, idIo)
+  assert.equal(idResult.status, 'escalation')
+  assert.equal(idIo.calls.logs.some((row) => row.panel_skipped === 'finding-id'), true)
+
+  const verdictIo = dispositionPanelIo({
+    reviewer1: dReviewEnv('pass', [{ id: 'RV1-1', severity: 'must-fix', location: 'a.mjs:1', summary: 'open' }]),
+    partner1: dPartnerEnv('pass', []),
+    adjudication1: leadEnv('escalate'),
+  })
+  const verdictResult = driveTask(D_PANEL_CTX, verdictIo)
+  assert.equal(verdictResult.status, 'escalation')
+  assert.equal(verdictIo.calls.logs.some((row) => row.panel_skipped === 'verdict-findings'), true)
 })

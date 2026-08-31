@@ -149,7 +149,7 @@ export const ENVELOPE_FIELD_KINDS = Object.freeze(['text', 'records'])
 // The CLOSED set of reasons an envelope refusal can name (#427). A refusal is a
 // {reason, why} pair whose reason is one of these; prose stays in `why`.
 export const ENVELOPE_REFUSAL_REASONS = Object.freeze([
-  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item',
+  'no-envelope', 'summary', 'artifacts', 'details', 'field-missing', 'field-kind', 'field-item', 'verdict-findings', 'finding-id',
 ])
 export const UNIVERSAL_STAGE_HEADS = Object.freeze(['escalate', 'done'])
 // #251 follow-on — a PARTIAL reviewed shape declares where it gets what a plan
@@ -671,7 +671,7 @@ export function envelopeDefect(env, shape, { taskDir } = {}) {
       }
     }
   }
-  return null
+  return reviewShapeDefect(env.details)
 }
 
 // One presence test, shared by the refusal and the report, so what is REFUSED as
@@ -840,7 +840,7 @@ export function reviewFindings(details) {
       id: entry.id,
       severity: entry.severity,
       location: trimmedOrNull(entry.location),
-      summary: trimmedOrNull(entry.summary),
+      summary: trimmedOrNull(entry.summary), disposition: dispositionOf(entry),
     })
   })
   return { findings, rejected }
@@ -2163,8 +2163,8 @@ function runTask(ctx, io, crash) {
     // nothing", which IS a report. An ABSENT key is a seat that did not report,
     // and absence is not zero (#442). Clobbering here erased the whole accept
     // contract and committed on a record claiming zero residuals.
-    if (review?.findings) S.acceptFindings = review.findings
-    if (review?.findings) S.lastReview = review
+    const canonical = review?.findings && !reviewShapeDefect(env?.details) ? review.findings : null   // #800 R8
+    if (canonical) { S.acceptFindings = canonical; S.lastReview = review }
     if (review?.findings_report && (review.findings_report.count_mismatch.length || review.findings_report.rejected.length)) {
       io.log(recordRow({ at: io.now(), review_findings_note: { dispatch: id, ...review.findings_report } }))
     }
@@ -3247,6 +3247,19 @@ function runTask(ctx, io, crash) {
       stageComplete()
       return aEnv
     }
+    // #800 R8 — a `pass` carrying a must-fix, or a finding id outside the closed shape,
+    // is refused by SHAPE before the panel can adjudicate it away. No partner, no
+    // adjudicator: reviewer A's envelope goes back to the outer loop unchanged, where
+    // the ordinary refusal consult re-asks that reviewer. `assignAndWait` has already
+    // declined to make it canonical (§1e). The row names the refusal the panel ACTUALLY
+    // saw — a durable record saying `verdict-findings` for a `finding-id` defect is a
+    // record of something that did not happen.
+    const panelRefusal = reviewShapeDefect(aEnv.details)
+    if (panelRefusal) {
+      panelLog({ panel_skipped: panelRefusal.reason })
+      stageComplete()
+      return aEnv
+    }
 
     const bBrief = art(`panel-b-brief-${n}.md`)
     const partnerInstructions = [
@@ -3274,7 +3287,38 @@ function runTask(ctx, io, crash) {
     const fused = fuseFindings(findingsOf(aEnv), findingsOf(bEnv), {
       sourceA: 'reviewer', sourceB: panel.partner,
     })
-    const structuredDivergences = fused.divergent.map(({ id, source, severity, location, summary }) => ({
+    // #800 revision 2 — PANEL-LOCAL ID ALLOCATION. reviewFindings keeps the FIRST valid
+    // entry for an id and drops every later duplicate (crew/drive.mjs:834-838), and the
+    // panel's own array is fed straight back through it by dispositionPlan. The panel
+    // mints the FIXED id `panel-class-${n}`, so a reviewer-origin finding already carrying
+    // that id ERASES the adjudicator's class must-fix — the one finding that says the class
+    // is NOT closed. needsSeat then comes back empty and the run takes the seat-free
+    // re-review shortcut on a class the adjudicator explicitly refused to close. The same
+    // collapse happens when reviewer A and the partner independently mint one id for two
+    // divergent findings; adjudicatePanel keys its decisions on id alone
+    // (crew/escalation-policy.mjs:141).
+    // Allocate in ONE pass, in this order — consensus, divergent, then the synthetic class
+    // finding — keeping the first occurrence UNCHANGED. THE ORDER IS WHAT MAKES REVIEWER A'S
+    // ROUTING SAFE, and it is the whole reason no private id-shadow key is needed: A's
+    // normalized ids are already unique (crew/drive.mjs:834-838); consensus carries A's id
+    // (crew/escalation-policy.mjs:107-114); and `fuseFindings` orders divergences as ALL
+    // unmatched A entries BEFORE all unmatched partner entries (:117-124). So every
+    // reviewer-A id is allocated before any id that could collide with it and is never
+    // reminted. Only a partner id or the synthetic class id can be reminted, and neither
+    // authorizes A's patch. `accepted.get(finding.id)` below is therefore exact.
+    const panelIds = new Set()
+    let panelIdSeq = 0
+    const allocId = (id, source) => {
+      if (!panelIds.has(id)) { panelIds.add(id); return id }
+      let minted = `panel-remint-${++panelIdSeq}`
+      while (panelIds.has(minted)) minted = `panel-remint-${++panelIdSeq}`
+      panelIds.add(minted)
+      panelLog({ panel_id_reminted: { source, from: id, to: minted } })
+      return minted
+    }
+    const allocatedConsensus = fused.consensus.map((finding) => ({ ...finding, id: allocId(finding.id, 'reviewer') }))
+    const allocatedDivergent = fused.divergent.map((finding) => ({ ...finding, id: allocId(finding.id, finding.source) }))
+    const structuredDivergences = allocatedDivergent.map(({ id, source, severity, location, summary }) => ({
       id, source, severity, location, summary,
     }))
     const divergenceLines = structuredDivergences.length > 0
@@ -3310,18 +3354,31 @@ function runTask(ctx, io, crash) {
       return aEnv
     }
 
-    const adjudicated = adjudicatePanel(fused.divergent, adjEnv.details)
+    const adjudicated = adjudicatePanel(allocatedDivergent, adjEnv.details)
+    // #800 R4 — the panel rebuilds findings from the normalized shape, which carries no
+    // patch. A reviewer-origin finding's routing must survive fusion or the panel
+    // silently disables auto-fix and ask-user on exactly the rounds a continuation
+    // needs them. DISMISSED findings are never re-attached: a dismissed finding must
+    // not execute. The map is acceptedRawById, so a rejected entry can no more
+    // authorize a patch here than it can on the ordinary path.
+    const accepted = acceptedRawById(aEnv.details)
+    const withRouting = (finding, origin) => {
+      const raw = origin === 'reviewer' ? accepted.get(finding.id) : null
+      if (!raw) return finding
+      const disposition = dispositionOf(raw)
+      return {
+        ...finding,
+        ...(disposition ? { disposition } : {}),
+        ...(typeof raw.patch === 'string' && raw.patch.trim() !== '' ? { patch: raw.patch } : {}),
+      }
+    }
     const findings = [
-      ...fused.consensus.map(({ id, severity, location, summary }) => ({
-        id, severity, location, summary, reviewer: 'both',
-      })),
-      ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => ({
-        id, severity, location, summary, reviewer: source,
-      })),
+      ...allocatedConsensus.map(({ id, severity, location, summary }) => withRouting({ id, severity, location, summary, reviewer: 'both' }, 'reviewer')),
+      ...adjudicated.upheld.map(({ id, severity, location, summary, source }) => withRouting({ id, severity, location, summary, reviewer: source }, source)),
     ]
     if (adjudicated.closesClass !== true && !findings.some((finding) => finding.severity === 'must-fix')) {
       findings.push({
-        id: `panel-class-${n}`,
+        id: allocId(`panel-class-${n}`, 'adjudicator'),
         severity: 'must-fix',
         location: null,
         summary: adjudicated.classInvariant || panelStandingQuestion,
@@ -3389,6 +3446,10 @@ function runTask(ctx, io, crash) {
         },
       },
     }
+    // A patch never reaches the canonical accept set or the journal: it lands in every
+    // escalation envelope (crew/drive.mjs:2327). `review.details.findings` — the array
+    // the outer loop routes from — keeps it.
+    const canonicalFindings = findings.map(({ patch, ...rest }) => rest)
     const outcome = {
       dispatch: `panel-r${n}`,
       panel: true,
@@ -3396,20 +3457,20 @@ function runTask(ctx, io, crash) {
       must_fix: review.details.must_fix,
       should_fix: review.details.should_fix,
       consider: review.details.consider,
-      findings,
+      findings: canonicalFindings,
       sources: ['reviewer', panel.partner],
       adjudicator: panel.adjudicator,
       class_invariant: adjudicated.classInvariant,
       closes_class: adjudicated.closesClass,
     }
     panelLog({ review_outcome: outcome })
-    S.acceptFindings = findings
+    S.acceptFindings = canonicalFindings
     S.lastReview = {
       verdict,
       must_fix: review.details.must_fix,
       should_fix: review.details.should_fix,
       consider: review.details.consider,
-      findings,
+      findings: canonicalFindings,
       panel: review.details.panel,
     }
     stageComplete()
@@ -3424,6 +3485,66 @@ function runTask(ctx, io, crash) {
       ...applyPrescriptionLines('the review'),
     ].join('\n')
   }
+  // #800 — a finding the reviewer marked `auto-fix` and shipped a patch for is applied
+  // by CODE (programmatic-over-model-tokens). The patch is REFUSED unless its whole
+  // write surface is readable AND inside files_in_scope: the scope gate is the one
+  // write surface this run has, and a reviewer's patch is not exempt from it. Every
+  // attempt is journalled — an applied patch nobody can see is not a fix, it is drift.
+  // The id is safe as a path component by CONSTRUCTION: findingIdDefect refused the
+  // whole envelope upstream if it was not (FINDING_ID_SHAPE). Nothing is sanitized
+  // here — a silent rewrite is what turns two distinct ids into one artifact path.
+  const applyAutoFixes = (entries, roundNo) => {
+    const applied = []
+    const refused = []
+    for (const entry of entries) {
+      const { targets, refusal } = patchTargets(entry.patch)
+      if (refusal) { refused.push({ id: entry.id, why: `the patch was refused unread: ${refusal}` }); continue }
+      const outside = outOfScopeFiles(targets, inScope)
+      if (outside.length > 0) {
+        refused.push({ id: entry.id, why: `the patch writes ${outside.join(', ')}, outside files_in_scope` })
+        continue
+      }
+      const patchPath = art(`auto-fix-r${roundNo}-${entry.id}.patch`)
+      const wrote = guardedWrite(io, patchPath, entry.patch.endsWith('\n') ? entry.patch : `${entry.patch}\n`)
+      if (wrote) { refused.push({ id: entry.id, why: `the patch artifact could not be written: ${wrote}` }); continue }
+      const res = io.run(`git apply --whitespace=nowarn ${shellArg(patchPath)}`)
+      if (res?.ok) applied.push(entry.id)
+      else refused.push({ id: entry.id, why: `git apply refused the patch: ${String(res?.output || '').slice(-500)}` })
+    }
+    if (entries.length > 0) io.log(recordRow({ at: io.now(), auto_fix: { round: roundNo, total: entries.length, applied, refused } }))
+    return { applied, refused }
+  }
+
+  // #800 — code applied a patch, so code re-runs the code-owned checks that already
+  // passed on the tree BEFORE it: scope, the validation lane, and the configured
+  // acceptance gate. Returns {ok:true} or {ok:false, kind, brief}; `kind` is the
+  // failed check's own name and becomes the escalation `where`, because "the lane is red"
+  // and "no accepted build" are different facts and only one of them is true.
+  // The brief carries the failure VERBATIM — a paraphrased failure is a second
+  // interpretation of evidence the builder can read directly.
+  const revalidateAfterAutoFix = (roundNo, applied) => {
+    const record = (outcome, why) => io.log(recordRow({ at: io.now(), auto_fix_revalidation: { round: roundNo, applied, outcome, why } }))
+    const failed = (kind, what, detail) => {
+      record(kind, what)
+      return { ok: false, kind, brief: [
+        `# Auto-fix revalidation bounce (round ${roundNo})`, '',
+        `The driver applied the reviewer's auto-fix patch(es) — ${applied.join(', ')} — and re-ran the code-owned checks. ${what}`,
+        '', detail, '', `Plan: ${planPath}`,
+      ].join('\n') }
+    }
+    const outside = outOfScopeFiles(io.changedFiles(), inScope)
+    if (outside.length > 0) return failed('scope', 'The tree now carries files OUTSIDE the plan scope:', outside.map((f) => `- ${f}`).join('\n'))
+    const laneAfter = io.run(lane)
+    if (!laneAfter.ok) return failed('lane', `The validation lane is RED. Make it green:\n\n    ${lane}`, `Failures:\n${String(laneAfter.output || '').slice(-4000)}`)
+    if (gateCmd) {
+      const gateAfter = runGate(`gate:autofix-r${roundNo}`, gateCmd)
+      lastGateOutput = gateAfter.output
+      if (!gateAfter.ok) return failed('gate', `The ACCEPTANCE GATE is red after the patch. The gate is immutable to you:\n\n    ${gateCmd}`, `Failures (verbatim):\n${String(gateAfter.output || '').slice(-4000)}`)
+    }
+    record('green', null)
+    return { ok: true }
+  }
+
   // #751 A REVIEWER bounce. The lead ruled the standing verdict STALE against a
   // tree the scope gate, the lane and every configured acceptance gate have already
   // proved, so the reviewer is re-assigned against THAT tree and nothing is rebuilt.
@@ -3691,7 +3812,8 @@ function runTask(ctx, io, crash) {
       io.writeFile(revBrief, panelBriefText)
       const review = panel ? panelReview(roundNo, panel) : assignAndWait('reviewer', revBrief, 'review')
       lastReviewPath = review.details?.review_path || art('review.md')
-      const v = verdictOf(review)
+      const shapeRefusal = reviewShapeDefect(review.details)
+      const v = shapeRefusal ? null : verdictOf(review)
       if (v) finalReview.verdict = v
       if (v) staleVerdict = null
       // A VERIFICATION COSTS NOTHING. Only a round that DEMANDS change spends a
@@ -3706,9 +3828,78 @@ function runTask(ctx, io, crash) {
       // is exactly what the old `reviews -= 1` refund below did.
       const counted = v === 'revise'
       if (counted) reviews += 1
-      io.log(recordRow({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews } }))
+      io.log(recordRow({ at: io.now(), review_round: { n: roundNo, verdict: review.details?.verdict ?? null, accounting: counted ? 'counted' : 'free', charged: reviews, ...(shapeRefusal ? { refused: shapeRefusal.reason } : {}) } }))
+      // #800 R4 — dispositions are settled BEFORE either verdict branch, but ONLY for a
+      // verdict the driver could read. A shape-refused or unreadable envelope is
+      // refused, never partially executed. An `ask-user` finding is a decision code may
+      // not take, on pass and on changes-needed alike; the lead's answer is CLOSED here
+      // — bounce-builder carries the lead's own steer straight to the builder and never
+      // falls through to a second consult.
+      const disposed = dispositionPlan(review.details)
+      // #800 revision 2 — journalled HERE, not in the pass branch below, because the
+      // ask-user branch `continue`s the build loop and the pass branch is therefore
+      // unreachable for a pass carrying BOTH dispositions. The patch was correctly not
+      // applied either way; without this move, that one case is the only pass whose
+      // skipped auto-fix leaves no refusal row, and a record that exists for every case
+      // but one is worse than none.
+      if (v === 'pass' && disposed.autoFix.length > 0) {
+        io.log(recordRow({ at: io.now(), auto_fix: { round: roundNo, total: disposed.autoFix.length, applied: [], refused: disposed.autoFix.map(({ id }) => ({ id, why: 'a pass verdict is not a fix path — the driver applies a patch only on changes-needed' })) } }))
+      }
+      if (v && disposed.askUser.length > 0) {
+        const lastAsk = finalRound()
+        const askOptions = !lastAsk || canGrant('review') ? ['bounce-builder', 'escalate'] : ['escalate']
+        const c = consultLead(askUserLines(disposed.askUser).join('\n'), askOptions, [planPath, lastReviewPath], { exclude: 'reviewer' })
+        if (c.decision !== 'bounce-builder') {
+          stageComplete()
+          return escalate('review-unresolved', c.reason, [], { ask_user: disposed.askUser.map(({ id }) => id) })
+        }
+        if (lastAsk) { grant('review', round); extraRounds += 1; extraReviews += 1 }
+        // A review carrying BOTH dispositions still gets its auto-fix applied: the
+        // ask-user finding is what needs the seat, the auto-fix never did. The builder
+        // round that follows supplies the code-owned validation, so no in-place
+        // revalidation is done here. If the lead escalates, nothing is applied.
+        if (v === 'revise') applyAutoFixes(disposed.autoFix, roundNo)
+        const b = art(`build-bounce-r${round}.md`)
+        failureUpgrade('review', 'builder')
+        io.writeFile(b, [`# Ask-user bounce (round ${round})`, '', c.guidance, '',
+          ...askUserLines(disposed.askUser), '', `Review: ${lastReviewPath}`, `Plan: ${planPath}`].join('\n'))
+        buildBrief = b; buildNote = 'review-fix'
+        stageComplete()
+        continue build
+      }
       if (v === 'pass') { stageComplete(); stage('review:pass'); accepted = 'review pass'; stageComplete(); break build }
       if (v === 'revise') {
+        const fixes = applyAutoFixes(disposed.autoFix, roundNo)
+        if (fixes.applied.length > 0 && disposed.needsSeat.length === 0 && fixes.refused.length === 0) {
+          // Every finding that demanded a change is closed, and CODE closed it. Re-prove
+          // the tree code changed, then re-review it in place rather than spending a
+          // builder round on work that is already done; the review budget still bounds
+          // the loop.
+          const revalidated = revalidateAfterAutoFix(roundNo, fixes.applied)
+          if (revalidated.ok) {
+            stageComplete()
+            continue
+          }
+          const lastFix = finalRound()
+          if (lastFix) {
+            const fixOptions = canGrant('review') ? ['bounce-builder', 'escalate'] : ['escalate']
+            const c = consultLead(
+              `The driver applied the reviewer's auto-fix patch(es) and the ${revalidated.kind} check went red on the patched tree. Grant one more build round, or escalate?`,
+              fixOptions, [planPath, lastReviewPath],
+            )
+            if (c.decision !== 'bounce-builder') {
+              stageComplete()
+              return escalate(revalidated.kind, c.reason)
+            }
+            grant('review', round); extraRounds += 1; extraReviews += 1
+          }
+          const b = art(`build-bounce-r${round}.md`)
+          failureUpgrade('review', 'builder')
+          io.writeFile(b, revalidated.brief)
+          buildBrief = b; buildNote = 'review-fix'
+          stageComplete()
+          continue build
+        }
         if (finalRound()) {
           const options = canGrant('review') ? ['bounce-builder', 'bounce-reviewer', 'accept', 'escalate'] : ['accept', 'escalate']
           const c = consultLead(
@@ -3770,7 +3961,9 @@ function runTask(ctx, io, crash) {
         continue build
       }
       const c = consultLead(
-        `The reviewer returned an unreadable verdict (status=${review.status}, verdict=${review.details?.verdict}). Bounce the reviewer, or escalate?`,
+        shapeRefusal
+          ? `The reviewer envelope is refused by shape [${shapeRefusal.reason}]: ${shapeRefusal.why}. This verdict is never accepted. Bounce the reviewer to decide again, or escalate?`
+          : `The reviewer returned an unreadable verdict (status=${review.status}, verdict=${review.details?.verdict}). Bounce the reviewer, or escalate?`,
         ['bounce', 'escalate'], [revBrief, ...(review.artifacts || [])],
         { exclude: 'reviewer' },
       )
@@ -4178,3 +4371,208 @@ export const JOURNAL_CHANNEL_NAMES = Object.freeze(Object.keys(JOURNAL_CHANNELS)
 // payload (crew/drive.mjs:2787 spreads a caller-built panel entry).
 export const recordRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.record })
 export const operationalRow = (row) => ({ ...row, channel: JOURNAL_CHANNELS.operational })
+
+// #800 — the reviewer's finding DISPOSITION. Declared down here, below every
+// crew/roles citation this file carries, so the call sites in envelopeDefect,
+// reviewFindings, assignAndWait, panelReview and the review loop add no line
+// above them (#743, #748).
+export const FINDING_DISPOSITIONS = Object.freeze(['auto-fix', 'ask-user', 'no-op'])
+
+// The disposition this entry declares, or null. OUT-OF-ENUM READS AS ABSENT: the
+// field is optional in this release, and a value the driver cannot recognise is
+// unknown, never a guess — an unrecognised disposition gets today's handling
+// (a seat closes it) rather than a mechanical apply nobody authorised.
+export function dispositionOf(entry) {
+  const declared = entry && typeof entry === 'object' ? entry.disposition : undefined
+  return FINDING_DISPOSITIONS.includes(declared) ? declared : null
+}
+
+// #800 ADDENDUM — the closed shape of a finding id that may reach a FILESYSTEM PATH.
+// `art()` is string concatenation (crew/drive.mjs:1789) and the applier interpolates
+// the id into a patch artifact filename, so the id is the one reviewer-authored value
+// in this file that becomes a path component. Bounded on BOTH axes because the two
+// failures differ: the character set keeps `../` and a NUL out of the path, and the
+// 64-character bound keeps a long-but-legal id from throwing ENAMETOOLONG on a real
+// filesystem before the fix is either applied or journalled refused.
+// NARROWER than crew/driver.mjs's SAFE_TOKEN_RE by one character on purpose: dropping
+// `.` makes the companion DOTS_ONLY_RE unnecessary, so ONE regex is the whole contract.
+export const FINDING_ID_SHAPE = /^[A-Za-z0-9_-]{1,64}$/
+
+// A reviewer's `pass` may not carry a must-fix: the charter has always said a
+// must-fix forces changes-needed (crew/roles/reviewer.md), and until now nothing
+// checked it, so a pass with an open must-fix committed (#772). Read from the RAW
+// entries: REFUSING is the safe direction, so a must-fix reviewFindings had to drop
+// still must refuse the pass. AUTHORIZING is the opposite — see acceptedRawById.
+// Returns an envelope refusal or null.
+export function verdictFindingsDefect(details) {
+  const verdict = details && typeof details === 'object' ? details.verdict : undefined
+  if (verdict !== 'pass' && verdict !== 'approve') return null
+  const entries = Array.isArray(details.findings) ? details.findings : []
+  const mustFix = entries.filter((entry) => entry && typeof entry === 'object' && entry.severity === 'must-fix')
+  const counted = Number.isInteger(details.must_fix) && details.must_fix > 0
+  if (mustFix.length === 0 && !counted) return null
+  const named = mustFix.map((entry) => (typeof entry.id === 'string' ? entry.id : '(unnamed)')).join(', ')
+  return {
+    reason: 'verdict-findings',
+    why: `verdict is ${JSON.stringify(verdict)} but the review carries ${mustFix.length || details.must_fix} must-fix finding(s)${named ? ` (${named})` : ''} — a must-fix forces changes-needed`,
+  }
+}
+
+// #800 ADDENDUM — an id outside FINDING_ID_SHAPE is a SHAPE DEFECT on the envelope,
+// refused BY NAME and re-asked. It is never rewritten and never truncated: truncation
+// is what mints a collision — two long ids sharing a prefix resolve to ONE artifact
+// path and the second finding's bytes overwrite the first's before either is applied.
+// Read from the RAW entries, like verdictFindingsDefect, because refusing is the safe
+// direction. An entry with NO id (or a non-string, or blank) is left exactly as it is
+// today: reviewFindings drops it (crew/drive.mjs:826-829), so it reaches no path, and
+// refusing the whole envelope for it would change behaviour this task never asked for.
+// The reported id is TRUNCATED IN THE MESSAGE ONLY — a 1,000-character id must not
+// become a 1,000-character journal row — and the truncation is visibly marked.
+export function findingIdDefect(details) {
+  const entries = Array.isArray(details?.findings) ? details.findings : []
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || entry.id.trim() === '') continue
+    if (FINDING_ID_SHAPE.test(entry.id)) continue
+    const shown = entry.id.length > 80 ? `${entry.id.slice(0, 80)}… (${entry.id.length} chars)` : entry.id
+    return {
+      reason: 'finding-id',
+      why: `finding id ${JSON.stringify(shown)} is outside the closed shape ${String(FINDING_ID_SHAPE)} — a finding id becomes a patch artifact path component, so it is refused rather than rewritten`,
+    }
+  }
+  return null
+}
+
+// The ONE shape gate on a reviewer envelope, so envelopeDefect, assignAndWait,
+// panelReview and the review loop can never disagree about what is refusable.
+// Order is stated, not incidental: the verdict contradiction is the older and more
+// consequential defect, so it is the reason a run reports when both are true.
+export function reviewShapeDefect(details) {
+  return verdictFindingsDefect(details) || findingIdDefect(details)
+}
+
+// #800 ADDENDUM — a guarded write. INSTRUMENTATION IS NEVER LOAD-BEARING and neither
+// is a patch artifact: a path the filesystem refuses (a component too long, a byte the
+// OS rejects, a directory that vanished) must refuse the FINDING, not the run. Returns
+// null on success or the throw's message; it never re-throws.
+// `??` and NOT `||`, prescribed and load-bearing: `new Error('')` has a FALSY message, so
+// `(err && err.message) || err` stringifies the Error OBJECT to "Error" and the empty-message
+// fallback below becomes unreachable. `err?.message ?? err ?? ''` keeps the empty string,
+// which is falsy, so the fallback fires — which is what the unit case claims.
+export function guardedWrite(io, filePath, contents) {
+  try { io.writeFile(filePath, contents); return null } catch (err) { return String(err?.message ?? err ?? '') || 'the write threw with no message' }
+}
+
+// The RAW entry behind each ACCEPTED finding, by id. It mirrors reviewFindings's
+// acceptance order EXACTLY — id, then severity, then `seen` — because that order is
+// load-bearing: reviewFindings rejects a malformed severity BEFORE adding the id to
+// `seen` (crew/drive.mjs:826-838), so a later valid entry sharing that id is the one
+// accepted. A map keyed on "first entry with a string id" would hand the REJECTED
+// entry's patch bytes to the accepted finding's routing — a confused deputy, and the
+// exact opposite of "only accepted findings authorize". ONE helper, used by both
+// dispositionPlan and panelReview, so the two can never drift apart.
+export function acceptedRawById(details) {
+  const accepted = new Map()
+  const seen = new Set()
+  for (const entry of Array.isArray(details?.findings) ? details.findings : []) {
+    if (!entry || typeof entry !== 'object' || typeof entry.id !== 'string' || entry.id.trim() === '') continue
+    if (!FINDING_SEVERITIES.includes(entry.severity)) continue
+    if (seen.has(entry.id)) continue
+    seen.add(entry.id)
+    accepted.set(entry.id, entry)
+  }
+  return accepted
+}
+
+// The files a unified diff would write, repo-relative — or a refusal naming why the
+// write surface could not be read. FAILS CLOSED, PER SECTION: a patch is parsed by
+// `diff --git` section and the WHOLE patch is refused when ANY section fails, because
+// a patch whose second section is unreadable can still carry a first section that
+// looks in-scope, and outOfScopeFiles would then be handed an incomplete list while
+// git apply applies both. Rename/copy metadata, binary patches and quoted paths are
+// rejected explicitly; a section carrying no `---`/`+++` pair (a mode-only change) is
+// rejected by the pair rule; a side that decodes to the EMPTY path is rejected too,
+// because outOfScopeFiles([]) is [] and an unread surface would otherwise pass the
+// scope check trivially. `/dev/null` is allowed on ONE side only.
+export const PATCH_METADATA_REFUSED = Object.freeze(['rename from ', 'rename to ', 'copy from ', 'copy to ', 'GIT binary patch'])
+export function patchTargets(patch) {
+  const refuse = (why) => ({ targets: [], refusal: why })
+  if (typeof patch !== 'string' || patch.trim() === '') return refuse('the patch is empty')
+  const lines = patch.split('\n')
+  const starts = []
+  lines.forEach((line, index) => { if (line.startsWith('diff --git ')) starts.push(index) })
+  if (starts.length === 0) return refuse('the patch declares no "diff --git" section, so its write surface cannot be read')
+  if (lines.slice(0, starts[0]).some((line) => line.trim() !== '')) return refuse('the patch carries content before its first "diff --git" section')
+  const targets = new Set()
+  for (let i = 0; i < starts.length; i += 1) {
+    const section = lines.slice(starts[i], i + 1 < starts.length ? starts[i + 1] : lines.length)
+    for (const banned of PATCH_METADATA_REFUSED) {
+      if (section.some((line) => line.startsWith(banned))) return refuse(`a section carries "${banned.trim()}" metadata, whose write surface this parser does not decode`)
+    }
+    const olds = section.filter((line) => line.startsWith('--- '))
+    const news = section.filter((line) => line.startsWith('+++ '))
+    if (olds.length !== 1 || news.length !== 1) return refuse(`section ${JSON.stringify(section[0])} does not carry exactly one "---"/"+++" target pair`)
+    const read = (line) => {
+      const raw = line.slice(4).split('\t')[0].trim()
+      if (raw === '/dev/null') return { devNull: true }
+      if (raw.startsWith('"')) return { quoted: true }
+      return { path: raw.replace(/^[ab]\//, '') }
+    }
+    const before = read(olds[0])
+    const after = read(news[0])
+    if (before.quoted || after.quoted) return refuse('a section carries a quoted path this parser does not decode')
+    if (before.devNull && after.devNull) return refuse('a section names /dev/null on both sides, so it writes nothing this parser can check against files_in_scope')
+    for (const side of [before, after]) {
+      if (side.devNull) continue
+      if (!side.path) return refuse('a section decodes to an empty path, so its write surface cannot be checked against files_in_scope')
+      targets.add(side.path)
+    }
+  }
+  // Defense in depth: an empty target set would pass outOfScopeFiles trivially. The
+  // per-side rule above makes this unreachable today — deliberately kept, and NOT
+  // given a gate check, because an unreachable guard is one no mutation can kill and
+  // a check no mutation can kill is vacuous by this repo's own rule.
+  if (targets.size === 0) return refuse('the patch names no file this parser can check against files_in_scope')
+  return { targets: [...targets], refusal: null }
+}
+
+// Split one review's findings by what the DRIVER can do with them, per ADR-030's
+// programmatic-over-model-tokens rule (#800, TRD §5 R4):
+//   autoFix   — mechanically safe and carrying a patch: code applies it, no seat.
+//   askUser   — touches behaviour or scope: the LEAD decides, never code.
+//   needsSeat — everything else a verdict demands: today's builder round.
+// A `no-op` finding is informational and appears in none of the three. Routing comes
+// from the normalized (accepted) findings and the patch bytes from acceptedRawById,
+// so a malformed or duplicate entry can neither route nor execute.
+export function dispositionPlan(details) {
+  const parsed = reviewFindings(details)
+  const accepted = parsed ? parsed.findings : []
+  const raw = acceptedRawById(details)
+  const autoFix = []
+  const askUser = []
+  const needsSeat = []
+  for (const finding of accepted) {
+    const disposition = finding.disposition
+    const entry = raw.get(finding.id) || {}
+    if (disposition === 'auto-fix' && typeof entry.patch === 'string' && entry.patch.trim() !== '') {
+      autoFix.push({ id: finding.id, severity: finding.severity, patch: entry.patch })
+      continue
+    }
+    if (disposition === 'ask-user') {
+      askUser.push({ id: finding.id, severity: finding.severity, location: finding.location, summary: finding.summary })
+      continue
+    }
+    if (disposition === 'no-op') continue
+    if (finding.severity === 'must-fix' || finding.severity === 'should-fix') needsSeat.push(finding.id)
+  }
+  return { autoFix, askUser, needsSeat }
+}
+
+// The lead's ask-user consult body. The lead decides what to do with findings the
+// reviewer says a human must weigh — never re-deciding the findings themselves.
+export function askUserLines(findings) {
+  return [
+    `The reviewer marked ${findings.length} finding(s) \`ask-user\`: they touch behaviour or scope, so code may not close them.`,
+    ...findings.map((f) => `- ${f.id} (${f.severity ?? 'unstated'}) ${f.location ?? ''} — ${f.summary ?? ''}`.replace(/\s+/g, ' ').trim()),
+    'Send them to the builder with guidance, or escalate to a human.',
+  ]
+}

@@ -12,11 +12,12 @@ import { shapeRun, matchesFilters } from './shape.mjs'
 // cooldown so a hot read loop cannot construct a handle per read.
 export const FEED_REOPEN_COOLDOWN_MS = 2000
 const OPTIONAL_COLUMNS = { sessions: ['mode', 'engineer'] }
-const OPTIONAL_TABLES = ['agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns']
+const OPTIONAL_TABLES = ['run_configurations', 'agent_sessions', 'gate_discriminations', 'gate_results', 'review_outcomes', 'accept_decisions', 'cell_failures', 'intake_sweeps', 'intake_refusals', 'seat_teardowns']
 // Which shape fields a missing table makes unknowable. Feeding these into the
 // probe reuses #48's NULL-probe path (shape.mjs) instead of inventing a second
 // mechanism for the same idea.
 const TABLE_FIELDS = {
+  run_configurations: ['configuration', 'task_profile', 'execution_shape', 'assurance'],
   agent_sessions: ['billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens'],
   gate_discriminations: ['gate_discrimination', 'gate_generations'],
   gate_results: ['gate_checks'],
@@ -132,17 +133,19 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
       }
       return value
     }
+    const runConfigurations = optional('run_configurations', () => ledger.runConfigurationsFor(ids))
     const agentSessions = optional('agent_sessions', () => ledger.agentSessionsFor(ids))
     const gateRows = optional('gate_discriminations', () => ledger.gateDiscriminationsFor(ids))
     const gateResults = optional('gate_results', () => ledger.gateResultsFor(ids))
     const reviewRows = optional('review_outcomes', () => ledger.reviewOutcomesFor(ids))
     const acceptRows = optional('accept_decisions', () => ledger.acceptDecisionsFor(ids))
-    const phaseMap = new Map(), eventMap = new Map(), agentSessionMap = new Map(), gateMap = new Map(), gateResultsMap = new Map(), reviewMap = new Map(), acceptMap = new Map()
+    const phaseMap = new Map(), eventMap = new Map(), configurationMap = new Map(), agentSessionMap = new Map(), gateMap = new Map(), gateResultsMap = new Map(), reviewMap = new Map(), acceptMap = new Map()
     for (const id of ids) {
       phaseMap.set(id, []); eventMap.set(id, []); agentSessionMap.set(id, []); gateMap.set(id, []); gateResultsMap.set(id, []); reviewMap.set(id, []); acceptMap.set(id, [])
     }
     for (const row of phases) phaseMap.get(row.adw_id)?.push(row)
     for (const row of agents) eventMap.get(row.adw_id)?.push(row)
+    for (const row of runConfigurations) configurationMap.set(row.adw_id, row)
     for (const row of agentSessions) agentSessionMap.get(row.adw_id)?.push(row)
     for (const row of gateRows) gateMap.get(row.adw_id)?.push(row)
     for (const row of gateResults) gateResultsMap.get(row.adw_id)?.push(row)
@@ -152,7 +155,7 @@ export function createLedgerFeed({ ledgerDb, triageDb, stderr = { write() {} }, 
     const shapeProbe = { ...probe, missing: [...probe.missing, ...probe.missing_tables.flatMap((table) => TABLE_FIELDS[table] ?? [])] }
     const now = Date.now()
     const runs = sessions.map((session) => shapeRun(session, phaseMap.get(session.adw_id), eventMap.get(session.adw_id), triageRows.get(session.adw_id), shapeProbe, now,
-      { agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) })).filter((run) => matchesFilters(run, filters))
+      { runConfiguration: configurationMap.get(session.adw_id) ?? null, agentSessions: agentSessionMap.get(session.adw_id), gateDiscriminations: gateMap.get(session.adw_id), gateResults: gateResultsMap.get(session.adw_id), reviewOutcomes: reviewMap.get(session.adw_id), acceptDecisions: acceptMap.get(session.adw_id) })).filter((run) => matchesFilters(run, filters))
     return { runs, degraded: degraded || triage.health().degraded, probe: { ...probe } }
   }
   function listEvents({ adw_id, after = 0, limit = 200, type, role, phase_id } = {}) {

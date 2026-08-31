@@ -55,10 +55,11 @@ const SKIP = SQLITE_OK ? false : `node:sqlite unavailable (below NODE_FLOOR ${NO
 // crew dir, which is where crew.json lives — and returns its mirrored sessions
 // row. `tier: null` writes a boot record with NO tier key at all, which is
 // exactly what a --roles boot produces.
-function bootTieredRun(tier) {
+function bootTieredRun(tier, runConfiguration = null) {
   const stateDir = mkdtempSync(join(tmpdir(), 'factory-ledger-boot-'))
   writeFileSync(join(stateDir, 'crew.json'), JSON.stringify({
     schema_version: 3, task: 'boot-tier', roles: ['lead', 'planner'], ...(tier === null ? {} : { tier }),
+    ...(runConfiguration ? { run_configuration: runConfiguration } : {}),
   }))
   const dbPath = join(stateDir, 'ledger', 'ledger.db')
   const emitter = openRun({ stateDir, repoSlug: 'r', taskSlug: 'boot-tier', dbPath })
@@ -66,7 +67,10 @@ function bootTieredRun(tier) {
     emitter.startRun()
     const ledger = openLedger({ dbPath })
     try {
-      return ledger.getSession(emitter.adwId)
+      return {
+        ...ledger.getSession(emitter.adwId),
+        configuration: ledger.dumpTable('run_configurations').find((row) => row.adw_id === emitter.adwId) ?? null,
+      }
     } finally { ledger.close() }
   } finally {
     emitter.dispose()
@@ -4573,6 +4577,23 @@ test('openRun records the boot tier and brief proposals, while a blockless brief
   assert.equal(blockless.row.proposed_strength, null)
 })
 
+test('openRun records the effective task profile, execution shape and assurance from the boot decision', { skip: SKIP }, () => {
+  const booted = bootTieredRun('build', {
+    profile: { requested: 'implementation', effective: 'implementation', source: 'explicit' },
+    execution: { requested: null, effective: 'full', source: 'profile_recommendation' },
+    assurance: { requested: 'standard', effective: 'standard', source: 'explicit' },
+  })
+  assert.equal(booted.tier, 'build')
+  assert.equal(booted.configuration.task_profile, 'implementation')
+  assert.equal(booted.configuration.task_profile_source, 'explicit')
+  assert.equal(booted.configuration.effective_execution, 'full')
+  assert.equal(booted.configuration.execution_source, 'profile_recommendation')
+  assert.equal(booted.configuration.requested_assurance, 'standard')
+  assert.equal(booted.configuration.effective_assurance, 'standard')
+  assert.equal(booted.configuration.assurance_source, 'explicit')
+  assert.equal(booted.configuration.legacy_tier, 'build')
+})
+
 test('proposal parser names malformed, duplicated and unknown blocks, and boot records null with one notice', { skip: SKIP }, () => {
   const fence = '```proposal'
   const cases = [
@@ -4641,19 +4662,30 @@ test('startSession refuses blank or over-long proposal names and accepts explici
   assert.equal(row.proposed_strength, null)
 })
 
-test('proposal fields replay through JSONL into sessions', { skip: SKIP }, () => {
+test('proposal fields and the run configuration row replay through JSONL', { skip: SKIP }, () => {
   const source = openTestLedger()
   source.startSession({
     adw_id: 'proposal-replay', repo_slug: 'r', task_slug: 't',
     proposed_shape: 'mechanical', proposed_strength: 'workhorse',
   })
+  source.recordRunConfiguration({
+    adw_id: 'proposal-replay', schema_version: 1,
+    task_profile: 'implementation', task_profile_source: 'explicit',
+    requested_execution: null, effective_execution: 'full', execution_source: 'profile_recommendation',
+    requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit',
+    legacy_variant: null, legacy_tier: 'build',
+  })
   const target = openTestLedger()
   assert.deepEqual(replayJsonl(source._jsonlPath, target), {
-    applied: 1, skipped: 0, failed: 0, complete: true, first_failure: null,
+    applied: 2, skipped: 0, failed: 0, complete: true, first_failure: null,
   })
   const row = target.getSession('proposal-replay')
   assert.equal(row.proposed_shape, 'mechanical')
   assert.equal(row.proposed_strength, 'workhorse')
+  const configuration = target.dumpTable('run_configurations')[0]
+  assert.equal(configuration.task_profile, 'implementation')
+  assert.equal(configuration.effective_execution, 'full')
+  assert.equal(configuration.effective_assurance, 'standard')
 })
 
 test('ledger query docs pin typed outcome columns, the closed cause vocabulary, and the escalations recipe', () => {

@@ -466,6 +466,25 @@ export const TABLES = Object.freeze({
     unique: [['adw_id']],
     indexes: [],
   },
+  run_configurations: {
+    columns: [
+      { name: 'adw_id', decl: 'TEXT PRIMARY KEY' },
+      { name: 'schema_version', decl: 'INTEGER' },
+      { name: 'task_profile', decl: 'TEXT' },
+      { name: 'task_profile_source', decl: 'TEXT' },
+      { name: 'requested_execution', decl: 'TEXT' },
+      { name: 'effective_execution', decl: 'TEXT' },
+      { name: 'execution_source', decl: 'TEXT' },
+      { name: 'requested_assurance', decl: 'TEXT' },
+      { name: 'effective_assurance', decl: 'TEXT' },
+      { name: 'assurance_source', decl: 'TEXT' },
+      { name: 'legacy_variant', decl: 'TEXT' },
+      { name: 'legacy_tier', decl: 'TEXT' },
+      { name: 'created_at', decl: 'TEXT' },
+    ],
+    unique: [['adw_id']],
+    indexes: [],
+  },
   phases: {
     columns: [
       { name: 'id', decl: 'INTEGER PRIMARY KEY' },
@@ -867,7 +886,7 @@ export const TABLES = Object.freeze({
 // JSONL line `kind` values. replayJsonl refuses any `kind` outside this set.
 export const WRITERS = Object.freeze([
   'startSession', 'endSession', 'startPhase', 'endPhase', 'recordEvent',
-  'recordEnvelope', 'recordSessionRequest', 'recordGateResult', 'recordGateDiscrimination',
+  'recordEnvelope', 'recordSessionRequest', 'recordRunConfiguration', 'recordGateResult', 'recordGateDiscrimination',
   'recordReviewOutcome', 'recordAcceptDecision', 'recordCellFailure', 'recordModifierAttempt', 'recordCiCycle', 'recordCiDispatch', 'recordIntakeSweep', 'recordIntakeRefusal', 'recordIntakeBrake', 'recordIntakeDispatch', 'recordSeatTeardown', 'recordSeatReclaim', 'startProcess', 'endProcess', 'heartbeat',
   'startAgentSession', 'endAgentSession', 'recordSourceError', 'linkRun',
 ])
@@ -879,6 +898,7 @@ export const WRITERS = Object.freeze([
 // never restated here — it is read from TABLES.
 export const WRITER_MIRROR_TABLES = Object.freeze({
   startSession: 'sessions',
+  recordRunConfiguration: 'run_configurations',
   startPhase: 'phases',
   recordEvent: 'events',
   recordSourceError: 'events',
@@ -1905,6 +1925,42 @@ export function openLedger({
         toBindable(args.billed_cost_usd),
         toBindable(args.adw_id),
       )
+    })
+    return args
+  }
+
+  function recordRunConfiguration(input = {}) {
+    const required = [
+      'adw_id', 'schema_version', 'task_profile', 'task_profile_source',
+      'requested_execution', 'effective_execution', 'execution_source',
+      'requested_assurance', 'effective_assurance', 'assurance_source',
+      'legacy_variant', 'legacy_tier',
+    ]
+    requireFields(input, required, 'recordRunConfiguration')
+    if (!Number.isInteger(input.schema_version) || input.schema_version < 1) {
+      refuse('recordRunConfiguration: schema_version must be a positive integer')
+    }
+    const short = (field) => normaliseShortName(input[field], 'recordRunConfiguration', field)
+    const args = redact({
+      adw_id: input.adw_id,
+      schema_version: input.schema_version,
+      task_profile: short('task_profile'),
+      task_profile_source: short('task_profile_source'),
+      requested_execution: short('requested_execution'),
+      effective_execution: short('effective_execution'),
+      execution_source: short('execution_source'),
+      requested_assurance: short('requested_assurance'),
+      effective_assurance: short('effective_assurance'),
+      assurance_source: short('assurance_source'),
+      legacy_variant: short('legacy_variant'),
+      legacy_tier: short('legacy_tier'),
+      created_at: isoMs(input.created_at ?? now()),
+    }, stats)
+    appendJsonl('recordRunConfiguration', args)
+    mirror((conn) => {
+      const cols = tableColumnNames('run_configurations')
+      conn.prepare(`INSERT OR IGNORE INTO run_configurations (${cols.join(', ')}) VALUES (${cols.map(() => '?').join(', ')})`)
+        .run(...cols.map((column) => toBindable(args[column])))
     })
     return args
   }
@@ -2990,6 +3046,13 @@ export function openLedger({
     return queryRows(`SELECT * FROM phases WHERE adw_id IN (${marks}) ORDER BY adw_id, seq`, ids)
   }
 
+  function runConfigurationsFor(adwIds) {
+    const ids = [...new Set((adwIds || []).filter(Boolean))]
+    if (!ids.length) return []
+    const marks = ids.map(() => '?').join(',')
+    return queryRows(`SELECT * FROM run_configurations WHERE adw_id IN (${marks})`, ids)
+  }
+
   function agentEventsFor(adwIds) {
     const ids = [...new Set((adwIds || []).filter(Boolean))]
     if (!ids.length) return []
@@ -3756,11 +3819,11 @@ export function openLedger({
 
   const handle = {
     get degraded() { return degraded },
-    startSession, endSession, recordSessionRequest, startPhase, endPhase, recordEvent, recordEnvelope,
+    startSession, endSession, recordSessionRequest, recordRunConfiguration, startPhase, endPhase, recordEvent, recordEnvelope,
     recordGateResult, recordGateDiscrimination, recordReviewOutcome, recordAcceptDecision, recordCellFailure, recordModifierAttempt, recordCiCycle, recordCiDispatch, recordIntakeSweep, recordIntakeRefusal, recordIntakeBrake, recordIntakeDispatch, recordSeatTeardown, recordSeatReclaim,
     startProcess, endProcess, heartbeat, startAgentSession, endAgentSession,
     recordSourceError, linkRun,
-    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
+    listSessions, listEvents, getSession, dumpTable, tableNames, columnNames, sessionsFiltered, runsStartedWithin, phasesFor, runConfigurationsFor, agentEventsFor, agentSessionsFor, gateDiscriminationsFor, gateResultsFor, reviewOutcomesFor, acceptDecisionsFor, supportsJson1, eventsPage, maxEventId, cellFailureRowsFor, unattributableCellFailures, seatTeardownRowsFor, intakePicks, intakeSweepTotals, intakeCandidateRefusals, intakeCandidatePicks, agentSessionTokenTotals, gateReviewGap, cellFailures, cellReviews, cellUsage, modifierAttempts, ciCycles, ciDispatches, intakeSweeps, intakeRefusals, intakeBrakes, intakeDispatches, issueDispatchVerdicts, seatTeardowns, escalations, seatReclaims, eligibleTasks, runSet, transportsFor, taskReadout, jsonlDrift,
     stats: statsFn,
     captureMirrorErrors,
     readConnection,

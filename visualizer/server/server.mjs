@@ -24,7 +24,7 @@ export const STOP_SWITCH_PATH = '.factory/STOP'
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const PROJECT_ROOT = resolve(ROOT, '..')
 const DIST = resolve(ROOT, 'web', 'dist')
-const schema = 1
+const schema = 2
 const DEFAULT_PORT = 4488
 
 function defaults() {

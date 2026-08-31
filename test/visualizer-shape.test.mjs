@@ -23,7 +23,7 @@ const missingProbe = { missing: ['mode', 'engineer'], latched: false, probes: 1 
 // the implementation's own output cannot notice that output shrinking (#476 V8).
 // MUTATION V8: derive this set from shapeRun's own output and a removed marker is
 // invisible again.
-const PENDING_FIELDS = ['accept_decisions', 'billed_cache_read_tokens', 'billed_cache_write_tokens', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'engineer', 'gate_checks', 'gate_discrimination', 'gate_generations', 'last_heartbeat_at', 'mode', 'phase_lanes', 'read_tokens', 'reviews', 'tier', 'written_tokens']
+const PENDING_FIELDS = ['accept_decisions', 'assurance', 'billed_cache_read_tokens', 'billed_cache_write_tokens', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'engineer', 'execution_shape', 'gate_checks', 'gate_discrimination', 'gate_generations', 'last_heartbeat_at', 'mode', 'phase_lanes', 'read_tokens', 'reviews', 'task_profile', 'tier', 'written_tokens']
 // Deliberately NEWEST-FIRST: the generation sort is load-bearing only when input
 // order and generation order disagree (#476 V9).
 // MUTATION V9: pre-sort this fixture ascending and the sort stops being exercised.
@@ -173,6 +173,35 @@ test('shapeRun uses the NULL probe wording for missing new measurements', () => 
   assert.equal(run.pending.billed_input_tokens, 'predates this measurement')
   assert.equal(run.pending.gate_discrimination, 'predates this measurement')
   assert.equal(run.pending.reviews, 'predates this measurement')
+})
+
+test('shapeRun exposes recorded run configuration without inferring legacy gaps', () => {
+  const recorded = shapeRun({
+    ...base,
+    tier: 'build',
+  }, [], [], null, { missing: [] }, Date.parse(end), { runConfiguration: {
+    schema_version: 1,
+    task_profile: 'implementation', task_profile_source: 'explicit',
+    requested_execution: null, effective_execution: 'full', execution_source: 'profile_recommendation',
+    requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit',
+    legacy_variant: null, legacy_tier: 'build', created_at: start,
+  } })
+  assert.equal(recorded.tier, 'build')
+  assert.equal(recorded.configuration.assurance.source, 'explicit')
+  assert.equal(recorded.task_profile, 'implementation')
+  assert.equal(recorded.execution_shape, 'full')
+  assert.equal(recorded.variant, 'full')
+  assert.equal(recorded.assurance, 'standard')
+  assert.equal(recorded.pending.task_profile, undefined)
+  assert.equal(recorded.pending.execution_shape, undefined)
+  assert.equal(recorded.pending.assurance, undefined)
+
+  const historical = shapeRun({ ...base, tier:'judge' }, [], [], null, { missing: ['configuration', 'task_profile', 'execution_shape', 'assurance'] }, Date.parse(end))
+  assert.equal(historical.configuration, null)
+  assert.equal(historical.task_profile, null)
+  assert.equal(historical.execution_shape, null)
+  assert.equal(historical.assurance, null)
+  assert.match(historical.pending.task_profile, /does not infer|not recorded/)
 })
 
 test('real emitted events leave phase lanes honestly unavailable, while linked events resolve', () => {

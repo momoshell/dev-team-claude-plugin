@@ -17,14 +17,26 @@ test('workflow semantics separate profile, execution and assurance without infer
   assert.deepEqual(assuranceOption('build'), { value:'build', label:'Standard · build' })
   assert.equal(assuranceMeta('mechanical').label, 'Quick')
   assert.equal(assuranceMeta('judge').label, 'Rigorous')
+  assert.equal(assuranceMeta('standard').alias, 'build')
   assert.equal(executionMeta('scout').label, 'Scout')
   assert.equal(taskProfileMeta(null).label, 'Not recorded')
   assert.match(taskProfileMeta(null).summary, /does not infer/)
-  assert.deepEqual(runConfiguration({ tier:'build', variant:'full' }), {
-    profile: taskProfileMeta(null),
-    execution: executionMeta('full'),
-    assurance: assuranceMeta('build'),
-  })
+  const historical = runConfiguration({ tier:'build', variant:'full' })
+  assert.equal(historical.profile.label, 'Not recorded')
+  assert.equal(historical.execution.label, 'Full reviewed')
+  assert.equal(historical.assurance.label, 'Standard')
+  assert.equal(historical.assurance.recording, 'legacy_alias')
+  const recorded = runConfiguration({ configuration:{
+    task_profile:{ requested:null, effective:'implementation', source:'explicit' },
+    execution:{ requested:null, effective:'full', source:'profile_recommendation' },
+    assurance:{ requested:'standard', effective:'standard', source:'explicit' },
+    legacy_tier:'build',
+  } })
+  assert.equal(recorded.profile.label, 'Implementation')
+  assert.equal(recorded.execution.label, 'Full reviewed')
+  assert.equal(recorded.assurance.label, 'Standard')
+  assert.equal(recorded.assurance.source, 'explicit')
+  assert.equal(recorded.assurance.recording, 'canonical')
 })
 
 test('crew summary separates distinct seats, assignment turns, and reused dispatch labels', () => {

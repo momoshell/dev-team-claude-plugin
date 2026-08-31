@@ -152,10 +152,12 @@ function sumBilled(rows, column, fallback) {
 // than --tier (crew/crew.mjs writes the key only for a tiered boot), or it
 // predates the sessions.tier column and is never backfilled.
 const TIER_UNMEASURED = "not measured — this run's session row records no tier: it was booted with explicit --roles rather than --tier, or it predates the sessions.tier column and is never backfilled; intake_dispatches records tier by issue, not by run"
+const CONFIGURATION_UNMEASURED = 'not recorded for this run — it predates canonical run-configuration recording or its boot record did not carry this axis; the visualizer does not infer configuration from phases or seats'
 
 function pendingFor(field, probe, value) {
   if (value !== null && value !== undefined) return null
   if (field === 'tier') return TIER_UNMEASURED
+  if (field === 'task_profile' || field === 'execution_shape' || field === 'assurance') return CONFIGURATION_UNMEASURED
   if (field === 'last_heartbeat_at') return 'no session or agent heartbeat was recorded for this run'
   if (field === 'phase_lanes') return "this run's agent events predate phase linkage (#123)"
   if (field === 'billed_cost_usd') return 'money deferred — a subscription seat is not billed per token (#185)'
@@ -217,7 +219,7 @@ function dateValue(v) {
 
 export function shapeRun(session, phases = [], agentEvents = [], triageRow = null,
                          probe = {}, now = Date.now(), extras = {}) {
-  const { agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [] } = extras || {}
+  const { runConfiguration = null, agentSessions = [], gateDiscriminations = [], reviewOutcomes = [], acceptDecisions = [], gateResults = [] } = extras || {}
   const ended = session.ended_at ?? null
   const start = dateValue(session.started_at)
   const finish = dateValue(ended)
@@ -243,6 +245,30 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
   const heartbeatMs = dateValue(last_heartbeat_at)
   const heartbeat_age_ms = heartbeatMs == null || !Number.isFinite(now) ? null : now - heartbeatMs
   const tier = Object.prototype.hasOwnProperty.call(session, 'tier') ? (session.tier ?? null) : null
+  const configuration = runConfiguration ? {
+    schema_version: runConfiguration.schema_version ?? null,
+    task_profile: {
+      requested: null,
+      effective: runConfiguration.task_profile ?? null,
+      source: runConfiguration.task_profile_source ?? null,
+    },
+    execution: {
+      requested: runConfiguration.requested_execution ?? null,
+      effective: runConfiguration.effective_execution ?? null,
+      source: runConfiguration.execution_source ?? null,
+    },
+    assurance: {
+      requested: runConfiguration.requested_assurance ?? null,
+      effective: runConfiguration.effective_assurance ?? null,
+      source: runConfiguration.assurance_source ?? null,
+    },
+    legacy_variant: runConfiguration.legacy_variant ?? null,
+    legacy_tier: runConfiguration.legacy_tier ?? null,
+    created_at: runConfiguration.created_at ?? null,
+  } : null
+  const taskProfile = configuration?.task_profile?.effective ?? null
+  const executionShape = configuration?.execution?.effective ?? null
+  const assurance = configuration?.assurance?.effective ?? null
   const gateRows = [...gateDiscriminations].sort((a, b) => (a.gate_generation ?? 0) - (b.gate_generation ?? 0))
   const gateGenerations = gateRows.length ? gateRows.map((row) => ({
     gate_generation: row.gate_generation ?? null,
@@ -274,8 +300,8 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     created_at: row.created_at ?? null,
   })) : null
   const pending = {}
-  for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens', 'tier', 'last_heartbeat_at']) {
-    const value = field === 'mode' ? mode : field === 'engineer' ? engineer : field === 'tier' ? tier : field === 'last_heartbeat_at' ? last_heartbeat_at : metrics[field]
+  for (const field of ['mode', 'engineer', 'billed_cost_usd', 'billed_input_tokens', 'billed_output_tokens', 'billed_cache_write_tokens', 'billed_cache_read_tokens', 'tier', 'task_profile', 'execution_shape', 'assurance', 'last_heartbeat_at']) {
+    const value = field === 'mode' ? mode : field === 'engineer' ? engineer : field === 'tier' ? tier : field === 'task_profile' ? taskProfile : field === 'execution_shape' ? executionShape : field === 'assurance' ? assurance : field === 'last_heartbeat_at' ? last_heartbeat_at : metrics[field]
     const reason = pendingFor(field, probe, value)
     if (reason) pending[field] = reason
   }
@@ -310,6 +336,13 @@ export function shapeRun(session, phases = [], agentEvents = [], triageRow = nul
     status: session.status ?? null,
     running: session.status === 'running',
     tier,
+    configuration,
+    task_profile: taskProfile,
+    execution_shape: executionShape,
+    // `variant` is retained as the web client's compatibility name for the
+    // execution axis while the API also exposes the canonical field name.
+    variant: executionShape,
+    assurance,
     last_heartbeat_at,
     heartbeat_age_ms,
     started_at: session.started_at ?? null,

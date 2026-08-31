@@ -109,6 +109,13 @@ function fixture(path, { filler = 0 } = {}) {
   const live = 'test-live-0000-0000-000000000002'
   const pane = 'test-pane-0000-0000-000000000003'
   ledger.startSession({ adw_id: done, repo_slug: 'repo', task_slug: 'finished' })
+  ledger.recordRunConfiguration({
+    adw_id: done, schema_version: 1,
+    task_profile: 'implementation', task_profile_source: 'explicit',
+    requested_execution: null, effective_execution: 'full', execution_source: 'profile_recommendation',
+    requested_assurance: 'standard', effective_assurance: 'standard', assurance_source: 'explicit',
+    legacy_variant: null, legacy_tier: 'build',
+  })
   for (const [seq, name] of ['plan', 'build', 'review'].entries()) { ledger.startPhase({ adw_id: done, seq: seq + 1, name }); ledger.endPhase({ adw_id: done, seq: seq + 1, status: 'ok' }) }
   ledger.recordEvent({ adw_id: done, type: 'agent_start', phase_id: 1, payload: { role: 'planner', dispatch_id: 'd1' } })
   ledger.recordEvent({ adw_id: done, type: 'agent_end', phase_id: 1, payload: { role: 'planner', dispatch_id: 'd1', outcome: 'done' } })
@@ -347,6 +354,11 @@ test('visualizer server never writes to the ledger', { skip: SKIP }, async () =>
     const historical = runs.find((run) => run.adw_id === done), running = runs.find((run) => run.adw_id === live)
     assert.ok(historical && running)
     assert.equal(historical.phases.length, 3)
+    assert.equal(historical.configuration.task_profile.effective, 'implementation')
+    assert.equal(historical.configuration.execution.effective, 'full')
+    assert.equal(historical.configuration.assurance.effective, 'standard')
+    assert.equal(historical.configuration.legacy_tier, 'build')
+    assert.equal(running.configuration, null)
     assert.equal(historical.agents.find((agent) => agent.dispatch_id === 'd2').outcome, 'done')
     assert.equal(running.agents.find((agent) => agent.dispatch_id === 'l1').outcome, null)
     assert.deepEqual(Object.keys(historical).sort(), Object.keys(running).sort())

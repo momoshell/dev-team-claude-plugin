@@ -1,6 +1,6 @@
 <script>
   import { deriveDisplayStatus, durationCell, gateCell, reviewCell, runActivity, tokenCell } from './fleet.js'
-  import { assuranceMeta, assuranceOption, executionMeta, taskProfileMeta } from './workflow-semantics.js'
+  import { assuranceOption, executionMeta, runConfiguration, taskProfileMeta } from './workflow-semantics.js'
   import Pagination from './Pagination.svelte'
   import Dropdown from './Dropdown.svelte'
 
@@ -17,6 +17,7 @@
   function envelopeFor(id) { return envelopes instanceof Map ? envelopes.get(id) : envelopes?.[id] }
   function statusFor(run) { return deriveDisplayStatus(run, envelopeFor(run.adw_id), now) }
   function activityFor(run) { return runActivity(run, now) }
+  function configurationFor(run) { return runConfiguration(run) }
   function matchesState(run) {
     const status = statusFor(run)
     if (state === 'active') return activityFor(run).live
@@ -27,7 +28,8 @@
   function matchesQuery(run) {
     const needle = query.trim().toLowerCase()
     if (!needle) return true
-    return [run.goal, run.repo_slug, run.adw_id, run.tier, assuranceMeta(run.tier).label, run.task_profile, taskProfileMeta(run.task_profile).label, run.variant, executionMeta(run.variant).label, run.engineer].some((value) => String(value || '').toLowerCase().includes(needle))
+    const configuration = configurationFor(run)
+    return [run.goal, run.repo_slug, run.adw_id, run.tier, run.assurance, configuration.assurance.label, run.task_profile, configuration.profile.label, run.execution_shape, run.variant, configuration.execution.label, run.engineer].some((value) => String(value || '').toLowerCase().includes(needle))
   }
   function phaseName(phase) { return String(phase?.name || 'phase').replaceAll('_', ' ') }
   function formatDate(value) {
@@ -42,7 +44,7 @@
   }
   function cacheRate(value) { return value == null ? null : `${value.toFixed(1)}% cache hit` }
 
-  let tiers = $derived([...new Set(runs.map((run) => run.tier).filter(Boolean))].sort())
+  let tiers = $derived([...new Set(runs.map((run) => configurationFor(run).assurance.key).filter(Boolean))].sort())
   let assuranceOptions = $derived([{ value:'all', label:'All assurance' }, ...tiers.map(assuranceOption)])
   let profiles = $derived([...new Set(runs.map((run) => run.task_profile).filter(Boolean))].sort())
   let profileOptions = $derived([{ value:'all', label:'All profiles' }, ...profiles.map((value) => ({ value, label:taskProfileMeta(value).label }))])
@@ -54,7 +56,7 @@
     completed: runs.filter((run) => !run.running && !run.triage?.reviewed_at).length,
     attention: runs.filter((run) => ['escalated', 'fail', 'aborted', 'silent', 'unverified'].includes(statusFor(run).key) && !run.triage?.reviewed_at).length,
   })
-  let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (assurance === 'all' || run.tier === assurance) && (taskProfile === 'all' || run.task_profile === taskProfile) && (executionShape === 'all' || run.variant === executionShape) && matchesQuery(run)))
+  let filtered = $derived(runs.filter((run) => (showArchived || !run.triage?.reviewed_at) && (run.goal || showArchived) && matchesState(run) && (assurance === 'all' || configurationFor(run).assurance.key === assurance) && (taskProfile === 'all' || run.task_profile === taskProfile) && (executionShape === 'all' || (run.execution_shape ?? run.variant) === executionShape) && matchesQuery(run)))
   let paged = $derived(filtered.slice((page - 1) * pageSize, page * pageSize))
 
   $effect(() => { void `${query}|${state}|${assurance}|${taskProfile}|${executionShape}|${showArchived}`; page = 1 })
@@ -88,7 +90,7 @@
 
   <div class="table-wrap">
     <table>
-      <thead><tr><th>Task</th><th>Status</th><th>Execution</th><th>Proof</th><th>Elapsed</th><th>Usage</th><th><span class="sr-only">Open</span></th></tr></thead>
+      <thead><tr><th>Task</th><th>Status</th><th>Run setup</th><th>Progress</th><th>Proof</th><th>Elapsed</th><th>Usage</th><th><span class="sr-only">Open</span></th></tr></thead>
       <tbody>
         {#each paged as run (run.adw_id)}
           {@const status = statusFor(run)}
@@ -97,9 +99,11 @@
           {@const gate = gateCell(run)}
           {@const review = reviewCell(run)}
           {@const tokens = tokenCell(run)}
+          {@const configuration = configurationFor(run)}
           <tr class:running={activity.live} class:silent={activity.attention && run.running} onclick={() => onopen(run)}>
             <td class="task-cell"><button type="button" class="task-link" onclick={(event) => { event.stopPropagation(); onopen(run) }}><strong>{run.goal || 'Untitled run'}</strong><span>{run.repo_slug || 'repository unavailable'} · <code>{String(run.adw_id || '').slice(0, 8)}</code></span></button></td>
-            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span><small title={assuranceMeta(run.tier).key ? `Stored tier: ${assuranceMeta(run.tier).key}` : assuranceMeta(run.tier).summary}>{assuranceMeta(run.tier).label} assurance</small></td>
+            <td><span class={`status ${status.tone}`}><span class="status-dot" aria-hidden="true"></span>{status.word}</span></td>
+            <td class="run-setup"><div><strong class:missing={!configuration.assurance.key}>{configuration.assurance.label}</strong>{#if configuration.assurance.legacy_alias}<code title="Legacy roster preset">{configuration.assurance.legacy_alias}</code>{/if}</div><small title={`${configuration.profile.summary} ${configuration.execution.summary}`}>{configuration.profile.key || configuration.execution.key ? `${configuration.profile.label} · ${configuration.execution.label}` : 'Profile and execution not recorded'}</small></td>
             <td class="execution"><div class="phase-line" aria-label={`${run.phases?.length || 0} phases`}>{#each run.phases || [] as phase (phase.id ?? phase.seq)}<span class:active={phase.status === 'running'} class:failed={phase.status === 'fail'} style={`--phase-color:var(--lane-${phase.lane ?? 6})`} title={`${phaseName(phase)} · ${phase.status || 'unknown'}`}></span>{/each}</div><small>{run.variant ? `${executionMeta(run.variant).label} · ` : ''}{run.phases?.length ? `${run.phases.length} phase${run.phases.length === 1 ? '' : 's'} · ${phaseName(run.phases.at(-1))}` : 'Waiting for first phase'}</small></td>
             <td class="proof"><span class:muted={gate.dashed}>{gate.dashed ? 'No gate proof' : gate.text}</span><small class:muted={review.dashed}>{review.dashed ? 'No review yet' : review.text}</small></td>
             <td class="time"><strong>{duration.dashed ? (run.running ? status.word : '—') : duration.text}</strong><small>{formatDate(run.started_at)}</small></td>
@@ -107,7 +111,7 @@
             <td><button class="open" type="button" aria-label={`Open ${run.goal || 'task'}`} onclick={(event) => { event.stopPropagation(); onopen(run) }}>→</button></td>
           </tr>
         {:else}
-          <tr><td colspan="7" class="empty"><strong>No tasks match this view.</strong><span>Try another status, assurance preset, or search term.</span></td></tr>
+          <tr><td colspan="8" class="empty"><strong>No tasks match this view.</strong><span>Try another status, assurance preset, or search term.</span></td></tr>
         {/each}
       </tbody>
     </table>
@@ -129,7 +133,7 @@
 .search-mark::after { content:''; position:absolute; width:.38rem; height:1.5px; background:var(--muted); right:-.28rem; bottom:-.16rem; transform:rotate(45deg); }
 .select-label { display:flex; align-items:center; gap:.45rem; color:var(--muted); font-size:.78rem; }
 .archive { display:flex; align-items:center; gap:.4rem; color:var(--muted); font-size:.78rem; white-space:nowrap; }.archive input { min-height:auto; accent-color:var(--accent); }
-.table-wrap { overflow:auto; } table { width:100%; min-width:980px; border-collapse:collapse; }
+.table-wrap { overflow:auto; } table { width:100%; min-width:1120px; border-collapse:collapse; }
 th { padding:.65rem .85rem; color:var(--muted); font-size:.67rem; letter-spacing:.11em; text-transform:uppercase; text-align:left; font-weight:700; }
 td { padding:.8rem .85rem; border-top:1px solid color-mix(in srgb,var(--line) 78%,transparent); vertical-align:middle; }
 tbody tr { cursor:pointer; transition:background .15s ease; } tbody tr:hover { background:var(--accent-soft); } tbody tr.running { box-shadow:inset 2px 0 var(--status-running); }
@@ -138,6 +142,7 @@ tbody tr.silent { box-shadow:inset 2px 0 var(--status-escalated); }
 .task-link span, small { display:block; color:var(--muted); font-size:.71rem; margin-top:.25rem; white-space:nowrap; } code { font-family:var(--mono); color:var(--muted); }
 .status { display:inline-flex; align-items:center; gap:.4rem; font-size:.8rem; white-space:nowrap; }.status-dot { width:.45rem; height:.45rem; border-radius:50%; background:currentColor; box-shadow:0 0 0 3px color-mix(in srgb,currentColor 12%,transparent); }
 .status.ok { color:var(--status-ok); }.status.fail { color:var(--status-fail); }.status.aborted { color:var(--status-running); }.status.busy { color:var(--status-running); }.status.serious { color:var(--status-escalated); }.status.quiet { color:var(--muted); }
+.run-setup > div { display:flex; align-items:center; gap:.38rem; }.run-setup strong { font-size:.78rem; white-space:nowrap; }.run-setup strong.missing { color:var(--muted); }.run-setup code { border:1px solid color-mix(in srgb,var(--accent) 30%,var(--line)); border-radius:1rem; background:color-mix(in srgb,var(--accent) 7%,transparent); color:var(--accent); padding:.12rem .32rem; font-size:.55rem; }.run-setup small { max-width:13rem; overflow:hidden; text-overflow:ellipsis; }
 .phase-line { display:flex; align-items:center; gap:3px; width:9rem; }.phase-line span { height:5px; min-width:8px; flex:1; border-radius:1rem; background:color-mix(in srgb,var(--phase-color) 68%,var(--line)); }
 .phase-line span.active { height:7px; background:var(--phase-color); box-shadow:0 0 8px color-mix(in srgb,var(--phase-color) 60%,transparent); }.phase-line span.failed { background:var(--status-fail); }
 .proof > span { display:block; text-transform:capitalize; font-size:.8rem; }.proof .muted { color:var(--muted); }

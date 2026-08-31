@@ -673,6 +673,47 @@ function openRunInner({
     }
   }
 
+  // ADR-035: crew boot resolves three independent configuration axes and
+  // persists the decision in crew.json before any run emission. Read those
+  // effective values verbatim so the ledger can answer what this particular
+  // run used. Missing/legacy boot records stay null; phases and seats are not
+  // reverse-engineered into configuration.
+  function bootRunConfiguration(legacyTier) {
+    try {
+      const raw = readFileSync(join(stateDir, 'crew.json'), 'utf8')
+      const configuration = JSON.parse(raw)?.run_configuration
+      if (!configuration || typeof configuration !== 'object') return null
+      const value = (axis, field) => {
+        const candidate = configuration?.[axis]?.[field]
+        if (candidate == null) return null
+        if (typeof candidate !== 'string') return null
+        const text = candidate.trim()
+        return text && text.length <= TIER_MAX_CHARS ? text : null
+      }
+      const effective = (axis) => {
+        const candidate = configuration?.[axis]?.effective
+        if (typeof candidate !== 'string') return null
+        const text = candidate.trim()
+        return text && text.length <= TIER_MAX_CHARS ? text : null
+      }
+      return {
+        schema_version: 1,
+        task_profile: effective('profile'),
+        task_profile_source: value('profile', 'source'),
+        requested_execution: value('execution', 'requested'),
+        effective_execution: effective('execution'),
+        execution_source: value('execution', 'source'),
+        requested_assurance: value('assurance', 'requested'),
+        effective_assurance: effective('assurance'),
+        assurance_source: value('assurance', 'source'),
+        legacy_variant: configuration?.execution?.source === 'alias' ? value('execution', 'requested') : null,
+        legacy_tier: legacyTier,
+      }
+    } catch {
+      return null
+    }
+  }
+
   // #291 step 3, recording half: the COMPILER's shape and strength proposals
   // travel in the brief as a fenced ```proposal block
   // (scripts/factory/make-brief.mjs renderProposalBlock). This READS that block
@@ -1036,13 +1077,16 @@ function openRunInner({
       if (!ok) return
       if (result.alreadyStarted) return
       const proposal = bootProposal()
+      const tier = bootTier()
+      const configuration = bootRunConfiguration(tier)
       emit((handle) => {
         handle.startSession({
           adw_id: adwId, repo_slug: repoSlug, task_slug: taskSlug, started_at: isoMs(now()),
-          tier: bootTier(),
+          tier,
           proposed_shape: proposal.shape,
           proposed_strength: proposal.strength,
         })
+        if (configuration) handle.recordRunConfiguration({ adw_id: adwId, ...configuration })
       })
       phaseTransition('planning')
     } catch (err) {

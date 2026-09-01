@@ -44,6 +44,7 @@ const DIRECTED_BRIEF_INVALID = 'directed-brief-invalid'
 const SEAT_FLOOR_CONFLICT = 'seat-floor-conflict'
 const CROSS_BATCH_COLLISION = 'cross-batch-collision'
 const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
+const EXTERNAL_FENCE_STALE = 'external-fence-stale'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -74,10 +75,16 @@ export const REFUSAL_REASONS = Object.freeze([
   SEAT_FLOOR_CONFLICT,
   CROSS_BATCH_COLLISION,
   PLAN_ADOPT_UNREADABLE,
+  EXTERNAL_FENCE_STALE,
 ])
 
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
 export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fences declares no surface at all and can be editing anything; a lane whose batch siblings have been reaped records no claim; and a repository whose git dir cannot be measured is not compared. None of those are cleared — they are reported unknown.'
+
+// A fence carried in from another batch is not a sibling: the operator must see WHICH
+// live lane it came from and that it was never counted in the arrival total checkArrival derives (#845).
+export const EXTERNAL_FENCE_PREFIX = 'dispatch-batch: external-fence'
+export const EXTERNAL_REGISTER_NAME = 'dispatch.external.fences.json'
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
 // citations in .md files are not, and a heuristic over prose would refuse every doc that
@@ -871,15 +878,43 @@ export function liveLaneClaims({ checkout, batchNames, deps } = {}) {
   return { state, root, live, own, foreign, unknown, cleared }
 }
 
-export function crossBatchCollisions({ entries, live } = {}) {
+export function externalCrewDir({ lane, parentDir, deps } = {}) {
+  const d = normalDeps(deps)
+  const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : process.cwd()
+  return join(crewRoot({ home: d.home }), slug(basename(join(parent, `dt-${lane}`))), slug(lane))
+}
+
+export function externalFenceLiveness({ externals, parentDir, deps } = {}) {
+  const d = normalDeps(deps)
+  return (Array.isArray(externals) ? externals : []).map((lane) => {
+    const dir = externalCrewDir({ lane, parentDir, deps: d })
+    const crewPath = join(dir, 'crew.json')
+    if (!d.existsSync(crewPath)) return { lane, dir, live: false, reason: 'crew-dir-absent', stage: null }
+    let crew
+    try { crew = JSON.parse(d.readFileSync(crewPath, 'utf8')) } catch {
+      return { lane, dir, live: false, reason: 'crew-json-unreadable', stage: null }
+    }
+    if (crew?.lane_name !== lane) return { lane, dir, live: false, reason: 'crew-lane-mismatch', stage: null }
+    const settled = d.existsSync(join(dir, 'returns', 'task.json'))
+    const journal = readJournal(join(dir, 'journal.jsonl'), d)
+    const live = laneActive({ settled }, journal)
+    return { lane, dir, live, reason: live ? null : 'run-settled', stage: journal.lastStage ?? null }
+  })
+}
+
+export function crossBatchCollisions({ entries, live, externals } = {}) {
   const collisions = []
   const ownEntries = Array.isArray(entries) ? entries : []
   const liveLanes = Array.isArray(live) ? live : []
+  const externalNames = new Set(Array.isArray(externals) ? externals : [])
   for (const entry of ownEntries) {
     const ownFiles = (Array.isArray(entry?.files) ? entry.files : [])
       .filter((file) => typeof file === 'string').map(normaliseRepoPath)
     const matchOwn = scopeMatcher(ownFiles)
     for (const current of liveLanes) {
+      // An external entry DECLARES that this live lane holds these files, so the pair it
+      // names is the intent, never a collision. Every other pair still refuses.
+      if (externalNames.has(entry.lane) && entry.lane === current.lane) continue
       const liveFiles = (Array.isArray(current?.files) ? current.files : [])
         .filter((file) => typeof file === 'string').map(normaliseRepoPath)
       const matchLive = scopeMatcher(liveFiles)
@@ -892,11 +927,12 @@ export function crossBatchCollisions({ entries, live } = {}) {
   return collisions
 }
 
-export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
+export function checkFences({ fences, lanes, graph, checkout, externals, parentDir, deps } = {}) {
   const d = normalDeps(deps)
   const entries = fenceEntriesOf(fences).map(normaliseFence)
   const batchLanes = Array.isArray(lanes) ? lanes : []
   const byLane = new Map(entries.map((entry) => [entry.lane, entry]))
+  const externalNames = new Set((Array.isArray(externals) ? externals : []).filter((name) => typeof name === 'string' && name.trim() !== ''))
 
   // An absent graph is UNMEASURED edges, not "no edges": relatedLanes reads false for every
   // pair, so an exemption this register does carry is reported as a sibling-leak that does
@@ -908,6 +944,9 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
 
   // Check the register's membership before inspecting its shapes: a batch lane
   // can never fall through to an implicit, unfenced write surface.
+  const batchNames = new Set(batchLanes.map(laneNameOf))
+  const claimedBoth = [...batchNames].filter((name) => externalNames.has(name))
+  if (claimedBoth.length > 0) refuse(`fence register marks batch lane(s) external: ${claimedBoth.join(', ')}; an external entry names a lane from ANOTHER batch`, FENCE_REGISTER_MISMATCH)
   for (const lane of batchLanes) {
     const name = laneNameOf(lane)
     if (!byLane.has(name)) refuse(`lane is not in the fence register: ${name}`, LANE_UNFENCED)
@@ -1012,9 +1051,17 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   // fence-count-mismatch, after every seat has been paid for. Both halves are decidable from
   // these two inputs with nothing booted. This check runs LAST on purpose: no existing
   // refusal changes the cause it names.
-  const batchNames = new Set(batchLanes.map(laneNameOf))
-  const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name))
+  const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name) && !externalNames.has(name))
   if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}, and a lane's sibling count is derived from batch size, so this register can only refuse at boot as ${FENCE_COUNT_MISMATCH}`, FENCE_REGISTER_MISMATCH)
+  const externalRows = externalFenceLiveness({ externals: [...externalNames], parentDir, deps: d })
+  const dead = externalRows.filter((row) => row.live !== true)
+  if (dead.length > 0) refuse(`the fence register names external lane(s) that are not live: ${dead.map((row) => `${row.lane} (${row.reason}, crew dir ${row.dir})`).join('; ')}; an external fence denies a surface its lane must still hold`, EXTERNAL_FENCE_STALE)
+  for (const row of externalRows) {
+    d.log(`${EXTERNAL_FENCE_PREFIX} lane=${row.lane} crew_dir=${row.dir} stage=${row.stage ?? 'none'} files=${(byLane.get(row.lane)?.files || []).join(',')}`)
+  }
+  if (externalRows.length > 0) {
+    d.log(`${EXTERNAL_FENCE_PREFIX} carried=${externalRows.length} lanes=${externalRows.map((row) => row.lane).join(',')} — carried in from lanes outside this batch; they deny every batch lane's write surface and are NOT counted in the sibling total checkArrival derives`)
+  }
   // Every check above reads only the register and the batch in hand; this one reads LIVE
   // state OUTSIDE both. A cause an operator can fix from the register alone is named first
   // and is never masked by one that depends on what else happens to be running.
@@ -1025,7 +1072,7 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
   // lane's own persisted fence. An UNDETERMINED live set is neither — it warns, and it
   // never reads as "no collision" (#678, #687).
   const crossBatch = liveLaneClaims({ checkout: scanRoot, batchNames, deps: d })
-  const collisions = crossBatchCollisions({ entries, live: crossBatch.live })
+  const collisions = crossBatchCollisions({ entries, live: crossBatch.live, externals: [...externalNames] })
   if (collisions.length > 0) {
     const detail = collisions.map((row) => `lane ${row.lane} collides with live lane ${row.live} on ${row.files.join(', ')} (crew dir ${row.dir})`).join('; ')
     refuse(`the fence register grants file(s) that a live lane outside this batch already holds: ${detail}; "ONE register, ONE batch" holds only while one batch runs at a time — settle, archive or narrow the named lane, or narrow this register`, CROSS_BATCH_COLLISION)
@@ -1035,7 +1082,7 @@ export function checkFences({ fences, lanes, graph, checkout, deps } = {}) {
     warnings.push({ kind: 'cross-batch-unknown', lane: null, unknown: crossBatch.unknown, text })
     d.log(text)
   }
-  return { perLane, warnings, crossBatch }
+  return { perLane, warnings, crossBatch, externals: externalRows }
 }
 
 // A fence denies a SIBLING's declared surface; it never denied an UNCLAIMED path, so a
@@ -1172,6 +1219,51 @@ export function readsFromRefusal(stderr) {
     return { reason: COUPLED_SOURCE_UNFENCED, files: parse(unfencedPrefix, unfencedAt, ';', true) }
   }
   return { reason: STALE_READ_ACK, files: parse(stalePrefix, staleAt, ',', false) }
+}
+
+// `gatherFences` refuses unknown entry keys, including `external`, so strip the marker
+// before compile and boot (`scripts/factory/make-brief.mjs:935`). The entry stays inside
+// `lanes` because `laneFenceFor` hands every non-own register entry to each lane
+// (`scripts/factory/make-brief.mjs:1060`).
+export function readRegister({ fencesPath, checkout, outDir, deps } = {}) {
+  const d = normalDeps(deps)
+  const authored = resolve(fencesPath)
+  let raw
+  try { raw = JSON.parse(d.readFileSync(authored, 'utf8')) } catch (err) {
+    refuse(`cannot read or parse fences ${authored}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !Array.isArray(raw.lanes)) {
+    refuse(`fence register ${authored} must be an object carrying a lanes array`, BATCH_UNREADABLE)
+  }
+  const externals = []
+  const lanes = raw.lanes.map((entry, index) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      refuse(`fence register ${authored} lanes[${index}] must be an object`, BATCH_UNREADABLE)
+    }
+    if (!Object.hasOwn(entry, 'external')) return entry
+    if (entry.external !== true) {
+      refuse(`fence register ${authored} lanes[${index}] external must be true or absent, found ${JSON.stringify(entry.external)}`, BATCH_UNREADABLE)
+    }
+    if (typeof entry.lane !== 'string' || entry.lane.trim() === '') {
+      refuse(`fence register ${authored} lanes[${index}] marks an external entry with no lane name`, BATCH_UNREADABLE)
+    }
+    if (externals.includes(entry.lane)) refuse(`fence register ${authored} names external lane ${entry.lane} twice`, BATCH_UNREADABLE)
+    externals.push(entry.lane)
+    const copy = { ...entry }
+    delete copy.external
+    return copy
+  })
+  if (externals.length === 0) {
+    return { fences: gatherFences({ fencesPath: authored, checkout }), externals: [], registerPath: authored, sanitised: false }
+  }
+  const target = join(resolve(outDir), EXTERNAL_REGISTER_NAME)
+  try {
+    mkdirSync(resolve(outDir), { recursive: true })
+    writeFileSync(target, JSON.stringify({ ...raw, lanes }, null, 2) + '\n')
+  } catch (err) {
+    refuse(`cannot write the external-stripped fence register ${target}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
+  }
+  return { fences: gatherFences({ fencesPath: target, checkout }), externals: [...externals].sort(), registerPath: target, sanitised: true }
 }
 
 function registerData({ fences, registerPath, d }) {
@@ -1526,7 +1618,7 @@ function overrideNote(result) {
   return result.overrodeProposal ? ` overrode proposal ${result.proposed} with lane tier ${result.tier}` : ''
 }
 
-export function checkArrival({ crew, lane, batchTotal } = {}) {
+export function checkArrival({ crew, lane, batchTotal, externals } = {}) {
   const state = crew && typeof crew === 'object' ? crew : {}
   if (state.lane_name !== lane) {
     refuse(`crew lane_name is ${JSON.stringify(state.lane_name)}, expected ${lane}`, FENCE_NOT_ARRIVED)
@@ -1534,10 +1626,17 @@ export function checkArrival({ crew, lane, batchTotal } = {}) {
   if (!Array.isArray(state.lane_fence)) {
     refuse(`crew lane_fence is missing or not an array for ${lane}`, FENCE_NOT_ARRIVED)
   }
-  if (state.lane_fence.length !== batchTotal - 1) {
-    refuse(`crew lane_fence for ${lane} names ${state.lane_fence.length} siblings, expected ${batchTotal - 1}`, FENCE_COUNT_MISMATCH)
+  const externalNames = new Set((Array.isArray(externals) ? externals : []).filter((name) => typeof name === 'string' && name.trim() !== ''))
+  const fence = state.lane_fence
+  const members = fence.filter((entry) => !externalNames.has(entry?.lane))
+  if (members.length !== batchTotal - 1) {
+    refuse(`crew lane_fence for ${lane} names ${members.length} batch sibling(s) besides ${externalNames.size} external fence(s), expected ${batchTotal - 1}`, FENCE_COUNT_MISMATCH)
   }
-  return { lane, siblings: state.lane_fence }
+  const missing = [...externalNames].filter((name) => !fence.some((entry) => entry?.lane === name))
+  if (missing.length > 0) {
+    refuse(`crew lane_fence for ${lane} does not carry external fence(s): ${missing.join(', ')}`, FENCE_NOT_ARRIVED)
+  }
+  return { lane, siblings: members, externals: fence.filter((entry) => externalNames.has(entry?.lane)) }
 }
 
 export function crewJsonPath({ checkout, lane } = {}) {
@@ -1949,12 +2048,14 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   return args.join(' ')
 }
 
-export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, runFlags = {}, deps } = {}) {
+export async function dispatchBatch({ batchDir, fences, checkout, parentDir, outDir, tier, variant, externals, registerPath: registerOverride, runFlags = {}, deps } = {}) {
   const d = normalDeps(deps)
   const transport = resolveTransport({ runFlags })
   const lanes = readBatch({ batchDir, deps: d })
   const { waves, graph } = planWaves({ lanes })
-  const fenceReport = checkFences({ fences, lanes, graph, checkout, deps: d })
+  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
+  const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
+  const fenceReport = checkFences({ fences, lanes, graph, checkout, externals, parentDir: parent, deps: d })
   // Preflight BEFORE planWorktrees: planWorktrees probes git for existing
   // branches, so an unsupported --variant reached here after the probe and was
   // reported as `branch-taken` when the real cause was an invalid run option
@@ -1981,12 +2082,12 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   const keep = runFlags['no-keep'] !== true
   const dryRun = runFlags['dry-run'] === true || runFlags.dryRun === true
   const batchSeats = batchSeatsFrom(runFlags)
-  const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
-  const parent = typeof parentDir === 'string' && parentDir.trim() ? parentDir : dirname(resolve(root))
   const outputDir = typeof outDir === 'string' && outDir.trim() ? resolve(outDir) : join(resolve(batchDir), 'out')
-  const registerPath = typeof runFlags.fences === 'string' && runFlags.fences.trim()
-    ? resolve(runFlags.fences)
-    : join(outputDir, 'dispatch.fences.json')
+  const registerPath = typeof registerOverride === 'string' && registerOverride.trim()
+    ? resolve(registerOverride)
+    : typeof runFlags.fences === 'string' && runFlags.fences.trim()
+      ? resolve(runFlags.fences)
+      : join(outputDir, 'dispatch.fences.json')
   const unstarted = []
 
   const logWaveState = () => {
@@ -2204,7 +2305,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     if (transport === PANE_TRANSPORT && !workspaceId) {
       refuse(`crew boot under --${PANE_TRANSPORT} produced no workspace for ${item.lane}: crew.json workspace_id is ${JSON.stringify(crew.workspace_id ?? null)}`, BOOT_FAILED)
     }
-    const arrival = checkArrival({ crew, lane: item.lane, batchTotal: lanes.length })
+    const arrival = checkArrival({ crew, lane: item.lane, batchTotal: lanes.length, externals })
     arrivals.push({ ...item, crewPath: path, arrival, workspaceId })
   }
 
@@ -2315,17 +2416,20 @@ export async function main(argv, deps = {}) {
       refuse('--fences <register.json> is required', BATCH_UNREADABLE)
     }
     const checkout = resolve(typeof flags.checkout === 'string' ? flags.checkout : process.cwd())
-    let fences
-    try {
-      fences = gatherFences({ fencesPath: flags.fences, checkout })
-    } catch (err) {
-      refuse(`cannot read or validate fences ${flags.fences}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
-    }
     const parentDir = typeof flags.parent === 'string' ? resolve(flags.parent) : dirname(checkout)
     const outDir = typeof flags.out === 'string' ? resolve(flags.out) : join(resolve(flags.batch), 'out')
+    let register
+    try {
+      register = readRegister({ fencesPath: flags.fences, checkout, outDir, deps })
+    } catch (err) {
+      if (err instanceof BatchRefusal) throw err
+      refuse(`cannot read or validate fences ${flags.fences}: ${err?.message || String(err)}`, BATCH_UNREADABLE)
+    }
     await dispatchBatch({
       batchDir: resolve(flags.batch),
-      fences,
+      fences: register.fences,
+      externals: register.externals,
+      registerPath: register.sanitised ? register.registerPath : undefined,
       checkout,
       parentDir,
       outDir,

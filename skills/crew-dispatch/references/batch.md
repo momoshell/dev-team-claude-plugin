@@ -37,12 +37,18 @@ and **`#379`** had two of three; a body stale about its trigger is stale about
 its steps too. Verify every clause you are about to brief, not just the blocking
 one.
 
+## A fence carried in from another batch
+
+A register entry marked `"external": true` names a live lane from ANOTHER batch: it denies every batch lane's write surface, it is not counted in the sibling total `checkArrival` derives, and a stale entry refuses `external-fence-stale` by name.
+
+Fence isolation now spans concurrent batches. The dispatcher verifies that the named lane's crew dir persists that exact lane name and its run has not settled, and the deny set is never derived by scanning `~/.crew`. The refusal constant is `EXTERNAL_FENCE_STALE = 'external-fence-stale'` at `scripts/factory/dispatch-batch.mjs:47`.
+
 ## The executable form
 
 `scripts/factory/dispatch-batch.mjs` is this sequence as code: one entry point
 over a batch directory of request JSONs and a fence register, refusing the
 batch at the first failed check rather than proceeding
-(`scripts/factory/dispatch-batch.mjs:32`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
+(`scripts/factory/dispatch-batch.mjs:33`, `FENCE_NOT_ARRIVED = 'fence-not-arrived'`).
 Every refusal above has a name in its exported `REFUSAL_REASONS`; the prose here
 says WHY each check exists, which the script cannot.
 
@@ -87,9 +93,9 @@ so an unflagged batch is unchanged and behaves exactly as before. The two
 transport names and the refusal are pinned in the dispatcher:
 `BOOT_TRANSPORT = 'headless-all'`, `PANE_TRANSPORT = 'panes'`, and
 `TRANSPORT_CONFLICT = 'transport-conflict'`
-(`scripts/factory/dispatch-batch.mjs:112`,
-`scripts/factory/dispatch-batch.mjs:113`,
-`scripts/factory/dispatch-batch.mjs:20`).
+(`scripts/factory/dispatch-batch.mjs:122`,
+`scripts/factory/dispatch-batch.mjs:123`,
+`scripts/factory/dispatch-batch.mjs:21`).
 
 `--headless-all` explicitly selects the factory transport. `--panes` selects
 pane mode by the ABSENCE of `--headless-all`, because `crew.mjs boot` knows no
@@ -139,7 +145,7 @@ nothing from someone else's edge.
 A dependent lane compiles in a worktree cut AFTER its predecessor landed, so
 its ground truth, baseline, and tripwires are the moved tree's. Containment is
 probed; a base that does not carry the predecessor's commit refuses
-**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:37`) rather than
+**dependent-base-stale** (`scripts/factory/dispatch-batch.mjs:38`) rather than
 compiling against a stale tree.
 
 Each wave is one invocation (`--wave`), because `run` is backgrounded and this

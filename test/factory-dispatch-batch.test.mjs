@@ -20,6 +20,8 @@ import {
   REFUSAL_REASONS,
   DISPATCH_RECORD_SUFFIX,
   DRY_RUN_BLIND_SPOT,
+  EXTERNAL_FENCE_PREFIX,
+  EXTERNAL_REGISTER_NAME,
   DISPATCH_ONLY_REQUEST_KEYS,
   MISCLASSIFIED_PREFIX,
   REQUEST_SUFFIX,
@@ -32,8 +34,11 @@ import {
   TEST_REACH_WARNING_PREFIX,
   checkArrival,
   checkDirectedBrief,
+  externalCrewDir,
+  externalFenceLiveness,
   checkFences,
   checkPlanScope,
+  crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
   crewJsonPath,
@@ -64,8 +69,10 @@ import {
   seatsDefect,
   mergeSeats,
   tierFloor,
+  readRegister,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief } from '../crew/drive.mjs'
+import { laneFenceFor } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 
 const root = scratchDir('factory-dispatch-batch-')
@@ -260,6 +267,183 @@ function collisionFixture(name, ownFiles, liveFiles) {
   })
   return { checkout, home, ownFiles }
 }
+
+test('readRegister strips external markers into an out-dir register and keeps them in lane fences', () => {
+  const checkout = gitFixture()
+  const authored = put(join(checkout, 'external-register.json'), JSON.stringify({ lanes: [
+    entry('lane-a', ['src/owned.mjs']),
+    entry('lane-b', ['src/stale.mjs']),
+    { lane: 'other-batch', files: ['README.md'], external: true },
+  ] }, null, 2))
+  const outDir = join(checkout, 'external-register-out')
+  const result = readRegister({ fencesPath: authored, checkout, outDir, deps: { home: root } })
+  assert.deepEqual(result.externals, ['other-batch'])
+  assert.equal(result.sanitised, true)
+  assert.equal(result.registerPath, join(outDir, EXTERNAL_REGISTER_NAME))
+  const written = JSON.parse(readFileSync(result.registerPath, 'utf8'))
+  assert.equal(Object.hasOwn(written.lanes.at(-1), 'external'), false)
+  assert.deepEqual(laneFenceFor({ fences: result.fences, lane: 'lane-a' }), [
+    { lane: 'lane-b', files: ['src/stale.mjs'] },
+    { lane: 'other-batch', files: ['README.md'] },
+  ])
+  assert.deepEqual(laneFenceFor({ fences: result.fences, lane: 'lane-b' }), [
+    { lane: 'lane-a', files: ['src/owned.mjs'] },
+    { lane: 'other-batch', files: ['README.md'] },
+  ])
+})
+
+test('readRegister returns the authored path and writes nothing without external entries', () => {
+  const checkout = gitFixture()
+  const authored = put(join(checkout, 'plain-register.json'), JSON.stringify({ lanes: [entry('lane-a', ['src/owned.mjs'])] }))
+  const outDir = join(checkout, 'plain-register-out')
+  mkdirSync(outDir)
+  put(join(outDir, 'sentinel'), 'unchanged\n')
+  const before = fsReaddirSync(outDir).sort()
+  const result = readRegister({ fencesPath: authored, checkout, outDir, deps: { home: root } })
+  assert.equal(result.sanitised, false)
+  assert.equal(result.registerPath, authored)
+  assert.deepEqual(fsReaddirSync(outDir).sort(), before)
+  assert.deepEqual(result.externals, [])
+})
+
+test('readRegister refuses malformed external markers, missing names, and duplicates', () => {
+  const checkout = gitFixture()
+  const outDir = join(checkout, 'invalid-register-out')
+  const cases = [
+    { name: 'wrong marker', lanes: [{ lane: 'lane-a', files: ['src/owned.mjs'], external: 'yes' }] },
+    { name: 'missing name', lanes: [{ files: ['src/owned.mjs'], external: true }] },
+    { name: 'duplicate', lanes: [
+      { lane: 'other-batch', files: ['README.md'], external: true },
+      { lane: 'other-batch', files: ['src/stale.mjs'], external: true },
+    ] },
+  ]
+  for (const item of cases) {
+    const path = put(join(checkout, `${item.name.replaceAll(' ', '-')}.json`), JSON.stringify({ lanes: item.lanes }))
+    const error = thrown(() => readRegister({ fencesPath: path, checkout, outDir, deps: { home: root } }))
+    assert.equal(error.reason, 'batch-unreadable', item.name)
+    assert.equal(error.message.includes(item.name === 'wrong marker' ? 'external' : item.name === 'missing name' ? 'no lane name' : 'twice'), true, item.name)
+  }
+})
+
+test('externalFenceLiveness distinguishes live, settled, and absent crew directories', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'external-liveness')
+  const parentDir = join(root, 'external-liveness-parent')
+  crewFixture({ home, repoDir: 'dt-live-external', laneDir: 'live-external', lane: 'live-external', checkout })
+  const settled = crewFixture({ home, repoDir: 'dt-settled-external', laneDir: 'settled-external', lane: 'settled-external', checkout })
+  put(join(settled, 'returns', 'task.json'), JSON.stringify({ status: 'done' }))
+  const rows = externalFenceLiveness({
+    externals: ['live-external', 'settled-external', 'absent-external'],
+    parentDir,
+    deps: { home },
+  })
+  assert.deepEqual(rows.map(({ lane, live, reason, stage }) => ({ lane, live, reason, stage })), [
+    { lane: 'live-external', live: true, reason: null, stage: 'build:r1' },
+    { lane: 'settled-external', live: false, reason: 'run-settled', stage: 'build:r1' },
+    { lane: 'absent-external', live: false, reason: 'crew-dir-absent', stage: null },
+  ])
+  assert.equal(rows[0].dir, externalCrewDir({ lane: 'live-external', parentDir, deps: { home } }))
+})
+
+test('externalFenceLiveness rejects a slug-collision crew identity by the requested name', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'external-slug-collision')
+  const parentDir = join(root, 'external-slug-collision-parent')
+  crewFixture({ home, repoDir: 'dt-other-lane', laneDir: 'other-lane', lane: 'other-lane', checkout })
+  const [requested, actual] = externalFenceLiveness({
+    externals: ['other_lane', 'other-lane'],
+    parentDir,
+    deps: { home },
+  })
+  assert.deepEqual(
+    { lane: requested.lane, live: requested.live, reason: requested.reason, stage: requested.stage },
+    { lane: 'other_lane', live: false, reason: 'crew-lane-mismatch', stage: null },
+  )
+  assert.equal(actual.live, true)
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('other_lane', ['src/stale.mjs'])],
+    lanes: [{ lane: 'lane-a', where: [] }],
+    checkout,
+    externals: ['other_lane'],
+    parentDir,
+    deps: { home, log: () => {} },
+  }))
+  assert.equal(error.reason, 'external-fence-stale')
+  assert.equal(error.message.includes('other_lane'), true)
+  assert.equal(error.message.includes('crew-lane-mismatch'), true)
+})
+
+test('crossBatchCollisions skips only the named external self-pair', () => {
+  const files = ['README.md']
+  assert.deepEqual(crossBatchCollisions({
+    entries: [{ lane: 'external-lane', files }],
+    live: [{ lane: 'external-lane', dir: '/tmp/external', files }],
+    externals: ['external-lane'],
+  }), [])
+  const collisions = crossBatchCollisions({
+    entries: [{ lane: 'lane-a', files }],
+    live: [{ lane: 'external-lane', dir: '/tmp/external', files }],
+    externals: ['external-lane'],
+  })
+  assert.equal(collisions.length, 1)
+  assert.equal(collisions[0].lane, 'lane-a')
+})
+
+test('checkFences validates external liveness, logs carried rows, and preserves sibling leakage', () => {
+  const checkout = gitFixture()
+  const home = join(root, 'external-fence-checks')
+  const parentDir = join(root, 'external-fence-parent')
+  crewFixture({ home, repoDir: 'dt-external-live', laneDir: 'external-live', lane: 'external-live', checkout })
+  const logs = []
+  const report = checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/stale.mjs']), entry('external-live', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
+    checkout,
+    externals: ['external-live'],
+    parentDir,
+    deps: { home, log: (line) => logs.push(String(line)) },
+  })
+  assert.deepEqual(report.externals.map(({ lane, live }) => ({ lane, live })), [{ lane: 'external-live', live: true }])
+  assert.equal(logs.some((line) => line.startsWith(EXTERNAL_FENCE_PREFIX) && line.includes('lane=external-live') && line.includes('crew_dir=')), true)
+  assert.equal(logs.some((line) => line.startsWith(EXTERNAL_FENCE_PREFIX) && line.includes('carried=1') && line.includes('NOT counted in the sibling total')), true)
+
+  const stale = crewFixture({ home, repoDir: 'dt-external-stale', laneDir: 'external-stale', lane: 'external-stale', checkout })
+  put(join(stale, 'returns', 'task.json'), JSON.stringify({ status: 'done' }))
+  const staleError = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/stale.mjs']), entry('external-stale', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
+    checkout,
+    externals: ['external-stale'],
+    parentDir,
+    deps: { home, log: () => {} },
+  }))
+  assert.equal(staleError.reason, 'external-fence-stale')
+  assert.equal(staleError.message.includes('external-stale'), true)
+
+  const siblingError = thrown(() => checkFences({
+    fences: [entry('lane-a', ['README.md']), entry('lane-b', ['src/stale.mjs']), entry('external-live', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
+    checkout,
+    externals: ['external-live'],
+    parentDir,
+    deps: { home, log: () => {} },
+  }))
+  assert.equal(siblingError.reason, 'sibling-leak')
+})
+
+test('checkFences refuses an absent external lane by name', () => {
+  const checkout = gitFixture()
+  const error = thrown(() => checkFences({
+    fences: [entry('lane-a', ['src/owned.mjs']), entry('lane-b', ['src/stale.mjs']), entry('external-missing', ['README.md'])],
+    lanes: [{ lane: 'lane-a', where: [] }, { lane: 'lane-b', where: [] }],
+    checkout,
+    externals: ['external-missing'],
+    parentDir: join(root, 'external-absent-parent'),
+    deps: { home: join(root, 'external-absent-home'), log: () => {} },
+  }))
+  assert.equal(error.reason, 'external-fence-stale')
+  assert.equal(error.message.includes('external-missing'), true)
+})
 
 function reachReport(checkout, fenceFiles = ['lib/widget.mjs'], surface = fenceFiles, deps = {}) {
   const logs = []
@@ -1220,8 +1404,38 @@ test('crew state paths and arrival checks use the runtime slug and exact sibling
   refusal(() => checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [] }, lane: 'lane-a', batchTotal: 2 }), 'fence-count-mismatch')
   assert.deepEqual(
     checkArrival({ crew: { lane_name: 'lane-a', lane_fence: [{ lane: 'lane-b', files: [] }] }, lane: 'lane-a', batchTotal: 2 }),
-    { lane: 'lane-a', siblings: [{ lane: 'lane-b', files: [] }] },
+    { lane: 'lane-a', siblings: [{ lane: 'lane-b', files: [] }], externals: [] },
   )
+})
+
+test('checkArrival counts batch siblings separately and requires each external fence', () => {
+  const crew = {
+    lane_name: 'lane-a',
+    lane_fence: [
+      { lane: 'lane-b', files: [] },
+      { lane: 'external-lane', files: ['README.md'] },
+    ],
+  }
+  assert.deepEqual(checkArrival({ crew, lane: 'lane-a', batchTotal: 2, externals: ['external-lane'] }), {
+    lane: 'lane-a',
+    siblings: [{ lane: 'lane-b', files: [] }],
+    externals: [{ lane: 'external-lane', files: ['README.md'] }],
+  })
+  const missingSibling = thrown(() => checkArrival({
+    crew: { ...crew, lane_fence: [{ lane: 'external-lane', files: ['README.md'] }] },
+    lane: 'lane-a',
+    batchTotal: 2,
+    externals: ['external-lane'],
+  }))
+  assert.equal(missingSibling.reason, 'fence-count-mismatch')
+  const missingExternal = thrown(() => checkArrival({
+    crew: { ...crew, lane_fence: [{ lane: 'lane-b', files: [] }] },
+    lane: 'lane-a',
+    batchTotal: 2,
+    externals: ['external-lane'],
+  }))
+  assert.equal(missingExternal.reason, 'fence-not-arrived')
+  assert.equal(missingExternal.message.includes('external-lane'), true)
 })
 
 test('tier floor and reconciliation keep the protected path at judge', () => {
@@ -2009,6 +2223,74 @@ test('main loads the fence register, forwards dry-run, and returns a usage code'
   ], { home: root, env: { DEVTEAM_LEDGER_DIR: root }, existsSync: () => false, spawn: () => ({ status: 1 }), log: () => {} })
   assert.equal(code, 0)
   assert.equal(await main(['--unknown'], { log: () => {} }), 2)
+})
+
+test('main sanitises an external register before dispatch and boot', async () => {
+  const checkout = gitFixture()
+  const batch = join(checkout, 'main-external-batch')
+  const parentDir = join(root, 'main-external-parent')
+  const outDir = join(root, 'main-external-out')
+  const home = join(root, 'main-external-home')
+  const external = 'external-lane'
+  mkdirSync(batch)
+  put(join(batch, 'lane-a.request.json'), JSON.stringify(request('measure main external behavior', ['src/owned.mjs'])))
+  const authored = join(checkout, 'main-external-fences.json')
+  put(authored, JSON.stringify({ lanes: [
+    entry('lane-a', ['src/owned.mjs']),
+    { lane: external, files: ['src/stale.mjs'], external: true },
+  ] }))
+  crewFixture({ home, repoDir: 'dt-external-lane', laneDir: external, lane: external, checkout })
+  const spawned = []
+  const logs = []
+  const code = await main([
+    '--batch', batch,
+    '--fences', authored,
+    '--checkout', checkout,
+    '--parent', parentDir,
+    '--out', outDir,
+    '--tier', 'mechanical',
+    '--variant', 'full',
+  ], {
+    home,
+    env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
+    assertQuiet: () => {},
+    readFileSync: (path, encoding) => {
+      const text = String(path)
+      if (text.endsWith(join('dt-lane-a', 'lane-a', 'crew.json'))) {
+        return JSON.stringify({
+          lane_name: 'lane-a',
+          lane_fence: [{ lane: external, files: ['src/stale.mjs'] }],
+        })
+      }
+      return readFileSync(text, encoding || 'utf8')
+    },
+    spawn: (call) => {
+      spawned.push(call)
+      const args = (call.args || []).map(String)
+      if (args.includes('rev-parse')) return { status: 1, stdout: '', stderr: '' }
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    spawnAsync: async (call) => {
+      spawned.push(call)
+      const args = (call.args || []).map(String)
+      if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+      const outAt = args.indexOf('--out')
+      if (outAt >= 0) put(args[outAt + 1], briefWithBlockOnly)
+      return { status: 0, stdout: '', stderr: '' }
+    },
+    log: (line) => logs.push(String(line)),
+  })
+  assert.equal(code, 0)
+  const stripped = join(outDir, EXTERNAL_REGISTER_NAME)
+  const sanitised = JSON.parse(readFileSync(stripped, 'utf8'))
+  assert.equal(Object.hasOwn(sanitised.lanes.find((entry) => entry.lane === external), 'external'), false)
+  assert.equal(logs.some((line) => line.startsWith(EXTERNAL_FENCE_PREFIX) && line.includes(`lane=${external}`)), true)
+  const fencedCalls = spawned.filter((call) => call.args.includes('--fences'))
+  assert.ok(fencedCalls.length >= 3)
+  assert.equal(fencedCalls.every((call) => call.args[call.args.indexOf('--fences') + 1] === stripped), true)
+  const boots = spawned.filter((call) => call.args.includes('boot'))
+  assert.equal(boots.length, 1)
+  assert.equal(boots[0].args[boots[0].args.indexOf('--fences') + 1], stripped)
 })
 
 test('an unsupported run variant refuses before any run launch', async () => {

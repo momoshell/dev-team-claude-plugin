@@ -484,13 +484,26 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
     { where: 'seat-died', why: 'seat died: planner — its worker root 47302 (pgid 47302) is gone (probe-dead) and no envelope arrived at /Users/momoshell/.crew/dt-b357-slotdriver/b357-slotdriver/returns/d1.planner.json', cause: 'seat-lost', actor: 'driver' },
     // the pane seat-death shape (crew/seat-io.mjs:1847) must classify identically
     { where: 'seat-died', why: 'seat died: planner — its pane is gone (2 consecutive liveness probes) and no envelope arrived at /tmp/returns/d1.planner.json', cause: 'seat-lost', actor: 'driver' },
+    // b337-fallback — /Users/momoshell/.crew/dt-b337-fallback/b337-fallback/returns/d6.builder.json
+    { where: 'rpc-timeout', why: 'rpc timeout: seat builder did not produce an envelope at /Users/momoshell/.crew/dt-b337-fallback/b337-fallback/returns/d6.builder.json', cause: 'seat-timeout', actor: 'driver' },
+    // b358-planadopt — /Users/momoshell/.crew/dt-b358-planadopt/b358-planadopt/returns/d4.reviewer.json
+    { where: 'rpc-timeout', why: 'rpc timeout: seat reviewer did not produce an envelope at /Users/momoshell/.crew/dt-b358-planadopt/b358-planadopt/returns/d4.reviewer.json', cause: 'seat-timeout', actor: 'driver' },
+    // b342-prbody — the prose matches the budget rule, but its timeout `where` outranks it
+    { where: 'headless-timeout', why: 'headless timeout: seat planner produced no valid envelope at /Users/momoshell/.crew/dt-b342-prbody/b342-prbody/returns/d1.planner.json', cause: 'seat-timeout', actor: 'driver' },
+    // b360-planadopt — /Users/momoshell/.crew/dt-b360-planadopt/b360-planadopt/returns/d3.reviewer.json
+    { where: 'rpc-aborted', why: 'rpc aborted: seat reviewer did not produce an envelope at /Users/momoshell/.crew/dt-b360-planadopt/b360-planadopt/returns/d3.reviewer.json', cause: 'seat-aborted', actor: 'driver' },
+    // b354-slotdriver — /Users/momoshell/.crew/dt-b354-slotdriver/b354-slotdriver/returns/task.json
+    { where: 'plan', why: 'no accepted plan within 2 rounds', cause: 'plan-rounds-exhausted', actor: 'lead' },
   ]
   for (const { where, why, cause, actor } of cases) {
     const mapped = escalationCause({ where, why })
     assert.deepEqual(mapped, { cause, actor }, `${where}: ${why}`)
     assert.equal(Object.isFrozen(mapped), true)
   }
-  for (const input of [{}, { where: 42, why: 17 }, { where: null, why: false }, null, 'not-an-envelope']) {
+  for (const input of [
+    {}, { where: 42, why: 17 }, { where: null, why: false }, null, 'not-an-envelope',
+    { where: 'plan-check', why: 'The one remaining High is a crash path, not a blemish: an unbounded reviewer id is interpolated into a patch artifact filename and written through an unguarded `io.writeFile`, aborting the run before the auto-fix is either applied or journalled as refused. I therefore cannot type it `cosmetic` without laundering a correctness gap, and `correctness-unverified` is refused into escalation by rule — so no honest accept exists here. Closing it requires two new gate checks with new labels and two new mutation entries, and the plan\'s `details.mutations` is a contract no seat may amend after acceptance, which puts the fix above my station. The divergence evidence (combined 91718 vs 44567, ratio 2.06) says another unfunded planning round is unlikely to produce a smaller shape, and I declined the second-opinion valve because both offered seats\' relevant knowledge is already on the page: the tech-lead authored this verdict and the reviewer has no diff to read at plan stage.' },
+  ]) {
     assert.deepEqual(escalationCause(input), { cause: 'unclassified', actor: null })
   }
   assert.deepEqual(escalationCause({ where: 'driver', why: 'anchor-absent in an unapplied change' }), { cause: 'plan-build-disagreement', actor: 'driver' })
@@ -498,6 +511,55 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
   // Matched on `where` alone: prose is never what carries a seat death.
   assert.deepEqual(escalationCause({ where: 'seat-died', why: '' }), { cause: 'seat-lost', actor: 'driver' })
   assert.ok(ESCALATION_CAUSES.includes('seat-lost'))
+  for (const cause of ['seat-timeout', 'seat-aborted', 'plan-rounds-exhausted']) {
+    assert.ok(ESCALATION_CAUSES.includes(cause))
+  }
+  assert.deepEqual([...ESCALATION_CAUSES].slice(0, 8), [
+    'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
+    'gate-defect', 'review-unresolved', 'infrastructure', 'seat-lost',
+  ])
+})
+
+test('escalationCause matches a seat failure on its stage, not on its prose', () => {
+  assert.deepEqual(escalationCause({ where: 'rpc-timeout', why: '' }), { cause: 'seat-timeout', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-timeout', why: 'planner: no valid envelope at /x within 1800s' }), { cause: 'seat-timeout', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-timeout', why: 'exceeded its 1800s budget' }), { cause: 'seat-timeout', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'rpc-aborted', why: '' }), { cause: 'seat-aborted', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-aborted', why: '' }), { cause: 'seat-aborted', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'builder', why: 'rpc timeout: seat builder did not produce an envelope at /x' }), { cause: 'seat-timeout', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'planner', why: 'headless timeout: seat planner produced no valid envelope at /x' }), { cause: 'seat-timeout', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'builder', why: 'headless aborted: seat builder produced no valid envelope at /x' }), { cause: 'seat-aborted', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'reviewer', why: 'rpc aborted: seat reviewer produced no envelope at /x' }), { cause: 'seat-aborted', actor: 'driver' })
+  assert.deepEqual(escalationCause({ where: 'headless-budget-refused', why: 'headless budget-refused: seat planner produced no valid envelope at /x' }), { cause: 'budget', actor: 'driver' })
+})
+
+test('the plan round cap is bounded to its own sentence', () => {
+  assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 7 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })
+  assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within 12 rounds' }), { cause: 'plan-rounds-exhausted', actor: 'lead' })
+  assert.deepEqual(escalationCause({ where: 'plan', why: 'no accepted plan within rounds' }), { cause: 'unclassified', actor: null })
+  assert.deepEqual(escalationCause({ where: 'plan', why: 'planner envelope carries no files_in_scope — the scope gate cannot run without it' }), { cause: 'unclassified', actor: null })
+  assert.deepEqual(escalationCause({ where: 'plan', why: "allowlisted read-only recipe' test reddens the moment package.json gains factory:closeout. The compiled brief therefore demands (acceptance h + 'Full suite green') something its own fence forbids — a contradiction inside an artifact compiled outside this workspace. A bounce is wo" }), { cause: 'brief-contradiction', actor: 'operator' })
+})
+
+test('new escalation causes round-trip through sessions and escalations', { skip: SKIP }, () => {
+  const ledger = openTestLedger()
+  try {
+    const cases = [
+      { cause: 'seat-timeout', actor: 'driver', ended_at: '2024-01-02T00:00:00.000Z' },
+      { cause: 'seat-aborted', actor: 'driver', ended_at: '2024-01-02T00:00:01.000Z' },
+      { cause: 'plan-rounds-exhausted', actor: 'lead', ended_at: '2024-01-02T00:00:02.000Z' },
+    ]
+    for (const { cause, actor, ended_at } of cases) {
+      const adw_id = `new-cause-${cause}`
+      ledger.startSession({ adw_id, repo_slug: 'r', task_slug: adw_id, started_at: '2024-01-01T00:00:00.000Z' })
+      ledger.endSession({ adw_id, status: 'aborted', outcome: 'escalated', terminal_reason: cause, terminal_actor: actor, ended_at })
+      const row = ledger.getSession(adw_id)
+      assert.equal(row.terminal_reason, cause)
+      assert.equal(row.terminal_actor, actor)
+      const grouped = ledger.escalations({ since: '2024-01-01T00:00:00.000Z' })
+      assert.ok(grouped.some((entry) => entry.cause === cause && entry.actor === actor && entry.count === 1))
+    }
+  } finally { ledger.close() }
 })
 
 test('a budget-refused headless outcome composes the ledger budget escalation cause', () => {

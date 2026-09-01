@@ -13,7 +13,7 @@ import { spawn as cpSpawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 
 import { assignmentLine } from './driver.mjs'
-import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson } from './headless.mjs'
+import { shq, classifyRun, readEnvelopeOrThrow, updateCrewJson, attributeExit, decodeExitStatus, stderrTail } from './headless.mjs'
 import { reclaimStore, PHASES, VERDICTS, EVIDENCE_KINDS, LIVENESS } from './reclaim.mjs'
 import { readJsonTri } from './json-leaf.mjs'
 import { PI_BUILTIN_TOOLS, PI_SUBAGENT_TOOL, translateDeny } from './adapters/adapter-pi.mjs'
@@ -186,6 +186,15 @@ function parseExit(path, read, exists) {
   } catch { return null }
 }
 
+// ADR-026: instrumentation is never load-bearing. Every diagnostic this file
+// writes about a dead seat goes through here, so a throwing log, an unreadable
+// stderr.log or a hostile clock never becomes the turn's failure.
+// MUTATION D1: unwrap the swallow and a failing journal write IS the turn's
+// failure — the caller sees the instrumentation's error instead of rpc-aborted.
+function neverLoadBearing(fn) {
+  try { fn() } catch { /* ADR-026 */ }
+}
+
 function adapterFor(adapters, role) {
   const entry = adapters?.[role]
   return entry?.adapter || entry || null
@@ -260,6 +269,36 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     try {
       emit?.({ kind: 'usage', id: turn.id, role: turn.role, model: crew.members?.[turn.role]?.model ?? null, session_id: seat.sessionId ?? null, transcript_path: seat.stream, usage })
     } catch { /* ADR-026: instrumentation is never load-bearing */ }
+  }
+  // The corpse report. On b360-planadopt every one of these facts was
+  // reconstructible by hand from the seat directory and NONE of it was in the
+  // journal (#842). Only a turn that ended WITHOUT an envelope gets a row, so a
+  // clean turn's journal stays byte-identical to the one it had before this.
+  // MUTATION E1: journal on every outcome and a clean turn grows a row.
+  // MUTATION A4: hard-code the gap and the row stops saying how long the
+  // worker was silent before its exit marker appeared.
+  function journalExitContext({ seat, turn, outcome, exitCode, envelope, groupBefore }) {
+    neverLoadBearing(() => {
+      if (envelope) return
+      const obs = turn?.observed || {}
+      const exitSeenAt = now()
+      const { code, signo, signal } = decodeExitStatus(exitCode)
+      const err = stderrTail(seat?.stderr, { readFileSync: read, existsSync: exists })
+      log({ at: exitSeenAt, rpc_exit_context: {
+        role: turn?.role ?? null, id: turn?.id ?? null, outcome,
+        exit_code: code, exit_signo: signo, exit_signal: signal,
+        attribution: attributeExit({ exitCode: code, driverSignalled: seat?.signalled === true }),
+        driver_signalled: seat?.signalled === true,
+        group_before_signal: groupBefore ?? 'unknown',
+        turn_index: obs.turns ?? null, frames: obs.frames ?? null,
+        last_frame: obs.lastType ?? null, last_frame_at: obs.lastAt ?? null,
+        last_tool: obs.lastTool ?? null, last_tool_at: obs.lastToolAt ?? null,
+        exit_seen_at: exitSeenAt,
+        exit_gap_ms: Number.isFinite(obs.lastAt) ? exitSeenAt - obs.lastAt : null,
+        stderr_bytes: err.bytes, stderr_tail: err.tail,
+        stderr_truncated: err.truncated, stderr_reason: err.reason,
+      } })
+    })
   }
   const root = join(taskDir || paths.taskDir, 'headless-rpc')
   const store = reclaimStore({
@@ -359,7 +398,34 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
     }
     if (seat.turn) seat.turn.usage = addUsage(seat.turn.usage, foldRpcUsage(frames))
+    neverLoadBearing(() => observe(seat, frames))
     return frames
+  }
+  // Frame-level observation for the corpse report. pi's rpc frames carry NO
+  // timestamp of their own (verified against
+  // tasks/headless-worker/captures/pi-b7-abort.jsonl), so every `_at` here is
+  // the DRIVER'S observation time and must never be read as the worker's.
+  function observe(seat, frames) {
+    const obs = seat.turn?.observed
+    if (!obs) return
+    const at = now()
+    for (const frame of frames) {
+      if (!frame || typeof frame !== 'object') continue
+      obs.frames += 1
+      // MUTATION A1: keep the FIRST frame type instead of the last and the
+      // b360 corpse's real last frame is lost again.
+      obs.lastType = typeof frame.type === 'string' ? frame.type : null
+      obs.lastAt = at
+      // MUTATION A2: count agent_start rather than turn_start and the turn
+      // index collapses to 1 — "turn 13 of a 10-minute turn" stops being said.
+      if (frame.type === 'turn_start') obs.turns += 1
+      if (frame.type === 'tool_execution_end') {
+        // MUTATION A3: record the call id instead of the tool NAME and the row
+        // no longer says which tool last completed.
+        obs.lastTool = typeof frame.toolName === 'string' ? frame.toolName : null
+        obs.lastToolAt = at
+      }
+    }
   }
   function pollSeat(seat) { return fold(seat, readFrames(seat)) }
   function responseError(role, frame) {
@@ -401,7 +467,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     if (marker.verdict === VERDICTS.BUSY && marker.marker?.pid) {
       // Adopt a still-running seat rather than opening a second pi session.
       fd = open(fifo, 'r+')
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, handle: marker.handle }
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: marker.marker.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, handle: marker.handle }
       seats.set(role, seat)
       return seat
     }
@@ -440,7 +506,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       member.session_id = sessionId; member.started = true
       notePersist(log, now, role, persistCrew(paths, role, { session_id: sessionId, started: true }, crewDeps))
       saveSession(role, { sessionId, pid: child.pid, startedAt: now(), lastAssignmentId: assignmentId })
-      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, handle }
+      seat = { role, dir, stream, stderr, exit, pgid, fifo, cmdPath, fd, pid: child.pid, sessionId, readOffset: fileSize(stream), rest: Buffer.alloc(0), responses: new Map(), turn: null, settling: null, signalled: false, handle }
       seats.set(role, seat)
       return seat
     } catch (err) {
@@ -496,7 +562,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     const offset = fileSize(seat.stream)
     seat.readOffset = offset; seat.rest = Buffer.alloc(0); seat.responses.clear()
     const prompt = assignmentLine({ id, role, briefFile, returnPath, taskDir: taskDir || paths.taskDir }) + (note ? `\n${note}` : '')
-    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, sentAt: now() }
+    const turn = { id, runId, role, returnPath, prompt, retries: 0, offset, usage: null, state: { sawJson: false, settled: false, ended: false }, observed: { frames: 0, turns: 0, lastType: null, lastAt: null, lastTool: null, lastToolAt: null }, sentAt: now() }
     seat.turn = turn
     const promptId = send(seat, { type: 'prompt', message: prompt, id: runId }, 'prompt')
     turn.promptId = promptId
@@ -510,6 +576,17 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     seat.settling = seat.turn && !seat.turn.state.settled ? seat.turn : null
     seat.turn = null
     seat.responses.clear()
+  }
+  // Cheap corroboration (#842 ask 4): was the group already gone BEFORE the
+  // driver signalled? Signal 0 never delivers. EPERM answers `unknown`, never
+  // `alive`, and an unsignalable pgid answers `unknown` rather than guessing.
+  // MUTATION F1: read every failed probe as `unknown` and a group that was
+  // already dead becomes indistinguishable from one nobody could probe.
+  function probeGroup(seat) {
+    const pgid = Number(seat?.pid)
+    if (!Number.isSafeInteger(pgid) || pgid <= 1) return 'unknown'
+    try { kill(-pgid, 0); return 'alive' }
+    catch (err) { return err?.code === 'ESRCH' ? 'gone' : 'unknown' }
   }
   function proveGroupDead(target) {
     const clearIfDead = (liveness) => {
@@ -536,6 +613,7 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     // settles UNKNOWN. UNKNOWN is never clean.
     if (!signalable) return finish(LIVENESS.UNKNOWN, 'invalid-pgid')
 
+    target.signalled = true
     try { kill(-pgid, 'SIGTERM') } catch {}
     let lastTerm = now()
     const deadline = now() + EXIT_MARKER_WINDOW_MS
@@ -543,12 +621,14 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
       if (now() - lastTerm >= TERM_REPEAT_MS) {
         lastTerm = now()
+        target.signalled = true
         try { kill(-pgid, 'SIGTERM') } catch {}
       }
       sleep(Math.min(EXIT_MARKER_POLL_MS, Math.max(1, deadline - now())))
     }
     if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
 
+    target.signalled = true
     try { kill(-pgid, 'SIGKILL') }
     catch (err) { if (err?.code === 'ESRCH') return finish(LIVENESS.DEAD, 'signal-esrch') }
     if (exitProof()) return finish(LIVENESS.DEAD, 'exit-marker')
@@ -669,12 +749,14 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       if (env) {
         const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: env, timedOut: false })
         log({ at: now(), rpc_outcome: outcome, role: turn.role, id: turn.id, exit_code: exitCode })
+        journalExitContext({ seat, turn, outcome, exitCode, envelope: env, groupBefore: null })
         emitUsage(turn, seat, turn.usage)
         finishTurn(seat)
         return env
       }
       if (exitCode !== null) {
         const outcome = classifyRun({ exitCode, signal: null, terminal: turn.state.settled, sawJson: turn.state.sawJson, envelope: null, timedOut: false })
+        journalExitContext({ seat, turn, outcome, exitCode, envelope: null, groupBefore: probeGroup(seat) })
         emitUsage(turn, seat, turn.usage)
         finishTurn(seat)
         throw staged(`rpc-${outcome}`, `rpc ${outcome}: seat ${turn.role} produced no envelope at ${returnPath}`, turn.role)
@@ -691,11 +773,13 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
       }
       sleep(WAIT_POLL_MS)
     }
+    const groupBefore = probeGroup(seat)
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
     if (!turn.state.settled) proveGroupDead(seat)
     // SIGTERM/abort handling can append a complete frame after the last
     // abort poll; drain it before the turn is cleared and usage is emitted.
     pollSeat(seat)
+    journalExitContext({ seat, turn, outcome: 'timeout', exitCode: parseExit(seat.exit, read, exists), envelope: null, groupBefore })
     emitUsage(turn, seat, turn.usage)
     finishTurn(seat)
     throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath}`, turn.role)

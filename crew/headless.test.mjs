@@ -4,9 +4,9 @@ import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readFileSync, rmSync
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
-  classifyRun, degradedSignals, foldUsage, headlessIo, parseStream, PROVIDER_FAILURE_KINDS,
-  providerFailureKind, recogniseProviderCondition, recogniseSeatRefusal,
-  SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, updateCrewJson,
+  attributeExit, classifyRun, decodeExitStatus, degradedSignals, foldUsage, headlessIo, parseStream,
+  PROVIDER_FAILURE_KINDS, providerFailureKind, recogniseProviderCondition, recogniseSeatRefusal,
+  SEAT_REFUSALS, SEAT_REFUSAL_ACTIONS, UNCLASSIFIED_REFUSAL, shq, stderrTail, updateCrewJson,
 } from './headless.mjs'
 import { cellFailureKind } from './seat-io.mjs'
 import { scratchDir, startFileWriter } from '../test/helpers.mjs'
@@ -99,6 +99,42 @@ test('degradedSignals names the signal that fired', () => {
     [{ exitCode: null, signal: 'SIGKILL', terminal: false }, ['exit-signal']],
   ]
   for (const [input, expected] of cases) assert.deepEqual(degradedSignals(input), expected)
+})
+
+test('decodeExitStatus separates signal numbers from wrapper exit codes', () => {
+  assert.deepEqual(decodeExitStatus(143), { code: 143, signo: 15, signal: 'SIGTERM' })
+  assert.deepEqual(decodeExitStatus(137), { code: 137, signo: 9, signal: 'SIGKILL' })
+  assert.deepEqual(decodeExitStatus(0), { code: 0, signo: null, signal: null })
+  assert.deepEqual(decodeExitStatus(200), { code: 200, signo: null, signal: null })
+  assert.deepEqual(decodeExitStatus(null), { code: null, signo: null, signal: null })
+  assert.deepEqual(decodeExitStatus(128 + 22), { code: 150, signo: 22, signal: null })
+})
+
+test('attributeExit names every measured exit cause and keeps unknown unmeasured', () => {
+  assert.equal(attributeExit({ exitCode: 143, driverSignalled: true }), 'driver-retired')
+  assert.equal(attributeExit({ exitCode: 143, driverSignalled: false }), 'external-signal')
+  assert.equal(attributeExit({ exitCode: 0, driverSignalled: false }), 'self-exit')
+  assert.equal(attributeExit({ exitCode: null, driverSignalled: true }), 'unknown')
+})
+
+test('stderrTail reports absence, unreadability, whole size, and the final bytes', () => {
+  assert.deepEqual(stderrTail('/missing', { existsSync: () => false, readFileSync: () => '' }), {
+    bytes: null, tail: null, truncated: false, reason: 'absent',
+  })
+  assert.doesNotThrow(() => {
+    const result = stderrTail('/denied', {
+      existsSync: () => true,
+      readFileSync: () => { throw new Error('permission denied') },
+    })
+    assert.deepEqual(result, { bytes: null, tail: null, truncated: false, reason: 'unreadable' })
+  })
+  const marker = `${'padding'.repeat(20)}TAIL-MARKER`
+  const long = stderrTail('/long', {
+    existsSync: () => true, readFileSync: () => marker, limit: 'TAIL-MARKER'.length,
+  })
+  assert.deepEqual(long, { bytes: Buffer.byteLength(marker), tail: 'TAIL-MARKER', truncated: true, reason: null })
+  const short = stderrTail('/short', { existsSync: () => true, readFileSync: () => 'short', limit: 100 })
+  assert.deepEqual(short, { bytes: 5, tail: 'short', truncated: false, reason: null })
 })
 
 test('a signal-killed worker is distinguishable from an unwritten marker', () => {

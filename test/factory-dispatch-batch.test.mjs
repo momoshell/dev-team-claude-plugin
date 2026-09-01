@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { existsSync as fsExistsSync, mkdirSync, readFileSync, readdirSync as fsReaddirSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import {
   BAND_FLOOR_REASONS,
@@ -44,6 +45,7 @@ import {
   measureBatchBaseline,
   normalDeps,
   parseCliArgs,
+  resolveAdoptions,
   planWaves,
   planWorktrees,
   readsFromRefusal,
@@ -1461,6 +1463,7 @@ async function dispatchFixture({
   headFor = null,
   readObserver = () => {},
   home = root,
+  existsProbe = null,
 } = {}) {
   const batch = join(root, `dispatch-${label}-${Math.random().toString(36).slice(2)}`)
   const parent = join(root, `dispatch-${label}-parent`)
@@ -1474,8 +1477,10 @@ async function dispatchFixture({
   const deps = {
     home,
     env: { DEVTEAM_LEDGER_DIR: join(home, 'factory-state') },
-    existsSync: (path) => String(path).endsWith('returns/task.json')
-      && Object.hasOwn(outcomes, laneFromOutcomePath(String(path))),
+    existsSync: (path) => existsProbe
+      ? existsProbe(path)
+      : String(path).endsWith('returns/task.json')
+        && Object.hasOwn(outcomes, laneFromOutcomePath(String(path))),
     readdirSync: () => names.map((lane) => `${lane}${REQUEST_SUFFIX}`),
     readFileSync: (path, encoding) => {
       const text = String(path)
@@ -1538,6 +1543,55 @@ async function dispatchFixture({
     deps,
   })
   return { report, spawned, logs, batch, parent, out, fences: laneFences }
+}
+
+function adoptionArchive(label, { plan = '# Archived plan\n', gate = '// Archived gate\n', planCheck = null, omit = null } = {}) {
+  const archive = join(root, `adoption-archive-${label}-${Math.random().toString(36).slice(2)}`)
+  if (omit !== 'plan.md') put(join(archive, 'task', 'plan.md'), plan)
+  if (omit !== 'gate.mjs') put(join(archive, 'task', 'gate.mjs'), gate)
+  if (planCheck !== null) put(join(archive, 'task', 'plan-check.md'), planCheck)
+  return archive
+}
+
+async function adoptionDispatchFixture({
+  label,
+  names = ['lane-a'],
+  requests = {},
+  runFlags = {},
+  brief = briefWithBlockOnly,
+  briefs = {},
+  outcomes = {},
+  home = join(root, `adoption-home-${label}-${Math.random().toString(36).slice(2)}`),
+} = {}) {
+  const previousHome = process.env.HOME
+  process.env.HOME = home
+  try {
+    return await dispatchFixture({
+      label,
+      names,
+      requests,
+      runFlags,
+      brief,
+      briefs,
+      outcomes,
+      home,
+      existsProbe: (path) => fsExistsSync(path)
+        || (String(path).endsWith('returns/task.json') && Object.hasOwn(outcomes, laneFromOutcomePath(String(path)))),
+      spawnAsync: async (call) => {
+        const args = (call.args || []).map(String)
+        if (args.includes('--discover-reads')) return { status: 0, stdout: '[]', stderr: '' }
+        const outIndex = args.indexOf('--out')
+        if (outIndex >= 0) {
+          const lane = compilerLane(args)
+          put(args[outIndex + 1], briefs[lane] ?? brief)
+        }
+        return { status: 0, stdout: '', stderr: '' }
+      },
+    })
+  } finally {
+    if (previousHome === undefined) delete process.env.HOME
+    else process.env.HOME = previousHome
+  }
 }
 
 function basenameOf(path) {
@@ -2449,6 +2503,139 @@ test('a dispatched depends_on lane still compiles with exactly the schema keys',
   assert.deepEqual(Object.keys(JSON.parse(readFileSync(path, 'utf8'))).sort(), ['ask', 'done_means', 'out_of_scope', 'where'])
 })
 
+test('parseCliArgs accepts repeated --adopt and refuses a spec with no lane', () => {
+  assert.deepEqual(parseCliArgs([
+    '--adopt', 'lane-a=/tmp/archive-a', '--adopt', 'lane-b=/tmp/archive-b',
+  ]).adopt, ['lane-a=/tmp/archive-a', 'lane-b=/tmp/archive-b'])
+  for (const spec of ['=dir', 'lane=', 'lane']) {
+    refusal(() => resolveAdoptions({
+      lanes: [{ lane: 'lane' }],
+      runFlags: { adopt: [spec] },
+      deps: { existsSync: () => false },
+    }), 'plan-adopt-unreadable')
+  }
+})
+
+test('both adoption routes copy the same archived plan and gate into the lane task dir', async () => {
+  const cliArchive = adoptionArchive('route-cli', { plan: '# CLI archived plan\n', gate: '// CLI archived gate\n' })
+  const requestArchive = adoptionArchive('route-request', { plan: '# request archived plan\n', gate: '// request archived gate\n' })
+  const cli = await adoptionDispatchFixture({
+    label: 'route-cli',
+    runFlags: parseCliArgs(['--adopt', `lane-a=${cliArchive}`]),
+  })
+  const requestRoute = await adoptionDispatchFixture({
+    label: 'route-request',
+    requests: { 'lane-a': requestFor('lane-a', { adopt: requestArchive }) },
+  })
+  for (const [run, archive] of [[cli, cliArchive], [requestRoute, requestArchive]]) {
+    const record = run.report.lanes.find(({ lane }) => lane === 'lane-a')
+    assert.equal(readFileSync(join(record.crewDir, 'task', 'plan.md'), 'utf8'), readFileSync(join(archive, 'task', 'plan.md'), 'utf8'))
+    assert.equal(readFileSync(join(record.crewDir, 'task', 'gate.mjs'), 'utf8'), readFileSync(join(archive, 'task', 'gate.mjs'), 'utf8'))
+  }
+})
+
+test('an archive missing gate.mjs or plan.md refuses by name and copies nothing', async () => {
+  for (const [missing, archive] of [
+    ['gate.mjs', adoptionArchive('missing-gate', { omit: 'gate.mjs' })],
+    ['plan.md', adoptionArchive('missing-plan', { omit: 'plan.md' })],
+  ]) {
+    const home = join(root, `adoption-missing-${missing}-${Math.random().toString(36).slice(2)}`)
+    const error = await thrownAsync(() => adoptionDispatchFixture({
+      label: `missing-${missing}`,
+      home,
+      runFlags: parseCliArgs(['--adopt', `lane-a=${archive}`]),
+    }))
+    assert.equal(error.reason, 'plan-adopt-unreadable')
+    assert.match(error.message, new RegExp(missing.replace('.', '\\.') ))
+    assert.equal(fsExistsSync(join(home, '.crew')), false)
+  }
+})
+
+test('the standing adoption block is byte-identical across two adopting lanes', async () => {
+  const firstArchive = adoptionArchive('standing-first')
+  const secondArchive = adoptionArchive('standing-second', { plan: '# A different plan\n' })
+  const result = await adoptionDispatchFixture({
+    label: 'standing-block',
+    names: ['lane-a', 'lane-b'],
+    requests: {
+      'lane-a': requestFor('lane-a', { adopt: firstArchive }),
+      'lane-b': requestFor('lane-b', { adopt: secondArchive }),
+    },
+  })
+  const first = readFileSync(join(result.out, 'lane-a.brief.md'), 'utf8').slice(briefWithBlockOnly.length)
+  const second = readFileSync(join(result.out, 'lane-b.brief.md'), 'utf8').slice(briefWithBlockOnly.length)
+  assert.notEqual(first.trim(), '')
+  assert.equal(first, second)
+})
+
+test('a revising plan-check adds findings while an accepted one does not', async () => {
+  const reviseArchive = adoptionArchive('findings-revise', { planCheck: 'finding\n\nVERDICT: revise\n' })
+  const acceptArchive = adoptionArchive('findings-accept', { planCheck: 'finding\n\nVERDICT: accept\n' })
+  const revise = await adoptionDispatchFixture({
+    label: 'findings-revise',
+    requests: { 'lane-a': requestFor('lane-a', { adopt: reviseArchive }) },
+  })
+  const accept = await adoptionDispatchFixture({
+    label: 'findings-accept',
+    requests: { 'lane-a': requestFor('lane-a', { adopt: acceptArchive }) },
+  })
+  const withFindings = readFileSync(join(revise.out, 'lane-a.brief.md'), 'utf8')
+  const withoutFindings = readFileSync(join(accept.out, 'lane-a.brief.md'), 'utf8')
+  assert.match(withFindings, /plan-check\.md/)
+  assert.doesNotMatch(withoutFindings, /plan-check\.md/)
+})
+
+test('the plan-adopted journal row carries the archive and sha256 of plan.md', async () => {
+  const archive = adoptionArchive('journal', { plan: '# Journal plan\nwith bytes\n' })
+  const result = await adoptionDispatchFixture({
+    label: 'journal',
+    runFlags: parseCliArgs(['--adopt', `lane-a=${archive}`]),
+  })
+  const record = result.report.lanes.find(({ lane }) => lane === 'lane-a')
+  const rows = readFileSync(record.journal, 'utf8').trim().split('\n').map((line) => JSON.parse(line))
+    .filter(({ event }) => event === 'plan-adopted')
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].archive, archive)
+  assert.equal(rows[0].plan_sha, createHash('sha256')
+    .update(readFileSync(join(archive, 'task', 'plan.md'), 'utf8')).digest('hex'))
+})
+
+test('a batch that adopts nothing leaves the compiled brief and task dir untouched', async () => {
+  const result = await adoptionDispatchFixture({ label: 'no-adoption' })
+  assert.equal(readFileSync(join(result.out, 'lane-a.brief.md'), 'utf8'), briefWithBlockOnly)
+  const record = result.report.lanes.find(({ lane }) => lane === 'lane-a')
+  assert.equal(fsExistsSync(join(record.crewDir, 'task')), false)
+})
+
+test('a request adopt key is dispatch-only and never reaches the compiler request', async () => {
+  const archive = adoptionArchive('compiler-request')
+  const result = await adoptionDispatchFixture({
+    label: 'compiler-request',
+    requests: { 'lane-a': requestFor('lane-a', { adopt: archive }) },
+  })
+  const compile = result.spawned.find(({ args }) => args.includes('--out'))
+  const path = compile.args[compile.args.indexOf('--request') + 1]
+  assert.equal(Object.hasOwn(JSON.parse(readFileSync(path, 'utf8')), 'adopt'), false)
+})
+
+test('an adopting resume line re-emits every --adopt value', async () => {
+  const firstArchive = adoptionArchive('resume-first')
+  const secondArchive = adoptionArchive('resume-second')
+  const result = await adoptionDispatchFixture({
+    label: 'resume-adoption',
+    names: ['lane-a', 'lane-b'],
+    requests: { 'lane-b': requestFor('lane-b', { depends_on: ['lane-a'] }) },
+    runFlags: {
+      wave: '1',
+      ...parseCliArgs(['--adopt', `lane-a=${firstArchive}`, '--adopt', `lane-b=${secondArchive}`]),
+    },
+  })
+  const deferred = result.logs.find((line) => line.includes('deferred lane=lane-b'))
+  assert.ok(deferred)
+  assert.equal(deferred.includes(`--adopt lane-a=${firstArchive}`), true)
+  assert.equal(deferred.includes(`--adopt lane-b=${secondArchive}`), true)
+})
+
 test('creates reaches the compiler as an optional fifth key while tier remains dispatch-only', async () => {
   const result = await dispatchFixture({
     label: 'creates-request',
@@ -2897,6 +3084,7 @@ test('baseContains treats only a measured zero probe as containment', () => {
 test('a request seats compile without carrying seats into the compiler request', async () => {
   const seats = { planner: { agent: 'pi', model: 'openai-codex/gpt-5.6-sol', effort: 'high' } }
   assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes('seats'), true)
+  assert.equal(DISPATCH_ONLY_REQUEST_KEYS.includes('adopt'), true)
   const result = await dispatchFixture({
     label: 'seats-request',
     names: ['lane-a'],

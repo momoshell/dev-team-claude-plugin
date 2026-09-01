@@ -38,6 +38,7 @@ import {
   externalFenceLiveness,
   checkFences,
   checkPlanScope,
+  checkMachineryBudget,
   crossBatchCollisions,
   collectAnchorPins,
   collectTestReach,
@@ -72,7 +73,7 @@ import {
   readRegister,
 } from '../scripts/factory/dispatch-batch.mjs'
 import { parseDirectedBrief } from '../crew/drive.mjs'
-import { laneFenceFor } from '../scripts/factory/make-brief.mjs'
+import { laneFenceFor, renderBrief } from '../scripts/factory/make-brief.mjs'
 import { scratchDir } from './helpers.mjs'
 
 const root = scratchDir('factory-dispatch-batch-')
@@ -1367,6 +1368,30 @@ test('a strict subset and a created path inside the fence both pass', () => {
   }))
 })
 
+test('machinery budget reports over-creation as one ask-user finding', () => {
+  const over = checkMachineryBudget({
+    lane: 'lane-a',
+    creates: ['lib/one.mjs'],
+    newFiles: ['lib/one.mjs', 'lib/two.mjs', 'lib/three.mjs'],
+    newSymbols: ['alpha', 'beta'],
+  })
+  assert.equal(over.budget, 3)
+  assert.equal(over.counted, 5)
+  assert.equal(over.excess, 2)
+  assert.equal(over.findings.length, 1)
+  assert.equal(over.findings[0].disposition, 'ask-user')
+  assert.match(over.findings[0].summary, /2/)
+
+  const within = checkMachineryBudget({ lane: 'lane-a', creates: ['lib/one.mjs'], newFiles: ['lib/one.mjs'], newSymbols: ['alpha'] })
+  assert.equal(within.findings.length, 0)
+  const boundary = checkMachineryBudget({ lane: 'lane-a', creates: [], newFiles: ['lib/one.mjs', 'lib/two.mjs'], newSymbols: [] })
+  assert.equal(boundary.counted, boundary.budget)
+  assert.equal(boundary.findings.length, 0)
+  const symbolsOnly = checkMachineryBudget({ lane: 'lane-a', creates: [], newFiles: [], newSymbols: ['alpha', 'beta', 'gamma'] })
+  assert.equal(symbolsOnly.findings.length, 1)
+  assert.doesNotThrow(() => checkMachineryBudget({ lane: 'lane-a', creates: ['lib/one.mjs'], newFiles: ['lib/one.mjs', 'lib/two.mjs', 'lib/three.mjs'], newSymbols: ['alpha', 'beta'] }))
+})
+
 test('collectAnchorPins skips an unreadable or malformed manifest', () => {
   const checkout = join(root, 'anchor-malformed-checkout')
   anchorFixtures(checkout, {
@@ -1668,6 +1693,7 @@ async function dispatchFixture({
   brief = briefWithBlockOnly,
   briefs = {},
   workspaceFor = (lane) => `ws-${lane}`,
+  crewJsonFor = null,
   outcomes = {},
   ancestor = () => 0,
   spawnResult = () => ({ status: 0, stdout: '', stderr: '' }),
@@ -1687,6 +1713,8 @@ async function dispatchFixture({
   for (const lane of names) put(join(batch, `${lane}${REQUEST_SUFFIX}`), JSON.stringify(authored[lane]))
   const spawned = []
   const logs = []
+  const wrote = new Map()
+  const appended = []
   const laneFences = fences || names.map((lane) => entry(lane, [`crew/owned-${lane}.mjs`]))
   const deps = {
     home,
@@ -1711,7 +1739,9 @@ async function dispatchFixture({
       if (text.endsWith('returns/task.json')) return JSON.stringify(outcomes[laneFromOutcomePath(text)])
       if (text.endsWith('/package.json')) return JSON.stringify({ private: true, scripts: { test: 'npm test' } })
       if (text.endsWith('/crew.json')) {
+        if (wrote.has(text)) return wrote.get(text)
         const lane = text.split('/').at(-2)
+        if (crewJsonFor) return crewJsonFor(lane)
         return JSON.stringify({
           lane_name: lane,
           lane_fence: names.filter((candidate) => candidate !== lane).map((sibling) => ({ lane: sibling, files: [] })),
@@ -1720,6 +1750,8 @@ async function dispatchFixture({
       }
       return readFileSync(text, encoding || 'utf8')
     },
+    writeFileSync: (path, content) => { wrote.set(String(path), String(content)) },
+    appendFileSync: (path, content) => { appended.push({ path: String(path), content: String(content) }) },
     spawn: (call) => {
       spawned.push(call)
       const args = (call.args || []).map(String)
@@ -1756,7 +1788,7 @@ async function dispatchFixture({
     runFlags,
     deps,
   })
-  return { report, spawned, logs, batch, parent, out, fences: laneFences }
+  return { report, spawned, logs, batch, parent, out, fences: laneFences, wrote, appended }
 }
 
 function adoptionArchive(label, { plan = '# Archived plan\n', gate = '// Archived gate\n', planCheck = null, omit = null } = {}) {
@@ -2393,7 +2425,7 @@ test('a dispatch over a checkout with pinned files unrelated to the batch still 
 
 test('normalDeps supplies the house-style dependency surface', () => {
   const deps = normalDeps({})
-  assert.deepEqual(Object.keys(deps).sort(), ['assertQuiet', 'env', 'existsSync', 'home', 'log', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync'])
+  assert.deepEqual(Object.keys(deps).sort(), ['appendFileSync', 'assertQuiet', 'env', 'existsSync', 'home', 'log', 'now', 'readFileSync', 'readdirSync', 'sleep', 'slots', 'spawn', 'spawnAsync', 'writeFileSync'])
 })
 
 test('compileLane discovers reads once and compiles once', async () => {
@@ -2425,6 +2457,103 @@ test('compileLane discovers reads once and compiles once', async () => {
   const retry = calls[1].args[calls[1].args.indexOf('--fences') + 1]
   assert.notEqual(retry, register)
   assert.deepEqual(JSON.parse(readFileSync(retry, 'utf8')).lanes[0].reads, [{ file: 'crew/x.mjs', why }])
+})
+
+test('dispatch records compiler intent in crew.json and the journal', async () => {
+  const intent = 'The dispatched lane purpose.'
+  const brief = [
+    '## Intent',
+    intent,
+    '## Proposed tier',
+    'proposed tier: mechanical',
+    '```proposal',
+    '{"shape":"mechanical","strength":"workhorse"}',
+    '```',
+  ].join('\n')
+  const result = await dispatchFixture({ label: 'intent-surfaces', names: ['lane-a'], brief })
+  const crewWrites = [...result.wrote.entries()].filter(([path]) => path.endsWith('/crew.json'))
+  assert.equal(crewWrites.length, 1)
+  const crew = JSON.parse(crewWrites[0][1])
+  assert.equal(crew.intent, intent)
+  assert.equal(crew.lane_name, 'lane-a')
+  assert.deepEqual(crew.lane_fence, [])
+  assert.equal(crew.workspace_id, 'ws-lane-a')
+
+  const rows = result.appended
+    .filter(({ path }) => path.endsWith('journal.jsonl'))
+    .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].event, 'lane-intent')
+  assert.equal(rows[0].task, 'lane-a')
+  assert.equal(rows[0].lane, 'lane-a')
+  assert.equal(rows[0].intent, intent)
+})
+
+test('compiler-owned intent outranks an Intent heading quoted by the ask', async () => {
+  const canonical = 'Canonical authored intent.'
+  const spoofed = 'Spoofed journal value.'
+  const prefix = 'Carry the authored intent into dispatch surfaces.'
+  const ask = [prefix, '## The ask', prefix, '## Intent', spoofed].join('\n')
+  const request = requestFor('lane-a', { ask, intent: canonical })
+  const brief = renderBrief({
+    request,
+    where: [],
+    discovery: { candidates: [], tripwires: [], broadKeys: [] },
+  })
+  const result = await dispatchFixture({
+    label: 'intent-quoted-heading',
+    names: ['lane-a'],
+    requests: { 'lane-a': request },
+    brief,
+  })
+  const crew = JSON.parse([...result.wrote.entries()].find(([path]) => path.endsWith('/crew.json'))[1])
+  assert.equal(crew.intent, canonical)
+  assert.notEqual(crew.intent, spoofed)
+  const row = result.appended
+    .filter(({ path }) => path.endsWith('journal.jsonl'))
+    .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))[0]
+  assert.equal(row.intent, canonical)
+  assert.notEqual(row.intent, spoofed)
+
+  const olderBrief = brief.replace(`\n## Intent\n${canonical}\n`, '\n')
+  const older = await dispatchFixture({
+    label: 'intent-quoted-heading-older',
+    names: ['lane-a'],
+    requests: { 'lane-a': request },
+    brief: olderBrief,
+  })
+  assert.equal([...older.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
+  assert.equal(older.appended.some(({ path }) => path.endsWith('journal.jsonl')), false)
+})
+
+test('a brief without compiler intent leaves crew.json and journal untouched', async () => {
+  const result = await dispatchFixture({ label: 'intent-absent', names: ['lane-a'], brief: briefWithBlockOnly })
+  assert.equal([...result.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
+  assert.equal(result.appended.some(({ path }) => path.endsWith('journal.jsonl')), false)
+})
+
+test('an unreadable crew.json still gets an intent journal row', async () => {
+  const intent = 'The malformed crew fixture purpose.'
+  const brief = ['## Intent', intent, '## Proposed tier', 'proposed tier: mechanical'].join('\n')
+  let reads = 0
+  const result = await dispatchFixture({
+    label: 'intent-malformed-crew',
+    names: ['lane-a'],
+    brief,
+    crewJsonFor: () => {
+      reads += 1
+      return reads === 1
+        ? JSON.stringify({ lane_name: 'lane-a', lane_fence: [], workspace_id: 'ws-lane-a' })
+        : '{not-json'
+    },
+  })
+  assert.equal([...result.wrote.keys()].some((path) => path.endsWith('/crew.json')), false)
+  const rows = result.appended
+    .filter(({ path }) => path.endsWith('journal.jsonl'))
+    .flatMap(({ content }) => content.split('\n').filter((line) => line.trim()).map((line) => JSON.parse(line)))
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].event, 'lane-intent')
+  assert.equal(rows[0].intent, intent)
 })
 
 test('a compile that still refuses coupled sources after discovery refuses reads-unresolved', async () => {

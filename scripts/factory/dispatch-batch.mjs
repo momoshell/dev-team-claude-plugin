@@ -430,6 +430,8 @@ export function normalDeps(deps = {}) {
   return {
     existsSync: deps.existsSync || fsExistsSync,
     readFileSync: deps.readFileSync || fsReadFileSync,
+    writeFileSync: deps.writeFileSync || writeFileSync,
+    appendFileSync: deps.appendFileSync || appendFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
     home: deps.home || homedir(),
     spawn: deps.spawn || ((options) => options?.background
@@ -1102,6 +1104,33 @@ export function checkPlanScope({ lane, declared, files } = {}) {
   return { lane: name, declared: paths, fence: fenceFiles }
 }
 
+const MACHINERY_ALLOWANCE = 2
+
+// TRD §5 R2 / §10 decision 6. The scope gate adjudicates PATHS; this
+// adjudicates PURPOSE-adjacent growth, and it is a FINDING the lead
+// disposes of, never a refusal — an over-creating plan may still be the
+// right plan. Counts are supplied by the caller, exactly as checkPlanScope
+// takes its `declared` list.
+export function checkMachineryBudget({ lane, creates = [], newFiles = [], newSymbols = [], allowance = MACHINERY_ALLOWANCE } = {}) {
+  const name = laneNameOf(lane)
+  const created = (Array.isArray(creates) ? creates : []).map(normaliseRepoPath)
+  const files = (Array.isArray(newFiles) ? newFiles : []).map(normaliseRepoPath)
+  const symbols = (Array.isArray(newSymbols) ? newSymbols : []).map((symbol) => String(symbol))
+  const budget = created.length + allowance
+  const counted = files.length + symbols.length
+  const excess = counted - budget
+  const findings = excess > 0
+    ? [{
+        id: `MB-${name}`,
+        severity: 'should-fix',
+        location: files[0] || 'plan.md',
+        summary: `lane ${name} plans ${counted} new item(s) — ${files.length} file(s) [${files.join(', ') || 'none'}] and ${symbols.length} exported symbol(s) [${symbols.join(', ') || 'none'}] — against a budget of ${budget} (creates ${created.length} + allowance ${allowance}): ${excess} over. Added machinery is a decision, not a defect: keep it, narrow it, or drop it.`,
+        disposition: 'ask-user',
+      }]
+    : []
+  return { lane: name, budget, counted, excess, findings }
+}
+
 // #658: a directed lane's PLAN IS ITS BRIEF, and the compiled brief is an artefact the
 // dispatcher holds in hand before it boots anything. parseDirectedBrief is the authority the
 // driver itself uses (crew/drive.mjs:2332) and its own defect string is reported verbatim, so
@@ -1306,6 +1335,50 @@ function writeUpdatedRegister({ data, lane, reads, outDir, d }) {
 function proposalFromBrief(text) {
   const match = /^proposed tier:\s*(mechanical|build|judge)\b/im.exec(text)
   return match ? match[1].toLowerCase() : null
+}
+
+const INTENT_EVENT = 'lane-intent'
+
+// Reads back what the compiler already decided, exactly as proposalFromBrief
+// does. The compiler echoes the authored ask in the title and `## The ask`;
+// that framing identifies its own intent section instead of one an ask quotes.
+// A brief with no intent section records null — an older brief keeps producing
+// the bytes it always did.
+function intentFromBrief(text) {
+  if (typeof text !== 'string') return null
+  const titlePrefix = '# Task: '
+  const askHeading = '\n## The ask\n'
+  const intentHeading = '\n## Intent\n'
+  let framed = false
+  let longestEchoedAskLength = -1
+  let longestEchoedAskEnd = -1
+  if (text.startsWith(titlePrefix)) {
+    let heading = text.indexOf(askHeading, titlePrefix.length)
+    while (heading >= 0) {
+      const ask = text.slice(titlePrefix.length, heading)
+      const echoed = heading + askHeading.length
+      if (text.startsWith(ask, echoed) && ask.length > longestEchoedAskLength) {
+        framed = true
+        longestEchoedAskLength = ask.length
+        longestEchoedAskEnd = echoed + ask.length
+      }
+      heading = text.indexOf(askHeading, heading + 1)
+    }
+    if (framed) {
+      if (!text.startsWith(intentHeading, longestEchoedAskEnd)) return null
+      const bodyStart = longestEchoedAskEnd + intentHeading.length
+      const end = text.indexOf('\n## ', bodyStart)
+      const body = text.slice(bodyStart, end < 0 ? text.length : end)
+      const value = body.split('\n').find((line) => line.trim() !== '')
+      return value ? value.trim() : null
+    }
+  }
+  const lines = text.split('\n')
+  const start = lines.findIndex((line) => line.trim() === '## Intent')
+  if (start < 0) return null
+  const body = lines.slice(start + 1).find((line) => line.trim() !== '')
+  if (body === undefined || body.startsWith('## ')) return null
+  return body.trim() || null
 }
 
 // Reads what the compiler already decided. The misclassification is a bare line in
@@ -1586,7 +1659,7 @@ export async function compileLane({ lane, batchDir, requestPath, laneDir, regist
   try { brief = textOf(d.readFileSync(briefPath, 'utf8')) } catch (err) {
     refuse(`compiler produced no readable brief for ${name}: ${err?.message || String(err)}`, COMPILE_REFUSED)
   }
-  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief) }
+  return { lane: name, brief: briefPath, registerPath: currentRegister, proposed: proposalFromBrief(brief), staffing: staffingFromBrief(brief), intent: intentFromBrief(brief) }
 }
 
 export function tierFloor({ files, extra } = {}) {
@@ -1935,6 +2008,22 @@ export function applyAdoption({ adoption, crewDir, briefPath, deps } = {}) {
   // dispatch line already names it, so a journal that cannot be appended never fails a lane.
   try { appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
   return { plan_sha: planSha, files: [...texts.keys()], taskDir }
+}
+
+// The lane's purpose reaches the two surfaces a running lane is read through.
+// Both writes are instrumentation: a lane never fails for want of a record.
+function recordIntent({ intent, crewPath, crewDir, lane, deps } = {}) {
+  const d = normalDeps(deps)
+  if (typeof intent !== 'string' || !intent.trim()) return null
+  let crew
+  try { crew = JSON.parse(textOf(d.readFileSync(crewPath, 'utf8'))) } catch { crew = null }
+  if (crew && typeof crew === 'object' && !Array.isArray(crew)) {
+    const merged = { ...crew, intent }
+    try { d.writeFileSync(crewPath, JSON.stringify(merged, null, 2) + '\n') } catch { /* the log line carries the same fact */ }
+  }
+  const row = { at: new Date().toISOString(), event: INTENT_EVENT, task: lane, lane, intent }
+  try { d.appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* instrumentation is never load-bearing */ }
+  return { intent }
 }
 
 function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
@@ -2317,6 +2406,8 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const runLog = join(crewDir, 'run.log')
     const adoption = adoptions.get(item.lane) ?? null
     const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
+    const recorded = recordIntent({ intent: item.intent, crewPath: item.crewPath, crewDir, lane: item.lane, deps: d })
+    if (recorded) d.log(`dispatch-batch: intent lane=${item.lane} intent=${JSON.stringify(recorded.intent)}`)
     if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from}`)
     let run
     try {

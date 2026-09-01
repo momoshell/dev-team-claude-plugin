@@ -52,7 +52,7 @@ const REQUEST_KEYS = Object.freeze(['ask', 'where', 'done_means', 'out_of_scope'
 // A lane may declare files it will CREATE. The key is OPTIONAL, so every
 // request authored before it existed stays valid, and it is a COMPILER key
 // rather than a dispatch-only one: the compiler is what exempts the path.
-export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates', 'directed'])
+export const OPTIONAL_REQUEST_KEYS = Object.freeze(['creates', 'directed', 'intent'])
 const CODE_EXTENSIONS = Object.freeze(['.js', '.mjs'])
 const ANSI_CSI = /\x1b\[[0-?]*[ -/]*[@-~]/g
 const ERROR_CODE = /^[a-z0-9]+(?:[-:][a-z0-9]+)+$/
@@ -436,6 +436,25 @@ export function validateAsk(ask, taskName) {
   return ask
 }
 
+function collapseSentence(value) {
+  return typeof value === 'string' ? value.replace(/\s+/g, ' ').trim() : ''
+}
+
+// One sentence: up to the first terminator followed by a space or the end.
+// A one-line ask with no terminator IS the sentence.
+function firstSentence(text) {
+  const match = /^.*?[.!?](?=\s|$)/.exec(text)
+  return match ? match[0] : text
+}
+
+// The lane's purpose in one sentence. An explicitly authored `intent` beats
+// the sentence derived from the ask; nothing else is consulted.
+export function resolveIntent(request = {}) {
+  const given = collapseSentence(request?.intent)
+  if (given) return given
+  return firstSentence(collapseSentence(request?.ask))
+}
+
 // DECISION (#657 item 5) — a `directed` plan on a request whose resolved variant
 // cannot consume it is ACCEPTED, never refused. This compiler is variant-blind by
 // construction: dispatch-batch.mjs splits `variant`, `tier` and `depends_on` off as
@@ -495,6 +514,10 @@ export function validateRequest(request, { taskName } = {}) {
       if (typeof path !== 'string') refuseUsage('every creates entry must be a string', WRONG_TYPE)
       if (!path.trim()) refuseUsage('every creates entry must be non-blank', MISSING_LINE)
     }
+  }
+  if (Object.prototype.hasOwnProperty.call(request, 'intent')) {
+    if (typeof request.intent !== 'string') refuseUsage('intent must be a string', WRONG_TYPE)
+    if (!request.intent.trim()) refuseUsage('intent must not be blank', MISSING_LINE)
   }
   for (const key of ['done_means', 'out_of_scope']) {
     if (typeof request[key] !== 'string') refuseUsage(`${key} must be a string`, WRONG_TYPE)
@@ -1789,6 +1812,8 @@ export function renderBrief(gathered) {
     `# Task: ${request.ask}`,
     '## The ask',
     request.ask,
+    '## Intent',
+    resolveIntent(request),
     ...directedSection(request.directed ?? null),
     '## Proposed tier',
     renderProposedTier(proposal),

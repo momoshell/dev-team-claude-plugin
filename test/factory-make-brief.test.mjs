@@ -17,7 +17,7 @@ import {
   REFUSAL_REASONS, SLOT_MARKER, TIER_NAMES, crossCheckCoupling, readsToAcknowledge,
   discoverTripwires, extractKeys, extractSymbols, gatherFences, gatherProtectedPaths, isTripwireFile, main,
   MUTATION_CONTRACT_BLOCK, PROPOSAL_BLOCK, PROPOSAL_KEYS, profileField, proposeTier,
-  readLadderBands, renderBrief, renderProposalBlock, resolveWriteSurface, validateAsk,
+  readLadderBands, renderBrief, renderProposalBlock, resolveIntent, resolveWriteSurface, validateAsk,
   validateRequest, validateScopeEntries, verifyCreates, verifyWhere,
 } from '../scripts/factory/make-brief.mjs'
 import { PROPOSAL_BLOCK as EMIT_PROPOSAL_BLOCK, PROPOSAL_KEYS as EMIT_PROPOSAL_KEYS } from '../scripts/factory/emit.mjs'
@@ -258,6 +258,22 @@ test('the four authored lines are carried verbatim and compilation is idempotent
   assert.equal(first, second)
 })
 
+test('intent resolves one collapsed sentence, accepts authored text, and validates its shape', () => {
+  assert.equal(resolveIntent({ ask: 'First sentence. Second sentence.' }), 'First sentence.')
+  assert.equal(resolveIntent({ intent: ' Authored   lane intent. ', ask: 'Derived sentence. Ignore this.' }), 'Authored lane intent.')
+  assert.equal(resolveIntent({ ask: 'A\nmultiline\trequest with no terminator' }), 'A multiline request with no terminator')
+
+  const base = { ask: ASK, where: ['lib/widget.mjs'], done_means: DONE, out_of_scope: OUT }
+  assert.deepEqual(validateRequest({ ...base, intent: 'specific intent' }, { taskName: 'intent-shape' }).intent, 'specific intent')
+  assert.throws(() => validateRequest({ ...base, intent: 42 }, { taskName: 'intent-shape' }), (error) => error.reason === 'wrong-type')
+  assert.throws(() => validateRequest({ ...base, intent: '   ' }, { taskName: 'intent-shape' }), (error) => error.reason === 'missing-line')
+
+  const brief = renderBrief({ request: { ...base, intent: 'specific intent' }, where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] } })
+  assert.equal((brief.match(/^## Intent$/gm) || []).length, 1)
+  assert.ok(brief.indexOf('## The ask') < brief.indexOf('## Intent'))
+  assert.ok(brief.indexOf('## Intent') < brief.indexOf('## Proposed tier'))
+})
+
 test('a missing where path refuses by name and a blank ask refuses', () => {
   const root = fixture('refusals')
   const missing = run(root, ['--request', request(root, { where: ['lib/nope.mjs'] }), '--checkout', root])
@@ -279,7 +295,7 @@ test('an optional creates declaration compiles, renders after verified paths, an
   ])
   const writeLine = section(brief, '## Conventions').split('\n').find((line) => line.startsWith('files_in_scope'))
   assert.equal(writeLine, 'files_in_scope (expected write surface; basis: authored where paths, no lane fence applied): config/thing.yml, lib/new-widget.mjs, lib/widget.mjs')
-  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates', 'directed'])
+  assert.deepEqual(OPTIONAL_REQUEST_KEYS, ['creates', 'directed', 'intent'])
 })
 
 test('creates verifies the opposite existence pair and reuses scope shape checks', () => {
@@ -1745,7 +1761,7 @@ test('shape and strength proposals ship inside the Proposed tier section', () =>
     proposal: proposeTier({ where: [], discovery: { candidates: [], tripwires: [], broadKeys: [] } }),
   })
   assert.deepEqual(brief.match(/^## .+$/gm), [
-    '## The ask', '## Proposed tier', '## Where', '## Done means', '## Tripwires',
+    '## The ask', '## Intent', '## Proposed tier', '## Where', '## Done means', '## Tripwires',
     '## Coupled sources', '## Baseline', '## Out of scope', '## Fences',
     '## What the crew decides', '## Acceptance', '## Acceptance gate',
     '## Per-check mutations', '## Validation lane', '## Conventions',

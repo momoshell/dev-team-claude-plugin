@@ -48,3 +48,18 @@ node crew/crew.mjs run --task <slug> --checkout <dir> --brief-file <path> --vari
 Do not move `--fences` into that run line. It is persisted by `boot` into
 `crew.json` as `lane_name` and `lane_fence`, the run's single source of fence
 truth.
+
+## Batch dispatch: plan adoption
+
+The flag form is `--adopt <lane>=<archive-dir>`. Repeat it once for each adopting
+lane. A lane request may carry an `adopt` key instead; when both name the same
+lane, `--adopt` wins.
+
+The archive is a crew directory: the dispatcher reads its `task/` subdirectory.
+Naming the `task` directory itself also works. `plan.md` and `gate.mjs` are
+required. If either is missing, dispatch refuses `plan-adopt-unreadable` having
+copied nothing. An optional `plan-check.md` carrying `VERDICT: revise` adds the
+findings clause to the adopting brief.
+
+The dispatcher writes a `plan-adopted` journal row with the archive path and a
+sha256 of the adopted plan.

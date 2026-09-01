@@ -3,10 +3,11 @@
 // It owns the ordered checks between a batch request directory and background
 // crew runs; every failed check is a named refusal and stops the batch.
 
-import { closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 import { parseDirectedBrief, scopeMatcher, validateScopeEntries as driveValidateScopeEntries, VARIANT_NAMES, VARIANTS } from '../../crew/drive.mjs'
 import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew/host-load.mjs'
@@ -42,6 +43,7 @@ const FENCE_REGISTER_MISMATCH = 'fence-register-mismatch'
 const DIRECTED_BRIEF_INVALID = 'directed-brief-invalid'
 const SEAT_FLOOR_CONFLICT = 'seat-floor-conflict'
 const CROSS_BATCH_COLLISION = 'cross-batch-collision'
+const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -71,6 +73,7 @@ export const REFUSAL_REASONS = Object.freeze([
   DIRECTED_BRIEF_INVALID,
   SEAT_FLOOR_CONFLICT,
   CROSS_BATCH_COLLISION,
+  PLAN_ADOPT_UNREADABLE,
 ])
 
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
@@ -100,7 +103,7 @@ export const REQUEST_SUFFIX = '.request.json'
 // Keys a lane's request carries for the DISPATCHER, not for the compiler. The
 // compiler's request schema is closed (REQUEST_KEYS, make-brief.mjs:51), so a
 // dispatch-only key is split off here and never reaches the compiled request.
-export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant', 'seats'])
+export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', 'variant', 'seats', 'adopt'])
 // The transports a dispatched batch can boot. Headless is the software-factory
 // mode and stays the DEFAULT, so an unflagged batch behaves exactly as it did
 // before this flag existed. #617 made the transport STATED; it is choosable
@@ -112,6 +115,32 @@ export const DISPATCH_ONLY_REQUEST_KEYS = Object.freeze(['tier', 'depends_on', '
 export const BOOT_TRANSPORT = 'headless-all'
 export const PANE_TRANSPORT = 'panes'
 export const COMPILE_REQUEST_SUFFIX = '.compile-request.json'
+
+// Plan adoption (#763). A re-dispatched lane whose predecessor already wrote a plan
+// reads it out of its own task dir instead of planning again, and the block that says
+// so is the SAME sentence every time — never a per-lane paragraph typed by hand.
+export const ADOPT_REQUIRED = Object.freeze(['plan.md', 'gate.mjs'])
+export const ADOPT_OPTIONAL = Object.freeze(['plan-check.md'])
+export const ADOPT_REVISE_MARKER = 'VERDICT: revise'
+export const ADOPT_EVENT = 'plan-adopted'
+export const ADOPT_BLOCK = [
+  '',
+  '## Adopted plan',
+  '',
+  'Your task dir ALREADY holds plan.md and gate.mjs, copied from a previous attempt at',
+  'this same task. Read both before you plan anything. If they hold, ADOPT them: leave',
+  'the files as they are, say so in your summary, and return the envelope that points at',
+  'them. If they do not hold, AMEND the smallest part that is wrong and say what you',
+  'changed and why. Do not re-plan from nothing — re-deriving a plan that already holds',
+  'is the cost this block exists to remove.',
+  '',
+].join('\n')
+export const ADOPT_FINDINGS_CLAUSE = [
+  'The previous attempt was BOUNCED: your task dir also holds plan-check.md carrying',
+  `${ADOPT_REVISE_MARKER}. Close every finding it names FIRST, and say per finding whether`,
+  'you closed it or why it does not apply.',
+  '',
+].join('\n')
 
 // The four per-role boot flags crew.mjs already accepts (ROLE_FLAG_PREFIXES,
 // crew/crew.mjs:2488) and the request-key spelling of each. Mirrored rather
@@ -512,6 +541,10 @@ function splitDispatchKeys(parsed, requestPath) {
       && (typeof dispatch.variant !== 'string' || dispatch.variant.trim() === '')) {
     refuse(`request ${requestPath} has an invalid variant; expected a non-empty string naming one of ${VARIANT_NAMES.join(', ')}`, BATCH_UNREADABLE)
   }
+  if (Object.prototype.hasOwnProperty.call(dispatch, 'adopt')
+      && (typeof dispatch.adopt !== 'string' || dispatch.adopt.trim() === '')) {
+    refuse(`request ${requestPath} has an invalid adopt; expected a non-empty string naming an archived crew or task directory`, BATCH_UNREADABLE)
+  }
   if (Object.prototype.hasOwnProperty.call(dispatch, 'seats')) {
     const defect = seatsDefect(dispatch.seats)
     if (defect) refuse(`request ${requestPath} has an invalid seats: ${defect}`, BATCH_UNREADABLE)
@@ -562,6 +595,7 @@ export function readBatch({ batchDir, deps } = {}) {
       tier: typeof dispatch.tier === 'string' ? dispatch.tier : null,
       variant: typeof dispatch.variant === 'string' ? dispatch.variant : null,
       seats: dispatch.seats && typeof dispatch.seats === 'object' ? dispatch.seats : null,
+      adopt: typeof dispatch.adopt === 'string' ? dispatch.adopt : null,
       depends_on: Array.isArray(dispatch.depends_on) ? [...new Set(dispatch.depends_on)] : [],
       where: request.where.map(normaliseRepoPath),
       creates: Array.isArray(request.creates) ? request.creates.map(normaliseRepoPath) : [],
@@ -1699,6 +1733,111 @@ export function seatFromSpec(batch, lane) {
   return entries.length > 0 ? entries.join(',') : 'none'
 }
 
+// `--adopt <lane>=<archive-dir>` and a request's `adopt` key name the SAME thing: the
+// crew dir a previous attempt left behind. The files live under its task subdirectory,
+// so an operator who names the task dir itself is taken at their word.
+export function adoptSourceDir(archive) {
+  return basename(archive) === 'task' ? archive : join(archive, 'task')
+}
+
+export function parseAdoptSpec(value) {
+  const text = typeof value === 'string' ? value.trim() : ''
+  const at = text.indexOf('=')
+  if (at <= 0 || at === text.length - 1) {
+    refuse(`--adopt must be <lane>=<archive-dir> and received ${JSON.stringify(value)}`, PLAN_ADOPT_UNREADABLE)
+  }
+  return { lane: text.slice(0, at).trim(), archive: resolve(text.slice(at + 1).trim()) }
+}
+
+// Verified BEFORE any worktree is created: a partial adoption is worse than none, so a
+// refusal here has copied nothing anywhere. A --adopt for a lane also carrying an
+// `adopt` request key wins, and the dispatch line says which route was taken.
+export function resolveAdoptions({ lanes, runFlags = {}, deps } = {}) {
+  const d = normalDeps(deps)
+  const batch = Array.isArray(lanes) ? lanes : []
+  const names = new Set(batch.map(laneNameOf))
+  const asked = new Map()
+  for (const lane of batch) {
+    const value = lane?.adopt
+    if (typeof value === 'string' && value.trim() !== '') {
+      asked.set(laneNameOf(lane), { archive: resolve(value.trim()), from: 'request' })
+    }
+  }
+  const flag = runFlags.adopt
+  const specs = Array.isArray(flag) ? flag : (flag === undefined || flag === null ? [] : [flag])
+  for (const spec of specs) {
+    const { lane, archive } = parseAdoptSpec(spec)
+    asked.set(lane, { archive, from: 'cli' })
+  }
+  const adoptions = new Map()
+  for (const [lane, { archive, from }] of [...asked].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    if (!names.has(lane)) refuse(`--adopt names a lane that is not in this batch: ${lane}`, PLAN_ADOPT_UNREADABLE)
+    const source = adoptSourceDir(archive)
+    const missing = ADOPT_REQUIRED.filter((name) => !d.existsSync(join(source, name)))
+    if (missing.length > 0) refuse(`lane ${lane} cannot adopt ${archive}: the archive holds no ${missing.join(' and no ')} under ${source}`, PLAN_ADOPT_UNREADABLE)
+    const checkPath = join(source, ADOPT_OPTIONAL[0])
+    const hasCheck = d.existsSync(checkPath)
+    let revise = false
+    if (hasCheck) {
+      let text = ''
+      try { text = textOf(d.readFileSync(checkPath, 'utf8')) } catch (err) {
+        refuse(`lane ${lane} cannot adopt ${archive}: ${checkPath} is unreadable: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
+      }
+      revise = text.includes(ADOPT_REVISE_MARKER)
+    }
+    adoptions.set(lane, { lane, archive, source, from, revise, planCheck: hasCheck ? checkPath : null })
+  }
+  return adoptions
+}
+
+// The standing block is a CONSTANT: the same sentence for every adopting lane, plus one
+// constant clause when the predecessor was bounced. Nothing lane-specific enters it.
+export function adoptionBlock(adoption) {
+  return ADOPT_BLOCK + (adoption.revise ? ADOPT_FINDINGS_CLAUSE : '')
+}
+
+// Copies, appends the block, records the row — once the lane has booted (so its crew dir
+// exists) and before its run starts (so the planner sees the files). Returns null for a
+// lane that adopts nothing, so a batch with no adoption produces the bytes it always did.
+export function applyAdoption({ adoption, crewDir, briefPath, deps } = {}) {
+  const d = normalDeps(deps)
+  if (!adoption) return null
+  const taskDir = join(crewDir, 'task')
+  const texts = new Map()
+  try {
+    mkdirSync(taskDir, { recursive: true })
+    for (const name of [...ADOPT_REQUIRED, ...ADOPT_OPTIONAL]) {
+      const from = join(adoption.source, name)
+      if (!d.existsSync(from)) continue
+      const text = textOf(d.readFileSync(from, 'utf8'))
+      texts.set(name, text)
+      writeFileSync(join(taskDir, name), text)
+    }
+  } catch (err) {
+    refuse(`lane ${adoption.lane} could not adopt ${adoption.archive} into ${taskDir}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
+  }
+  const planSha = createHash('sha256').update(texts.get('plan.md')).digest('hex')
+  try { appendFileSync(briefPath, adoptionBlock(adoption)) } catch (err) {
+    refuse(`lane ${adoption.lane} could not carry the adoption block into ${briefPath}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
+  }
+  const row = {
+    at: new Date().toISOString(),
+    event: ADOPT_EVENT,
+    task: adoption.lane,
+    lane: adoption.lane,
+    archive: adoption.archive,
+    source: adoption.source,
+    plan_sha: planSha,
+    files: [...texts.keys()],
+    findings: adoption.revise,
+    adopt_from: adoption.from,
+  }
+  // Instrumentation is never load-bearing: the copy has already happened and the
+  // dispatch line already names it, so a journal that cannot be appended never fails a lane.
+  try { appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
+  return { plan_sha: planSha, files: [...texts.keys()], taskDir }
+}
+
 function bootCommand({ lane, laneDir, tier, registerPath, transport, seats, runFlags = {} }) {
   return {
     file: 'node',
@@ -1793,6 +1932,7 @@ function resumeCommand({ batchDir, fences, checkout, parentDir, outDir, tier, va
   add('tier', runFlags.tier ?? tier)
   add('variant', runFlags.variant ?? variant)
   add('baseline', runFlags.baseline)
+  for (const spec of Array.isArray(runFlags.adopt) ? runFlags.adopt : (runFlags.adopt ? [runFlags.adopt] : [])) add('adopt', spec)
   for (const flag of [
     'plan-rounds', 'build-rounds', 'review-rounds', 'wait-builder', 'wait-planner',
     'wait-reviewer', 'wait-lead', 'wait-tech-lead', 'validation-lane', 'suite',
@@ -1821,6 +1961,9 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
   // (RV3-1). A refusal must name the cause it measured, not the first one it
   // tripped over. Ordering is the whole fix — both refusals still fire.
   preflightRunOptions({ variant, runFlags, lanes })
+  // Before any worktree exists: an archive that does not hold a plan refuses here,
+  // having copied nothing.
+  const adoptions = resolveAdoptions({ lanes, runFlags, deps: d })
 
   const waveRaw = runFlags.wave === undefined || runFlags.wave === null ? 1 : runFlags.wave
   const waveText = String(waveRaw).trim()
@@ -1894,6 +2037,10 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     d.log(JSON.stringify({ dispatch: 'dry-run', plans }))
     for (const lane of waveLanes) {
       d.log(`dispatch-batch: dry-run lane=${lane.lane} tier=${lane.tier ?? tier ?? 'none'} seats=${seatSpec(mergeSeats(batchSeats, lane.seats))} seats_from=${seatFromSpec(batchSeats, lane.seats)}`)
+    }
+    for (const lane of waveLanes) {
+      const adoption = adoptions.get(lane.lane)
+      if (adoption) d.log(`dispatch-batch: dry-run lane=${lane.lane} adopt=${adoption.archive} source=${adoption.source} findings=${adoption.revise} adopt_from=${adoption.from}`)
     }
     d.log(DRY_RUN_BLIND_SPOT)
     return { dryRun: true, plans, lanes: waveLanes, fences: fenceReport, waves, wave: waveNumber, deferred, unstarted }
@@ -2067,6 +2214,9 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
     const crewDir = dirname(item.crewPath)
     const journal = join(crewDir, 'journal.jsonl')
     const runLog = join(crewDir, 'run.log')
+    const adoption = adoptions.get(item.lane) ?? null
+    const applied = applyAdoption({ adoption, crewDir, briefPath: item.brief, deps: d })
+    if (applied) d.log(`dispatch-batch: plan-adopted lane=${item.lane} archive=${adoption.archive} source=${adoption.source} plan_sha=${applied.plan_sha} files=${applied.files.join(',')} findings=${adoption.revise} adopt_from=${adoption.from}`)
     let run
     try {
       run = d.spawn({
@@ -2127,6 +2277,7 @@ export function parseCliArgs(argv) {
     ...BOOT_MEMORY_FLAGS,
   ])
   const booleanFlags = new Set(['dry-run', 'force', 'no-keep', PANE_TRANSPORT, BOOT_TRANSPORT])
+  const repeatableFlags = new Set(['adopt'])
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
     if (typeof argument !== 'string' || !argument.startsWith('--')) {
@@ -2140,13 +2291,14 @@ export function parseCliArgs(argv) {
       continue
     }
     const seatFlag = Object.values(SEAT_FIELDS).some((prefix) => name.startsWith(prefix) && name.length > prefix.length)
-    if (!seatFlag && !valueFlags.has(name)) refuse(`unknown option: --${name}`, BATCH_UNREADABLE)
-    if (Object.prototype.hasOwnProperty.call(flags, name)) refuse(`duplicate --${name}`, BATCH_UNREADABLE)
+    if (!seatFlag && !valueFlags.has(name) && !repeatableFlags.has(name)) refuse(`unknown option: --${name}`, BATCH_UNREADABLE)
+    if (!repeatableFlags.has(name) && Object.prototype.hasOwnProperty.call(flags, name)) refuse(`duplicate --${name}`, BATCH_UNREADABLE)
     const value = argv[index + 1]
     if (value == null || (typeof value === 'string' && value.startsWith('--'))) {
       refuse(`--${name} requires a value`, BATCH_UNREADABLE)
     }
-    flags[name] = value
+    if (repeatableFlags.has(name)) flags[name] = [...(flags[name] || []), value]
+    else flags[name] = value
     index += 1
   }
   if (positional.length > 0) refuse(`unexpected argument: ${positional[0]}`, BATCH_UNREADABLE)

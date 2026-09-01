@@ -1,11 +1,11 @@
 # Architecture decision register
 
 Every ADR number this repo has ever minted, ratified or not. **Grep here before
-minting a new one** — the next free number is **038**.
+minting a new one** — the next free number is **039**.
 
 That instruction is the point of the file. ADR numbers are cited from shipped
 code as the authority for invariants (`scripts/factory/emit.mjs`,
-`crew/drive.mjs:141`, `crew/headless.mjs`), and those citations name *numbers,
+`crew/drive.mjs:711`, `crew/headless.mjs`), and those citations name *numbers,
 not paths* — so the register has to be findable and complete or the citation
 resolves to nothing. It previously lived in `.claude/dev-team/memory/`, the
 tree v0.2.0 declared retired, which is what #128 was filed to fix.
@@ -66,6 +66,7 @@ not free.
 | 035 | Run configuration is five independent axes; `--variant`/`--tier` retire after one release window | ratified 2026-08-30 | [full document](adr-035-run-configuration-axes.md) |
 | 036 | ACP is the headless seat transport; the envelope stays the record | **written 2026-08-31 by #792** | [full document](adr-036-acp-seat-transport.md) |
 | 037 | Local models: the LAN trust boundary, band admission by ratified evidence, and zero cost counted but never reported as savings | ratified 2026-08-30 | [full document](adr-037-local-models.md) |
+| 038 | The protected floor forces proof on the changed surface, not plan-time adversary rounds | ratified 2026-09-01 | [full document](adr-038-floor-forces-proof-not-rounds.md) |
 
 ### The 014–019 tangle, recorded so nobody re-derives it
 

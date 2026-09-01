@@ -480,6 +480,10 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
     { where: 'plan', why: "allowlisted read-only recipe' test reddens the moment package.json gains factory:closeout. The compiled brief therefore demands (acceptance h + 'Full suite green') something its own fence forbids — a contradiction inside an artifact compiled outside this workspace. A bounce is wo", cause: 'brief-contradiction', actor: 'operator' },
     { where: 'review', why: 'the lead could not settle finding 2 within its rounds', cause: 'review-unresolved', actor: 'lead' },
     { where: 'gate', why: 'the gate check C3 survived its declared mutation and the repair did not fix it', cause: 'gate-defect', actor: 'lead' },
+    // b357-slotdriver — the headless seat-death shape (crew/seat-io.mjs:2185), measured 2026-09-01
+    { where: 'seat-died', why: 'seat died: planner — its worker root 47302 (pgid 47302) is gone (probe-dead) and no envelope arrived at /Users/momoshell/.crew/dt-b357-slotdriver/b357-slotdriver/returns/d1.planner.json', cause: 'seat-lost', actor: 'driver' },
+    // the pane seat-death shape (crew/seat-io.mjs:1847) must classify identically
+    { where: 'seat-died', why: 'seat died: planner — its pane is gone (2 consecutive liveness probes) and no envelope arrived at /tmp/returns/d1.planner.json', cause: 'seat-lost', actor: 'driver' },
   ]
   for (const { where, why, cause, actor } of cases) {
     const mapped = escalationCause({ where, why })
@@ -491,6 +495,9 @@ test('escalationCause maps the archived envelopes and never guesses an unknown p
   }
   assert.deepEqual(escalationCause({ where: 'driver', why: 'anchor-absent in an unapplied change' }), { cause: 'plan-build-disagreement', actor: 'driver' })
   assert.deepEqual(escalationCause({ where: 'scope', why: 'exceeded its 1800s budget' }), { cause: 'plan-build-disagreement', actor: 'driver' })
+  // Matched on `where` alone: prose is never what carries a seat death.
+  assert.deepEqual(escalationCause({ where: 'seat-died', why: '' }), { cause: 'seat-lost', actor: 'driver' })
+  assert.ok(ESCALATION_CAUSES.includes('seat-lost'))
 })
 
 test('a budget-refused headless outcome composes the ledger budget escalation cause', () => {

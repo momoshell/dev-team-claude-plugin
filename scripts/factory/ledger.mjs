@@ -144,7 +144,7 @@ export const SEAT_VALUE_SOURCES = Object.freeze(['roster', 'profile_recommendati
 export const TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator', 'finalizer'])
 export const ESCALATION_CAUSES = Object.freeze([
   'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
-  'gate-defect', 'review-unresolved', 'infrastructure',
+  'gate-defect', 'review-unresolved', 'infrastructure', 'seat-lost',
 ])
 export const ESCALATION_CAUSE_UNCLASSIFIED = 'unclassified'
 
@@ -164,23 +164,36 @@ export function escalationCause(input = {}) {
   if (where === 'scope' || /\banchor-(absent|ambiguous|unsafe)\b/.test(why) || /\bunapplied\b/.test(why)) {
     return Object.freeze({ cause: 'plan-build-disagreement', actor: 'driver' })
   }
-  // Rule 3: no envelope or an exceeded budget is a driver budget outcome.
+  // Rule 3: a seat-death location is a NAMED, measured loss — the worker died
+  // and no envelope arrived. Deliberately not 'budget': the journal records
+  // nothing that separates a wait-ceiling kill from an OOM or an external
+  // signal, and inferring one from prose would be a guess. Matched on `where`
+  // alone so both seat-death message shapes classify identically — pane
+  // (crew/seat-io.mjs:1847) and headless (crew/seat-io.mjs:2185) share only the
+  // words 'no envelope arrived', which rule 4's 'no valid envelope' never sees.
+  // FOLLOW-UP: the emitting side — a distinct seat-wait-expired signal from the
+  // driver, which would let a ceiling kill be told apart from a death — lands
+  // once b359-slotdriver frees the crew surface.
+  if (where === 'seat-died') {
+    return Object.freeze({ cause: 'seat-lost', actor: 'driver' })
+  }
+  // Rule 4: no envelope or an exceeded budget is a driver budget outcome.
   if (/\bno valid envelope\b/.test(why) || /\bexceeded its \d+s budget\b/.test(why)) {
     return Object.freeze({ cause: 'budget', actor: 'driver' })
   }
-  // Rule 4: contradiction in the escalation prose is an operator-owned brief issue.
+  // Rule 5: contradiction in the escalation prose is an operator-owned brief issue.
   if (/\bcontradict/i.test(why)) {
     return Object.freeze({ cause: 'brief-contradiction', actor: 'operator' })
   }
-  // Rule 5: a gate location identifies a lead-owned gate defect.
+  // Rule 6: a gate location identifies a lead-owned gate defect.
   if (where === 'gate') {
     return Object.freeze({ cause: 'gate-defect', actor: 'lead' })
   }
-  // Rule 6: review and refuted-must-fix locations identify an unresolved review.
+  // Rule 7: review and refuted-must-fix locations identify an unresolved review.
   if (where === 'review' || where === 'refuted-must-fix') {
     return Object.freeze({ cause: 'review-unresolved', actor: 'lead' })
   }
-  // Rule 7: these locations are infrastructure failures owned by the driver.
+  // Rule 8: these locations are infrastructure failures owned by the driver.
   if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
     return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   }

@@ -60,7 +60,7 @@ The ledger declares **23 tables** plus SQLite's own `sqlite_sequence`. `run_conf
 
 `sessions.outcome` records the typed terminal result (`success`, `escalated`, `aborted`, or `failed`); `sessions.terminal_reason` records the measured cause or signal name; and `sessions.terminal_actor` records the actor that ended the run. NULL in any of these columns means the fact was not measured, never a measured zero, and no historical row is backfilled by inference. `sessions.status` keeps its old meaning and enum (`running`, `ok`, `fail`, or `aborted`), so an escalation remains legacy `aborted` while its typed outcome is `escalated`. The `task` readout carries `absent.outcome` for a row without a typed outcome.
 
-The closed escalation-cause vocabulary is `transport`, `budget`, `plan-build-disagreement`, `brief-contradiction`, `gate-defect`, `review-unresolved`, `infrastructure`, with `unclassified` for a `{where, why}` pair no rule classifies.
+The closed escalation-cause vocabulary is `transport`, `budget`, `plan-build-disagreement`, `brief-contradiction`, `gate-defect`, `review-unresolved`, `infrastructure`, `seat-lost`, with `unclassified` for a `{where, why}` pair no rule classifies.
 
 ## Retired tables
 

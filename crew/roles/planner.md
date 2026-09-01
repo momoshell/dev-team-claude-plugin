@@ -63,6 +63,8 @@ against it with git and bounces anything outside. A missing or empty list
 escalates the whole task — the gate cannot be skipped. Paths repo-relative,
 exactly as `git status --porcelain` prints them.
 
+The dispatched surface is a CEILING: a plan may return the dispatched paths or a subset, but never a path outside them. If discovery shows the fence is genuinely insufficient, return `status: "insufficient"` with a numbered `details.questions` entry rather than a wider `files_in_scope`.
+
 Discover that list; do not guess it. A contract is not just the file that
 defines it — it is every test that pins it. For each file you put in scope —
 code or not; a config file, a CI workflow, a fixture, or documentation a test
@@ -172,7 +174,7 @@ comes from the reviewer and the lead not sharing your premises.
 
 You get **exactly one authoring moment for `details.mutations`** and
 `files_in_scope`: the driver binds both from the accepted plan envelope
-(`crew/drive.mjs:3229-3230`) and never assigns you again, so a check you cannot
+(`crew/drive.mjs:3274-3275`) and never assigns you again, so a check you cannot
 author now **cannot be added later** by anyone — not the tech-lead, not the
 lead, not the builder. The only thing a later seat can do with a gap you left is
 RECORD it as a residual. Author the check you would want at plan-check, or say

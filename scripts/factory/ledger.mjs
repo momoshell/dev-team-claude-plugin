@@ -145,6 +145,7 @@ export const TERMINAL_ACTORS = Object.freeze(['driver', 'lead', 'operator', 'fin
 export const ESCALATION_CAUSES = Object.freeze([
   'transport', 'budget', 'plan-build-disagreement', 'brief-contradiction',
   'gate-defect', 'review-unresolved', 'infrastructure', 'seat-lost',
+  'seat-timeout', 'seat-aborted', 'plan-rounds-exhausted',
 ])
 export const ESCALATION_CAUSE_UNCLASSIFIED = 'unclassified'
 
@@ -170,30 +171,59 @@ export function escalationCause(input = {}) {
   // signal, and inferring one from prose would be a guess. Matched on `where`
   // alone so both seat-death message shapes classify identically — pane
   // (crew/seat-io.mjs:1847) and headless (crew/seat-io.mjs:2185) share only the
-  // words 'no envelope arrived', which rule 4's 'no valid envelope' never sees.
+  // words 'no envelope arrived', which rule 7's 'no valid envelope' never sees.
   // FOLLOW-UP: the emitting side — a distinct seat-wait-expired signal from the
   // driver, which would let a ceiling kill be told apart from a death — lands
   // once b359-slotdriver frees the crew surface.
   if (where === 'seat-died') {
     return Object.freeze({ cause: 'seat-lost', actor: 'driver' })
   }
-  // Rule 4: no envelope or an exceeded budget is a driver budget outcome.
+  // Rule 4: the driver's own wait ceiling fired — it killed the seat; nothing
+  // died under it. `where` is the raised error's stage: `headless-${outcome}`
+  // (crew/headless.mjs:497) or the literal 'rpc-timeout' (crew/headless-rpc.mjs:701).
+  // The message-shape arm catches the SAME failure re-wrapped under a seat
+  // variant, where `where` becomes the role (crew/drive.mjs:2866). It must
+  // precede the budget rule: the headless timeout message carries 'produced no
+  // valid envelope', which rule 7 would otherwise claim as budget — b342's real
+  // row measured exactly that (#840).
+  if (where === 'rpc-timeout' || where === 'headless-timeout' || /\b(rpc|headless) timeout:/.test(why)) {
+    return Object.freeze({ cause: 'seat-timeout', actor: 'driver' })
+  }
+  // Rule 5: the worker exited MID-STREAM — an exit file, no envelope and no
+  // terminal frame (crew/headless-rpc.mjs:680, and crew/headless.mjs:497 over
+  // classifyRun's 'aborted'). Deliberately distinct from seat-lost (a corpse
+  // the driver found by probe) and from seat-timeout (a ceiling kill): the three
+  // imply different operator actions — retry a transient, investigate a kill,
+  // raise a budget (#840 amendment).
+  if (where === 'rpc-aborted' || where === 'headless-aborted' || /\b(rpc|headless) aborted:/.test(why)) {
+    return Object.freeze({ cause: 'seat-aborted', actor: 'driver' })
+  }
+  // Rule 6: the plan loop hit its round cap (crew/drive.mjs:3198) — the lead's
+  // loop did not converge. This is the ONE rule anchored on the why rather than
+  // the where, because `where` is 'plan' for several unrelated escalations
+  // (b329's brief contradiction among them). The sentence is the driver's own
+  // generated structure, not free prose, and the ^$ anchors keep it from
+  // claiming a row that merely mentions it.
+  if (/^no accepted plan within \d+ rounds$/.test(why.trim())) {
+    return Object.freeze({ cause: 'plan-rounds-exhausted', actor: 'lead' })
+  }
+  // Rule 7: no envelope or an exceeded budget is a driver budget outcome.
   if (/\bno valid envelope\b/.test(why) || /\bexceeded its \d+s budget\b/.test(why)) {
     return Object.freeze({ cause: 'budget', actor: 'driver' })
   }
-  // Rule 5: contradiction in the escalation prose is an operator-owned brief issue.
+  // Rule 8: contradiction in the escalation prose is an operator-owned brief issue.
   if (/\bcontradict/i.test(why)) {
     return Object.freeze({ cause: 'brief-contradiction', actor: 'operator' })
   }
-  // Rule 6: a gate location identifies a lead-owned gate defect.
+  // Rule 9: a gate location identifies a lead-owned gate defect.
   if (where === 'gate') {
     return Object.freeze({ cause: 'gate-defect', actor: 'lead' })
   }
-  // Rule 7: review and refuted-must-fix locations identify an unresolved review.
+  // Rule 10: review and refuted-must-fix locations identify an unresolved review.
   if (where === 'review' || where === 'refuted-must-fix') {
     return Object.freeze({ cause: 'review-unresolved', actor: 'lead' })
   }
-  // Rule 8: these locations are infrastructure failures owned by the driver.
+  // Rule 11: these locations are infrastructure failures owned by the driver.
   if (new Set(['driver', 'cold-suite', 'suite', 'rebase', 'publish', 'converge-pr']).has(where)) {
     return Object.freeze({ cause: 'infrastructure', actor: 'driver' })
   }

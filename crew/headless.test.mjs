@@ -487,6 +487,28 @@ test('unref failure retains SPAWNING reservation', () => { const f = makeFixture
 test('timeout EPERM retains marker', () => { let clock = 0; const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill() { const e = Error('permission'); e.code = 'EPERM'; throw e } }); try { const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); assert.throws(() => f.io.wait(run.returnPath, 0)); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), true) } finally { f.cleanup() } })
 test('timeout EPERM plus dead pgid clears marker', () => { let clock = 0; const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill(pid, signal) { if (signal === 'SIGTERM' || signal === 'SIGKILL') { const e = Error(); e.code = 'EPERM'; throw e } const e = Error(); e.code = 'ESRCH'; throw e } }); try { const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' }); mkdirSync(join(f.taskDir, 'headless', run.id), { recursive: true }); writeFileSync(join(f.taskDir, 'headless', run.id, 'pgid'), '111'); assert.throws(() => f.io.wait(run.returnPath, 0)); assert.equal(existsSync(join(f.taskDir, 'headless', '.builder.active.json')), false) } finally { f.cleanup() } })
 
+test('a proven timeout releases the physical run for a same-assignment re-ask', () => {
+  let clock = 0
+  const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill: () => {} })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' })
+    assert.throws(() => f.io.wait(run.returnPath, 0), (error) => error.stage === 'headless-timeout')
+    const retry = f.io.assign({ role: 'builder', briefFile: '/tmp/retry-b', reask: { id: run.id, returnPath: join(f.returnsDir, `${run.id}.retry.builder.json`) } })
+    assert.equal(retry.id, run.id)
+    assert.equal(retry.returnPath.endsWith('.retry.builder.json'), true)
+  } finally { f.cleanup() }
+})
+
+test('an unproven timeout keeps the physical run busy', () => {
+  let clock = 0
+  const f = makeFixture({ now: () => clock, sleep: () => { clock += 5000 }, kill: () => { throw Object.assign(new Error('permission denied'), { code: 'EPERM' }) } })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/tmp/b' })
+    assert.throws(() => f.io.wait(run.returnPath, 0), (error) => error.stage === 'headless-timeout')
+    assert.throws(() => f.io.assign({ role: 'builder', briefFile: '/tmp/retry-b', reask: { id: run.id, returnPath: join(f.returnsDir, `${run.id}.retry.builder.json`) } }), (error) => error.stage === 'headless-session-busy')
+  } finally { f.cleanup() }
+})
+
 test('the wrapper publishes its pgid atomically before the worker runs', () => {
   let shell = null
   const f = makeFixture({ spawn: (bin, args) => { shell = args[1]; return { pid: 901, unref() {} } } })
@@ -853,6 +875,28 @@ test('a second budget refusal spends no second fallback and escapes as budget', 
     assert.equal(f.spawnCount(), 2); assert.equal(f.fallbackRows().length, 1)
     assert.equal(f.crew.members['tech-lead'].fallback.length, 1)
   } finally { f.cleanup() }
+})
+
+test('a budget fallback marks the escaped error as spent and a first failure does not', () => {
+  const spent = fallbackFixture((n, runDir) => writeBudgetRefusal(runDir))
+  try {
+    const run = spent.io.assign({ role: 'tech-lead', briefFile: join(spent.taskDir, 'brief.md') })
+    assert.throws(() => spent.io.wait(run.returnPath, 600), (err) => {
+      assert.equal(err.stage, 'headless-budget-refused')
+      assert.equal(err.graceSpent, true)
+      return true
+    })
+  } finally { spent.cleanup() }
+
+  const first = fallbackFixture((n, runDir) => writeBudgetRefusal(runDir), { chain: null })
+  try {
+    const run = first.io.assign({ role: 'tech-lead', briefFile: join(first.taskDir, 'brief.md') })
+    assert.throws(() => first.io.wait(run.returnPath, 600), (err) => {
+      assert.equal(err.stage, 'headless-budget-refused')
+      assert.equal(Object.hasOwn(err, 'graceSpent'), false)
+      return true
+    })
+  } finally { first.cleanup() }
 })
 
 test('a fallback inherits the original absolute deadline and a late declared cell does not spawn', () => {

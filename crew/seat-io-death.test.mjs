@@ -275,8 +275,8 @@ test('a measured settle is death even when the current ps table is unavailable',
 test('alive, unidentified, and unusable ps readings are absences that keep the transport outcome', () => {
   for (const ps of ['alive', 'unidentified', 'unknown']) {
     withRun({ ps }, (run) => {
-      assert.equal(run.elapsedMs, run.budgetMs)
-      assert.equal(run.ticks, run.budgetMs / WAIT_POLL_MS)
+      assert.equal(run.elapsedMs, run.budgetMs * 2)
+      assert.equal(run.ticks, run.budgetMs * 2 / WAIT_POLL_MS)
       assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
       assert.equal(run.diedRow, null)
     })
@@ -285,12 +285,12 @@ test('alive, unidentified, and unusable ps readings are absences that keep the t
 
 test('a missing current record and a different dispatch record never kill this wait', () => {
   withRun({ record: false }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs)
+    assert.equal(run.elapsedMs, run.budgetMs * 2)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
     assert.equal(run.diedRow, null)
   })
   withRun({ recordSeatId: 'd1', dispatchId: 'd2' }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs)
+    assert.equal(run.elapsedMs, run.budgetMs * 2)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
     assert.equal(run.diedRow, null)
   })
@@ -389,15 +389,15 @@ test('the seat_died row measures wait budget and leaves final turn usage unknown
 
 test('diagnostic failures remain load-bearing only for evidence, not for the requested delay', () => {
   withRun({ ps: 'alive', captureThrows: true }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs)
+    assert.equal(run.elapsedMs, run.budgetMs * 2)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
   })
   withRun({ ps: 'alive', growthThrows: true }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs)
+    assert.equal(run.elapsedMs, run.budgetMs * 2)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
   })
   withRun({ ps: 'absent', record: false, corruptStore: true }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs)
+    assert.equal(run.elapsedMs, run.budgetMs * 2)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
   })
 })

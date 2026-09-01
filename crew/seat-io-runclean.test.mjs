@@ -8,7 +8,8 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
   COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
-  providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, settleSeatTeardown,
+  providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown,
+  SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
 } from './seat-io.mjs'
 import { headlessIo, recogniseProviderCondition, SEAT_REFUSALS } from './headless.mjs'
@@ -172,6 +173,7 @@ const SEAT_JOURNAL_EXPECTED = Object.freeze([
   ['operationalRow', "event='seat-stale'", 'at role id last_frame_at stale_ms threshold_ms'],
   ['recordRow', "event='seat-silence-reask'", 'at role id returnPath outcome why silent_ms ...extra'],
   ['recordRow', "event='envelope-reask'", 'at role id returnPath transport outcome ...extra'],
+  ['recordRow', '', 'at event role id cause outcome spent_ms ceiling_s from_return_path to_return_path from_run_id to_run_id ...extra'],
   ['operationalRow', "event='pane-usage'", 'role id session_id parent subagents subagent_files measured'],
   ['operationalRow', "event='tree-witness'", 'at checkout outcome refused modified removed added head_changed cause detail'],
   ['recordRow', '', 'at seat_died returnPath'],
@@ -185,11 +187,11 @@ test('every journal emit site in seat-io is inventoried, wrapped and on the righ
   const text = readFileSync(new URL('./seat-io.mjs', import.meta.url), 'utf8')
   for (const sink of SEAT_PASS_THROUGH) assert.equal(text.split(sink).length - 1, 1, `pass-through changed or duplicated: ${sink}`)
   const sites = seatJournalSites(text)
-  assert.equal(sites.length, 31)
+  assert.equal(sites.length, 32)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), SEAT_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 25)
-  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 6)
+  assert.equal(sites.filter(({ wrapper }) => wrapper === 'recordRow').length, 7)
 })
 
 test('run shell spawns use the named output buffer while git plumbing stays unbounded', () => {
@@ -1498,14 +1500,14 @@ const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done",
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
-function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [] } = {}) {
+function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null } = {}) {
   const root = scratchDir(`seat-transport-reask-${transport}-`)
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
   const workerBin = join(root, 'stub-claude')
   writeFileSync(workerBin, '')
-  const logs = []; const events = []; const assigns = []
-  let clock = 0; let waitIndex = 0
+  const logs = []; const events = []; const assigns = []; const waitCalls = []
+  let clock = 0; let waitIndex = 0; let transportSleep = null
   const transportIo = {
     assign(spec) {
       assigns.push(spec)
@@ -1513,12 +1515,14 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [],
       if (failure) throw failure
       const id = spec?.reask?.id || `d${assigns.length}`
       const returnPath = spec?.reask?.returnPath || join(paths.returnsDir, `${id}.builder.json`)
-      return { id, returnPath }
+      return { id, returnPath, runId: `run-${assigns.length}` }
     },
-    wait(path) {
+    wait(path, seconds) {
+      waitCalls.push({ path, seconds })
+      onWait?.({ path, seconds, deps, sleep: transportSleep })
       const step = waits[waitIndex++]
       if (typeof step !== 'function') throw new Error(`no scripted wait for ${path}`)
-      return step(path)
+      return step(path, seconds)
     },
     teardown() { return [] },
   }
@@ -1531,13 +1535,15 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [],
     now: () => clock,
     sleep: (ms) => { clock += ms },
     logLine: (_path, row) => logs.push(row),
-    ...(transport === HEADLESS_RPC_TRANSPORT ? { headlessRpcIo: () => transportIo } : { headlessIo: () => transportIo }),
+    ...(transport === HEADLESS_RPC_TRANSPORT
+      ? { headlessRpcIo: ({ deps: transportDeps }) => { transportSleep = transportDeps.sleep; return transportIo } }
+      : { headlessIo: ({ deps: transportDeps }) => { transportSleep = transportDeps.sleep; return transportIo } }),
   }
   const io = seatIo(crew, paths, root, null, null, {}, deps)
   io.emit = (event) => events.push(event)
   const first = io.assign({ role: 'builder', briefFile: '/tmp/brief.md' })
   const reaskPath = join(paths.returnsDir, `${first.id}.reask.builder.json`)
-  return { root, paths, crew, io, first, reaskPath, assigns, logs, events, cleanup: () => rmSync(root, { recursive: true, force: true }) }
+  return { root, paths, crew, io, first, reaskPath, assigns, waitCalls, logs, events, cleanup: () => rmSync(root, { recursive: true, force: true }) }
 }
 
 function parseReaskFailure(stage, raw = MALFORMED_REASK) {
@@ -1689,6 +1695,184 @@ test('reaskDecision refuses a settled, absent, indeterminate or non-pane seat an
   for (const transport of [HEADLESS_TRANSPORT, HEADLESS_RPC_TRANSPORT]) {
     assert.equal(reaskDecision({ kind: 'unusable-envelope', transport, surfaceId: null, alive: null, asked: false, reassignable: true }).ask, true)
   }
+})
+
+test('seatRetryDecision keeps the lost-seat cause set and one-per-assignment bound closed', () => {
+  for (const kind of ['no-envelope', 'unusable-envelope', 'seat-died', 'transport-error', undefined]) {
+    const result = seatRetryDecision({ kind, transport: HEADLESS_TRANSPORT, reassignable: true })
+    assert.equal(result.retry, false)
+    assert.match(result.why, new RegExp(String(kind)))
+  }
+  for (const kind of ['timeout', 'aborted']) {
+    const result = seatRetryDecision({ kind, transport: HEADLESS_TRANSPORT, reassignable: true })
+    assert.equal(result.retry, true)
+  }
+  for (const option of [{ asked: true }, { graceSpent: true }]) {
+    const result = seatRetryDecision({ kind: 'timeout', transport: HEADLESS_TRANSPORT, reassignable: true, ...option })
+    assert.equal(result.retry, false)
+    assert.match(result.why, /per assignment/)
+  }
+  const unavailable = seatRetryDecision({ kind: 'timeout', transport: 'future-transport', reassignable: false })
+  assert.equal(unavailable.retry, false)
+  assert.match(unavailable.why, /future-transport/)
+  assert.deepEqual(SEAT_RETRY_KINDS, ['timeout', 'aborted'])
+  assert.equal(SEAT_RETRY_MAX, 1)
+  assert.deepEqual(SEAT_RETRY_EVENTS, { timeout: 'seat-timeout-reask', aborted: 'seat-abort-reask' })
+})
+
+test('a lost headless seat is re-asked on a fresh path with its original id and measured row', () => {
+  for (const [transport, stage, event] of [
+    [HEADLESS_TRANSPORT, 'headless-timeout', 'seat-timeout-reask'],
+    [HEADLESS_RPC_TRANSPORT, 'rpc-aborted', 'seat-abort-reask'],
+  ]) {
+    const harness = makeTransportReaskHarness({
+      transport,
+      waits: [
+        () => { throw stagedReaskFailure(stage, `${stage}: first attempt lost`) },
+        () => JSON.parse(VALID_REASK),
+      ],
+    })
+    try {
+      const envelope = harness.io.wait(harness.first.returnPath, 37)
+      assert.deepEqual(envelope, JSON.parse(VALID_REASK))
+      assert.equal(harness.assigns.length, 2)
+      const retry = harness.assigns[1]
+      assert.equal(retry.reask.id, harness.first.id)
+      assert.equal(retry.reask.returnPath, join(harness.paths.returnsDir, `${harness.first.id}.retry.builder.json`))
+      assert.notEqual(retry.reask.returnPath, harness.first.returnPath)
+      assert.deepEqual(harness.waitCalls.map(({ path, seconds }) => ({ path, seconds })), [
+        { path: harness.first.returnPath, seconds: 37 },
+        { path: retry.reask.returnPath, seconds: 37 },
+      ])
+      const row = harness.logs.find((candidate) => candidate.event === event && candidate.outcome === 'recovered')
+      assert.ok(row)
+      assert.equal(row.cause, stage === 'rpc-aborted' ? 'aborted' : 'timeout')
+      assert.equal(row.from_return_path, harness.first.returnPath)
+      assert.equal(row.to_return_path, retry.reask.returnPath)
+      assert.equal(row.from_run_id, 'run-1')
+      assert.equal(row.to_run_id, 'run-2')
+      assert.equal(row.ceiling_s, 37)
+      assert.equal(Number.isFinite(row.spent_ms), true)
+      const brief = readFileSync(join(harness.paths.taskDir, `retry-${harness.first.id}.builder.md`), 'utf8')
+      assert.match(brief, /WORK is not in question/)
+      assert.match(brief, new RegExp(`previous attempt was lost \\(${row.cause}\\)`))
+      assert.match(brief, new RegExp(`Write your ReturnEnvelope as valid JSON to ${retry.reask.returnPath.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}`))
+      assert.match(brief, new RegExp(`Then print exactly: CREW-DONE builder ${harness.first.id}`))
+    } finally { harness.cleanup() }
+  }
+})
+
+test('a second lost-seat failure escalates without buying a third assignment', () => {
+  for (const [first, second] of [
+    ['headless-timeout', 'headless-timeout'],
+    ['headless-timeout', 'headless-aborted'],
+    ['rpc-aborted', 'rpc-timeout'],
+  ]) {
+    const transport = first.startsWith('rpc') || second.startsWith('rpc') ? HEADLESS_RPC_TRANSPORT : HEADLESS_TRANSPORT
+    const harness = makeTransportReaskHarness({
+      transport,
+      waits: [
+        () => { throw stagedReaskFailure(first) },
+        () => { throw stagedReaskFailure(second) },
+      ],
+    })
+    try {
+      assert.throws(() => harness.io.wait(harness.first.returnPath, 5))
+      assert.equal(harness.assigns.length, 2)
+      const failed = harness.logs.find((row) => row.event === (first.startsWith('rpc') ? 'seat-abort-reask' : 'seat-timeout-reask') && row.outcome === 'failed')
+      assert.equal(failed.failure, second.startsWith('rpc') ? 'timeout' : second.endsWith('aborted') ? 'aborted' : 'timeout')
+    } finally { harness.cleanup() }
+  }
+})
+
+test('the unusable-envelope and lost-seat paths share one grace in either order', () => {
+  const parseFirst = makeTransportReaskHarness({
+    waits: [
+      () => { throw parseReaskFailure('headless-parse-error') },
+      () => { throw stagedReaskFailure('headless-timeout') },
+      () => JSON.parse(VALID_REASK),
+    ],
+  })
+  try {
+    assert.throws(() => parseFirst.io.wait(parseFirst.first.returnPath, 5))
+    assert.equal(parseFirst.assigns.length, 2)
+  } finally { parseFirst.cleanup() }
+
+  const lostFirst = makeTransportReaskHarness({
+    waits: [
+      () => { throw stagedReaskFailure('headless-timeout') },
+      () => { throw parseReaskFailure('headless-parse-error') },
+    ],
+  })
+  try {
+    assert.throws(() => lostFirst.io.wait(lostFirst.first.returnPath, 5))
+    assert.equal(lostFirst.assigns.length, 2)
+  } finally { lostFirst.cleanup() }
+})
+
+test('a spent budget grace and a clean no-envelope never buy a lost-seat retry', () => {
+  const spent = stagedReaskFailure('headless-timeout')
+  spent.graceSpent = true
+  for (const [transport, stage, error] of [
+    [HEADLESS_TRANSPORT, 'headless-timeout', spent],
+    [HEADLESS_RPC_TRANSPORT, 'rpc-no-envelope', stagedReaskFailure('rpc-no-envelope')],
+  ]) {
+    const harness = makeTransportReaskHarness({ transport, waits: [() => { throw error }] })
+    try {
+      assert.throws(() => harness.io.wait(harness.first.returnPath, 5))
+      assert.equal(harness.assigns.length, 1)
+      const retryRows = harness.logs.filter((row) => row.event === 'seat-timeout-reask' || row.event === 'seat-abort-reask')
+      assert.equal(retryRows.length, error.stage === 'rpc-no-envelope' ? 0 : 1)
+      if (retryRows.length) assert.equal(retryRows[0].outcome, 'declined')
+      assert.equal(stage, error.stage)
+    } finally { harness.cleanup() }
+  }
+})
+
+test('a lost-seat retry that stays busy records each settle attempt and then undelivered', () => {
+  const busy = stagedReaskFailure('headless-session-busy', 'seat remains live')
+  const harness = makeTransportReaskHarness({
+    waits: [() => { throw stagedReaskFailure('headless-timeout') }],
+    assignFails: [null, ...Array.from({ length: 13 }, () => busy)],
+  })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 5))
+    const rows = harness.logs.filter((row) => row.event === 'seat-timeout-reask')
+    assert.equal(harness.assigns.length, 14)
+    assert.equal(rows.filter((row) => row.outcome === 'busy').length, 12)
+    assert.equal(rows.at(-1).outcome, 'undelivered')
+    assert.equal(rows.at(-1).attempt, 13)
+  } finally { harness.cleanup() }
+})
+
+test('a lost-seat retry keeps the heartbeat seam active', () => {
+  let stream = null
+  let waitNumber = 0
+  const harness = makeTransportReaskHarness({
+    waits: [
+      ({ path }) => { throw stagedReaskFailure('headless-timeout', `first wait at ${path}`) },
+      () => JSON.parse(VALID_REASK),
+    ],
+    onWait: ({ sleep }) => {
+      waitNumber += 1
+      if (!stream || typeof sleep !== 'function') return
+      writeFileSync(stream, '{}\n')
+      utimesSync(stream, waitNumber, waitNumber)
+      sleep(1)
+      if (waitNumber > 1) {
+        writeFileSync(stream, '{}\n')
+        utimesSync(stream, waitNumber + 1, waitNumber + 1)
+        sleep(1)
+      }
+    },
+  })
+  try {
+    stream = join(harness.paths.taskDir, 'headless', 'd1', 'stream.jsonl')
+    mkdirSync(dirname(stream), { recursive: true })
+    assert.deepEqual(harness.io.wait(harness.first.returnPath, 5), JSON.parse(VALID_REASK))
+    const row = harness.logs.find((candidate) => candidate.event === SEAT_LIVENESS_EVENT && candidate.growth === true)
+    assert.ok(row)
+  } finally { harness.cleanup() }
 })
 
 test('a headless-json seat gets exactly one re-ask carrying the original assignment id, and a valid second envelope continues the run', () => {

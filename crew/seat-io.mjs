@@ -118,6 +118,27 @@ const REFUSAL_READING_MAX_MS = 300_000
 export const REASK_MAX = 1
 export const REASK_TIMEOUT_S = 600
 
+// The closed set of failure kinds ONE bounded re-ask can recover: a wait that
+// ran out (#838) and a worker that vanished MID-TURN leaving a corpse (the
+// 2026-09-01 amendment, measured on b360). `no-envelope` is deliberately
+// ABSENT: a worker that settled cleanly and wrote nothing failed differently
+// and stays escalating. Nothing here reads an EXIT CODE: every pi rpc seat
+// exits on the retire SIGTERM including the successful ones
+// (crew/headless-rpc.mjs:539), so an exit code names no cause. Do not write
+// that code's numeric value anywhere in this file — gate check G1 greps for
+// it, and a comment quoting it reddens the check as surely as logic would.
+const RETRY_KIND_TIMEOUT = 'timeout'
+const RETRY_KIND_ABORTED = 'aborted'
+export const SEAT_RETRY_KINDS = Object.freeze([RETRY_KIND_TIMEOUT, RETRY_KIND_ABORTED])
+// One grace per assignment TOTAL, never one per cause: the same bound
+// REASK_MAX names, and the SAME `reasked` set the unusable-envelope re-ask
+// spends from.
+export const SEAT_RETRY_MAX = REASK_MAX
+export const SEAT_RETRY_EVENTS = Object.freeze({
+  [RETRY_KIND_TIMEOUT]: 'seat-timeout-reask',
+  [RETRY_KIND_ABORTED]: 'seat-abort-reask',
+})
+
 // A transport re-ask is a fresh ASSIGNMENT, and a headless-json seat's prior
 // invocation may not have written its `exit` file yet at the instant its
 // unparseable envelope is read — assign refuses that as busy
@@ -1560,6 +1581,13 @@ export function reaskDecision({ kind, transport, surfaceId, alive, asked, reassi
   return { ask: true, why: `transport ${String(transport)} re-asks by a fresh assignment carrying the original id` }
 }
 
+export function seatRetryDecision({ kind, transport, reassignable = false, asked = false, graceSpent = false }) {
+  if (!SEAT_RETRY_KINDS.includes(kind)) return { retry: false, why: `failure kind ${String(kind)} is not a lost seat, so a second ask would recover nothing` }
+  if (asked || graceSpent) return { retry: false, why: `the grace of ${SEAT_RETRY_MAX} per assignment is already spent` }
+  if (!reassignable) return { retry: false, why: `transport ${String(transport)} owns its own wait and send seam and this driver holds no re-assign seam for it` }
+  return { retry: true, why: `a ${kind} seat is re-asked once, on a fresh collect path carrying the original assignment id` }
+}
+
 // What the driver owes a seat that emitted an UNCLASSIFIED refusal frame, from
 // measured facts only: the frame's instant, the newest transcript mtime, now,
 // and whether the one re-send was already sent. Pure and exported for the same
@@ -2669,6 +2697,111 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     }
     return { envelope: null, error: err }
   }
+  const retryLostSeat = ({ returnPath, info, transport, err, timeoutS, waitStartedAt: dispatchStartedAt }) => {
+    const role = info?.role || 'unknown'
+    const transportName = transport ? (crew.members?.[role]?.transport || 'unknown') : DEFAULT_TRANSPORT
+    // What this driver HOLDS, measured rather than assumed: an ENROLLED transport
+    // io that exposes both halves of the seam is one this driver can ask again.
+    const reassignable = !!transport && REASK_TRANSPORTS.has(transportName) && typeof transport.assign === 'function' && typeof transport.wait === 'function'
+    const kind = cellFailureKind(err)
+    const decision = seatRetryDecision({ kind: cellFailureKind(err), transport: transportName, reassignable, asked: reasked.has(returnPath), graceSpent: err?.graceSpent === true })
+    const retryId = info?.id || 'retry'
+    const retryPath = join(paths.returnsDir, `${retryId}.retry.${role}.json`)
+    const fromRunId = info?.workerId ?? null
+    const measuredAt = now()
+    const spentMs = Number.isFinite(dispatchStartedAt) && Number.isFinite(measuredAt) ? measuredAt - dispatchStartedAt : null
+    let toRunId = null
+    const note = (outcome, extra = {}) => {
+      try {
+        io.log(recordRow({ at: now(), event: SEAT_RETRY_EVENTS[kind], role, id: retryId, cause: kind, outcome, spent_ms: spentMs, ceiling_s: timeoutS, from_return_path: returnPath, to_return_path: retryPath, from_run_id: fromRunId, to_run_id: toRunId, ...extra }))
+      } catch { /* the journal is diagnostics, never load-bearing for a wait */ }
+    }
+    if (!decision.retry) {
+      const why = decision.why
+      err.message = `${err.message}\n[no lost-seat re-ask: ${why}]`
+      err.seatRetry = { attempted: false, why }
+      note('declined', { why })
+      return { envelope: null, error: err }
+    }
+    reasked.add(returnPath)
+    const briefPath = join(paths.taskDir, `retry-${retryId}.${role}.md`)
+    const spentForBrief = Number.isFinite(spentMs) ? `${Math.max(0, spentMs) / 1000} seconds` : 'an unknown amount of time'
+    try {
+      writeFileSync(briefPath, [
+        `# Re-ask ${retryId}: the previous seat attempt was lost`,
+        '',
+        'Your WORK is not in question. This is a bounded recovery of the same logical assignment.',
+        `The previous attempt was lost (${kind}) after ${spentForBrief}.`,
+        `Write your ReturnEnvelope as valid JSON to ${retryPath}.`,
+        'Change nothing about the work you already did and make no repo edits.',
+        `Then print exactly: CREW-DONE ${role} ${retryId}`,
+        '',
+        'This is the only lost-seat re-ask; a second lost attempt escalates.',
+      ].join('\n'))
+    } catch (sendErr) {
+      err.message = `${err.message}\n[re-ask attempted and not delivered: ${sendErr?.message || String(sendErr)}]`
+      err.seatRetry = { attempted: true, delivered: false, recovered: false, why: sendErr?.message || String(sendErr) }
+      note('undelivered', { why: sendErr?.message || String(sendErr), attempt: 1 })
+      return { envelope: null, error: err }
+    }
+    // A re-ask spends operator TIME at the ceiling it was given; it never raises the budget.
+    const window = timeoutS
+    let collectPath = retryPath
+    let secondErr = null
+    for (let attempt = 0; attempt < SEAT_RETRY_MAX; attempt += 1) {
+      let deliveryAttempts = 1
+      let polls = 0
+      toRunId = null
+      try {
+        for (;;) {
+          deliveryAttempts = polls + 1
+          try {
+            const assigned = transport.assign({ role, briefFile: briefPath, reask: { id: retryId, returnPath: retryPath } })
+            toRunId = assigned?.runId ?? assigned?.run_id ?? null
+            bindHeadlessIdentity(info, assigned)
+            break
+          } catch (assignErr) {
+            if (!REASK_BUSY_STAGES.has(assignErr?.stage) || polls >= REASK_SETTLE_POLLS) throw assignErr
+            note('busy', { attempt: deliveryAttempts, why: assignErr?.message || String(assignErr) })
+            polls += 1
+            sleep(REASK_SETTLE_MS)
+          }
+        }
+      } catch (sendErr) {
+        err.message = `${err.message}\n[re-ask attempted and not delivered: ${sendErr?.message || String(sendErr)}]`
+        err.seatRetry = { attempted: true, delivered: false, recovered: false, why: sendErr?.message || String(sendErr) }
+        note('undelivered', { why: sendErr?.message || String(sendErr), attempt: deliveryAttempts })
+        return { envelope: null, error: err }
+      }
+      try {
+        const waitStartedAt = now()
+        const env = withHeadlessWatch(info, () => transport.wait(collectPath, window), { returnPath: collectPath, timeoutS: window, waitStartedAt })
+        if (env != null) {
+          err.message = `${err.message}\n[re-ask recovered: the lost seat returned a usable envelope and the run continued]`
+          err.seatRetry = { attempted: true, delivered: true, recovered: true }
+          note('recovered', { attempt: attempt + 1 })
+          return { envelope: env, error: err }
+        }
+        const noEnvelope = new Error(`re-ask wait returned no envelope at ${collectPath}`)
+        noEnvelope.stage = transportName === HEADLESS_RPC_TRANSPORT ? 'rpc-no-envelope' : 'headless-no-envelope'
+        secondErr = noEnvelope
+      } catch (attemptErr) {
+        secondErr = attemptErr
+      }
+      if (SEAT_RETRY_KINDS.includes(cellFailureKind(secondErr))) continue
+      break
+    }
+    if (!secondErr) {
+      secondErr = new Error(`lost-seat re-ask produced no usable envelope at ${collectPath}`)
+      secondErr.stage = transportName === HEADLESS_RPC_TRANSPORT ? 'rpc-no-envelope' : 'headless-no-envelope'
+    }
+    const secondKind = cellFailureKind(secondErr)
+    note('failed', { failure: secondKind, second: secondErr?.stage || null })
+    if (secondErr && [SEAT_REFUSAL_STAGE, SEAT_DIED_STAGE].includes(secondErr.stage)) throw secondErr
+    err.message = `${err.message}\n[re-ask attempted: the lost seat did not produce a usable envelope: ${secondErr?.message || String(secondErr)}]`
+    err.seatRetry = { attempted: true, delivered: true, recovered: false, failure: secondKind, second: secondErr?.stage || null }
+    return { envelope: null, error: err }
+  }
   // The stash stack is NOT per-worktree: `git rev-parse --git-path refs/stash` resolves to the SAME file in the common git dir from every linked worktree,
   // so `git stash pop` restores whatever lane pushed LAST (#471). The entry a
   // push created is identified by the unique message it carries and restored by
@@ -2883,6 +3016,15 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
             // cell defect — but the RUN continues as if the first envelope had
             // been readable.
             noteCellFailure(info?.role, info?.id, 'unusable-envelope', recovery.error || err)
+            settled = recovery.envelope
+            return recovery.envelope
+          }
+          if (recovery) failure = recovery.error || err
+        }
+        if (SEAT_RETRY_KINDS.includes(cellFailureKind(err))) {
+          const recovery = retryLostSeat({ returnPath, info, transport, err, timeoutS, waitStartedAt })
+          if (recovery?.envelope != null) {
+            noteCellFailure(info?.role, info?.id, cellFailureKind(err), recovery.error || err)
             settled = recovery.envelope
             return recovery.envelope
           }

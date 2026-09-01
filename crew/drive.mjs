@@ -3023,6 +3023,9 @@ function runTask(ctx, io, crash) {
   const plans = stageEnabled(shape, 'plan') // does this shape plan, or inherit?
   let planEnv = null
   let planBrief = ctx.briefFile
+  // A bounce that has its own machine-readable reason sets this; it is CONSUMED once, so
+  // the plan-check bounces keep the 'plan-revision' note they have always carried (#843).
+  let planNote = null
   let extraPlanRounds = 0
   let divergenceConsulted = false
   const planRevisionBrief = (round, check) => {
@@ -3037,7 +3040,8 @@ function runTask(ctx, io, crash) {
   }
   for (let round = 1; plans && round <= limits.plan_rounds + extraPlanRounds; round += 1) {
     stage(`plan:r${round}`)
-    const env = assignAndWait('planner', planBrief, round === 1 ? 'plan' : 'plan-revision')
+    const env = assignAndWait('planner', planBrief, planNote ?? (round === 1 ? 'plan' : 'plan-revision'))
+    planNote = null
     if (env.status !== 'done') {
       const asked = parseQuestions(env.details)
       const questions = asked?.questions ?? []
@@ -3064,6 +3068,47 @@ function runTask(ctx, io, crash) {
       planBrief = b
       stageComplete()
       continue
+    }
+    // #843 — the dispatched write surface is a CEILING: a replan may NARROW it, never
+    // WIDEN it. The triage/repair shape has held this rule since crew/drive.mjs:2972.
+    // Checked on EVERY round, not only the accepted one, because a bounce is reachable
+    // only from inside this loop and the lead's "accept the latest plan anyway" path
+    // would otherwise let a widened envelope through. Measured against
+    // ctx.files_in_scope every round and never against the previous plan: otherwise one
+    // bounce launders the swap it was raised to correct. Placed before the carve check
+    // because the surface promise is a precondition of considering the plan at all, and
+    // a bounce is cheaper than a plan-carve escalation; slices obey the same rule anyway.
+    // The DISPATCHED side is validated by every dispatch path before driveTask sees it;
+    // the PLANNED side is not validated until crew/drive.mjs:3201-3210, AFTER this loop.
+    // scopeMatcher calls entry.endsWith('/') and repoRelativePath.startsWith(entry)
+    // unconditionally, so a planner envelope carrying files_in_scope: [null] would THROW
+    // here and never reach the typed escalate('plan', …) refusal that already exists for
+    // it. So this comparison runs only on a planned scope the scope gate could honor;
+    // anything else bypasses the block untouched and is refused, in one place, below.
+    // Malformed planner output is NOT classified as narrowed, widened or undispatched —
+    // it was never compared, and inventing a verdict for it would be the fabricated
+    // reading the null in `dispatched` exists to avoid.
+    const plannedScope = env.details?.files_in_scope
+    const plannedComparable = Array.isArray(plannedScope) && plannedScope.length > 0
+      && validateScopeEntries(plannedScope).length === 0
+    if (plannedComparable) {
+      const planScope = planScopeVerdict(ctx.files_in_scope, plannedScope)
+      io.log(recordRow({ at: io.now(), plan_scope: { round, ...planScope } }))
+      if (planScope.verdict === PLAN_SCOPE.widened) {
+        const scopeFinal = round >= limits.plan_rounds + extraPlanRounds
+        if (scopeFinal) {
+          stageComplete()
+          return escalate(PLAN_SCOPE.widened, planScopeWhy(planScope, true), env.artifacts || [])
+        }
+        const b = art(`plan-bounce-r${round}.md`)
+        failureUpgrade('plan', 'planner') // the kind the other three plan bounces already use
+        io.writeFile(b, planScopeBounceLines(round, planScope, ctx.briefFile, ctx.files_in_scope).join('\n'))
+        planBrief = b
+        planNote = PLAN_SCOPE.widened
+        planEnv = null
+        stageComplete()
+        continue
+      }
     }
     planEnv = env
     try {
@@ -4747,6 +4792,52 @@ export function staleVerdictLines(stale) {
     `the CURRENT tree has already passed the scope gate, the validation lane, and every`,
     `configured acceptance gate. You are REPLACING that verdict against this tree,`,
     `not answering it — read the diff again.`]
+}
+
+// #843 — the plan-acceptance scope vocabulary. `dispatched: null`, never 0: a lane
+// dispatched with no scope was never COMPARED, and an unmeasured cell carries null and a
+// closed reason rather than a fabricated zero (CLAUDE.md). `same` is its own token so a
+// reader can tell "compared, identical" from "never compared".
+export const PLAN_SCOPE = Object.freeze({
+  undispatched: 'plan-scope-undispatched',
+  same: 'plan-scope-same',
+  narrowed: 'plan-scope-narrowed',
+  widened: 'plan-scope-widened',
+})
+export const PLAN_SCOPE_VERDICTS = Object.freeze(Object.values(PLAN_SCOPE))
+// Array-ness and non-emptiness are all this helper judges about `dispatched`; a non-empty
+// MALFORMED array is compared as dispatched, which is outside the production contract —
+// every dispatch path validates the scope with the same leaf before the driver sees it
+// (crew/crew.mjs:427, crew/child.mjs:71, crew/daemon.mjs:105), so a second copy here would
+// be the drift that leaf exists to prevent.
+export function planScopeVerdict(dispatched, planned) {
+  const asked = Array.isArray(planned) ? planned : []
+  if (!Array.isArray(dispatched) || dispatched.length === 0) {
+    return { verdict: PLAN_SCOPE.undispatched, added: [], dropped: [], dispatched: null, planned: asked.length }
+  }
+  const added = outOfScopeFiles(asked, scopeMatcher(dispatched))
+  const dropped = outOfScopeFiles(dispatched, scopeMatcher(asked))
+  // Widening DOMINATES a simultaneous drop: b359 both added two modules and shed the two
+  // anchor manifests it was dispatched to repair, and the refusal must name the additions.
+  const verdict = added.length > 0 ? PLAN_SCOPE.widened : dropped.length > 0 ? PLAN_SCOPE.narrowed : PLAN_SCOPE.same
+  return { verdict, added, dropped, dispatched: dispatched.length, planned: asked.length }
+}
+export function planScopeWhy(verdict, final) {
+  return `the plan widens the dispatched write surface with ${verdict.added.join(', ')} — a lane may narrow the surface it was dispatched with, never widen it${final ? '; on the final plan round there is no revision left to bounce it to' : ''}`
+}
+export function planScopeBounceLines(round, verdict, briefFile, dispatched) {
+  return [
+    `# Plan scope bounce (round ${round})`, '',
+    planScopeWhy(verdict, false), '',
+    'The dispatched write surface — the only files this lane may write:',
+    ...dispatched.map((f) => `- ${f}`), '',
+    'Your files_in_scope added, and this lane may not:',
+    ...verdict.added.map((f) => `- ${f}`), '',
+    'Re-plan INSIDE the dispatched surface. Narrowing it is legal and is recorded, not refused;',
+    'if the task genuinely cannot be built inside it, return status insufficient with the gap as',
+    'a numbered details.questions entry rather than widening the surface yourself.', '',
+    `Original brief: ${briefFile}`,
+  ]
 }
 
 export const JOURNAL_CHANNELS = Object.freeze({ record: 'record', operational: 'operational' })

@@ -44,6 +44,7 @@ import {
   DIRECTED_STAGE_HEAD, DIRECTED_SOURCES, DIRECTED_SEATS, DIRECTED_STAGES, PARTIAL_REVIEWED, parseDirectedBrief,
   stageEnabled, undeclaredStage, shapeDefect, sourcesDefect, outOfScopeFiles, envelopeDefect, envelopeFieldsPresent,
   ENVELOPE_REFUSAL_REASONS, bounceTargetOf, staleVerdictLines,
+  PLAN_SCOPE, PLAN_SCOPE_VERDICTS, planScopeVerdict,
 } from './drive.mjs'
 
 const TD = '/tmp/fake-task'
@@ -1003,6 +1004,8 @@ test('the planner charter documents how to discover files_in_scope', () => {
     'crew/adapter-*.test.mjs',
     '#193',
     '#199',
+    'dispatched surface is a CEILING',
+    '`details.questions` entry rather than a wider `files_in_scope`',
   ]) assert.ok(charter.includes(token), token)
   assert.match(charter, /grep/i)
 })
@@ -6909,6 +6912,9 @@ test('the planner is confined to its own stages — no post-acceptance path assi
   assert.equal(hits.length, 2)
   assert.match(hits[0], /'triage'/)
   assert.match(hits[1], /round === 1 \? 'plan' : 'plan-revision'/)
+  // #843: the widening bounce carries its own note, so the site reads a consumed-once
+  // override in FRONT of the ternary — the two ordinary notes are still the fallback.
+  assert.match(hits[1], /planNote \?\? \(round === 1/)
   assert.equal(hits.some((line) => /gate-(repair|fix)/.test(line)), false)
   const io = b44MidRunRepairIo()
   driveTask(CTX, io)
@@ -7535,6 +7541,7 @@ const DRIVE_JOURNAL_EXPECTED = Object.freeze([
   ['recordRow', '', 'at directed'],
   ['recordRow', '', 'at member_questions'],
   ['recordRow', '', 'at question_answers'],
+  ['recordRow', '', 'at plan_scope'],
   ['recordRow', '', 'at gate_path_rejected'],
   ['recordRow', '', 'at plan_growth'],
   ['recordRow', '', 'at carve_verdict'],
@@ -7570,7 +7577,7 @@ test('the journal channel vocabulary is closed, exported and additive', () => {
 test('every journal emit site in the driver is inventoried, wrapped and on the right channel', () => {
   const text = readFileSync(new URL('./drive.mjs', import.meta.url), 'utf8')
   const sites = driveJournalSites(text)
-  assert.equal(sites.length, 46)
+  assert.equal(sites.length, 47)
   assert.deepEqual(sites.map(({ wrapper, events, keys }) => [wrapper, events, keys]), DRIVE_JOURNAL_EXPECTED)
   assert.ok(sites.every(({ wrapper }) => wrapper === 'recordRow' || wrapper === 'operationalRow'))
   assert.equal(sites.filter(({ wrapper }) => wrapper === 'operationalRow').length, 1)
@@ -9147,4 +9154,289 @@ test('#800 §7b 48 — continuation panels journal the exact shape refusal they 
   const verdictResult = driveTask(D_PANEL_CTX, verdictIo)
   assert.equal(verdictResult.status, 'escalation')
   assert.equal(verdictIo.calls.logs.some((row) => row.panel_skipped === 'verdict-findings'), true)
+})
+
+
+// ─── #843 — a replan may NARROW its dispatched write surface, never WIDEN it ───
+// The fixture is the real b359-slotdriver round-2 replan: an 8-path dispatch, and a
+// d2 planner envelope that ADDED crew/child.mjs and crew/crew.mjs while shedding the
+// two anchor manifests it was fenced to repair. Still 8 entries, which is exactly why
+// plan_growth stayed blind to it.
+const S843_DISPATCHED = Object.freeze([
+  'crew/drive.mjs', 'crew/drive.test.mjs', 'crew/crew.test.mjs', 'crew/daemon.test.mjs',
+  'crew/io-contract.test.mjs', 'crew/seat-io-runclean.test.mjs',
+  'skills/backend-node/anchors.json', 'skills/crew-recovery/anchors.json',
+])
+const S843_D2 = Object.freeze([
+  'crew/drive.mjs', 'crew/drive.test.mjs', 'crew/crew.test.mjs', 'crew/daemon.test.mjs',
+  'crew/io-contract.test.mjs', 'crew/seat-io-runclean.test.mjs',
+  'crew/child.mjs', 'crew/crew.mjs',
+])
+const S843_ADDED = Object.freeze(['crew/child.mjs', 'crew/crew.mjs'])
+const S843_DROPPED = Object.freeze(['skills/backend-node/anchors.json', 'skills/crew-recovery/anchors.json'])
+const S843_NARROWED = Object.freeze(S843_DISPATCHED.filter((f) => !S843_DROPPED.includes(f)))
+const S843_RUNS = { 'lane-cmd': { ok: true, output: '' }, 'suite-cmd': { ok: true, output: '' } }
+// The dispatch names crew/drive.mjs, a protected path, so the sensitivity floor runs on
+// every case here. Satisfy it — a floor refusal would confound every escalation read below.
+const s843Reseat = () => ({ applied: true, from: { id: 'build' }, to: { id: 'judge' }, rung: 'mechanical→judge' })
+const s843PlanEnv = (files) => planEnv({
+  details: {
+    plan_path: `${TD}/plan.md`, files_in_scope: Array.isArray(files) ? [...files] : files,
+    validation_lane: 'lane-cmd', consult_questions: [], carve_verdict: 'proceed',
+  },
+})
+const s843Io = (envelopes, changed = ['crew/io-contract.test.mjs']) =>
+  fakeIo({ envelopes, runs: S843_RUNS, changed, reseat: s843Reseat })
+const s843Ctx = (over = {}) => ({
+  ...CTX, files_in_scope: [...S843_DISPATCHED],
+  limits: { plan_rounds: 1, build_rounds: 2, review_rounds: 2 }, ...over,
+})
+const s843Rows = (io) => io.calls.logs.filter((row) => row && row.plan_scope).map((row) => row.plan_scope)
+const s843PathsIn = (text) => {
+  const seen = []
+  for (const hit of String(text).match(/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+\.(?:mjs|json|md|js|ts)/g) || []) {
+    if (!seen.includes(hit)) seen.push(hit)
+  }
+  return seen
+}
+// The bullet block under a heading, up to the first blank line. Reading the SECTION and
+// not the document is what keeps the two bounce-brief assertions narrow: the refusal
+// sentence above the lists also names the added paths.
+const s843Bullets = (text, heading) => {
+  const lines = String(text).split('\n')
+  const at = lines.findIndex((line) => line.includes(heading))
+  if (at < 0) return null
+  const out = []
+  for (let i = at + 1; i < lines.length && lines[i].trim() !== ''; i += 1) {
+    if (lines[i].startsWith('- ')) out.push(lines[i].slice(2))
+  }
+  return out
+}
+
+test('planScopeVerdict is pure and names all four states', () => {
+  assert.equal(Object.isFrozen(PLAN_SCOPE), true)
+  assert.deepEqual(PLAN_SCOPE_VERDICTS, [
+    'plan-scope-undispatched', 'plan-scope-same', 'plan-scope-narrowed', 'plan-scope-widened',
+  ])
+  assert.equal(Object.isFrozen(PLAN_SCOPE_VERDICTS), true)
+
+  // Never compared is a STATE, not a zero: dispatched is null, never 0.
+  for (const absent of [undefined, null, [], 'a.mjs']) {
+    const v = planScopeVerdict(absent, ['a.mjs'])
+    assert.equal(v.verdict, PLAN_SCOPE.undispatched)
+    assert.equal(v.dispatched, null)
+    assert.deepEqual([v.added, v.dropped], [[], []])
+  }
+
+  const same = planScopeVerdict(['a.mjs', 'b.mjs'], ['b.mjs', 'a.mjs'])
+  assert.equal(same.verdict, PLAN_SCOPE.same)
+  assert.deepEqual([same.added, same.dropped], [[], []])
+  assert.deepEqual([same.dispatched, same.planned], [2, 2])
+
+  // A LEGAL directory prefix — crew/ alone is rejected by validateScopeEntries, so the
+  // fixture uses a two-segment prefix.
+  assert.deepEqual(validateScopeEntries(['crew/roles/']), [])
+  const prefix = planScopeVerdict(['crew/roles/'], ['crew/roles/anchors.json'])
+  assert.equal(prefix.verdict, PLAN_SCOPE.narrowed)
+  assert.deepEqual(prefix.added, [])
+  assert.deepEqual(prefix.dropped, ['crew/roles/'])
+
+  const narrowed = planScopeVerdict(S843_DISPATCHED, S843_NARROWED)
+  assert.equal(narrowed.verdict, PLAN_SCOPE.narrowed)
+  assert.deepEqual(narrowed.dropped, [...S843_DROPPED])
+  assert.deepEqual(narrowed.added, [])
+
+  // Widening DOMINATES a simultaneous drop — b359 did both, and the refusal must name
+  // the additions.
+  const both = planScopeVerdict(S843_DISPATCHED, S843_D2)
+  assert.equal(both.verdict, PLAN_SCOPE.widened)
+  assert.deepEqual(both.added, [...S843_ADDED])
+  assert.deepEqual(both.dropped, [...S843_DROPPED])
+
+  // A non-array planned scope reads as [], never as a throw.
+  const none = planScopeVerdict(['a.mjs'], undefined)
+  assert.equal(none.verdict, PLAN_SCOPE.narrowed)
+  assert.equal(none.planned, 0)
+})
+
+test('the b359 round-2 replan is refused at plan acceptance', () => {
+  const io = s843Io({ 'planner:1': s843PlanEnv(S843_D2) }, [...S843_D2])
+  const result = driveTask(s843Ctx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan-scope-widened')
+  assert.equal(result.details.stages.includes('escalate:plan-scope-widened'), true)
+  // The planner is never allowed to reach a builder on a widened surface.
+  assert.deepEqual(io.calls.assign.map((a) => a.role), ['planner'])
+})
+
+test('the widening refusal names exactly the paths that were added', () => {
+  const io = s843Io({ 'planner:1': s843PlanEnv(S843_D2) }, [...S843_D2])
+  const result = driveTask(s843Ctx(), io)
+  const why = result.details.escalation.why
+  assert.deepEqual(s843PathsIn(why), [...S843_ADDED])
+  assert.match(why, /never widen it/)
+  assert.match(why, /on the final plan round there is no revision left to bounce it to/)
+})
+
+test('a widening bounces the planner while a plan round remains', () => {
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_NARROWED),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  const result = driveTask(s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
+  assert.equal(result.status, 'done')
+  const planners = io.calls.assign.filter((a) => a.role === 'planner')
+  assert.equal(planners.length, 2)
+  assert.equal(planners[1].briefFile, `${TD}/plan-bounce-r1.md`)
+})
+
+test('the widening bounce reasons its own assignment', () => {
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_NARROWED),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  driveTask(s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
+  assert.deepEqual(io.calls.assign.filter((a) => a.role === 'planner').map((a) => a.note),
+    ['plan', 'plan-scope-widened'])
+})
+
+test('the scope note is spent on one assignment and does not leak', () => {
+  // Three planner rounds: r1 widens and scope-bounces, r2 conforms but the tech-lead
+  // says revise, r3 comes from that ORDINARY plan-check bounce and must read
+  // plan-revision again. The source-text pin cannot see this — it only proves the
+  // override exists, not that it is cleared.
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_D2),
+    'planner:2': s843PlanEnv(S843_NARROWED),
+    'planner:3': s843PlanEnv(S843_NARROWED),
+    'tech-lead:1': checkEnv('revise'), 'tech-lead:2': checkEnv('approve'),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  const ctx = s843Ctx({
+    roles: ['lead', 'planner', 'tech-lead', 'builder', 'reviewer'],
+    limits: { plan_rounds: 3, build_rounds: 2, review_rounds: 2 },
+  })
+  driveTask(ctx, io)
+  assert.deepEqual(io.calls.assign.filter((a) => a.role === 'planner').map((a) => a.note),
+    ['plan', 'plan-scope-widened', 'plan-revision'])
+})
+
+test('the widening bounce brief lists the dispatched surface and the additions', () => {
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_NARROWED),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  driveTask(s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
+  const bounce = io.calls.writes[`${TD}/plan-bounce-r1.md`]
+  assert.equal(typeof bounce, 'string')
+  assert.deepEqual(s843Bullets(bounce, 'The dispatched write surface'), [...S843_DISPATCHED])
+  assert.deepEqual(s843Bullets(bounce, 'Your files_in_scope added'), [...S843_ADDED])
+  assert.match(bounce, /Narrowing it is legal and is recorded, not refused/)
+})
+
+test('a widening bounce is accounted as a planner failure upgrade', () => {
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_NARROWED),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  driveTask(s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } }), io)
+  const upgrades = io.calls.logs
+    .filter((row) => row && row.modifier && row.modifier.modifier === 'failure-upgrade')
+    .map((row) => row.modifier.role)
+  assert.deepEqual(upgrades, ['planner'])
+})
+
+test('a bounce never moves the dispatched baseline', () => {
+  // Round 2 is measured against the DISPATCH, not against the plan just refused —
+  // otherwise one bounce launders the swap the round exists to correct.
+  const io = s843Io({ 'planner:1': s843PlanEnv(S843_D2), 'planner:2': s843PlanEnv(S843_D2) }, [...S843_D2])
+  const ctx = s843Ctx({ limits: { plan_rounds: 2, build_rounds: 2, review_rounds: 2 } })
+  const result = driveTask(ctx, io)
+  assert.equal(result.details.escalation.where, 'plan-scope-widened')
+  assert.deepEqual(ctx.files_in_scope, [...S843_DISPATCHED])
+})
+
+test('a narrowed plan is accepted and journals what it shed', () => {
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_NARROWED),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  const result = driveTask(s843Ctx(), io)
+  assert.equal(result.status, 'done')
+  const rows = s843Rows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].verdict, PLAN_SCOPE.narrowed)
+  assert.equal(rows[0].round, 1)
+  assert.deepEqual([...rows[0].dropped].sort(), [...S843_DROPPED].sort())
+  assert.deepEqual(rows[0].added, [])
+  assert.deepEqual([rows[0].dispatched, rows[0].planned], [8, 6])
+})
+
+test('a matching plan is accepted and journals its identical scope', () => {
+  const io = s843Io({
+    'planner:1': s843PlanEnv(S843_DISPATCHED),
+    'builder:1': buildEnv({ details: { files_changed: ['crew/io-contract.test.mjs'], commit_message: 'feat: the change' } }),
+    'reviewer:1': reviewEnv('pass'),
+  })
+  const result = driveTask(s843Ctx(), io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, [
+    'plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass',
+    'commit', 'suite', 'suite:cold', 'done',
+  ])
+  const rows = s843Rows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].verdict, PLAN_SCOPE.same)
+  assert.deepEqual([rows[0].added, rows[0].dropped], [[], []])
+})
+
+test('a lane with no dispatched scope is unchanged and says so', () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': planEnv(), 'builder:1': buildEnv(), 'reviewer:1': reviewEnv('pass') },
+    runs: S843_RUNS, changed: ['a.mjs', 'a.test.mjs'],
+  })
+  const result = driveTask(CTX, io)
+  assert.equal(result.status, 'done')
+  assert.deepEqual(result.details.stages, [
+    'plan:r1', 'build:r1', 'scope-gate:r1', 'lane:r1', 'review:r1', 'review:pass',
+    'commit', 'suite', 'suite:cold', 'done',
+  ])
+  const rows = s843Rows(io)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].verdict, PLAN_SCOPE.undispatched)
+  assert.equal(rows[0].dispatched, null)
+  assert.deepEqual([rows[0].added, rows[0].dropped], [[], []])
+})
+
+test('a malformed planner scope reaches the existing refusal, not a crash', () => {
+  // The DISPATCHED side is validated by every dispatch path before driveTask sees it;
+  // the planner envelope is not validated until after the plan loop. scopeMatcher
+  // dereferences both sides unconditionally, so an unguarded comparison would throw on
+  // files_in_scope: [null] and never reach the typed escalate('plan', …) below.
+  assert.throws(() => outOfScopeFiles(['crew/drive.mjs'], scopeMatcher([null])), TypeError)
+  const io = s843Io({ 'planner:1': s843PlanEnv([null]) }, [])
+  const result = driveTask(s843Ctx(), io)
+  assert.equal(result.status, 'escalation')
+  assert.equal(result.details.escalation.where, 'plan')
+  assert.match(result.details.escalation.why, /null \(empty or non-string entry\)/)
+  // Never classified: a scope that was never compared gets no verdict at all.
+  assert.deepEqual(s843Rows(io), [])
+})
+
+test("the repair shape's own scope rule is untouched", () => {
+  const io = fakeIo({
+    envelopes: { 'planner:1': triageEnv({ details: { plan_path: `${TD}/triage.md`, files_in_scope: ['b.mjs'] } }) },
+    runs: S843_RUNS, changed: ['a.mjs'],
+    files: { [`${TD}/triage.md`]: '# Triage\n\nfix the off-by-one in a.mjs\n' },
+  })
+  const result = driveTask({ ...CTX, variant: 'repair', lane: 'lane-cmd', files_in_scope: ['a.mjs', 'a.test.mjs'] }, io)
+  assert.equal(result.details.escalation.where, 'triage-scope')
+  assert.match(result.details.escalation.why,
+    /a triage that needs a wider surface is an escalation, not a re-plan/)
 })

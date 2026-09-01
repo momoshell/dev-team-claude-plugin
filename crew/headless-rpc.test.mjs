@@ -388,6 +388,37 @@ test('agent_end alone is not completion and times out', () => {
   } finally { f.cleanup() }
 })
 
+test('an rpc timeout permits a same-session re-ask with a fresh return path', () => {
+  let clock = 0
+  const f = fixture({ now: () => clock, sleep: (ms) => { clock += ms }, kill: () => {} })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    assert.throws(() => f.io.wait(first.returnPath, 0), (err) => err.stage === 'rpc-timeout')
+    const retryPath = join(f.paths.returnsDir, `${first.id}.retry.builder.json`)
+    const retry = f.io.assign({ role: 'builder', briefFile: '/retry.md', reask: { id: first.id, returnPath: retryPath } })
+    assert.deepEqual(retry, { id: first.id, returnPath: retryPath })
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 1)
+    assert.match(f.writes.at(-1).message, new RegExp(retryPath.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
+  } finally { f.cleanup() }
+})
+
+test('an rpc-aborted corpse respawns and resumes the session on its fresh return path', () => {
+  const f = fixture({ now: () => 0, sleep: () => {}, kill: () => {} })
+  try {
+    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seatDir = join(f.paths.taskDir, 'headless-rpc', 'builder')
+    writeFileSync(join(seatDir, 'stream.jsonl'), '{"type":"assistant"}\n')
+    writeFileSync(join(seatDir, 'exit'), '1')
+    assert.throws(() => f.io.wait(first.returnPath, 1), (err) => err.stage === 'rpc-aborted')
+    const retryPath = join(f.paths.returnsDir, `${first.id}.retry.builder.json`)
+    const retry = f.io.assign({ role: 'builder', briefFile: '/retry.md', reask: { id: first.id, returnPath: retryPath } })
+    assert.deepEqual(retry, { id: first.id, returnPath: retryPath })
+    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 2)
+    assert.equal(f.specs.at(-1).resume, true)
+    assert.equal(f.specs.at(-1).sessionId, 'session-1')
+  } finally { f.cleanup() }
+})
+
 test('a 1921-byte envelope with a literal newline is UNREADABLE, not a settled no-envelope', () => {
   const f = fixture()
   try {

@@ -497,6 +497,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     err.stage = `headless-${outcome}`; err.role = run.role
     const condition = capturedCondition(run, read, exists)
     if (condition) err.providerCondition = condition
+    // The grace is per ASSIGNMENT, not per cause: a turn whose budget fallback
+    // was already spent gets no second re-ask from seat-io (#838 (2)).
+    if ((fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX) err.graceSpent = true
     return err
   }
   function busy(role, sessionId) {
@@ -671,8 +674,10 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
         const current = store.reconcile(run.role)
         if (current.marker?.reservation_id === run.reservation_id) proven = store.probeEvidence(current.marker.evidence) === LIVENESS.DEAD
       }
-      if (proven) store.clear({ key: run.role, reservation_id: run.reservation_id })
-      else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id, run_id: run.runId })
+      if (proven) {
+        store.clear({ key: run.role, reservation_id: run.reservation_id })
+        runs.delete(returnPath) // a proven-dead run is not a live prior (#838)
+      } else log({ at: now(), event: 'headless-timeout-marker-retained', role: run.role, id: run.id, run_id: run.runId })
     }
     const raced = readEnvelopeOrFail(run)
     if (raced) { const stream = parseStream(run.stream, read, exists); const exitCode = parseExit(run.exit, read, exists); const outcome = classifyRun({ exitCode, signal: null, terminal: stream.terminal, sawJson: stream.sawJson, envelope: raced, timedOut: false, budgetRefused: stream.budgetRefused }); recordOutcome(run, outcome, stream, exitCode); emitUsage(run, stream.usage); return raced }

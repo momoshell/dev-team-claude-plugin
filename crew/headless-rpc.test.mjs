@@ -55,6 +55,61 @@ function settle(f, run, frames = [{ type: 'agent_settled' }]) {
   writeFileSync(run.returnPath, JSON.stringify({ assignment_id: run.id, role: 'builder', status: 'done' }))
 }
 
+function b360Frames() {
+  const frames = [{ type: 'agent_start' }]
+  for (let turn = 1; turn <= 13; turn += 1) {
+    frames.push({ type: 'turn_start' })
+    frames.push({ type: 'message_start' })
+    const toolName = turn === 13 ? 'grep' : 'bash'
+    frames.push({ type: 'tool_execution_start', toolCallId: `call_b360_${turn}`, toolName })
+    frames.push({ type: 'tool_execution_end', toolCallId: `call_b360_${turn}`, toolName, isError: false })
+    frames.push({ type: 'message_end', message: { role: 'assistant' } })
+  }
+  frames.push({ type: 'message_update' })
+  return frames
+}
+
+const STDERR_MARKER = 'PI-DYING-BREATH-b369'
+const STDERR_TEXT = `${'S'.repeat(5000)}\n${STDERR_MARKER}\n`
+
+function contextRows(rows) {
+  return rows.filter((row) => row && typeof row === 'object' && row.rpc_exit_context != null)
+}
+
+function runAbortContext({ probe = 'ESRCH', log } = {}) {
+  let clock = 0
+  let exitPath
+  let firstSleep = true
+  const rows = []
+  const f = fixture({
+    now: () => clock,
+    sleep: (ms) => {
+      clock += ms
+      if (firstSleep) {
+        firstSleep = false
+        writeFileSync(exitPath, '143')
+      }
+    },
+    kill: (_pid, signal) => {
+      if (signal === 0) {
+        const err = new Error(`probe ${probe}`)
+        err.code = probe
+        throw err
+      }
+    },
+    log: log || ((row) => rows.push(row)),
+  })
+  const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+  const seat = join(f.paths.taskDir, 'headless-rpc', 'builder')
+  exitPath = join(seat, 'exit')
+  writeFileSync(join(seat, 'stream.jsonl'), `${b360Frames().map((x) => JSON.stringify(x)).join('\n')}\n`)
+  writeFileSync(join(seat, 'stderr.log'), STDERR_TEXT)
+  let thrown = null
+  try { f.io.wait(run.returnPath, 1000) } catch (err) { thrown = err }
+  const logged = contextRows(rows)
+  return { f, run, thrown, rows, row: logged.at(-1) || null }
+}
+
 test('splitFrames preserves LF framing and chunk rest', () => {
   // readline sees three records for the U+2028 trap; byte-level LF sees two.
   const payload = Buffer.from('{"message":"a\u2028b"}\n{"message":"c"}\n')
@@ -169,6 +224,99 @@ test('abort command: abort settles before a fresh assignment', () => {
     assert.equal(f.io.wait(first.returnPath, 1).status, 'done')
     assert.equal(f.io.assign({ role: 'builder', briefFile: '/brief.md' }).id, 'd2')
   } finally { f.cleanup() }
+})
+
+test('an aborted mid-turn journals the last frame, turn, tool, gap, and stderr tail', () => {
+  const result = runAbortContext()
+  try {
+    assert.equal(result.thrown?.stage, 'rpc-aborted')
+    const rows = contextRows(result.rows)
+    assert.equal(rows.length, 1)
+    const row = rows[0].rpc_exit_context
+    assert.equal(row.outcome, 'aborted')
+    assert.equal(row.exit_code, 143)
+    assert.equal(row.last_frame, 'message_update')
+    assert.equal(row.turn_index, 13)
+    assert.equal(row.last_tool, 'grep')
+    assert.equal(row.driver_signalled, false)
+    assert.equal(row.exit_signo, 15)
+    assert.equal(row.exit_signal, 'SIGTERM')
+    assert.equal(row.group_before_signal, 'gone')
+    assert.ok(Number.isFinite(row.last_frame_at))
+    assert.ok(Number.isFinite(row.exit_seen_at))
+    assert.ok(row.exit_gap_ms > 0)
+    assert.equal(row.exit_gap_ms, row.exit_seen_at - row.last_frame_at)
+    assert.ok(row.stderr_tail.includes(STDERR_MARKER))
+    assert.equal(row.stderr_bytes, Buffer.byteLength(STDERR_TEXT))
+  } finally { result.f.cleanup() }
+})
+
+test('the same signal code distinguishes driver retirement from external death', () => {
+  const external = runAbortContext()
+  try {
+    assert.equal(external.row?.rpc_exit_context?.exit_code, 143)
+    assert.equal(external.row?.rpc_exit_context?.attribution, 'external-signal')
+    assert.equal(external.row?.rpc_exit_context?.driver_signalled, false)
+  } finally { external.f.cleanup() }
+
+  let clock = 0
+  let exitPath
+  const rows = []
+  const retired = fixture({
+    now: () => clock,
+    sleep: (ms) => { clock += ms },
+    kill: (_pid, signal) => { if (signal !== 0) writeFileSync(exitPath, '143') },
+    log: (row) => rows.push(row),
+  })
+  try {
+    const run = retired.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    const seat = join(retired.paths.taskDir, 'headless-rpc', 'builder')
+    exitPath = join(seat, 'exit')
+    writeFileSync(join(seat, 'stream.jsonl'), `${b360Frames().map((x) => JSON.stringify(x)).join('\n')}\n`)
+    writeFileSync(join(seat, 'stderr.log'), STDERR_TEXT)
+    assert.throws(() => retired.io.wait(run.returnPath, 0), (err) => err.stage === 'rpc-timeout')
+    const row = contextRows(rows).at(-1)?.rpc_exit_context
+    assert.equal(row.exit_code, 143)
+    assert.equal(row.attribution, 'driver-retired')
+    assert.equal(row.driver_signalled, true)
+    assert.equal(row.group_before_signal, 'alive')
+  } finally { retired.cleanup() }
+})
+
+test('an unprobeable process group is recorded as unknown, not gone or alive', () => {
+  const result = runAbortContext({ probe: 'EPERM' })
+  try {
+    assert.equal(result.thrown?.stage, 'rpc-aborted')
+    assert.equal(result.row?.rpc_exit_context?.group_before_signal, 'unknown')
+  } finally { result.f.cleanup() }
+})
+
+test('a clean settled envelope adds no rpc exit-context row', () => {
+  const rows = []
+  const f = fixture({ log: (row) => rows.push(row) })
+  try {
+    const run = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+    settle(f, run, [{ type: 'agent_end' }, { type: 'agent_settled' }])
+    writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'exit'), '0')
+    const envelope = f.io.wait(run.returnPath, 1)
+    assert.equal(envelope.status, 'done')
+    assert.equal(contextRows(rows).length, 0)
+  } finally { f.cleanup() }
+})
+
+test('a throwing exit-context journal remains non-load-bearing', () => {
+  const seen = []
+  const result = runAbortContext({ log: (row) => {
+    if (row && row.rpc_exit_context != null) {
+      seen.push(row)
+      throw new Error('B369-INSTRUMENTATION-BOOM')
+    }
+  } })
+  try {
+    assert.equal(seen.length, 1)
+    assert.equal(result.thrown?.stage, 'rpc-aborted')
+    assert.equal(result.thrown?.message.includes('B369-INSTRUMENTATION-BOOM'), false)
+  } finally { result.f.cleanup() }
 })
 
 test('session_resume: a second supervisor uses the persisted session', () => {

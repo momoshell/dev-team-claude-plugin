@@ -167,6 +167,62 @@ export function providerFailureKind(status) {
 // still runs out of chain, an unconsumed chain still hits the cap.
 export const FALLBACK_MAX = 1
 
+// The POSIX wait-status convention the seat wrapper records: /bin/sh writes
+// `$?`, which is 128 + signum when the worker died on a signal. Decoding it
+// back is the only way 143 stops meaning two different things (#842). An
+// unrecognised signal number is null, never a guessed name.
+export const SIGNAL_NAMES = Object.freeze({
+  1: 'SIGHUP', 2: 'SIGINT', 3: 'SIGQUIT', 4: 'SIGILL', 6: 'SIGABRT', 8: 'SIGFPE',
+  9: 'SIGKILL', 10: 'SIGBUS', 11: 'SIGSEGV', 13: 'SIGPIPE', 14: 'SIGALRM',
+  15: 'SIGTERM', 24: 'SIGXCPU', 25: 'SIGXFSZ', 30: 'SIGUSR1', 31: 'SIGUSR2',
+})
+
+// MUTATION C2: stop subtracting the 128 offset and the signal number becomes
+// the raw wait status, so the row can no longer name the signal apart from
+// the code.
+export function decodeExitStatus(exitCode) {
+  const code = Number.isFinite(exitCode) ? Math.trunc(exitCode) : null
+  if (code === null) return { code: null, signo: null, signal: null }
+  const signo = code > 128 && code < 160 ? code - 128 : null
+  return { code, signo, signal: signo === null ? null : (SIGNAL_NAMES[signo] ?? null) }
+}
+
+export const EXIT_ATTRIBUTIONS = Object.freeze({
+  DRIVER_RETIRED: 'driver-retired', EXTERNAL_SIGNAL: 'external-signal',
+  SELF_EXIT: 'self-exit', UNKNOWN: 'unknown',
+})
+
+// MUTATION C1: collapse the two causes and 143 goes back to meaning nothing.
+// `driverSignalled` is a POSITIVE observation the supervisor makes when it
+// itself delivers a signal; absence of it is never evidence of anything else,
+// which is why an undecodable code answers UNKNOWN rather than SELF_EXIT.
+export function attributeExit({ exitCode, driverSignalled }) {
+  const { code, signo } = decodeExitStatus(exitCode)
+  if (code === null) return EXIT_ATTRIBUTIONS.UNKNOWN
+  if (signo === null) return EXIT_ATTRIBUTIONS.SELF_EXIT
+  return driverSignalled ? EXIT_ATTRIBUTIONS.DRIVER_RETIRED : EXIT_ATTRIBUTIONS.EXTERNAL_SIGNAL
+}
+
+export const STDERR_TAIL_BYTES = 4096
+
+// The LAST bytes, because what a dying worker wrote is at the END of the file:
+// #842's stderr.log held one benign STARTUP line for a ten-minute turn and
+// nothing from the turn itself. A missing or unreadable file is an ABSENCE
+// (`bytes: null`), never a zero, and this never throws.
+// MUTATION B1: take the HEAD instead of the TAIL and the row carries only the
+// startup line again.
+// MUTATION B2: report the tail's length as the byte count and the row silently
+// understates how much stderr the worker wrote.
+export function stderrTail(path, { readFileSync, existsSync, limit = STDERR_TAIL_BYTES } = {}) {
+  if (!path || !existsSync(path)) return { bytes: null, tail: null, truncated: false, reason: 'absent' }
+  try {
+    const raw = readFileSync(path)
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(String(raw), 'utf8')
+    const cut = Math.max(0, buf.length - limit)
+    return { bytes: buf.length, tail: buf.subarray(cut).toString('utf8'), truncated: cut > 0, reason: null }
+  } catch { return { bytes: null, tail: null, truncated: false, reason: 'unreadable' } }
+}
+
 // The named signals a degraded run can carry. Each is a POSITIVE observation
 // about how the worker ENDED; absence of evidence is never one of them.
 export const DEGRADED_SIGNALS = { EXIT_NONZERO: 'exit-nonzero', EXIT_SIGNAL: 'exit-signal', TERMINAL_MISSING: 'terminal-missing' }

@@ -548,6 +548,9 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
     const degraded = outcome === 'ok-degraded' ? degradedSignals({ exitCode, signal, terminal: stream.terminal }) : null
     log({ at: now(), headless_outcome: outcome, exit_code: exitCode, signal, terminal_reason: stream.terminalReason, lines: stream.lines, stream: run.stream, ...(degraded ? { degraded } : {}), ...(stream.providerFailure ? { provider_failure: stream.providerFailure } : {}) })
   }
+  function graceSpentFor(run) {
+    return (fallbacksUsed.get(`${run.role}:${run.id}`) ?? 0) >= FALLBACK_MAX
+  }
   function outcomeError(run, outcome, message) {
     const err = new Error(message || `headless ${outcome}: seat ${run.role} produced no valid envelope at ${run.returnPath}`)
     err.stage = `headless-${outcome}`; err.role = run.role
@@ -644,6 +647,7 @@ export function headlessIo({ crew, paths, taskDir, checkout, adapters, bin, deps
       emitUsage(run, stream.usage)
       const condition = capturedCondition(run, read, exists)
       if (condition) err.providerCondition = condition
+      if (graceSpentFor(run)) err.graceSpent = true
       throw err
     }
   }

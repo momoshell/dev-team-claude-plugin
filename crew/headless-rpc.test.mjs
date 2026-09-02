@@ -536,18 +536,41 @@ test('agent_end alone is not completion and times out', () => {
   } finally { f.cleanup() }
 })
 
-test('an rpc timeout permits a same-session re-ask with a fresh return path', () => {
-  let clock = 0
-  const f = fixture({ now: () => clock, sleep: (ms) => { clock += ms }, kill: () => {} })
-  try {
-    const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
-    assert.throws(() => f.io.wait(first.returnPath, 0), (err) => err.stage === 'rpc-timeout')
-    const retryPath = join(f.paths.returnsDir, `${first.id}.retry.builder.json`)
-    const retry = f.io.assign({ role: 'builder', briefFile: '/retry.md', reask: { id: first.id, returnPath: retryPath } })
-    assert.deepEqual(retry, { id: first.id, returnPath: retryPath })
-    assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, 1)
-    assert.match(f.writes.at(-1).message, new RegExp(retryPath.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')))
-  } finally { f.cleanup() }
+test('an rpc timeout reuses an alive seat but replaces a killed seat with no exit marker', () => {
+  for (const { killGroup } of [{ killGroup: false }, { killGroup: true }]) {
+    let clock = 0
+    let groupAlive = true
+    const f = fixture({
+      now: () => clock,
+      sleep: (ms) => { clock += ms },
+      kill: (_pid, signal) => {
+        if (signal === 0) {
+          if (!groupAlive) {
+            const error = new Error('group is gone')
+            error.code = 'ESRCH'
+            throw error
+          }
+          return
+        }
+        if (killGroup) groupAlive = false
+      },
+    })
+    try {
+      const first = f.io.assign({ role: 'builder', briefFile: '/brief.md' })
+      writeFileSync(join(f.paths.taskDir, 'headless-rpc', 'builder', 'pgid'), '701')
+      assert.throws(() => f.io.wait(first.returnPath, 0), (err) => err.stage === 'rpc-timeout')
+      const exitPath = join(f.paths.taskDir, 'headless-rpc', 'builder', 'exit')
+      assert.equal(existsSync(exitPath), false)
+      const retryPath = join(f.paths.returnsDir, `${first.id}.retry.builder.json`)
+      const retry = f.io.assign({ role: 'builder', briefFile: '/retry.md', reask: { id: first.id, returnPath: retryPath } })
+      assert.deepEqual(retry, { id: first.id, returnPath: retryPath })
+      assert.equal(f.commands.filter((entry) => entry.kind === 'spawn').length, killGroup ? 2 : 1)
+      if (killGroup) {
+        assert.equal(f.specs.at(-1).resume, true)
+        assert.equal(f.specs.at(-1).sessionId, 'session-1')
+      }
+    } finally { f.cleanup() }
+  }
 })
 
 test('an rpc-aborted corpse respawns and resumes the session on its fresh return path', () => {

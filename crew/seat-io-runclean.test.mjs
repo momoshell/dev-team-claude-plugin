@@ -7,7 +7,7 @@ import {
 import { tmpdir } from 'node:os'
 import { basename, dirname, join } from 'node:path'
 import {
-  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
+  COLD_PATH_FALLBACK_ROOTS, COLD_PATH_MIN_SHARED, cellFailureKind, claudeRefusalFrames, claudeTranscriptPaths, coldGuardNames, coldPathCollision, coldPathRoots, coldRootCollision, DESCENDANT_STORE_DIRS, descendantCapture, emitAdapter, HEADLESS_RPC_TRANSPORT, HEADLESS_TRANSPORT, LIVENESS_MISSES_TO_DIE, LIVENESS_PROBE_MS, neutralColdPath, REASK_SETTLE_POLLS, REASK_TIMEOUT_S, SEAT_DIED_STAGE, SEAT_LIVENESS_EVENT, SUBSTRATE_GRACE_MS, paneRetryFrame, piRefusalFrames, piSessionDir, piTranscriptPaths,
   providerConditionDetail, paneUsageFrames, readEnvelopeFile, reaskDecision, recogniseProviderRetry, saveCrew, seatIo, seatRetryDecision, settleSeatTeardown,
   SEAT_RETRY_EVENTS, SEAT_RETRY_KINDS, SEAT_RETRY_MAX,
   SEAT_REFUSAL_STAGE, SILENCE_REASK_MS, TRANSCRIPT_STALE_MS, WAIT_POLL_MS, waitForEnvelope, waitState, transcriptGrowth, silenceReaskDecision,
@@ -1190,6 +1190,22 @@ test('emitAdapter maps only finite heartbeat timestamps to the session writer', 
   assert.deepEqual(calls, [{ adw_id: 'adw-heartbeat', target: 'session', at: 12345 }])
 })
 
+test('emitAdapter keeps unmeasured seat-reclaim counters null', () => {
+  const rows = []
+  const emitter = {
+    adwId: 'adw-reclaim-null',
+    emit: (fn) => fn({ recordSeatReclaim: (row) => rows.push(row) }),
+  }
+  emitAdapter(emitter)({
+    kind: 'seat-reclaim', transport: HEADLESS_TRANSPORT, seat_id: 'd1',
+    reservation_id: 'res-1', sweep_id: 'sweep-1', outcome: 'reclaimed',
+  })
+  assert.equal(rows.length, 1)
+  for (const key of ['captures', 'missed_snapshots', 'discovery_failures', 'captured', 'signalled', 'reclaimed', 'live', 'identity_refused', 'probe_unknown']) {
+    assert.equal(rows[0][key], null)
+  }
+})
+
 test('seatIo stamps a pane heartbeat from the probe timestamp before the envelope arrives', () => {
   withRepo({ dirty: false }, (fixture) => {
     let clock = 0
@@ -1500,7 +1516,7 @@ const MALFORMED_REASK = '{"assignment_id":"d1","role":"builder","status":"done",
 const MALFORMED_REASK_2 = '{"assignment_id":"d1","role":"builder","status":"done","summary":"second\ntry"}'
 const VALID_REASK = JSON.stringify({ assignment_id: 'd1', role: 'builder', status: 'done', summary: 'finished the build', artifacts: [], details: {} })
 
-function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null } = {}) {
+function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [], assignFails = [], onWait = null, unmeasuredFirst = false } = {}) {
   const root = scratchDir(`seat-transport-reask-${transport}-`)
   const paths = { dir: root, taskDir: join(root, 'task'), returnsDir: join(root, 'returns') }
   mkdirSync(paths.taskDir, { recursive: true }); mkdirSync(paths.returnsDir, { recursive: true })
@@ -1513,9 +1529,15 @@ function makeTransportReaskHarness({ transport = HEADLESS_TRANSPORT, waits = [],
       assigns.push(spec)
       const failure = assignFails[assigns.length - 1]
       if (failure) throw failure
-      const id = spec?.reask?.id || `d${assigns.length}`
-      const returnPath = spec?.reask?.returnPath || join(paths.returnsDir, `${id}.builder.json`)
-      return { id, returnPath, runId: `run-${assigns.length}` }
+      const n = assigns.length
+      const id = spec?.reask?.id || (unmeasuredFirst && n === 1 ? null : `d${n}`)
+      const returnPath = spec?.reask?.returnPath || join(paths.returnsDir, `${id || 'unmeasured'}.builder.json`)
+      const transportDir = join(paths.taskDir, DESCENDANT_STORE_DIRS[transport])
+      mkdirSync(transportDir, { recursive: true })
+      writeFileSync(join(transportDir, '.builder.active.json'), JSON.stringify({
+        key: 'builder', id: `run-${n}`, role: 'builder', reservation_id: `res-${n}`, phase: 'running',
+      }))
+      return { id, returnPath }
     },
     wait(path, seconds) {
       waitCalls.push({ path, seconds })
@@ -1754,12 +1776,64 @@ test('a lost headless seat is re-asked on a fresh path with its original id and 
       assert.equal(row.ceiling_s, 37)
       assert.equal(Number.isFinite(row.spent_ms), true)
       const brief = readFileSync(join(harness.paths.taskDir, `retry-${harness.first.id}.builder.md`), 'utf8')
-      assert.match(brief, /WORK is not in question/)
+      assert.match(brief, /may be PARTIAL/)
+      assert.match(brief, /half-applied/)
+      assert.doesNotMatch(brief, /WORK is not in question/)
       assert.match(brief, new RegExp(`previous attempt was lost \\(${row.cause}\\)`))
       assert.match(brief, new RegExp(`Write your ReturnEnvelope as valid JSON to ${retry.reask.returnPath.replace(/[.*+?^${}()|[\\]\\]/g, '\\\\$&')}`))
       assert.match(brief, new RegExp(`Then print exactly: CREW-DONE builder ${harness.first.id}`))
     } finally { harness.cleanup() }
   }
+})
+
+test('a lost-seat retry caps a ceiling above REASK_TIMEOUT_S without doubling it', () => {
+  const ceilingS = REASK_TIMEOUT_S + 300
+  const harness = makeTransportReaskHarness({
+    waits: [
+      () => { throw stagedReaskFailure('headless-timeout') },
+      () => { throw stagedReaskFailure('headless-timeout') },
+    ],
+  })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, ceilingS))
+    assert.equal(harness.waitCalls[1].seconds, REASK_TIMEOUT_S)
+    assert.notEqual(harness.waitCalls[1].seconds, ceilingS * 2)
+  } finally { harness.cleanup() }
+})
+
+test('a lost seat with no measured assignment id declines without naming a retry file', () => {
+  const harness = makeTransportReaskHarness({
+    unmeasuredFirst: true,
+    waits: [() => { throw stagedReaskFailure('headless-timeout') }],
+  })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 5), (error) => {
+      assert.match(error.message, /no recorded assignment id/)
+      return true
+    })
+    assert.equal(harness.assigns.length, 1)
+    const row = harness.logs.find((candidate) => candidate.event === 'seat-timeout-reask')
+    assert.equal(row.id, null)
+    assert.equal(row.to_return_path, null)
+    assert.equal(readdirSync(harness.paths.taskDir).some((name) => /^retry-retry\..*\.md$/.test(name)), false)
+  } finally { harness.cleanup() }
+})
+
+test('a seat death raised by the lost-seat re-ask is journalled and measured as a cell failure', () => {
+  const harness = makeTransportReaskHarness({
+    waits: [
+      () => { throw stagedReaskFailure('headless-timeout') },
+      () => { throw stagedReaskFailure(SEAT_DIED_STAGE) },
+    ],
+  })
+  try {
+    assert.throws(() => harness.io.wait(harness.first.returnPath, 5), (error) => {
+      assert.equal(error.stage, SEAT_DIED_STAGE)
+      return true
+    })
+    assert.ok(harness.logs.some((row) => row.seat_died === 'builder'))
+    assert.ok(harness.events.some((event) => event.kind === 'cell-failure' && event.failure === 'seat-died'))
+  } finally { harness.cleanup() }
 })
 
 test('a second lost-seat failure escalates without buying a third assignment', () => {
@@ -1819,7 +1893,10 @@ test('a spent budget grace and a clean no-envelope never buy a lost-seat retry',
   ]) {
     const harness = makeTransportReaskHarness({ transport, waits: [() => { throw error }] })
     try {
-      assert.throws(() => harness.io.wait(harness.first.returnPath, 5))
+      let thrown
+      try { harness.io.wait(harness.first.returnPath, 5) } catch (error) { thrown = error }
+      assert.ok(thrown)
+      if (error.stage !== 'rpc-no-envelope') assert.match(thrown.message, /grace/)
       assert.equal(harness.assigns.length, 1)
       const retryRows = harness.logs.filter((row) => row.event === 'seat-timeout-reask' || row.event === 'seat-abort-reask')
       assert.equal(retryRows.length, error.stage === 'rpc-no-envelope' ? 0 : 1)

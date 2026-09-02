@@ -775,13 +775,18 @@ export function headlessRpcIo({ crew, paths, taskDir, checkout, adapters, bin, d
     }
     const groupBefore = probeGroup(seat)
     abort(turn.role, { settleMs: ABORT_SETTLE_MS })
-    if (!turn.state.settled) proveGroupDead(seat)
+    const proof = turn.state.settled ? null : proveGroupDead(seat)
+    const discardSeat = !!proof && proof.liveness !== LIVENESS.ALIVE
     // SIGTERM/abort handling can append a complete frame after the last
     // abort poll; drain it before the turn is cleared and usage is emitted.
     pollSeat(seat)
     journalExitContext({ seat, turn, outcome: 'timeout', exitCode: parseExit(seat.exit, read, exists), envelope: null, groupBefore })
     emitUsage(turn, seat, turn.usage)
     finishTurn(seat)
+    if (discardSeat) {
+      try { closeFd(seat.fd) } catch { /* the fd belongs to a group that is gone */ }
+      seats.delete(seat.role)
+    }
     throw staged('rpc-timeout', `rpc timeout: seat ${turn.role} did not produce an envelope at ${returnPath}`, turn.role)
   }
   function entries(role, { since } = {}) {

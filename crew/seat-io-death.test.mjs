@@ -8,6 +8,7 @@ import {
   DESCENDANT_DIR,
   HEADLESS_RPC_TRANSPORT,
   HEADLESS_TRANSPORT,
+  REASK_TIMEOUT_S,
   SEAT_DIED_STAGE,
   WAIT_POLL_MS,
   seatIo,
@@ -17,7 +18,8 @@ import {
 const ROLE = 'builder'
 const ROOT_PID = 999001
 const ROOT_START = 'Sun Aug 30 22:16:18 2026'
-const BUDGET_S = 120
+const BUDGET_S = 900
+const RETRY_WINDOW_MS = Math.min(BUDGET_S, REASK_TIMEOUT_S) * 1000
 
 function recordPath(taskDir, transport, seatId) {
   const dirName = transport === HEADLESS_RPC_TRANSPORT ? 'headless-rpc' : 'headless'
@@ -275,8 +277,8 @@ test('a measured settle is death even when the current ps table is unavailable',
 test('alive, unidentified, and unusable ps readings are absences that keep the transport outcome', () => {
   for (const ps of ['alive', 'unidentified', 'unknown']) {
     withRun({ ps }, (run) => {
-      assert.equal(run.elapsedMs, run.budgetMs * 2)
-      assert.equal(run.ticks, run.budgetMs * 2 / WAIT_POLL_MS)
+      assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)
+      assert.equal(run.ticks, (run.budgetMs + RETRY_WINDOW_MS) / WAIT_POLL_MS)
       assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
       assert.equal(run.diedRow, null)
     })
@@ -285,12 +287,12 @@ test('alive, unidentified, and unusable ps readings are absences that keep the t
 
 test('a missing current record and a different dispatch record never kill this wait', () => {
   withRun({ record: false }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs * 2)
+    assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
     assert.equal(run.diedRow, null)
   })
   withRun({ recordSeatId: 'd1', dispatchId: 'd2' }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs * 2)
+    assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
     assert.equal(run.diedRow, null)
   })
@@ -389,15 +391,15 @@ test('the seat_died row measures wait budget and leaves final turn usage unknown
 
 test('diagnostic failures remain load-bearing only for evidence, not for the requested delay', () => {
   withRun({ ps: 'alive', captureThrows: true }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs * 2)
+    assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
   })
   withRun({ ps: 'alive', growthThrows: true }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs * 2)
+    assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
   })
   withRun({ ps: 'absent', record: false, corruptStore: true }, (run) => {
-    assert.equal(run.elapsedMs, run.budgetMs * 2)
+    assert.equal(run.elapsedMs, run.budgetMs + RETRY_WINDOW_MS)
     assert.notEqual(run.error?.stage, SEAT_DIED_STAGE)
   })
 })

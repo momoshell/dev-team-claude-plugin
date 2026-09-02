@@ -1344,11 +1344,11 @@ export function emitAdapter(emitter, crew = null) {
         owner_liveness: event.owner_liveness ?? null, root_pid: event.root_pid ?? null,
         root_pgid: event.root_pgid ?? null, root_start: event.root_start ?? null,
         root_liveness: event.root_liveness ?? null, root_settled: event.root_settled ?? null,
-        captures: event.captures ?? 0, missed_snapshots: event.missed_snapshots ?? 0,
-        discovery_failures: event.discovery_failures ?? 0, captured: event.captured ?? 0,
-        signalled: event.signalled ?? 0, reclaimed: event.reclaimed ?? 0,
-        live: event.live ?? 0, identity_refused: event.identity_refused ?? 0,
-        probe_unknown: event.probe_unknown ?? 0, outcome: event.outcome,
+        captures: event.captures ?? null, missed_snapshots: event.missed_snapshots ?? null,
+        discovery_failures: event.discovery_failures ?? null, captured: event.captured ?? null,
+        signalled: event.signalled ?? null, reclaimed: event.reclaimed ?? null,
+        live: event.live ?? null, identity_refused: event.identity_refused ?? null,
+        probe_unknown: event.probe_unknown ?? null, outcome: event.outcome,
         reason: event.reason ?? null, coverage_outcome: event.coverage_outcome,
         coverage_reason: event.coverage_reason ?? null, created_at: event.created_at ?? null,
       }))
@@ -1568,7 +1568,7 @@ export function readEnvelopeFile(returnPath, deps = {}) {
 // does not own is a FABRICATED recovery, and the escalation must say which.
 export function reaskDecision({ kind, transport, surfaceId, alive, asked, reassignable = false }) {
   if (kind !== 'unusable-envelope') return { ask: false, why: `failure kind ${String(kind)} is not an unparseable envelope, so there is nothing a re-emit could fix` }
-  if (asked) return { ask: false, why: `a re-ask was already sent for this envelope; the bound is ${REASK_MAX} per assignment` }
+  if (asked) return { ask: false, why: `the re-ask grace for this assignment is already spent; the bound is ${REASK_MAX} per assignment, shared across causes` }
   if (transport === DEFAULT_TRANSPORT) {
     if (!surfaceId) return { ask: false, why: 'the seat has no recorded surface, so there is no live participant to ask' }
     if (alive !== true) return { ask: false, why: `the pane probe returned ${alive === false ? 'probe-dead' : 'probe-unknown'}, and a re-ask to a seat that is not measurably alive is a fabricated recovery` }
@@ -2083,7 +2083,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
   const resolveBin = deps.resolveWorkerBin || resolveWorkerBin
   let seq = 0
   const seatFor = new Map()
-  const reasked = new Set()   // returnPaths already re-asked — the bound, per assignment
+  const reasked = new Set()   // assignments whose one shared re-ask grace is spent
+  const graceKey = (info, returnPath) => `${info?.role || 'unknown'}:${info?.id ?? returnPath}`
+  const graceIsSpent = (info, returnPath, err) => {
+    const key = graceKey(info, returnPath)
+    if (err?.graceSpent === true) reasked.add(key)
+    return reasked.has(key)
+  }
+  const spendGrace = (info, returnPath) => { reasked.add(graceKey(info, returnPath)) }
   const refusalFloor = new Map()      // role -> the instant after which a frame is THIS request's
   const lastRefusal = new Map()       // role -> the last refusal frame seen, the evidence a failure quotes
   const lastGrowth = new Map()        // returnPath -> { at, latest }, the last measured transcript reading
@@ -2582,7 +2589,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       transport: transportName,
       surfaceId,
       alive,
-      asked: reasked.has(returnPath),
+      asked: graceIsSpent(info, returnPath, err),
       reassignable,
     })
     const note = (outcome, extra = {}) => {
@@ -2595,7 +2602,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('declined', { why: decision.why })
       return { envelope: null, error: err }
     }
-    reasked.add(returnPath)
+    spendGrace(info, returnPath)
     const staleRaw = typeof err.raw === 'string' ? err.raw : null
     const reaskId = info?.id || 'reask'
     const briefPath = join(paths.taskDir, `reask-${reaskId}.${role}.md`)
@@ -2704,9 +2711,14 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
     // io that exposes both halves of the seam is one this driver can ask again.
     const reassignable = !!transport && REASK_TRANSPORTS.has(transportName) && typeof transport.assign === 'function' && typeof transport.wait === 'function'
     const kind = cellFailureKind(err)
-    const decision = seatRetryDecision({ kind: cellFailureKind(err), transport: transportName, reassignable, asked: reasked.has(returnPath), graceSpent: err?.graceSpent === true })
-    const retryId = info?.id || 'retry'
-    const retryPath = join(paths.returnsDir, `${retryId}.retry.${role}.json`)
+    // An UNMEASURED assignment id is null with a reason, never the literal
+    // 'retry': that literal NAMES a return path, so two seats that both lost
+    // their id would collect on the same file (#855).
+    const retryId = typeof info?.id === 'string' && info.id.trim() ? info.id : null
+    const retryPath = retryId ? join(paths.returnsDir, `${retryId}.retry.${role}.json`) : null
+    const decision = retryId === null
+      ? { retry: false, why: 'the lost seat has no recorded assignment id, so a re-ask could not name a return path that is its own' }
+      : seatRetryDecision({ kind, transport: transportName, reassignable, asked: graceIsSpent(info, returnPath, err), graceSpent: err?.graceSpent === true })
     const fromRunId = info?.workerId ?? null
     const measuredAt = now()
     const spentMs = Number.isFinite(dispatchStartedAt) && Number.isFinite(measuredAt) ? measuredAt - dispatchStartedAt : null
@@ -2723,17 +2735,17 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('declined', { why })
       return { envelope: null, error: err }
     }
-    reasked.add(returnPath)
+    spendGrace(info, returnPath)
     const briefPath = join(paths.taskDir, `retry-${retryId}.${role}.md`)
     const spentForBrief = Number.isFinite(spentMs) ? `${Math.max(0, spentMs) / 1000} seconds` : 'an unknown amount of time'
     try {
       writeFileSync(briefPath, [
         `# Re-ask ${retryId}: the previous seat attempt was lost`,
         '',
-        'Your WORK is not in question. This is a bounded recovery of the same logical assignment.',
-        `The previous attempt was lost (${kind}) after ${spentForBrief}.`,
+        `The previous attempt was lost (${kind}) after ${spentForBrief}: it was cut off mid-flight, so whatever it had already written may be PARTIAL.`,
+        'This is a bounded recovery of the same logical assignment. Read the repo state before you trust it — edits from the lost attempt may be half-applied.',
+        'Finish the assignment from what is actually there, and report status: done only when the work is complete.',
         `Write your ReturnEnvelope as valid JSON to ${retryPath}.`,
-        'Change nothing about the work you already did and make no repo edits.',
         `Then print exactly: CREW-DONE ${role} ${retryId}`,
         '',
         'This is the only lost-seat re-ask; a second lost attempt escalates.',
@@ -2744,8 +2756,8 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       note('undelivered', { why: sendErr?.message || String(sendErr), attempt: 1 })
       return { envelope: null, error: err }
     }
-    // A re-ask spends operator TIME at the ceiling it was given; it never raises the budget.
-    const window = timeoutS
+    // A re-ask spends operator TIME at the smaller of the original timeout ceiling and the fixed re-ask cap; it never raises the budget.
+    const retryWindowS = Math.min(timeoutS, REASK_TIMEOUT_S)
     let collectPath = retryPath
     let secondErr = null
     for (let attempt = 0; attempt < SEAT_RETRY_MAX; attempt += 1) {
@@ -2757,8 +2769,9 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           deliveryAttempts = polls + 1
           try {
             const assigned = transport.assign({ role, briefFile: briefPath, reask: { id: retryId, returnPath: retryPath } })
-            toRunId = assigned?.runId ?? assigned?.run_id ?? null
-            bindHeadlessIdentity(info, assigned)
+            let identity = null
+            try { identity = bindHeadlessIdentity(info, assigned) } catch { identity = null }
+            toRunId = identity?.workerId ?? null
             break
           } catch (assignErr) {
             if (!REASK_BUSY_STAGES.has(assignErr?.stage) || polls >= REASK_SETTLE_POLLS) throw assignErr
@@ -2775,7 +2788,7 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
       }
       try {
         const waitStartedAt = now()
-        const env = withHeadlessWatch(info, () => transport.wait(collectPath, window), { returnPath: collectPath, timeoutS: window, waitStartedAt })
+        const env = withHeadlessWatch(info, () => transport.wait(collectPath, retryWindowS), { returnPath: collectPath, timeoutS: retryWindowS, waitStartedAt })
         if (env != null) {
           err.message = `${err.message}\n[re-ask recovered: the lost seat returned a usable envelope and the run continued]`
           err.seatRetry = { attempted: true, delivered: true, recovered: true }
@@ -3022,7 +3035,13 @@ export function seatIo(crew, paths, checkout, emitter, adapters, args = {}, deps
           if (recovery) failure = recovery.error || err
         }
         if (SEAT_RETRY_KINDS.includes(cellFailureKind(err))) {
-          const recovery = retryLostSeat({ returnPath, info, transport, err, timeoutS, waitStartedAt })
+          let recovery = null
+          try {
+            recovery = retryLostSeat({ returnPath, info, transport, err, timeoutS, waitStartedAt })
+          } catch (retryErr) {
+            if (retryErr?.stage !== SEAT_DIED_STAGE) throw retryErr
+            failure = retryErr
+          }
           if (recovery?.envelope != null) {
             noteCellFailure(info?.role, info?.id, cellFailureKind(err), recovery.error || err)
             settled = recovery.envelope

@@ -935,6 +935,24 @@ test('a budget fallback marks the escaped error as spent and a first failure doe
   } finally { first.cleanup() }
 })
 
+test('a spent budget fallback marks an unparseable envelope as grace spent', () => {
+  const f = fallbackFixture((n, runDir, returnsDir) => {
+    if (n === 1) return writeBudgetRefusal(runDir)
+    writeFileSync(join(returnsDir, 'd1.tech-lead.json'), `{"assignment_id":"d1","role":"tech-lead","status":"done","summary":"second
+try"}`)
+    writeFileSync(join(runDir, 'stream.jsonl'), `${JSON.stringify({ type: 'result', terminal_reason: 'completed', subtype: 'success' })}\n`)
+    writeFileSync(join(runDir, 'exit'), '0')
+  })
+  try {
+    const run = f.io.assign({ role: 'tech-lead', briefFile: join(f.taskDir, 'brief.md') })
+    assert.throws(() => f.io.wait(run.returnPath, 600), (err) => {
+      assert.equal(err.stage, 'headless-parse-error')
+      assert.equal(err.graceSpent, true)
+      return true
+    })
+  } finally { f.cleanup() }
+})
+
 test('a fallback inherits the original absolute deadline and a late declared cell does not spawn', () => {
   const clock = { t: 0 }; const deadline = 600_000
   const f = fallbackFixture(() => {}, { clock, onSleep: ({ clock: c, runDir, spawns }) => {

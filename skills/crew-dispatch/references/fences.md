@@ -7,7 +7,9 @@ not yet a register the driver can safely consume.
 ## Two-pass compile
 
 Start with a register whose lane has the intended `files` and an empty reads
-list:
+list. `make-brief` accepts and ignores an `external: true` marker, so this same
+two-pass compile recipe also works unchanged on a register carrying an external
+entry:
 
 ```json
 {

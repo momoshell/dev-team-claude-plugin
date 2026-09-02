@@ -661,6 +661,39 @@ test('--discover-reads uses the lane brief task name for generated requests', ()
   assert.equal(compiled.status, 0, `${compiled.stderr}\n${compiled.stdout}`)
 })
 
+test('--discover-reads and compile accept an external true marker and drop it', () => {
+  const root = fixture('discover-reads-external-marker')
+  const fencesPath = put(root, 'external-fences.json', `${JSON.stringify({
+    lanes: [
+      { lane: 'own', files: ['lib/widget.mjs'], reads: [] },
+      { lane: 'carried', files: ['lib/caller.mjs'], reads: [], external: true },
+    ],
+  }, null, 2)}\n`)
+  const requestPath = request(root, { where: ['lib/widget.mjs'] })
+  const gathered = gatherFences({ fencesPath, checkout: root })
+  assert.deepEqual(gathered, [
+    { lane: 'carried', files: ['lib/caller.mjs'], reads: [] },
+    { lane: 'own', files: ['lib/widget.mjs'], reads: [] },
+  ])
+  const discovered = run(root, [
+    '--discover-reads', 'own', '--request', requestPath, '--checkout', root, '--fences', fencesPath,
+  ])
+  assert.equal(discovered.status, 0, `${discovered.stderr}\n${discovered.stdout}`)
+  const compiled = run(root, [
+    '--request', requestPath, '--checkout', root, '--fences', fencesPath,
+    '--lane', 'own', '--out', join(root, 'external-marker.md'), '--force',
+  ])
+  assert.equal(compiled.status, 0, `${compiled.stderr}\n${compiled.stdout}`)
+})
+
+test('gatherFences refuses an external marker whose value is not true', () => {
+  const root = fixture('invalid-external-marker')
+  const fencesPath = put(root, 'fences.json', `${JSON.stringify({
+    lanes: [{ lane: 'own', files: ['lib/widget.mjs'], external: 'yes' }],
+  }, null, 2)}\n`)
+  assert.throws(() => gatherFences({ fencesPath, checkout: root }), (error) => error.reason === 'bad-fences')
+})
+
 test('--discover-reads prints an empty register when every coupled source is fenced', () => {
   const root = fixture('discover-reads-empty', { citingComment: true })
   const fencesPath = put(root, 'fences.json', `${JSON.stringify({

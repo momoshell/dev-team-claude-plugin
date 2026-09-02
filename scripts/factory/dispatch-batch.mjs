@@ -3,7 +3,7 @@
 // It owns the ordered checks between a batch request directory and background
 // crew runs; every failed check is a named refusal and stops the batch.
 
-import { appendFileSync, closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, writeFileSync } from 'node:fs'
+import { appendFileSync, closeSync, existsSync as fsExistsSync, openSync, readFileSync as fsReadFileSync, readdirSync as fsReaddirSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { spawn as childSpawn, spawnSync } from 'node:child_process'
@@ -14,7 +14,7 @@ import { assertHostQuiet, hostLoad, loadPolicy, withSuiteSlot } from '../../crew
 import { protectedHitsIn, resolveProtectedPaths } from '../../crew/protected-paths.mjs'
 import { slug } from '../../crew/slug.mjs'
 import { LADDER_BANDS, PROPOSAL_BLOCK, TIER_NAMES, extractSymbols, gatherFences, isTripwireFile, validateRequest } from './make-brief.mjs'
-import { archivedLanes, crewRoot, discoverLanes, laneActive, readJournal } from './lane-watch.mjs'
+import { archivedLanes, crewRoot, discoverLanes, DRIVER_GONE_PERIODS, HEARTBEAT_PERIOD_MS, laneActive, readJournal } from './lane-watch.mjs'
 
 const BATCH_EMPTY = 'batch-empty'
 const BATCH_UNREADABLE = 'batch-unreadable'
@@ -45,6 +45,7 @@ const SEAT_FLOOR_CONFLICT = 'seat-floor-conflict'
 const CROSS_BATCH_COLLISION = 'cross-batch-collision'
 const PLAN_ADOPT_UNREADABLE = 'plan-adopt-unreadable'
 const EXTERNAL_FENCE_STALE = 'external-fence-stale'
+const EXTERNAL_FENCE_ABANDONED = 'external-fence-abandoned'
 
 export const REFUSAL_REASONS = Object.freeze([
   BATCH_EMPTY,
@@ -76,6 +77,7 @@ export const REFUSAL_REASONS = Object.freeze([
   CROSS_BATCH_COLLISION,
   PLAN_ADOPT_UNREADABLE,
   EXTERNAL_FENCE_STALE,
+  EXTERNAL_FENCE_ABANDONED,
 ])
 
 export const CROSS_BATCH_UNKNOWN_PREFIX = 'dispatch-batch: WARNING cross-batch-unknown:'
@@ -85,6 +87,9 @@ export const CROSS_BATCH_BLIND_SPOT = 'BLIND SPOT: a lane booted without --fence
 // live lane it came from and that it was never counted in the arrival total checkArrival derives (#845).
 export const EXTERNAL_FENCE_PREFIX = 'dispatch-batch: external-fence'
 export const EXTERNAL_REGISTER_NAME = 'dispatch.external.fences.json'
+
+export const ROLES_ANCHOR_MANIFEST = 'crew/roles/anchors.json'
+export const ROLES_ANCHOR_COMPANIONS = Object.freeze(['crew/roles/planner.md', 'crew/roles/tech-lead.md'])
 
 // The scan reads anchors.json manifests, which are machine-readable. Prose file:line
 // citations in .md files are not, and a heuristic over prose would refuse every doc that
@@ -140,6 +145,12 @@ export const ADOPT_BLOCK = [
   'them. If they do not hold, AMEND the smallest part that is wrong and say what you',
   'changed and why. Do not re-plan from nothing — re-deriving a plan that already holds',
   'is the cost this block exists to remove.',
+  '',
+  'Your files_in_scope may never exceed the dispatched write surface this lane was given,',
+  'named under files_in_scope in the Conventions section of this brief. The adopted plan was',
+  'scoped to a PREVIOUS attempt and this fence may be NARROWER: narrow the adopted scope to',
+  'that surface and say so. The scope guard measures the fence you were dispatched with,',
+  'never the one the archive remembers.',
   '',
 ].join('\n')
 export const ADOPT_FINDINGS_CLAUSE = [
@@ -433,6 +444,7 @@ export function normalDeps(deps = {}) {
     writeFileSync: deps.writeFileSync || writeFileSync,
     appendFileSync: deps.appendFileSync || appendFileSync,
     readdirSync: deps.readdirSync || fsReaddirSync,
+    mkdirSync: deps.mkdirSync || mkdirSync,
     home: deps.home || homedir(),
     spawn: deps.spawn || ((options) => options?.background
       ? spawnBackground(options)
@@ -668,20 +680,24 @@ export function relatedLanes(graph, a, b) {
   return Boolean(graph.ancestors.get(a)?.has(b) || graph.ancestors.get(b)?.has(a))
 }
 
-// Every skills/<name>/anchors.json in ONE pass, keyed by the file each pin targets. A
+// Every anchors.json manifest in ONE pass, keyed by the file each pin targets. A
 // lane loop must never re-read a manifest: the scan is O(manifests), not O(lanes x files).
 export function collectAnchorPins({ checkout, deps } = {}) {
   const d = normalDeps(deps)
   const root = typeof checkout === 'string' && checkout.trim() ? checkout : process.cwd()
   const byFile = new Map()
   const manifests = []
+  const manifestPaths = [ROLES_ANCHOR_MANIFEST]
   let names
-  try { names = d.readdirSync(join(root, 'skills')) } catch { return { byFile, manifests } }
-  if (!Array.isArray(names)) return { byFile, manifests }
-  for (const raw of names) {
-    const name = typeof raw === 'string' ? raw : raw?.name
-    if (typeof name !== 'string') continue
-    const manifest = `skills/${name}/anchors.json`
+  try { names = d.readdirSync(join(root, 'skills')) } catch { names = [] }
+  if (Array.isArray(names)) {
+    for (const raw of names) {
+      const name = typeof raw === 'string' ? raw : raw?.name
+      if (typeof name !== 'string') continue
+      manifestPaths.push(`skills/${name}/anchors.json`)
+    }
+  }
+  for (const manifest of manifestPaths) {
     const path = join(root, manifest)
     let parsed
     try {
@@ -886,21 +902,72 @@ export function externalCrewDir({ lane, parentDir, deps } = {}) {
   return join(crewRoot({ home: d.home }), slug(basename(join(parent, `dt-${lane}`))), slug(lane))
 }
 
+export function externalLaneReason({ settled, stage }) {
+  if (settled) return 'run-settled'
+  if (typeof stage === 'string' && stage.startsWith('escalate:')) return 'run-escalated'
+  return 'run-complete'
+}
+
 export function externalFenceLiveness({ externals, parentDir, deps } = {}) {
   const d = normalDeps(deps)
   return (Array.isArray(externals) ? externals : []).map((lane) => {
     const dir = externalCrewDir({ lane, parentDir, deps: d })
     const crewPath = join(dir, 'crew.json')
-    if (!d.existsSync(crewPath)) return { lane, dir, live: false, reason: 'crew-dir-absent', stage: null }
+    let crewExists
+    try { crewExists = d.existsSync(crewPath) } catch {
+      return {
+        lane, dir, live: false, reason: 'crew-json-unreadable', stage: null,
+        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
+      }
+    }
+    if (!crewExists) {
+      return {
+        lane, dir, live: false, reason: 'crew-dir-absent', stage: null,
+        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
+      }
+    }
     let crew
     try { crew = JSON.parse(d.readFileSync(crewPath, 'utf8')) } catch {
-      return { lane, dir, live: false, reason: 'crew-json-unreadable', stage: null }
+      return {
+        lane, dir, live: false, reason: 'crew-json-unreadable', stage: null,
+        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
+      }
     }
-    if (crew?.lane_name !== lane) return { lane, dir, live: false, reason: 'crew-lane-mismatch', stage: null }
-    const settled = d.existsSync(join(dir, 'returns', 'task.json'))
+    if (crew?.lane_name !== lane) {
+      return {
+        lane, dir, live: false, reason: 'crew-lane-mismatch', stage: null,
+        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
+      }
+    }
+    let settled
+    try { settled = d.existsSync(join(dir, 'returns', 'task.json')) } catch {
+      return {
+        lane, dir, live: false, reason: 'crew-json-unreadable', stage: null,
+        heartbeat_age_ms: null, stale_after_ms: null, sibling_files: null,
+      }
+    }
     const journal = readJournal(join(dir, 'journal.jsonl'), d)
+    const stage = journal.lastStage ?? null
     const live = laneActive({ settled }, journal)
-    return { lane, dir, live, reason: live ? null : 'run-settled', stage: journal.lastStage ?? null }
+    let nowMs
+    try { nowMs = typeof d.now === 'function' ? d.now() : Date.now() } catch { nowMs = null }
+    const staleAfterMs = DRIVER_GONE_PERIODS * HEARTBEAT_PERIOD_MS
+    const age = journal.lastActivityAt === null || !Number.isFinite(nowMs) ? null : nowMs - journal.lastActivityAt
+    const abandoned = live && age !== null && age > staleAfterMs
+    const siblingFiles = [...new Set((Array.isArray(crew.lane_fence) ? crew.lane_fence : [])
+      .flatMap((entry) => Array.isArray(entry?.files) ? entry.files : [])
+      .filter((file) => typeof file === 'string')
+      .map(normaliseRepoPath))].sort()
+    return {
+      lane,
+      dir,
+      live: live && !abandoned,
+      reason: live ? (abandoned ? EXTERNAL_FENCE_ABANDONED : null) : externalLaneReason({ settled, stage }),
+      stage,
+      heartbeat_age_ms: age,
+      stale_after_ms: staleAfterMs,
+      sibling_files: siblingFiles,
+    }
   })
 }
 
@@ -1004,7 +1071,11 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
     const unfencedPins = anchorPinsOutsideFence({ surface: ownSurface, fenceFiles: ownFiles, pins })
     if (unfencedPins.length > 0) {
       const detail = unfencedPins.map(({ file, manifest, keys }) => `${file} pinned by ${manifest} at ${keys.join(', ')}`).join('; ')
-      const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; a shift is repairable with node skills/qa-test-writing/anchor-pin.mjs --repair <skill dir>, so this does not block dispatch; rot and ambiguity still fail in the skill's own exhibits.test.mjs. ${ANCHOR_BLIND_SPOT}`
+      const rolesManifestUnfenced = unfencedPins.some(({ manifest }) => manifest === ROLES_ANCHOR_MANIFEST)
+      const rolesClause = rolesManifestUnfenced
+        ? ` The roles manifest is held to a strict bijection with the charters ${ROLES_ANCHOR_COMPANIONS.join(' and ')} at crew/drive.test.mjs:1041, so all three must be fenced together — a hard test failure, not a warning.`
+        : ''
+      const text = `${ANCHOR_PIN_WARNING_PREFIX} lane ${name} writes anchor-pinned file(s) whose pinning manifest is outside its fence: ${detail}; a shift is repairable with node skills/qa-test-writing/anchor-pin.mjs --repair <skill dir>, so this does not block dispatch; rot and ambiguity still fail in the skill's own exhibits.test.mjs.${rolesClause} ${ANCHOR_BLIND_SPOT}`
       warnings.push({ kind: 'anchor-pin', lane: name, pins: unfencedPins, text })
       d.log(text)
     }
@@ -1056,10 +1127,30 @@ export function checkFences({ fences, lanes, graph, checkout, externals, parentD
   const absent = entries.map(({ lane }) => lane).filter((name) => !batchNames.has(name) && !externalNames.has(name))
   if (absent.length > 0) refuse(`fence register names lane(s) absent from the batch: ${absent.join(', ')}; the batch carries ${[...batchNames].join(', ') || 'no lanes'}, and a lane's sibling count is derived from batch size, so this register can only refuse at boot as ${FENCE_COUNT_MISMATCH}`, FENCE_REGISTER_MISMATCH)
   const externalRows = externalFenceLiveness({ externals: [...externalNames], parentDir, deps: d })
-  const dead = externalRows.filter((row) => row.live !== true)
+  const abandonedRows = externalRows.filter((row) => row.reason === EXTERNAL_FENCE_ABANDONED)
+  const dead = externalRows.filter((row) => row.live !== true && row.reason !== EXTERNAL_FENCE_ABANDONED)
   if (dead.length > 0) refuse(`the fence register names external lane(s) that are not live: ${dead.map((row) => `${row.lane} (${row.reason}, crew dir ${row.dir})`).join('; ')}; an external fence denies a surface its lane must still hold`, EXTERNAL_FENCE_STALE)
+  if (abandonedRows.length > 0) refuse(`the fence register names external lane(s) whose driver is gone: ${abandonedRows.map((row) => `${row.lane} (crew dir ${row.dir}, heartbeat age ${row.heartbeat_age_ms}ms, stale after ${row.stale_after_ms}ms)`).join('; ')}; the lane's driver is gone, so the surface is denied by a lane nobody is running`, EXTERNAL_FENCE_ABANDONED)
   for (const row of externalRows) {
-    d.log(`${EXTERNAL_FENCE_PREFIX} lane=${row.lane} crew_dir=${row.dir} stage=${row.stage ?? 'none'} files=${(byLane.get(row.lane)?.files || []).join(',')}`)
+    const declared = [...new Set((byLane.get(row.lane)?.files || [])
+      .filter((file) => typeof file === 'string')
+      .map(normaliseRepoPath))].sort()
+    const claimed = row.sibling_files === null
+      ? null
+      : [...new Set((row.sibling_files || [])
+        .filter((file) => typeof file === 'string')
+        .map(normaliseRepoPath))].sort()
+    const matchClaimed = scopeMatcher(claimed || [])
+    const overlap = declared.filter(matchClaimed)
+    const fenceCompare = !claimed || claimed.length === 0
+      ? 'unmeasured'
+      : overlap.length > 0 ? 'mismatch' : 'clear'
+    d.log(`${EXTERNAL_FENCE_PREFIX} lane=${row.lane} crew_dir=${row.dir} stage=${row.stage ?? 'none'} files=${declared.join(',')} fence_compare=${fenceCompare}`)
+    if (overlap.length > 0) {
+      const mismatchText = `${EXTERNAL_FENCE_PREFIX} lane=${row.lane} crew_dir=${row.dir} mismatch declared=${declared.join(',') || 'none'} claimed=${claimed.join(',')} files=${overlap.join(',')}; blind spot: a lane's own fence is not recorded in its own crew.json, so only a file another lane demonstrably owns can be contradicted — an under-declared external is not measured.`
+      warnings.push({ kind: 'external-fence-mismatch', lane: row.lane, declared, claimed, files: overlap, text: mismatchText })
+      d.log(mismatchText)
+    }
   }
   if (externalRows.length > 0) {
     d.log(`${EXTERNAL_FENCE_PREFIX} carried=${externalRows.length} lanes=${externalRows.map((row) => row.lane).join(',')} — carried in from lanes outside this batch; they deny every batch lane's write surface and are NOT counted in the sibling total checkArrival derives`)
@@ -1712,8 +1803,9 @@ export function checkArrival({ crew, lane, batchTotal, externals } = {}) {
   return { lane, siblings: members, externals: fence.filter((entry) => externalNames.has(entry?.lane)) }
 }
 
-export function crewJsonPath({ checkout, lane } = {}) {
-  return join(homedir(), '.crew', slug(basename(checkout)), slug(lane), 'crew.json')
+export function crewJsonPath({ checkout, lane, deps } = {}) {
+  const d = normalDeps(deps)
+  return join(d.home, '.crew', slug(basename(checkout)), slug(lane), 'crew.json')
 }
 
 function outcomeFromPath(path, d) {
@@ -1739,7 +1831,7 @@ function outcomeFromPath(path, d) {
 
 export function laneOutcome({ lane, laneDir, deps } = {}) {
   const d = normalDeps(deps)
-  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane }))
+  const crewDir = dirname(crewJsonPath({ checkout: laneDir, lane, deps: d }))
   const livePath = join(crewDir, 'returns', 'task.json')
   const live = outcomeFromPath(livePath, d)
   if (live.found) return live.outcome
@@ -1976,20 +2068,38 @@ export function applyAdoption({ adoption, crewDir, briefPath, deps } = {}) {
   if (!adoption) return null
   const taskDir = join(crewDir, 'task')
   const texts = new Map()
+  let names
   try {
-    mkdirSync(taskDir, { recursive: true })
-    for (const name of [...ADOPT_REQUIRED, ...ADOPT_OPTIONAL]) {
+    const missingNow = ADOPT_REQUIRED.filter((name) => !d.existsSync(join(adoption.source, name)))
+    if (missingNow.length > 0) {
+      refuse(`lane ${adoption.lane} cannot adopt ${adoption.archive}: required file(s) gone at copy time: ${missingNow.join(', ')}`, PLAN_ADOPT_UNREADABLE)
+    }
+    names = [...ADOPT_REQUIRED, ...ADOPT_OPTIONAL.filter((name) => d.existsSync(join(adoption.source, name)))]
+    for (const name of names) {
       const from = join(adoption.source, name)
-      if (!d.existsSync(from)) continue
       const text = textOf(d.readFileSync(from, 'utf8'))
       texts.set(name, text)
-      writeFileSync(join(taskDir, name), text)
     }
   } catch (err) {
+    if (err instanceof BatchRefusal) throw err
+    refuse(`lane ${adoption.lane} could not read adoption ${adoption.archive} from ${adoption.source}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
+  }
+  const written = []
+  try {
+    d.mkdirSync(taskDir, { recursive: true })
+    for (const name of names) {
+      const target = join(taskDir, name)
+      written.push(target)
+      d.writeFileSync(target, texts.get(name))
+    }
+  } catch (err) {
+    for (const path of written) {
+      try { rmSync(path, { force: true }) } catch { /* rollback is best effort after an interrupted write */ }
+    }
     refuse(`lane ${adoption.lane} could not adopt ${adoption.archive} into ${taskDir}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
   }
   const planSha = createHash('sha256').update(texts.get('plan.md')).digest('hex')
-  try { appendFileSync(briefPath, adoptionBlock(adoption)) } catch (err) {
+  try { d.appendFileSync(briefPath, adoptionBlock(adoption)) } catch (err) {
     refuse(`lane ${adoption.lane} could not carry the adoption block into ${briefPath}: ${err?.message || String(err)}`, PLAN_ADOPT_UNREADABLE)
   }
   const row = {
@@ -2006,7 +2116,7 @@ export function applyAdoption({ adoption, crewDir, briefPath, deps } = {}) {
   }
   // Instrumentation is never load-bearing: the copy has already happened and the
   // dispatch line already names it, so a journal that cannot be appended never fails a lane.
-  try { appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
+  try { d.appendFileSync(join(crewDir, 'journal.jsonl'), `${JSON.stringify(row)}\n`) } catch { /* the dispatch line carries the same fact */ }
   return { plan_sha: planSha, files: [...texts.keys()], taskDir }
 }
 
@@ -2381,7 +2491,7 @@ export async function dispatchBatch({ batchDir, fences, checkout, parentDir, out
       if (floorReason) refuse(`crew boot refused ${item.lane} at a ratified floor [${floorReason}]: ${JSON.stringify(childFailure(boot))}`, SEAT_FLOOR_CONFLICT)
       refuse(`crew boot failed for ${item.lane}: ${JSON.stringify(childFailure(boot))}`, BOOT_FAILED)
     }
-    const path = crewJsonPath({ checkout: item.plan.dir, lane: item.lane })
+    const path = crewJsonPath({ checkout: item.plan.dir, lane: item.lane, deps: d })
     let crew
     try { crew = JSON.parse(d.readFileSync(path, 'utf8')) } catch (err) {
       refuse(`crew boot produced no readable crew.json for ${item.lane}: ${err?.message || String(err)}`, FENCE_NOT_ARRIVED)
